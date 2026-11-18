@@ -7,8 +7,7 @@ const {
   mergeBookmarks,
   mergeWidgets,
   mergeSettings,
-  mergeDocker,
-  mergeCustomCss
+  mergeDocker
 } = require('../lib/merge');
 
 test('mergeServices: handles null, undefined, non-array, and empty inputs gracefully', () => {
@@ -215,14 +214,4 @@ test('mergeDocker: deep merges multi-host Docker connection objects', () => {
     'my-docker': { socket: '/var/run/docker.sock' },
     'remote-docker': { host: '192.0.2.14', port: 2375 }
   });
-});
-
-test('mergeCustomCss: concatenates core and user CSS with newline', () => {
-  assert.equal(mergeCustomCss(null, null), '');
-  assert.equal(mergeCustomCss('body { color: red; }', null), 'body { color: red; }');
-  assert.equal(mergeCustomCss(null, 'body { color: blue; }'), 'body { color: blue; }');
-  assert.equal(
-    mergeCustomCss('/* Core CSS */\n:root { --bg: #000; }', '/* User CSS */\n:root { --bg: #111; }'),
-    '/* Core CSS */\n:root { --bg: #000; }\n\n/* User CSS */\n:root { --bg: #111; }'
-  );
 });

@@ -19,9 +19,9 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 		echo "=== Linting $$svc ==="; \
 		(cd $$svc && golangci-lint run ./...) || exit 1; \
 	done
-	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js" ]; then \
+	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid.js" ]; then \
 		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
-		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js || exit 1; \
+		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid.js || exit 1; \
 	fi
 
 CONSOLE_UI := services/console/ui

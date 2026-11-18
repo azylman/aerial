@@ -52,7 +52,7 @@ test('prepare-config: resolveDefaultAppConfigDir returns /app/config when presen
   assert.equal(resolveDefaultAppConfigDir(() => false), null);
 });
 
-test('prepare-config: run mirrors merged custom.css and configs to appConfigDir when user custom.css is absent', () => {
+test('prepare-config: run mirrors configs to appConfigDir and removes stale custom.css', () => {
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-appcfg-'));
   const userDir = path.join(tmpBase, 'user');
   const coreDir = path.join(tmpBase, 'core');
@@ -65,12 +65,11 @@ test('prepare-config: run mirrors merged custom.css and configs to appConfigDir 
   fs.mkdirSync(appConfigDir, { recursive: true });
 
   try {
-    fs.writeFileSync(path.join(coreDir, 'custom.css'), '/* core permet theme */\nbody { background: #06050a; }\n', 'utf8');
+    fs.writeFileSync(path.join(coreDir, 'custom.css'), '/* stale theme */\nbody { background: #000; }\n', 'utf8');
     fs.writeFileSync(path.join(coreDir, 'settings.yaml'), '{"theme":"dark","color":"slate"}\n', 'utf8');
     fs.writeFileSync(path.join(userDir, 'settings.yaml'), '{"showStats":true}\n', 'utf8');
     fs.writeFileSync(path.join(coreDir, 'extra.js'), '// core extra js\n', 'utf8');
-    // Simulate upstream homepage having initialized an empty 0-byte custom.css and extra.js in /app/config
-    fs.writeFileSync(path.join(appConfigDir, 'custom.css'), '', 'utf8');
+    fs.writeFileSync(path.join(appConfigDir, 'custom.css'), '/* stale theme */\n', 'utf8');
     fs.writeFileSync(path.join(appConfigDir, 'extra.js'), '', 'utf8');
 
     const stubYaml = {
@@ -79,8 +78,8 @@ test('prepare-config: run mirrors merged custom.css and configs to appConfigDir 
     };
     run({ coreDir, userDir, targetDir, appConfigDir, yaml: stubYaml, candidatePaths: [] });
 
-    const appCss = fs.readFileSync(path.join(appConfigDir, 'custom.css'), 'utf8');
-    assert.ok(appCss.includes('core permet theme'));
+    assert.equal(fs.existsSync(path.join(appConfigDir, 'custom.css')), false);
+    assert.equal(fs.existsSync(path.join(targetDir, 'custom.css')), false);
     const appSettings = JSON.parse(fs.readFileSync(path.join(appConfigDir, 'settings.yaml'), 'utf8'));
     assert.equal(appSettings.theme, 'dark');
     assert.equal(appSettings.showStats, true);
@@ -106,12 +105,8 @@ test('prepare-config: run executes clean one-shot merge', () => {
 
     run({ coreDir, userDir, targetDir });
 
-    const mergedCssPath = path.join(targetDir, 'custom.css');
-    assert.ok(fs.existsSync(mergedCssPath));
-    const mergedCss = fs.readFileSync(mergedCssPath, 'utf8');
-    assert.ok(mergedCss.includes('core css'));
+    assert.equal(fs.existsSync(path.join(targetDir, 'custom.css')), false);
     if (resolveYamlParser()) {
-      assert.ok(mergedCss.includes('user css'));
       const summaryLogPath = path.join(targetDir, 'merge-summary.log');
       assert.ok(fs.existsSync(summaryLogPath));
     }

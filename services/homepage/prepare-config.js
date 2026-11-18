@@ -7,8 +7,7 @@ const {
   mergeBookmarks,
   mergeWidgets,
   mergeSettings,
-  mergeDocker,
-  mergeCustomCss
+  mergeDocker
 } = require('./lib/merge');
 
 function resolveDefaultCoreDir(existsFn = fs.existsSync) {
@@ -113,6 +112,7 @@ function copyFallback(srcDir, dstDir) {
     if (!fs.existsSync(srcDir)) return;
     const entries = fs.readdirSync(srcDir);
     for (const entry of entries) {
+      if (entry === 'custom.css') continue;
       const srcPath = path.join(srcDir, entry);
       const dstPath = path.join(dstDir, entry);
       try {
@@ -154,29 +154,27 @@ function run(dirs = {}) {
     }
   };
 
+  for (const dir of targetDirs) {
+    try {
+      fs.unlinkSync(path.join(dir, 'custom.css'));
+    } catch (_) {}
+  }
+
   const yaml = dirs.yaml || resolveYamlParser();
   if (!yaml) {
     console.error(`[prepare-config] js-yaml not found in container environment. Falling back to raw core copy.`);
     for (const dir of targetDirs) {
       copyFallback(coreDir, dir);
     }
-    try {
-      const mergedCss = mergeCustomCss(
-        safeRead(path.join(coreDir, 'custom.css')),
-        safeRead(path.join(userDir, 'custom.css'))
-      );
-      writeTargets('custom.css', mergedCss);
-    } catch (_) {}
     return;
   }
 
   const configFiles = [
-    { name: 'services.yaml', merger: mergeServices, isYaml: true },
-    { name: 'widgets.yaml', merger: mergeWidgets, isYaml: true },
-    { name: 'bookmarks.yaml', merger: mergeBookmarks, isYaml: true },
-    { name: 'settings.yaml', merger: mergeSettings, isYaml: true },
-    { name: 'docker.yaml', merger: mergeDocker, isYaml: true },
-    { name: 'custom.css', merger: mergeCustomCss, isYaml: false }
+    { name: 'services.yaml', merger: mergeServices },
+    { name: 'widgets.yaml', merger: mergeWidgets },
+    { name: 'bookmarks.yaml', merger: mergeBookmarks },
+    { name: 'settings.yaml', merger: mergeSettings },
+    { name: 'docker.yaml', merger: mergeDocker }
   ];
 
   const logEntries = [];
@@ -189,31 +187,24 @@ function run(dirs = {}) {
       const coreRaw = safeRead(corePath);
       const userRaw = safeRead(userPath);
 
-      if (cfg.isYaml) {
-        const coreParsed = parseYaml(yaml, coreRaw, corePath);
-        const userParsed = parseYaml(yaml, userRaw, userPath);
+      const coreParsed = parseYaml(yaml, coreRaw, corePath);
+      const userParsed = parseYaml(yaml, userRaw, userPath);
 
-        let finalObj;
-        if (userParsed && userParsed.__parseError) {
-          console.error(`[prepare-config] Warning: Skipping malformed user ${cfg.name}; falling back to core.`);
-          logEntries.push(`${cfg.name}: user parse error (${userParsed.__parseError}) - fell back to core`);
-          finalObj = (coreParsed && !coreParsed.__parseError) ? coreParsed : null;
-        } else {
-          const safeCore = (coreParsed && !coreParsed.__parseError) ? coreParsed : null;
-          const safeUser = (userParsed && !userParsed.__parseError) ? userParsed : null;
-          finalObj = cfg.merger(safeCore, safeUser);
-          logEntries.push(`${cfg.name}: merged successfully`);
-        }
-
-        const defaultFallback = (cfg.name === 'settings.yaml' || cfg.name === 'docker.yaml') ? {} : [];
-        const dumped = yaml.dump(finalObj !== null && finalObj !== undefined ? finalObj : defaultFallback);
-        writeTargets(cfg.name, dumped);
+      let finalObj;
+      if (userParsed && userParsed.__parseError) {
+        console.error(`[prepare-config] Warning: Skipping malformed user ${cfg.name}; falling back to core.`);
+        logEntries.push(`${cfg.name}: user parse error (${userParsed.__parseError}) - fell back to core`);
+        finalObj = (coreParsed && !coreParsed.__parseError) ? coreParsed : null;
       } else {
-        // Custom CSS
-        const mergedCss = cfg.merger(coreRaw, userRaw);
-        writeTargets(cfg.name, mergedCss);
-        logEntries.push(`${cfg.name}: concatenated successfully`);
+        const safeCore = (coreParsed && !coreParsed.__parseError) ? coreParsed : null;
+        const safeUser = (userParsed && !userParsed.__parseError) ? userParsed : null;
+        finalObj = cfg.merger(safeCore, safeUser);
+        logEntries.push(`${cfg.name}: merged successfully`);
       }
+
+      const defaultFallback = (cfg.name === 'settings.yaml' || cfg.name === 'docker.yaml') ? {} : [];
+      const dumped = yaml.dump(finalObj !== null && finalObj !== undefined ? finalObj : defaultFallback);
+      writeTargets(cfg.name, dumped);
     } catch (err) {
       console.error(`[prepare-config] Error processing ${cfg.name}: ${err.message}`);
       logEntries.push(`${cfg.name}: failed (${err.message})`);
@@ -233,7 +224,7 @@ function run(dirs = {}) {
     if (fs.existsSync(coreDir)) {
       const coreFiles = fs.readdirSync(coreDir);
       for (const file of coreFiles) {
-        if (!configFiles.some(c => c.name === file)) {
+        if (file !== 'custom.css' && !configFiles.some(c => c.name === file)) {
           const src = path.join(coreDir, file);
           if (fs.statSync(src).isFile()) {
             const data = fs.readFileSync(src);

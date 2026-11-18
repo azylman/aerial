@@ -2,21 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Aerial Docs // Data Matrix</title>
+  <title>Aerial Docs</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
   <meta name="description" content="Aerial Assistant Documentation & Architecture Diagrams">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="assets/css/dark.css">
-  <link rel="stylesheet" href="assets/css/cyberpunk-docs.css?v=12.0">
 </head>
 <body>
-  <div id="app">Initializing Aerial Docs Matrix...</div>
+  <div id="app">Loading...</div>
 
   <script>
     window.$docsify = {
-      name: 'AERIAL // DOCS',
+      name: 'Aerial Docs',
       repo: '',
       loadSidebar: true,
       subMaxLevel: 3,
@@ -31,15 +27,15 @@
       search: {
         maxAge: 86400000,
         paths: 'auto',
-        placeholder: 'Search docs matrix...',
+        placeholder: 'Search docs...',
         noData: 'No matching records found',
         depth: 3,
         hideOtherSidebarContent: false
       },
       copyCode: {
-        buttonText: 'COPY',
-        errorText: 'ERROR',
-        successText: 'COPIED'
+        buttonText: 'Copy',
+        errorText: 'Error',
+        successText: 'Copied'
       }
     };
   </script>
@@ -58,8 +54,8 @@
   <script src="assets/js/prism/prism-python.min.js"></script>
   <script src="assets/js/prism/prism-docker.min.js"></script>
 
-  <!-- Mermaid.js Engine & Aerial Cyberpunk Plugin -->
+  <!-- Mermaid.js Engine & Plugin -->
   <script src="assets/js/mermaid.min.js"></script>
-  <script src="assets/js/plugins/docsify-mermaid-cyberpunk.js"></script>
+  <script src="assets/js/plugins/docsify-mermaid.js"></script>
 </body>
 </html>
