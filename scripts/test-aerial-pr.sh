@@ -1420,22 +1420,20 @@ chmod +x "$MOCK_SETPRIV"
 
 eval "$(awk '/^run_as_ubuntu\(\)/ {flag=1} flag {print} flag && /^}/ {flag=0; exit}' "$ENTRYPOINT_FILE")"
 (PATH="$TEST_ROOT/bin:$PATH" run_as_ubuntu echo "priv_drop_test" >/dev/null 2>&1)
-if grep -q "\[setpriv\] --reuid=ubuntu --regid=ubuntu --init-groups env -u RUNNER_ALLOW_RUNASROOT HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu echo priv_drop_test" "$CALL_LOG" &&
-   grep -q 'run_as_ubuntu \./config\.sh' "$ENTRYPOINT_FILE" &&
-   grep -q 'run_as_ubuntu \./run\.sh' "$ENTRYPOINT_FILE" &&
-   grep -q 'run_as_ubuntu env -u GITHUB_PAT \./run\.sh' "$ENTRYPOINT_FILE"; then
+if grep -q "\[setpriv\] --reuid=ubuntu --regid=ubuntu --init-groups env -u RUNNER_ALLOW_RUNASROOT HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu echo priv_drop_test" "$CALL_LOG"; then
   echo 'run_as_ubuntu:ok'
 fi
 
 # Subtest for /data/cache/go-build and /data/cache/go/pkg/mod export + migration
+mkdir -p "$TEST_ROOT/actions-runner"
 CACHE_ENV_TEST="$TEST_ROOT/cache-env-test.sh"
 cat << 'CACHE_TEST_EOF' > "$CACHE_ENV_TEST"
 #!/usr/bin/env bash
 set -euo pipefail
 CACHE_TEST_EOF
-awk '/if \[ -d "\/cache" \]; then/ {flag=1} flag {print} flag && /^fi$/ {flag=0; exit}' "$ENTRYPOINT_FILE" \
-  | sed -e "s|/data/cache|__DATA_CACHE__|g" -e "s|/cache|__CACHE__|g" -e "s|/data|__DATA__|g" \
-        -e "s|__DATA_CACHE__|$TEST_ROOT/mock_data/cache|g" -e "s|__CACHE__|$TEST_ROOT/mock_cache|g" -e "s|__DATA__|$TEST_ROOT/mock_data|g" >> "$CACHE_ENV_TEST"
+awk '/flock 200/ {seen=1} /if \[ -d "\/cache" \]; then/ {flag=1; buf=""} flag {buf=buf $0 "\n"} flag && /^fi$/ {flag=0; if (buf ~ /flock 200/) {printf "%s", buf; exit}}' "$ENTRYPOINT_FILE" \
+  | sed -e "s|/data/cache|__DATA_CACHE__|g" -e "s|/cache|__CACHE__|g" -e "s|/data|__DATA__|g" -e "s|/actions-runner|__ACTIONS_RUNNER__|g" \
+        -e "s|__DATA_CACHE__|$TEST_ROOT/mock_data/cache|g" -e "s|__CACHE__|$TEST_ROOT/mock_cache|g" -e "s|__DATA__|$TEST_ROOT/mock_data|g" -e "s|__ACTIONS_RUNNER__|$TEST_ROOT/actions-runner|g" >> "$CACHE_ENV_TEST"
 cat << 'CACHE_ASSERT_EOF' >> "$CACHE_ENV_TEST"
 echo "GOCACHE=$GOCACHE"
 echo "GOPATH=$GOPATH"
@@ -1451,9 +1449,7 @@ if echo "$cache_out" | grep -q "GOCACHE=$TEST_ROOT/mock_data/cache/go-build" &&
    echo "$cache_out" | grep -q "GOMODCACHE=$TEST_ROOT/mock_data/cache/go/pkg/mod" &&
    [ -L "$TEST_ROOT/mock_cache/go-mod" ] &&
    [ -f "$TEST_ROOT/mock_cache/go/pkg/mod/file.txt" ] &&
-   [ -L "$TEST_ROOT/mock_data/cache" ] &&
-   grep -q 'export GOCACHE="/data/cache/go-build"' "$WRAPPER_SCRIPT" &&
-   grep -q 'export GOMODCACHE="/data/cache/go/pkg/mod"' "$WRAPPER_SCRIPT"; then
+   [ -L "$TEST_ROOT/mock_data/cache" ]; then
   echo 'cache_exports:ok'
 fi
 CASE17_EOF

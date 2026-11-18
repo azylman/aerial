@@ -552,21 +552,6 @@ else
 fi
 
 if [ -d "/cache" ]; then
-  mkdir -p /data
-  ln -sfn /cache /data/cache
-  (
-    flock 200
-    mkdir -p /cache/go-build /cache/go/pkg /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
-    if [ -d "/cache/go-mod" ] && [ ! -L "/cache/go-mod" ]; then
-      mkdir -p /cache/go/pkg/mod
-      cp -a /cache/go-mod/. /cache/go/pkg/mod/ 2>/dev/null || true
-      rm -rf /cache/go-mod
-      ln -sfn go/pkg/mod /cache/go-mod
-    elif [ ! -e "/cache/go-mod" ] && [ ! -L "/cache/go-mod" ]; then
-      ln -sfn go/pkg/mod /cache/go-mod
-    fi
-    find /cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
-  ) 200>"/cache/.init.lock"
   export GOCACHE="/data/cache/go-build"
   export GOPATH="/data/cache/go"
   export GOMODCACHE="/data/cache/go/pkg/mod"
@@ -972,7 +957,9 @@ echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
   mkdir -p /data
+  chmod 0755 /data 2>/dev/null || true
   ln -sfn /cache /data/cache
+  chown -h 1000:1000 /data/cache 2>/dev/null || true
   (
     flock 200
     mkdir -p /cache/go-build /cache/go/pkg /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
