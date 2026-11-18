@@ -47,6 +47,27 @@ var archiveCoverageDir = func(w io.Writer, dir string) error {
 	return tw.Close()
 }
 
+// SetupHealthMux builds the shared ServeMux for health, metrics, and coverage flush.
+// It mounts GET /health and GET /healthz with the standard ok JSON, GET /metrics
+// only when metrics is non-nil, and GET plus POST /debug/coverage/flush via
+// HandleCoverageFlush(service).
+func SetupHealthMux(service string, metrics http.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	health := func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+	mux.HandleFunc("GET /health", health)
+	mux.HandleFunc("GET /healthz", health)
+	if metrics != nil {
+		mux.Handle("GET /metrics", metrics)
+	}
+
+	coverageFlush := HandleCoverageFlush(service)
+	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
+	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
+	return mux
+}
+
 // HandleCoverageFlush returns an HTTP handler for /debug/coverage/flush that writes
 // runtime coverage metadata and counters to an ephemeral directory and streams them
 // back as an application/x-tar archive.
