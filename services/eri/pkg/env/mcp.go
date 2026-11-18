@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -312,9 +313,20 @@ func formatCodexServerCommand(b *strings.Builder, name string, srvMap map[string
 }
 
 // FormatCodexConfigTOML transforms an agy/claude MCP config JSON message into Codex config.toml format.
-func FormatCodexConfigTOML(rawConfig json.RawMessage, proxyBase string) string {
+func FormatCodexConfigTOML(rawConfig json.RawMessage, proxyBase string, target ...string) string {
 	var b strings.Builder
 	b.WriteString("[features]\nhooks = true\n")
+
+	if pb := strings.TrimSpace(proxyBase); pb != "" {
+		endpoint := deriveCodexOTelEndpoint(rawConfig, pb, target...)
+		b.WriteString("\n[otel]\n")
+		b.WriteString("log_user_prompt = false\n")
+		b.WriteString("log_agent_responses = false\n")
+		b.WriteString("log_sse_deltas = false\n")
+		b.WriteString("log_guardian_assessments = false\n")
+		b.WriteString("tool_result = { max_bytes = 0 }\n")
+		fmt.Fprintf(&b, "exporter = { otlp-http = { endpoint = %q, protocol = \"json\" } }\n", endpoint)
+	}
 
 	if len(rawConfig) == 0 {
 		return b.String()
@@ -371,6 +383,70 @@ func FormatCodexConfigTOML(rawConfig json.RawMessage, proxyBase string) string {
 	return b.String()
 }
 
+func deriveCodexOTelEndpoint(rawConfig json.RawMessage, proxyBase string, target ...string) string {
+	pb := strings.TrimSpace(proxyBase)
+	if pb == "" {
+		return ""
+	}
+	origin := extractProxyOrigin(pb)
+
+	var targetSegment string
+	if len(target) > 0 && strings.TrimSpace(target[0]) != "" {
+		targetSegment = strings.TrimSpace(target[0])
+	}
+	if targetSegment == "" {
+		trimmedPB := strings.TrimRight(pb, "/")
+		for _, known := range []string{"discord", "voice", "ephemeral"} {
+			if strings.HasSuffix(trimmedPB, "/"+known) {
+				targetSegment = known
+				break
+			}
+		}
+	}
+	if targetSegment == "" {
+		targetSegment = extractTargetFromRawMCPConfig(rawConfig)
+	}
+
+	endpoint := origin + OTelLogsPathPrefix
+	if targetSegment != "" {
+		endpoint += "/" + url.PathEscape(targetSegment)
+	}
+	return endpoint
+}
+
+func extractProxyOrigin(pb string) string {
+	if u, err := url.Parse(pb); err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host
+	}
+	return strings.TrimRight(pb, "/")
+}
+
+func extractTargetFromRawMCPConfig(rawConfig json.RawMessage) string {
+	servers := parseRawMCPServers(rawConfig)
+	for _, srv := range servers {
+		srvMap, ok := srv.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, k := range mcpURLKeys {
+			u, ok := srvMap[k].(string)
+			if !ok || u == "" {
+				continue
+			}
+			idx := strings.Index(u, MCPProxyPathPrefix)
+			if idx == -1 {
+				continue
+			}
+			rest := strings.TrimPrefix(u[idx:], MCPProxyPathPrefix)
+			parts := strings.Split(rest, "/")
+			if len(parts) > 0 && parts[0] != "" {
+				return parts[0]
+			}
+		}
+	}
+	return ""
+}
+
 const (
 	mcpKeyType       = "type"
 	mcpKeyCommand    = "command"
@@ -399,7 +475,27 @@ func (p *Provisioner) writeTargetConfigFile(targetDir, fileName string, rawConfi
 
 // EnsureTargetCodexConfigTOML writes TOML configuration into <codexDir>/config.toml.
 func (p *Provisioner) EnsureTargetCodexConfigTOML(codexDir string, rawConfig json.RawMessage) error {
-	return p.writeTargetConfigFile(codexDir, "config.toml", rawConfig, FormatCodexConfigTOML)
+	if p == nil || codexDir == "" {
+		return nil
+	}
+	var proxyBase string
+	if p.mcpProxy != nil {
+		proxyBase = p.mcpProxy.proxyBase()
+	}
+	trimmed := strings.TrimSpace(string(rawConfig))
+	if (len(rawConfig) == 0 || trimmed == "" || trimmed == `""` || trimmed == nullLiteral) && proxyBase == "" {
+		return nil
+	}
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create codex directory %s: %w", codexDir, err)
+	}
+	var target string
+	base := filepath.Base(filepath.Dir(codexDir))
+	if base == string(TargetDiscord) || base == string(TargetVoice) || base == string(TargetEphemeral) {
+		target = base
+	}
+	content := FormatCodexConfigTOML(rawConfig, proxyBase, target)
+	return p.writeAtomic(filepath.Join(codexDir, "config.toml"), content)
 }
 
 func extractMCPHeaders(srvMap map[string]any, serverURL, proxyBase string) map[string]string {

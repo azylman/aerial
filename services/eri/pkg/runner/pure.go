@@ -235,8 +235,38 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
 	cmdEnv = append(cmdEnv, mcpTraceEnv(input.MCPProxyPort, input.DaemonID)...)
+	cmdEnv = append(cmdEnv, claudeOTelEnv(input.Engine, input.MCPProxyPort, input.DaemonID)...)
 	cmdEnv = appendTraceEnv(cmdEnv, input.TraceEnv)
 	return append(cmdEnv, input.ExtraEnv...)
+}
+
+func claudeOTelEnv(engine, port, daemonID string) []string {
+	if !strings.EqualFold(strings.TrimSpace(engine), "claude") {
+		return nil
+	}
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return nil
+	}
+	daemonID = strings.TrimSpace(daemonID)
+	envList := []string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+		"OTEL_LOGS_EXPORTER=otlp",
+		"OTEL_METRICS_EXPORTER=none",
+		"OTEL_TRACES_EXPORTER=none",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:" + port + "/internal/otel/v1/logs",
+		"OTEL_LOG_USER_PROMPTS=0",
+		"OTEL_LOG_ASSISTANT_RESPONSES=0",
+		"OTEL_LOG_TOOL_CONTENT=0",
+		"OTEL_LOG_TOOL_DETAILS=0",
+		"OTEL_LOG_RAW_API_BODIES=0",
+		"OTEL_LOG_MANAGED_SETTINGS=0",
+	}
+	if daemonID != "" {
+		envList = append(envList, "OTEL_EXPORTER_OTLP_LOGS_HEADERS=X-Eri-Daemon="+daemonID)
+	}
+	return envList
 }
 
 // MCPProxyAnnouncePath is the loopback route `hook-guard trace` posts MCP call announcements to.

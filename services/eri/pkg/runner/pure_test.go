@@ -346,6 +346,65 @@ func TestBuildAgyEnv(t *testing.T) {
 	}
 }
 
+func TestBuildAgyEnv_ClaudeTelemetry(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		input       AgyEnvInput
+		contains    []string
+		notContains []string
+	}{
+		{
+			AgyEnvInput{
+				Engine:       "claude",
+				MCPProxyPort: "8080",
+				DaemonID:     "d-claude-1",
+			},
+			[]string{
+				"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+				"OTEL_LOGS_EXPORTER=otlp",
+				"OTEL_METRICS_EXPORTER=none",
+				"OTEL_TRACES_EXPORTER=none",
+				"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json",
+				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:8080/internal/otel/v1/logs",
+				"OTEL_LOG_USER_PROMPTS=0",
+				"OTEL_LOG_ASSISTANT_RESPONSES=0",
+				"OTEL_LOG_TOOL_CONTENT=0",
+				"OTEL_LOG_TOOL_DETAILS=0",
+				"OTEL_LOG_RAW_API_BODIES=0",
+				"OTEL_LOG_MANAGED_SETTINGS=0",
+				"OTEL_EXPORTER_OTLP_LOGS_HEADERS=X-Eri-Daemon=d-claude-1",
+			},
+			nil,
+		},
+		{
+			AgyEnvInput{
+				Engine:       "claude",
+				MCPProxyPort: "8080",
+			},
+			[]string{
+				"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:8080/internal/otel/v1/logs",
+			},
+			[]string{
+				"OTEL_EXPORTER_OTLP_LOGS_HEADERS=",
+			},
+		},
+		{
+			AgyEnvInput{
+				Engine:       "agy",
+				MCPProxyPort: "8080",
+			},
+			nil,
+			[]string{
+				"CLAUDE_CODE_ENABLE_TELEMETRY=",
+				"OTEL_LOGS_EXPORTER=",
+			},
+		},
+	} {
+		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
+	}
+}
+
 func TestSanitizeDaemonTargetKey(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

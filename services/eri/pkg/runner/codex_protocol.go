@@ -182,11 +182,11 @@ func (d *StreamingDaemon) executeCodexInit(ctx context.Context, reader *bufio.Re
 	initReq := codexRPCRequest{
 		JSONRPC: codexRPCVersion,
 		ID:      1,
-		Method:  "initialize",
+		Method:  rpcMethodInitialize,
 		Params: map[string]any{
-			"clientInfo": map[string]any{
-				"name":    "eri",
-				"version": "1.0.0",
+			rpcClientInfoKey: map[string]any{
+				rpcNameKey:    "eri",
+				rpcVersionKey: rpcClientVersion,
 			},
 			"capabilities": map[string]any{
 				"experimentalApi": true,

@@ -20,7 +20,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
@@ -34,14 +33,10 @@ const (
 
 var apiKeyQueryRegex = regexp.MustCompile(`([?&]key=)[^&]+`)
 
-type (
-	MCPServerConfig = mcp.ServerConfig
-	MCPTool         = mcp.Tool
-	MCPDispatcher   interface {
-		ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error)
-		Execute(ctx context.Context, name string, args map[string]any) (string, error)
-	}
-)
+type MCPDispatcher interface {
+	ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error)
+	Execute(ctx context.Context, name string, args map[string]any) (string, error)
+}
 
 func cleanParameters(schema map[string]any) map[string]any {
 	res := cleanSchemaNode(schema)
@@ -258,13 +253,13 @@ func cleanSchemaNode(schema map[string]any) map[string]any {
 }
 
 type DefaultMCPDispatcher struct {
-	d *mcp.DefaultDispatcher
+	d *DefaultDispatcher
 }
 
 var _ MCPDispatcher = (*DefaultMCPDispatcher)(nil)
 
 func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client, allowedTools ...[]string) *DefaultMCPDispatcher {
-	return &DefaultMCPDispatcher{d: mcp.NewDispatcher(servers, client, allowedTools...)}
+	return &DefaultMCPDispatcher{d: NewDispatcher(servers, client, allowedTools...)}
 }
 
 func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {

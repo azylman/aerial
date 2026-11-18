@@ -14,6 +14,9 @@ import (
 // MCPProxyPathPrefix is the loopback route prefix of eri's tracing MCP proxy.
 const MCPProxyPathPrefix = "/internal/mcp-proxy/"
 
+// OTelLogsPathPrefix is the loopback route prefix of eri's OTel log receiver.
+const OTelLogsPathPrefix = "/internal/otel/v1/logs"
+
 // DaemonHeader carries the calling daemon's ERI_DAEMON_ID on Claude Code MCP requests.
 const DaemonHeader = "X-Eri-Daemon"
 
