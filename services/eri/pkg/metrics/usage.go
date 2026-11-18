@@ -36,6 +36,9 @@ func init() {
 	Registry.MustRegister(UsageQuotaRemainingFraction, UsageQuotaResetTimestampSeconds)
 }
 
+// windowWeekly labels the seven-day quota window shared by all engine usage payloads.
+const windowWeekly = "weekly"
+
 type QuotaBucket struct {
 	ID                string  `json:"id"`
 	Window            string  `json:"window"`
@@ -134,7 +137,7 @@ func ClaudeUsageToGroups(raw []byte) ([]QuotaGroup, error) {
 		id, window string
 		w          *claudeUsageWindow
 	}{
-		{"claude-seven-day", "weekly", resp.SevenDay},
+		{"claude-seven-day", windowWeekly, resp.SevenDay},
 		{"claude-seven-day-opus", "weekly-opus", resp.SevenDayOpus},
 		{"claude-seven-day-sonnet", "weekly-sonnet", resp.SevenDaySonnet},
 		{"claude-five-hour", "5h", resp.FiveHour},
@@ -240,7 +243,7 @@ func CodexUsageToGroups(raw []byte) ([]QuotaGroup, error) {
 	}
 	var buckets []QuotaBucket
 	for _, duration := range []int{604800, 18000} {
-		id, window := "codex-seven-day", "weekly"
+		id, window := "codex-seven-day", windowWeekly
 		if duration == 18000 {
 			id, window = "codex-five-hour", "5h"
 		}
@@ -327,6 +330,78 @@ func NewCodexUsageRunner(client *http.Client, baseURL, authFilePath string) Usag
 	}
 }
 
+type museUsageWindow struct {
+	UsedPercent *float64 `json:"usedPercent"`
+	ResetsAtMs  int64    `json:"resetsAtMs"`
+}
+
+type museUsageResponse struct {
+	Allowance *struct {
+		Weekly *museUsageWindow `json:"weekly"`
+		Window *museUsageWindow `json:"window"`
+	} `json:"allowance"`
+}
+
+// MuseUsageToGroups maps a `muse usage --json` payload onto the shared QuotaGroup contract.
+// Buckets are ordered weekly first, then the rolling window, matching the other engines.
+func MuseUsageToGroups(raw []byte) ([]QuotaGroup, error) {
+	var resp museUsageResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Allowance == nil {
+		return nil, errors.New("muse usage payload contains no allowance object")
+	}
+	windows := []struct {
+		id, window string
+		w          *museUsageWindow
+	}{
+		{"muse-seven-day", windowWeekly, resp.Allowance.Weekly},
+		{"muse-five-hour", "5h", resp.Allowance.Window},
+	}
+	var buckets []QuotaBucket
+	for _, win := range windows {
+		if win.w == nil || win.w.UsedPercent == nil {
+			continue
+		}
+		reset := ""
+		if win.w.ResetsAtMs > 0 {
+			reset = time.UnixMilli(win.w.ResetsAtMs).UTC().Format(time.RFC3339)
+		}
+		buckets = append(buckets, QuotaBucket{
+			ID:                win.id,
+			Window:            win.window,
+			ResetTime:         reset,
+			RemainingFraction: min(max((100-*win.w.UsedPercent)/100, 0), 1),
+		})
+	}
+	if len(buckets) == 0 {
+		return nil, errors.New("muse usage payload contains no quota windows")
+	}
+	return []QuotaGroup{{Name: "Muse", Buckets: buckets}}, nil
+}
+
+// RecordMuseUsageJSON parses a `muse usage --json` payload and publishes it as quota telemetry.
+func RecordMuseUsageJSON(raw []byte) error {
+	groups, err := MuseUsageToGroups(raw)
+	if err != nil {
+		return err
+	}
+	recordQuotaGroups(groups)
+	return nil
+}
+
+func DefaultMuseUsageRunner(museBin, homeDir string, baseEnv []string, isTest bool) UsageRunnerFunc {
+	if isTest {
+		return nil
+	}
+	return NewMuseUsageRunner(museBin, homeDir, baseEnv)
+}
+
+func NewMuseUsageRunner(museBin, homeDir string, baseEnv []string) UsageRunnerFunc {
+	return newExecUsageRunner(museBin, "muse", homeDir, baseEnv, "usage", "--json")
+}
+
 func DefaultUsageRunner(agyBin, homeDir string, baseEnv []string, isTest bool) UsageRunnerFunc {
 	if isTest {
 		return nil
@@ -335,9 +410,14 @@ func DefaultUsageRunner(agyBin, homeDir string, baseEnv []string, isTest bool) U
 }
 
 func NewAgyUsageRunner(agyBin, homeDir string, baseEnv []string) UsageRunnerFunc {
-	bin := strings.TrimSpace(agyBin)
-	if bin == "" {
-		bin = "agy"
+	return newExecUsageRunner(agyBin, "agy", homeDir, baseEnv, "--print", "/usage", "--output-format", "json")
+}
+
+// newExecUsageRunner runs a CLI usage subcommand with HOME pinned to homeDir.
+func newExecUsageRunner(bin, defaultBin, homeDir string, baseEnv []string, args ...string) UsageRunnerFunc {
+	resolved := strings.TrimSpace(bin)
+	if resolved == "" {
+		resolved = defaultBin
 	}
 	var env []string
 	for _, e := range baseEnv {
@@ -351,7 +431,7 @@ func NewAgyUsageRunner(agyBin, homeDir string, baseEnv []string) UsageRunnerFunc
 	return func(ctx context.Context) ([]byte, error) {
 		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(runCtx, bin, "--print", "/usage", "--output-format", "json")
+		cmd := exec.CommandContext(runCtx, resolved, args...)
 		cmd.Env = env
 		return cmd.Output()
 	}
