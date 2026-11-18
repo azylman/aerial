@@ -7,18 +7,20 @@ import (
 	"strings"
 
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // RetryActionChunk journals the accepted generation separately from launching.
 // A crash before the reset acknowledgement replays the idempotent transaction;
 // a crash after it replays only reconciliation, never another generation reset.
-func (b *BuildObject) RetryActionChunk(ctx restate.ObjectContext, req RetryActionChunkRequest) (RetryActionChunkResult, error) {
+func (b *BuildObject) RetryActionChunk(ctx restate.ObjectContext, req store.RetryActionChunkRequest) (store.RetryActionChunkResult, error) {
 	if b == nil || b.store == nil {
-		return RetryActionChunkResult{}, restate.TerminalErrorf("retry authority not configured")
+		return store.RetryActionChunkResult{}, restate.TerminalErrorf("retry authority not configured")
 	}
 	rt := b.getRuntime(ctx)
 	if !retryActionRequestMatches(req, rt.Key()) {
-		return RetryActionChunkResult{}, toTerminalErr(fmt.Errorf("%w: build key, chunk, expected dispatch and reason are required", ErrInvalidBuildInput))
+		return store.RetryActionChunkResult{}, toTerminalErr(fmt.Errorf("%w: build key, chunk, expected dispatch and reason are required", ErrInvalidBuildInput))
 	}
 	reset, err := rt.RunReconcileStep("retry-action-reset", func(runCtx context.Context) (reconcileStepOutput, error) {
 		result, err := b.store.RetryActionChunk(runCtx, req)
@@ -31,16 +33,16 @@ func (b *BuildObject) RetryActionChunk(ctx restate.ObjectContext, req RetryActio
 		return reconcileStepOutput{RetryResult: result}, nil
 	})
 	if err != nil {
-		return RetryActionChunkResult{}, err
+		return store.RetryActionChunkResult{}, err
 	}
 	if reset.RetryResult == nil {
-		return RetryActionChunkResult{}, errors.New("retry journal missing accepted generation")
+		return store.RetryActionChunkResult{}, errors.New("retry journal missing accepted generation")
 	}
 	// The reopened build may notify its next terminal outcome independently of
 	// the failed generation. Preserve every sibling launch acknowledgement.
 	state, err := rt.GetState()
 	if err != nil {
-		return RetryActionChunkResult{}, err
+		return store.RetryActionChunkResult{}, err
 	}
 	if state != nil && state.TerminalNotified {
 		state.TerminalNotified = false
@@ -48,7 +50,7 @@ func (b *BuildObject) RetryActionChunk(ctx restate.ObjectContext, req RetryActio
 	}
 	if _, err := b.executeObjectTransition(retryReconcileRuntime{rt}, "retry-action-reconcile", nil); err != nil {
 		// Reset is committed; durable recovery owns the accepted generation.
-		return RetryActionChunkResult{}, errors.New("retry reconciliation pending: " + err.Error())
+		return store.RetryActionChunkResult{}, errors.New("retry reconciliation pending: " + err.Error())
 	}
 	return *reset.RetryResult, nil
 }
@@ -66,6 +68,6 @@ func (r retryReconcileRuntime) RunReconcileStep(name string, fn func(context.Con
 	})
 }
 
-func retryActionRequestMatches(req RetryActionChunkRequest, key string) bool {
+func retryActionRequestMatches(req store.RetryActionChunkRequest, key string) bool {
 	return validRetryInstructionPair(req) && strings.TrimSpace(req.BuildID) != "" && req.BuildID == key && strings.TrimSpace(req.ChunkID) != "" && strings.TrimSpace(req.ExpectedDispatchID) != "" && strings.TrimSpace(req.Reason) != ""
 }

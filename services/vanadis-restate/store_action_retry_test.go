@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 func TestPostgresVanadisStore_RetryActionChunk(t *testing.T) {
@@ -28,11 +29,11 @@ func TestPostgresVanadisStore_RetryActionChunk(t *testing.T) {
 		db          dbScript
 		wantErr     bool
 		wantErrIs   error
-		request     *RetryActionChunkRequest
+		request     *store.RetryActionChunkRequest
 	}{
-		{name: "empty build", request: &RetryActionChunkRequest{ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}, wantErr: true, wantErrIs: ErrInvalidBuildInput},
-		{name: "empty chunk", request: &RetryActionChunkRequest{BuildID: "b1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}, wantErr: true, wantErrIs: ErrInvalidBuildInput},
-		{name: "blank reason", request: &RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: " "}, wantErr: true, wantErrIs: ErrInvalidBuildInput},
+		{name: "empty build", request: &store.RetryActionChunkRequest{ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}, wantErr: true, wantErrIs: ErrInvalidBuildInput},
+		{name: "empty chunk", request: &store.RetryActionChunkRequest{BuildID: "b1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}, wantErr: true, wantErrIs: ErrInvalidBuildInput},
+		{name: "blank reason", request: &store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: " "}, wantErr: true, wantErrIs: ErrInvalidBuildInput},
 		{name: "negative generation", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: -1}, expected: "vanadis-c1-turn-0", wantErr: true},
 		{name: "failed replay", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: 1}, expected: "vanadis-c1-turn-0", wantErr: true},
 		{name: "missing prerequisite", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"absent"}}, expected: "vanadis-c1-turn-0", wantErr: true},
@@ -73,19 +74,19 @@ func TestPostgresVanadisStore_RetryActionChunk(t *testing.T) {
 			t.Parallel()
 			tc.db.buildRow = buildRow("b1", tc.buildStatus)
 			tc.db.chunks = append([]model.VanadisChunk{tc.chunk}, tc.siblings...)
-			store, _ := tc.db.open()
-			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: tc.expected, Reason: "operator retry"}
+			st, _ := tc.db.open()
+			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: tc.expected, Reason: "operator retry"}
 			if tc.request != nil {
 				req = *tc.request
 			}
-			got, err := store.RetryActionChunk(context.Background(), req)
+			got, err := st.RetryActionChunk(context.Background(), req)
 			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
 				t.Fatalf("err=%v want=%v", err, tc.wantErrIs)
 			}
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("result=%+v err=%v wantErr=%v", got, err, tc.wantErr)
 			}
-			if !tc.wantErr && (got == nil || *got != (RetryActionChunkResult{BuildID: "b1", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Accepted: true})) {
+			if !tc.wantErr && (got == nil || *got != (store.RetryActionChunkResult{BuildID: "b1", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Accepted: true})) {
 				t.Fatalf("result=%+v", got)
 			}
 		})
@@ -139,16 +140,16 @@ func TestPostgresVanadisStore_RetryActionChunkTransactions(t *testing.T) {
 			current := original
 			sibling := model.VanadisChunk{ID: "c0", BuildID: "b1", Status: "completed"}
 			lost := tc.lostCommit
-			store := retryFixtureStore(&mu, &current, &buildStatus, sibling, tc.failBuild, &lost)
-			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
-			for err := range retryConcurrentRequests(store, req, tc.concurrent) {
+			st := retryFixtureStore(&mu, &current, &buildStatus, sibling, tc.failBuild, &lost)
+			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
+			for err := range retryConcurrentRequests(st, req, tc.concurrent) {
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
 				}
 			}
 			if tc.lostCommit || tc.replayChanged {
 				req.ExpectedInstructions, req.ReplacementInstructions = new("different"), new("ignored")
-				result, err := store.RetryActionChunk(context.Background(), req)
+				result, err := st.RetryActionChunk(context.Background(), req)
 				if err != nil || !validRetryResult(result) {
 					t.Fatalf("replay=%+v err=%v", result, err)
 				}
@@ -216,7 +217,7 @@ func retryFixtureStore(mu *sync.Mutex, current *model.VanadisChunk, buildStatus 
 	}})
 }
 
-func validRetryResult(result *RetryActionChunkResult) bool {
+func validRetryResult(result *store.RetryActionChunkResult) bool {
 	return result != nil && result.DispatchID == "vanadis-c1-turn-1" && result.Accepted
 }
 
@@ -246,12 +247,12 @@ func retryFixtureExec(query string, local *model.VanadisChunk, parent *string, f
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
-func retryConcurrentRequests(store *PostgresVanadisStore, req RetryActionChunkRequest, concurrent int) <-chan error {
+func retryConcurrentRequests(st *PostgresVanadisStore, req store.RetryActionChunkRequest, concurrent int) <-chan error {
 	results := make(chan error, concurrent)
 	var wg sync.WaitGroup
 	for range concurrent {
 		wg.Go(func() {
-			result, err := store.RetryActionChunk(context.Background(), req)
+			result, err := st.RetryActionChunk(context.Background(), req)
 			if err == nil && (!validRetryResult(result)) {
 				err = fmt.Errorf("unexpected result %+v", result)
 			}

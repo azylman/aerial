@@ -14,6 +14,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type retryJournalRuntime struct {
@@ -61,7 +62,7 @@ func (r *retryJournalRuntime) RunReconcileStep(name string, fn func(context.Cont
 }
 
 type retryAuthorityFixture struct {
-	VanadisStore
+	store.VanadisStore
 
 	current     *model.VanadisChunk
 	buildStatus *string
@@ -99,11 +100,11 @@ func TestBuildRetryAction(t *testing.T) {
 			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}
 			status := "failed"
 			lost := tc.lostCommit
-			store := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
-			authority := &retryAuthorityFixture{VanadisStore: store, current: &current, buildStatus: &status}
+			st := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
+			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
-			req := RetryActionChunkRequest{BuildID: cmp.Or(tc.reqBuild, "b1"), ChunkID: "c1", ExpectedDispatchID: cmp.Or(tc.identity, "vanadis-c1-turn-0"), Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
+			req := store.RetryActionChunkRequest{BuildID: cmp.Or(tc.reqBuild, "b1"), ChunkID: "c1", ExpectedDispatchID: cmp.Or(tc.identity, "vanadis-c1-turn-0"), Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.lostCommit || tc.lostJournal || tc.reconcileErr != nil {
 				if err == nil || restate.IsTerminalError(err) {
@@ -181,14 +182,14 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", Instructions: "verify"}
 			status := "failed"
 			lost := false
-			store := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
-			authority := &retryAuthorityFixture{VanadisStore: store, current: &current, buildStatus: &status}
+			st := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
+			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
 			f := &retryDispatchFixture{accepted: map[string]BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, NewExecutor(t.TempDir(), NewHTTPEriClient(ts.URL, ts.Client()), nil, "", nil))
-			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
+			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {
 				if err == nil {

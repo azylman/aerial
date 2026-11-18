@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // Legacy Restate service names preserved for the dark-launch default agent.
@@ -81,7 +82,7 @@ type AttachChunkPRResponse struct {
 type buildObjectInvoker interface {
 	RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error
 	RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error
-	RouteAttachPR(ctx context.Context, buildID string, req AttachChunkPRRequest) (AttachChunkPRResponse, error)
+	RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error)
 	RouteFailChunk(ctx context.Context, buildID string, req FailChunkRequest) (FailChunkResponse, error)
 }
 
@@ -113,7 +114,7 @@ func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, bui
 	return nil
 }
 
-func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, buildID string, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	_ = ctx
 	return restate.Object[AttachChunkPRResponse](r.ctx, r.serviceName(), buildID, "AttachPR").Request(req)
 }
@@ -125,29 +126,29 @@ func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, buildID s
 
 // BuildRouterService resolves non-build-keyed requests and delegates them to the authoritative Build object.
 type BuildRouterService struct {
-	store          VanadisStore
+	store          store.VanadisStore
 	invokerFactory func(restate.Context) buildObjectInvoker
 	agentName      string
 }
 
 // NewBuildRouterService constructs a BuildRouterService.
-func NewBuildRouterService(store VanadisStore, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
-	if pg, ok := store.(*PostgresVanadisStore); ok && pg == nil {
-		store = nil
+func NewBuildRouterService(st store.VanadisStore, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
+	if pg, ok := st.(*PostgresVanadisStore); ok && pg == nil {
+		st = nil
 	}
 	var ifn func(restate.Context) buildObjectInvoker
 	if len(invokerFactory) > 0 {
 		ifn = invokerFactory[0]
 	}
 	return &BuildRouterService{
-		store:          store,
+		store:          st,
 		invokerFactory: ifn,
 	}
 }
 
 // NewBuildRouterServiceWithAgent constructs a BuildRouterService with an agent-scoped Restate service name.
-func NewBuildRouterServiceWithAgent(store VanadisStore, agentName string, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
-	s := NewBuildRouterService(store, invokerFactory...)
+func NewBuildRouterServiceWithAgent(st store.VanadisStore, agentName string, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
+	s := NewBuildRouterService(st, invokerFactory...)
 	s.agentName = strings.TrimSpace(agentName)
 	return s
 }
@@ -279,7 +280,7 @@ func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub
 }
 
 // RouteAttachPR resolves the build and delegates PR attachment to the target Build.
-func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	req.ChunkID = strings.TrimSpace(req.ChunkID)
 	req.Repo = strings.TrimSpace(req.Repo)
 	if req.PRNumber <= 0 || (req.ChunkID == "" && req.Repo == "") {
@@ -385,8 +386,8 @@ var initPostgres = func(ctx context.Context, pgURL string) (*PostgresVanadisStor
 		closePgxPoolFn(pool)
 		return nil, nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	store := NewPostgresVanadisStore(pool)
-	return store, func(context.Context) {
+	st := NewPostgresVanadisStore(pool)
+	return st, func(context.Context) {
 		closePgxPoolFn(pool)
 	}, nil
 }
@@ -423,7 +424,7 @@ func extractChunkIDFromBranch(repo, branch string) string {
 			return ""
 		}
 	}
-	if !isValidVanadisChunkID(chunkID) {
+	if !store.IsValidVanadisChunkID(chunkID) {
 		return ""
 	}
 	return chunkID
@@ -521,7 +522,7 @@ func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRe
 			Action:     mutationChunkFailed,
 			ChunkID:    strings.TrimSpace(ev.VanadisChunkID),
 			DispatchID: ev.DispatchID,
-			Reason:     firstNonEmpty(ev.Error, "dispatch outcome failed"),
+			Reason:     store.FirstNonEmpty(ev.Error, "dispatch outcome failed"),
 		}
 	default:
 		return nil
@@ -762,7 +763,7 @@ func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID s
 	for _, c := range chunks {
 		if c.ID == chunkID {
 			chunk = c
-			chunk.Effort = capChunkEffort(c.Effort)
+			chunk.Effort = store.CapChunkEffort(c.Effort)
 			break
 		}
 	}
@@ -781,7 +782,7 @@ func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bl
 		TargetID:       strings.TrimSpace(bld.ThreadID),
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
 		Prompt:         prompt,
-		Effort:         capChunkEffort(chunk.Effort),
+		Effort:         store.CapChunkEffort(chunk.Effort),
 		SkipIfActive:   skip,
 	})
 }
@@ -1019,7 +1020,7 @@ func isEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk,
 	if buildThread := normalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && normalizeDiscordThreadID(ev.TargetID) != buildThread {
 		return false
 	}
-	return attachmentMatches(*c, *build, AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
+	return attachmentMatches(*c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
 }
 
 func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string) {
@@ -1090,7 +1091,7 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 		return "", vErr
 	}
 
-	_, attachedChunkID, _, aErr := b.store.AttachChunkPR(rc, AttachChunkPRRequest{
+	_, attachedChunkID, _, aErr := b.store.AttachChunkPR(rc, store.AttachChunkPRRequest{
 		ChunkID:  targetChunk.ID,
 		PRNumber: ev.PRNumber,
 		Repo:     strings.TrimSpace(ev.Repo),
@@ -1132,7 +1133,7 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 			}
 			return res != nil && res.CompletionAccepted, nil
 		case statusFailed, statusTimeout, statusCrashed:
-			reason := firstNonEmpty(ev.Error, "dispatch outcome failed")
+			reason := store.FirstNonEmpty(ev.Error, "dispatch outcome failed")
 			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
 				return false, err
 			}
@@ -1215,7 +1216,7 @@ func (b *BuildObject) resumeNoPRChunk(rc restate.RunContext, bld *model.VanadisB
 	if err != nil {
 		return fmt.Errorf("format chunk prompt: %w", err)
 	}
-	chunk.Effort = capChunkEffort(chunk.Effort)
+	chunk.Effort = store.CapChunkEffort(chunk.Effort)
 	// eri dedupes by dispatch ID, so never skip: a dropped resume would stall the chunk.
 	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, noPRResumeDispatchID(chunk.ID), FormatNoPRResumePrompt(chunk, chunkPrompt), false); err != nil {
 		return err

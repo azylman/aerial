@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 func TestFirstAttachmentRecovery(t *testing.T) {
@@ -34,8 +35,8 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := model.VanadisBuild{ID: "b1", Status: tc.parent}
-			store, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
-			_, _, _, err := store.AttachChunkPR(context.Background(), attachRequest("c1", "aerial"))
+			st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
+			_, _, _, err := st.AttachChunkPR(context.Background(), attachRequest("c1", "aerial"))
 			if tc.wantConflict {
 				assertStoreErr(t, err, ErrBuildConflict, false)
 			} else if err != nil {
@@ -103,8 +104,8 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 			if tc.failure == "" {
 				script.execErr = nil
 			}
-			store, _ := script.open()
-			b, c, th, err := store.AttachChunkPR(context.Background(), attachRequest("selected", "aerial"))
+			st, _ := script.open()
+			b, c, th, err := st.AttachChunkPR(context.Background(), attachRequest("selected", "aerial"))
 			if assertStoreErr(t, err, tc.wantErr, false) {
 				return
 			}
@@ -143,7 +144,7 @@ func TestFirstWorkerFailure(t *testing.T) {
 // remediation wake, not persistence of the preceding attachment transaction.
 func TestRecoveredChunkRemediationWake(t *testing.T) {
 	t.Parallel()
-	store, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
+	st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
 	payloads := make(chan BrainDispatchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req BrainDispatchRequest
@@ -157,7 +158,7 @@ func TestRecoveredChunkRemediationWake(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
-	bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), NewHTTPEriClient(server.URL, server.Client()), nil, "", nil))
+	bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), NewHTTPEriClient(server.URL, server.Client()), nil, "", nil))
 	ctx := makeObjectMockContext(t, "b1")
 	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		return true, bo.handlePREventType(rc, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "unit", Details: "unit test failed"})
@@ -180,7 +181,7 @@ func TestExecutePRAttachment(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
-		req         AttachChunkPRRequest
+		req         store.AttachChunkPRRequest
 		db          dbScript
 		wantCode    restate.Code
 		wantMessage string
@@ -188,14 +189,14 @@ func TestExecutePRAttachment(t *testing.T) {
 		{"missing action repo", attachRequest("c1", ""), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required"},
 		{"blank action repo", attachRequest("c1", "  "), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required"},
 		{"standalone repo", attachRequest("", ""), dbScript{}, 400, "repo is required"},
-		{"invalid number", AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number"},
+		{"invalid number", store.AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number"},
 		{"transient database error", attachRequest("c1", "aerial"), dbScript{row: errRow(errors.New("connection interrupted"))}, 0, "connection interrupted"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := tc.db.open()
-			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			st, _ := tc.db.open()
+			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			mc := mocks.NewMockContext(t)
 			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), _ any, _ ...restate.RunOption) restate.TerminalError {
 				_, err := fn(mockRunContext{Context: context.Background()})
