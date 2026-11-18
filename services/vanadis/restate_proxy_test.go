@@ -372,3 +372,45 @@ func TestRestateDeadlineResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestRestateScopedNames_Derivation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		agent          string
+		wantBuild      string
+		wantRouter     string
+		wantObjectPath string
+		wantRouterPath string
+	}{
+		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Create", wantRouterPath: "/BuildRouter-miorine/RouteFailChunk"},
+		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := BuildServiceName(tc.agent); got != tc.wantBuild {
+				t.Fatalf("BuildServiceName(%q) = %q, want %q", tc.agent, got, tc.wantBuild)
+			}
+			if got := BuildRouterServiceName(tc.agent); got != tc.wantRouter {
+				t.Fatalf("BuildRouterServiceName(%q) = %q, want %q", tc.agent, got, tc.wantRouter)
+			}
+			s := &VanadisServer{restateCfg: RestateConfig{AgentName: tc.agent}}
+			if got := s.buildServiceName(); got != tc.wantBuild {
+				t.Fatalf("buildServiceName() = %q, want %q", got, tc.wantBuild)
+			}
+			if got := s.buildRouterServiceName(); got != tc.wantRouter {
+				t.Fatalf("buildRouterServiceName() = %q, want %q", got, tc.wantRouter)
+			}
+			if got := s.restateObjectPath("b1", "Create"); got != tc.wantObjectPath {
+				t.Fatalf("restateObjectPath() = %q, want %q", got, tc.wantObjectPath)
+			}
+			if got := s.restateRouterPath("RouteFailChunk"); got != tc.wantRouterPath {
+				t.Fatalf("restateRouterPath() = %q, want %q", got, tc.wantRouterPath)
+			}
+		})
+	}
+}

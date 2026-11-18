@@ -67,7 +67,7 @@ func (s *VanadisServer) retryActionChunk(ctx context.Context, req RetryActionChu
 	if err != nil {
 		return nil, err
 	}
-	target := strings.TrimRight(s.restateCfg.RestateIngressURL, "/") + "/Build/" + url.PathEscape(req.BuildID) + "/RetryActionChunk"
+	target := strings.TrimRight(s.restateCfg.RestateIngressURL, "/") + "/" + s.buildServiceName() + "/" + url.PathEscape(req.BuildID) + "/RetryActionChunk"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

@@ -18,6 +18,37 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
+// Legacy Restate service names preserved for the dark-launch default agent.
+const (
+	legacyBuildServiceName       = "Build"
+	legacyBuildRouterServiceName = "BuildRouter"
+)
+
+// NormalizeAgentName trims and lowercases a per-agent name for scoped Restate names.
+func NormalizeAgentName(agent string) string {
+	return strings.ToLower(strings.TrimSpace(agent))
+}
+
+// BuildServiceName derives the Restate Build Virtual Object name for an agent.
+// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
+func BuildServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return legacyBuildServiceName
+	}
+	return legacyBuildServiceName + "-" + name
+}
+
+// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
+// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
+func BuildRouterServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return legacyBuildRouterServiceName
+	}
+	return legacyBuildRouterServiceName + "-" + name
+}
+
 // FailChunkRequest carries the chunk and reason for failing a chunk.
 type FailChunkRequest struct {
 	DispatchID string `json:"dispatch_id,omitempty"`
@@ -54,7 +85,15 @@ type buildObjectInvoker interface {
 }
 
 type restateBuildObjectInvoker struct {
-	ctx restate.Context
+	ctx          restate.Context
+	buildService string
+}
+
+func (r restateBuildObjectInvoker) serviceName() string {
+	if strings.TrimSpace(r.buildService) == "" {
+		return legacyBuildServiceName
+	}
+	return r.buildService
 }
 
 const (
@@ -63,30 +102,31 @@ const (
 
 func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, "Build", buildID, "OnPREvent").Send(ev)
+	_ = restate.ObjectSend(r.ctx, r.serviceName(), buildID, "OnPREvent").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, "Build", buildID, "OnDispatchOutcome").Send(ev)
+	_ = restate.ObjectSend(r.ctx, r.serviceName(), buildID, "OnDispatchOutcome").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, buildID string, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	_ = ctx
-	return restate.Object[AttachChunkPRResponse](r.ctx, "Build", buildID, "AttachPR").Request(req)
+	return restate.Object[AttachChunkPRResponse](r.ctx, r.serviceName(), buildID, "AttachPR").Request(req)
 }
 
 func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, buildID string, req FailChunkRequest) (FailChunkResponse, error) {
 	_ = ctx
-	return restate.Object[FailChunkResponse](r.ctx, "Build", buildID, "FailChunk").Request(req)
+	return restate.Object[FailChunkResponse](r.ctx, r.serviceName(), buildID, "FailChunk").Request(req)
 }
 
 // BuildRouterService resolves non-build-keyed requests and delegates them to the authoritative Build object.
 type BuildRouterService struct {
 	store          VanadisStore
 	invokerFactory func(restate.Context) buildObjectInvoker
+	agentName      string
 }
 
 // NewBuildRouterService constructs a BuildRouterService.
@@ -104,16 +144,33 @@ func NewBuildRouterService(store VanadisStore, invokerFactory ...func(restate.Co
 	}
 }
 
+// NewBuildRouterServiceWithAgent constructs a BuildRouterService with an agent-scoped Restate service name.
+func NewBuildRouterServiceWithAgent(store VanadisStore, agentName string, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
+	s := NewBuildRouterService(store, invokerFactory...)
+	s.agentName = strings.TrimSpace(agentName)
+	return s
+}
+
 // ServiceName returns the Restate service name.
-func (*BuildRouterService) ServiceName() string {
-	return "BuildRouter"
+func (s *BuildRouterService) ServiceName() string {
+	if s == nil {
+		return legacyBuildRouterServiceName
+	}
+	return BuildRouterServiceName(s.agentName)
+}
+
+func (s *BuildRouterService) buildServiceName() string {
+	if s == nil {
+		return legacyBuildServiceName
+	}
+	return BuildServiceName(s.agentName)
 }
 
 func (s *BuildRouterService) getInvoker(ctx restate.Context) buildObjectInvoker {
 	if s != nil && s.invokerFactory != nil {
 		return s.invokerFactory(ctx)
 	}
-	return restateBuildObjectInvoker{ctx: ctx}
+	return restateBuildObjectInvoker{ctx: ctx, buildService: s.buildServiceName()}
 }
 
 func isLookupNotFound(err error) bool {

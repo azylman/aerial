@@ -1467,3 +1467,30 @@ func TestBuildObject_AuthorityCoverageExtra(t *testing.T) {
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }
+
+func TestBuildServiceName_Derivation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		agent      string
+		wantBuild  string
+		wantRouter string
+	}{
+		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter"},
+		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter"},
+		{name: "aerial case insensitive", agent: "Aerial", wantBuild: "Build", wantRouter: "BuildRouter"},
+		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta"},
+		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine"},
+		{name: "whitespace trimmed", agent: "  suletta  ", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta"},
+		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.wantBuild, BuildServiceName(tc.agent))
+			assert.Equal(t, tc.wantRouter, BuildRouterServiceName(tc.agent))
+			assert.Equal(t, tc.wantBuild, NewBuildObjectWithAgent("", tc.agent, nil).ServiceName())
+			assert.Equal(t, tc.wantRouter, NewBuildRouterServiceWithAgent(nil, tc.agent).ServiceName())
+		})
+	}
+}

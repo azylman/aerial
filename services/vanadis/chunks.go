@@ -251,7 +251,7 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var resp AttachChunkPRResponse
-	if err := s.callRestateIngress(r.Context(), "/BuildRouter/RouteAttachPR", req, &resp); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateRouterPath("RouteAttachPR"), req, &resp); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -320,7 +320,7 @@ func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var updated VanadisBuild
-	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/UpdateBuild", buildID), req, &updated); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "UpdateBuild"), req, &updated); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -356,7 +356,7 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 	}
 	req.ChunkRef = chunkRef
 	var updated VanadisChunk
-	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/UpdateChunk", buildID), req, &updated); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "UpdateChunk"), req, &updated); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -373,7 +373,7 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var appended []VanadisChunk
-	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/AppendChunks", buildID), req, &appended); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "AppendChunks"), req, &appended); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -392,7 +392,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		}
 	}
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
-	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/RemoveChunk", buildID), req, nil); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "RemoveChunk"), req, nil); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}

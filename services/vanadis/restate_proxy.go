@@ -21,6 +21,32 @@ import (
 type RestateConfig struct {
 	Enabled           bool   `yaml:"enabled"`
 	RestateIngressURL string `yaml:"restate_ingress_url"`
+	AgentName         string `yaml:"agent_name"`
+}
+
+// NormalizeAgentName trims whitespace for per-agent scoped Restate names.
+func NormalizeAgentName(agent string) string {
+	return strings.ToLower(strings.TrimSpace(agent))
+}
+
+// BuildServiceName derives the Restate Build Virtual Object name for an agent.
+// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
+func BuildServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return "Build"
+	}
+	return "Build-" + name
+}
+
+// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
+// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
+func BuildRouterServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return "BuildRouter"
+	}
+	return "BuildRouter-" + name
 }
 
 // LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
@@ -48,7 +74,30 @@ func LoadRestateConfig(configPath string) RestateConfig {
 	return RestateConfig{
 		Enabled:           enabled,
 		RestateIngressURL: ingressURL,
+		AgentName:         strings.TrimSpace(firstNonEmpty(os.Getenv("AGENT_NAME"), fileCfg.AgentName, "aerial")),
 	}
+}
+
+func (s *VanadisServer) buildServiceName() string {
+	if s == nil {
+		return "Build"
+	}
+	return BuildServiceName(s.restateCfg.AgentName)
+}
+
+func (s *VanadisServer) buildRouterServiceName() string {
+	if s == nil {
+		return "BuildRouter"
+	}
+	return BuildRouterServiceName(s.restateCfg.AgentName)
+}
+
+func (s *VanadisServer) restateObjectPath(buildID, handler string) string {
+	return "/" + s.buildServiceName() + "/" + buildID + "/" + handler
+}
+
+func (s *VanadisServer) restateRouterPath(handler string) string {
+	return "/" + s.buildRouterServiceName() + "/" + handler
 }
 
 // CancelBuildRequest represents a cancel build mutation payload.
