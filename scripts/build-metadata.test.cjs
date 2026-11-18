@@ -55,26 +55,43 @@ test('publisher final binds API provenance and fails closed', async () => {
       {name:'retained prior success',app:123,attempt:2,duplicate:false,fail:false},
       {name:'wrong app',app:9,attempt:2,duplicate:false,fail:true},
       {name:'newer rerun',app:123,attempt:3,duplicate:false,fail:true},
-      {name:'duplicate transport',app:123,attempt:2,duplicate:true,fail:true}
+      {name:'post-final cloned result',app:123,attempt:2,duplicate:true,fail:false},
+      {name:'canonical text with human summary',app:123,attempt:2,text:true,fail:false},
+      {name:'identical dual payload',app:123,attempt:2,text:true,dual:true,fail:false},
+      {name:'mixed transport replica',app:123,attempt:2,text:true,duplicate:true,legacyClone:true,fail:false},
+      {name:'conflicting clone',app:123,attempt:2,duplicate:true,conflict:true,fail:true},
+      {name:'conflicting dual payload',app:123,attempt:2,text:true,conflict:true,dual:true,fail:true},
+      {name:'different raw clone',app:123,attempt:2,duplicate:true,whitespace:true,fail:true},
+      {name:'invalid canonical text',app:123,attempt:2,text:true,invalid:true,fail:true},
+      {name:'wrong workflow payload',app:123,attempt:2,foreign:true,fail:true},
+      {name:'wrong head',app:123,attempt:2,wrongHead:true,fail:true},
+      {name:'wrong external identity',app:123,attempt:2,wrongID:true,fail:true},
+      {name:'publication failure',app:123,attempt:2,publishFailure:true,fail:true},
+      {name:'matrix failed before publication',app:123,attempt:2,matrix:'failure',fail:true},
+      {name:'actual rerun failure supersedes retained success',app:123,attempt:2,reexecuted:true,fail:true}
     ]) {
       let published;
       global.fetch = async (url,options) => {
         let payload;
-        if (options.method === 'POST') {published=JSON.parse(options.body);payload={id:42};}
+        if (options.method === 'POST') { if (c.publishFailure) return {ok:false,status:403}; published=JSON.parse(options.body);payload={id:42};}
         else if (url.includes('/actions/runs/')) payload={run_attempt:c.attempt,run_number:2,path:base.workflow_path,event:'push',repository:{full_name:'owner/repo'},head_sha:env.GITHUB_SHA,check_suite_id:7};
         else if (url.includes('/check-suites/')) payload={app:{id:123}};
         else {
-          const record={name:'build-metadata-result',app:{id:c.app},head_sha:env.GITHUB_SHA,external_id:m.externalID(r),status:'completed',conclusion:'neutral',output:{summary:JSON.stringify(r)}};
-          payload={check_runs:c.duplicate ? [record,record] : [record]};
+          const raw=JSON.stringify(c.foreign ? {...r,workflow_path:'.github/workflows/other.yml'} : r);
+          const other=JSON.stringify({...r,state:'failure',pushed:false});
+          const record={id:10,name:'build-metadata-result',app:{id:c.app},head_sha:c.wrongHead ? 'd'.repeat(40) : env.GITHUB_SHA,external_id:m.externalID(r)+(c.wrongID ? ':wrong' : ''),status:'completed',conclusion:'neutral',output:c.text ? {text:c.invalid ? 'invalid' : raw,summary:c.dual ? (c.conflict ? other : raw) : 'Image result'} : {summary:raw}};
+          const clone={...record,id:99,output:c.legacyClone ? {summary:raw} : {...record.output,summary:c.conflict ? other : c.whitespace ? raw+' ' : record.output.summary}};
+          const rerun={...record,id:100,external_id:m.externalID({...r,run_attempt:2}),output:{text:JSON.stringify({...r,run_attempt:2,source_attempt:2,state:'failure',pushed:false}),summary:'Reexecuted'}};
+          payload={check_runs:c.reexecuted ? [record,rerun] : c.duplicate ? [record,clone] : [record]};
         }
         return {ok:true,json:async()=>payload};
       };
-      if (c.fail) await assert.rejects(m.main(env),undefined,c.name);
+      if (c.fail) await assert.rejects(m.main({...env,MATRIX_RESULT:c.matrix || 'success'}),undefined,c.name);
       else {
         await m.main(env);
         assert.equal(published.head_sha,env.GITHUB_SHA);
         assert.equal(published.conclusion,'neutral');
-        assert.equal(JSON.parse(published.output.summary).results[0].source_attempt,1);
+        assert.equal(JSON.parse(published.output.text).results[0].source_attempt,1);
       }
     }
   } finally {global.fetch=savedFetch;process.argv=savedArgv;fs.rmSync(dir,{recursive:true,force:true});}
@@ -91,7 +108,9 @@ test('publisher writes neutral source checks and updates service records', async
       global.fetch=async(url,options)=>{published=JSON.parse(options.body);method=options.method;return {ok:true,json:async()=>({id:42})};};
       process.argv=['node','publisher',c.mode];
       await m.main(env);
-      const data=JSON.parse(published.output.summary);
+      assert.equal(typeof published.output.text,'string');
+      assert.match(published.output.summary,/^Build metadata v1: /);
+      const data=JSON.parse(published.output.text);
       assert.equal(data.kind,c.kind);
       assert.equal(published.head_sha,'c'.repeat(40));
       assert.equal(data.execution_sha,'b'.repeat(40));
