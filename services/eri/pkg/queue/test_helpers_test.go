@@ -1010,12 +1010,18 @@ func (*mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, s
 type mockClaimStore struct {
 	db.Store
 
-	claimErr error
-	claimed  bool
+	claimErr         error
+	claimed          bool
+	claimDispatchErr error
+	claimedDispatch  bool
 }
 
 func (m *mockClaimStore) ClaimPendingMessage(context.Context, string) (bool, error) {
 	return m.claimed, m.claimErr
+}
+
+func (m *mockClaimStore) ClaimPendingDispatch(context.Context, string) (bool, error) {
+	return m.claimedDispatch, m.claimDispatchErr
 }
 
 func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {

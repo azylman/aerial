@@ -570,12 +570,30 @@ func (te *turnExecution) releaseActivePoolLease() {
 	}
 }
 
+func (te *turnExecution) requeueMessageOnClaimError(m db.Message, claimErr error) {
+	te.logf("[WorkerPool] Failed to claim message %s: %v", m.ID, claimErr)
+	if te.pool == nil || (te.pool.ctx != nil && te.pool.ctx.Err() != nil) {
+		return
+	}
+	delay := time.Second
+	if te.pool.cfg.RetryDelayOverride > 0 {
+		delay = te.pool.cfg.RetryDelayOverride
+	}
+	mCopy := m
+	time.AfterFunc(delay, func() {
+		if te.pool == nil || (te.pool.ctx != nil && te.pool.ctx.Err() != nil) {
+			return
+		}
+		te.pool.Enqueue(mCopy)
+	})
+}
+
 func (te *turnExecution) claimPendingBurst() []db.Message {
 	var claimedBurst []db.Message
 	for _, m := range te.burst {
 		claimed, claimErr := te.pool.cfg.Store.ClaimPendingMessage(te.pool.ctx, m.ID)
 		if claimErr != nil {
-			te.logf("[WorkerPool] Failed to claim message %s: %v", m.ID, claimErr)
+			te.requeueMessageOnClaimError(m, claimErr)
 			continue
 		}
 		if !claimed {
