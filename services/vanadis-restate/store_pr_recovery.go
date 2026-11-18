@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -22,7 +22,7 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 	}
 	defer func() {
 		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] PR recovery rollback: %v", rbErr)
+			slog.ErrorContext(ctx, "[vanadis] PR recovery rollback failed", "error", rbErr)
 		}
 	}()
 	var buildID string

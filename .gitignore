@@ -26,6 +26,7 @@ PR_DESCRIPTION.md
 /services/eri/transcript-search
 /services/eri/hook-guard
 /services/console/console
+/services/coverage-ingest/coverage-ingest
 
 # Console React UI build output and local toolchain (built in Docker / by the gates)
 /services/console/ui/node_modules/

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -168,7 +168,7 @@ func (s *VanadisServer) collectQueueMetrics(ctx context.Context) {
 	}
 	pending, inFlight, err := q.ConsumerStats(ctx, "AERIAL_JOBS", "vanadis-chunk")
 	if err != nil {
-		log.Printf("[vanadis] [metrics] error querying consumer stats: %v", err)
+		slog.ErrorContext(ctx, "[vanadis] [metrics] error querying consumer stats", "error", err)
 		return
 	}
 	QueueDepth.WithLabelValues("pending").Set(float64(pending))

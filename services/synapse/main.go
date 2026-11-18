@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -149,7 +150,7 @@ func (s *RouterServer) consumerStatsQuerier() consumerStatsQuerier {
 func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if q := s.consumerStatsQuerier(); q != nil {
 		if err := collectJetStreamQueueMetrics(r.Context(), q); err != nil {
-			log.Printf("[synapse] [metrics] error collecting jetstream queue metrics: %v", err)
+			slog.ErrorContext(r.Context(), "[synapse] [metrics] error collecting jetstream queue metrics", "error", err)
 		}
 	}
 	if s != nil && s.gatewayLatencyFn != nil {
@@ -220,7 +221,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
 		}
-		log.Printf("[synapse] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
+		slog.ErrorContext(r.Context(), "[synapse] failed to register PR", "pr", req.PRNumber, "repo", req.Repo, "error", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "Failed to register PR"})
 		return
 	}
@@ -274,7 +275,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 	s.enrichDeployEventPRAndTarget(r.Context(), &evt)
 	logPrefix := firstNonEmpty(originPrefix, "deploy")
 	if (evt.Event == eventDeployStarted || evt.Event == eventDeploySuccess) && s.shouldTreatDeploySuccessAsSync(r.Context(), evt) {
-		log.Printf("[synapse] [%s] ignoring pre-image %s for %s on %s#%d (waiting for image build)", logPrefix, evt.Event, evt.JobName, evt.Repo, evt.PRNumber)
+		slog.InfoContext(r.Context(), "[synapse] ignoring pre-image event (waiting for image build)", "origin", logPrefix, "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 			fieldStatus:   "ignored",
 			fieldEvent:    evt.Event,
@@ -286,7 +287,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 	if s.bus != nil {
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
-			log.Printf("[synapse] [%s] ERROR: failed to publish job to jetstream: %v", logPrefix, err)
+			slog.ErrorContext(r.Context(), "[synapse] failed to publish job to jetstream", "origin", logPrefix, "error", err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 			return
 		}
@@ -300,7 +301,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 
 	processed, err := s.ProcessDeployEvent(r.Context(), evt)
 	if err != nil {
-		log.Printf("[synapse] [%s] error processing event: %v", logPrefix, err)
+		slog.ErrorContext(r.Context(), "[synapse] error processing event", "origin", logPrefix, "error", err)
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		fieldStatus:   statusAccepted,
@@ -317,7 +318,7 @@ func (s *RouterServer) resolvePRFromRegistrySHA(ctx context.Context, repo, sha s
 	}
 	prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
 	if err != nil {
-		log.Printf("[synapse] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
+		slog.WarnContext(ctx, "[synapse] [registry] failed resolving PR by SHA locally", "sha", sha, "error", err)
 		return 0, "", "", false
 	}
 	if prNum <= 0 {
@@ -340,7 +341,7 @@ func (s *RouterServer) backfillRegistryTargetID(ctx context.Context, repo string
 		targetID = tID
 	}
 	if backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha); err != nil {
-		log.Printf("[synapse] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
+		slog.WarnContext(ctx, "[synapse] [registry] failed backfilling merge_sha", "sha", sha, "repo", repo, "pr", prNum, "error", err)
 	} else if targetID == "" && backfillTID != "" {
 		targetID = backfillTID
 	}
@@ -403,7 +404,7 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	}
 	if dmMsg != "" && s.isValidAlertTarget(targetID) {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
-			log.Printf("[synapse] [dispatcher] warning dispatching %s direct message: %v", label, err)
+			slog.WarnContext(ctx, "[synapse] [dispatcher] error dispatching direct message", "label", label, "error", err)
 		}
 	}
 	if opt.silent {
@@ -416,7 +417,7 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 			SkipIfActive: opt.skipIfActive,
 		}
 		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {
-			log.Printf("[synapse] [dispatcher] error dispatching background %s prompt: %v", label, err)
+			slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching background prompt", "label", label, "error", err)
 			return fmt.Errorf("dispatch background %s prompt: %w", label, err)
 		}
 		return nil
@@ -426,7 +427,7 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	}
 	req := PromptRequest{ChannelID: targetID, Prompt: prompt}
 	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
-		log.Printf("[synapse] [dispatcher] error dispatching %s prompt: %v", label, err)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching prompt", "label", label, "error", err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
 	}
 	return nil
@@ -438,7 +439,7 @@ func (s *RouterServer) resolveDeployEventPRNumber(ctx context.Context, evt *Depl
 	}
 	prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA)
 	if err != nil {
-		log.Printf("[synapse] [deploy] failed resolving SHA %s: %v", evt.CommitSHA, err)
+		slog.WarnContext(ctx, "[synapse] [deploy] failed resolving SHA", "sha", evt.CommitSHA, "error", err)
 		return
 	}
 	if prNum > 0 {
@@ -453,7 +454,7 @@ func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *Depl
 	}
 	targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber)
 	if err != nil {
-		log.Printf("[synapse] [deploy] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		slog.WarnContext(ctx, "[synapse] [deploy] failed resolving thread for PR", "repo", evt.Repo, "pr", evt.PRNumber, "error", err)
 		return
 	}
 	if targetID != "" {
@@ -474,18 +475,18 @@ func (s *RouterServer) handleDeployStartedRegistry(ctx context.Context, evt Depl
 		return false
 	}
 	if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
-		log.Printf("[synapse] [deploy] skipping deploy_started for %s on %s#%d (waiting for image build)", evt.JobName, evt.Repo, evt.PRNumber)
+		slog.InfoContext(ctx, "[synapse] [deploy] skipping deploy_started (waiting for image build)", "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		return true
 	}
 	if len(evt.ExpectedJobs) > 0 {
 		if _, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
-			log.Printf("[synapse] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			slog.WarnContext(ctx, "[synapse] [registry] error recording expected jobs on deploy_started", "repo", evt.Repo, "pr", evt.PRNumber, "error", err)
 		}
 	}
 	if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
-		log.Printf("[synapse] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
+		slog.WarnContext(ctx, "[synapse] [registry] error transitioning pr to deploying", "repo", evt.Repo, "pr", evt.PRNumber, "job", evt.JobName, "error", err)
 	} else if tID == "" {
-		log.Printf("[synapse] [deploy] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
+		slog.InfoContext(ctx, "[synapse] [deploy] skipping deploy_started (job already deployed or PR inactive)", "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		return true
 	}
 	return false
@@ -498,7 +499,7 @@ func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt Dep
 	syncHasExpected := len(dedupeTrimmedStrings(evt.ExpectedJobs)) > 0
 	if s.registry != nil {
 		if regHasExpected, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
-			log.Printf("[synapse] [registry] warning recording expected jobs on sync_success for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			slog.WarnContext(ctx, "[synapse] [registry] error recording expected jobs on sync_success", "repo", evt.Repo, "pr", evt.PRNumber, "error", err)
 		} else {
 			syncHasExpected = syncHasExpected || regHasExpected
 		}
@@ -521,7 +522,7 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 	}
 	if s.registry != nil && evt.PRNumber > 0 {
 		if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, evt.Repo, evt.PRNumber); ackErr != nil {
-			log.Printf("[synapse] [registry] warning: failed acknowledging deploy_failed_published for %s#%d: %v", evt.Repo, evt.PRNumber, ackErr)
+			slog.WarnContext(ctx, "[synapse] [registry] failed acknowledging deploy_failed_published", "repo", evt.Repo, "pr", evt.PRNumber, "error", ackErr)
 		}
 	}
 	if evt.PRNumber > 0 {
@@ -614,7 +615,7 @@ func (s *RouterServer) isDeployEventOwnedByWatcher(ctx context.Context, evt Depl
 	}
 	tracked, err := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber)
 	if err != nil {
-		log.Printf("[synapse] [deploy] warning checking kustomization requests for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		slog.WarnContext(ctx, "[synapse] [deploy] error checking kustomization requests", "repo", evt.Repo, "pr", evt.PRNumber, "error", err)
 	}
 	return tracked
 }
@@ -622,13 +623,12 @@ func (s *RouterServer) isDeployEventOwnedByWatcher(ctx context.Context, evt Depl
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
 	s.enrichDeployEventPRAndTarget(ctx, &evt)
 
-	log.Printf("[synapse] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
-		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
+	slog.InfoContext(ctx, "[synapse] [deploy] deploy event", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber, "commit", evt.CommitSHA, "status", evt.Status, "target_id", evt.TargetID, "deployment_id", evt.DeploymentID, "details", evt.Details)
 
 	s.evaluateFluxEventTriggers(ctx, evt)
 
 	if s.isDeployEventOwnedByWatcher(ctx, evt) {
-		log.Printf("[synapse] [deploy] deferring %s for %s on %s#%d to the kustomization watcher", evt.Event, evt.JobName, evt.Repo, evt.PRNumber)
+		slog.InfoContext(ctx, "[synapse] [deploy] deferring event to the kustomization watcher", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		return &evt, nil
 	}
 
@@ -657,8 +657,7 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		}
 
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
-			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
-				evt.Repo, evt.JobName, evt.PRNumber, evt.CommitSHA)
+			slog.InfoContext(ctx, "[synapse] [deploy] suppressing duplicate deploy_success", "repo", evt.Repo, "job", evt.JobName, "pr", evt.PRNumber, "commit", evt.CommitSHA)
 			return &evt, nil
 		}
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
@@ -908,6 +907,7 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	_, flushTracing := tracing.Init(ctx, "synapse", tracing.DefaultConfigPath)
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	err := runApp(ctx, cfgSrc)
 	cancel()

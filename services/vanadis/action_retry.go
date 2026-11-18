@@ -118,7 +118,7 @@ func decodeRetryActionRequest(r *http.Request) (RetryActionChunkRequest, error) 
 func (s *VanadisServer) handleRetryActionChunk(w http.ResponseWriter, r *http.Request) {
 	req, err := decodeRetryActionRequest(r)
 	if err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	result, err := s.retryActionChunk(r.Context(), req)
@@ -127,7 +127,7 @@ func (s *VanadisServer) handleRetryActionChunk(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, result)

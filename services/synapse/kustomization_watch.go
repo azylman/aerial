@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -525,7 +526,7 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 		}
 	}
 	if repatchAt != "" && s.dispatcher != nil {
-		log.Printf("[synapse] [flux-watch] re-requesting lost reconcile of %s/%s at %s", obs.Ref.Namespace, obs.Ref.Name, repatchAt)
+		slog.InfoContext(ctx, "[synapse] [flux-watch] re-requesting lost reconcile", "namespace", obs.Ref.Namespace, "name", obs.Ref.Name, "requested_at", repatchAt)
 		if err := s.dispatcher.ReconcileKustomization(ctx, obs.Ref, repatchAt); err != nil {
 			errs = append(errs, fmt.Errorf("re-request reconcile of %s/%s: %w", obs.Ref.Namespace, obs.Ref.Name, err))
 		}
@@ -567,7 +568,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	name := obs.Ref.Name
 	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
 	if commitSHA == "" {
-		log.Printf("[synapse] [flux-watch] waiting on %s for %s#%d: no merge commit recorded", name, pr.Repo, pr.PRNumber)
+		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting on kustomization: no merge commit recorded", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber)
 		return nil
 	}
 	if state.SourceRepo != "" && strings.EqualFold(normalizeRepo(state.SourceRepo), normalizeRepo(pr.Repo)) {
@@ -577,7 +578,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 			return fmt.Errorf("check applied revision of %s for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
 		}
 		if !live {
-			log.Printf("[synapse] [flux-watch] waiting for %s to apply %s for %s#%d (applied %q)", name, commitSHA, pr.Repo, pr.PRNumber, applied)
+			slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for kustomization to apply commit", "kustomization", name, "commit", commitSHA, "repo", pr.Repo, "pr", pr.PRNumber, "applied", applied)
 			return nil
 		}
 	}
@@ -592,7 +593,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	case done:
 		return s.completeKustomizationRequest(ctx, pr, name)
 	default:
-		log.Printf("[synapse] [flux-watch] waiting for rollout of %s for %s#%d: %s", name, pr.Repo, pr.PRNumber, reason)
+		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
 		return nil
 	}
 }
@@ -728,7 +729,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		OccurredAt:   time.Now().UTC(),
 	})
 	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
-		log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
+		slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
 	}
 	return nil
 }
@@ -806,7 +807,7 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 	if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)
 	}
-	log.Printf("[synapse] [deploy] deferring completion of %s#%d to the kustomization watcher (%s)", repo, prNum, strings.Join(names, ", "))
+	slog.InfoContext(ctx, "[synapse] [deploy] deferring completion to the kustomization watcher", "repo", repo, "pr", prNum, "kustomizations", strings.Join(names, ", "))
 	return true, s.reconcileImageKustomizations(ctx, refs, requests)
 }
 
@@ -825,7 +826,7 @@ func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []
 	var errs []error
 	for _, ref := range refs {
 		if err := s.dispatcher.ReconcileKustomization(ctx, ref, requests[ref.Name].RequestedAt); err != nil {
-			log.Printf("[synapse] [dispatcher] error reconciling kustomization %s/%s: %v", ref.Namespace, ref.Name, err)
+			slog.ErrorContext(ctx, "[synapse] [dispatcher] error reconciling kustomization", "namespace", ref.Namespace, "name", ref.Name, "error", err)
 			errs = append(errs, err)
 		}
 	}
