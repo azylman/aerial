@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -188,38 +190,201 @@ func TestConfigSampleRatio(t *testing.T) {
 	}
 }
 
-// TestSetup mutates the global provider and propagator, so it is not parallel.
+// TestSetup mutates the global provider, propagator and environment, so it is not parallel.
 func TestSetup(t *testing.T) {
 	tests := []struct {
-		name         string
-		cfg          Config
-		wantErr      bool
-		wantForwards bool // inbound traceparent survives on the extracted context
+		name            string
+		cfg             Config
+		env             map[string]string
+		wantForwards    bool // inbound traceparent survives on the extracted context
+		wantRootSampled bool // a new root span is recorded and sampled
+		// envEndpointCollector points OTEL_EXPORTER_OTLP_TRACES_ENDPOINT at a local collector;
+		// wantCollectorHit expects an ended root span to be exported there on shutdown.
+		envEndpointCollector bool
+		wantCollectorHit     bool
 	}{
 		{name: "disabled forwards context", cfg: Config{}, wantForwards: true},
-		{name: "enabled", cfg: Config{Enabled: true, Endpoint: "http://127.0.0.1:1/v1/traces", Stack: "aerial"}, wantForwards: true},
+		{
+			name: "enabled", cfg: Config{Enabled: true, Endpoint: "http://127.0.0.1:1/v1/traces", Stack: "aerial"},
+			wantForwards: true, wantRootSampled: true,
+		},
+		{
+			name: "yaml ratio sampler", cfg: Config{Enabled: true, Endpoint: "http://127.0.0.1:1/v1/traces", SampleRatio: 0.0000001},
+			wantForwards: true,
+		},
+		{
+			name: "OTEL_TRACES_SAMPLER replaces yaml sampler",
+			cfg:  Config{Enabled: true, Endpoint: "http://127.0.0.1:1/v1/traces", SampleRatio: 0.0000001},
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_on"}, wantForwards: true, wantRootSampled: true,
+		},
+		{
+			name: "OTEL endpoint replaces yaml endpoint", cfg: Config{Enabled: true, Endpoint: "http://127.0.0.1:1/v1/traces"},
+			envEndpointCollector: true, wantForwards: true, wantRootSampled: true, wantCollectorHit: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			shutdown, err := Setup(context.Background(), "eri", tc.cfg)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Setup err = %v, wantErr %v", err, tc.wantErr)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
 			}
-			defer func() {
-				if err := shutdown(context.Background()); err != nil {
-					t.Errorf("shutdown: %v", err)
-				}
-			}()
-			var seen string
-			h := Middleware("test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				seen = trace.SpanContextFromContext(r.Context()).TraceID().String()
-			}))
-			req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
-			// Unsampled parent: ParentBased drops the span, so nothing is ever exported.
-			req.Header.Set("Traceparent", "00-"+parentTraceID+"-"+parentSpanID+"-00")
-			h.ServeHTTP(httptest.NewRecorder(), req)
+			hits := new(atomic.Int32)
+			if tc.envEndpointCollector {
+				hits = startEnvCollector(t)
+			}
+			shutdown, err := Setup(context.Background(), "eri", tc.cfg)
+			if err != nil {
+				t.Fatalf("Setup err = %v, want nil", err)
+			}
+			seen, seenBaggage := serveThroughGlobalMiddleware()
 			if (seen == parentTraceID) != tc.wantForwards {
 				t.Errorf("trace id in handler = %q, want forwarded=%v", seen, tc.wantForwards)
+			}
+			if seenBaggage != "aerial" {
+				t.Errorf("baggage in handler = %q, want %q", seenBaggage, "aerial")
+			}
+			// Only ended when a local collector is listening, so nothing is queued for a dead endpoint.
+			_, span := Tracer().Start(context.Background(), "root")
+			if span.SpanContext().IsSampled() != tc.wantRootSampled {
+				t.Errorf("root span sampled = %v, want %v", span.SpanContext().IsSampled(), tc.wantRootSampled)
+			}
+			if tc.envEndpointCollector {
+				span.End()
+			}
+			if err := shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown: %v", err)
+			}
+			if got := hits.Load() > 0; got != tc.wantCollectorHit {
+				t.Errorf("collector hit = %v, want %v", got, tc.wantCollectorHit)
+			}
+		})
+	}
+}
+
+// startEnvCollector points OTEL_EXPORTER_OTLP_TRACES_ENDPOINT at a local OTLP collector and
+// returns its count of trace export requests.
+func startEnvCollector(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	hits := new(atomic.Int32)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/traces" {
+			hits.Add(1)
+		}
+	}))
+	t.Cleanup(collector.Close)
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL+"/v1/traces")
+	return hits
+}
+
+// serveThroughGlobalMiddleware sends a request with an unsampled parent and baggage through
+// Middleware built from the global provider and propagator, returning the trace ID and
+// "tenant" baggage the handler saw. ParentBased drops the unsampled span, so nothing exports.
+func serveThroughGlobalMiddleware() (traceID, tenant string) {
+	h := Middleware("test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceID = trace.SpanContextFromContext(r.Context()).TraceID().String()
+		tenant = baggage.FromContext(r.Context()).Member("tenant").Value()
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
+	req.Header.Set("Traceparent", "00-"+parentTraceID+"-"+parentSpanID+"-00")
+	req.Header.Set("Baggage", "tenant=aerial")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	return traceID, tenant
+}
+
+func TestEnvOverrides(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want sdkEnvOverrides
+	}{
+		{name: "nothing set keeps yaml", env: map[string]string{}},
+		{name: "traces endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://vt:10428/v1/traces"}, want: sdkEnvOverrides{endpoint: true}},
+		{name: "generic endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://vt:10428"}, want: sdkEnvOverrides{endpoint: true}},
+		{name: "blank endpoint ignored", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "  "}},
+		{name: "sampler", env: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_on"}, want: sdkEnvOverrides{sampler: true}},
+		{name: "sampler arg alone keeps yaml", env: map[string]string{"OTEL_TRACES_SAMPLER_ARG": "0.5"}},
+		{
+			name: "both", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://vt:10428", "OTEL_TRACES_SAMPLER": "always_off"},
+			want: sdkEnvOverrides{endpoint: true, sampler: true},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := envOverrides(func(k string) string { return tc.env[k] }); got != tc.want {
+				t.Errorf("envOverrides = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewResource sets process environment (t.Setenv), so it is not parallel.
+func TestNewResource(t *testing.T) {
+	tests := []struct {
+		name          string
+		stack         string
+		env           map[string]string
+		want          map[string]string
+		wantAbsent    []string
+		wantSchemaURL string
+		wantErr       bool
+	}{
+		{
+			name: "stack becomes service.namespace", stack: "miorine",
+			want: map[string]string{
+				"service.name": "haro", "service.namespace": "miorine", "aerial.stack": "miorine",
+				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
+			},
+			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+		{
+			name: "empty stack omits namespace",
+			want: map[string]string{"service.name": "haro", "aerial.stack": ""}, wantAbsent: []string{"service.namespace"},
+			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+		{
+			name: "OTEL_RESOURCE_ATTRIBUTES added", stack: "aerial",
+			env: map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,k8s.namespace.name=default,k8s.node.name=calibarn,service.version=v1.2.3"},
+			want: map[string]string{
+				"service.name": "haro", "service.namespace": "aerial", "k8s.pod.name": "haro-7d9",
+				"k8s.namespace.name": "default", "k8s.node.name": "calibarn", "service.version": "v1.2.3",
+			},
+			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+		{
+			name: "OTEL_SERVICE_NAME overrides service.name", stack: "suletta",
+			env:           map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
+			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "suletta"},
+			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+		{
+			name: "malformed attributes keep the rest", stack: "aerial",
+			env:     map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,broken"},
+			want:    map[string]string{"service.name": "haro", "service.namespace": "aerial", "k8s.pod.name": "haro-7d9"},
+			wantErr: true, wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.env["OTEL_RESOURCE_ATTRIBUTES"])
+			t.Setenv("OTEL_SERVICE_NAME", tc.env["OTEL_SERVICE_NAME"])
+			res, err := newResource(context.Background(), "haro", Config{Stack: tc.stack})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("newResource err = %v, wantErr %v", err, tc.wantErr)
+			}
+			attrs := attrMap(res.Attributes())
+			for k, v := range tc.want {
+				if got, ok := attrs[k]; !ok || got != v {
+					t.Errorf("resource %s = %q (present %v), want %q", k, got, ok, v)
+				}
+			}
+			for _, k := range tc.wantAbsent {
+				if _, ok := attrs[k]; ok {
+					t.Errorf("resource has %s, want absent", k)
+				}
+			}
+			if res.SchemaURL() != tc.wantSchemaURL {
+				t.Errorf("schema URL = %q, want %q", res.SchemaURL(), tc.wantSchemaURL)
 			}
 		})
 	}
@@ -387,6 +552,7 @@ type middlewareTestCase struct {
 	wantRoute   string
 	wantParent  bool
 	wantError   bool
+	wantNoSpan  bool // probe path: served with no span and no extracted context
 }
 
 func runMiddlewareCase(t *testing.T, tc middlewareTestCase) {
@@ -406,8 +572,20 @@ func runMiddlewareCase(t *testing.T, tc middlewareTestCase) {
 	if tc.traceparent != "" {
 		req.Header.Set("Traceparent", tc.traceparent)
 	}
-	newMiddleware(tp, propagation.TraceContext{}, "eri", mux).ServeHTTP(httptest.NewRecorder(), req)
-
+	rec := httptest.NewRecorder()
+	newMiddleware(tp, propagation.TraceContext{}, "eri", mux).ServeHTTP(rec, req)
+	if rec.Code != tc.status {
+		t.Errorf("response status = %d, want %d", rec.Code, tc.status)
+	}
+	if tc.wantNoSpan {
+		if n := len(sr.Ended()) + len(sr.Started()); n != 0 {
+			t.Errorf("probe recorded %d spans, want 0", n)
+		}
+		if handlerTP != "" {
+			t.Errorf("probe handler saw trace context %q, want none", handlerTP)
+		}
+		return
+	}
 	assertMiddlewareSpan(t, tc, sr, handlerTP)
 }
 
@@ -467,6 +645,15 @@ func TestMiddleware(t *testing.T) {
 		{
 			name: "post-routed name replaces handler rename", pattern: "/mcp", target: "/mcp", rename: "mcp tools/call",
 			status: http.StatusOK, wantName: "POST /mcp", wantRoute: "/mcp",
+		},
+		{name: "health probe untraced", pattern: "/health", target: "/health", traceparent: parentTraceparent, status: http.StatusOK, wantNoSpan: true},
+		{name: "healthz probe untraced", pattern: "/healthz", target: "/healthz", traceparent: parentTraceparent, status: http.StatusOK, wantNoSpan: true},
+		{name: "readyz probe untraced", pattern: "/readyz", target: "/readyz", traceparent: parentTraceparent, status: http.StatusServiceUnavailable, wantNoSpan: true},
+		{name: "livez probe untraced", pattern: "/livez", target: "/livez", status: http.StatusOK, wantNoSpan: true},
+		{name: "metrics scrape untraced", pattern: "/metrics", target: "/metrics", traceparent: parentTraceparent, status: http.StatusOK, wantNoSpan: true},
+		{
+			name: "probe-like prefix still traced", pattern: "/healthz/deep", target: "/healthz/deep", status: http.StatusOK,
+			wantName: "POST /healthz/deep", wantRoute: "/healthz/deep",
 		},
 	}
 	for _, tc := range tests {
