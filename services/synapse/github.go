@@ -588,14 +588,6 @@ type GitHubCheckRunPayload struct {
 	} `json:"repository"`
 }
 
-type GitHubCheckRunsResponse struct {
-	CheckRuns []struct {
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	} `json:"check_runs"`
-}
-
 type GitHubWorkflowRunPayload struct {
 	Action      string `json:"action"`
 	WorkflowRun struct {
@@ -850,7 +842,7 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 	emitAdditional := false
 	if prNum > 0 && res.PRNumber == 0 {
 		res.PRNumber = prNum
-		if res.Event == ghEventCheckRun && !isGateAggregatorCheck(res.CheckName) {
+		if res.Event == ghEventCheckRun && !isGateAggregatorCheck(res.CheckName) && !isBuildMetadataCheck(res.CheckName) {
 			if !isRoboRevCheck(res.CheckName) {
 				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 			}
@@ -874,7 +866,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		return nil
 	}
 	emitAdditional := false
-	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {
+	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) && !isBuildMetadataCheck(res.CheckName) {
 		if !isRoboRevCheck(res.CheckName) {
 			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 		}
@@ -1148,7 +1140,7 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 }
 
 func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGitHubEvent) {
-	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) {
+	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || (isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName)) {
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(res.Status), "completed") && strings.EqualFold(strings.TrimSpace(res.Conclusion), "cancelled") {
@@ -1197,6 +1189,9 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	res.HeadSHA = p.CheckRun.HeadSHA
 	res.Status = p.CheckRun.Status
 	res.Conclusion = p.CheckRun.Conclusion
+	if isBuildMetadataCheck(res.CheckName) {
+		return res, nil
+	}
 	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
 	slog.InfoContext(ctx, "[synapse] [github] [check_run] event", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
 
@@ -1340,7 +1335,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 	res = &ResolvedGitHubEvent{Event: event, Delivery: delivery}
 	// Triggers are only evaluated after successful processing to prevent destructive trigger claiming during transient errors/JetStream retries.
 	defer func() {
-		if err == nil {
+		if err == nil && (res == nil || res.Event != ghEventCheckRun || !isBuildMetadataCheck(res.CheckName)) {
 			s.evaluateGitHubEventTriggers(ctx, res, body)
 		}
 	}()

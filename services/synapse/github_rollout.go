@@ -161,6 +161,9 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 	passedBuildJobs = make(map[string]bool)
 
 	for checkName, state := range checks {
+		if isBuildMetadataCheck(checkName) {
+			continue
+		}
 		s := strings.ToLower(strings.TrimSpace(state))
 		switch s {
 		case statusPassed:
@@ -423,6 +426,9 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 	}
 	hasPending := false
 	for _, cr := range checkRuns.CheckRuns {
+		if isBuildMetadataCheck(cr.Name) {
+			continue
+		}
 		state := classifyCheckState(cr.Status, cr.Conclusion)
 		if !isGateAggregatorCheck(cr.Name) && state == statusFailed {
 			s.failedCheckSHAs.Store(key, headSHA)
