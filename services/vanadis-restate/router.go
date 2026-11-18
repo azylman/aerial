@@ -1144,11 +1144,118 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 		return err
 	}
 	if !applied {
+		if b.executor != nil && isCompletedDispatchStatus(ev.Status) {
+			return b.handleNoPRTurnOutcome(ctx, ev)
+		}
 		return nil
 	}
 	rt := b.getRuntime(ctx)
 	mutation := dispatchCompletionMutation(ev)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterDispatch, mutation); tErr != nil {
+		return toTerminalErr(tErr)
+	}
+	return nil
+}
+
+type noPRAction string
+
+const (
+	noPRActionNone   noPRAction = "none"
+	noPRActionResume noPRAction = "resume"
+	noPRActionFail   noPRAction = "fail"
+)
+
+const noPRFailureReason = "chunk turn ended without opening a PR (after one automatic resume)"
+
+// noPRResumeDispatchID identifies the single automatic resume turn for a PR chunk.
+func noPRResumeDispatchID(chunkID string) string {
+	return fmt.Sprintf("vanadis-%s-nopr-resume-1", strings.TrimSpace(chunkID))
+}
+
+func isCompletedDispatchStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case statusCompleted, dispatchStatusSuccess:
+		return true
+	}
+	return false
+}
+
+// noPRTurnAction decides how to react when a PR chunk's turn completes. The
+// submit script attaches PRs synchronously, so a completed launch or resume turn
+// on a still-running chunk without a PR means the turn ended without one.
+func noPRTurnAction(chunk VanadisChunk, buildStatus, dispatchID string) noPRAction {
+	if chunk.Mode == chunkModeAction || chunk.PRNumber != 0 || buildStatus != statusRunning {
+		return noPRActionNone
+	}
+	if chunk.Status != statusRunning && chunk.Status != statusCoding {
+		return noPRActionNone
+	}
+	switch dispatchID {
+	case actionDispatchID(chunk):
+		return noPRActionResume
+	case noPRResumeDispatchID(chunk.ID):
+		return noPRActionFail
+	}
+	return noPRActionNone
+}
+
+func findChunkIndex(chunks []VanadisChunk, chunkID string) int {
+	for i := range chunks {
+		if chunks[i].ID == chunkID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (b *BuildObject) resumeNoPRChunk(rc restate.RunContext, bld *VanadisBuild, chunks []VanadisChunk, idx int) error {
+	chunk := chunks[idx]
+	chunkPrompt, err := b.executor.FormatChunkPrompt(*bld, chunks, idx)
+	if err != nil {
+		return fmt.Errorf("format chunk prompt: %w", err)
+	}
+	chunk.Effort = capChunkEffort(chunk.Effort)
+	// eri dedupes by dispatch ID, so never skip: a dropped resume would stall the chunk.
+	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, noPRResumeDispatchID(chunk.ID), FormatNoPRResumePrompt(chunk, chunkPrompt), false); err != nil {
+		return err
+	}
+	banner := fmt.Sprintf("Chunk %d turn ended without a PR — automatic resume dispatched", chunk.ChunkIndex+1)
+	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, banner); sErr != nil {
+		slog.WarnContext(rc, "[vanadis-restate] sync build widget warning", "error", sErr)
+	}
+	return nil
+}
+
+// handleNoPRTurnOutcome resumes a PR chunk whose launch turn ended without a PR
+// once, then fails it loudly when the resume turn also ends without one.
+func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
+	buildID := restate.Key(ctx)
+	chunkID := strings.TrimSpace(ev.VanadisChunkID)
+	action, err := runJournaled(ctx, labelOnDispatchOutcome, "handle-nopr-turn-outcome", func(rc restate.RunContext) (noPRAction, error) {
+		bld, chunks, err := b.store.GetBuild(rc, buildID)
+		if err != nil {
+			return noPRActionNone, err
+		}
+		idx := findChunkIndex(chunks, chunkID)
+		if bld == nil || idx < 0 {
+			return noPRActionNone, nil
+		}
+		action := noPRTurnAction(chunks[idx], bld.Status, ev.DispatchID)
+		if action == noPRActionResume {
+			if err := b.resumeNoPRChunk(rc, bld, chunks, idx); err != nil {
+				return noPRActionNone, err
+			}
+		}
+		return action, nil
+	})
+	if err != nil {
+		return err
+	}
+	if action != noPRActionFail {
+		return nil
+	}
+	mutation := &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunkID, DispatchID: ev.DispatchID, Reason: noPRFailureReason}
+	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterNoPRFail, mutation); tErr != nil {
 		return toTerminalErr(tErr)
 	}
 	return nil

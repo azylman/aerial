@@ -821,3 +821,93 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 		})
 	}
 }
+
+func TestNoPRTurnAction(t *testing.T) {
+	t.Parallel()
+	pr := func(status string, prNumber int) VanadisChunk {
+		return VanadisChunk{ID: "c1", Mode: "pr", Status: status, PRNumber: prNumber}
+	}
+	tests := []struct {
+		name        string
+		chunk       VanadisChunk
+		buildStatus string
+		dispatchID  string
+		want        noPRAction
+	}{
+		{"running pr chunk launch turn resumes", pr("running", 0), "running", "vanadis-c1-turn-0", noPRActionResume},
+		{"coding pr chunk launch turn resumes", pr("coding", 0), "running", "vanadis-c1-turn-0", noPRActionResume},
+		{"legacy empty mode launch turn resumes", VanadisChunk{ID: "c1", Status: "running"}, "running", "vanadis-c1-turn-0", noPRActionResume},
+		{"resume turn without pr fails", pr("running", 0), "running", "vanadis-c1-nopr-resume-1", noPRActionFail},
+		{"attached pr ignored", pr("running", 12), "running", "vanadis-c1-turn-0", noPRActionNone},
+		{"pr opened status ignored", pr("pr_opened", 0), "running", "vanadis-c1-turn-0", noPRActionNone},
+		{"failed chunk ignored", pr("failed", 0), "running", "vanadis-c1-nopr-resume-1", noPRActionNone},
+		{"cancelled chunk ignored", pr("cancelled", 0), "running", "vanadis-c1-turn-0", noPRActionNone},
+		{"failed build ignored", pr("running", 0), "failed", "vanadis-c1-turn-0", noPRActionNone},
+		{"cancelled build ignored", pr("running", 0), "cancelled", "vanadis-c1-nopr-resume-1", noPRActionNone},
+		{"ci remediation dispatch ignored", pr("running", 0), "running", "vanadis-c1-cifail-abc123-1", noPRActionNone},
+		{"conflict remediation dispatch ignored", pr("running", 0), "running", "vanadis-conflict-c1-abc123", noPRActionNone},
+		{"other chunk resume id ignored", pr("running", 0), "running", "vanadis-c2-nopr-resume-1", noPRActionNone},
+		{"action chunk ignored", VanadisChunk{ID: "c1", Mode: "action", Status: "running"}, "running", "vanadis-c1-turn-0", noPRActionNone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, noPRTurnAction(tc.chunk, tc.buildStatus, tc.dispatchID))
+		})
+	}
+}
+
+func TestNoPRResumeDispatchID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, chunkID, want string
+	}{
+		{"plain chunk id", "chunk-1-fix", "vanadis-chunk-1-fix-nopr-resume-1"},
+		{"whitespace trimmed", " c1 ", "vanadis-c1-nopr-resume-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, noPRResumeDispatchID(tc.chunkID))
+		})
+	}
+}
+
+func TestFormatNoPRResumePrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		chunk        VanadisChunk
+		chunkPrompt  string
+		wantContains []string
+	}{
+		{
+			name:        "includes recovery steps and original prompt",
+			chunk:       VanadisChunk{ID: "c1"},
+			chunkPrompt: "ORIGINAL CHUNK PROMPT",
+			wantContains: []string{
+				"[VANADIS AUTOMATIC RESUME]\nYour previous turn for chunk c1 ended without opening a PR.",
+				"check whether a PR already exists for this chunk's branch (branch name contains \"vanadis-c1\")",
+				"--vanadis-chunk c1",
+				"Call fail_chunk with a reason only if genuinely blocked.",
+				"Never end the turn while a background command is still needed for the next step",
+				"The original chunk instructions follow.\n\nORIGINAL CHUNK PROMPT",
+			},
+		},
+		{
+			name:         "trims chunk id",
+			chunk:        VanadisChunk{ID: " c2 "},
+			chunkPrompt:  "P",
+			wantContains: []string{"for chunk c2 ended", "--vanadis-chunk c2'"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatNoPRResumePrompt(tc.chunk, tc.chunkPrompt)
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+		})
+	}
+}
