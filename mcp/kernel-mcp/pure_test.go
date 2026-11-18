@@ -286,7 +286,6 @@ func TestScriptBuilders(t *testing.T) {
 		{"build amazon cart script", BuildAmazonCartScript(), ".a-truncate-full"},
 		{"build amazon add to cart script", BuildAmazonAddToCartScript(), "#newAccordionRow_0"},
 		{"build amazon cart count script", BuildAmazonCartCountScript(), "#attachSiNoCoverage"},
-		{"stealth init script webgpu and offscreen", StealthInitScript, "OffscreenCanvas"},
 	}
 
 	for _, tc := range tests {

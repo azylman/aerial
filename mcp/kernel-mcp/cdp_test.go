@@ -29,10 +29,6 @@ type fakeCDPOptions struct {
 	onlyChrome       bool
 	evalException    string
 	detachOnMethod   string
-	failPageEnable   bool
-	failUserAgent    bool
-	failAddScript    bool
-	failStealthEval  bool
 	failMouseMoved   bool
 	failMousePress   bool
 	failMouseRelease bool
@@ -100,18 +96,6 @@ func checkFakeCDPMethodFails(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOpt
 		writeFakeCDPError(ws, req.ID, -32603, "Internal error executing command", wsMu)
 		return true
 	}
-	if opts.failPageEnable && req.Method == "Page.enable" {
-		writeFakeCDPError(ws, req.ID, -32000, "Page.enable failed", wsMu)
-		return true
-	}
-	if opts.failUserAgent && req.Method == "Emulation.setUserAgentOverride" {
-		writeFakeCDPError(ws, req.ID, -32000, "setUserAgentOverride failed", wsMu)
-		return true
-	}
-	if opts.failAddScript && req.Method == "Page.addScriptToEvaluateOnNewDocument" {
-		writeFakeCDPError(ws, req.ID, -32000, "addScriptToEvaluateOnNewDocument failed", wsMu)
-		return true
-	}
 	return checkFakeCDPMouseFails(ws, req, opts, wsMu)
 }
 
@@ -164,10 +148,6 @@ func handleFakeCDPMethod(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions
 		fakeSrv.attachedTarget = p.TargetID
 		fakeSrv.attachedMu.Unlock()
 		return map[string]any{"sessionId": "test-session-1"}, false
-	case "Page.enable", "Emulation.setUserAgentOverride":
-		return map[string]any{}, false
-	case "Page.addScriptToEvaluateOnNewDocument":
-		return map[string]any{"identifier": "1"}, false
 	case "Runtime.evaluate":
 		return handleFakeCDPEval(ws, req, opts, wsMu)
 	case "Input.dispatchMouseEvent", "Input.insertText", "Page.navigate":
@@ -180,10 +160,6 @@ func handleFakeCDPMethod(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions
 }
 
 func handleFakeCDPEval(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) (any, bool) {
-	if opts.failStealthEval {
-		writeFakeCDPError(ws, req.ID, -32000, "stealth eval failed", wsMu)
-		return nil, true
-	}
 	if opts.evalException != "" {
 		return map[string]any{
 			"result": map[string]any{"type": "undefined"},
@@ -351,30 +327,6 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "parse cdp target response",
 		},
-		{
-			name:      "stealth Page.enable failure",
-			opts:      fakeCDPOptions{failPageEnable: true},
-			wantErr:   true,
-			errSubstr: "Page.enable",
-		},
-		{
-			name:      "stealth Emulation.setUserAgentOverride failure",
-			opts:      fakeCDPOptions{failUserAgent: true},
-			wantErr:   true,
-			errSubstr: "Emulation.setUserAgentOverride",
-		},
-		{
-			name:      "stealth Page.addScriptToEvaluateOnNewDocument failure",
-			opts:      fakeCDPOptions{failAddScript: true},
-			wantErr:   true,
-			errSubstr: "Page.addScriptToEvaluateOnNewDocument",
-		},
-		{
-			name:      "stealth Runtime.evaluate failure",
-			opts:      fakeCDPOptions{failStealthEval: true},
-			wantErr:   true,
-			errSubstr: "Runtime.evaluate stealth script",
-		},
 	}
 
 	for _, tc := range tests {
@@ -407,12 +359,8 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 				}
 			}
 
-			// Connected but stealthReady false
-			client.stateMu.Lock()
-			client.stealthReady = false
-			client.stateMu.Unlock()
 			if err := client.EnsureConnection(ctx); err != nil {
-				t.Fatalf("EnsureConnection() re-stealth error: %v", err)
+				t.Fatalf("EnsureConnection() fast-path error: %v", err)
 			}
 		})
 	}
