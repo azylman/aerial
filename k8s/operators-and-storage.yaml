@@ -1,455 +1,3 @@
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: infisical-bootstrap-sa
-  namespace: default
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: infisical-bootstrap
-  namespace: default
-# Note: Kubernetes RBAC cannot restrict the 'create' verb by resourceNames because object
-# names are evaluated after creation admission. Read and patch verbs are strictly bounded
-# to the four managed bootstrap secrets (postgres-aerial-role, infisical-secret,
-# infisical-universal-auth, infisical-admin).
-rules:
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - create
-  - apiGroups:
-      - ""
-    resourceNames:
-      - postgres-aerial-role
-      - infisical-secret
-      - infisical-universal-auth
-      - infisical-admin
-    resources:
-      - secrets
-    verbs:
-      - get
-      - patch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: infisical-bootstrap-binding
-  namespace: default
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: infisical-bootstrap
-subjects:
-  - kind: ServiceAccount
-    name: infisical-bootstrap-sa
-    namespace: default
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  annotations:
-    kustomize.toolkit.fluxcd.io/force: enabled
-    kustomize.toolkit.fluxcd.io/substitute: disabled
-  labels:
-    app.kubernetes.io/name: infisical-bootstrap
-  name: infisical-bootstrap
-  namespace: default
-spec:
-  backoffLimit: 6
-  ttlSecondsAfterFinished: 86400
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: infisical-bootstrap
-    spec:
-      containers:
-        - command:
-            - node
-            - -e
-            - |
-              "use strict";
-              const crypto = require("crypto");
-              const fs = require("fs");
-              const http = require("http");
-              const https = require("https");
-
-              const ns = "default";
-              const saDir = "/var/run/secrets/kubernetes.io/serviceaccount";
-              const saToken = fs.readFileSync(saDir + "/token", "utf8").trim();
-              const caCert = fs.readFileSync(saDir + "/ca.crt");
-              const infisicalUrl = (process.env.INFISICAL_URL || "http://infisical.default.svc.cluster.local:8080").replace(/\/$/, "");
-              const projectSlug = process.env.INFISICAL_PROJECT_SLUG || "aerial-8-jn8";
-              const randHex = (bytes = 16) => crypto.randomBytes(bytes).toString("hex");
-              const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-              const b64d = (v) => (v ? Buffer.from(v, "base64").toString("utf8") : "");
-              const isAlreadyExists = (status, data) => {
-                if (status === 409) return true;
-                if (status === 400 && data) {
-                  const msg = typeof data === "string" ? data : (data.message || "");
-                  return /already exists/i.test(msg);
-                }
-                return false;
-              };
-              const isAlreadyBootstrapped = (status, data) => {
-                if (status === 409) return true;
-                if (status === 400 && data) {
-                  const msg = typeof data === "string" ? data : (data.message || "");
-                  return /already/i.test(msg);
-                }
-                return false;
-              };
-
-              function httpJson(urlStr, { method = "GET", headers = {}, body, ca } = {}) {
-                return new Promise((resolve, reject) => {
-                  const u = new URL(urlStr);
-                  const mod = u.protocol === "https:" ? https : http;
-                  const payload = body !== undefined ? JSON.stringify(body) : undefined;
-                  const reqHeaders = { Accept: "application/json", ...headers };
-                  if (payload !== undefined) {
-                    reqHeaders["Content-Type"] = reqHeaders["Content-Type"] || "application/json";
-                    reqHeaders["Content-Length"] = Buffer.byteLength(payload);
-                  }
-                  const req = mod.request(
-                    u,
-                    { method, headers: reqHeaders, ca, timeout: 15000 },
-                    (res) => {
-                      let raw = "";
-                      res.setEncoding("utf8");
-                      res.on("data", (chunk) => { raw += chunk; });
-                      res.on("end", () => {
-                        let data = null;
-                        if (raw) {
-                          try { data = JSON.parse(raw); } catch (_) { data = { raw }; }
-                        }
-                        resolve({ status: res.statusCode || 0, data });
-                      });
-                    }
-                  );
-                  req.on("timeout", () => req.destroy(new Error("Request timeout: " + method + " " + u.pathname)));
-                  req.on("error", reject);
-                  if (payload !== undefined) req.write(payload);
-                  req.end();
-                });
-              }
-
-              const k8sUrl = (p) => "https://kubernetes.default.svc/api/v1/namespaces/" + ns + p;
-              const k8sHeaders = (extra = {}) => ({ Authorization: "Bearer " + saToken, ...extra });
-
-              async function ensureSecret(name, type, stringData) {
-                const getRes = await httpJson(k8sUrl("/secrets/" + name), { headers: k8sHeaders(), ca: caCert });
-                if (getRes.status === 200) {
-                  console.log("[infisical-bootstrap] Secret/" + name + " already exists; skipping.");
-                  return getRes.data;
-                }
-                if (getRes.status !== 404) {
-                  throw new Error("Failed checking Secret/" + name + ": HTTP " + getRes.status);
-                }
-                const createRes = await httpJson(k8sUrl("/secrets"), {
-                  method: "POST",
-                  headers: k8sHeaders(),
-                  ca: caCert,
-                  body: { apiVersion: "v1", kind: "Secret", metadata: { name, namespace: ns }, type, stringData },
-                });
-                if (createRes.status === 201 || createRes.status === 200) {
-                  console.log("[infisical-bootstrap] Created Secret/" + name + ".");
-                  return createRes.data;
-                }
-                if (createRes.status === 409) {
-                  const retry = await httpJson(k8sUrl("/secrets/" + name), { headers: k8sHeaders(), ca: caCert });
-                  return retry.data;
-                }
-                throw new Error("Failed creating Secret/" + name + ": HTTP " + createRes.status);
-              }
-
-              async function upsertSecret(name, stringData) {
-                const getRes = await httpJson(k8sUrl("/secrets/" + name), { headers: k8sHeaders(), ca: caCert });
-                if (getRes.status === 404) {
-                  return ensureSecret(name, "Opaque", stringData);
-                }
-                if (getRes.status !== 200) {
-                  throw new Error("Failed reading Secret/" + name + " for update: HTTP " + getRes.status);
-                }
-                const patchRes = await httpJson(k8sUrl("/secrets/" + name), {
-                  method: "PATCH",
-                  headers: k8sHeaders({ "Content-Type": "application/merge-patch+json" }),
-                  ca: caCert,
-                  body: { stringData },
-                });
-                if (patchRes.status !== 200) {
-                  throw new Error("Failed patching Secret/" + name + ": HTTP " + patchRes.status);
-                }
-                return patchRes.data;
-              }
-
-              async function upsertSecretWithRetry(name, stringData, maxAttempts = 30) {
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                  try {
-                    return await upsertSecret(name, stringData);
-                  } catch (err) {
-                    if (attempt === maxAttempts) throw err;
-                    const delay = Math.min(1000 * attempt, 5000);
-                    console.warn("[infisical-bootstrap] upsertSecret(" + name + ") attempt " + attempt + "/" + maxAttempts + " failed: " + (err && err.message ? err.message : err) + ". Retrying in " + delay + "ms...");
-                    await sleep(delay);
-                  }
-                }
-              }
-
-              async function waitForInfisical() {
-                for (let i = 1; i <= 120; i++) {
-                  try {
-                    const res = await httpJson(infisicalUrl + "/api/status");
-                    if (res.status === 200) return;
-                  } catch (_) {}
-                  console.log("[infisical-bootstrap] Waiting for Infisical API (" + i + "/120)...");
-                  await sleep(3000);
-                }
-                throw new Error("Timed out waiting for Infisical /api/status");
-              }
-
-              (async () => {
-                await ensureSecret("postgres-aerial-role", "kubernetes.io/basic-auth", {
-                  username: "aerial",
-                  password: randHex(16),
-                });
-                await ensureSecret("infisical-secret", "Opaque", {
-                  AUTH_SECRET: randHex(16),
-                  ENCRYPTION_KEY: randHex(16),
-                });
-
-                const uaRes = await httpJson(k8sUrl("/secrets/infisical-universal-auth"), { headers: k8sHeaders(), ca: caCert });
-                const uaData = (uaRes.status === 200 && uaRes.data && uaRes.data.data) || {};
-                if (b64d(uaData.INFISICAL_CLIENT_ID) && b64d(uaData.INFISICAL_CLIENT_SECRET)) {
-                  console.log("[infisical-bootstrap] Secret/infisical-universal-auth already configured; nothing to do.");
-                  return;
-                }
-
-                await waitForInfisical();
-
-                const adminRes = await httpJson(k8sUrl("/secrets/infisical-admin"), { headers: k8sHeaders(), ca: caCert });
-                const adminData = (adminRes.status === 200 && adminRes.data && adminRes.data.data) || {};
-
-                let token = b64d(adminData.INFISICAL_TOKEN);
-                let identityId = b64d(adminData.INFISICAL_IDENTITY_ID);
-                let adminEmail = b64d(adminData.INFISICAL_ADMIN_EMAIL) || "admin@aerial.local";
-                let adminPassword = b64d(adminData.INFISICAL_ADMIN_PASSWORD) || randHex(16);
-
-                if (!adminData.INFISICAL_ADMIN_PASSWORD) {
-                  await upsertSecretWithRetry("infisical-admin", {
-                    INFISICAL_ADMIN_EMAIL: adminEmail,
-                    INFISICAL_ADMIN_PASSWORD: adminPassword,
-                  });
-                }
-
-                if (!token || !identityId) {
-                  const bootRes = await httpJson(infisicalUrl + "/api/v1/admin/bootstrap", {
-                    method: "POST",
-                    body: { email: adminEmail, password: adminPassword, organization: "Aerial" },
-                  });
-                  if (bootRes.status === 200 && bootRes.data && bootRes.data.identity) {
-                    identityId = bootRes.data.identity.id;
-                    token = bootRes.data.identity.credentials.token;
-                    try {
-                      await upsertSecretWithRetry("infisical-admin", {
-                        INFISICAL_TOKEN: token,
-                        INFISICAL_IDENTITY_ID: identityId,
-                        INFISICAL_ADMIN_EMAIL: adminEmail,
-                        INFISICAL_ADMIN_PASSWORD: adminPassword,
-                      }, 60);
-                      console.log("[infisical-bootstrap] Initialized Infisical organization and checkpointed admin identity.");
-                    } catch (persistErr) {
-                      console.error("[infisical-bootstrap] CRITICAL: Failed to checkpoint admin credentials to Secret/infisical-admin: " + (persistErr && persistErr.message ? persistErr.message : persistErr));
-                      throw persistErr;
-                    }
-                  } else if (isAlreadyBootstrapped(bootRes.status, bootRes.data)) {
-                    throw new Error(
-                      "Infisical instance is already bootstrapped but credentials are missing from Secret/infisical-admin. " +
-                      "Recovery: Log into Infisical admin UI or create a machine identity bearer token, then patch the existing secret: " +
-                      "kubectl patch secret infisical-admin --type=merge -p '{\"stringData\":{\"INFISICAL_TOKEN\":\"<token>\",\"INFISICAL_IDENTITY_ID\":\"<id>\"}}' " +
-                      "or populate Secret/infisical-universal-auth directly (see README.md)."
-                    );
-                  } else {
-                    throw new Error("Infisical /api/v1/admin/bootstrap failed: HTTP " + bootRes.status + " - " + JSON.stringify(bootRes.data));
-                  }
-                }
-
-                const authHeaders = { Authorization: "Bearer " + token };
-                let projRes = await httpJson(infisicalUrl + "/api/v1/projects/slug/" + encodeURIComponent(projectSlug), {
-                  headers: authHeaders,
-                });
-                let project = projRes.status === 200 && projRes.data && (projRes.data.project || projRes.data.workspace);
-                if (!project) {
-                  const createProj = await httpJson(infisicalUrl + "/api/v1/projects", {
-                    method: "POST",
-                    headers: authHeaders,
-                    body: {
-                      projectName: "Aerial",
-                      slug: projectSlug,
-                      type: "secret-manager",
-                      shouldCreateDefaultEnvs: false,
-                    },
-                  });
-                  if (createProj.status === 200 && createProj.data && (createProj.data.project || createProj.data.workspace)) {
-                    project = createProj.data.project || createProj.data.workspace;
-                    console.log("[infisical-bootstrap] Created Infisical project '" + projectSlug + "'.");
-                  } else if (isAlreadyExists(createProj.status, createProj.data)) {
-                    projRes = await httpJson(infisicalUrl + "/api/v1/projects/slug/" + encodeURIComponent(projectSlug), {
-                      headers: authHeaders,
-                    });
-                    project = projRes.status === 200 && projRes.data && (projRes.data.project || projRes.data.workspace);
-                  }
-                  if (!project) {
-                    throw new Error("Failed creating Infisical project '" + projectSlug + "': HTTP " + createProj.status);
-                  }
-                }
-
-                const envRes = await httpJson(infisicalUrl + "/api/v1/projects/" + project.id + "/environments", {
-                  method: "POST",
-                  headers: authHeaders,
-                  body: { name: "default", slug: "default" },
-                });
-                if (envRes.status !== 200 && !isAlreadyExists(envRes.status, envRes.data)) {
-                  throw new Error("Failed creating 'default' environment: HTTP " + envRes.status + " - " + JSON.stringify(envRes.data));
-                }
-
-                const memRes = await httpJson(infisicalUrl + "/api/v1/projects/" + project.id + "/identity-memberships/" + identityId, {
-                  method: "POST",
-                  headers: authHeaders,
-                  body: { roles: [{ role: "admin" }] },
-                });
-                if (memRes.status !== 200 && !isAlreadyExists(memRes.status, memRes.data)) {
-                  throw new Error("Failed binding identity to project: HTTP " + memRes.status + " - " + JSON.stringify(memRes.data));
-                }
-
-                for (const secretKey of ["NATS_AERIAL_PASSWORD", "NATS_MIORINE_PASSWORD", "NATS_SULETTA_PASSWORD"]) {
-                  const getSec = await httpJson(
-                    infisicalUrl + "/api/v3/secrets/raw/" + secretKey + "?workspaceId=" + encodeURIComponent(project.id) + "&environment=default&secretPath=%2F",
-                    { headers: authHeaders }
-                  );
-                  if (getSec.status === 200) {
-                    continue;
-                  }
-                  const createSec = await httpJson(infisicalUrl + "/api/v3/secrets/raw/" + secretKey, {
-                    method: "POST",
-                    headers: authHeaders,
-                    body: {
-                      workspaceId: project.id,
-                      environment: "default",
-                      secretPath: "/",
-                      secretValue: randHex(16),
-                      type: "shared",
-                    },
-                  });
-                  if (createSec.status !== 200 && !isAlreadyExists(createSec.status, createSec.data)) {
-                    throw new Error("Failed seeding " + secretKey + " in Infisical: HTTP " + createSec.status + " - " + JSON.stringify(createSec.data));
-                  }
-                }
-
-                await upsertSecretWithRetry("infisical-admin", {
-                  INFISICAL_PROJECT_ID: project.id,
-                  INFISICAL_PROJECT_SLUG: projectSlug,
-                });
-
-                let uaConfigRes = await httpJson(infisicalUrl + "/api/v1/auth/universal-auth/identities/" + identityId, {
-                  headers: authHeaders,
-                });
-                if (uaConfigRes.status === 404 || (uaConfigRes.data && uaConfigRes.data.message === "Universal auth configuration not found")) {
-                  uaConfigRes = await httpJson(infisicalUrl + "/api/v1/auth/universal-auth/identities/" + identityId, {
-                    method: "POST",
-                    headers: authHeaders,
-                    body: {
-                      // Restrict Universal Auth to private RFC1918 subnets (k3s pod/service CIDRs 10.42.0.0/16, 10.43.0.0/16) and localhost
-                      // Restrict Universal Auth to k3s cluster networks (pod CIDR 10.42.0.0/16, service CIDR 10.43.0.0/16) and loopback
-                      clientSecretTrustedIps: [
-                        { ipAddress: "10.42.0.0/16" },
-                        { ipAddress: "10.43.0.0/16" },
-                        { ipAddress: "127.0.0.1/32" },
-                      ],
-                      accessTokenTTL: 2592000,
-                    },
-                  });
-                }
-                if (uaConfigRes.status !== 200 && !isAlreadyExists(uaConfigRes.status, uaConfigRes.data)) {
-                  throw new Error("Failed attaching Universal Auth: HTTP " + uaConfigRes.status);
-                }
-                const clientId = uaConfigRes.data && uaConfigRes.data.identityUniversalAuth && uaConfigRes.data.identityUniversalAuth.clientId;
-                if (!clientId) {
-                  throw new Error("Failed extracting Universal Auth clientId from response: " + JSON.stringify(uaConfigRes.data));
-                }
-
-                const listSecretsRes = await httpJson(infisicalUrl + "/api/v1/auth/universal-auth/identities/" + identityId + "/client-secrets", {
-                  headers: authHeaders,
-                });
-                if (listSecretsRes.status === 200 && Array.isArray(listSecretsRes.data && listSecretsRes.data.clientSecretData)) {
-                  for (const s of listSecretsRes.data.clientSecretData) {
-                    if (s && s.id && !s.isClientSecretRevoked && s.description === "external-secrets-operator") {
-                      try {
-                        await httpJson(infisicalUrl + "/api/v1/auth/universal-auth/identities/" + identityId + "/client-secrets/" + s.id + "/revoke", {
-                          method: "POST",
-                          headers: authHeaders,
-                          body: {},
-                        });
-                        console.log("[infisical-bootstrap] Revoked unpersisted orphaned client secret " + s.id + ".");
-                      } catch (_) {}
-                    }
-                  }
-                }
-
-                const csRes = await httpJson(infisicalUrl + "/api/v1/auth/universal-auth/identities/" + identityId + "/client-secrets", {
-                  method: "POST",
-                  headers: authHeaders,
-                  body: { description: "external-secrets-operator", ttl: 0, numUsesLimit: 0 },
-                });
-                if (csRes.status !== 200 || !csRes.data || !csRes.data.clientSecret) {
-                  throw new Error("Failed creating Universal Auth client secret: HTTP " + csRes.status);
-                }
-                const clientSecret = csRes.data.clientSecret;
-                const clientSecretId = csRes.data.clientSecretData && csRes.data.clientSecretData.id;
-
-                try {
-                  await upsertSecretWithRetry("infisical-universal-auth", {
-                    INFISICAL_CLIENT_ID: clientId,
-                    INFISICAL_CLIENT_SECRET: clientSecret,
-                    INFISICAL_PROJECT_ID: project.id,
-                    INFISICAL_PROJECT_SLUG: projectSlug,
-                  });
-                  console.log("[infisical-bootstrap] Successfully provisioned Infisical Universal Auth and seeded NATS secrets.");
-                } catch (persistErr) {
-                  if (clientSecretId) {
-                    try {
-                      await httpJson(infisicalUrl + "/api/v1/auth/universal-auth/identities/" + identityId + "/client-secrets/" + clientSecretId + "/revoke", {
-                        method: "POST",
-                        headers: authHeaders,
-                        body: {},
-                      });
-                      console.warn("[infisical-bootstrap] Revoked orphaned client secret " + clientSecretId + " following persistence failure.");
-                    } catch (_) {}
-                  }
-                  throw persistErr;
-                }
-              })().catch((err) => {
-                console.error("[infisical-bootstrap] FATAL:", err && err.message ? err.message : err);
-                process.exit(1);
-              });
-          env:
-            - name: INFISICAL_URL
-              value: http://infisical.default.svc.cluster.local:8080
-            - name: INFISICAL_PROJECT_SLUG
-              value: aerial-8-jn8
-          image: docker.io/library/node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a
-          name: infisical-bootstrap
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 25m
-              memory: 64Mi
-      restartPolicy: OnFailure
-      serviceAccountName: infisical-bootstrap-sa
----
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -1072,6 +620,80 @@ spec:
     name: infisical
   target:
     creationPolicy: Owner
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: postgres-aerial-password-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - password
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-aerial-role
+  namespace: default
+spec:
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: postgres-aerial-password-generator
+  refreshInterval: "0"
+  refreshPolicy: CreatedOnce
+  target:
+    creationPolicy: CreateOrMerge
+    deletionPolicy: Retain
+    immutable: true
+    name: postgres-aerial-role
+    template:
+      data:
+        username: aerial
+      mergePolicy: Merge
+      type: kubernetes.io/basic-auth
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: infisical-secret-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - AUTH_SECRET
+    - ENCRYPTION_KEY
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: infisical-secret
+  namespace: default
+spec:
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: infisical-secret-generator
+  refreshInterval: "0"
+  refreshPolicy: CreatedOnce
+  target:
+    creationPolicy: CreateOrMerge
+    deletionPolicy: Retain
+    immutable: true
+    name: infisical-secret
 ---
 apiVersion: generators.external-secrets.io/v1alpha1
 kind: Password
