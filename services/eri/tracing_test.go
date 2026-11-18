@@ -152,7 +152,8 @@ func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
 		path      string
 		wantSpans int
 	}{
-		{name: "ordinary route gets a server span", path: "/health", wantSpans: 1},
+		{name: "ordinary route gets a server span", path: "/prompt", wantSpans: 1},
+		{name: "health probe is untraced", path: "/health", wantSpans: 0},
 		{name: "MCP proxy route is left to the proxy", path: "/internal/mcp-proxy/discord/docket", wantSpans: 0},
 	}
 	for _, tc := range tests {
