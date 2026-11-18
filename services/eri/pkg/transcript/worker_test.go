@@ -659,7 +659,6 @@ type syncTranscriptsErrorCase struct {
 	wantSynced          int
 	wantSummaries       int
 	wantStepsInserted   int
-	wantLastIndexed     int
 }
 
 func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
@@ -672,8 +671,7 @@ func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
 		{name: "unopenable socket file recorded as error in sweep", socketFile: true, wantSweepErrors: 1},
 		{name: "batch insert error increments errors and inserts 0 steps", hasSession: true, failBatchInsert: true, wantSweepErrors: 1, wantStepsInserted: 0},
 		{name: "upsert settled session error increments errors and generates 0 summaries", hasSession: true, failUpsertSummary: true, wantSweepErrors: 1, wantSummaries: 0},
-		{name: "empty transcript file generates summary with watermark -2", emptyFile: true, wantSummaries: 1, wantLastIndexed: -2},
-		{name: "empty transcript file upsert error increments errors", emptyFile: true, failUpsertSummary: true, wantSweepErrors: 1},
+		{name: "empty transcript file is skipped without summary", emptyFile: true, wantSummaries: 0, wantSynced: 0},
 		{name: "upsert active session progress error increments errors", prePopActive: true, activeFile: true, failUpsertSummary: true, wantSweepErrors: 1},
 	}
 }
@@ -757,15 +755,13 @@ func assertErrorCaseStats(t *testing.T, store db.TranscriptStore, stats SyncStat
 		t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
 	}
 
-	if tc.wantLastIndexed != 0 && store != nil {
+	if tc.emptyFile && store != nil {
 		states, err := store.GetSessionSyncStates(context.Background())
 		if err != nil {
 			t.Fatalf("GetSessionSyncStates: %v", err)
 		}
-		if tc.emptyFile {
-			if states["sess-empty-file"].LastIndexedStep != tc.wantLastIndexed {
-				t.Errorf("LastIndexedStep = %d, want %d", states["sess-empty-file"].LastIndexedStep, tc.wantLastIndexed)
-			}
+		if state, ok := states["sess-empty-file"]; ok {
+			t.Errorf("sess-empty-file should be absent from sync states, got %+v", state)
 		}
 	}
 }
