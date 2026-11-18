@@ -1,10 +1,12 @@
 // Command coverage-ingest is a one-shot collector, run by a CronJob, that pulls
 // in-memory Go coverage counters from every configured /debug/coverage/flush target,
-// merges them per service, and upserts production_code_coverage.
+// merges them per service, and upserts production_code_coverage. It also ingests and
+// then deletes coverage runs that short-lived jobs spooled to configured directories.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -55,10 +57,16 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	defer pool.Close()
 
-	if err := Ingest(ctx, cfg, &http.Client{}, ExecCovdata{GoBin: *goBin}, PostgresStore{DB: pool}); err != nil {
+	runner, store := ExecCovdata{GoBin: *goBin}, PostgresStore{DB: pool}
+	// Spools ingest even when live targets fail: the two sources are independent.
+	err = errors.Join(
+		Ingest(ctx, cfg, &http.Client{}, runner, store),
+		IngestSpools(ctx, cfg.Spools, runner, store),
+	)
+	if err != nil {
 		log.Printf("[coverage-ingest] finished with failures: %v", err)
 		return 1
 	}
-	log.Printf("[coverage-ingest] ingested %d targets", len(cfg.Targets))
+	log.Printf("[coverage-ingest] ingested %d targets and %d spools", len(cfg.Targets), len(cfg.Spools))
 	return 0
 }

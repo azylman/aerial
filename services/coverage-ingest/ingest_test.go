@@ -59,7 +59,23 @@ func TestParseConfig(t *testing.T) {
 			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 0s\nconnect_retry_interval: 0s\n",
 			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
 		},
-		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets"},
+		{
+			name: "spools only",
+			yaml: "spools:\n  - service: photos-sync\n    dir: /coverage-spool/photos-sync\n",
+			want: Config{Spools: []Spool{{Service: "photos-sync", Dir: "/coverage-spool/photos-sync"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+		},
+		{
+			name: "targets and spools",
+			yaml: "targets:\n  - service: eri\n    url: http://x\nspools:\n  - service: photos-sync\n    dir: /s/p\n",
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, Spools: []Spool{{Service: "photos-sync", Dir: "/s/p"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+		},
+		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets or spools"},
+		{name: "empty spools list", yaml: "spools: []\n", wantErr: "no targets or spools"},
+		{name: "spool missing service", yaml: "spools:\n  - dir: /s/p\n", wantErr: "spool 0 needs service and absolute dir"},
+		{name: "spool relative dir", yaml: "spools:\n  - service: photos-sync\n    dir: s/p\n", wantErr: "spool 0 needs service and absolute dir"},
+		{name: "spool missing dir", yaml: "spools:\n  - service: photos-sync\n", wantErr: "spool 0 needs service and absolute dir"},
+		{name: "spool service also a target", yaml: "targets:\n  - service: eri\n    url: http://x\nspools:\n  - service: eri\n    dir: /s/e\n", wantErr: `spool service "eri" is also a target`},
+		{name: "duplicate spool service", yaml: "spools:\n  - service: p\n    dir: /s/a\n  - service: p\n    dir: /s/b\n", wantErr: `spool service "p" appears twice`},
 		{name: "missing url", yaml: "targets:\n  - service: eri\n", wantErr: "target 0 needs service and url"},
 		{name: "blank service", yaml: "targets:\n  - service: ' '\n    url: http://x\n", wantErr: "target 0 needs service and url"},
 		{name: "negative timeout", yaml: "targets:\n  - service: eri\n    url: http://x\nflush_timeout: -1s\n", wantErr: "flush_timeout must not be negative"},
@@ -396,11 +412,13 @@ type fakeStore struct {
 
 	mu      sync.Mutex
 	upserts map[string][]CoverageRow
+	calls   []string // services in upsert order, including failed calls
 }
 
 func (s *fakeStore) UpsertService(_ context.Context, service string, rows []CoverageRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, service)
 	if err := s.errs[service]; err != nil {
 		return err
 	}
@@ -563,6 +581,194 @@ func TestIngest(t *testing.T) {
 	}
 }
 
+// spoolEntry is one fixture entry directly under a spool dir: a directory named name
+// holding small files, whose mtime is set age in the past. A locked entry also holds a
+// non-empty read-only subdirectory so os.RemoveAll on it fails.
+type spoolEntry struct {
+	name   string
+	files  []string
+	age    time.Duration
+	locked bool
+}
+
+func spoolRun(name string, files ...string) spoolEntry { return spoolEntry{name: name, files: files} }
+
+func buildSpool(t *testing.T, dir string, entries []spoolEntry) {
+	t.Helper()
+	for _, e := range entries {
+		path := filepath.Join(dir, e.name)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", e.name, err)
+		}
+		for _, f := range e.files {
+			writeFile(t, filepath.Join(path, f), "x")
+		}
+		if e.locked {
+			lockDir(t, filepath.Join(path, "locked"))
+		}
+		mtime := time.Now().Add(-e.age)
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", e.name, err)
+		}
+	}
+}
+
+// lockDir creates dir holding one file and makes it read-only, restoring write
+// permission at cleanup so t.TempDir can remove it.
+func lockDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	writeFile(t, filepath.Join(dir, "f"), "x")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+}
+
+func TestIngestSpools(t *testing.T) {
+	t.Parallel()
+	const (
+		r1 = "20261101T030000Z-11"
+		r2 = "20261102T030000Z-12"
+		r3 = "20261103T030000Z-13"
+	)
+	sampleRows := []CoverageRow{{File: "github.com/x/svc/a.go", Function: "Run", Percent: 75}, {File: "github.com/x/svc/a.go", Function: "Stop", Percent: 0}}
+	tests := []struct {
+		name          string
+		entries       []spoolEntry
+		missingDir    bool
+		storeErr      error
+		wantFileSets  [][]string
+		wantCalls     []string
+		wantUpserts   map[string][]CoverageRow
+		wantRemaining []string
+		wantErrs      []string
+	}{
+		{name: "empty spool is a silent no-op", wantRemaining: []string{}},
+		{
+			name:          "one run ingested then deleted",
+			entries:       []spoolEntry{spoolRun(r1, "covmeta.a", "covcounters.a.1.1")},
+			wantFileSets:  [][]string{{"covcounters.a.1.1", "covmeta.a"}},
+			wantCalls:     []string{"photos-sync"},
+			wantUpserts:   map[string][]CoverageRow{"photos-sync": sampleRows},
+			wantRemaining: []string{},
+		},
+		{
+			name:          "runs sharing meta merge into one call",
+			entries:       []spoolEntry{spoolRun(r1, "covmeta.a", "covcounters.a.1.1"), spoolRun(r2, "covmeta.a", "covcounters.a.2.2")},
+			wantFileSets:  [][]string{{"covcounters.a.1.1", "covcounters.a.2.2", "covmeta.a", "covmeta.a"}},
+			wantCalls:     []string{"photos-sync"},
+			wantUpserts:   map[string][]CoverageRow{"photos-sync": sampleRows},
+			wantRemaining: []string{},
+		},
+		{
+			name: "meta versions apply in order of their newest run",
+			entries: []spoolEntry{
+				spoolRun(r1, "covmeta.a", "covcounters.a.1.1"),
+				spoolRun(r2, "covmeta.b", "covcounters.b.2.2"),
+				spoolRun(r3, "covmeta.a", "covcounters.a.3.3"),
+			},
+			wantFileSets: [][]string{
+				{"covcounters.b.2.2", "covmeta.b"},
+				{"covcounters.a.1.1", "covcounters.a.3.3", "covmeta.a", "covmeta.a"},
+			},
+			wantCalls:     []string{"photos-sync", "photos-sync"},
+			wantUpserts:   map[string][]CoverageRow{"photos-sync": sampleRows},
+			wantRemaining: []string{},
+		},
+		{
+			name:          "fresh hidden temp run is ignored and kept",
+			entries:       []spoolEntry{{name: ".tmp-123", files: []string{"covmeta.a", "covcounters.a.1.1"}, age: time.Hour}, spoolRun(r1, "covmeta.a", "covcounters.a.1.1")},
+			wantFileSets:  [][]string{{"covcounters.a.1.1", "covmeta.a"}},
+			wantCalls:     []string{"photos-sync"},
+			wantUpserts:   map[string][]CoverageRow{"photos-sync": sampleRows},
+			wantRemaining: []string{".tmp-123"},
+		},
+		{
+			name:          "stale temp run removed, other hidden entries kept",
+			entries:       []spoolEntry{{name: ".tmp-456", files: []string{"covmeta.a"}, age: 25 * time.Hour}, {name: ".keep", age: 48 * time.Hour}},
+			wantRemaining: []string{".keep"},
+		},
+		{
+			name: "store failure keeps runs and stops later groups",
+			entries: []spoolEntry{
+				spoolRun(r1, "covmeta.b", "covcounters.b.1.1"),
+				spoolRun(r2, "covmeta.a", "covcounters.a.2.2"),
+			},
+			storeErr:      errors.New("commit photos-sync: deadlock"),
+			wantFileSets:  [][]string{{"covcounters.b.1.1", "covmeta.b"}},
+			wantCalls:     []string{"photos-sync"},
+			wantRemaining: []string{r1, r2},
+			wantErrs:      []string{"spool photos-sync (", "runs through " + r1 + ": commit photos-sync: deadlock"},
+		},
+		{
+			name: "cleanup failure stops later groups",
+			entries: []spoolEntry{
+				{name: r1, files: []string{"covmeta.b", "covcounters.b.1.1"}, locked: true},
+				spoolRun(r2, "covmeta.a", "covcounters.a.2.2"),
+			},
+			wantFileSets:  [][]string{{"covcounters.b.1.1", "covmeta.b", "locked"}},
+			wantCalls:     []string{"photos-sync"},
+			wantUpserts:   map[string][]CoverageRow{"photos-sync": sampleRows},
+			wantRemaining: []string{r1, r2},
+			wantErrs:      []string{"remove ingested run"},
+		},
+		{
+			name: "incomplete runs kept and reported, complete run ingested",
+			entries: []spoolEntry{
+				spoolRun(r1, "covmeta.a"),
+				spoolRun(r2, "covcounters.a.2.2"),
+				spoolRun(r3, "covmeta.a", "covcounters.a.3.3"),
+			},
+			wantFileSets:  [][]string{{"covcounters.a.3.3", "covmeta.a"}},
+			wantCalls:     []string{"photos-sync"},
+			wantUpserts:   map[string][]CoverageRow{"photos-sync": sampleRows},
+			wantRemaining: []string{r1, r2},
+			wantErrs:      []string{"run " + r1 + ": incomplete run: 1 covmeta and 0 covcounters", "run " + r2 + ": incomplete run: 0 covmeta and 1 covcounters"},
+		},
+		{
+			name:       "missing spool dir names the dir",
+			missingDir: true,
+			wantErrs:   []string{"spool photos-sync (", "/absent): read spool"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if tc.missingDir {
+				dir = filepath.Join(dir, "absent")
+			}
+			buildSpool(t, dir, tc.entries)
+			runner := &fakeRunner{out: []byte(sampleReport)}
+			store := &fakeStore{errs: map[string]error{"photos-sync": tc.storeErr}}
+			err := IngestSpools(context.Background(), []Spool{{Service: "photos-sync", Dir: dir}}, runner, store)
+			if len(tc.wantErrs) == 0 && err != nil {
+				t.Fatalf("IngestSpools error = %v, want nil", err)
+			}
+			for _, want := range tc.wantErrs {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("IngestSpools error = %v, want it to contain %q", err, want)
+				}
+			}
+			if !reflect.DeepEqual(runner.fileSets, tc.wantFileSets) {
+				t.Fatalf("covdata inputs = %v, want %v", runner.fileSets, tc.wantFileSets)
+			}
+			if !slices.Equal(store.calls, tc.wantCalls) {
+				t.Fatalf("upsert calls = %v, want %v", store.calls, tc.wantCalls)
+			}
+			if !reflect.DeepEqual(store.upserts, tc.wantUpserts) {
+				t.Fatalf("upserts = %+v, want %+v", store.upserts, tc.wantUpserts)
+			}
+			if !tc.missingDir && !slices.Equal(listDir(t, dir), tc.wantRemaining) {
+				t.Fatalf("remaining = %v, want %v", listDir(t, dir), tc.wantRemaining)
+			}
+		})
+	}
+}
+
 // refusedPath marks a TestIngest target that must point at a closed listener.
 const refusedPath = "<refused>"
 
@@ -657,6 +863,13 @@ func TestRun(t *testing.T) {
 	srv := newFlushServer(t, nil)
 	writeFile(t, filepath.Join(dir, "bad.yaml"), "targets: [\n")
 	writeFile(t, filepath.Join(dir, "down.yaml"), "targets:\n  - service: eri\n    url: "+srv.URL+"/missing\nflush_timeout: 2s\n")
+	emptySpool := filepath.Join(dir, "spool")
+	if err := os.Mkdir(emptySpool, 0o700); err != nil {
+		t.Fatalf("mkdir spool: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "spool.yaml"), "spools:\n  - service: photos-sync\n    dir: "+emptySpool+"\n")
+	writeFile(t, filepath.Join(dir, "nospool.yaml"), "spools:\n  - service: photos-sync\n    dir: "+filepath.Join(dir, "absent")+"\n")
+	writeFile(t, filepath.Join(dir, "down-spool.yaml"), "targets:\n  - service: eri\n    url: "+srv.URL+"/missing\nspools:\n  - service: photos-sync\n    dir: "+emptySpool+"\n")
 	tests := []struct {
 		name       string
 		args       []string
@@ -668,6 +881,9 @@ func TestRun(t *testing.T) {
 		{name: "unreadable config", args: []string{"-config", filepath.Join(dir, "absent.yaml")}, wantCode: 1, wantStderr: "read config"},
 		{name: "invalid config", args: []string{"-config", filepath.Join(dir, "bad.yaml")}, wantCode: 1, wantStderr: "parse config"},
 		{name: "failing target exits non-zero", args: []string{"-config", filepath.Join(dir, "down.yaml")}, wantCode: 1},
+		{name: "empty spool with no targets succeeds", args: []string{"-config", filepath.Join(dir, "spool.yaml")}, wantCode: 0},
+		{name: "missing spool dir exits non-zero", args: []string{"-config", filepath.Join(dir, "nospool.yaml")}, wantCode: 1},
+		{name: "failing target with healthy spool exits non-zero", args: []string{"-config", filepath.Join(dir, "down-spool.yaml")}, wantCode: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
