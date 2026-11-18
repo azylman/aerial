@@ -53,13 +53,14 @@ func syncBrainEnvironment(ctx context.Context, provisioner *env.Provisioner, cfg
 type ReloadOption func(*reloadConfigOptions)
 
 type reloadConfigOptions struct {
-	dgSession           *discordgo.Session
-	reloadSupplier      func(active *config.Config) error
-	skipEnvironmentSync bool
-	provisioner         *env.Provisioner
-	workerPool          *queue.WorkerPool
-	ephemeralPool       runner.AgentPool
-	onReload            func(source string)
+	dgSession             *discordgo.Session
+	reloadSupplier        func(active *config.Config) error
+	skipEnvironmentSync   bool
+	provisioner           *env.Provisioner
+	workerPool            *queue.WorkerPool
+	ephemeralPool         runner.AgentPool
+	onReload              func(source string)
+	lastDaemonFingerprint string
 }
 
 func WithDiscordSession(s *discordgo.Session) ReloadOption {
@@ -105,6 +106,171 @@ func ensureConfigDefaults(cfg *config.Config) {
 	}
 }
 
+func computeDaemonReloadFingerprint(cfg *config.Config, options *reloadConfigOptions) string {
+	if cfg == nil || cfg.Current() == nil {
+		return ""
+	}
+	cur := cfg.Current()
+	homeDir := cur.GeminiHomeDir
+	if homeDir == "" {
+		homeDir = DefaultGeminiHomeDir()
+	}
+	dataDir := cur.DataDir
+	if dataDir == "" {
+		dataDir = DefaultDataDir()
+	}
+
+	var b strings.Builder
+	b.WriteString("homeDir:")
+	b.WriteString(homeDir)
+	b.WriteString("\ndataDir:")
+	b.WriteString(dataDir)
+	b.WriteString("\nengine:")
+	b.WriteString(cur.GetEngine())
+	b.WriteString("\nclaudeBin:")
+	b.WriteString(cur.ClaudeBin)
+	b.WriteString("\ncodexBin:")
+	b.WriteString(cur.CodexBin)
+	b.WriteString("\nmuseBin:")
+	b.WriteString(cur.MuseBin)
+	b.WriteString("\nagyBin:")
+	b.WriteString(cur.AgyBin)
+	b.WriteString("\nmodel:")
+	b.WriteString(cur.Model)
+	b.WriteString("\nlowEffortModel:")
+	b.WriteString(cur.LowEffortModel)
+	b.WriteString("\nmediumEffortModel:")
+	b.WriteString(cur.MediumEffortModel)
+	b.WriteString("\ntimezone:")
+	b.WriteString(cur.Timezone)
+	b.WriteString("\napiKey:")
+	b.WriteString(cur.APIKey)
+	b.WriteString("\nharnessApiKey:")
+	b.WriteString(cur.HarnessAPIKey)
+	b.WriteString("\nsystemPrompt:")
+	b.WriteString(cur.SystemPrompt)
+	b.WriteString("\nvoice.engine:")
+	b.WriteString(cur.Voice.Engine)
+	b.WriteString("\nvoice.model:")
+	b.WriteString(cur.Voice.Model)
+	b.WriteString("\nvoice.prewarmedTargets:")
+	b.WriteString(strings.Join(cur.Voice.PrewarmedTargets, ","))
+	b.WriteString("\nvoiceAllowedTools:")
+	b.WriteString(strings.Join(cur.VoiceAllowedTools(), ","))
+	b.WriteString("\nvoiceAmbientContext:")
+	if amb := cur.VoiceAmbientContext(); amb != nil {
+		if ambBytes, err := json.Marshal(amb); err == nil {
+			b.Write(ambBytes)
+		}
+	} else {
+		b.WriteString("nil")
+	}
+	b.WriteString("\nmcpServers:")
+	if mcpServersJSON, err := json.Marshal(cur.McpServers); err == nil {
+		b.Write(mcpServersJSON)
+	}
+	b.WriteString("\nmcps:")
+	if mcpsJSON, err := json.Marshal(cur.MCPServers); err == nil {
+		b.Write(mcpsJSON)
+	}
+	b.WriteString("\nmcpConfig:")
+	b.WriteString(cur.MCPConfig)
+	b.WriteString("\ncredentialSources:")
+	if credJSON, err := json.Marshal(cur.CredentialSources); err == nil {
+		b.Write(credJSON)
+	}
+	b.WriteByte('\n')
+
+	for _, cred := range []struct {
+		name   string
+		source config.CredentialSource
+	}{
+		{"oauth", cur.CredentialSources.OAuth},
+		{"codex", cur.CredentialSources.Codex},
+		{"muse", cur.CredentialSources.Muse},
+	} {
+		if cred.source.Disabled || strings.TrimSpace(cred.source.Path) == "" {
+			continue
+		}
+		path := strings.TrimSpace(cred.source.Path)
+		b.WriteString("credBytes:")
+		b.WriteString(cred.name)
+		b.WriteByte(':')
+		b.WriteString(path)
+		b.WriteByte(':')
+		if data, err := os.ReadFile(path); err == nil {
+			b.Write(data)
+		}
+		b.WriteByte('\n')
+	}
+
+	if options != nil && !options.skipEnvironmentSync && options.provisioner != nil {
+		b.WriteString("provisioner:")
+		b.WriteString(options.provisioner.SourceFingerprint())
+		b.WriteByte('\n')
+	}
+
+	h := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(h[:])
+}
+
+func updateEphemeralPoolEngineAndModel(cur *config.ConfigData, ephemPool runner.AgentPool) {
+	if ephemPool == nil {
+		return
+	}
+	switch u := ephemPool.(type) {
+	case interface {
+		UpdateEngine(engine, claudeBin string, codexBin ...string)
+	}:
+		u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
+	case interface {
+		UpdateEngine(engine, claudeBin string)
+	}:
+		u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
+	}
+	lowModel, _ := resolveBrainModelDefaults(cur)
+	if modelUpdater, ok := ephemPool.(interface{ UpdateModel(model string) }); ok {
+		modelUpdater.UpdateModel(lowModel)
+	}
+}
+
+func updateWorkerPoolEngine(cur *config.ConfigData, workerPool *queue.WorkerPool) {
+	if workerPool == nil {
+		return
+	}
+	for _, k := range queue.AllValidPoolKeys() {
+		if p := workerPool.Pool(k); p != nil {
+			switch u := p.(type) {
+			case interface {
+				UpdateEngine(engine, claudeBin string, codexBin ...string)
+			}:
+				u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
+			case interface {
+				UpdateEngine(engine, claudeBin string)
+			}:
+				u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
+			}
+		}
+	}
+}
+
+func markDirtyIfFingerprintChanged(source string, cfg *config.Config, options *reloadConfigOptions) {
+	nextFP := computeDaemonReloadFingerprint(cfg, options)
+	if nextFP == options.lastDaemonFingerprint {
+		log.Printf("[%s] Daemon configuration and provisioned assets unchanged; preserving active daemon sessions", source)
+		return
+	}
+	options.lastDaemonFingerprint = nextFP
+	if options.ephemeralPool != nil {
+		if md, ok := options.ephemeralPool.(interface{ MarkDirty() }); ok {
+			md.MarkDirty()
+		}
+	}
+	if options.workerPool != nil {
+		options.workerPool.MarkDirty()
+	}
+}
+
 func executeConfigReload(ctx context.Context, source string, cfg *config.Config, options *reloadConfigOptions) {
 	if cfg == nil {
 		return
@@ -134,43 +300,9 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 	}
 
 	cur := cfg.Current()
-	if options.ephemeralPool != nil {
-		switch u := options.ephemeralPool.(type) {
-		case interface {
-			UpdateEngine(engine, claudeBin string, codexBin ...string)
-		}:
-			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
-		case interface {
-			UpdateEngine(engine, claudeBin string)
-		}:
-			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
-		}
-		lowModel, _ := resolveBrainModelDefaults(cur)
-		if modelUpdater, ok := options.ephemeralPool.(interface{ UpdateModel(model string) }); ok {
-			modelUpdater.UpdateModel(lowModel)
-		}
-		if md, ok := options.ephemeralPool.(interface{ MarkDirty() }); ok {
-			md.MarkDirty()
-		}
-	}
-
-	if options.workerPool != nil {
-		for _, k := range queue.AllValidPoolKeys() {
-			if p := options.workerPool.Pool(k); p != nil {
-				switch u := p.(type) {
-				case interface {
-					UpdateEngine(engine, claudeBin string, codexBin ...string)
-				}:
-					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
-				case interface {
-					UpdateEngine(engine, claudeBin string)
-				}:
-					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
-				}
-			}
-		}
-		options.workerPool.MarkDirty()
-	}
+	updateEphemeralPoolEngineAndModel(cur, options.ephemeralPool)
+	updateWorkerPoolEngine(cur, options.workerPool)
+	markDirtyIfFingerprintChanged(source, cfg, options)
 }
 
 func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...ReloadOption) func(source string) {
@@ -188,6 +320,13 @@ func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...Rel
 			opt(options)
 		}
 	}
+
+	if options.provisioner == nil && !options.skipEnvironmentSync && cfg != nil {
+		if prov, err := env.NewFromConfig(cfg); err == nil {
+			options.provisioner = prov
+		}
+	}
+	options.lastDaemonFingerprint = computeDaemonReloadFingerprint(cfg, options)
 
 	var reloadMu sync.Mutex
 	return func(source string) {
