@@ -448,90 +448,15 @@ spec:
         universalAuthCredentials:
           clientId:
             key: INFISICAL_CLIENT_ID
-            name: shared-secrets
+            name: infisical-universal-auth
           clientSecret:
             key: INFISICAL_CLIENT_SECRET
-            name: shared-secrets
+            name: infisical-universal-auth
       secretsScope:
         projectSlug: ${INFISICAL_PROJECT_SLUG:=aerial-8-jn8}
         environmentSlug: default
         secretsPath: /
         recursive: false
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: infisical-universal-auth
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: INFISICAL_CLIENT_ID
-      secretKey: INFISICAL_CLIENT_ID
-    - remoteRef:
-        key: INFISICAL_CLIENT_SECRET
-      secretKey: INFISICAL_CLIENT_SECRET
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Orphan
-    deletionPolicy: Retain
-    name: infisical-universal-auth
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: postgres-aerial-role
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Orphan
-    deletionPolicy: Retain
-    template:
-      data:
-        password: "{{ .POSTGRES_PASSWORD }}"
-        username: aerial
-      metadata:
-        annotations:
-          # Bump to make CNPG re-apply the managed role password from this secret.
-          aerial.io/role-password-resync: "2026-11-10"
-        labels:
-          cnpg.io/reload: "true"
-      type: kubernetes.io/basic-auth
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: infisical-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-    - remoteRef:
-        key: AUTH_SECRET
-      secretKey: AUTH_SECRET
-    - remoteRef:
-        key: ENCRYPTION_KEY
-      secretKey: ENCRYPTION_KEY
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Orphan
-    deletionPolicy: Retain
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
