@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -156,7 +157,7 @@ func (m *CallSessionManager) SteerCall(ctx context.Context, callID, message, mod
 			Mode:        mode,
 			CreatedAt:   time.Now().UTC(),
 		}); err != nil {
-			log.Printf("prospera: append owner instruction: %v", err)
+			slog.ErrorContext(ctx, "prospera: append owner instruction", "error", err)
 		}
 	}
 
@@ -206,14 +207,14 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 
 	conn, err := m.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("prospera: websocket upgrade failed: %v", err)
+		slog.ErrorContext(r.Context(), "prospera: websocket upgrade failed", "error", err)
 		return
 	}
-	defer func() {
+	defer func(ctx context.Context) {
 		if closeErr := conn.Close(); closeErr != nil {
-			log.Printf("prospera: connection close err: %v", closeErr)
+			slog.WarnContext(ctx, "prospera: connection close err", "error", closeErr)
 		}
-	}()
+	}(r.Context())
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -223,7 +224,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 		var getErr error
 		call, getErr = m.store.GetCall(ctx, callID)
 		if getErr != nil {
-			log.Printf("prospera: get call %s: %v", callID, getErr)
+			slog.ErrorContext(ctx, "prospera: get call failed", "call_id", callID, "error", getErr)
 		}
 	}
 
@@ -380,7 +381,7 @@ func (s *MediaStreamSession) Run(parentCtx context.Context) {
 
 	gemConn, err := s.dialGemini(ctx, model)
 	if err != nil {
-		log.Printf("prospera: gemini live dial error for %s: %v", s.callID, err)
+		slog.ErrorContext(ctx, "prospera: gemini live dial error", "call_id", s.callID, "error", err)
 		return
 	}
 	s.mu.Lock()
@@ -393,12 +394,12 @@ func (s *MediaStreamSession) Run(parentCtx context.Context) {
 		s.mu.Lock()
 		if s.geminiConn != nil {
 			if closeErr := s.geminiConn.Close(); closeErr != nil {
-				log.Printf("prospera: gemini conn close err: %v", closeErr)
+				slog.WarnContext(ctx, "prospera: gemini conn close err", "error", closeErr)
 			}
 		}
 		if s.twilioConn != nil {
 			if closeErr := s.twilioConn.Close(); closeErr != nil {
-				log.Printf("prospera: twilio conn close err: %v", closeErr)
+				slog.WarnContext(ctx, "prospera: twilio conn close err", "error", closeErr)
 			}
 		}
 		s.closed = true
@@ -408,7 +409,7 @@ func (s *MediaStreamSession) Run(parentCtx context.Context) {
 	// Send initial setup handshake
 	setupMsg := BuildGeminiSetupMessage(model, s.systemPrompt, s.voiceName(), s.language)
 	if err := s.sendGeminiJSON(setupMsg); err != nil {
-		log.Printf("prospera: gemini live setup error: %v", err)
+		slog.ErrorContext(ctx, "prospera: gemini live setup error", "error", err)
 		return
 	}
 
@@ -513,7 +514,7 @@ func (s *MediaStreamSession) dispatchTwilioEvent(ctx context.Context, msg twilio
 		s.flushPendingTranscripts(context.WithoutCancel(ctx))
 		if s.store != nil {
 			if err := s.store.UpdateCallState(ctx, s.callID, "completed", "completed_by_remote", ""); err != nil {
-				log.Printf("prospera: update call state err: %v", err)
+				slog.ErrorContext(ctx, "prospera: update call state err", "error", err)
 			}
 		}
 		return true
@@ -533,10 +534,10 @@ func (s *MediaStreamSession) handleTwilioStart(ctx context.Context, streamSID, c
 
 	if s.store != nil {
 		if err := s.store.BindProviderCallSID(ctx, s.callID, callSID); err != nil {
-			log.Printf("prospera: bind provider sid err: %v", err)
+			slog.ErrorContext(ctx, "prospera: bind provider sid err", "error", err)
 		}
 		if err := s.store.UpdateCallState(ctx, s.callID, "in-progress", "", ""); err != nil {
-			log.Printf("prospera: update call state err: %v", err)
+			slog.ErrorContext(ctx, "prospera: update call state err", "error", err)
 		}
 	}
 }
@@ -549,12 +550,12 @@ func (s *MediaStreamSession) handleTwilioHangupMark(ctx context.Context) {
 
 	if s.twilioClient != nil && sid != "" {
 		if err := s.twilioClient.HangupCall(ctx, sid); err != nil {
-			log.Printf("prospera: twilio hangup err: %v", err)
+			slog.ErrorContext(ctx, "prospera: twilio hangup err", "error", err)
 		}
 	}
 	if s.store != nil {
 		if err := s.store.UpdateCallState(ctx, s.callID, "completed", "completed", ""); err != nil {
-			log.Printf("prospera: update call state err: %v", err)
+			slog.ErrorContext(ctx, "prospera: update call state err", "error", err)
 		}
 	}
 }
@@ -778,7 +779,7 @@ func (s *MediaStreamSession) flushTranscriptBuf(ctx context.Context, role string
 		Text:      text,
 		Timestamp: time.Now().UTC(),
 	}); err != nil {
-		log.Printf("prospera: append transcript turn err: %v", err)
+		slog.ErrorContext(ctx, "prospera: append transcript turn err", "error", err)
 	}
 }
 
@@ -804,7 +805,7 @@ func (s *MediaStreamSession) handleModelTurnPart(ctx context.Context, part Gemin
 			Text:      part.Text,
 			Timestamp: time.Now().UTC(),
 		}); err != nil {
-			log.Printf("prospera: append transcript turn err: %v", err)
+			slog.ErrorContext(ctx, "prospera: append transcript turn err", "error", err)
 		}
 	}
 }
@@ -917,7 +918,7 @@ func (s *MediaStreamSession) reconnectGemini(ctx context.Context) bool {
 	s.mu.Lock()
 	if s.geminiConn != nil {
 		if closeErr := s.geminiConn.Close(); closeErr != nil {
-			log.Printf("prospera: close prev gemini conn err: %v", closeErr)
+			slog.WarnContext(ctx, "prospera: close prev gemini conn err", "error", closeErr)
 		}
 	}
 	s.geminiConn = newConn

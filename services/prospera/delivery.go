@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"regexp"
@@ -196,7 +196,7 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 	content := strings.TrimSpace(sb.String())
 	if content == "" {
 		if _, advErr := r.store.AdvanceLiveTranscriptCursor(ctx, callID, cursor, totalTurns); advErr != nil {
-			log.Printf("reporter: advance empty transcript cursor: %v", advErr)
+			slog.ErrorContext(ctx, "reporter: advance empty transcript cursor", "error", advErr)
 		}
 		return nil
 	}
@@ -207,7 +207,7 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 	}
 
 	if _, advErr := r.store.AdvanceLiveTranscriptCursor(ctx, callID, cursor, totalTurns); advErr != nil {
-		log.Printf("reporter: advance transcript cursor: %v", advErr)
+		slog.ErrorContext(ctx, "reporter: advance transcript cursor", "error", advErr)
 	}
 	return nil
 }
@@ -238,7 +238,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 
 	// Flush any unsent live transcript turns before posting summary.
 	if flushErr := r.FlushLiveTranscript(ctx, callID); flushErr != nil {
-		log.Printf("reporter: flush live transcript before report: %v", flushErr)
+		slog.ErrorContext(ctx, "reporter: flush live transcript before report", "error", flushErr)
 	}
 
 	prompt := BuildPostCallSummaryPrompt(call)
@@ -271,12 +271,12 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 
 	if postErr := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
 		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+postErr.Error()); transErr != nil {
-			log.Printf("reporter: transition report status to failed: %v", transErr)
+			slog.ErrorContext(ctx, "reporter: transition report status to failed", "error", transErr)
 		}
 		return postErr
 	}
 	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusDelivered, summary); transErr != nil {
-		log.Printf("reporter: transition report status to delivered: %v", transErr)
+		slog.ErrorContext(ctx, "reporter: transition report status to delivered", "error", transErr)
 	}
 	return nil
 }
@@ -382,13 +382,13 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 	}
 
 	if setErr := r.store.SetVoicemailRecording(ctx, callID, recordingURL); setErr != nil {
-		log.Printf("reporter: set voicemail recording: %v", setErr)
+		slog.ErrorContext(ctx, "reporter: set voicemail recording", "error", setErr)
 	}
 
 	audioBytes, contentType, err := r.twilio.DownloadRecording(ctx, recordingURL)
 	if err != nil {
 		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "download failed: "+err.Error()); transErr != nil {
-			log.Printf("reporter: transition status to failed: %v", transErr)
+			slog.ErrorContext(ctx, "reporter: transition status to failed", "error", transErr)
 		}
 		return fmt.Errorf("reporter: download recording: %w", err)
 	}
@@ -413,13 +413,13 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 
 	if err := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, []discordAttachmentPayload{att}); err != nil {
 		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+err.Error()); transErr != nil {
-			log.Printf("reporter: transition status to failed: %v", transErr)
+			slog.ErrorContext(ctx, "reporter: transition status to failed", "error", transErr)
 		}
 		return err
 	}
 
 	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusDelivered, transcript); transErr != nil {
-		log.Printf("reporter: transition status to delivered: %v", transErr)
+		slog.ErrorContext(ctx, "reporter: transition status to delivered", "error", transErr)
 	}
 	return nil
 }
@@ -578,7 +578,7 @@ func (r *Reporter) DeliverInboundSMS(ctx context.Context, msg VoiceMessage) erro
 
 	if r.store != nil {
 		if markErr := r.store.MarkVoiceMessageDelivered(ctx, msg.MessageSID); markErr != nil {
-			log.Printf("reporter: mark voice message delivered: %v", markErr)
+			slog.ErrorContext(ctx, "reporter: mark voice message delivered", "error", markErr)
 		}
 	}
 	return nil

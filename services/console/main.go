@@ -197,7 +197,11 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	b, err := json.Marshal(data)
 	if err != nil {
-		log.Printf("[Console:HTTP] Failed to marshal JSON response: %v", err)
+		if r != nil {
+			slog.ErrorContext(r.Context(), "[Console:HTTP] failed to marshal JSON response", "error", err)
+		} else {
+			slog.Error("[Console:HTTP] failed to marshal JSON response", "error", err)
+		}
 		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -401,7 +405,7 @@ func resolveClusterState(ctx context.Context, kubeAPIServer, gitCommit string, g
 		if k8sErr == nil && len(k8sServices) > 0 {
 			services = k8sServices
 		} else if k8sErr != nil {
-			log.Printf("[Console] Warning: Failed to fetch K8s cluster state (%s): %v, falling back to Docker", kubeAPIServer, k8sErr)
+			slog.WarnContext(ctx, "[Console] failed to fetch K8s cluster state, falling back to Docker", "kube_api_server", kubeAPIServer, "error", k8sErr)
 		}
 	}
 	if len(services) == 0 {
@@ -452,7 +456,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 
 		activeTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
 		if taskErr != nil {
-			log.Printf("[Console] Failed to fetch active tasks from brain (%s): %v", brainURL, taskErr)
+			slog.WarnContext(ctx, "[Console] failed to fetch active tasks from brain", "brain_url", brainURL, "error", taskErr)
 			activeTasks = []ActiveTaskStatus{}
 		}
 		if activeTasks == nil {
@@ -659,9 +663,9 @@ var (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	resolvedPath := ResolveConfigPath(defaultConfigPath)
 	cfg, err := loadConfigFn(resolvedPath)

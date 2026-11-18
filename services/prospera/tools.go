@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -200,13 +200,13 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 	})
 	if err != nil {
 		if updateErr := h.store.UpdateCallState(ctx, callID, callStateFailed, err.Error(), ""); updateErr != nil {
-			log.Printf("prospera: update call state failed: %v", updateErr)
+			slog.ErrorContext(ctx, "prospera: update call state failed", "error", updateErr)
 		}
 		return InitiateCallOutput{}, fmt.Errorf("initiate_call: twilio create call: %w", err)
 	}
 
 	if bindErr := h.store.BindProviderCallSID(ctx, callID, providerSID); bindErr != nil {
-		log.Printf("prospera: bind provider sid failed: %v", bindErr)
+		slog.ErrorContext(ctx, "prospera: bind provider sid failed", "error", bindErr)
 	}
 	return InitiateCallOutput{
 		CallID:          callID,
@@ -266,23 +266,23 @@ func (h *ToolHandler) EndCall(ctx context.Context, args EndCallArgs) (EndCallOut
 
 	if h.sessionMgr != nil {
 		if endErr := h.sessionMgr.EndCall(callID); endErr != nil {
-			log.Printf("prospera: session end call: %v", endErr)
+			slog.ErrorContext(ctx, "prospera: session end call", "error", endErr)
 		}
 	}
 
 	if call.ProviderCallSID != "" && h.twilio != nil {
 		if hangupErr := h.twilio.HangupCall(ctx, call.ProviderCallSID); hangupErr != nil {
-			log.Printf("prospera: twilio hangup: %v", hangupErr)
+			slog.ErrorContext(ctx, "prospera: twilio hangup", "error", hangupErr)
 		}
 	}
 
 	if updateErr := h.store.UpdateCallState(ctx, callID, "completed", "operator_requested", ""); updateErr != nil {
-		log.Printf("prospera: update call state: %v", updateErr)
+		slog.ErrorContext(ctx, "prospera: update call state", "error", updateErr)
 	}
 
 	if h.reporter != nil {
 		if repErr := h.reporter.DeliverCallReport(ctx, callID); repErr != nil {
-			log.Printf("prospera: deliver call report: %v", repErr)
+			slog.ErrorContext(ctx, "prospera: deliver call report", "error", repErr)
 		}
 	}
 
@@ -369,7 +369,7 @@ func (h *ToolHandler) SendSMS(ctx context.Context, args SendSMSArgs) (SendSMSOut
 		CreatedAt:        time.Now().UTC(),
 	}
 	if _, saveErr := h.store.SaveVoiceMessage(ctx, msg); saveErr != nil {
-		log.Printf("prospera: save voice message: %v", saveErr)
+		slog.ErrorContext(ctx, "prospera: save voice message", "error", saveErr)
 	}
 
 	return SendSMSOutput{

@@ -31,7 +31,7 @@ func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pub
 func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pubsub.Bus) error {
 	var ev pubsub.TranscriptSyncedEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-		log.Printf("[Coven] warning: failed to unmarshal transcript synced event: %v", err)
+		slog.WarnContext(ctx, "[Coven] failed to unmarshal transcript synced event", "error", err)
 		return nil
 	}
 	if strings.TrimSpace(ev.ConversationID) == "" || strings.TrimSpace(ev.SessionID) == "healthcheck-ping" {
@@ -56,22 +56,22 @@ func nakBackoffDelay(numDelivered uint64) time.Duration {
 func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Worker) error {
 	var args pubsub.CovenExtractJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[Coven] error unmarshaling coven extract job: %v", err)
+		slog.ErrorContext(ctx, "[Coven] error unmarshaling coven extract job", "error", err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[Coven] warning: error terming coven extract job: %v", termErr)
+			slog.WarnContext(ctx, "[Coven] error terming coven extract job", "error", termErr)
 		}
 		return nil
 	}
 	if err := worker.ExtractThread(ctx, args.ThreadID); err != nil {
 		if msg.NumDelivered() >= 5 {
-			log.Printf("[Coven] dropping coven extract job for thread %s after %d delivery attempts: %v", args.ThreadID, msg.NumDelivered(), err)
+			slog.ErrorContext(ctx, "[Coven] dropping coven extract job after max delivery attempts", "thread_id", args.ThreadID, "delivered", msg.NumDelivered(), "error", err)
 			if termErr := msg.Term(); termErr != nil {
-				log.Printf("[Coven] warning: error terming coven extract job: %v", termErr)
+				slog.WarnContext(ctx, "[Coven] error terming coven extract job", "error", termErr)
 			}
 			return nil
 		}
 		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
-			log.Printf("[Coven] warning: error naking coven extract job: %v", nakErr)
+			slog.WarnContext(ctx, "[Coven] error naking coven extract job", "error", nakErr)
 		}
 		return err
 	}
@@ -87,7 +87,7 @@ func subscribeCovenTranscriptSynced(ctx context.Context, b pubsub.Bus) error {
 			if msg.NumDelivered() < 5 {
 				return err
 			}
-			log.Printf("[Coven] dropping transcript synced event after %d delivery attempts: %v", msg.NumDelivered(), err)
+			slog.ErrorContext(msgCtx, "[Coven] dropping transcript synced event after max delivery attempts", "delivered", msg.NumDelivered(), "error", err)
 			return nil
 		}
 		return nil
@@ -285,9 +285,9 @@ var (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	resolvedPath := ResolveConfigPath(configPath)
 	cfg, err := LoadConfig(resolvedPath)

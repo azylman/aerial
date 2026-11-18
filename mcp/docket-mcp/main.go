@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -449,22 +450,22 @@ func validateCreateRelations(ctx context.Context, src NodeSource, parentID *int6
 func (s *Server) wireCreateRelations(ctx context.Context, taskID int64, parentID *int64, blocks, blockedBy, related []int64) {
 	if parentID != nil {
 		if err := s.vikunja.CreateRelation(ctx, taskID, *parentID, "parenttask"); err != nil {
-			log.Printf("[docket-mcp] create relation parenttask error: %v", err)
+			slog.ErrorContext(ctx, "[docket-mcp] create relation error", "kind", "parenttask", "task_id", taskID, "other_id", *parentID, "error", err)
 		}
 	}
 	for _, b := range blocks {
 		if err := s.vikunja.CreateRelation(ctx, taskID, b, "blocking"); err != nil {
-			log.Printf("[docket-mcp] create relation blocking error: %v", err)
+			slog.ErrorContext(ctx, "[docket-mcp] create relation error", "kind", "blocking", "task_id", taskID, "other_id", b, "error", err)
 		}
 	}
 	for _, bb := range blockedBy {
 		if err := s.vikunja.CreateRelation(ctx, bb, taskID, "blocking"); err != nil {
-			log.Printf("[docket-mcp] create relation blocked_by error: %v", err)
+			slog.ErrorContext(ctx, "[docket-mcp] create relation error", "kind", "blocked_by", "task_id", taskID, "other_id", bb, "error", err)
 		}
 	}
 	for _, r := range related {
 		if err := s.vikunja.CreateRelation(ctx, taskID, r, "related"); err != nil {
-			log.Printf("[docket-mcp] create relation related error: %v", err)
+			slog.ErrorContext(ctx, "[docket-mcp] create relation error", "kind", "related", "task_id", taskID, "other_id", r, "error", err)
 		}
 	}
 }
@@ -508,7 +509,7 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 		}
 	}
 	if err = s.store.UpdateTaskEmbeddingAndResolution(ctx, task.ID, emb, ""); err != nil {
-		log.Printf("[docket-mcp] update embedding error: %v", err)
+		slog.ErrorContext(ctx, "[docket-mcp] update embedding error", "task_id", task.ID, "error", err)
 	}
 
 	summary := TaskSummary{
@@ -565,14 +566,14 @@ func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool)
 
 	if len(emb) > 0 {
 		if err = s.store.UpdateTaskEmbedding(ctx, args.ID, emb); err != nil {
-			log.Printf("[docket-mcp] update embedding error: %v", err)
+			slog.ErrorContext(ctx, "[docket-mcp] update embedding error", "task_id", args.ID, "error", err)
 		}
 	}
 
 	var res string
 	resMap, err := s.store.FetchTaskResolutions(ctx, []int64{args.ID})
 	if err != nil {
-		log.Printf("[docket-mcp] fetch resolution for update error: %v", err)
+		slog.ErrorContext(ctx, "[docket-mcp] fetch resolution for update error", "task_id", args.ID, "error", err)
 	} else {
 		res = resMap[args.ID]
 	}
@@ -668,10 +669,10 @@ func (s *Server) closeCompleted(ctx context.Context, id int64, reason string, no
 		return fmt.Errorf("failed to update task status: %w", err)
 	}
 	if err := s.vikunja.CreateComment(ctx, id, "Closed as completed: "+reason); err != nil {
-		log.Printf("[docket-mcp] comment error: %v", err)
+		slog.ErrorContext(ctx, "[docket-mcp] comment error", "task_id", id, "error", err)
 	}
 	if err := s.store.UpdateTaskResolutionBatch(ctx, []int64{id}, taskStatusCompleted); err != nil {
-		log.Printf("[docket-mcp] update resolution error: %v", err)
+		slog.ErrorContext(ctx, "[docket-mcp] update resolution error", "task_id", id, "error", err)
 	}
 	return nil
 }
@@ -687,7 +688,7 @@ func (s *Server) closeWontDo(ctx context.Context, id int64, reason string, openS
 		return fmt.Errorf("failed to update task status: %w", err)
 	}
 	if err := s.vikunja.CreateComment(ctx, id, "Closed as wont_do: "+reason); err != nil {
-		log.Printf("[docket-mcp] comment error: %v", err)
+		slog.ErrorContext(ctx, "[docket-mcp] comment error", "task_id", id, "error", err)
 	}
 
 	for _, sid := range openSubIDs {
@@ -696,16 +697,16 @@ func (s *Server) closeWontDo(ctx context.Context, id int64, reason string, openS
 			subTask.Done = true
 			subTask.DoneAt = &now
 			if _, err := s.vikunja.UpdateTask(ctx, subTask); err != nil {
-				log.Printf("[docket-mcp] update subtask error: %v", err)
+				slog.ErrorContext(ctx, "[docket-mcp] update subtask error", "task_id", sid, "error", err)
 			}
 			if err := s.vikunja.CreateComment(ctx, sid, fmt.Sprintf("Cascaded close (wont_do) from parent task %d: %s", id, reason)); err != nil {
-				log.Printf("[docket-mcp] comment subtask error: %v", err)
+				slog.ErrorContext(ctx, "[docket-mcp] comment subtask error", "task_id", sid, "error", err)
 			}
 		}
 	}
 	closedIDs := append([]int64{id}, openSubIDs...)
 	if err := s.store.UpdateTaskResolutionBatch(ctx, closedIDs, taskStatusWontDo); err != nil {
-		log.Printf("[docket-mcp] update resolution batch error: %v", err)
+		slog.ErrorContext(ctx, "[docket-mcp] update resolution batch error", "task_ids", closedIDs, "error", err)
 	}
 	return nil
 }
@@ -938,6 +939,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	_, flushTracing := tracing.Init(ctx, "docket-mcp", tracing.DefaultConfigPath)
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	err = runServerFn(ctx, cfg)
 	flushTracing()
