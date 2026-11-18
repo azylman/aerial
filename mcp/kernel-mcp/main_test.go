@@ -206,8 +206,6 @@ func handleMainFakeCDPEvaluate(ws *websocket.Conn, state *mainFakeCDPState, reqI
 
 func evaluateRemainingExpressions(expr string) any {
 	switch {
-	case strings.Contains(expr, "StealthInitScript") || strings.Contains(expr, "navigator.webdriver"):
-		return true
 	case strings.Contains(expr, "cloneNode(true)"):
 		return map[string]any{
 			"title": "Amazon Test",
@@ -271,8 +269,6 @@ func handleMainFakeCDPMethod(ws *websocket.Conn, state *mainFakeCDPState, reqID 
 	switch method {
 	case "Target.attachToTarget":
 		writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{"sessionId": "sess-main-1"})
-	case "Page.enable", "Emulation.setUserAgentOverride", "Page.addScriptToEvaluateOnNewDocument":
-		writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{})
 	case "Page.navigate":
 		handleMainFakeCDPNavigate(ws, state, reqID, params)
 	case "Runtime.evaluate":

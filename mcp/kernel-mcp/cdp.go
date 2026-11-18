@@ -41,7 +41,7 @@ type cdpError struct {
 	Message string `json:"message"`
 }
 
-// CDPClient manages a WebSocket connection to Chromium CDP with stealth injection.
+// CDPClient manages a WebSocket connection to Chromium CDP.
 type CDPClient struct {
 	cfg        *Config
 	httpClient *http.Client
@@ -53,7 +53,6 @@ type CDPClient struct {
 
 	activeConn      *websocket.Conn
 	activeSessionID string
-	stealthReady    bool
 	lastNavHost     string
 	pending         map[int64]chan cdpResponse
 	msgID           atomic.Int64
@@ -181,7 +180,6 @@ func (c *CDPClient) handleDisconnect(conn *websocket.Conn, err error) {
 	if c.activeConn == conn {
 		c.activeConn = nil
 		c.activeSessionID = ""
-		c.stealthReady = false
 		c.lastNavHost = ""
 	}
 	for id, ch := range c.pending {
@@ -203,13 +201,9 @@ func (c *CDPClient) EnsureConnection(ctx context.Context) error {
 
 	c.stateMu.Lock()
 	conn := c.activeConn
-	stealth := c.stealthReady
 	c.stateMu.Unlock()
 
 	if conn != nil {
-		if !stealth {
-			return c.ensureStealthSessionLocked(ctx)
-		}
 		return nil
 	}
 
@@ -228,7 +222,6 @@ func (c *CDPClient) EnsureConnection(ctx context.Context) error {
 
 	c.stateMu.Lock()
 	c.activeConn = newConn
-	c.stealthReady = false
 	c.stateMu.Unlock()
 
 	go c.readLoop(newConn)
@@ -252,7 +245,7 @@ func (c *CDPClient) EnsureConnection(ctx context.Context) error {
 		}
 	}
 
-	return c.ensureStealthSessionLocked(ctx)
+	return nil
 }
 
 // sendCDPDirect issues a raw CDP command over a specific connection.
@@ -331,49 +324,6 @@ func (c *CDPClient) SendCDP(ctx context.Context, method string, params any) (jso
 	}
 
 	return c.sendCDPDirect(ctx, conn, method, params, sessID)
-}
-
-func (c *CDPClient) ensureStealthSessionLocked(ctx context.Context) error {
-	c.stateMu.Lock()
-	if c.stealthReady || c.activeConn == nil {
-		c.stateMu.Unlock()
-		return nil
-	}
-	conn := c.activeConn
-	sessID := c.activeSessionID
-	c.stateMu.Unlock()
-
-	if _, err := c.sendCDPDirect(ctx, conn, "Page.enable", map[string]any{}, sessID); err != nil {
-		return fmt.Errorf("Page.enable: %w", err)
-	}
-
-	if _, err := c.sendCDPDirect(ctx, conn, "Emulation.setUserAgentOverride", map[string]any{
-		"userAgent":         StealthUserAgent,
-		"acceptLanguage":    "en-US,en;q=0.9",
-		"platform":          "Linux x86_64",
-		"userAgentMetadata": StealthUAMetadata,
-	}, sessID); err != nil {
-		return fmt.Errorf("Emulation.setUserAgentOverride: %w", err)
-	}
-
-	if _, err := c.sendCDPDirect(ctx, conn, "Page.addScriptToEvaluateOnNewDocument", map[string]any{
-		"source": StealthInitScript,
-	}, sessID); err != nil {
-		return fmt.Errorf("Page.addScriptToEvaluateOnNewDocument: %w", err)
-	}
-
-	if _, err := c.sendCDPDirect(ctx, conn, "Runtime.evaluate", map[string]any{
-		"expression":    StealthInitScript,
-		"returnByValue": true,
-	}, sessID); err != nil {
-		return fmt.Errorf("Runtime.evaluate stealth script: %w", err)
-	}
-
-	c.stateMu.Lock()
-	c.stealthReady = true
-	c.stateMu.Unlock()
-
-	return nil
 }
 
 // DispatchTrustedClick performs a realistic 3-step mouse click sequence via CDP.
@@ -530,7 +480,6 @@ func (c *CDPClient) Close() error {
 	c.stateMu.Lock()
 	conn := c.activeConn
 	c.activeConn = nil
-	c.stealthReady = false
 	c.activeSessionID = ""
 	c.lastNavHost = ""
 	c.stateMu.Unlock()
