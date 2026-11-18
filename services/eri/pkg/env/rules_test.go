@@ -1,0 +1,733 @@
+package env
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
+)
+
+type compileAndDiscoverRulesCase struct {
+	name                string
+	target              RuleTarget
+	engine              string
+	prompt              string
+	fileSizeLimit       bool
+	tornZeroByte        bool
+	dirIsFile           bool
+	userSubIsFile       bool
+	aerialPersonaIsFile bool
+	configPersonaIsFile bool
+	aerialEngineIsFile  bool
+	userEngineIsFile    bool
+	aerialEngineTorn    bool
+	userEngineOversized bool
+	statErrorSubfolder  bool
+	emptyDirTest        bool
+	testResolve         bool
+	wantErr             bool
+	wantPromptMD        bool
+	wantPersona         bool
+	wantPrefixOrder     []string
+	wantExcludedPrefix  string
+}
+
+func testResolveDir(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	candDir := filepath.Join(tmpDir, "cand")
+	_ = os.Mkdir(candDir, 0o755)
+
+	if r := resolveDir(candDir, nil); r != candDir {
+		t.Errorf("resolveDir configured mismatch: %q", r)
+	}
+	if r := resolveDir(filepath.Join(tmpDir, "missing"), []string{candDir}); r != candDir {
+		t.Errorf("resolveDir candidate fallback mismatch: %q", r)
+	}
+	missing := filepath.Join(tmpDir, "nonexistent")
+	if r := resolveDir(missing, []string{filepath.Join(tmpDir, "nonexistent2")}); r != missing {
+		t.Errorf("resolveDir default mismatch: %q", r)
+	}
+}
+
+func testEmptyDirDiscovery(t *testing.T) {
+	t.Helper()
+	res, err := discoverRuleFiles("", "common", "00_")
+	if res != nil || err != nil {
+		t.Errorf("expected nil, nil for empty dir, got %v, %v", res, err)
+	}
+
+	tmpDir := t.TempDir()
+	commonDir := filepath.Join(tmpDir, "common")
+	_ = os.MkdirAll(filepath.Join(commonDir, "nested_dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(commonDir, "notes.txt"), []byte("not a rule"), 0o644)
+	_ = os.WriteFile(filepath.Join(commonDir, "01.md"), []byte("valid rule"), 0o644)
+	files, err := discoverRuleFiles(tmpDir, "common", "00_")
+	if err != nil || len(files) != 1 {
+		t.Errorf("expected 1 file discovered, got %d, err: %v", len(files), err)
+	}
+}
+
+func runStatErrorSubfolderTest(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "file_blocker")
+	_ = os.WriteFile(blocker, []byte("f"), 0o644)
+	if _, err := discoverRuleFiles(blocker, "subfolder", "00_"); err == nil {
+		t.Fatalf("expected error from ENOTDIR stat on subfolder")
+	}
+}
+
+func setupCompileRuleBlockers(t *testing.T, aerialDir, configDir string, tc compileAndDiscoverRulesCase) {
+	t.Helper()
+	if tc.aerialEngineIsFile {
+		path := filepath.Join(aerialDir, "discord", "claude")
+		_ = os.RemoveAll(path)
+		_ = os.WriteFile(path, []byte("file-not-dir"), 0o644)
+	}
+	if tc.userEngineIsFile {
+		path := filepath.Join(configDir, "discord", "claude")
+		_ = os.RemoveAll(path)
+		_ = os.WriteFile(path, []byte("file-not-dir"), 0o644)
+	}
+	if tc.aerialEngineTorn {
+		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
+	}
+	if tc.userEngineOversized {
+		writeTestFile(t, filepath.Join(configDir, "discord", "claude", "oversized.md"), strings.Repeat("B", MaxSourceRuleFileSizeBytes+200))
+	}
+
+	for _, pt := range []struct {
+		cond bool
+		path string
+	}{
+		{tc.dirIsFile, filepath.Join(aerialDir, "common")},
+		{tc.userSubIsFile, filepath.Join(configDir, "discord")},
+		{tc.aerialPersonaIsFile, filepath.Join(aerialDir, "persona")},
+		{tc.configPersonaIsFile, filepath.Join(configDir, "persona")},
+	} {
+		if pt.cond {
+			_ = os.RemoveAll(pt.path)
+			_ = os.WriteFile(pt.path, []byte("file-not-dir"), 0o644)
+		}
+	}
+}
+
+func assertPrefixOrder(t *testing.T, wantPrefixOrder []string, rules []ruleSourceFile) {
+	t.Helper()
+	var actualPrefixes []string
+	for _, r := range rules {
+		if r.prefix != "" {
+			actualPrefixes = append(actualPrefixes, r.prefix)
+		}
+	}
+	orderIdx := 0
+	for _, pfx := range actualPrefixes {
+		if orderIdx < len(wantPrefixOrder) && strings.HasPrefix(pfx, wantPrefixOrder[orderIdx]) {
+			orderIdx++
+		}
+	}
+	if orderIdx != len(wantPrefixOrder) {
+		t.Errorf("prefix order check failed: matched %d of %d expected prefixes (%v), got prefixes %v",
+			orderIdx, len(wantPrefixOrder), wantPrefixOrder, actualPrefixes)
+	}
+}
+
+func assertCompileDiscoveryOutput(t *testing.T, tc compileAndDiscoverRulesCase, rules []ruleSourceFile) {
+	t.Helper()
+	hasPrompt := false
+	hasPersona := false
+	for _, r := range rules {
+		if r.filename == "99_custom_prompt.md" {
+			hasPrompt = true
+		}
+		if strings.Contains(r.filename, "persona") {
+			hasPersona = true
+		}
+		if tc.wantExcludedPrefix != "" && strings.HasPrefix(r.prefix+r.filename, tc.wantExcludedPrefix) {
+			t.Errorf("found excluded prefix %s in compiled rule file %s", tc.wantExcludedPrefix, r.prefix+r.filename)
+		}
+	}
+	if hasPrompt != tc.wantPromptMD {
+		t.Errorf("prompt rule existence=%v, want=%v", hasPrompt, tc.wantPromptMD)
+	}
+	if hasPersona != tc.wantPersona {
+		t.Errorf("target %s persona existence=%v, want=%v", tc.target, hasPersona, tc.wantPersona)
+	}
+	if len(tc.wantPrefixOrder) > 0 {
+		assertPrefixOrder(t, tc.wantPrefixOrder, rules)
+	}
+}
+
+func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase) {
+	t.Helper()
+	if tc.statErrorSubfolder {
+		runStatErrorSubfolderTest(t)
+		return
+	}
+	if tc.emptyDirTest {
+		testEmptyDirDiscovery(t)
+		return
+	}
+	if tc.testResolve {
+		testResolveDir(t)
+		return
+	}
+
+	content := "Standard rule body"
+	if tc.fileSizeLimit {
+		content = strings.Repeat("A", MaxSourceRuleFileSizeBytes+100)
+	} else if tc.tornZeroByte {
+		content = ""
+	}
+
+	p, aerialDir, configDir := newTestProvisioner(t, map[string]string{
+		"common/01_identity.md":     "Aerial core identity",
+		"discord/01_chat.md":        "Discord chat handling",
+		"discord/claude/01_exec.md": "Claude discord instructions",
+		"discord/codex/01_exec.md":  "Codex discord instructions",
+		"voice/01_audio.md":         "Voice audio handling",
+		"ephemeral/01_temp.md":      "Ephemeral worker rules",
+	}, map[string]string{
+		"common/10_persona_style.md":  "Config persona override",
+		"common/20_facts.md":          content,
+		"discord/30_user_chat.md":     "Config discord settings",
+		"discord/claude/10_custom.md": "User claude customizations",
+		"discord/codex/10_custom.md":  "User codex customizations",
+	})
+
+	setupCompileRuleBlockers(t, aerialDir, configDir, tc)
+
+	var rules []ruleSourceFile
+	var err error
+	if tc.engine != "" {
+		rules, err = p.compileTargetRules(tc.target, tc.prompt, tc.engine)
+	} else {
+		rules, err = p.compileTargetRules(tc.target, tc.prompt)
+	}
+
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("compileTargetRules() error = %v, wantErr %v", err, tc.wantErr)
+	}
+	if !tc.wantErr {
+		assertCompileDiscoveryOutput(t, tc, rules)
+	}
+}
+
+func TestCompileAndDiscoverRules(t *testing.T) {
+	tests := []compileAndDiscoverRulesCase{
+		{name: "discord target with custom prompt", target: TargetDiscord, prompt: "Do not compromise invariants", wantPromptMD: true, wantPersona: true},
+		{name: "voice target includes persona and target rules", target: TargetVoice, wantPersona: true},
+		{name: "ephemeral target compiles isolated rules and filters out persona", target: TargetEphemeral, wantPersona: false},
+		{name: "rule file exceeding size limit triggers error", target: TargetDiscord, fileSizeLimit: true, wantErr: true},
+		{name: "torn zero byte rule file triggers discovery error", target: TargetDiscord, tornZeroByte: true, wantErr: true},
+		{name: "aerial common subfolder is regular file triggers discovery error", target: TargetDiscord, dirIsFile: true, wantErr: true},
+		{name: "user target subfolder is regular file triggers discovery error", target: TargetDiscord, userSubIsFile: true, wantErr: true},
+		{name: "aerial persona subfolder is regular file triggers error", target: TargetDiscord, aerialPersonaIsFile: true, wantErr: true},
+		{name: "config persona subfolder is regular file triggers error", target: TargetDiscord, configPersonaIsFile: true, wantErr: true},
+		{name: "statErr ENOTDIR on subfolder triggers discovery error", statErrorSubfolder: true, wantErr: true},
+		{name: "discoverRuleFiles empty dir and non-md skipping", emptyDirTest: true},
+		{name: "resolveDir candidate fallback and defaults", testResolve: true},
+		{
+			name:               "discord target with claude engine compiles engine rules in prefix order",
+			target:             TargetDiscord,
+			engine:             config.EngineClaude,
+			wantPersona:        true,
+			wantPrefixOrder:    []string{"00_aerial_common_", "10_user_common_", "20_aerial_discord_", "25_aerial_discord_claude_", "30_user_discord_", "35_user_discord_claude_"},
+			wantExcludedPrefix: "25_aerial_discord_codex_",
+		},
+		{
+			name:               "discord target with codex engine compiles codex rules and excludes claude",
+			target:             TargetDiscord,
+			engine:             config.EngineCodex,
+			wantPersona:        true,
+			wantPrefixOrder:    []string{"00_aerial_common_", "10_user_common_", "20_aerial_discord_", "25_aerial_discord_codex_", "30_user_discord_", "35_user_discord_codex_"},
+			wantExcludedPrefix: "25_aerial_discord_claude_",
+		},
+		{
+			name:               "voice target ignores engine parameter",
+			target:             TargetVoice,
+			engine:             config.EngineClaude,
+			wantPersona:        true,
+			wantExcludedPrefix: "25_aerial_discord_claude_",
+		},
+		{
+			name:               "ephemeral target ignores engine parameter",
+			target:             TargetEphemeral,
+			engine:             config.EngineClaude,
+			wantPersona:        false,
+			wantExcludedPrefix: "25_aerial_discord_claude_",
+		},
+		{
+			name:               "aerial engine subfolder is regular file triggers discovery error",
+			target:             TargetDiscord,
+			engine:             config.EngineClaude,
+			aerialEngineIsFile: true,
+			wantErr:            true,
+		},
+		{
+			name:             "user engine subfolder is regular file triggers discovery error",
+			target:           TargetDiscord,
+			engine:           config.EngineClaude,
+			userEngineIsFile: true,
+			wantErr:          true,
+		},
+		{
+			name:             "aerial engine torn zero byte file triggers error",
+			target:           TargetDiscord,
+			engine:           config.EngineClaude,
+			aerialEngineTorn: true,
+			wantErr:          true,
+		},
+		{
+			name:                "user engine oversized rule file triggers error",
+			target:              TargetDiscord,
+			engine:              config.EngineClaude,
+			userEngineOversized: true,
+			wantErr:             true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runCompileAndDiscoverRulesCase(t, tc)
+		})
+	}
+}
+
+type atomicSwapRulesCase struct {
+	name             string
+	emptyStaging     bool
+	targetIsFile     bool
+	parentIsFile     bool
+	stagingWriteFail bool
+	backupFail       bool
+	stagingMoveFail  bool
+	restoreFail      bool
+	wantErr          bool
+}
+
+func runAtomicSwapRulesCase(t *testing.T, tc atomicSwapRulesCase) {
+	t.Helper()
+	origRename := renameRulesDir
+	defer func() { renameRulesDir = origRename }()
+
+	tmpParent := t.TempDir()
+	targetDir := filepath.Join(tmpParent, "rules")
+	origFile := writeTestFile(t, filepath.Join(targetDir, "original.md"), "active rule")
+
+	if tc.parentIsFile {
+		writeTestFile(t, filepath.Join(tmpParent, "blocked_parent"), "file")
+		targetDir = filepath.Join(tmpParent, "blocked_parent", "rules")
+	}
+	if tc.targetIsFile {
+		_ = os.RemoveAll(targetDir)
+		writeTestFile(t, targetDir, "not a dir")
+	}
+
+	var rules []ruleSourceFile
+	if tc.stagingWriteFail {
+		rules = []ruleSourceFile{
+			{filename: "nonexistent_sub/01.md", content: "data", prefix: "00_"},
+		}
+	} else if !tc.emptyStaging {
+		rules = []ruleSourceFile{
+			{filename: "new.md", prefix: "00_", content: "new rule"},
+		}
+	}
+
+	if tc.backupFail {
+		renameRulesDir = func(src, dst string) error {
+			if strings.Contains(dst, ".rules.backup.") {
+				return errors.New("simulated backup error")
+			}
+			return origRename(src, dst)
+		}
+	}
+
+	if tc.stagingMoveFail {
+		callCount := 0
+		renameRulesDir = func(oldpath, newpath string) error {
+			callCount++
+			if callCount == 1 {
+				return origRename(oldpath, newpath) // backup succeeds
+			}
+			if callCount == 2 {
+				return errors.New("simulated staging move failure")
+			}
+			if tc.restoreFail {
+				return errors.New("simulated restore failure")
+			}
+			return origRename(oldpath, newpath) // restore succeeds
+		}
+	}
+
+	p := newDisabledProvisioner(t, "", "")
+	err := p.atomicSwapRulesDir(rules, targetDir)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("atomicSwapRulesDir() error = %v, wantErr %v", err, tc.wantErr)
+	}
+
+	if tc.stagingMoveFail && !tc.restoreFail {
+		data, rErr := os.ReadFile(origFile)
+		if rErr != nil || string(data) != "active rule" {
+			t.Fatalf("backup was not restored after failed swap: %v, data=%q", rErr, string(data))
+		}
+	} else if !tc.wantErr {
+		newFile := filepath.Join(targetDir, "00_new.md")
+		data, rErr := os.ReadFile(newFile)
+		if rErr != nil || string(data) != "new rule" {
+			t.Fatalf("target rules dir does not contain new file: %v", rErr)
+		}
+	}
+}
+
+func TestAtomicSwapRulesDir(t *testing.T) {
+	tests := []atomicSwapRulesCase{
+		{name: "successful directory swap"},
+		{name: "abort when staging has zero rules", emptyStaging: true, wantErr: true},
+		{name: "error when target path is a file", targetIsFile: true, wantErr: true},
+		{name: "error when parent dir creation fails", parentIsFile: true, wantErr: true},
+		{name: "staging write failure on invalid relative path", stagingWriteFail: true, wantErr: true},
+		{name: "backup failure when target backup rename fails", backupFail: true, wantErr: true},
+		{name: "rollback restores backup when staging move fails", stagingMoveFail: true, wantErr: true},
+		{name: "staging move failure and restore failure", stagingMoveFail: true, restoreFail: true, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runAtomicSwapRulesCase(t, tc)
+		})
+	}
+}
+
+type syncRulesCase struct {
+	name              string
+	emptyHome         bool
+	zeroRules         bool
+	primaryFail       bool
+	configFail        bool
+	voiceFail         bool
+	ephemeralFail     bool
+	runtimeFail       bool
+	concurrent        bool
+	noDataDir         bool
+	staleClaudeMD     bool
+	claudeDiscordFail bool
+	codexDiscordFail  bool
+	checkIsolation    bool
+	wantErr           bool
+	wantPrimaryMD     bool
+}
+
+func assertNonEmptyWithoutFrontmatter(t *testing.T, path, label string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		t.Fatalf("expected %s in %s: %v", label, path, err)
+	}
+	if strings.Contains(string(data), "---") {
+		t.Errorf("%s should not contain YAML frontmatter: %s", label, string(data))
+	}
+}
+
+func assertFileNotExist(t *testing.T, path, label string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected no %s in %s, got err=%v", label, path, err)
+	}
+}
+
+func assertTargetDirectoryOrSymlink(t *testing.T, path, label string, isEphemeral bool) {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if isEphemeral {
+		if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("expected isolated %s dir: %v", label, err)
+		}
+		return
+	}
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("expected %s symlink: %v", label, err)
+	}
+}
+
+func assertPrimaryRulesMD(t *testing.T, p *Provisioner, tc syncRulesCase) {
+	t.Helper()
+	claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
+	codexMD := filepath.Join(p.homeDir, ".codex", "AGENTS.md")
+	museMD := filepath.Join(p.homeDir, ".config", "muse", "AGENTS.md")
+	if !tc.wantPrimaryMD {
+		assertFileNotExist(t, claudeMD, "CLAUDE.md")
+		assertFileNotExist(t, codexMD, "AGENTS.md")
+		assertFileNotExist(t, museMD, "muse AGENTS.md")
+		return
+	}
+	assertNonEmptyWithoutFrontmatter(t, claudeMD, "CLAUDE.md")
+	assertNonEmptyWithoutFrontmatter(t, codexMD, "AGENTS.md")
+	assertNonEmptyWithoutFrontmatter(t, museMD, "muse AGENTS.md")
+
+	if tc.checkIsolation {
+		cData, _ := os.ReadFile(claudeMD)
+		if !strings.Contains(string(cData), "Claude Discord Content") || strings.Contains(string(cData), "Codex Discord Content") {
+			t.Errorf("primary CLAUDE.md isolation failure: %s", string(cData))
+		}
+		codexData, _ := os.ReadFile(codexMD)
+		if !strings.Contains(string(codexData), "Codex Discord Content") || strings.Contains(string(codexData), "Claude Discord Content") {
+			t.Errorf("primary AGENTS.md isolation failure: %s", string(codexData))
+		}
+		museData, _ := os.ReadFile(museMD)
+		if !strings.Contains(string(museData), "Muse Discord Content") || strings.Contains(string(museData), "Claude Discord Content") {
+			t.Errorf("primary muse AGENTS.md isolation failure: %s", string(museData))
+		}
+	}
+}
+
+func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
+	t.Helper()
+	for _, target := range allRuntimeTargets {
+		rtHome := p.runtimeHomeDir(target)
+		isEph := target == TargetEphemeral
+		for _, mdRel := range []string{
+			filepath.Join(".claude", "CLAUDE.md"),
+			filepath.Join(".codex", "AGENTS.md"),
+			filepath.Join(".config", "muse", "AGENTS.md"),
+		} {
+			if _, err := os.Stat(filepath.Join(rtHome, mdRel)); err != nil {
+				t.Errorf("expected %s in %s runtime: %v", mdRel, target, err)
+			}
+		}
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".claude", "projects"), "claude projects", isEph)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".codex", "sessions"), "codex sessions", isEph)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".local", "share", "muse", "sessions"), "muse sessions", isEph)
+	}
+}
+
+func assertDiscordGeminiIsolation(t *testing.T, p *Provisioner) {
+	t.Helper()
+	discordGeminiRules := filepath.Join(p.runtimeHomeDir(TargetDiscord), ".gemini", "rules")
+	entries, err := os.ReadDir(discordGeminiRules)
+	if err != nil {
+		t.Fatalf("failed to read discord .gemini/rules: %v", err)
+	}
+	hasAgy := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "25_aerial_discord_agy_") || strings.Contains(e.Name(), "35_user_discord_agy_") {
+			hasAgy = true
+		}
+		if strings.Contains(e.Name(), "claude") || strings.Contains(e.Name(), "codex") || strings.Contains(e.Name(), "muse") {
+			t.Errorf("discord .gemini/rules leaked non-agy engine file: %s", e.Name())
+		}
+	}
+	if !hasAgy {
+		t.Errorf("discord .gemini/rules missing agy engine rules")
+	}
+}
+
+func assertDiscordEngineMDIsolation(t *testing.T, p *Provisioner) {
+	t.Helper()
+	discordClaudeMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".claude", "CLAUDE.md"))
+	if !strings.Contains(string(discordClaudeMD), "Claude Discord Content") {
+		t.Errorf("discord .claude/CLAUDE.md missing Claude content: %s", string(discordClaudeMD))
+	}
+	if strings.Contains(string(discordClaudeMD), "Codex Discord Content") || strings.Contains(string(discordClaudeMD), "Muse Discord Content") {
+		t.Errorf("discord .claude/CLAUDE.md leaked codex/muse content: %s", string(discordClaudeMD))
+	}
+
+	discordCodexMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".codex", "AGENTS.md"))
+	if !strings.Contains(string(discordCodexMD), "Codex Discord Content") {
+		t.Errorf("discord .codex/AGENTS.md missing Codex content: %s", string(discordCodexMD))
+	}
+	if strings.Contains(string(discordCodexMD), "Claude Discord Content") || strings.Contains(string(discordCodexMD), "Muse Discord Content") {
+		t.Errorf("discord .codex/AGENTS.md leaked claude/muse content: %s", string(discordCodexMD))
+	}
+
+	discordMuseMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".config", "muse", "AGENTS.md"))
+	if !strings.Contains(string(discordMuseMD), "Muse Discord Content") {
+		t.Errorf("discord muse AGENTS.md missing Muse content: %s", string(discordMuseMD))
+	}
+	if strings.Contains(string(discordMuseMD), "Claude Discord Content") || strings.Contains(string(discordMuseMD), "Codex Discord Content") {
+		t.Errorf("discord muse AGENTS.md leaked claude/codex content: %s", string(discordMuseMD))
+	}
+}
+
+func assertVoiceAndEphemeralIsolation(t *testing.T, p *Provisioner) {
+	t.Helper()
+	voiceClaudeMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetVoice), ".claude", "CLAUDE.md"))
+	if strings.Contains(string(voiceClaudeMD), "Claude Discord Content") || strings.Contains(string(voiceClaudeMD), "Discord content") {
+		t.Errorf("voice runtime leaked discord content: %s", string(voiceClaudeMD))
+	}
+	if !strings.Contains(string(voiceClaudeMD), "Voice content") {
+		t.Errorf("voice runtime missing voice content: %s", string(voiceClaudeMD))
+	}
+
+	ephClaudeMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetEphemeral), ".claude", "CLAUDE.md"))
+	if strings.Contains(string(ephClaudeMD), "Claude Discord Content") || strings.Contains(string(ephClaudeMD), "Discord content") {
+		t.Errorf("ephemeral runtime leaked discord content: %s", string(ephClaudeMD))
+	}
+}
+
+func assertRuleEngineIsolation(t *testing.T, p *Provisioner) {
+	t.Helper()
+	assertDiscordGeminiIsolation(t, p)
+	assertDiscordEngineMDIsolation(t, p)
+	assertVoiceAndEphemeralIsolation(t, p)
+}
+
+func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
+	t.Helper()
+	rulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
+	entries, rErr := os.ReadDir(rulesDir)
+	if rErr != nil || len(entries) == 0 {
+		t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
+	}
+	assertPrimaryRulesMD(t, p, tc)
+	if !tc.noDataDir {
+		assertRuntimeRulesMD(t, p)
+		if tc.checkIsolation {
+			assertRuleEngineIsolation(t, p)
+		}
+	}
+}
+
+func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
+	t.Helper()
+	if tc.emptyHome {
+		p := newDisabledProvisioner(t, "", "")
+		if err := p.SyncRules(""); err != nil {
+			t.Fatalf("expected nil error on empty home: %v", err)
+		}
+		return
+	}
+
+	p, aerialDir, _ := newTestProvisioner(t, map[string]string{
+		"common/01_rule.md":           "Common content",
+		"discord/01_rule.md":          "Discord content",
+		"discord/agy/01_agy.md":       "Agy Discord Content",
+		"discord/claude/01_claude.md": "Claude Discord Content",
+		"discord/codex/01_codex.md":   "Codex Discord Content",
+		"discord/muse/01_muse.md":     "Muse Discord Content",
+		"voice/01_rule.md":            "Voice content",
+		"ephemeral/01_rule.md":        "Ephemeral content",
+	}, nil)
+	if tc.noDataDir {
+		np := newDisabledProvisioner(t, t.TempDir(), "")
+		np.SetAerialRulesDir(p.aerialRulesDir)
+		np.SetConfigRulesDir(p.configRulesDir)
+		p = np
+	}
+	if tc.staleClaudeMD {
+		writeTestFile(t, filepath.Join(p.homeDir, ".claude", "CLAUDE.md"), "stale")
+		writeTestFile(t, filepath.Join(p.homeDir, ".codex", "AGENTS.md"), "stale")
+		writeTestFile(t, filepath.Join(p.homeDir, ".config", "muse", "AGENTS.md"), "stale")
+	}
+
+	if tc.zeroRules {
+		p.SetAerialRulesDir(t.TempDir())
+		p.SetConfigRulesDir(t.TempDir())
+	}
+
+	if tc.voiceFail {
+		writeTestFile(t, filepath.Join(aerialDir, "voice", "torn.md"), "")
+	}
+	if tc.ephemeralFail {
+		writeTestFile(t, filepath.Join(aerialDir, "ephemeral", "torn.md"), "")
+	}
+	if tc.claudeDiscordFail {
+		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
+	}
+	if tc.codexDiscordFail {
+		writeTestFile(t, filepath.Join(aerialDir, "discord", "codex", "torn.md"), "")
+	}
+	if tc.primaryFail {
+		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file blocker")
+	}
+	if tc.configFail {
+		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "rules"), "file blocker")
+	}
+	if tc.runtimeFail {
+		writeTestFile(t, filepath.Join(p.dataDir, "runtimes", "discord", ".gemini", "rules"), "file blocker")
+	}
+
+	if tc.concurrent {
+		var wg sync.WaitGroup
+		errCh := make(chan error, 5)
+		for i := range 5 {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				errCh <- p.SyncRules(fmt.Sprintf("Prompt %d", idx))
+			}(i)
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			if err != nil {
+				t.Fatalf("concurrent SyncRules failed: %v", err)
+			}
+		}
+		return
+	}
+
+	err := p.SyncRules("Custom System Prompt")
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("SyncRules() error = %v, wantErr %v", err, tc.wantErr)
+	}
+
+	if !tc.wantErr {
+		assertSyncRulesOutput(t, tc, p)
+	}
+}
+
+func TestSyncRules(t *testing.T) {
+	tests := []syncRulesCase{
+		{name: "empty home returns nil", emptyHome: true, wantErr: false},
+		{name: "successful sync compiles and provisions all runtimes", wantErr: false},
+		{name: "successful sync compiles and provisions all runtimes with strict engine isolation", checkIsolation: true, wantErr: false},
+		{name: "stale primary CLAUDE.md removed when runtimes exist", staleClaudeMD: true, wantErr: false},
+		{name: "no dataDir writes primary CLAUDE.md", noDataDir: true, wantErr: false, wantPrimaryMD: true},
+		{name: "no dataDir writes primary CLAUDE.md and AGENTS.md with per-engine content", noDataDir: true, checkIsolation: true, wantErr: false, wantPrimaryMD: true},
+		{name: "zero rules aborts swap under lobotomy protection", zeroRules: true, wantErr: true},
+		{name: "voice rules compilation failure returns error", voiceFail: true, wantErr: true},
+		{name: "ephemeral rules compilation failure returns error", ephemeralFail: true, wantErr: true},
+		{name: "claude discord rules compilation failure returns error", claudeDiscordFail: true, wantErr: true},
+		{name: "codex discord rules compilation failure returns error", codexDiscordFail: true, wantErr: true},
+		{name: "primary rules write failure returns error", primaryFail: true, wantErr: true},
+		{name: "config rules write failure logs warning but succeeds", configFail: true, wantErr: false},
+		{name: "runtime rules write failure logs warning and continues", runtimeFail: true, wantErr: false},
+		{name: "concurrent sync execution safe under systemRulesMu", concurrent: true, wantErr: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runSyncRulesCase(t, tc)
+		})
+	}
+}
+
+func TestStripRuleFrontmatter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "with frontmatter", input: "---\nkey: val\n---\nbody text", want: "body text"},
+		{name: "without frontmatter", input: "plain rule content", want: "plain rule content"},
+		{name: "unterminated frontmatter", input: "---\nkey: val without closing", want: "---\nkey: val without closing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripRuleFrontmatter(tc.input)
+			if got != tc.want {
+				t.Fatalf("stripRuleFrontmatter(%q) = %q; want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
