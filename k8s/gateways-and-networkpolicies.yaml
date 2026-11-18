@@ -205,7 +205,7 @@ spec:
         - group: ""
           kind: Service
           name: restate
-          namespace: restate
+          namespace: restate-green
           port: 9070
           weight: 1
       filters:
