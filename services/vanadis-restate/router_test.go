@@ -598,7 +598,7 @@ func (*unattachedPREventSpyStore) ReserveChunkForLaunch(_ context.Context, _ str
 	return nil
 }
 
-func (s *unattachedPREventSpyStore) IncrementChunkCIFailCount(_ context.Context, chunkID, banner string) (int, error) {
+func (s *unattachedPREventSpyStore) IncrementChunkCIFailCount(_ context.Context, chunkID, banner string, _ ...string) (int, error) {
 	s.cStatus = chunkID + ":ci_failed"
 	s.banner = banner
 	return 1, nil
