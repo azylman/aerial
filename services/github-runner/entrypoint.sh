@@ -560,6 +560,7 @@ if [ -d "/cache" ]; then
   export GOPATH="/data/cache/go"
   export GOMODCACHE="/data/cache/go/pkg/mod"
   export GOLANGCI_LINT_CACHE="/data/cache/golangci-lint"
+  export GOFLAGS="-trimpath"
   export PIP_CACHE_DIR="/cache/pip"
   export RUSTUP_HOME="/usr/local/rustup"
   export CARGO_HOME="/usr/local/cargo"
@@ -571,6 +572,7 @@ GOCACHE=/data/cache/go-build
 GOPATH=/data/cache/go
 GOMODCACHE=/data/cache/go/pkg/mod
 GOLANGCI_LINT_CACHE=/data/cache/golangci-lint
+GOFLAGS=-trimpath
 PIP_CACHE_DIR=/cache/pip
 RUSTUP_HOME=/usr/local/rustup
 CARGO_HOME=/usr/local/cargo

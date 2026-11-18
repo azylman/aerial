@@ -363,8 +363,8 @@ func TestBuildPoolEnv(t *testing.T) {
 
 	tests := []buildPoolEnvCase{
 		{name: "EmptyRuntimeBaseReturnsBaseEnv", base: []string{"FOO=bar", "BAZ=qux"}, wantExact: []string{"FOO=bar", "BAZ=qux"}},
-		{name: "InjectsUnifiedCacheDirectories", base: []string{"EXISTING=1"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "<tmp>/cache/go-build", "GOPATH": "<tmp>/cache/go", "GOMODCACHE": "<tmp>/cache/go/pkg/mod", "GOLANGCI_LINT_CACHE": "<tmp>/cache/golangci-lint", "EXISTING": "1"}},
-		{name: "PreservesExplicitCacheEnv", base: []string{"GOCACHE=/custom/gocache", "GOPATH=/custom/gopath", "GOMODCACHE=/custom/modcache", "GOLANGCI_LINT_CACHE=/custom/lintcache"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "/custom/gocache", "GOPATH": "/custom/gopath", "GOMODCACHE": "/custom/modcache", "GOLANGCI_LINT_CACHE": "/custom/lintcache"}},
+		{name: "InjectsUnifiedCacheDirectories", base: []string{"EXISTING=1"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "<tmp>/cache/go-build", "GOPATH": "<tmp>/cache/go", "GOMODCACHE": "<tmp>/cache/go/pkg/mod", "GOLANGCI_LINT_CACHE": "<tmp>/cache/golangci-lint", "GOFLAGS": "-trimpath", "EXISTING": "1"}},
+		{name: "PreservesExplicitCacheEnv", base: []string{"GOCACHE=/custom/gocache", "GOPATH=/custom/gopath", "GOMODCACHE=/custom/modcache", "GOLANGCI_LINT_CACHE=/custom/lintcache", "GOFLAGS=-mod=readonly"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "/custom/gocache", "GOPATH": "/custom/gopath", "GOMODCACHE": "/custom/modcache", "GOLANGCI_LINT_CACHE": "/custom/lintcache", "GOFLAGS": "-mod=readonly"}},
 		{name: "InjectsConfiguredTimezone", base: []string{"EXISTING=1"}, useTmpDir: true, tz: []string{"America/Los_Angeles"}, wantEnv: map[string]string{"TZ": "America/Los_Angeles"}},
 		{name: "PreservesExplicitTZ", base: []string{"TZ=UTC"}, useTmpDir: true, tz: []string{"America/Los_Angeles"}, wantEnv: map[string]string{"TZ": "UTC"}},
 	}

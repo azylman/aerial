@@ -278,6 +278,9 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 			extra = append(extra, item.key+"="+filepath.Join(cacheBase, item.sub))
 		}
 	}
+	if !envMap["GOFLAGS"] {
+		extra = append(extra, "GOFLAGS=-trimpath")
+	}
 	if !envMap["TZ"] {
 		var tz string
 		if len(timezone) > 0 && strings.TrimSpace(timezone[0]) != "" {
