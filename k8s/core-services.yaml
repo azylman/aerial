@@ -197,6 +197,10 @@ spec:
               name: codex-auth
               readOnly: true
               subPath: codex-auth.json
+            - mountPath: /local/muse-auth.json
+              name: muse-auth
+              readOnly: true
+              subPath: muse-auth.json
             - mountPath: /secrets
               name: shared-secrets
               readOnly: true
@@ -377,6 +381,14 @@ spec:
             items:
               - key: CODEX_AUTH_JSON
                 path: codex-auth.json
+            optional: true
+            secretName: eri-secret
+        - name: muse-auth
+          secret:
+            defaultMode: 384
+            items:
+              - key: MUSE_AUTH_JSON
+                path: muse-auth.json
             optional: true
             secretName: eri-secret
         - name: shared-secrets

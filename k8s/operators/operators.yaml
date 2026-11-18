@@ -1,6 +1,42 @@
 apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: gateway-api
+  namespace: flux-system
+spec:
+  ignore: |
+    /*
+    !/config/crd/
+  interval: 24h
+  ref:
+    tag: v1.6.3
+  url: https://github.com/kubernetes-sigs/gateway-api.git
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  name: gateway-api-crds
+  namespace: flux-system
+spec:
+  force: false
+  interval: 1h
+  path: ./config/crd
+  prune: false
+  sourceRef:
+    kind: GitRepository
+    name: gateway-api
+  timeout: 2m
+  wait: true
+---
+apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: cloudnative-pg
   namespace: flux-system
 spec:
@@ -10,11 +46,15 @@ spec:
 apiVersion: v1
 kind: Namespace
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: cnpg-system
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: cnpg
   namespace: cnpg-system
 spec:
@@ -42,6 +82,8 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: external-secrets
   namespace: flux-system
 spec:
@@ -51,11 +93,15 @@ spec:
 apiVersion: v1
 kind: Namespace
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: external-secrets
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: external-secrets
   namespace: external-secrets
 spec:
@@ -76,6 +122,8 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: nginx-gateway
   namespace: flux-system
 spec:
@@ -86,11 +134,15 @@ spec:
 apiVersion: v1
 kind: Namespace
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: nginx-gateway
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: ngf
   namespace: nginx-gateway
 spec:
@@ -115,6 +167,8 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: victoriametrics
   namespace: flux-system
 spec:
@@ -124,6 +178,8 @@ spec:
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: vm-operator
   namespace: default
 spec:
@@ -150,6 +206,8 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: actions-runner-controller
   namespace: flux-system
 spec:
@@ -160,11 +218,15 @@ spec:
 apiVersion: v1
 kind: Namespace
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: arc-systems
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: arc-controller
   namespace: arc-systems
 spec:
@@ -187,6 +249,8 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: stakater
   namespace: flux-system
 spec:
@@ -196,6 +260,8 @@ spec:
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: reloader
   namespace: default
 spec:
@@ -215,6 +281,8 @@ spec:
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: restate-operator
   namespace: flux-system
 spec:
@@ -225,6 +293,8 @@ spec:
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   name: restate-operator
   namespace: default
 spec:
