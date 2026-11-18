@@ -34,11 +34,27 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
+type mockVoicePoolWithModel struct {
+	runner.AgentPool
+
+	model string
+}
+
+func (m *mockVoicePoolWithModel) Model() string {
+	if m == nil {
+		return ""
+	}
+	return m.model
+}
+
 type effortModelResolutionCase struct {
 	name, cfgLow, cfgMed string
 	poolNil              bool
 	appLowVal, appMedVal *string
+	appVoiceVal          *string
+	voicePoolModel       string
 	wantLow, wantMed     string
+	wantVoice            string
 }
 
 func runEffortModelResolutionCase(t *testing.T, tt effortModelResolutionCase) {
@@ -51,10 +67,13 @@ func runEffortModelResolutionCase(t *testing.T, tt effortModelResolutionCase) {
 		if got := nilPool.MediumEffortModel(); got != tt.wantMed {
 			t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
 		}
+		if got := nilPool.VoiceModel(); got != tt.wantVoice {
+			t.Errorf("VoiceModel() = %q, want %q", got, tt.wantVoice)
+		}
 		return
 	}
 	var appCfg *config.Config
-	if tt.appLowVal != nil || tt.appMedVal != nil {
+	if tt.appLowVal != nil || tt.appMedVal != nil || tt.appVoiceVal != nil {
 		appCfg = newTestConfig(func(d *config.ConfigData) {
 			if tt.appLowVal != nil {
 				d.LowEffortModel = *tt.appLowVal
@@ -62,14 +81,24 @@ func runEffortModelResolutionCase(t *testing.T, tt effortModelResolutionCase) {
 			if tt.appMedVal != nil {
 				d.MediumEffortModel = *tt.appMedVal
 			}
+			if tt.appVoiceVal != nil {
+				d.Voice.Model = *tt.appVoiceVal
+			}
 		})
 	}
-	p := New(appCfg, WorkerPoolConfig{LowEffortModel: tt.cfgLow, MediumEffortModel: tt.cfgMed})
+	cfg := WorkerPoolConfig{LowEffortModel: tt.cfgLow, MediumEffortModel: tt.cfgMed}
+	if tt.voicePoolModel != "" {
+		cfg.VoiceProcessPool = &mockVoicePoolWithModel{model: tt.voicePoolModel}
+	}
+	p := New(appCfg, cfg)
 	if got := p.LowEffortModel(); got != tt.wantLow {
 		t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
 	}
 	if got := p.MediumEffortModel(); got != tt.wantMed {
 		t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
+	}
+	if got := p.VoiceModel(); got != tt.wantVoice {
+		t.Errorf("VoiceModel() = %q, want %q", got, tt.wantVoice)
 	}
 }
 
@@ -77,15 +106,18 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	t.Parallel()
 	defaultLow := config.DefaultConfigData().LowEffortModel
 	defaultMed := config.DefaultConfigData().MediumEffortModel
-	appLow, appMed, appEmpty := "app-cfg-low-model", "app-cfg-med-model", ""
+	appLow, appMed, appEmpty, appVoice := "app-cfg-low-model", "app-cfg-med-model", "", "app-voice-model"
 
 	tests := []effortModelResolutionCase{
-		{"NilPoolFallback", "", "", true, nil, nil, defaultLow, defaultMed},
-		{"CustomModelInCfg", "gemini-flash-low-test", "gemini-flash-med-test", false, nil, nil, "gemini-flash-low-test", "gemini-flash-med-test"},
-		{"AppCfgOverride", "", "", false, &appLow, &appMed, "app-cfg-low-model", "app-cfg-med-model"},
-		{"AppCfgEmptyWithCfgFallback", "cfg-fallback-low", "cfg-fallback-med", false, &appEmpty, &appEmpty, "cfg-fallback-low", "cfg-fallback-med"},
-		{"AppCfgEmptyAndCfgEmptyDefaults", "", "", false, &appEmpty, &appEmpty, defaultLow, defaultMed},
-		{"AppCfgNilAndCfgEmptyDefaults", "", "", false, nil, nil, defaultLow, defaultMed},
+		{"NilPoolFallback", "", "", true, nil, nil, nil, "", defaultLow, defaultMed, defaultLow},
+		{"CustomModelInCfg", "gemini-flash-low-test", "gemini-flash-med-test", false, nil, nil, nil, "", "gemini-flash-low-test", "gemini-flash-med-test", "gemini-flash-low-test"},
+		{"AppCfgOverride", "", "", false, &appLow, &appMed, nil, "", "app-cfg-low-model", "app-cfg-med-model", "app-cfg-low-model"},
+		{"AppCfgEmptyWithCfgFallback", "cfg-fallback-low", "cfg-fallback-med", false, &appEmpty, &appEmpty, nil, "", "cfg-fallback-low", "cfg-fallback-med", "cfg-fallback-low"},
+		{"AppCfgEmptyAndCfgEmptyDefaults", "", "", false, &appEmpty, &appEmpty, nil, "", defaultLow, defaultMed, defaultLow},
+		{"AppCfgNilAndCfgEmptyDefaults", "", "", false, nil, nil, nil, "", defaultLow, defaultMed, defaultLow},
+		{"AppCfgVoiceModelSet", "", "", false, nil, nil, &appVoice, "", defaultLow, defaultMed, "app-voice-model"},
+		{"VoiceProcessPoolModelWhenAppCfgNil", "", "", false, nil, nil, nil, "pool-voice-model", defaultLow, defaultMed, "pool-voice-model"},
+		{"AppCfgVoiceModelEmptyIgnoresVoicePool", "", "", false, &appLow, nil, &appEmpty, "stale-pool-model", "app-cfg-low-model", defaultMed, "app-cfg-low-model"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,6 +139,9 @@ type voiceTurnTestCase struct {
 	// wantRegistered expects the daemon's registry entry during Execute (it must be gone after).
 	wantTurnStatus                             string
 	wantChatSpan, wantRegistered, wantUntraced bool
+	appVoiceModel, appLowModel                 string
+	useGeminiAPIPool                           bool
+	wantModel, wantProvider                    string
 }
 
 // voiceTraceHarness is the tracing side of a voice test pool: the recorder its spans land in,
@@ -137,6 +172,43 @@ func (h *voiceTraceHarness) observeRegistration() {
 // voiceTestTarget names the voice test pool's runtime home, so its daemons register under it.
 const voiceTestTarget = "voice"
 
+func buildVoiceTestAppConfig(tt *voiceTurnTestCase) *config.Config {
+	if tt.appVoiceModel == "" && tt.appLowModel == "" {
+		return nil
+	}
+	return newTestConfig(func(d *config.ConfigData) {
+		if tt.appLowModel != "" {
+			d.LowEffortModel = tt.appLowModel
+		}
+		d.Voice.Model = tt.appVoiceModel
+	})
+}
+
+func setupGeminiVoiceTestPool(t *testing.T, appCfg *config.Config, h *voiceTraceHarness) *WorkerPool {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini voice reply\"}],\"role\":\"model\"}}],\"index\":0}\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(ts.Close)
+	geminiPool := runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
+		APIKey: "test-api-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client(),
+	})
+	t.Cleanup(func() { _ = geminiPool.Close() })
+	p := New(appCfg, WorkerPoolConfig{
+		VoiceProcessPool: geminiPool,
+		TracerProvider:   h.tp,
+		ActiveTurns:      h.registry,
+	})
+	p.Start()
+	return p
+}
+
 func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarness, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
 	t.Helper()
 	if tt.poolNil {
@@ -155,8 +227,12 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 		p.pools = nil
 		return p, nil, false
 	}
+	appCfg := buildVoiceTestAppConfig(tt)
+	if tt.useGeminiAPIPool {
+		return setupGeminiVoiceTestPool(t, appCfg, h), nil, true
+	}
 	if tt.useVoiceHook {
-		p := New(nil, WorkerPoolConfig{
+		p := New(appCfg, WorkerPoolConfig{
 			TracerProvider: h.tp, ActiveTurns: h.registry,
 			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 				onRecordPrompt(prompt)
@@ -174,7 +250,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 		return p, nil, true
 	}
 	if tt.useVoiceStreamHook {
-		p := New(nil, WorkerPoolConfig{
+		p := New(appCfg, WorkerPoolConfig{
 			TracerProvider: h.tp, ActiveTurns: h.registry,
 			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
 				if tt.hookErr != nil {
@@ -193,7 +269,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 		return p, nil, true
 	}
 	if tt.runnerOut != "" || tt.runnerErr != nil || tt.runnerCode != 0 {
-		p := New(nil, WorkerPoolConfig{
+		p := New(appCfg, WorkerPoolConfig{
 			LowEffortModel: "low-effort-fast-model", Store: dbtest.NewFakeStore(), TracerProvider: h.tp, ActiveTurns: h.registry,
 			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 				return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
@@ -215,7 +291,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 		cancelCallerOnScan: onScan, blockUntilDone: blockCh,
 	})
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", GeminiHomeDir: filepath.Join(t.TempDir(), voiceTestTarget)}, spawner)
-	p := New(nil, WorkerPoolConfig{ProcessPool: procPool, TracerProvider: h.tp, ActiveTurns: h.registry})
+	p := New(appCfg, WorkerPoolConfig{ProcessPool: procPool, TracerProvider: h.tp, ActiveTurns: h.registry})
 	p.Start()
 	return p, procPool, true
 }
@@ -297,6 +373,29 @@ func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
 	assertVoiceTurnOutputs(t, tt, reply, convID, statusReceived, sentenceReceived, recordedPrompt)
 }
 
+func assertVoiceTurnModelAndProvider(t *testing.T, tt voiceTurnTestCase, attrs map[string]string) {
+	t.Helper()
+	if tt.wantModel != "" && attrs["gen_ai.request.model"] != tt.wantModel {
+		t.Errorf("invoke_agent model = %q, want %q", attrs["gen_ai.request.model"], tt.wantModel)
+	}
+	if tt.wantProvider != "" && attrs["gen_ai.provider.name"] != tt.wantProvider {
+		t.Errorf("invoke_agent provider = %q, want %q", attrs["gen_ai.provider.name"], tt.wantProvider)
+	}
+}
+
+func assertVoiceTurnChatSpan(t *testing.T, ended []sdktrace.ReadOnlySpan, parentSpanID trace.SpanID, wantChatSpan bool) {
+	t.Helper()
+	hasChat := false
+	for _, s := range ended {
+		if s.Name() == "chat" && s.Parent().SpanID() == parentSpanID {
+			hasChat = true
+		}
+	}
+	if hasChat != wantChatSpan {
+		t.Errorf("chat child span = %v, want %v", hasChat, wantChatSpan)
+	}
+}
+
 // assertVoiceTurnTrace checks the turn's invoke_agent span (parented to the caller's span), its
 // chat child, and that the daemon was registered only while the turn executed.
 func assertVoiceTurnTrace(t *testing.T, tt voiceTurnTestCase, h *voiceTraceHarness, callerID trace.SpanID) {
@@ -324,23 +423,19 @@ func assertVoiceTurnTrace(t *testing.T, tt voiceTurnTestCase, h *voiceTraceHarne
 	}
 	attrs := map[string]string{}
 	for _, kv := range turn.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.String()
+		attrs[string(kv.Key)] = kv.Value.AsString()
+		if attrs[string(kv.Key)] == "" {
+			attrs[string(kv.Key)] = kv.Value.String()
+		}
 	}
 	if attrs["aerial.turn.trigger"] != "voice" || attrs["aerial.turn.status"] != tt.wantTurnStatus {
 		t.Errorf("invoke_agent trigger=%q status=%q, want voice/%q", attrs["aerial.turn.trigger"], attrs["aerial.turn.status"], tt.wantTurnStatus)
 	}
+	assertVoiceTurnModelAndProvider(t, tt, attrs)
 	if wantErr := tt.wantTurnStatus != "success"; wantErr != (turn.Status().Code == codes.Error) {
 		t.Errorf("invoke_agent span status = %v, want error=%v", turn.Status().Code, wantErr)
 	}
-	hasChat := false
-	for _, s := range h.rec.Ended() {
-		if s.Name() == "chat" && s.Parent().SpanID() == turn.SpanContext().SpanID() {
-			hasChat = true
-		}
-	}
-	if hasChat != tt.wantChatSpan {
-		t.Errorf("chat child span = %v, want %v", hasChat, tt.wantChatSpan)
-	}
+	assertVoiceTurnChatSpan(t, h.rec.Ended(), turn.SpanContext().SpanID(), tt.wantChatSpan)
 }
 
 func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
@@ -368,6 +463,9 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 		{name: "SendFailureBrokenPipe", prompt: "test", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
 		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled", wantRegistered: true},
 		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", clearPreSpawnedSessionID: true, resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
+		{name: "VoiceModelSet", prompt: "test", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "haiku", wantProvider: "anthropic"},
+		{name: "VoiceModelEmptyFallbackLow", prompt: "test", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "opus-low", wantProvider: "anthropic"},
+		{name: "GeminiAPIPoolVoiceModel", prompt: "test", sessionID: "sess-gemini-voice", useGeminiAPIPool: true, wantReply: "gemini voice reply", wantTurnStatus: "success", wantChatSpan: true, wantModel: "gemini-2.5-flash", wantProvider: "gcp.gemini"},
 	}
 
 	for _, tt := range tests {

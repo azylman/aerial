@@ -102,6 +102,18 @@ func (p *DynamicVoicePool) UpdatePrewarmedTargets(targets []string) {
 	}
 }
 
+// Model returns the configured model of the active voice pool, if available.
+func (p *DynamicVoicePool) Model() string {
+	pool, err := p.activePool()
+	if err != nil || pool == nil {
+		return ""
+	}
+	if m, ok := pool.(interface{ Model() string }); ok {
+		return m.Model()
+	}
+	return ""
+}
+
 // MarkDirty serializes reloads using reloadMu.
 func (p *DynamicVoicePool) MarkDirty() {
 	if p == nil {
