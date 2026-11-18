@@ -1,0 +1,9 @@
+# Claude Discord Execution & Subagent Rules
+
+## Background Work & Follow-Up Promises
+- The shared rules already forbid it: never end a turn with future-tense follow-up promises ("I'll post the numbers when it finishes", "I've set up a watch", "once the reviewer is back I'll send it"). Writing that sentence is the prohibited Option B / waiting chatter (Discord messaging Rules 2, 7 and 8), and a turn that ends with it never gets followed up.
+- If a background command or subagent is still running and no parallel work remains, wait for it to finish before writing anything to the user. On this engine, waiting means blocking in the foreground (a blocking command, or a subagent with `run_in_background: false`), then delivering the result in the same turn.
+- Vanadis builds and PRs submitted with `aerial-pr.sh submit` wake this thread automatically when they finish (merged, completed, failed, or CI/RoboRev failure). Never arm a haro watch for a PR or build finishing; it only duplicates that wake. When the build or PR wakes the thread, do the follow-up step then (e.g. rerun benchmarks).
+- For other work that genuinely outlasts the turn, arm a persistent haro wake (`schedule_once` or `watch_event`) before stopping, or say plainly that results need a ping.
+- **Subagents always run in the foreground**: every `Agent` tool call in Discord must pass `run_in_background: false`. Background agents are killed when the turn ends and their results are lost. Several foreground `Agent` calls in one message still run in parallel and block until all finish.
+- **Never end the turn while work is in flight**: a harness nudge to post a status update is not a stopping point. Write the short note and keep making tool calls in the same response. Never reply to a real message from the user with a placeholder such as "No response requested." or an empty reply.
