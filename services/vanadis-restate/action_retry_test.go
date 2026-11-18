@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type retryJournalRuntime struct {
@@ -61,12 +63,12 @@ func (r *retryJournalRuntime) RunReconcileStep(name string, fn func(context.Cont
 type retryAuthorityFixture struct {
 	VanadisStore
 
-	current     *VanadisChunk
+	current     *model.VanadisChunk
 	buildStatus *string
 }
 
-func (f *retryAuthorityFixture) GetBuild(context.Context, string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: "b1", Status: *f.buildStatus}, []VanadisChunk{*f.current}, nil
+func (f *retryAuthorityFixture) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	return &model.VanadisBuild{ID: "b1", Status: *f.buildStatus}, []model.VanadisChunk{*f.current}, nil
 }
 
 func TestBuildRetryAction(t *testing.T) {
@@ -94,10 +96,10 @@ func TestBuildRetryAction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
-			current := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}
+			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}
 			status := "failed"
 			lost := tc.lostCommit
-			store := retryFixtureStore(&mu, &current, &status, VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
+			store := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
 			authority := &retryAuthorityFixture{VanadisStore: store, current: &current, buildStatus: &status}
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
@@ -176,10 +178,10 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
-			current := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", Instructions: "verify"}
+			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", Instructions: "verify"}
 			status := "failed"
 			lost := false
-			store := retryFixtureStore(&mu, &current, &status, VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
+			store := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
 			authority := &retryAuthorityFixture{VanadisStore: store, current: &current, buildStatus: &status}
 			f := &retryDispatchFixture{accepted: map[string]BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)

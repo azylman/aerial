@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type checkStatusSpyStore struct {
@@ -22,7 +23,7 @@ type checkStatusSpyStore struct {
 
 	lifecycleStatus string
 	getBuildErr     error
-	chunks          []VanadisChunk
+	chunks          []model.VanadisChunk
 	calls           []string
 	resets          []string
 	failed          []string
@@ -38,13 +39,13 @@ type checkStatusSpyStore struct {
 	skipFailApply   bool
 }
 
-func (s *checkStatusSpyStore) chunk(chunkID string) *VanadisChunk {
+func (s *checkStatusSpyStore) chunk(chunkID string) *model.VanadisChunk {
 	for i := range s.chunks {
 		if s.chunks[i].ID == chunkID {
 			return &s.chunks[i]
 		}
 	}
-	s.chunks = append(s.chunks, VanadisChunk{ID: chunkID, BuildID: "b1", Effort: effortMedium, CIFailCount: s.failCount})
+	s.chunks = append(s.chunks, model.VanadisChunk{ID: chunkID, BuildID: "b1", Effort: effortMedium, CIFailCount: s.failCount})
 	return &s.chunks[len(s.chunks)-1]
 }
 
@@ -62,15 +63,15 @@ func (s *checkStatusSpyStore) IncrementChunkCIFailCount(_ context.Context, chunk
 	return s.failCount, nil
 }
 
-func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	if s.getBuildErr != nil {
 		return nil, nil, s.getBuildErr
 	}
 	chunks := s.chunks
 	if len(chunks) == 0 {
-		chunks = []VanadisChunk{{ID: "c1", BuildID: buildID, Effort: effortMedium, CIFailCount: s.failCount}}
+		chunks = []model.VanadisChunk{{ID: "c1", BuildID: buildID, Effort: effortMedium, CIFailCount: s.failCount}}
 	}
-	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, chunks, nil
+	return &model.VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, chunks, nil
 }
 
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
@@ -109,7 +110,7 @@ func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &checkStatusSpyStore{resetErr: tc.resetErr, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: "merged", HeadSHA: "head"}}}
+			store := &checkStatusSpyStore{resetErr: tc.resetErr, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "merged", HeadSHA: "head"}}}
 			bo := NewBuildObject("", nil).WithAuthority(store, nil)
 			ctx := mockRunContext{Context: context.Background()}
 			err := bo.handlePREventType(ctx, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: tc.mergeSHA})
@@ -141,12 +142,12 @@ func TestBuildObject_RejectedCheckFailure(t *testing.T) {
 	}
 }
 
-func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
 	s.failed = append(s.failed, chunkID+":"+reason)
 	if s.failErr != nil {
 		return nil, nil, false, s.failErr
 	}
-	return &VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -203,7 +204,7 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1"}), errPRTransitionSkipped)
 	assert.Empty(t, spy.resets)
 
-	var parsedChunk VanadisChunk
+	var parsedChunk model.VanadisChunk
 	applyRawChunkCIChecks(&parsedChunk, []byte(`{"_head_sha":"sha-1","_merge_sha":"m-1","_remediated_sha":"sha-1","_head_at":"1700000000000000000","_seen_heads":"sha-0,sha-1","lint":"passed"}`))
 	assert.Equal(t, "sha-1", parsedChunk.HeadSHA)
 	assert.Equal(t, "m-1", parsedChunk.MergeSHA)
@@ -236,11 +237,11 @@ func (m *mockBusError) Publish(context.Context, string, string, any) error {
 
 func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	t.Parallel()
-	b1 := VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
-	c1 := VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
+	b1 := model.VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
+	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
 	store, _ := dbScript{
 		buildRow: &mockRow{b: &b1},
-		chunks:   []VanadisChunk{c1},
+		chunks:   []model.VanadisChunk{c1},
 		execTag:  "UPDATE 1",
 	}.open()
 	eriErr := &mockEriClient{
@@ -254,7 +255,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	boErr := NewBuildObject("", nil).WithAuthority(store, execErr)
 
 	// notifyBuildTerminal error branches
-	assert.Error(t, boErr.notifyBuildTerminal(context.Background(), &b1, []VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG"))
+	assert.Error(t, boErr.notifyBuildTerminal(context.Background(), &b1, []model.VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG"))
 
 	// notifyChunkFailure error branches
 	ctx := makeObjectMockContext(t, "b-err")
@@ -271,7 +272,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 
 	// persistBuildCreation error branches
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		_, _ = boErr.persistBuildCreation(rc, b1, []VanadisChunk{c1})
+		_, _ = boErr.persistBuildCreation(rc, b1, []model.VanadisChunk{c1})
 		return true, nil
 	})
 
@@ -611,7 +612,7 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{
-				chunks: []VanadisChunk{{
+				chunks: []model.VanadisChunk{{
 					ID:            "c1",
 					BuildID:       "b1",
 					Status:        statusRunning,
@@ -719,19 +720,19 @@ func TestActionFailureAcceptedAndCompletionMutation(t *testing.T) {
 	t.Parallel()
 
 	// actionFailureAccepted branches
-	cFailed := VanadisChunk{ID: "c1", Status: statusFailed, Mode: chunkModeAction, StallNudges: 1}
+	cFailed := model.VanadisChunk{ID: "c1", Status: statusFailed, Mode: chunkModeAction, StallNudges: 1}
 	assert.True(t, actionFailureAccepted(cFailed, statusRunning, "vanadis-c1-turn-1"))
 	assert.True(t, actionFailureAccepted(cFailed, statusFailed, "vanadis-c1-turn-1"))
 	assert.False(t, actionFailureAccepted(cFailed, statusRunning, "vanadis-c1-turn-0"))
 
-	cRunning := VanadisChunk{ID: "c1", Status: statusRunning, Mode: chunkModeAction, StallNudges: 1}
+	cRunning := model.VanadisChunk{ID: "c1", Status: statusRunning, Mode: chunkModeAction, StallNudges: 1}
 	assert.True(t, actionFailureAccepted(cRunning, statusRunning, "vanadis-c1-turn-1"))
 
 	// isFailureCompletionMutation branches
 	assert.False(t, isFailureCompletionMutation(nil, nil))
-	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "other", ChunkID: "c1"}, []VanadisChunk{cRunning}))
-	assert.True(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1"}, []VanadisChunk{cRunning}))
-	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "other"}, []VanadisChunk{cRunning}))
+	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "other", ChunkID: "c1"}, []model.VanadisChunk{cRunning}))
+	assert.True(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1"}, []model.VanadisChunk{cRunning}))
+	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "other"}, []model.VanadisChunk{cRunning}))
 
 	// dispatchCompletionMutation branches
 	mFail := dispatchCompletionMutation(pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom", DispatchID: "d1"})
@@ -765,12 +766,12 @@ func TestBuildObject_TransitionErrorPropagation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b1 := VanadisBuild{ID: "b-trans", Title: "Build", Objective: "Obj", Status: "running", ThreadID: "th-1"}
-			c1 := VanadisChunk{ID: "c1", BuildID: "b-trans", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
-			c2 := VanadisChunk{ID: "c2", BuildID: "b-trans", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
+			b1 := model.VanadisBuild{ID: "b-trans", Title: "Build", Objective: "Obj", Status: "running", ThreadID: "th-1"}
+			c1 := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
+			c2 := model.VanadisChunk{ID: "c2", BuildID: "b-trans", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
 			store, _ := dbScript{
 				buildRow: &mockRow{b: &b1},
-				chunks:   []VanadisChunk{c1, c2},
+				chunks:   []model.VanadisChunk{c1, c2},
 				execTag:  "UPDATE 1",
 				row:      valuesRow("running"),
 				countRow: valuesRow(1),
@@ -814,11 +815,11 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	t.Parallel()
 
 	// 1. Replay notifyBuildTerminal on failure continuation when !terminalNotified
-	bFailed := VanadisBuild{ID: "b-failed", Status: statusFailed, ThreadID: "th-1", Objective: "Test failure"}
-	cFailed := VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
+	bFailed := model.VanadisBuild{ID: "b-failed", Status: statusFailed, ThreadID: "th-1", Objective: "Test failure"}
+	cFailed := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
 	store, _ := dbScript{
 		buildRow: &mockRow{b: &bFailed},
-		chunks:   []VanadisChunk{cFailed},
+		chunks:   []model.VanadisChunk{cFailed},
 		row:      failRow(statusFailed, statusFailed, 1),
 	}.open()
 	bus := &deploymentEventRecorder{}
@@ -856,11 +857,11 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	assert.Empty(t, bus.events)
 
 	// 2. FailMutation retry logic: returns nil when !failed but chunk was already failed and accepted
-	bldAlreadyFailed := VanadisBuild{ID: "b-fail", Status: statusFailed}
-	chkAlreadyFailed := VanadisChunk{ID: "c1", BuildID: "b-fail", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
+	bldAlreadyFailed := model.VanadisBuild{ID: "b-fail", Status: statusFailed}
+	chkAlreadyFailed := model.VanadisChunk{ID: "c1", BuildID: "b-fail", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
 	storeRetryOk, _ := dbScript{
 		buildRow: &mockRow{b: &bldAlreadyFailed},
-		chunks:   []VanadisChunk{chkAlreadyFailed},
+		chunks:   []model.VanadisChunk{chkAlreadyFailed},
 		row:      failRow(statusFailed, statusFailed, 1),
 	}.open()
 	boFailRetry := NewBuildObject("", nil).WithAuthority(storeRetryOk, nil)
@@ -876,11 +877,11 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 		promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") },
 	}
 	execFail := NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", nil)
-	bRunning := VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
-	cAction := VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
+	bRunning := model.VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
+	cAction := model.VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
 	storeFailChunk, _ := dbScript{
 		buildRow: &mockRow{b: &bRunning},
-		chunks:   []VanadisChunk{cAction},
+		chunks:   []model.VanadisChunk{cAction},
 		row:      failRow("running", "running"),
 	}.open()
 	boFailChunk := NewBuildObject("", nil).WithAuthority(storeFailChunk, execFail)

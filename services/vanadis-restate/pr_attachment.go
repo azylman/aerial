@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
@@ -76,7 +78,7 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 	if err != nil {
 		return "", "", "", err
 	}
-	var selected *VanadisChunk
+	var selected *model.VanadisChunk
 	for i := range chunks {
 		if chunks[i].ID == chunkID {
 			selected = &chunks[i]
@@ -144,7 +146,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 	title := firstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, cleanRepoName(repo)))
 	threadID := normalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
-	build := VanadisBuild{
+	build := model.VanadisBuild{
 		ID:        buildID,
 		ThreadID:  threadID,
 		Tier:      0,
@@ -155,7 +157,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	chunk := VanadisChunk{
+	chunk := model.VanadisChunk{
 		ID:           chunkID,
 		BuildID:      buildID,
 		ChunkIndex:   0,
@@ -204,7 +206,7 @@ func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, ch
 	return fmt.Errorf("attach pr failed for chunk %s #%d", chunkID, prNumber)
 }
 
-func attachmentRecoveryAllowed(b VanadisBuild, chunks []VanadisChunk, selected string) bool {
+func attachmentRecoveryAllowed(b model.VanadisBuild, chunks []model.VanadisChunk, selected string) bool {
 	if b.Status != statusRunning && b.Status != statusFailed {
 		return false
 	}
@@ -216,7 +218,7 @@ func attachmentRecoveryAllowed(b VanadisBuild, chunks []VanadisChunk, selected s
 	return true
 }
 
-func attachmentMatches(c VanadisChunk, b VanadisBuild, req AttachChunkPRRequest) bool {
+func attachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req AttachChunkPRRequest) bool {
 	candidates := repoMatchCandidates(req.Repo)
 	matches := len(candidates) == 0
 	for _, repo := range candidates {
@@ -228,6 +230,6 @@ func attachmentMatches(c VanadisChunk, b VanadisBuild, req AttachChunkPRRequest)
 	return matches && c.Status != statusCancelled && b.Status != statusCancelled && b.Status != statusCompleted && (!terminalChunk || c.PRNumber == req.PRNumber)
 }
 
-func firstWorkerFailure(c VanadisChunk) bool {
+func firstWorkerFailure(c model.VanadisChunk) bool {
 	return c.Mode == "pr" && c.Status == statusFailed && c.PRNumber == 0 && c.CIFailCount == 0
 }

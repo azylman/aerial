@@ -16,6 +16,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // Legacy Restate service names preserved for the dark-launch default agent.
@@ -442,11 +443,11 @@ func cleanRepoName(repo string) string {
 	return repo
 }
 
-func actionDispatchID(chunk VanadisChunk) string {
+func actionDispatchID(chunk model.VanadisChunk) string {
 	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
 }
 
-func actionCompletionAccepted(chunk VanadisChunk, buildStatus, dispatchID string) bool {
+func actionCompletionAccepted(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
 	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
 		chunk.Status = statusRunning
 		buildStatus = statusRunning
@@ -455,7 +456,7 @@ func actionCompletionAccepted(chunk VanadisChunk, buildStatus, dispatchID string
 }
 
 // actionLaunchKey preserves legacy acknowledgement keys outside action retries.
-func actionLaunchKey(chunk VanadisChunk) string {
+func actionLaunchKey(chunk model.VanadisChunk) string {
 	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
 		// A colon is forbidden in chunk IDs, keeping generation keys disjoint.
 		return "dispatch:" + actionDispatchID(chunk)
@@ -527,7 +528,7 @@ func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRe
 	}
 }
 
-func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []VanadisChunk) bool {
+func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []model.VanadisChunk) bool {
 	if mutation == nil {
 		return false
 	}
@@ -542,7 +543,7 @@ func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []Vanadis
 	return false
 }
 
-func isFailureCompletionMutation(mutation *BuildMutationRequest, chunks []VanadisChunk) bool {
+func isFailureCompletionMutation(mutation *BuildMutationRequest, chunks []model.VanadisChunk) bool {
 	if mutation == nil {
 		return false
 	}
@@ -557,7 +558,7 @@ func isFailureCompletionMutation(mutation *BuildMutationRequest, chunks []Vanadi
 	return false
 }
 
-func terminalNotificationRecorded(state *BuildObjectState) bool {
+func terminalNotificationRecorded(state *model.BuildObjectState) bool {
 	return state != nil && state.TerminalNotified
 }
 
@@ -575,7 +576,7 @@ func normalizeCompletionMutation(mutation *BuildMutationRequest) *BuildMutationR
 	}
 }
 
-func actionFailureAccepted(c VanadisChunk, buildStatus, dispatchID string) bool {
+func actionFailureAccepted(c model.VanadisChunk, buildStatus, dispatchID string) bool {
 	if c.Status == statusFailed && (buildStatus == statusRunning || buildStatus == statusFailed) {
 		c.Status = statusRunning
 		buildStatus = statusRunning
@@ -583,11 +584,11 @@ func actionFailureAccepted(c VanadisChunk, buildStatus, dispatchID string) bool 
 	return actionFailureAllowed(c, buildStatus, dispatchID)
 }
 
-func failureSkipped(c VanadisChunk, buildStatus, dispatchID string) bool {
+func failureSkipped(c model.VanadisChunk, buildStatus, dispatchID string) bool {
 	return (c.Mode == chunkModeAction && !actionFailureAllowed(c, buildStatus, dispatchID)) || c.Status == statusFailed || c.Status == statusCompleted || c.Status == statusCancelled
 }
 
-func actionFailureAllowed(c VanadisChunk, buildStatus, dispatchID string) bool {
+func actionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) bool {
 	if c.PRNumber == 0 {
 		return actionCompletionAllowed(c, buildStatus, dispatchID)
 	}
@@ -752,12 +753,12 @@ func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event str
 	return b.store.RecordPRCheckStatus(ctx, chunkID, strings.TrimSpace(ev.HeadSHA), checkName, checkState)
 }
 
-func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID string) (*VanadisBuild, VanadisChunk, error) {
+func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID string) (*model.VanadisBuild, model.VanadisChunk, error) {
 	bld, chunks, err := b.store.GetBuild(rc, buildID)
 	if err != nil {
-		return nil, VanadisChunk{}, err
+		return nil, model.VanadisChunk{}, err
 	}
-	chunk := VanadisChunk{ID: chunkID, BuildID: buildID, Effort: effortMedium}
+	chunk := model.VanadisChunk{ID: chunkID, BuildID: buildID, Effort: effortMedium}
 	for _, c := range chunks {
 		if c.ID == chunkID {
 			chunk = c
@@ -768,7 +769,7 @@ func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID s
 	return bld, chunk, nil
 }
 
-func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *VanadisBuild, chunk VanadisChunk, dispatchID, prompt string, skipIfActive ...bool) error {
+func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *model.VanadisBuild, chunk model.VanadisChunk, dispatchID, prompt string, skipIfActive ...bool) error {
 	skip := true
 	if len(skipIfActive) > 0 {
 		skip = skipIfActive[0]
@@ -804,7 +805,7 @@ func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunk
 		}
 	}
 	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
-	chunks := []VanadisChunk{}
+	chunks := []model.VanadisChunk{}
 	if chk != nil {
 		chunks = append(chunks, *chk)
 	}
@@ -1005,7 +1006,7 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	return nil
 }
 
-func isEligibleUnattachedChunk(build *VanadisBuild, c *VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
+func isEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
 	if build == nil || c == nil {
 		return false
 	}
@@ -1033,7 +1034,7 @@ func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string
 	}
 }
 
-func selectUnattachedTargetChunk(build *VanadisBuild, chunks []VanadisChunk, ev pubsub.PRLifecycleEvent) *VanadisChunk {
+func selectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.VanadisChunk, ev pubsub.PRLifecycleEvent) *model.VanadisChunk {
 	if build == nil {
 		return nil
 	}
@@ -1053,7 +1054,7 @@ func selectUnattachedTargetChunk(build *VanadisBuild, chunks []VanadisChunk, ev 
 	if !canFallbackThreadRepoLookup(ev) || evThread == "" || buildThread == "" || evThread != buildThread {
 		return nil
 	}
-	var matched *VanadisChunk
+	var matched *model.VanadisChunk
 	for i := range chunks {
 		if chunks[i].BuildID == build.ID && isEligibleUnattachedChunk(build, &chunks[i], ev) {
 			if matched != nil {
@@ -1183,7 +1184,7 @@ func isCompletedDispatchStatus(status string) bool {
 // noPRTurnAction decides how to react when a PR chunk's turn completes. The
 // submit script attaches PRs synchronously, so a completed launch or resume turn
 // on a still-running chunk without a PR means the turn ended without one.
-func noPRTurnAction(chunk VanadisChunk, buildStatus, dispatchID string) noPRAction {
+func noPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) noPRAction {
 	if chunk.Mode == chunkModeAction || chunk.PRNumber != 0 || buildStatus != statusRunning {
 		return noPRActionNone
 	}
@@ -1199,7 +1200,7 @@ func noPRTurnAction(chunk VanadisChunk, buildStatus, dispatchID string) noPRActi
 	return noPRActionNone
 }
 
-func findChunkIndex(chunks []VanadisChunk, chunkID string) int {
+func findChunkIndex(chunks []model.VanadisChunk, chunkID string) int {
 	for i := range chunks {
 		if chunks[i].ID == chunkID {
 			return i
@@ -1208,7 +1209,7 @@ func findChunkIndex(chunks []VanadisChunk, chunkID string) int {
 	return -1
 }
 
-func (b *BuildObject) resumeNoPRChunk(rc restate.RunContext, bld *VanadisBuild, chunks []VanadisChunk, idx int) error {
+func (b *BuildObject) resumeNoPRChunk(rc restate.RunContext, bld *model.VanadisBuild, chunks []model.VanadisChunk, idx int) error {
 	chunk := chunks[idx]
 	chunkPrompt, err := b.executor.FormatChunkPrompt(*bld, chunks, idx)
 	if err != nil {

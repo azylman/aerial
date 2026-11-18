@@ -26,6 +26,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 const (
@@ -243,61 +244,6 @@ type RemoveChunkRequest struct {
 	ChunkRef string `json:"chunk_ref"`
 }
 
-// VanadisBuild represents a multi-chunk engineering build run.
-type VanadisBuild struct {
-	ID              string    `json:"id"`
-	ThreadID        string    `json:"thread_id"`
-	Tier            int       `json:"tier"`
-	Title           string    `json:"title"`
-	Objective       string    `json:"objective"`
-	SharedContext   string    `json:"shared_context,omitempty"`
-	Status          string    `json:"status"`
-	StatusMessageID string    `json:"status_message_id,omitempty"`
-	Quiet           bool      `json:"quiet"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-// VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
-type VanadisChunk struct {
-	ID                 string                 `json:"id"`
-	BuildID            string                 `json:"build_id"`
-	ChunkIndex         int                    `json:"chunk_index"`
-	Mode               string                 `json:"mode"`
-	Repo               string                 `json:"repo,omitempty"`
-	Title              string                 `json:"title"`
-	Instructions       string                 `json:"instructions"`
-	TargetFiles        []string               `json:"target_files"`
-	TargetSymbols      []string               `json:"target_symbols"`
-	Effort             string                 `json:"effort"`
-	AcceptanceCriteria []string               `json:"acceptance_criteria"`
-	Status             string                 `json:"status"`
-	PRNumber           int                    `json:"pr_number,omitempty"`
-	StallNudges        int                    `json:"stall_nudges,omitempty"`
-	DependsOn          []string               `json:"depends_on"`
-	CIFailCount        int                    `json:"ci_fail_count"`
-	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
-	HeadSHA            string                 `json:"head_sha,omitempty"`
-	RemediatedSHA      string                 `json:"remediated_sha,omitempty"`
-	MergeSHA           string                 `json:"merge_sha,omitempty"`
-	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
-	Banner             string                 `json:"banner,omitempty"`
-	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
-	DeployAwakeableID  string                 `json:"deploy_awakeable_id,omitempty"`
-	StartedAt          time.Time              `json:"started_at,omitempty"`
-	CompletedAt        time.Time              `json:"completed_at,omitempty"`
-	CreatedAt          time.Time              `json:"created_at"`
-	UpdatedAt          time.Time              `json:"updated_at"`
-}
-
-// BuildObjectState represents the authoritative K/V state for a Vanadis build managed by BuildObject.
-type BuildObjectState struct {
-	TerminalNotified bool            `json:"terminal_notified,omitempty"`
-	Build            VanadisBuild    `json:"build"`
-	Chunks           []VanadisChunk  `json:"chunks"`
-	Launched         map[string]bool `json:"launched,omitempty"`
-}
-
 // BuildMutationRequest represents a typed mutation payload targeting BuildObject.
 type BuildMutationRequest struct {
 	Revision     string                 `json:"revision,omitempty"`
@@ -321,15 +267,15 @@ type reconcileStepOutput struct {
 	LaunchedChunks []string                `json:"launched_chunks,omitempty"`
 	LaunchedMap    map[string]bool         `json:"launched_map,omitempty"`
 	Error          string                  `json:"error,omitempty"`
-	State          *BuildObjectState       `json:"state,omitempty"`
+	State          *model.BuildObjectState `json:"state,omitempty"`
 }
 
 type objectRuntime interface {
 	Key() string
 	GetLaunched() (map[string]bool, error)
 	SetLaunched(launched map[string]bool)
-	GetState() (*BuildObjectState, error)
-	SetState(state BuildObjectState)
+	GetState() (*model.BuildObjectState, error)
+	SetState(state model.BuildObjectState)
 	ClearState()
 	ScheduleReconcile()
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
@@ -362,11 +308,11 @@ func (r restateObjectRuntime) SetLaunched(launched map[string]bool) {
 	restate.Set(r.ctx, "launched", launched)
 }
 
-func (r restateObjectRuntime) GetState() (*BuildObjectState, error) {
-	return restate.Get[*BuildObjectState](r.ctx, "state")
+func (r restateObjectRuntime) GetState() (*model.BuildObjectState, error) {
+	return restate.Get[*model.BuildObjectState](r.ctx, "state")
 }
 
-func (r restateObjectRuntime) SetState(state BuildObjectState) {
+func (r restateObjectRuntime) SetState(state model.BuildObjectState) {
 	restate.Set(r.ctx, "state", &state)
 }
 
@@ -439,12 +385,12 @@ func (b *BuildObject) ServiceName() string {
 	return BuildServiceName(b.agentName)
 }
 
-func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *BuildObjectState, transErr error) {
+func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) {
 	if b.executor == nil {
 		return
 	}
-	var build *VanadisBuild
-	var chunks []VanadisChunk
+	var build *model.VanadisBuild
+	var chunks []model.VanadisChunk
 	if b.store != nil {
 		if bld, chks, err := b.store.GetBuild(ctx, buildID); err == nil && bld != nil {
 			build = bld
@@ -490,8 +436,8 @@ func toTerminalErr(err error) error {
 	}
 }
 
-func planInputsToChunks(buildID string, inputs []CreateChunkInput) []VanadisChunk {
-	chunks := make([]VanadisChunk, len(inputs))
+func planInputsToChunks(buildID string, inputs []CreateChunkInput) []model.VanadisChunk {
+	chunks := make([]model.VanadisChunk, len(inputs))
 	now := time.Now().UTC()
 	for i, in := range inputs {
 		cid := strings.TrimSpace(in.ID)
@@ -502,7 +448,7 @@ func planInputsToChunks(buildID string, inputs []CreateChunkInput) []VanadisChun
 		if mode == "" {
 			mode = "pr"
 		}
-		chunks[i] = VanadisChunk{
+		chunks[i] = model.VanadisChunk{
 			ID:                 cid,
 			BuildID:            buildID,
 			ChunkIndex:         i,
@@ -523,7 +469,7 @@ func planInputsToChunks(buildID string, inputs []CreateChunkInput) []VanadisChun
 	return chunks
 }
 
-func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build VanadisBuild, chunks []VanadisChunk) (bool, error) {
+func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build model.VanadisBuild, chunks []model.VanadisChunk) (bool, error) {
 	if err := b.store.CreateBuild(rc, build, chunks); err != nil {
 		return false, err
 	}
@@ -536,7 +482,7 @@ func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build VanadisB
 }
 
 // Create handles initial build and DAG initialization.
-func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) (VanadisBuild, error) {
+func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) (model.VanadisBuild, error) {
 	buildID := strings.TrimSpace(restate.Key(ctx))
 	if buildID == "" {
 		buildID = strings.TrimSpace(req.ID)
@@ -544,25 +490,25 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	if buildID == "" {
 		err := fmt.Errorf("%w: build id cannot be empty", ErrInvalidBuildInput)
 		recordReconcileError(labelCreate, err)
-		return VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
+		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	threadID := strings.TrimSpace(req.ThreadID)
 	objective := strings.TrimSpace(req.Objective)
 	if threadID == "" || objective == "" {
 		err := fmt.Errorf("%w: thread_id and objective cannot be empty", ErrInvalidBuildInput)
 		recordReconcileError(labelCreate, err)
-		return VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
+		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
 	chunks := planInputsToChunks(buildID, req.Chunks)
 	if err := validateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
 		recordReconcileError(labelCreate, err)
-		return VanadisBuild{}, toTerminalErr(err)
+		return model.VanadisBuild{}, toTerminalErr(err)
 	}
 	validatedChunks, err := normalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		recordReconcileError(labelCreate, err)
-		return VanadisBuild{}, toTerminalErr(err)
+		return model.VanadisBuild{}, toTerminalErr(err)
 	}
 
 	title := strings.TrimSpace(req.Title)
@@ -570,7 +516,7 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		title = objective
 	}
 	now := time.Now().UTC()
-	build := VanadisBuild{
+	build := model.VanadisBuild{
 		ID:            buildID,
 		ThreadID:      threadID,
 		Tier:          req.Tier,
@@ -588,29 +534,29 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 			return b.persistBuildCreation(rc, build, validatedChunks)
 		})
 		if err != nil {
-			return VanadisBuild{}, toTerminalErr(err)
+			return model.VanadisBuild{}, toTerminalErr(err)
 		}
 	}
 
 	rt := b.getRuntime(ctx)
-	rt.SetState(BuildObjectState{Build: build, Chunks: validatedChunks})
+	rt.SetState(model.BuildObjectState{Build: build, Chunks: validatedChunks})
 	rt.SetLaunched(make(map[string]bool))
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileInitial, nil); tErr != nil {
-		return VanadisBuild{}, toTerminalErr(tErr)
+		return model.VanadisBuild{}, toTerminalErr(tErr)
 	}
 	return build, nil
 }
 
 // UpdateBuild mutates build metadata and updates state.
-func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (VanadisBuild, error) {
+func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (model.VanadisBuild, error) {
 	buildID := restate.Key(ctx)
 	if b.store == nil {
-		return VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
+		return model.VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
 	}
-	res, err := runJournaled(ctx, labelUpdateBuild, "update-build-postgres", func(rc restate.RunContext) (VanadisBuild, error) {
+	res, err := runJournaled(ctx, labelUpdateBuild, "update-build-postgres", func(rc restate.RunContext) (model.VanadisBuild, error) {
 		updated, err := b.store.UpdateBuild(rc, buildID, req)
 		if err != nil {
-			return VanadisBuild{}, err
+			return model.VanadisBuild{}, err
 		}
 		if b.executor != nil {
 			_, chunks, gErr := b.store.GetBuild(rc, buildID)
@@ -623,7 +569,7 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 		return *updated, nil
 	})
 	if err != nil {
-		return VanadisBuild{}, toTerminalErr(err)
+		return model.VanadisBuild{}, toTerminalErr(err)
 	}
 	rt := b.getRuntime(ctx)
 	if st, gErr := rt.GetState(); gErr == nil && st != nil {
@@ -634,25 +580,25 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 }
 
 // Cancel cancels the active build and clears Restate state.
-func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (VanadisBuild, error) {
+func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (model.VanadisBuild, error) {
 	buildID := restate.Key(ctx)
 	rt := b.getRuntime(ctx)
 	defer rt.ClearState()
 
 	if b.store == nil {
-		return VanadisBuild{ID: buildID, Status: statusCancelled}, nil
+		return model.VanadisBuild{ID: buildID, Status: statusCancelled}, nil
 	}
 
-	res, err := runJournaled(ctx, labelCancel, "cancel-build-postgres", func(rc restate.RunContext) (VanadisBuild, error) {
+	res, err := runJournaled(ctx, labelCancel, "cancel-build-postgres", func(rc restate.RunContext) (model.VanadisBuild, error) {
 		bld, chunks, err := b.store.GetBuild(rc, buildID)
 		if err != nil {
-			return VanadisBuild{}, err
+			return model.VanadisBuild{}, err
 		}
 		if bld.Status == statusCompleted || bld.Status == statusFailed {
 			return *bld, fmt.Errorf("%w: cannot cancel terminal build %s", ErrBuildConflict, bld.Status)
 		}
 		if err := b.store.UpdateBuildStatus(rc, buildID, statusCancelled); err != nil {
-			return VanadisBuild{}, err
+			return model.VanadisBuild{}, err
 		}
 		bld.Status = statusCancelled
 		if b.executor != nil {
@@ -671,13 +617,13 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		return *bld, nil
 	})
 	if err != nil {
-		return VanadisBuild{}, toTerminalErr(err)
+		return model.VanadisBuild{}, toTerminalErr(err)
 	}
 	return res, nil
 }
 
 // AppendChunks appends chunks to a running build and advances the DAG.
-func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) ([]VanadisChunk, error) {
+func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) ([]model.VanadisChunk, error) {
 	if len(req.Chunks) == 0 {
 		err := fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput)
 		recordReconcileError(labelAppendChunks, err)
@@ -689,8 +635,8 @@ func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRe
 	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks)
 }
 
-func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput) ([]VanadisChunk, error) {
-	appended, err := runJournaled(ctx, labelAppendChunks, "append-chunks-postgres", func(rc restate.RunContext) ([]VanadisChunk, error) {
+func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput) ([]model.VanadisChunk, error) {
+	appended, err := runJournaled(ctx, labelAppendChunks, "append-chunks-postgres", func(rc restate.RunContext) ([]model.VanadisChunk, error) {
 		return b.store.AppendChunks(rc, buildID, chunks)
 	})
 	if err != nil {
@@ -703,30 +649,30 @@ func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID stri
 }
 
 // UpdateChunk modifies a pending chunk and revalidates dependencies.
-func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (VanadisChunk, error) {
+func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (model.VanadisChunk, error) {
 	buildID := restate.Key(ctx)
 	chunkRef := strings.TrimSpace(req.ChunkRef)
 	if chunkRef == "" {
 		err := fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput)
 		recordReconcileError(labelUpdateChunk, err)
-		return VanadisChunk{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
+		return model.VanadisChunk{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	if b.store == nil {
-		return VanadisChunk{}, nil
+		return model.VanadisChunk{}, nil
 	}
-	updated, err := runJournaled(ctx, labelUpdateChunk, "update-chunk-postgres", func(rc restate.RunContext) (VanadisChunk, error) {
+	updated, err := runJournaled(ctx, labelUpdateChunk, "update-chunk-postgres", func(rc restate.RunContext) (model.VanadisChunk, error) {
 		c, err := b.store.UpdateChunk(rc, buildID, chunkRef, req)
 		if err != nil {
-			return VanadisChunk{}, err
+			return model.VanadisChunk{}, err
 		}
 		return *c, nil
 	})
 	if err != nil {
-		return VanadisChunk{}, toTerminalErr(err)
+		return model.VanadisChunk{}, toTerminalErr(err)
 	}
 	rt := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterUpdateChunk, nil); tErr != nil {
-		return VanadisChunk{}, toTerminalErr(tErr)
+		return model.VanadisChunk{}, toTerminalErr(tErr)
 	}
 	return updated, nil
 }
@@ -769,7 +715,7 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 	return nil
 }
 
-func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild, chunkID, reason string) error {
+func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld model.VanadisBuild, chunkID, reason string) error {
 	if b.executor == nil {
 		return nil
 	}
@@ -777,7 +723,7 @@ func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild
 		slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
 	buildObj := bld
-	var chunks []VanadisChunk
+	var chunks []model.VanadisChunk
 	if b.store != nil {
 		fetched, fetchedChunks, gErr := b.store.GetBuild(rc, bld.ID)
 		if gErr != nil {
@@ -850,7 +796,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 	}
 	if res.Failed && res.BuildID != "" && res.BuildStatus == statusFailed && res.ChunkStatus == statusFailed && b.executor != nil {
 		_, nErr := runJournaled(ctx, labelFailChunk, "notify-chunk-failure", func(rc restate.RunContext) (bool, error) {
-			bld := VanadisBuild{
+			bld := model.VanadisBuild{
 				ID:        res.BuildID,
 				ThreadID:  res.ThreadID,
 				Objective: res.Objective,
@@ -957,7 +903,7 @@ func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest
 	return b.executeObjectTransition(rt, labelMutateBuild, &req)
 }
 
-func mergePriorLaunched(priorState *BuildObjectState, priorLaunched map[string]bool) map[string]bool {
+func mergePriorLaunched(priorState *model.BuildObjectState, priorLaunched map[string]bool) map[string]bool {
 	if priorState == nil || len(priorState.Launched) == 0 {
 		return priorLaunched
 	}
@@ -972,7 +918,7 @@ func mergePriorLaunched(priorState *BuildObjectState, priorLaunched map[string]b
 	return priorLaunched
 }
 
-func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID string, mutation *BuildMutationRequest, priorState *BuildObjectState, priorLaunched map[string]bool) (reconcileStepOutput, error) {
+func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID string, mutation *BuildMutationRequest, priorState *model.BuildObjectState, priorLaunched map[string]bool) (reconcileStepOutput, error) {
 	notifiedInStep := false
 	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
 		var out reconcileStepOutput
@@ -1027,7 +973,7 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 		// Keep only the delivery marker across terminal invocations. The journaled
 		// step result restores it on replay after a crash before SetState.
 		if terminalNotificationRecorded(priorState) || terminalNotificationRecorded(stepOut.State) {
-			rt.SetState(BuildObjectState{TerminalNotified: true})
+			rt.SetState(model.BuildObjectState{TerminalNotified: true})
 		}
 	} else {
 		if stepOut.State != nil {
@@ -1098,7 +1044,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 	return nil
 }
 
-func countActiveChunks(chunks []VanadisChunk) int {
+func countActiveChunks(chunks []model.VanadisChunk) int {
 	activeCount := 0
 	for _, c := range chunks {
 		s := strings.ToLower(strings.TrimSpace(c.Status))
@@ -1109,7 +1055,7 @@ func countActiveChunks(chunks []VanadisChunk) int {
 	return activeCount
 }
 
-func isLaunchCandidate(chunk VanadisChunk, chunks []VanadisChunk, launchedMap map[string]bool) (candidate bool, resuming bool) {
+func isLaunchCandidate(chunk model.VanadisChunk, chunks []model.VanadisChunk, launchedMap map[string]bool) (candidate bool, resuming bool) {
 	s := strings.ToLower(strings.TrimSpace(chunk.Status))
 	res := s == statusRunning && chunk.Mode == chunkModeAction && chunk.StallNudges > 0
 	unlaunched := s == statusRunning && !launchedMap[actionLaunchKey(chunk)] && chunk.PRNumber == 0
@@ -1122,7 +1068,7 @@ func isLaunchCandidate(chunk VanadisChunk, chunks []VanadisChunk, launchedMap ma
 	return true, res || unlaunched
 }
 
-func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) ([]string, error) {
+func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk, launchedMap map[string]bool) ([]string, error) {
 	var launchedChunks []string
 	var launchErrors []error
 	activeCount := countActiveChunks(chunks)
@@ -1175,7 +1121,7 @@ func (b *BuildObject) shouldScheduleReconcile(out reconcileStepOutput) bool {
 	return b.store != nil && out.Error == errDispatchActive.Error() && out.BuildStatus == statusRunning
 }
 
-func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, status, reason, promptHeader, promptMsg string) error {
+func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, status, reason, promptHeader, promptMsg string) error {
 	if b.executor == nil {
 		return nil
 	}
@@ -1198,7 +1144,7 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBui
 	return errors.Join(wakeErr, widgetErr)
 }
 
-func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk) (string, error) {
+func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk) (string, error) {
 	allDone := true
 	hasFailed := false
 	for _, c := range chunks {
@@ -1252,7 +1198,7 @@ func cloneLaunchedMap(priorLaunched map[string]bool) map[string]bool {
 	return launchedMap
 }
 
-func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, mutation *BuildMutationRequest, terminalNotified bool) (bool, error) {
+func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, mutation *BuildMutationRequest, terminalNotified bool) (bool, error) {
 	if terminalNotified {
 		return true, nil
 	}
@@ -1284,7 +1230,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 			if readErr != nil {
 				return reconcileStepOutput{}, readErr
 			}
-			return reconcileStepOutput{BuildStatus: build.Status, State: &BuildObjectState{Build: *build, Chunks: chunks, Launched: priorLaunched}}, nil
+			return reconcileStepOutput{BuildStatus: build.Status, State: &model.BuildObjectState{Build: *build, Chunks: chunks, Launched: priorLaunched}}, nil
 		}
 		return reconcileStepOutput{}, err
 	}
@@ -1305,7 +1251,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
 		return reconcileStepOutput{
 			BuildStatus: build.Status,
-			State:       &BuildObjectState{Build: *build, Chunks: chunks, TerminalNotified: terminalNotified},
+			State:       &model.BuildObjectState{Build: *build, Chunks: chunks, TerminalNotified: terminalNotified},
 		}, nil
 	}
 
@@ -1330,7 +1276,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		Error:          recoveryReason,
 		LaunchedChunks: launchedChunks,
 		LaunchedMap:    launchedMap,
-		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted || finalStatus == statusFailed},
+		State:          &model.BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted || finalStatus == statusFailed},
 	}, nil
 }
 

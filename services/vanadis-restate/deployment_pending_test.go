@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func TestDeploymentStartBeforeMerge(t *testing.T) {
@@ -32,7 +33,7 @@ func TestDeploymentStartBeforeMerge(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, Status: "pr_opened", HeadSHA: "head"}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, Status: "pr_opened", HeadSHA: "head"}}}}
 			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", OccurredAt: now, RolloutState: &pubsub.PRRolloutState{StartedJobs: []string{"web"}}}
 			b := &BuildObject{store: store}
 			require.NoError(t, b.armDeploymentStart(rt, "b", ev))
@@ -45,7 +46,7 @@ func TestDeploymentStartBeforeMerge(t *testing.T) {
 			store.chunks[0].Status = tc.status
 			store.chunks[0].MergeSHA = tc.revision
 			store.chunks[0].HeadSHA = tc.head
-			state := &BuildObjectState{Build: VanadisBuild{Status: statusRunning}, Chunks: append([]VanadisChunk(nil), store.chunks...)}
+			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), store.chunks...)}
 			require.NoError(t, (&BuildObject{store: store}).syncDeploymentDeadlines(rt, state, nil, nil))
 			require.Equal(t, tc.wantArmed, len(rt.attempts) > 0)
 			require.Empty(t, rt.pending)
@@ -81,9 +82,9 @@ func TestPendingDeploymentFailures(t *testing.T) {
 			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Deadline: now.Add(15 * time.Minute), Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}}}
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now, pendingErr: tc.pendingErr, getErr: tc.attemptErr, nowErr: tc.clockErr, pending: map[string]pendingDeploymentStart{"c:merge": p}}
 			rt.runStepErr = tc.journalErr
-			chunks := []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged}}
+			chunks := []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged}}
 			store := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{getBuildErr: tc.readErr, chunks: chunks}}
-			state := &BuildObjectState{Build: VanadisBuild{Status: statusRunning}, Chunks: append([]VanadisChunk(nil), chunks...)}
+			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), chunks...)}
 			require.Error(t, (&BuildObject{store: store}).syncDeploymentDeadlines(rt, state, tc.ev, nil))
 			require.Empty(t, rt.scheduled)
 			require.Equal(t, statusMerged, store.chunks[0].Status)
@@ -106,7 +107,7 @@ func TestPendingDeploymentPromotionRechecksAuthority(t *testing.T) {
 			if tc.name == "missing chunk" {
 				chunkID = "other-chunk"
 			}
-			store := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: chunkID, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}}}
+			store := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: chunkID, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}}}
 			out, err := (&BuildObject{store: store}).promotePendingDeploymentStart(context.Background(), "b", pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}})
 			require.NoError(t, err)
 			require.NotNil(t, out.State)
@@ -130,7 +131,7 @@ func TestPendingDeploymentPreservesAuthoritativeEvidence(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged, RolloutState: tc.current}}}}
+			store := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged, RolloutState: tc.current}}}}
 			out, err := (&BuildObject{store: store}).promotePendingDeploymentStart(context.Background(), "b", pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge", RolloutState: pending}})
 			require.NoError(t, err)
 			require.NotNil(t, out.State)
@@ -155,8 +156,8 @@ func TestPendingDeploymentKeepsExistingAttempt(t *testing.T) {
 			a := deploymentAttempt{ChunkID: "c", PRNumber: 1, Revision: "merge", Generation: 7, Deadline: now.Add(time.Minute), Delivered: tc.delivered}
 			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Deadline: now.Add(15 * time.Minute), Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now, attempts: map[string]deploymentAttempt{"c": a}, pending: map[string]pendingDeploymentStart{"c:merge": p}}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: tc.status}}}}
-			state := &BuildObjectState{Build: VanadisBuild{Status: statusRunning}, Chunks: append([]VanadisChunk(nil), store.chunks...)}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: tc.status}}}}
+			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), store.chunks...)}
 			require.NoError(t, (&BuildObject{store: store}).syncDeploymentDeadlines(rt, state, nil, nil))
 			require.Equal(t, a, rt.attempts["c"])
 			require.Empty(t, rt.pending)
@@ -178,9 +179,9 @@ func TestPendingDeploymentDoesNotAdoptStaleSnapshot(t *testing.T) {
 			t.Parallel()
 			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), pending: map[string]pendingDeploymentStart{"c:merge": p}}
-			chunks := []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}
+			chunks := []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}
 			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: chunks}}
-			state := &BuildObjectState{Build: VanadisBuild{Status: statusRunning}, Chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}}
+			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}}
 			require.NoError(t, (&BuildObject{store: store}).syncDeploymentDeadlines(rt, state, nil, nil))
 			require.Empty(t, rt.attempts)
 			require.Empty(t, rt.pending)
@@ -209,7 +210,7 @@ func TestPendingDeploymentCapture(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", Status: "pr_opened"}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", Status: "pr_opened"}}}}
 			require.NoError(t, (&BuildObject{store: store}).armDeploymentStart(rt, "b", pubsub.PRLifecycleEvent{Event: tc.event, Repo: "owner/repo", PRNumber: 1, HeadSHA: tc.head, MergeSHA: tc.revision, OccurredAt: tc.occurred}))
 			require.Equal(t, tc.wantPending, len(rt.pending) > 0)
 			require.Empty(t, rt.attempts)
@@ -223,11 +224,11 @@ func TestPendingDeploymentCapture(t *testing.T) {
 type pendingAuthorityStore struct {
 	VanadisStore
 
-	build  VanadisBuild
-	chunks []VanadisChunk
+	build  model.VanadisBuild
+	chunks []model.VanadisChunk
 }
 
-func (s *pendingAuthorityStore) GetBuild(context.Context, string) (*VanadisBuild, []VanadisChunk, error) {
+func (s *pendingAuthorityStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	return &s.build, s.chunks, nil
 }
 
@@ -243,9 +244,9 @@ func TestPendingDeploymentRechecksTerminalBuild(t *testing.T) {
 			t.Parallel()
 			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), pending: map[string]pendingDeploymentStart{"c:merge": p}}
-			chunks := []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}
-			store := &pendingAuthorityStore{build: VanadisBuild{Status: tc.status}, chunks: chunks}
-			state := &BuildObjectState{Build: VanadisBuild{Status: statusRunning}, Chunks: append([]VanadisChunk(nil), chunks...)}
+			chunks := []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}
+			store := &pendingAuthorityStore{build: model.VanadisBuild{Status: tc.status}, chunks: chunks}
+			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), chunks...)}
 			require.NoError(t, (&BuildObject{store: store}).syncDeploymentDeadlines(rt, state, nil, nil))
 			require.Empty(t, rt.attempts)
 			require.Empty(t, rt.scheduled)
