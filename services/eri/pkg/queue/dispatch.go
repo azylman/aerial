@@ -37,10 +37,11 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	claimed, claimErr := p.cfg.Store.ClaimPendingDispatch(p.ctx, d.ID)
-	if claimErr != nil || !claimed {
-		if claimErr != nil {
-			log.Printf("[WorkerPool] Failed to claim dispatch %s: %v", d.ID, claimErr)
-		}
+	if claimErr != nil {
+		p.requeueDispatchOnClaimError(d, claimErr)
+		return
+	}
+	if !claimed {
 		return
 	}
 
@@ -97,6 +98,24 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	te.turnPrompt = te.buildDispatchPrompt(promptCtx)
 	promptSpan.End()
 	te.executeWithRetries()
+}
+
+func (p *WorkerPool) requeueDispatchOnClaimError(d db.Dispatch, claimErr error) {
+	log.Printf("[WorkerPool] Failed to claim dispatch %s: %v", d.ID, claimErr)
+	if p.ctx != nil && p.ctx.Err() != nil {
+		return
+	}
+	delay := time.Second
+	if p.cfg.RetryDelayOverride > 0 {
+		delay = p.cfg.RetryDelayOverride
+	}
+	dCopy := d
+	time.AfterFunc(delay, func() {
+		if p.ctx != nil && p.ctx.Err() != nil {
+			return
+		}
+		p.EnqueueDispatch(dCopy)
+	})
 }
 
 var (

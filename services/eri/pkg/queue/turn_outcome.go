@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
 
@@ -264,19 +266,68 @@ func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
 	return ""
 }
 
+func isRetryableDeliveryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "failed to send message chunk ") && !strings.Contains(errStr, "chunk 0:") {
+		return false
+	}
+	if delivery.IsPermissionError(err) || delivery.IsThreadArchivedOrLockedError(err) || delivery.IsMessageNotFoundError(err) {
+		return false
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) && restErr.Response != nil {
+		status := restErr.Response.StatusCode
+		if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+			return true
+		}
+		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+			return false
+		}
+	}
+	return true
+}
+
 func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*delivery.Attachment) {
 	deliveryTarget := te.threadID
 	replyToID := te.resolveReplyToMessageID(deliveryTarget)
 	_, span := te.startChildSpan(te.poolCtx(), spanDeliver)
 	defer span.End()
+
+	delay := 500 * time.Millisecond
+	if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
+		delay = te.pool.cfg.RetryDelayOverride
+	}
+
 	var deliveryErr error
-	switch {
-	case te.pool.cfg.ReplyDeliveryWithAttachmentsFunc != nil:
-		deliveryErr = te.pool.cfg.ReplyDeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments, replyToID)
-	case te.pool.cfg.DeliveryWithAttachmentsFunc != nil:
-		deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
-	case te.pool.cfg.DeliveryFunc != nil:
-		deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
+retryLoop:
+	for attempt := 1; attempt <= 3; attempt++ {
+		switch {
+		case te.pool.cfg.ReplyDeliveryWithAttachmentsFunc != nil:
+			deliveryErr = te.pool.cfg.ReplyDeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments, replyToID)
+		case te.pool.cfg.DeliveryWithAttachmentsFunc != nil:
+			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
+		case te.pool.cfg.DeliveryFunc != nil:
+			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
+		}
+		if deliveryErr == nil {
+			return
+		}
+		if !isRetryableDeliveryError(deliveryErr) {
+			break
+		}
+		if attempt < 3 {
+			if te.poolCtx().Err() != nil {
+				break
+			}
+			select {
+			case <-te.poolCtx().Done():
+				break retryLoop
+			case <-time.After(delay):
+			}
+		}
 	}
 	if deliveryErr != nil {
 		span.SetStatus(codes.Error, "delivery failed")
