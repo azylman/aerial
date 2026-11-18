@@ -660,15 +660,18 @@ func TestBuildK8sHTTPClient_TableDriven(t *testing.T) {
 			kubeCAPath = tc.caPath
 
 			client := buildK8sHTTPClient()
-			tr, ok := client.Transport.(*http.Transport)
-			if !ok || tr == nil {
-				t.Fatalf("expected *http.Transport, got %T", client.Transport)
+			if client.Timeout != 3*time.Second {
+				t.Errorf("timeout = %v, want 3s", client.Timeout)
 			}
-
-			hasRootCA := tr.TLSClientConfig != nil && tr.TLSClientConfig.RootCAs != nil
-			if hasRootCA != tc.wantRootCA {
-				t.Errorf("hasRootCA = %v, want %v", hasRootCA, tc.wantRootCA)
+			// The mock API server's self-signed cert verifies only when the CA was attached.
+			resp, err := client.Get(mockTLSServer.URL)
+			if resp != nil {
+				_ = resp.Body.Close()
 			}
+			if hasRootCA := err == nil; hasRootCA != tc.wantRootCA {
+				t.Errorf("TLS handshake ok = %v (err %v), want %v", hasRootCA, err, tc.wantRootCA)
+			}
+			client.CloseIdleConnections()
 		})
 	}
 }

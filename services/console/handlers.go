@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // FactItem represents a semantic memory item received from brain
@@ -162,7 +164,7 @@ type BuildDetailAPIResponse struct {
 }
 
 // Singleton tuned HTTP client for upstream vanadis communication
-var vanadisHTTPClient = &http.Client{
+var vanadisHTTPClient = tracing.Client(&http.Client{
 	Timeout: 5 * time.Second,
 	Transport: &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -176,7 +178,7 @@ var vanadisHTTPClient = &http.Client{
 		ResponseHeaderTimeout: 4 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	},
-}
+})
 
 // fetchUpstreamJSON executes an HTTP GET request with a 4-second timeout against targetURL,
 // decodes any non-200 JSON error into upstreamErrMsg, or unmarshals the 200 OK JSON response into dest.
@@ -530,7 +532,7 @@ const (
 )
 
 // Singleton tuned HTTP client for upstream docket-mcp communication.
-var docketHTTPClient = &http.Client{
+var docketHTTPClient = tracing.Client(&http.Client{
 	Timeout: 5 * time.Second,
 	Transport: &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -543,7 +545,7 @@ var docketHTTPClient = &http.Client{
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 4 * time.Second,
 	},
-}
+})
 
 // rejectDocketRequest answers 405 for non-GET methods and 503 degraded when docket_url is
 // unset, reporting whether the request was already answered.

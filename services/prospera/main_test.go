@@ -304,6 +304,7 @@ type runAppMainSignalTestCase struct {
 }
 
 func TestRunApp_MainSignal(t *testing.T) {
+	t.Cleanup(installTestTracing) // main() runs tracing.Init, which replaces the test tracer
 	origLoad := loadConfigFn
 	origRun := runAppFn
 	origExit := exitFn

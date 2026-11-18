@@ -1,9 +1,11 @@
 package tracing
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,6 +24,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/goleak"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
@@ -547,12 +550,14 @@ type middlewareTestCase struct {
 	traceparent string
 	preRouted   string
 	rename      string
-	status      int
-	wantName    string
-	wantRoute   string
-	wantParent  bool
-	wantError   bool
-	wantNoSpan  bool // probe path: served with no span and no extracted context
+	// opaqueNext hides the mux behind a plain handler, so routing is only visible afterwards.
+	opaqueNext bool
+	status     int
+	wantName   string
+	wantRoute  string
+	wantParent bool
+	wantError  bool
+	wantNoSpan bool // probe path: served with no span and no extracted context
 }
 
 func runMiddlewareCase(t *testing.T, tc middlewareTestCase) {
@@ -572,8 +577,12 @@ func runMiddlewareCase(t *testing.T, tc middlewareTestCase) {
 	if tc.traceparent != "" {
 		req.Header.Set("Traceparent", tc.traceparent)
 	}
+	var next http.Handler = mux
+	if tc.opaqueNext {
+		next = http.HandlerFunc(mux.ServeHTTP)
+	}
 	rec := httptest.NewRecorder()
-	newMiddleware(tp, propagation.TraceContext{}, "eri", mux).ServeHTTP(rec, req)
+	newMiddleware(tp, propagation.TraceContext{}, "eri", next).ServeHTTP(rec, req)
 	if rec.Code != tc.status {
 		t.Errorf("response status = %d, want %d", rec.Code, tc.status)
 	}
@@ -643,8 +652,16 @@ func TestMiddleware(t *testing.T) {
 			status: http.StatusOK, wantName: "mcp tools/call", wantRoute: "/mcp",
 		},
 		{
-			name: "post-routed name replaces handler rename", pattern: "/mcp", target: "/mcp", rename: "mcp tools/call",
+			name: "whole mux routes up front so handler rename sticks", pattern: "/mcp", target: "/mcp", rename: "mcp tools/call",
+			status: http.StatusOK, wantName: "mcp tools/call", wantRoute: "/mcp",
+		},
+		{
+			name: "opaque handler post-routed name replaces handler rename", pattern: "/mcp", target: "/mcp", rename: "mcp tools/call", opaqueNext: true,
 			status: http.StatusOK, wantName: "POST /mcp", wantRoute: "/mcp",
+		},
+		{
+			name: "opaque handler unmatched keeps operation name", pattern: "/prompt", target: "/nope", opaqueNext: true,
+			status: http.StatusNotFound, wantName: "eri",
 		},
 		{name: "health probe untraced", pattern: "/health", target: "/health", traceparent: parentTraceparent, status: http.StatusOK, wantNoSpan: true},
 		{name: "healthz probe untraced", pattern: "/healthz", target: "/healthz", traceparent: parentTraceparent, status: http.StatusOK, wantNoSpan: true},
@@ -673,6 +690,45 @@ func TestStatusWriter(t *testing.T) {
 	w.Flush()
 	if w.status != http.StatusOK || !rec.Flushed || w.Unwrap() != rec {
 		t.Errorf("status=%d flushed=%v", w.status, rec.Flushed)
+	}
+}
+
+// hijackRecorder is a ResponseRecorder that also implements http.Hijacker, like net/http's
+// server writer does for websocket upgrades.
+type hijackRecorder struct{ *httptest.ResponseRecorder }
+
+func (hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) { return nil, nil, nil }
+
+func TestStatusWriterHijack(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		hijackable  bool
+		priorStatus int
+		wantStatus  int
+		wantErr     bool
+	}{
+		{name: "upgrade records switching protocols", hijackable: true, wantStatus: 101},
+		{name: "hijack after a written header keeps that status", hijackable: true, priorStatus: 418, wantStatus: 418},
+		{name: "writer without hijack support reports an error", wantStatus: 200, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var base http.ResponseWriter = httptest.NewRecorder()
+			if tc.hijackable {
+				base = hijackRecorder{httptest.NewRecorder()}
+			}
+			w := &statusWriter{ResponseWriter: base, status: http.StatusOK}
+			if tc.priorStatus != 0 {
+				w.WriteHeader(tc.priorStatus)
+			}
+			var hijacker http.Hijacker = w
+			_, _, err := hijacker.Hijack()
+			if (err != nil) != tc.wantErr || w.status != tc.wantStatus {
+				t.Errorf("Hijack err = %v status = %d, want err=%v status=%d", err, w.status, tc.wantErr, tc.wantStatus)
+			}
+		})
 	}
 }
 
@@ -755,6 +811,44 @@ func TestTransport(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runTransportCase(t, tc)
+		})
+	}
+}
+
+func TestTransportCloseIdleConnections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		propagate bool
+	}{
+		{name: "internal client closes the base transport's idle connections", propagate: true},
+		{name: "external client closes the base transport's idle connections"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			closed := make(chan struct{})
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+				if s == http.StateClosed {
+					close(closed)
+				}
+			}
+			srv.Start()
+			t.Cleanup(srv.Close)
+			base := &http.Transport{}
+			client := &http.Client{Transport: newTransport(noop.NewTracerProvider(), propagation.TraceContext{}, base, tc.propagate)}
+			resp, err := client.Get(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			client.CloseIdleConnections()
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("idle keep-alive connection was not closed")
+			}
 		})
 	}
 }

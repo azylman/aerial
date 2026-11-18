@@ -20,7 +20,10 @@ import (
 	"testing/fstest"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 func TestStatusHandler(t *testing.T) {
@@ -469,11 +472,11 @@ func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
 }
 
 func TestFetchGitSyncStatus(t *testing.T) {
-	ctx := context.Background()
-
+	var gotTraceparent string
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/status":
+			gotTraceparent = r.Header.Get("Traceparent")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
 				Status:        "lagging",
@@ -508,6 +511,9 @@ func TestFetchGitSyncStatus(t *testing.T) {
 		wantRepoCommit  string
 		wantErr         string
 		wantErrNonEmpty bool
+		// traceparent is the caller's context; wantUpstreamTrace the trace id gitsync must see.
+		traceparent       string
+		wantUpstreamTrace string
 	}{
 		{
 			name:       "empty_URL_returns_fallback",
@@ -538,11 +544,22 @@ func TestFetchGitSyncStatus(t *testing.T) {
 			wantStatus:      "synced",
 			wantErrNonEmpty: true,
 		},
+		{
+			name:              "propagates_caller_trace_to_gitsync",
+			url:               mockServer.URL,
+			wantStatus:        "lagging",
+			traceparent:       "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantUpstreamTrace: "4bf92f3577b34da6a3ce929d0e0e4736",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := fetchGitSyncStatus(ctx, tc.url)
+			gotTraceparent = ""
+			resp := fetchGitSyncStatus(tracing.ContextWithTraceparent(context.Background(), tc.traceparent), tc.url)
+			if tc.wantUpstreamTrace != "" {
+				assertTraceparentTrace(t, gotTraceparent, tc.wantUpstreamTrace)
+			}
 			if tc.wantStatus != "" && resp.Status != tc.wantStatus {
 				t.Errorf("expected status %q, got %q", tc.wantStatus, resp.Status)
 			}
@@ -1081,6 +1098,60 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 	}
 }
 
+// assertTraceparentTrace fails unless traceparent is a W3C header carrying traceID.
+func assertTraceparentTrace(t *testing.T, traceparent, traceID string) {
+	t.Helper()
+	if parts := strings.Split(traceparent, "-"); len(parts) != 4 || parts[1] != traceID {
+		t.Errorf("upstream traceparent = %q, want trace %s", traceparent, traceID)
+	}
+}
+
+func TestSetupConsoleMux_Tracing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		target   string
+		traceID  string
+		wantSpan string
+	}{
+		{name: "facts proxy via brain client", target: "/api/facts", traceID: "11111111111111111111111111111111", wantSpan: "GET /api/facts"},
+		{name: "builds proxy via vanadis client", target: "/console/api/builds", traceID: "22222222222222222222222222222222", wantSpan: "GET /console/api/builds"},
+		{name: "docket proxy via docket client", target: "/api/docket/tasks", traceID: "33333333333333333333333333333333", wantSpan: "GET /api/docket/tasks"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			upstreamTraceparent := make(chan string, 4)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamTraceparent <- r.Header.Get("Traceparent")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(upstream.Close)
+			cfg := ConsoleConfig{BrainURL: upstream.URL, MemoryURL: upstream.URL, VanadisURL: upstream.URL, DocketURL: upstream.URL}
+			req := httptest.NewRequest(http.MethodGet, tc.target, http.NoBody)
+			req.Header.Set("Traceparent", "00-"+tc.traceID+"-00f067aa0ba902b7-01")
+			SetupConsoleMux(cfg, nil).ServeHTTP(httptest.NewRecorder(), req)
+
+			select {
+			case got := <-upstreamTraceparent:
+				assertTraceparentTrace(t, got, tc.traceID)
+			default:
+				t.Fatal("handler made no upstream call")
+			}
+			var server trace.SpanKind
+			for _, s := range spanRecorder.Ended() {
+				if s.SpanContext().TraceID().String() == tc.traceID && s.Name() == tc.wantSpan {
+					server = s.SpanKind()
+				}
+			}
+			if server != trace.SpanKindServer {
+				t.Errorf("no server span %q in trace %s", tc.wantSpan, tc.traceID)
+			}
+		})
+	}
+}
+
 func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 	reg, err := NewAssetRegistry(fstest.MapFS{
 		"index.html":          {Data: []byte(`<div id="root"></div>`)},
@@ -1213,6 +1284,7 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 }
 
 func TestMain_Execution(t *testing.T) {
+	t.Cleanup(installTestTracing) // main() runs tracing.Init, which replaces the test tracer
 	origLoad := loadConfigFn
 	origRun := runConsoleFn
 	origExit := exitFn

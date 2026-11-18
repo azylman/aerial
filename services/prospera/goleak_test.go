@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
 )
 
@@ -52,8 +57,16 @@ func init() {
 	wrapHermeticTransport()
 }
 
+// installTestTracing installs sampled spans and W3C propagation, as in production, so client
+// wiring is observable. Tests that run main() restore it, since tracing.Init resets the globals.
+func installTestTracing() {
+	otel.SetTracerProvider(sdktrace.NewTracerProvider())
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+}
+
 func TestMain(m *testing.M) {
 	wrapHermeticTransport()
+	installTestTracing()
 	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
 		http.DefaultClient.CloseIdleConnections()
 		if cl, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {
@@ -107,4 +120,24 @@ func TestHermeticTransport_BlocksNonLoopbackAndReservedPorts(t *testing.T) {
 			t.Fatalf("expected port %s block error, got %v", port, err)
 		}
 	}
+}
+
+// traceCaller returns a context carrying a sampled caller span (or a bare context) and the
+// caller's trace id ("" without a span).
+func traceCaller(withParent bool) (context.Context, string) {
+	if !withParent {
+		return context.Background(), ""
+	}
+	ctx, span := otel.Tracer("test").Start(context.Background(), "caller")
+	span.End()
+	return ctx, span.SpanContext().TraceID().String()
+}
+
+// headerTraceID returns the trace id of a W3C traceparent header, or "" when absent or invalid.
+func headerTraceID(h http.Header) string {
+	sc := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(h)))
+	if !sc.IsValid() {
+		return ""
+	}
+	return sc.TraceID().String()
 }

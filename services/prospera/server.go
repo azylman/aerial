@@ -281,10 +281,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /-/reload", s.cfgSrc.Handler("prospera"))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera"))
 
-	mcpBridge := tracing.Middleware("prospera", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		httpkit.ServeMCPStream(w, r, s.streamHandler, "Prospera Voice Subsystem MCP Server Ready\n", "", "")
-	}))
-	mux.Handle("/mcp", mcpBridge)
+	})
 
 	mux.HandleFunc("POST /api/webhooks/twilio/voice", s.handleTwilioVoice)
 	mux.HandleFunc("POST /twilio/voice", s.handleTwilioVoice)
@@ -300,7 +299,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/webhooks/twilio/sms", s.handleTwilioSMS)
 	mux.HandleFunc("POST /twilio/sms", s.handleTwilioSMS)
 
-	return mux
+	// One server span per request for every route; /mcp is not wrapped again.
+	return tracing.Middleware("prospera", mux)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

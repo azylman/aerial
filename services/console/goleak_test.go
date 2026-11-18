@@ -7,8 +7,22 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/goleak"
 )
+
+// spanRecorder captures every span the console records under test.
+var spanRecorder = tracetest.NewSpanRecorder()
+
+// installTestTracing installs sampled spans and W3C propagation, as in production. Tests that run
+// main() restore it, since tracing.Init replaces the globals.
+func installTestTracing() {
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+}
 
 type hermeticTestTransport struct {
 	base http.RoundTripper
@@ -54,6 +68,7 @@ func init() {
 
 func TestMain(m *testing.M) {
 	wrapHermeticTransport()
+	installTestTracing()
 	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
 		http.DefaultClient.CloseIdleConnections()
 		if cl, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {

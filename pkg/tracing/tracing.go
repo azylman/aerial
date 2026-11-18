@@ -9,12 +9,14 @@
 package tracing
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -265,7 +267,7 @@ func newMiddleware(tp trace.TracerProvider, prop propagation.TextMapPropagator, 
 		}
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		name, attrs := operation, []attribute.KeyValue{attribute.String("http.request.method", r.Method)}
-		preRouted := routeFromPattern(r.Pattern)
+		preRouted := routeFromPattern(routedPattern(next, r))
 		if preRouted != "" {
 			name = r.Method + " " + preRouted
 			attrs = append(attrs, attribute.String("http.route", preRouted))
@@ -286,6 +288,17 @@ func newMiddleware(tp trace.TracerProvider, prop propagation.TextMapPropagator, 
 			span.SetStatus(codes.Error, "")
 		}
 	})
+}
+
+// routedPattern returns the ServeMux pattern for r. When next is a whole *http.ServeMux the
+// pattern is resolved before routing, so the span is named up front and a routed handler may
+// still rename it (e.g. "mcp tools/call").
+func routedPattern(next http.Handler, r *http.Request) string {
+	if mux, ok := next.(*http.ServeMux); ok && r.Pattern == "" {
+		_, pattern := mux.Handler(r)
+		return pattern
+	}
+	return r.Pattern
 }
 
 // probePaths are liveness, readiness and metrics endpoints that Middleware never traces.
@@ -335,6 +348,16 @@ func (w *statusWriter) Flush() {
 
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack hands the connection to websocket upgraders, which assert http.Hijacker on the writer
+// directly instead of using http.ResponseController. A successful hijack records 101.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err == nil && !w.wroteHeader {
+		w.status, w.wroteHeader = http.StatusSwitchingProtocols, true
+	}
+	return conn, rw, err
+}
 
 // Transport wraps base (http.DefaultTransport when nil) with client spans and traceparent
 // injection. The url.full attribute is reduced to scheme://host.
@@ -394,6 +417,14 @@ func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		span.SetStatus(codes.Error, "")
 	}
 	return resp, nil
+}
+
+// CloseIdleConnections forwards to the base transport so http.Client.CloseIdleConnections keeps
+// working on wrapped clients.
+func (t *transport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
 }
 
 func originOnly(u *url.URL) string {
