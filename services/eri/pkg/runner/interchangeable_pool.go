@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
@@ -238,7 +239,7 @@ func (p *InterchangeablePool) ExecuteEphemeral(ctx context.Context, targetKey, p
 	if p.capture {
 		span.SetAttributes(ContentAttributes(prompt, response)...)
 	}
-	endEphemeralSpan(span, p.Model(), res, err)
+	endEphemeralSpan(span, p.Model(), targetKey, res, err)
 	return response, err
 }
 
@@ -255,10 +256,11 @@ func (p *InterchangeablePool) executeEphemeral(ctx context.Context, targetKey, p
 }
 
 // endEphemeralSpan records an ephemeral run's model, provider, usage and outcome, then ends span.
-func endEphemeralSpan(span trace.Span, model string, res *TurnResult, err error) {
+func endEphemeralSpan(span trace.Span, model, targetKey string, res *TurnResult, err error) {
 	var usage AgyUsage
 	if res != nil {
 		usage = res.Usage
+		metrics.RecordTokens(model, targetKey, usage.InputTokens, usage.OutputTokens, usage.ThinkingTokens, usage.CacheReadTokens, usage.TotalTokens)
 	}
 	attrs := UsageAttributes(usage)
 	if model != "" {
