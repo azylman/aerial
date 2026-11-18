@@ -653,6 +653,9 @@ spec:
         key: CODEX_AUTH_JSON
       secretKey: CODEX_AUTH_JSON
     - remoteRef:
+        key: MUSE_AUTH_JSON
+      secretKey: MUSE_AUTH_JSON
+    - remoteRef:
         key: ANTIGRAVITY_OAUTH_TOKEN
       secretKey: ANTIGRAVITY_OAUTH_TOKEN
     - remoteRef:
