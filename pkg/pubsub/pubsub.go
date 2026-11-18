@@ -316,16 +316,53 @@ type JetStreamBus struct {
 	heartbeatInterval time.Duration
 }
 
-// NewJetStreamBus connects to NATS with resilient reconnect options and initializes JetStream.
-func NewJetStreamBus(ctx context.Context, natsURL string, extraOpts ...nats.Option) (*JetStreamBus, error) {
-	opts := make([]nats.Option, 0, 3+len(extraOpts))
+// HealthChecker is an optional interface implemented by buses that can report
+// whether their underlying connection is still usable.
+type HealthChecker interface {
+	Healthy() error
+}
+
+// CheckHealth reports the bus's connection health. Buses that do not implement
+// HealthChecker are treated as healthy; a nil bus is unhealthy.
+func CheckHealth(bus Bus) error {
+	if bus == nil {
+		return errors.New("pubsub: bus is nil")
+	}
+	if hc, ok := bus.(HealthChecker); ok {
+		return hc.Healthy()
+	}
+	return nil
+}
+
+// ErrConnectionClosed is returned by Healthy once the NATS connection has
+// closed for good and will never reconnect.
+var ErrConnectionClosed = errors.New("pubsub: nats connection permanently closed")
+
+// jetStreamBusOptions returns the resilient default connect options followed by
+// extraOpts, so callers can override any default.
+//
+// IgnoreAuthErrorAbort keeps the client reconnecting through repeated
+// authorization errors (e.g. a client that races a broker password rotation)
+// instead of closing the connection permanently after the second auth failure.
+func jetStreamBusOptions(extraOpts ...nats.Option) []nats.Option {
+	opts := make([]nats.Option, 0, 5+len(extraOpts))
 	opts = append(opts,
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(1*time.Second),
 		nats.RetryOnFailedConnect(true),
+		nats.IgnoreAuthErrorAbort(),
+		nats.ClosedHandler(logConnClosed),
 	)
-	opts = append(opts, extraOpts...)
-	nc, err := nats.Connect(natsURL, opts...)
+	return append(opts, extraOpts...)
+}
+
+func logConnClosed(nc *nats.Conn) {
+	log.Printf("[pubsub] ERROR: NATS connection permanently closed (last error: %v); bus is unhealthy until restart", nc.LastError())
+}
+
+// NewJetStreamBus connects to NATS with resilient reconnect options and initializes JetStream.
+func NewJetStreamBus(ctx context.Context, natsURL string, extraOpts ...nats.Option) (*JetStreamBus, error) {
+	nc, err := nats.Connect(natsURL, jetStreamBusOptions(extraOpts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}
@@ -597,6 +634,22 @@ func (b *JetStreamBus) ensureStream(cfg *nats.StreamConfig) error {
 		return err
 	}
 	return err
+}
+
+// Healthy reports an error when the bus has no connection or the connection is
+// permanently closed. A connection that is reconnecting is still healthy: it
+// buffers and recovers on its own.
+func (b *JetStreamBus) Healthy() error {
+	if b == nil || b.nc == nil {
+		return errors.New("pubsub: nats connection not initialized")
+	}
+	if b.nc.IsClosed() {
+		if lastErr := b.nc.LastError(); lastErr != nil {
+			return fmt.Errorf("%w: %w", ErrConnectionClosed, lastErr)
+		}
+		return ErrConnectionClosed
+	}
+	return nil
 }
 
 // Close closes the underlying NATS connection.
