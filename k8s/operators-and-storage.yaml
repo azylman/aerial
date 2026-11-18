@@ -418,9 +418,7 @@ spec:
         value: 256 MiB
       - name: RESTATE_TRACING_ENDPOINT
         value: http://victoriatraces.default.svc.cluster.local:4317
-      - name: OTEL_RESOURCE_ATTRIBUTES
-        value: aerial.stack=aerial,service.namespace=aerial
-    image: docker.io/restatedev/restate:1.6
+    image: docker.io/restatedev/restate:1.7.14@sha256:c947270d4fb0ab41b61d228029e19676c46848e1147a037e598ee7f9e0695c2d
     replicas: 1
     resources:
       limits:
