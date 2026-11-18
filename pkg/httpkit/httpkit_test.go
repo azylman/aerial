@@ -774,3 +774,65 @@ func TestBuildPostgresDSN(t *testing.T) {
 		})
 	}
 }
+
+func TestSetupHealthMux(t *testing.T) {
+	// Not t.Parallel() on the flush cases: they mutate WriteCountersDirFn/WriteMetaDirFn.
+	origCounters := WriteCountersDirFn
+	origMeta := WriteMetaDirFn
+	t.Cleanup(func() {
+		WriteCountersDirFn = origCounters
+		WriteMetaDirFn = origMeta
+	})
+	WriteMetaDirFn = func(string) error { return nil }
+	WriteCountersDirFn = func(string) error { return nil }
+
+	stubMetrics := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("stub-metrics"))
+	})
+
+	tests := []struct {
+		name       string
+		service    string
+		metrics    http.Handler
+		method     string
+		path       string
+		wantStatus int
+		wantBody   string
+		wantCT     string
+	}{
+		{name: "GET /health returns ok JSON", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{name: "GET /healthz returns ok JSON", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{name: "GET /metrics served when handler non-nil", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK, wantBody: "stub-metrics"},
+		{name: "GET /metrics missing when handler nil", service: "test-svc", metrics: nil, method: http.MethodGet, path: "/metrics", wantStatus: http.StatusNotFound},
+		{name: "POST /debug/coverage/flush streams tar", service: "test-svc", metrics: stubMetrics, method: http.MethodPost, path: "/debug/coverage/flush", wantStatus: http.StatusOK, wantCT: "application/x-tar"},
+		{name: "GET /debug/coverage/flush streams tar", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK, wantCT: "application/x-tar"},
+		{name: "unknown route returns 404", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound},
+		{name: "POST /health is not registered", service: "test-svc", metrics: stubMetrics, method: http.MethodPost, path: "/health", wantStatus: http.StatusMethodNotAllowed},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := SetupHealthMux(tc.service, tc.metrics)
+			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("SetupHealthMux %s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.wantStatus)
+			}
+			if tc.wantBody != "" {
+				if strings.Contains(tc.wantBody, `"status"`) {
+					if strings.TrimSpace(rec.Body.String()) != tc.wantBody {
+						t.Errorf("SetupHealthMux %s %s body = %q, want %q", tc.method, tc.path, rec.Body.String(), tc.wantBody)
+					}
+				} else if !strings.Contains(rec.Body.String(), tc.wantBody) {
+					t.Errorf("SetupHealthMux %s %s body = %q, want substring %q", tc.method, tc.path, rec.Body.String(), tc.wantBody)
+				}
+			}
+			if tc.wantCT != "" && rec.Header().Get("Content-Type") != tc.wantCT {
+				t.Errorf("SetupHealthMux %s %s Content-Type = %q, want %q", tc.method, tc.path, rec.Header().Get("Content-Type"), tc.wantCT)
+			}
+		})
+	}
+}

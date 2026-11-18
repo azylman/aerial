@@ -312,19 +312,7 @@ func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Messa
 
 // SetupHealthMux creates the ServeMux for health, metrics, and coverage flush.
 func SetupHealthMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", handleHealth)
-	mux.HandleFunc("GET /healthz", handleHealth)
-	mux.Handle("GET /metrics", promhttp.Handler())
-
-	coverageFlush := httpkit.HandleCoverageFlush("vanadis-nats")
-	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
-	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
-	return mux
-}
-
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	return httpkit.SetupHealthMux("vanadis-nats", promhttp.Handler())
 }
 
 var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
