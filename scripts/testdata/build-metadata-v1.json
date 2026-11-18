@@ -1,0 +1,1 @@
+{"version":1,"kind":"manifest","repository":"owner/repo","workflow_path":".github/workflows/ci.yml","run_id":1,"run_number":1,"run_attempt":1,"event":"push","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","execution_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pr_number":null,"selected":[]}
