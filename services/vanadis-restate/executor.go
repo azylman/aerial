@@ -565,14 +565,6 @@ func (e *Executor) fetchCheckJobFailureLogsChecked(ctx context.Context, repo str
 	return ExtractCIFailureDetails(string(body)), nil
 }
 
-func (e *Executor) fetchCheckJobFailureLogs(ctx context.Context, repo string, jobID int64) string {
-	res, err := e.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
-	if err != nil {
-		return ""
-	}
-	return res
-}
-
 type gitHubIssueComment struct {
 	ID   int64  `json:"id"`
 	Body string `json:"body"`
@@ -624,14 +616,6 @@ func (e *Executor) fetchLatestRoboRevCommentChecked(ctx context.Context, repo st
 		return truncatePromptRunes(body, maxRoboRevCommentRunes), nil
 	}
 	return "", nil
-}
-
-func (e *Executor) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
-	res, err := e.fetchLatestRoboRevCommentChecked(ctx, repo, prNumber, headSHA)
-	if err != nil {
-		return ""
-	}
-	return res
 }
 
 // FormatCIFailurePrompt formats the failure prompt when a CI check fails.
