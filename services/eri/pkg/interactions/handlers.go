@@ -29,6 +29,10 @@ var (
 )
 
 func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	var flags discordgo.MessageFlags
+	if !getBoolOption(i.ApplicationCommandData().Options, "public", false) {
+		flags = discordgo.MessageFlagsEphemeral
+	}
 	var groups []metrics.QuotaGroup
 	var updatedAt time.Time
 	if r.deps.QuotaProvider != nil {
@@ -67,7 +71,7 @@ func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral},
+		Data: &discordgo.InteractionResponseData{Content: content, Flags: flags},
 	}); err != nil {
 		log.Printf("[Interactions] Failed to respond to /quota: %v", err)
 	}

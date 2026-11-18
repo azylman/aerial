@@ -104,7 +104,8 @@ func (r *Router) Handle(ctx context.Context, s *discordgo.Session, i *discordgo.
 		isAdmin = cfg.IsAdmin(user.ID, user.Username, user.GlobalName)
 	}
 
-	if !isAdmin {
+	// /quota is read-only telemetry and open to every caller; all other commands are admin-only.
+	if !isAdmin && i.ApplicationCommandData().Name != "quota" {
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
