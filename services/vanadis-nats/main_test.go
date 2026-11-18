@@ -277,6 +277,7 @@ type prTestCase struct {
 	serverStatus  int
 	closeServer   bool
 	overrideURL   string
+	termErr       error
 	wantErr       bool
 	wantNaked     bool
 	wantTermed    bool
@@ -324,6 +325,7 @@ func runPRTestCase(t *testing.T, tc prTestCase) {
 		subject:   "aerial.pr.opened",
 		header:    tc.msgHeader,
 		delivered: tc.delivered,
+		termErr:   tc.termErr,
 	}
 
 	err := bridge.HandlePRLifecycleEvent(context.Background(), msg)
@@ -503,6 +505,16 @@ func TestHandlePRLifecycleEvent_ErrorsAndRetries(t *testing.T) {
 			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
 			delivered:    1,
 			overrideURL:  "://invalid-url\x7f",
+			wantRequests: 0,
+			wantErr:      true,
+			wantTermed:   true,
+		},
+		{
+			name:         "request creation error with term failure still returns error",
+			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
+			delivered:    1,
+			overrideURL:  "://invalid-url\x7f",
+			termErr:      errors.New("term failed"),
 			wantRequests: 0,
 			wantErr:      true,
 			wantTermed:   true,

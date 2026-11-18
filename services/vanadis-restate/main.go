@@ -1351,19 +1351,7 @@ func (b *BuildObject) callVanadisTransition(ctx context.Context, buildID string,
 
 // SetupHealthMux creates the ServeMux for health, metrics, and coverage flush.
 func SetupHealthMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", handleHealth)
-	mux.HandleFunc("GET /healthz", handleHealth)
-	mux.Handle("GET /metrics", promhttp.Handler())
-
-	coverageFlush := httpkit.HandleCoverageFlush("vanadis-restate")
-	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
-	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
-	return mux
-}
-
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	return httpkit.SetupHealthMux("vanadis-restate", promhttp.Handler())
 }
 
 // RunApp runs both the health server and the Restate worker server.
