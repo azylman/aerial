@@ -333,6 +333,123 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			t.Fatalf("expected worker pool engine claude and bin /opt/anthropic/bin/claude, got %q, %q", workerSpawnedEngine, workerSpawnedClaudeBin)
 		}
 	})
+
+	t.Run("fingerprint gated reload preserves idle daemons unless config or assets change", func(t *testing.T) {
+		testFingerprintGatedDaemonReload(t)
+	})
+}
+
+func assertDaemonDirtyState(t *testing.T, ephem, discord *runner.StreamingDaemon, wantDirty bool, step string) {
+	t.Helper()
+	if ephem.IsDirty() != wantDirty {
+		t.Errorf("[%s] ephem daemon dirty=%v, want %v", step, ephem.IsDirty(), wantDirty)
+	}
+	if discord.IsDirty() != wantDirty {
+		t.Errorf("[%s] discord daemon dirty=%v, want %v", step, discord.IsDirty(), wantDirty)
+	}
+}
+
+func getTestDaemons(t *testing.T, ephemPool, discordPool *runner.UnifiedProcessPool) (*runner.StreamingDaemon, *runner.StreamingDaemon) {
+	t.Helper()
+	dEphem, err := ephemPool.GetOrCreate(t.Context(), "ephemeral:worker-0", "")
+	if err != nil {
+		t.Fatalf("failed to spawn ephem daemon: %v", err)
+	}
+	dDiscord, err := discordPool.GetOrCreate(t.Context(), "discord:worker-0", "")
+	if err != nil {
+		t.Fatalf("failed to spawn discord daemon: %v", err)
+	}
+	return dEphem, dDiscord
+}
+
+func testFingerprintGatedDaemonReload(t *testing.T) {
+	t.Helper()
+	homeDir := t.TempDir()
+	dataDir := t.TempDir()
+	credFile := filepath.Join(homeDir, "oauth-token.json")
+	if err := os.WriteFile(credFile, []byte(`{"token":"initial"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = homeDir
+		d.DataDir = dataDir
+		d.Model = "gemini-3.8-flash-low"
+		d.LowEffortModel = "gemini-3.8-flash-low"
+		d.CredentialSources.OAuth = config.CredentialSource{Path: credFile}
+	})
+
+	prov, err := env.NewFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spawner := newMockMainDaemonSpawner()
+	ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
+	defer func() { _ = ephemPool.Close() }()
+
+	workerSpawner := newMockMainDaemonSpawner()
+	mockDiscordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, workerSpawner)
+	defer func() { _ = mockDiscordPool.Close() }()
+
+	wp := queue.New(cfg, queue.WorkerPoolConfig{
+		Pools: map[queue.PoolKey]runner.AgentPool{
+			{Ephemeral: false, Effort: "high"}: mockDiscordPool,
+		},
+	})
+
+	dEphem, dDiscord := getTestDaemons(t, ephemPool, mockDiscordPool)
+	supplierCandidateMutator := func(candidate *config.Config) error { return nil }
+
+	reloadFn := CreateReloadConfigFunc(t.Context(), cfg,
+		WithProvisioner(prov),
+		WithWorkerPool(wp),
+		WithEphemeralPool(ephemPool),
+		WithReloadSupplier(func(candidate *config.Config) error {
+			return supplierCandidateMutator(candidate)
+		}),
+	)
+
+	// 1. Unchanged reload: preserves existing idle daemons without marking them dirty
+	reloadFn("UnchangedReload")
+	assertDaemonDirtyState(t, dEphem, dDiscord, false, "UnchangedReload")
+	if ephemDaemon, ok := ephemPool.Get("ephemeral:worker-0"); !ok || ephemDaemon != dEphem {
+		t.Errorf("expected ephem daemon preserved, got ok=%v, match=%v", ok, ephemDaemon == dEphem)
+	}
+	if discordDaemon, ok := mockDiscordPool.Get("discord:worker-0"); !ok || discordDaemon != dDiscord {
+		t.Errorf("expected discord daemon preserved, got ok=%v, match=%v", ok, discordDaemon == dDiscord)
+	}
+
+	// 2. Change model: marks daemons dirty
+	supplierCandidateMutator = func(candidate *config.Config) error {
+		cur := candidate.Current()
+		cur.Model = "gemini-2.5-pro"
+		candidate.Update(cur)
+		return nil
+	}
+	reloadFn("ModelChangeReload")
+	assertDaemonDirtyState(t, dEphem, dDiscord, true, "ModelChangeReload")
+
+	// 3. Change engine: marks daemons dirty
+	dEphem2, dDiscord2 := getTestDaemons(t, ephemPool, mockDiscordPool)
+	supplierCandidateMutator = func(candidate *config.Config) error {
+		cur := candidate.Current()
+		cur.Engine = "claude"
+		cur.ClaudeBin = "/usr/local/bin/claude"
+		candidate.Update(cur)
+		return nil
+	}
+	reloadFn("EngineChangeReload")
+	assertDaemonDirtyState(t, dEphem2, dDiscord2, true, "EngineChangeReload")
+
+	// 4. Change credential file: marks daemons dirty
+	dEphem3, dDiscord3 := getTestDaemons(t, ephemPool, mockDiscordPool)
+	supplierCandidateMutator = func(candidate *config.Config) error { return nil }
+	if err := os.WriteFile(credFile, []byte(`{"token":"rotated-secret"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reloadFn("CredentialChangeReload")
+	assertDaemonDirtyState(t, dEphem3, dDiscord3, true, "CredentialChangeReload")
 }
 
 func TestRegisterGitSyncReload(t *testing.T) {

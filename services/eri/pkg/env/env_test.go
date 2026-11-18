@@ -976,3 +976,192 @@ func TestOverlayConfigMCPServers(t *testing.T) {
 		})
 	}
 }
+
+type sourceFingerprintCase struct {
+	name            string
+	nilProv         bool
+	emptyHome       bool
+	mutateRule      bool
+	mutateSkill     bool
+	mutateHook      bool
+	mutateCred      bool
+	expectEmpty     bool
+	expectBaseMatch bool
+}
+
+func runSourceFingerprintCase(t *testing.T, tc sourceFingerprintCase) {
+	t.Helper()
+	if tc.nilProv {
+		var p *Provisioner
+		if fp := p.SourceFingerprint(); fp != "" {
+			t.Fatalf("expected empty string for nil provisioner, got %q", fp)
+		}
+		return
+	}
+	if tc.emptyHome {
+		p := newDisabledProvisioner(t, "", t.TempDir())
+		if fp := p.SourceFingerprint(); fp != "" {
+			t.Fatalf("expected empty string for empty home provisioner, got %q", fp)
+		}
+		return
+	}
+
+	homeDir := t.TempDir()
+	dataDir := t.TempDir()
+	aerialDir := t.TempDir()
+	configDir := t.TempDir()
+	skillsDir := t.TempDir()
+	hooksDir := t.TempDir()
+	credDir := t.TempDir()
+
+	ruleFile := filepath.Join(aerialDir, "00_test.md")
+	writeTestFile(t, ruleFile, "# Base Rule")
+
+	skillMD := filepath.Join(skillsDir, "test-skill", "SKILL.md")
+	writeTestFile(t, skillMD, "# Test Skill")
+
+	hookScript := filepath.Join(hooksDir, "pre-commit")
+	writeTestFile(t, hookScript, "#!/bin/sh\nexit 0\n")
+
+	credFile := filepath.Join(credDir, "token.json")
+	writeTestFile(t, credFile, `{"token":"initial"}`)
+
+	p := newDisabledProvisioner(t, homeDir, dataDir)
+	p.SetAerialRulesDir(aerialDir)
+	p.SetConfigRulesDir(configDir)
+	p.SetCustomSkillsDir(skillsDir)
+	p.SetHooksDir(hooksDir)
+	p.SetOAuthTokenSourcePath(credFile)
+
+	baseFP := p.SourceFingerprint()
+	if baseFP == "" {
+		t.Fatalf("expected non-empty baseline fingerprint")
+	}
+
+	if tc.expectBaseMatch {
+		repeatedFP := p.SourceFingerprint()
+		if repeatedFP != baseFP {
+			t.Fatalf("expected repeated fingerprint to match baseline %q, got %q", baseFP, repeatedFP)
+		}
+		return
+	}
+
+	if tc.mutateRule {
+		writeTestFile(t, ruleFile, "# Modified Rule Content")
+	}
+	if tc.mutateSkill {
+		writeTestFile(t, skillMD, "# Modified Skill Content")
+	}
+	if tc.mutateHook {
+		writeTestFile(t, hookScript, "#!/bin/sh\nexit 1\n")
+	}
+	if tc.mutateCred {
+		writeTestFile(t, credFile, `{"token":"rotated-token"}`)
+	}
+
+	mutatedFP := p.SourceFingerprint()
+	if mutatedFP == "" {
+		t.Fatalf("expected non-empty mutated fingerprint")
+	}
+	if mutatedFP == baseFP {
+		t.Fatalf("expected fingerprint to change after mutation, but got same %q", mutatedFP)
+	}
+}
+
+func TestProvisioner_SourceFingerprint(t *testing.T) {
+	t.Parallel()
+	tests := []sourceFingerprintCase{
+		{name: "nil provisioner returns empty string", nilProv: true, expectEmpty: true},
+		{name: "empty home returns empty string", emptyHome: true, expectEmpty: true},
+		{name: "identical assets produce matching fingerprint across repeated calls", expectBaseMatch: true},
+		{name: "modifying rule file produces distinct fingerprint", mutateRule: true},
+		{name: "modifying skill SKILL.md produces distinct fingerprint", mutateSkill: true},
+		{name: "modifying hook script produces distinct fingerprint", mutateHook: true},
+		{name: "modifying credential file produces distinct fingerprint", mutateCred: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSourceFingerprintCase(t, tc)
+		})
+	}
+}
+
+type hashDirCase struct {
+	name          string
+	relativePaths []string
+	symlinks      map[string]string
+	asFile        bool
+	emptyRoot     bool
+	nonExistent   bool
+	wantContains  string
+	wantCount     int
+}
+
+func setupHashDirRoot(t *testing.T, tc hashDirCase) string {
+	t.Helper()
+	if tc.emptyRoot {
+		return ""
+	}
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "root")
+	if tc.asFile {
+		return writeTestFile(t, root, "just a file")
+	}
+	if tc.nonExistent {
+		return root
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	for _, rel := range tc.relativePaths {
+		writeTestFile(t, filepath.Join(root, rel), "content of "+rel)
+	}
+	for link, target := range tc.symlinks {
+		linkTarget := target
+		if !filepath.IsAbs(target) && target != "." && target != ".." {
+			linkTarget = filepath.Join(root, target)
+		}
+		if err := os.Symlink(linkTarget, filepath.Join(root, link)); err != nil {
+			t.Fatalf("symlink %s -> %s: %v", link, linkTarget, err)
+		}
+	}
+	return root
+}
+
+func runHashDirCase(t *testing.T, tc hashDirCase) {
+	t.Helper()
+	root := setupHashDirRoot(t, tc)
+
+	var buf strings.Builder
+	hashProvisionerDir(&buf, "test-label", root)
+	out := buf.String()
+	if tc.wantContains != "" && !strings.Contains(out, tc.wantContains) {
+		t.Fatalf("expected output containing %q, got %q", tc.wantContains, out)
+	}
+	if tc.wantCount > 0 {
+		count := strings.Count(out, tc.wantContains)
+		if count != tc.wantCount {
+			t.Fatalf("expected %q to appear %d times, got %d in %q", tc.wantContains, tc.wantCount, count, out)
+		}
+	}
+}
+
+func TestHashProvisionerDir(t *testing.T) {
+	t.Parallel()
+	tests := []hashDirCase{
+		{name: "empty root string", emptyRoot: true, wantContains: "test-label:empty"},
+		{name: "nonexistent root directory", nonExistent: true, wantContains: "test-label:empty"},
+		{name: "regular file as root", asFile: true, wantContains: "test-label:empty"},
+		{name: "empty directory", wantContains: "test-label:empty"},
+		{name: "nested directory with files", relativePaths: []string{"a/b/c/file.txt"}, wantContains: "file.txt", wantCount: 1},
+		{name: "directory with symlink loop preserves single file occurrence", relativePaths: []string{"real.txt"}, symlinks: map[string]string{"loop": "."}, wantContains: "real.txt", wantCount: 1},
+		{name: "directory with broken symlink skips broken link and hashes valid file", relativePaths: []string{"valid.txt"}, symlinks: map[string]string{"broken": "missing"}, wantContains: "valid.txt", wantCount: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHashDirCase(t, tc)
+		})
+	}
+}
