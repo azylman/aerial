@@ -17,8 +17,8 @@ apiVersion: v1
 data:
   aerial.override: |
     rewrite stop {
-        name regex restate\.aerial\.?$ restate.restate.svc.cluster.local.
-        answer name (.*)\.restate\.svc\.cluster\.local\.?$ restate.aerial.
+        name regex restate\.aerial\.?$ restate.restate-green.svc.cluster.local.
+        answer name (.*)\.restate-green\.svc\.cluster\.local\.?$ restate.aerial.
     }
     rewrite stop {
         name regex restate-green\.aerial\.?$ restate.restate-green.svc.cluster.local.
