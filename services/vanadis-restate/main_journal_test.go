@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // observeJournalCallback inspects the callback error before the SDK mock adapter
@@ -79,12 +80,12 @@ func TestRunJournaledCallback(t *testing.T) {
 }
 
 type metadataMutationStore struct {
-	VanadisStore
+	store.VanadisStore
 
 	err error
 }
 
-func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req UpdateBuildRequest) (*model.VanadisBuild, error) {
+func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req store.UpdateBuildRequest) (*model.VanadisBuild, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -94,8 +95,8 @@ func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req Up
 //nolint:tparallel // Requests must run in order against the same object after a conflict.
 func TestUpdateBuildConflictThenValid(t *testing.T) {
 	t.Parallel()
-	store := &metadataMutationStore{err: ErrBuildConflict}
-	bo := NewBuildObject("", nil).WithAuthority(store, nil)
+	st := &metadataMutationStore{err: ErrBuildConflict}
+	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 	rt := newFakeObjectRuntime("build")
 	bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
 	tests := []struct {
@@ -108,11 +109,11 @@ func TestUpdateBuildConflictThenValid(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store.err = tc.err
+			st.err = tc.err
 			mc := mocks.NewMockContext(t)
 			mc.EXPECT().Key().Return("build")
 			observeJournalCallback(t, mc, tc.err, tc.code)
-			got, err := bo.UpdateBuild(restate.WithMockContext(mc), UpdateBuildRequest{Title: "Updated"})
+			got, err := bo.UpdateBuild(restate.WithMockContext(mc), store.UpdateBuildRequest{Title: "Updated"})
 			if tc.err == nil {
 				require.NoError(t, err)
 				assert.Equal(t, model.VanadisBuild{ID: "build", Title: "Updated"}, got)
@@ -185,8 +186,8 @@ func TestCreateBuildJournalCallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dbErr := fmt.Errorf("database: %w", &pgconn.PgError{Code: tc.code, ConstraintName: tc.constraint, Detail: "private database details"})
-			store, _ := (dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: dbErr}).open()
-			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			st, _ := (dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: dbErr}).open()
+			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			mc := mocks.NewMockContext(t)
 			want := dbErr
 			if tc.terminal != 0 {
@@ -218,8 +219,8 @@ func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := tc.db.open()
-			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			st, _ := tc.db.open()
+			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			accepted, err := bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
 			assert.ErrorIs(t, err, tc.want)
 			assert.Equal(t, tc.want == nil, accepted)
@@ -270,8 +271,8 @@ func TestCreateBuildConflictAtomicity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tx := &creationTransaction{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
-			store := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
-			err := store.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
+			st := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
+			err := st.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
 			require.ErrorIs(t, err, ErrBuildConflict)
 			assert.Empty(t, tx.durable)
 			assert.Empty(t, tx.pending)

@@ -22,6 +22,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 const (
@@ -312,7 +313,7 @@ func (e *Executor) FormatChunkPrompt(build model.VanadisBuild, chunks []model.Va
 
 // ExecuteLaunchChunk reserves the chunk in PostgreSQL and dispatches it directly to Eri via POST /dispatch.
 // It explicitly DOES NOT publish to aerial.jobs.vanadis.chunk.
-func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int, notice string) error {
+func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int, notice string) error {
 	if e == nil || e.eriClient == nil {
 		return errors.New("executor or eri client is nil")
 	}
@@ -322,8 +323,8 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 	chunk := chunks[activeIdx]
 
 	var reserveErr error
-	if store != nil {
-		reserveErr = store.ReserveChunkForLaunch(ctx, chunk.ID)
+	if st != nil {
+		reserveErr = st.ReserveChunkForLaunch(ctx, chunk.ID)
 	}
 	if reserveErr != nil && chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
 		return fmt.Errorf("reserve action generation: %w", reserveErr)
@@ -344,7 +345,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 		TargetID:       strings.TrimSpace(build.ThreadID),
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
 		Prompt:         notice + prompt,
-		Effort:         capChunkEffort(chunk.Effort),
+		Effort:         store.CapChunkEffort(chunk.Effort),
 		SkipIfActive:   true,
 	}
 
@@ -412,7 +413,7 @@ func (e *Executor) DispatchDirectMessage(ctx context.Context, channelID, content
 
 // SyncBuildWidget formats the Discord tracker widget and dispatches it directly to Eri via POST /discord/widget.
 // It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>.
-func (e *Executor) SyncBuildWidget(ctx context.Context, store VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, notice string) (string, error) {
+func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, notice string) (string, error) {
 	if e == nil || e.eriClient == nil {
 		return "", nil
 	}
@@ -424,8 +425,8 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, store VanadisStore, buil
 	if err != nil {
 		return "", fmt.Errorf("sync widget to eri: %w", err)
 	}
-	if msgID != "" && msgID != build.StatusMessageID && store != nil {
-		if uErr := store.UpdateBuildStatusMessageID(ctx, build.ID, msgID); uErr != nil {
+	if msgID != "" && msgID != build.StatusMessageID && st != nil {
+		if uErr := st.UpdateBuildStatusMessageID(ctx, build.ID, msgID); uErr != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] update status message id failed", "error", uErr)
 		}
 	}
@@ -506,7 +507,7 @@ func (e *Executor) ResolveCIFailureDetails(ctx context.Context, repo string, prN
 }
 
 func (e *Executor) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	apiURL := firstNonEmpty(e.gitHubAPIURL, "https://api.github.com")
+	apiURL := store.FirstNonEmpty(e.gitHubAPIURL, "https://api.github.com")
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(apiURL, "/")+path, body)
 	if err != nil {
 		return nil, err
@@ -631,8 +632,8 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	}
 	extraLine := strings.Join(extraParts, "\n")
 
-	shortRepo := firstNonEmpty(cleanRepoName(ev.Repo), "aerial")
-	branchArg := firstNonEmpty(cleanBranch, "<branch>")
+	shortRepo := store.FirstNonEmpty(cleanRepoName(ev.Repo), "aerial")
+	branchArg := store.FirstNonEmpty(cleanBranch, "<branch>")
 	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
 
 	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix. " + checkoutAndSubmit
@@ -665,8 +666,8 @@ The original chunk instructions follow.
 
 // FormatConflictPrompt formats the conflict prompt when merge conflict is detected.
 func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
-	shortRepo := firstNonEmpty(cleanRepoName(ev.Repo), "aerial")
-	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
+	shortRepo := store.FirstNonEmpty(cleanRepoName(ev.Repo), "aerial")
+	cleanBranch := store.FirstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
 	return fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", ev.PRNumber, ev.Repo, cleanBranch, ev.HeadSHA, shortRepo, cleanBranch)
 }
 
@@ -695,7 +696,7 @@ func formatDeployFailureHeader(repo, commit, jobName string, prNumber int) strin
 
 // FormatDeployFailurePrompt formats the failure prompt when deployment or git sync fails.
 func FormatDeployFailurePrompt(ev pubsub.PRLifecycleEvent) string {
-	commit := firstNonEmpty(ev.MergeSHA, ev.HeadSHA)
+	commit := store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA)
 	cleanEvent := strings.ToLower(strings.TrimSpace(ev.Event))
 	var extraLine string
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
@@ -813,8 +814,8 @@ func truncatePromptDetails(s string) string {
 
 // Widget formatting helpers
 func buildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChunk, deployUIURL ...string) StatusWidgetRequest {
-	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), statusRunning)
-	baseURL := firstNonEmpty(deployUIURL...)
+	widgetStatus := store.FirstNonEmpty(normalizeWidgetStatus(build.Status), statusRunning)
+	baseURL := store.FirstNonEmpty(deployUIURL...)
 	wChunks := make([]StatusWidgetChunk, len(chunks))
 	for i, c := range chunks {
 		wChunks[i] = buildStatusWidgetChunk(c, baseURL)
@@ -824,7 +825,7 @@ func buildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChun
 		MessageID: build.StatusMessageID,
 		ID:        build.ID,
 		Tier:      build.Tier,
-		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
+		Title:     store.FirstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    build.Objective,
 		SkipSink:  build.Quiet,
@@ -834,11 +835,11 @@ func buildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChun
 }
 
 func buildStatusWidgetChunk(c model.VanadisChunk, deployUIURL ...string) StatusWidgetChunk {
-	baseURL := firstNonEmpty(deployUIURL...)
+	baseURL := store.FirstNonEmpty(deployUIURL...)
 	// Action chunks have no repository; only PR chunks fall back to the default repo.
 	chunkRepo := ""
 	if c.Mode != chunkModeAction {
-		chunkRepo = firstNonEmpty(c.Repo, "aerial")
+		chunkRepo = store.FirstNonEmpty(c.Repo, "aerial")
 	}
 	chunkStatus := normalizeWidgetStatus(c.Status)
 	activeStep := FormatChunkActiveStep(c, baseURL)
@@ -988,7 +989,7 @@ func formatDeployTargetLabel(name, kind, deployUIURL string) string {
 }
 
 func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool, deployUIURL ...string) string {
-	baseURL := firstNonEmpty(deployUIURL...)
+	baseURL := store.FirstNonEmpty(deployUIURL...)
 	label := formatDeployTargetLabel(job, "job", baseURL)
 	jKey := strings.ToLower(strings.TrimSpace(job))
 	switch {
@@ -1006,7 +1007,7 @@ func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSe
 }
 
 func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool, deployUIURL ...string) string {
-	baseURL := firstNonEmpty(deployUIURL...)
+	baseURL := store.FirstNonEmpty(deployUIURL...)
 	deployedSet := make(map[string]bool, len(deployedJobs))
 	for _, j := range deployedJobs {
 		deployedSet[strings.ToLower(strings.TrimSpace(j))] = true
@@ -1028,7 +1029,7 @@ func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses 
 	if cleanStatus != statusDeploying {
 		return "", false
 	}
-	baseURL := firstNonEmpty(deployUIURL...)
+	baseURL := store.FirstNonEmpty(deployUIURL...)
 	names := make([]string, 0, len(kustomizationStatuses))
 	for name := range kustomizationStatuses {
 		names = append(names, name)
@@ -1061,7 +1062,7 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 
 // FormatChunkActiveStep formats the step string for a chunk in a widget.
 func FormatChunkActiveStep(chunk model.VanadisChunk, deployUIURL ...string) string {
-	baseURL := firstNonEmpty(deployUIURL...)
+	baseURL := store.FirstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	if cleanStatus == statusOpen || cleanStatus == statusPROpened {
 		if len(chunk.CIChecks) > 0 {
@@ -1251,7 +1252,7 @@ func formatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 	isActionChunk := active.Mode == chunkModeAction
 	activeRepo := ""
 	if !isActionChunk {
-		activeRepo = firstNonEmpty(cleanRepoName(active.Repo), "aerial")
+		activeRepo = store.FirstNonEmpty(cleanRepoName(active.Repo), "aerial")
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: %s\n", build.ID)
@@ -1279,7 +1280,7 @@ func formatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 		sb.WriteString("\n")
 	}
 
-	targetFilesStr := firstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
+	targetFilesStr := store.FirstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
 	fmt.Fprintf(&sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\n", activeIdx+1, total, active.ID, active.Title)
 	if isActionChunk {
 		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", actionDispatchID(active))

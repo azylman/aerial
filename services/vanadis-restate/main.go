@@ -27,6 +27,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 const (
@@ -201,12 +202,12 @@ func LoadConfigFromEnv() Config {
 		vanadisURL = "http://vanadis.aerial:4025"
 	}
 
-	pgURL := strings.TrimSpace(firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
-	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
-	natsURL := strings.TrimSpace(firstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
-	ghToken := strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
-	shareRoot := strings.TrimSpace(firstNonEmpty(os.Getenv("SHARE_ROOT"), defaultShareRoot))
-	agentName := strings.TrimSpace(firstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
+	pgURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
+	eriURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
+	natsURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
+	ghToken := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
+	shareRoot := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("SHARE_ROOT"), defaultShareRoot))
+	agentName := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
 		RestatePort: restatePort,
@@ -262,12 +263,12 @@ type RestateTransitionRequest struct {
 }
 
 type reconcileStepOutput struct {
-	RetryResult    *RetryActionChunkResult `json:"retry_result,omitempty"`
-	BuildStatus    string                  `json:"build_status"`
-	LaunchedChunks []string                `json:"launched_chunks,omitempty"`
-	LaunchedMap    map[string]bool         `json:"launched_map,omitempty"`
-	Error          string                  `json:"error,omitempty"`
-	State          *model.BuildObjectState `json:"state,omitempty"`
+	RetryResult    *store.RetryActionChunkResult `json:"retry_result,omitempty"`
+	BuildStatus    string                        `json:"build_status"`
+	LaunchedChunks []string                      `json:"launched_chunks,omitempty"`
+	LaunchedMap    map[string]bool               `json:"launched_map,omitempty"`
+	Error          string                        `json:"error,omitempty"`
+	State          *model.BuildObjectState       `json:"state,omitempty"`
 }
 
 type objectRuntime interface {
@@ -336,7 +337,7 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
 type BuildObject struct {
-	store          VanadisStore
+	store          store.VanadisStore
 	executor       *Executor
 	vanadisURL     string
 	httpClient     *http.Client
@@ -368,11 +369,11 @@ func NewBuildObjectWithAgent(vanadisURL, agentName string, httpClient *http.Clie
 }
 
 // WithAuthority wires the PostgreSQL store and side-effect executor into BuildObject.
-func (b *BuildObject) WithAuthority(store VanadisStore, exec *Executor) *BuildObject {
-	if pg, ok := store.(*PostgresVanadisStore); ok && pg == nil {
-		store = nil
+func (b *BuildObject) WithAuthority(st store.VanadisStore, exec *Executor) *BuildObject {
+	if pg, ok := st.(*PostgresVanadisStore); ok && pg == nil {
+		st = nil
 	}
-	b.store = store
+	b.store = st
 	b.executor = exec
 	return b
 }
@@ -436,7 +437,7 @@ func toTerminalErr(err error) error {
 	}
 }
 
-func planInputsToChunks(buildID string, inputs []CreateChunkInput) []model.VanadisChunk {
+func planInputsToChunks(buildID string, inputs []store.CreateChunkInput) []model.VanadisChunk {
 	chunks := make([]model.VanadisChunk, len(inputs))
 	now := time.Now().UTC()
 	for i, in := range inputs {
@@ -548,7 +549,7 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 }
 
 // UpdateBuild mutates build metadata and updates state.
-func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (model.VanadisBuild, error) {
+func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req store.UpdateBuildRequest) (model.VanadisBuild, error) {
 	buildID := restate.Key(ctx)
 	if b.store == nil {
 		return model.VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
@@ -635,7 +636,7 @@ func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRe
 	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks)
 }
 
-func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput) ([]model.VanadisChunk, error) {
+func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []store.CreateChunkInput) ([]model.VanadisChunk, error) {
 	appended, err := runJournaled(ctx, labelAppendChunks, "append-chunks-postgres", func(rc restate.RunContext) ([]model.VanadisChunk, error) {
 		return b.store.AppendChunks(rc, buildID, chunks)
 	})
@@ -649,7 +650,7 @@ func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID stri
 }
 
 // UpdateChunk modifies a pending chunk and revalidates dependencies.
-func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (model.VanadisChunk, error) {
+func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req store.UpdateChunkRequest) (model.VanadisChunk, error) {
 	buildID := restate.Key(ctx)
 	chunkRef := strings.TrimSpace(req.ChunkRef)
 	if chunkRef == "" {
@@ -819,24 +820,24 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 }
 
 // AttachPR attaches a PR to a chunk or standalone build.
-func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
-	store := b.store
-	if store == nil {
+func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+	st := b.store
+	if st == nil {
 		return AttachChunkPRResponse{Status: "attached", BuildID: restate.Key(ctx), ChunkID: req.ChunkID}, nil
 	}
 	return b.executePRAttachment(ctx, req)
 }
 
-func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
-	store := b.store
+func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+	st := b.store
 	attached, attachErr := runJournaled(ctx, labelAttachPR, "attach-pr-postgres", func(rc restate.RunContext) (AttachChunkPRResponse, error) {
-		bID, cID, thID, err := store.AttachChunkPR(rc, req)
+		bID, cID, thID, err := st.AttachChunkPR(rc, req)
 		if err != nil {
 			return AttachChunkPRResponse{}, toTerminalErr(err)
 		}
 		if exec := b.executor; exec != nil {
-			if bld, chunks, gErr := store.GetBuild(rc, bID); gErr == nil && bld != nil {
-				if _, sErr := exec.SyncBuildWidget(rc, store, *bld, chunks, ""); sErr != nil {
+			if bld, chunks, gErr := st.GetBuild(rc, bID); gErr == nil && bld != nil {
+				if _, sErr := exec.SyncBuildWidget(rc, st, *bld, chunks, ""); sErr != nil {
 					slog.ErrorContext(ctx, "[vanadis-restate] sync widget error on attach pr", "error", sErr)
 				}
 			}
@@ -1209,7 +1210,7 @@ func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *
 		return true, nil
 	}
 	if build.Status == statusFailed && isFailureCompletionMutation(mutation, chunks) {
-		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, firstNonEmpty(mutation.Reason, "chunk failed"), "VANADIS BUILD FAILED", "Build encountered failures."); nErr != nil {
+		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, store.FirstNonEmpty(mutation.Reason, "chunk failed"), "VANADIS BUILD FAILED", "Build encountered failures."); nErr != nil {
 			return false, nErr
 		}
 		return true, nil

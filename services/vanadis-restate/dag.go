@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 const (
@@ -153,21 +154,21 @@ func validateConcurrentDisjointPRChunks(out []model.VanadisChunk, reach [][]bool
 		if isTerminalChunkStatus(chunkI.Status) {
 			continue
 		}
-		modeI, err := normalizeChunkMode(chunkI.Mode)
+		modeI, err := store.NormalizeChunkMode(chunkI.Mode)
 		if err != nil || modeI != "pr" {
 			continue
 		}
-		repoI := normalizeRepo(chunkI.Repo)
+		repoI := store.NormalizeRepo(chunkI.Repo)
 		for j := i + 1; j < len(out); j++ {
 			chunkJ := out[j]
 			if isTerminalChunkStatus(chunkJ.Status) {
 				continue
 			}
-			modeJ, err := normalizeChunkMode(chunkJ.Mode)
+			modeJ, err := store.NormalizeChunkMode(chunkJ.Mode)
 			if err != nil || modeJ != "pr" {
 				continue
 			}
-			repoJ := normalizeRepo(chunkJ.Repo)
+			repoJ := store.NormalizeRepo(chunkJ.Repo)
 			if !strings.EqualFold(repoI, repoJ) {
 				continue
 			}
@@ -213,16 +214,16 @@ func validateCreateBuildInputs(buildID, threadID, objective string, chunks []mod
 		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.Instructions) == "" {
 			return fmt.Errorf("chunk[%d] id, title, and instructions cannot be empty", i)
 		}
-		if !isValidVanadisChunkID(strings.TrimSpace(c.ID)) {
+		if !store.IsValidVanadisChunkID(strings.TrimSpace(c.ID)) {
 			return fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
 		}
 		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
 			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
 		}
-		if err := validateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
+		if err := store.ValidateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
 			return err
 		}
-		if _, err := normalizeChunkEffort(c.Effort); err != nil {
+		if _, err := store.NormalizeChunkEffort(c.Effort); err != nil {
 			return fmt.Errorf("chunk[%d] %w", i, err)
 		}
 	}

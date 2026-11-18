@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type mockEriClient struct {
@@ -151,8 +152,8 @@ func TestExecutor_PromptAndDispatch(t *testing.T) {
 		t.Error("expected error on out of bounds chunk index, got nil")
 	}
 
-	store, _ := dbScript{}.open()
-	if err := exec.ExecuteLaunchChunk(context.Background(), store, b, chunks, 0, "[NOTICE]\n"); err != nil {
+	st, _ := dbScript{}.open()
+	if err := exec.ExecuteLaunchChunk(context.Background(), st, b, chunks, 0, "[NOTICE]\n"); err != nil {
 		t.Fatalf("ExecuteLaunchChunk failed: %v", err)
 	}
 	if eri.lastDispatch == nil || eri.lastDispatch.VanadisChunkID != "c1" {
@@ -178,12 +179,12 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 		},
 	}
 	exec := NewExecutor("", eri, nil, "", nil)
-	store, _ := dbScript{execTag: "UPDATE 1"}.open()
+	st, _ := dbScript{execTag: "UPDATE 1"}.open()
 
 	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
 	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
 
-	msgID, err := exec.SyncBuildWidget(context.Background(), store, b, chunks, "Notice!")
+	msgID, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "Notice!")
 	if err != nil || msgID != "widget-msg-456" {
 		t.Fatalf("SyncBuildWidget msgID = %q err = %v", msgID, err)
 	}
@@ -203,7 +204,7 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 		},
 	}
 	execErr := NewExecutor("", eriErr, nil, "", nil)
-	if _, err := execErr.SyncBuildWidget(context.Background(), store, b, chunks, ""); err == nil {
+	if _, err := execErr.SyncBuildWidget(context.Background(), st, b, chunks, ""); err == nil {
 		t.Error("expected error on eri failure")
 	}
 
@@ -1058,7 +1059,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 }
 
 type mockStoreForLaunch struct {
-	VanadisStore
+	store.VanadisStore
 
 	reserveErr error
 }
@@ -1143,8 +1144,8 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 			}))
 			defer srv.Close()
 			build := model.VanadisBuild{ID: "b", Status: "running"}
-			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []model.VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
-			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
+			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []model.VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
+			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantAcknowledged, out.LaunchedMap[tc.key])

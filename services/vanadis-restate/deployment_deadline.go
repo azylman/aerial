@@ -12,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // The provisional p95 (~233s over 75 intervals) informs this engineering
@@ -68,7 +69,7 @@ func (r restateObjectRuntime) ScheduleDeploymentDeadline(req DeploymentDeadlineR
 }
 
 func deploymentRevision(c model.VanadisChunk) string {
-	return firstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
+	return store.FirstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
 }
 
 func nextDeploymentAttempt(old deploymentAttempt, c model.VanadisChunk, start time.Time, retry bool) deploymentAttempt {
@@ -195,7 +196,7 @@ func (b *BuildObject) recordDeploymentStart(rc restate.RunContext, buildID, chun
 		return false, "", nil
 	}
 	for _, c := range chunks {
-		if c.ID != chunkID || deploymentRevision(c) != firstNonEmpty(ev.MergeSHA, ev.HeadSHA) {
+		if c.ID != chunkID || deploymentRevision(c) != store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) {
 			continue
 		}
 		// Starts are progress observations, not explicit retries. Preserve failure
@@ -305,7 +306,7 @@ func deploymentEligible(c model.VanadisChunk) bool {
 }
 
 func deploymentStartAt(now time.Time, ev *pubsub.PRLifecycleEvent, c model.VanadisChunk) time.Time {
-	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && firstNonEmpty(ev.MergeSHA, ev.HeadSHA) == deploymentRevision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
+	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) == deploymentRevision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
 		return ev.OccurredAt
 	}
 	return now

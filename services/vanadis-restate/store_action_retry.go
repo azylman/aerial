@@ -10,27 +10,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// RetryActionChunkRequest fences a single operator-requested action retry.
-type RetryActionChunkRequest struct {
-	BuildID                 string  `json:"build_id"`
-	ChunkID                 string  `json:"chunk_id"`
-	ExpectedDispatchID      string  `json:"expected_dispatch_id"`
-	Reason                  string  `json:"reason"`
-	ExpectedInstructions    *string `json:"expected_instructions,omitempty"    jsonschema:"Exact stored instructions required for correction; supply with replacement_instructions"`
-	ReplacementInstructions *string `json:"replacement_instructions,omitempty" jsonschema:"Corrected nonblank worker instructions atomically saved before retry; supply with expected_instructions"`
-}
-
-type RetryActionChunkResult struct {
-	BuildID    string `json:"build_id"`
-	ChunkID    string `json:"chunk_id"`
-	DispatchID string `json:"dispatch_id"`
-	Accepted   bool   `json:"accepted"`
-}
-
 // RetryActionChunk is intentionally concrete-only until durable intake is wired.
-func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req RetryActionChunkRequest) (*RetryActionChunkResult, error) {
+func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req store.RetryActionChunkRequest) (*store.RetryActionChunkResult, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
@@ -74,12 +58,12 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req RetryAc
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &RetryActionChunkResult{BuildID: req.BuildID, ChunkID: c.ID, DispatchID: actionDispatchID(c), Accepted: true}, nil
+	return &store.RetryActionChunkResult{BuildID: req.BuildID, ChunkID: c.ID, DispatchID: actionDispatchID(c), Accepted: true}, nil
 }
 
 // lockRetryBuildAndChunks follows the parent-first ordering used by existing mutations.
 func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (model.VanadisBuild, []model.VanadisChunk, error) {
-	b, err := scanBuild(tx.QueryRow(ctx, `SELECT `+buildColumns+` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID))
+	b, err := store.ScanBuild(tx.QueryRow(ctx, `SELECT `+store.BuildColumns+` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, nil, ErrBuildNotFound
 	}
@@ -91,7 +75,7 @@ func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (mo
 		return b, nil, err
 	}
 	defer rows.Close()
-	chunks, err := scanChunks(rows)
+	chunks, err := store.ScanChunks(rows)
 	return b, chunks, err
 }
 
@@ -129,7 +113,7 @@ func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bo
 	return true
 }
 
-func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req RetryActionChunkRequest) (model.VanadisChunk, bool, error) {
+func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req store.RetryActionChunkRequest) (model.VanadisChunk, bool, error) {
 	var selected *model.VanadisChunk
 	for i := range chunks {
 		if chunks[i].ID == req.ChunkID {
@@ -163,13 +147,13 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	return c, replay, nil
 }
 
-func validRetryInstructionPair(req RetryActionChunkRequest) bool {
+func validRetryInstructionPair(req store.RetryActionChunkRequest) bool {
 	if req.ExpectedInstructions == nil && req.ReplacementInstructions == nil {
 		return true
 	}
 	return req.ExpectedInstructions != nil && req.ReplacementInstructions != nil && strings.TrimSpace(*req.ExpectedInstructions) != "" && strings.TrimSpace(*req.ReplacementInstructions) != ""
 }
 
-func retryInstructionsMatch(req RetryActionChunkRequest, c model.VanadisChunk) bool {
+func retryInstructionsMatch(req store.RetryActionChunkRequest, c model.VanadisChunk) bool {
 	return req.ExpectedInstructions == nil || c.Instructions == *req.ExpectedInstructions
 }

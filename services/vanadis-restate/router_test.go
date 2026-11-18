@@ -19,12 +19,13 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type mockInvoker struct {
 	prEventFn         func(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error
 	dispatchOutcomeFn func(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error
-	attachPRFn        func(ctx context.Context, buildID string, req AttachChunkPRRequest) (AttachChunkPRResponse, error)
+	attachPRFn        func(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error)
 	failChunkFn       func(ctx context.Context, buildID string, req FailChunkRequest) (FailChunkResponse, error)
 
 	lastPRBuildID       string
@@ -49,7 +50,7 @@ func (m *mockInvoker) RouteDispatchOutcome(ctx context.Context, buildID string, 
 	return nil
 }
 
-func (m *mockInvoker) RouteAttachPR(ctx context.Context, buildID string, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+func (m *mockInvoker) RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	m.lastAttachBuildID = buildID
 	if m.attachPRFn != nil {
 		return m.attachPRFn(ctx, buildID, req)
@@ -239,8 +240,8 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			inv := &mockInvoker{}
-			store, _ := tc.db.open()
-			router := NewBuildRouterService(store, func(restate.Context) buildObjectInvoker { return inv })
+			st, _ := tc.db.open()
+			router := NewBuildRouterService(st, func(restate.Context) buildObjectInvoker { return inv })
 			ctx := makeRouterMockContext(t)
 			err := router.RoutePREvent(ctx, tc.ev)
 			if tc.wantErr {
@@ -285,8 +286,8 @@ func TestExtractChunkIDFromBranch(t *testing.T) {
 func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
 	t.Parallel()
 	inv := &mockInvoker{}
-	store, _ := dbScript{row: valuesRow("b-dispatch")}.open()
-	router := NewBuildRouterService(store, func(restate.Context) buildObjectInvoker { return inv })
+	st, _ := dbScript{row: valuesRow("b-dispatch")}.open()
+	router := NewBuildRouterService(st, func(restate.Context) buildObjectInvoker { return inv })
 
 	ctx := makeRouterMockContext(t)
 
@@ -311,31 +312,31 @@ func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
 func TestBuildRouterService_RouteAttachPR(t *testing.T) {
 	t.Parallel()
 	inv := &mockInvoker{}
-	store, _ := dbScript{row: valuesRow("b-existing")}.open()
-	router := NewBuildRouterService(store, func(restate.Context) buildObjectInvoker { return inv })
+	st, _ := dbScript{row: valuesRow("b-existing")}.open()
+	router := NewBuildRouterService(st, func(restate.Context) buildObjectInvoker { return inv })
 
 	ctx := makeRouterMockContext(t)
 
 	// Validation failure
-	_, err := router.RouteAttachPR(ctx, AttachChunkPRRequest{})
+	_, err := router.RouteAttachPR(ctx, store.AttachChunkPRRequest{})
 	assert.Error(t, err)
 
 	// Route attach with chunk id
-	res, err := router.RouteAttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
+	res, err := router.RouteAttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
 	assert.NoError(t, err)
 	assert.Equal(t, "b-existing", res.BuildID)
 
 	// Route attach without chunk id, but with repo lookup returning build id
 	storeRepo, _ := dbScript{row: valuesRow("c1", "b-repo", 0, "medium", false)}.open()
 	routerRepo := NewBuildRouterService(storeRepo, func(restate.Context) buildObjectInvoker { return inv })
-	resRepo, err := routerRepo.RouteAttachPR(ctx, AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"})
+	resRepo, err := routerRepo.RouteAttachPR(ctx, store.AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"})
 	assert.NoError(t, err)
 	assert.Equal(t, "b-repo", resRepo.BuildID)
 
 	// Route attach standalone new build id
 	storeUnmatched, _ := dbScript{row: errRow(ErrChunkNotFound)}.open()
 	routerUnmatched := NewBuildRouterService(storeUnmatched, func(restate.Context) buildObjectInvoker { return inv })
-	resNew, err := routerUnmatched.RouteAttachPR(ctx, AttachChunkPRRequest{PRNumber: 999, Repo: "aerial"})
+	resNew, err := routerUnmatched.RouteAttachPR(ctx, store.AttachChunkPRRequest{PRNumber: 999, Repo: "aerial"})
 	assert.NoError(t, err)
 	assert.True(t, resNew.BuildID != "")
 }
@@ -343,8 +344,8 @@ func TestBuildRouterService_RouteAttachPR(t *testing.T) {
 func TestBuildRouterService_RouteFailChunk(t *testing.T) {
 	t.Parallel()
 	inv := &mockInvoker{}
-	store, _ := dbScript{row: valuesRow("b-fail")}.open()
-	router := NewBuildRouterService(store, func(restate.Context) buildObjectInvoker { return inv })
+	st, _ := dbScript{row: valuesRow("b-fail")}.open()
+	router := NewBuildRouterService(st, func(restate.Context) buildObjectInvoker { return inv })
 
 	ctx := makeRouterMockContext(t)
 
@@ -370,7 +371,7 @@ func TestBuildRouterService_RouteFailChunk(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			inv := &mockInvoker{}
-			router := NewBuildRouterService(store, func(restate.Context) buildObjectInvoker { return inv })
+			router := NewBuildRouterService(st, func(restate.Context) buildObjectInvoker { return inv })
 			inv.failChunkFn = func(_ context.Context, buildID string, req FailChunkRequest) (FailChunkResponse, error) {
 				assert.Equal(t, tc.dispatchID, req.DispatchID)
 				return FailChunkResponse{BuildID: buildID, Failed: true}, nil
@@ -402,7 +403,7 @@ func TestRestateBuildObjectInvoker(t *testing.T) {
 	ctx := context.Background()
 	_ = inv.RoutePREvent(ctx, "b1", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1})
 	_ = inv.RouteDispatchOutcome(ctx, "b1", pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"})
-	_, _ = inv.RouteAttachPR(ctx, "b1", AttachChunkPRRequest{PRNumber: 1})
+	_, _ = inv.RouteAttachPR(ctx, "b1", store.AttachChunkPRRequest{PRNumber: 1})
 	_, _ = inv.RouteFailChunk(ctx, "b1", FailChunkRequest{ChunkID: "c1"})
 }
 
@@ -429,14 +430,14 @@ func TestBuildRouterService_NilStoreAndErrorPaths(t *testing.T) {
 	assert.Equal(t, beforeDisp+1, reconcileErrorsCount(t, labelRouteDispatchOutcome))
 
 	// RouteAttachPR nil store generates build ID
-	_, err := rNil.RouteAttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
+	_, err := rNil.RouteAttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
 	assert.NoError(t, err)
 
 	// RouteAttachPR standalone matching existing PR
 	storeAttach, _ := dbScript{row: valuesRow("c-new", "b-new", 0, "medium", false)}.open()
 	inv := &mockInvoker{}
 	rStandalone := NewBuildRouterService(storeAttach, func(restate.Context) buildObjectInvoker { return inv })
-	resp, err := rStandalone.RouteAttachPR(ctx, AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"})
+	resp, err := rStandalone.RouteAttachPR(ctx, store.AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"})
 	assert.NoError(t, err)
 	assert.Equal(t, "b-new", resp.BuildID)
 
@@ -460,15 +461,15 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "sha-1", ""))
 
 	// Empty arguments
-	store, _ := dbScript{execTag: "UPDATE 1"}.open()
-	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
-	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
-	assert.Error(t, store.ResetPRCheckState(context.Background(), "", "sha-1", ""))
+	st, _ := dbScript{execTag: "UPDATE 1"}.open()
+	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
+	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
+	assert.Error(t, st.ResetPRCheckState(context.Background(), "", "sha-1", ""))
 
 	// Success
-	assert.NoError(t, store.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
-	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
+	assert.NoError(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
+	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
+	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 
 	// Skipped transition (0 rows affected)
 	storeZero, _ := dbScript{execTag: "UPDATE 0", row: errRow(pgx.ErrNoRows)}.open()
@@ -514,8 +515,8 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := tc.db.open()
-			bID, cID, err := store.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
+			st, _ := tc.db.open()
+			bID, cID, err := st.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}
@@ -527,7 +528,7 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 }
 
 type unattachedPREventSpyStore struct {
-	VanadisStore
+	store.VanadisStore
 
 	chunks          []model.VanadisChunk
 	getBuildErr     error
@@ -542,8 +543,8 @@ type unattachedPREventSpyStore struct {
 	syncWidgetCalls int
 }
 
-func (*unattachedPREventSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*VanadisChunkPRLookup, error) {
-	return &VanadisChunkPRLookup{Matched: false}, nil
+func (*unattachedPREventSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*store.VanadisChunkPRLookup, error) {
+	return &store.VanadisChunkPRLookup{Matched: false}, nil
 }
 
 func (s *unattachedPREventSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
@@ -553,7 +554,7 @@ func (s *unattachedPREventSpyStore) GetBuild(_ context.Context, buildID string) 
 	return &model.VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, nil
 }
 
-func (s *unattachedPREventSpyStore) AttachChunkPR(_ context.Context, req AttachChunkPRRequest) (string, string, string, error) {
+func (s *unattachedPREventSpyStore) AttachChunkPR(_ context.Context, req store.AttachChunkPRRequest) (string, string, string, error) {
 	if s.attachErr != nil {
 		return "", "", "", s.attachErr
 	}

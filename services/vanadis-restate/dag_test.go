@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type dagTestCase struct {
@@ -388,35 +389,35 @@ func TestValidateUpdateChunkInput_Validation(t *testing.T) {
 	strPtr := func(s string) *string { return &s }
 
 	// validateUpdateChunkInput tests
-	_, err := validateUpdateChunkInput("", "c1", UpdateChunkRequest{})
+	_, err := validateUpdateChunkInput("", "c1", store.UpdateChunkRequest{})
 	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
 		t.Fatalf("expected error on empty buildID, got %v", err)
 	}
-	_, err = validateUpdateChunkInput("b1", "", UpdateChunkRequest{})
+	_, err = validateUpdateChunkInput("b1", "", store.UpdateChunkRequest{})
 	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
 		t.Fatalf("expected error on empty chunkRef, got %v", err)
 	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{})
+	_, err = validateUpdateChunkInput("b1", "c1", store.UpdateChunkRequest{})
 	if err == nil || !strings.Contains(err.Error(), "at least one updated field are required") {
 		t.Fatalf("expected error on empty fields, got %v", err)
 	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("  ")})
+	_, err = validateUpdateChunkInput("b1", "c1", store.UpdateChunkRequest{Mode: strPtr("  ")})
 	if err == nil || !strings.Contains(err.Error(), "mode cannot be empty string") {
 		t.Fatalf("expected error on empty mode string, got %v", err)
 	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("invalid-mode")})
+	_, err = validateUpdateChunkInput("b1", "c1", store.UpdateChunkRequest{Mode: strPtr("invalid-mode")})
 	if err == nil {
 		t.Fatal("expected error on invalid mode")
 	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "huge"})
+	_, err = validateUpdateChunkInput("b1", "c1", store.UpdateChunkRequest{Effort: "huge"})
 	if err == nil {
 		t.Fatal("expected error on invalid effort")
 	}
-	effort, err := validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "high"})
+	effort, err := validateUpdateChunkInput("b1", "c1", store.UpdateChunkRequest{Effort: "high"})
 	if err != nil || effort != "medium" {
 		t.Fatalf("expected medium effort, got %q (err: %v)", effort, err)
 	}
-	effort, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Title: "New Title"})
+	effort, err = validateUpdateChunkInput("b1", "c1", store.UpdateChunkRequest{Title: "New Title"})
 	if err != nil || effort != "" {
 		t.Fatalf("expected empty effort, got %q (err: %v)", effort, err)
 	}
@@ -441,35 +442,35 @@ func TestApplyChunkUpdates_Validation(t *testing.T) {
 	// PR mode with empty repo error
 	cEmptyRepo := c
 	cEmptyRepo.Repo = ""
-	err := applyChunkUpdates(&cEmptyRepo, UpdateChunkRequest{}, "")
+	err := applyChunkUpdates(&cEmptyRepo, store.UpdateChunkRequest{}, "")
 	if err == nil || !strings.Contains(err.Error(), "repo is required for pr mode") {
 		t.Fatalf("expected error on pr mode with empty repo, got %v", err)
 	}
 
 	// Action mode with repo error
 	cActionWithRepo := c
-	err = applyChunkUpdates(&cActionWithRepo, UpdateChunkRequest{Mode: strPtr("action"), Repo: "azylman/aerial"}, "")
+	err = applyChunkUpdates(&cActionWithRepo, store.UpdateChunkRequest{Mode: strPtr("action"), Repo: "azylman/aerial"}, "")
 	if err == nil || !strings.Contains(err.Error(), "action chunk must have empty repo") {
 		t.Fatalf("expected error on action chunk with repo, got %v", err)
 	}
 
 	// Action mode with target_files error
 	cActionWithFiles := c
-	err = applyChunkUpdates(&cActionWithFiles, UpdateChunkRequest{Mode: strPtr("action"), TargetFiles: []string{"a.go"}}, "")
+	err = applyChunkUpdates(&cActionWithFiles, store.UpdateChunkRequest{Mode: strPtr("action"), TargetFiles: []string{"a.go"}}, "")
 	if err == nil || !strings.Contains(err.Error(), "action chunk must not specify target_files") {
 		t.Fatalf("expected error on action chunk with target_files, got %v", err)
 	}
 
 	// Action mode with target_symbols error
 	cActionWithSymbols := c
-	err = applyChunkUpdates(&cActionWithSymbols, UpdateChunkRequest{Mode: strPtr("action"), TargetSymbols: []string{"Sym"}}, "")
+	err = applyChunkUpdates(&cActionWithSymbols, store.UpdateChunkRequest{Mode: strPtr("action"), TargetSymbols: []string{"Sym"}}, "")
 	if err == nil || !strings.Contains(err.Error(), "action chunk must not specify target_symbols") {
 		t.Fatalf("expected error on action chunk with target_symbols, got %v", err)
 	}
 
 	// Valid action mode switch
 	cValidAction := c
-	err = applyChunkUpdates(&cValidAction, UpdateChunkRequest{
+	err = applyChunkUpdates(&cValidAction, store.UpdateChunkRequest{
 		Mode:         strPtr("action"),
 		Title:        "New Action Title",
 		Instructions: "New Action Instr",
