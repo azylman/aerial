@@ -282,7 +282,7 @@ func assertChownPaths(t *testing.T, chowned []string) {
 	if len(chowned) == 0 {
 		t.Errorf("expected chownPath to be called when getEuid returns 0")
 	}
-	var foundRtHome, foundBrain, foundCodex bool
+	var foundRtHome, foundBrain, foundCodex, foundAtomicTmp, foundRtConfigParent bool
 	for _, cp := range chowned {
 		if strings.Contains(cp, filepath.Join("runtimes", "discord")) {
 			foundRtHome = true
@@ -293,6 +293,12 @@ func assertChownPaths(t *testing.T, chowned []string) {
 		if strings.Contains(cp, ".codex") || strings.Contains(cp, "codex") {
 			foundCodex = true
 		}
+		if strings.Contains(cp, ".settings.json.tmp.") {
+			foundAtomicTmp = true
+		}
+		if strings.HasSuffix(cp, filepath.Join("runtimes", "ephemeral", ".config")) {
+			foundRtConfigParent = true
+		}
 	}
 	if !foundRtHome {
 		t.Errorf("expected runtime home directory to be chowned")
@@ -302,6 +308,12 @@ func assertChownPaths(t *testing.T, chowned []string) {
 	}
 	if !foundCodex {
 		t.Errorf("expected codex directory to be chowned")
+	}
+	if !foundAtomicTmp {
+		t.Errorf("expected writeAtomic temp file to be chowned before rename")
+	}
+	if !foundRtConfigParent {
+		t.Errorf("expected runtime .config parent directory to be chowned")
 	}
 	for _, cp := range chowned {
 		if strings.Contains(cp, "target-skill") || strings.Contains(cp, "symlink-test") {
