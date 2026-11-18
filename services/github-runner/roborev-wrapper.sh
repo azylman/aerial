@@ -15,6 +15,7 @@ if [ -d "/cache" ]; then
   export GOPATH="/data/cache/go"
   export GOMODCACHE="/data/cache/go/pkg/mod"
   export GOLANGCI_LINT_CACHE="/data/cache/golangci-lint"
+  export GOFLAGS="-trimpath"
   export PIP_CACHE_DIR="/cache/pip"
   export CARGO_TARGET_DIR="/cache/cargo-target"
   export NPM_CONFIG_CACHE="/cache/npm"

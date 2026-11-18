@@ -321,6 +321,7 @@ run_go_test() {
                 ${GOCACHE:+GOCACHE="$GOCACHE"} \
                 ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
                 ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
+                ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
                 ${TMPDIR:+TMPDIR="$TMPDIR"} \
                 ${SystemRoot:+SystemRoot="$SystemRoot"} \
                 ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
@@ -338,7 +339,7 @@ run_go_test() {
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="$cgo_val" \
-                go test ${race_flag:+"$race_flag"} ./...)
+                go test ${race_flag:+"$race_flag"} -trimpath ./...)
         elif has_docker; then
             docker run --rm \
                 -v aerial-go-cache:/root/.cache/go-build \
@@ -353,7 +354,7 @@ run_go_test() {
                 CGO_ENABLED=1 \
                 LANG="en_US.UTF-8" \
                 LC_ALL="en_US.UTF-8" \
-                go test -race ./...
+                go test -race -trimpath ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1
@@ -386,6 +387,7 @@ run_go_pkg_coverage() {
             ${GOCACHE:+GOCACHE="$GOCACHE"} \
             ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
             ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
+            ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
             ${TMPDIR:+TMPDIR="$TMPDIR"} \
             ${SystemRoot:+SystemRoot="$SystemRoot"} \
             ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
@@ -403,7 +405,7 @@ run_go_pkg_coverage() {
             LC_ALL="${LC_ALL:-en_US.UTF-8}" \
             GIT_TERMINAL_PROMPT=0 \
             CGO_ENABLED="$cgo_val" \
-            go test ${race_flag:+"$race_flag"} -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
+            go test ${race_flag:+"$race_flag"} -trimpath -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
             rm -f "$prof_file"
             exit 1
         fi
@@ -568,7 +570,7 @@ ensure_code_health() {
     CODE_HEALTH_BIN="$bin_dir/code-health"
     src_sum=$(cksum "$REPO_ROOT/scripts/code-health/"*.go 2>/dev/null || true)
     if [ ! -x "$CODE_HEALTH_BIN" ] || [ -z "$src_sum" ] || [ "$(cat "${CODE_HEALTH_BIN}.cksum" 2>/dev/null || true)" != "$src_sum" ]; then
-        (cd "$REPO_ROOT/scripts/code-health" && go build -o "$CODE_HEALTH_BIN" .)
+        (cd "$REPO_ROOT/scripts/code-health" && go build -trimpath -o "$CODE_HEALTH_BIN" .)
         printf '%s\n' "$src_sum" > "${CODE_HEALTH_BIN}.cksum"
     fi
 }

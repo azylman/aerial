@@ -209,6 +209,7 @@ while IFS='|' read -r svc pkg; do
             ${GOCACHE:+GOCACHE="$GOCACHE"} \
             ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
             ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
+            ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
             ${TMPDIR:+TMPDIR="$TMPDIR"} \
             ${SystemRoot:+SystemRoot="$SystemRoot"} \
             ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
@@ -226,7 +227,7 @@ while IFS='|' read -r svc pkg; do
             LC_ALL="${LC_ALL:-en_US.UTF-8}" \
             GIT_TERMINAL_PROMPT=0 \
             CGO_ENABLED="$cgo_val" \
-            go test ${race_flag:+"$race_flag"} -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
+            go test ${race_flag:+"$race_flag"} -trimpath -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
             echo "PASS" > "$status_file"
         else
             echo "FAIL" > "$status_file"
