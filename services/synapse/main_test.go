@@ -1198,3 +1198,11 @@ func TestSetupPostgres(t *testing.T) {
 		})
 	}
 }
+
+func (*mockPRRegistry) RecordPRBuildMetadata(context.Context, string, int, BuildMetadata) (bool, error) {
+	return false, nil
+}
+
+func (*mockPRRegistry) LoadPRBuildMetadata(context.Context, string, int) (BuildMetadata, bool, error) {
+	return BuildMetadata{}, false, nil
+}
