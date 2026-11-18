@@ -104,6 +104,10 @@ function writeAtomic(targetDir, filename, content) {
   }
 }
 
+function escapeShellValue(val) {
+  return `'${String(val).replace(/'/g, "'\\''")}'`;
+}
+
 function copyFallback(srcDir, dstDir) {
   try {
     if (!fs.existsSync(srcDir)) return;
@@ -274,15 +278,25 @@ function run(dirs = {}) {
 
     if (parsed && serviceConfigPath) {
       const envLines = [];
-      if (parsed.port) envLines.push(`PORT="${parsed.port}"`);
-      if (parsed.allowed_hosts) envLines.push(`HOMEPAGE_ALLOWED_HOSTS="${parsed.allowed_hosts}"`);
-      if (parsed.log_level) envLines.push(`LOG_LEVEL="${parsed.log_level}"`);
+      if (parsed.port) envLines.push(`PORT=${escapeShellValue(parsed.port)}`);
+      if (parsed.allowed_hosts) envLines.push(`HOMEPAGE_ALLOWED_HOSTS=${escapeShellValue(parsed.allowed_hosts)}`);
+      if (parsed.log_level) envLines.push(`LOG_LEVEL=${escapeShellValue(parsed.log_level)}`);
       if (parsed.node_tls_reject_unauthorized !== undefined) {
-        envLines.push(`NODE_TLS_REJECT_UNAUTHORIZED="${parsed.node_tls_reject_unauthorized}"`);
+        envLines.push(`NODE_TLS_REJECT_UNAUTHORIZED=${escapeShellValue(parsed.node_tls_reject_unauthorized)}`);
       }
-      if (parsed.unifi_url) envLines.push(`HOMEPAGE_VAR_UNIFI_URL="${parsed.unifi_url}"`);
-      if (parsed.unifi_user) envLines.push(`HOMEPAGE_VAR_UNIFI_USER="${parsed.unifi_user}"`);
-      if (parsed.qnap_user) envLines.push(`HOMEPAGE_VAR_QNAP_USER="${parsed.qnap_user}"`);
+
+      const reservedKeys = new Set(['port', 'allowed_hosts', 'log_level', 'node_tls_reject_unauthorized']);
+      for (const [k, v] of Object.entries(parsed)) {
+        if (reservedKeys.has(k)) continue;
+        const varName = `HOMEPAGE_VAR_${k.toUpperCase()}`;
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(varName)) {
+          console.error(`[prepare-config] Warning: Skipping invalid environment variable name "${varName}" for key "${k}".`);
+          continue;
+        }
+        if ((typeof v === 'string' && v !== '') || typeof v === 'number' || typeof v === 'boolean') {
+          envLines.push(`${varName}=${escapeShellValue(v)}`);
+        }
+      }
 
       if (envLines.length > 0) {
         writeAtomic(targetDir, 'runtime.env', envLines.join('\n') + '\n');
@@ -327,5 +341,6 @@ module.exports = {
   parseYaml,
   safeRead,
   writeAtomic,
-  copyFallback
+  copyFallback,
+  escapeShellValue
 };

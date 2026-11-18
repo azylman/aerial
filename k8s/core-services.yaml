@@ -136,24 +136,6 @@ spec:
                   key: GITHUB_PAT
                   name: eri-secret
                   optional: true
-            - name: HA_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  key: HA_TOKEN
-                  name: eri-secret
-                  optional: true
-            - name: UBEREATS_MCP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  key: UBEREATS_MCP_TOKEN
-                  name: eri-secret
-                  optional: true
-            - name: CLOUDFLARE_MCP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  key: CLOUDFLARE_MCP_TOKEN
-                  name: eri-secret
-                  optional: true
             - name: CLAUDE_CODE_OAUTH_TOKEN
               valueFrom:
                 secretKeyRef:

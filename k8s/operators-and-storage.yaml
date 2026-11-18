@@ -632,35 +632,12 @@ spec:
         key: POSTGRES_PASSWORD
       secretKey: POSTGRES_PASSWORD
     - remoteRef:
-        key: GEMINI_HARNESS_API_KEY
-      secretKey: GEMINI_HARNESS_API_KEY
-    - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
-    - remoteRef:
-        key: HA_TOKEN
-      secretKey: HA_TOKEN
-    - remoteRef:
-        key: UBEREATS_MCP_TOKEN
-      secretKey: UBEREATS_MCP_TOKEN
-    - remoteRef:
-        key: CLOUDFLARE_MCP_TOKEN
-      secretKey: CLOUDFLARE_MCP_TOKEN
-    - remoteRef:
-        key: CLAUDE_CODE_OAUTH_TOKEN
-      secretKey: CLAUDE_CODE_OAUTH_TOKEN
-    - remoteRef:
-        key: CODEX_AUTH_JSON
-      secretKey: CODEX_AUTH_JSON
-    - remoteRef:
-        key: MUSE_AUTH_JSON
-      secretKey: MUSE_AUTH_JSON
-    - remoteRef:
-        key: ANTIGRAVITY_OAUTH_TOKEN
-      secretKey: ANTIGRAVITY_OAUTH_TOKEN
-    - remoteRef:
-        key: 1PASSWORD_SERVICE_ACCOUNT_TOKEN
-      secretKey: 1PASSWORD_SERVICE_ACCOUNT_TOKEN
+  dataFrom:
+    - find:
+        name:
+          regexp: '^(GEMINI_HARNESS_API_KEY|ANTIGRAVITY_OAUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|CODEX_AUTH_JSON|MUSE_AUTH_JSON)$'
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -674,10 +651,10 @@ metadata:
   name: eri-ssh-key
   namespace: default
 spec:
-  data:
-    - remoteRef:
-        key: SSH_PRIVATE_KEY
-      secretKey: SSH_PRIVATE_KEY
+  dataFrom:
+    - find:
+        name:
+          regexp: '^SSH_PRIVATE_KEY$'
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -711,23 +688,6 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: victoriametrics-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: HA_METRICS_TOKEN
-      secretKey: HA_METRICS_TOKEN
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
   name: victoria-admin-secret
   namespace: default
 spec:
@@ -735,29 +695,6 @@ spec:
     - remoteRef:
         key: VICTORIA_ADMIN_AUTH_KEY
       secretKey: VICTORIA_ADMIN_AUTH_KEY
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: homepage-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: HA_TOKEN
-      secretKey: HA_TOKEN
-    - remoteRef:
-        key: UNIFI_PASS
-      secretKey: UNIFI_PASS
-    - remoteRef:
-        key: QNAP_PASS
-      secretKey: QNAP_PASS
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -821,12 +758,10 @@ spec:
     - remoteRef:
         key: POSTGRES_PASSWORD
       secretKey: POSTGRES_PASSWORD
-    - remoteRef:
-        key: GEMINI_HARNESS_API_KEY
-      secretKey: GEMINI_HARNESS_API_KEY
-    - remoteRef:
-        key: TWILIO_AUTH_TOKEN
-      secretKey: TWILIO_AUTH_TOKEN
+  dataFrom:
+    - find:
+        name:
+          regexp: '^(GEMINI_HARNESS_API_KEY|TWILIO_AUTH_TOKEN)$'
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -845,17 +780,12 @@ spec:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
     - remoteRef:
-        key: ANTIGRAVITY_OAUTH_TOKEN
-      secretKey: ANTIGRAVITY_OAUTH_TOKEN
-    - remoteRef:
-        key: CLAUDE_CODE_OAUTH_TOKEN
-      secretKey: CLAUDE_CODE_OAUTH_TOKEN
-    - remoteRef:
-        key: CODEX_AUTH_JSON
-      secretKey: CODEX_AUTH_JSON
-    - remoteRef:
         key: POSTGRES_PASSWORD
       secretKey: POSTGRES_PASSWORD
+  dataFrom:
+    - find:
+        name:
+          regexp: '^(ANTIGRAVITY_OAUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|CODEX_AUTH_JSON)$'
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
