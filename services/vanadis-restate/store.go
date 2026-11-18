@@ -7,14 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -22,33 +19,26 @@ import (
 )
 
 const (
-	statusPending            = "pending"
-	statusRunning            = "running"
-	statusCoding             = "coding"
-	statusOpen               = "open"
-	statusPROpened           = "pr_opened"
-	statusMerged             = "merged"
-	statusSynced             = "synced"
-	statusDeploying          = "deploying"
-	statusDeployed           = "deployed"
-	statusConflict           = "conflict"
-	statusDeployFailed       = "deploy_failed"
-	statusCIFailed           = "ci_failed"
-	chunkModeAction          = "action"
-	defaultRepoOwner         = "azylman"
-	effortLow                = "low"
-	effortMedium             = "medium"
-	effortHigh               = "high"
-	insertChunkSQL           = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
-	selectChunksForUpdateSQL = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
+	statusPending      = "pending"
+	statusRunning      = "running"
+	statusCoding       = "coding"
+	statusOpen         = "open"
+	statusPROpened     = "pr_opened"
+	statusMerged       = "merged"
+	statusSynced       = "synced"
+	statusDeploying    = "deploying"
+	statusDeployed     = "deployed"
+	statusConflict     = "conflict"
+	statusDeployFailed = "deploy_failed"
+	statusCIFailed     = "ci_failed"
+	chunkModeAction    = "action"
+	defaultRepoOwner   = "azylman"
+	effortLow          = "low"
+	effortMedium       = "medium"
+	effortHigh         = "high"
 )
 
-var (
-	ErrBuildNotFound     = errors.New("vanadis build not found")
-	ErrChunkNotFound     = errors.New("vanadis chunk not found")
-	ErrBuildConflict     = errors.New("vanadis build state conflict")
-	ErrInvalidBuildInput = errors.New("invalid vanadis build input")
-)
+var ErrChunkNotFound = errors.New("vanadis chunk not found")
 
 type CreateBuildRequest struct {
 	ID            string                   `json:"id"`
@@ -99,11 +89,11 @@ func (s *PostgresVanadisStore) UpdateChunkStatus(ctx context.Context, chunkID, s
 }
 
 func (s *PostgresVanadisStore) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "status", status, false, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status", ErrBuildNotFound)
+	return s.execUpdateByID(ctx, "build id", buildID, "status", status, false, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status", store.ErrBuildNotFound)
 }
 
 func (s *PostgresVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "message_id", messageID, true, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status_message_id", ErrBuildNotFound)
+	return s.execUpdateByID(ctx, "build id", buildID, "message_id", messageID, true, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status_message_id", store.ErrBuildNotFound)
 }
 
 func (s *PostgresVanadisStore) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
@@ -124,212 +114,6 @@ func (s *PostgresVanadisStore) ReserveChunkForLaunch(ctx context.Context, chunkI
 	return nil
 }
 
-func insertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.VanadisChunk, cQ string) error {
-	cMode, err := store.NormalizeChunkMode(c.Mode)
-	if err != nil {
-		return fmt.Errorf("chunk %s: %w", c.ID, err)
-	}
-	cRepo := ""
-	if cMode == "pr" {
-		cRepo = store.NormalizeRepo(c.Repo)
-		if cRepo == "" {
-			return fmt.Errorf("chunk %s: repo is required for pr mode", c.ID)
-		}
-	} else {
-		if strings.TrimSpace(c.Repo) != "" {
-			return fmt.Errorf("chunk %s: action chunk must have empty repo", c.ID)
-		}
-		if len(c.TargetFiles) > 0 || len(c.TargetSymbols) > 0 {
-			return fmt.Errorf("chunk %s: action chunk must not specify target files or symbols", c.ID)
-		}
-	}
-	cStatus := store.FirstNonEmpty(strings.TrimSpace(c.Status), "pending")
-	cEffort, err := store.NormalizeChunkEffort(c.Effort)
-	if err != nil {
-		return fmt.Errorf("chunk %s: %w", c.ID, err)
-	}
-	var prNum, startedAt, completedAt any
-	if c.PRNumber > 0 {
-		prNum = c.PRNumber
-	}
-	if !c.StartedAt.IsZero() {
-		startedAt = c.StartedAt
-	} else if cStatus == statusRunning || cStatus == statusCoding {
-		startedAt = time.Now().UTC()
-	}
-	if !c.CompletedAt.IsZero() {
-		completedAt = c.CompletedAt
-	} else if isTerminalChunkStatus(cStatus) {
-		completedAt = time.Now().UTC()
-	}
-	ciChecksJSON := marshalJSONBOrEmpty(c.CIChecks)
-	rolloutStateJSON := marshalJSONBOrEmpty(c.RolloutState)
-	if _, err := tx.Exec(ctx, cQ,
-		strings.TrimSpace(c.ID), buildID, c.ChunkIndex, cMode, cRepo,
-		strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions),
-		store.NonNilSlice(c.TargetFiles), store.NonNilSlice(c.TargetSymbols), cEffort,
-		store.NonNilSlice(c.AcceptanceCriteria), cStatus, prNum, c.StallNudges,
-		store.NonNilSlice(c.DependsOn), c.CIFailCount, ciChecksJSON, rolloutStateJSON,
-		strings.TrimSpace(c.Banner), strings.TrimSpace(c.MergeAwakeableID),
-		strings.TrimSpace(c.DeployAwakeableID), startedAt, completedAt,
-	); err != nil {
-		if knownCreationConflict(err, "vanadis_chunks_pkey", "uq_vanadis_chunks_build_index") {
-			return fmt.Errorf("%w: chunk %q in build %q already exists", ErrBuildConflict, c.ID, buildID)
-		}
-		return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
-	}
-	return nil
-}
-
-// Only constraints owned by build creation are deterministic conflicts.
-// Unrecognized database failures retain their original retryable error chain.
-func knownCreationConflict(err error, constraints ...string) bool {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
-		return false
-	}
-	return slices.Contains(constraints, pgErr.ConstraintName)
-}
-
-// Compare immutable request fields only: execution may already have advanced
-// after a successful commit whose acknowledgement was lost.
-func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.VanadisBuild, bc []model.VanadisChunk) bool {
-	buildKey := func(v model.VanadisBuild) model.VanadisBuild {
-		return model.VanadisBuild{
-			ID: strings.TrimSpace(v.ID), ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
-			Title:     store.FirstNonEmpty(strings.TrimSpace(v.Title), strings.TrimSpace(v.Objective)),
-			Objective: strings.TrimSpace(v.Objective), SharedContext: strings.TrimSpace(v.SharedContext), Quiet: v.Quiet,
-		}
-	}
-	if buildKey(a) != buildKey(b) || len(ac) != len(bc) {
-		return false
-	}
-	chunkKey := func(c model.VanadisChunk) (model.VanadisChunk, error) {
-		mode, err := store.NormalizeChunkMode(c.Mode)
-		if err != nil {
-			return model.VanadisChunk{}, err
-		}
-		effort, err := store.NormalizeChunkEffort(c.Effort)
-		if err != nil {
-			return model.VanadisChunk{}, err
-		}
-		repo := ""
-		if mode == "pr" {
-			repo = store.NormalizeRepo(c.Repo)
-		}
-		return model.VanadisChunk{
-			ID: strings.TrimSpace(c.ID), ChunkIndex: c.ChunkIndex, Mode: mode, Repo: repo,
-			Title: strings.TrimSpace(c.Title), Instructions: strings.TrimSpace(c.Instructions),
-			TargetFiles: store.NonNilSlice(c.TargetFiles), TargetSymbols: store.NonNilSlice(c.TargetSymbols),
-			Effort: effort, AcceptanceCriteria: store.NonNilSlice(c.AcceptanceCriteria), DependsOn: store.NonNilSlice(c.DependsOn),
-		}, nil
-	}
-	byID := make(map[string]model.VanadisChunk, len(ac))
-	for _, c := range ac {
-		key, err := chunkKey(c)
-		if err != nil {
-			return false
-		}
-		byID[c.ID] = key
-	}
-	for _, c := range bc {
-		old, ok := byID[strings.TrimSpace(c.ID)]
-		key, err := chunkKey(c)
-		if err != nil || !ok || !reflect.DeepEqual(old, key) {
-			return false
-		}
-		delete(byID, strings.TrimSpace(c.ID))
-	}
-	return len(byID) == 0
-}
-
-func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	buildID, threadID, objective := strings.TrimSpace(build.ID), strings.TrimSpace(build.ThreadID), strings.TrimSpace(build.Objective)
-	if err := validateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
-		return err
-	}
-	normChunks, err := normalizeAndValidateBuildDAG(chunks)
-	if err != nil {
-		return err
-	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] tx rollback error: %v", rbErr)
-		}
-	}()
-	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING;`
-	now := time.Now().UTC()
-	bTitle := store.FirstNonEmpty(strings.TrimSpace(build.Title), objective)
-	tag, err := tx.Exec(ctx, bQ, buildID, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), store.FirstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now)
-	if err != nil {
-		return fmt.Errorf("failed to insert vanadis build: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		// ON CONFLICT waits for an ambiguous prior commit without aborting this
-		// transaction. Lock the build before comparing its complete chunk set.
-		existing, err := store.ScanBuild(tx.QueryRow(ctx, "SELECT "+store.BuildColumns+" FROM vanadis_builds WHERE id = $1 FOR UPDATE;", buildID))
-		if err != nil {
-			return fmt.Errorf("read existing build: %w", err)
-		}
-		rows, err := tx.Query(ctx, selectChunksForUpdateSQL, buildID)
-		if err != nil {
-			return fmt.Errorf("read existing chunks: %w", err)
-		}
-		persisted, err := store.ScanChunks(rows)
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		if !sameBuildCreation(existing, persisted, build, normChunks) {
-			return fmt.Errorf("%w: build %q already exists with different creation data", ErrBuildConflict, buildID)
-		}
-		return tx.Commit(ctx)
-	}
-	for _, c := range normChunks {
-		if err := insertBuildChunk(ctx, tx, buildID, c, insertChunkSQL); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
-}
-
-func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if s == nil || s.db == nil {
-		return nil, nil, errors.New("database connection is nil")
-	}
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return nil, nil, errors.New("build id cannot be empty")
-	}
-	bQ := `SELECT ` + store.BuildColumns + ` FROM vanadis_builds WHERE id = $1;`
-	row := s.db.QueryRow(ctx, bQ, buildID)
-	b, err := store.ScanBuild(row)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, ErrBuildNotFound
-		}
-		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
-	}
-	cQ := `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
-	rows, err := s.db.Query(ctx, cQ, buildID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
-	}
-	defer rows.Close()
-	chunks, err := store.ScanChunks(rows)
-	if err != nil {
-		return nil, nil, err
-	}
-	return &b, chunks, nil
-}
-
 func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, req store.UpdateBuildRequest) (*model.VanadisBuild, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
@@ -339,7 +123,7 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 	obj := strings.TrimSpace(req.Objective)
 	sharedCtx := strings.TrimSpace(req.SharedContext)
 	if buildID == "" || (title == "" && obj == "" && sharedCtx == "") {
-		return nil, fmt.Errorf("%w: build id and at least one non-empty field (title, objective, shared_context) are required", ErrInvalidBuildInput)
+		return nil, fmt.Errorf("%w: build id and at least one non-empty field (title, objective, shared_context) are required", store.ErrInvalidBuildInput)
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -355,12 +139,12 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 	checkErr := tx.QueryRow(ctx, `SELECT status FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID).Scan(&currentStatus)
 	if checkErr != nil {
 		if errors.Is(checkErr, pgx.ErrNoRows) {
-			return nil, ErrBuildNotFound
+			return nil, store.ErrBuildNotFound
 		}
 		return nil, fmt.Errorf("check build status: %w", checkErr)
 	}
 	if currentStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, currentStatus)
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", store.ErrBuildConflict, buildID, currentStatus)
 	}
 
 	const updateQ = `UPDATE vanadis_builds SET title = CASE WHEN $2 != '' THEN $2 ELSE title END, objective = CASE WHEN $3 != '' THEN $3 ELSE objective END, shared_context = CASE WHEN $4 != '' THEN $4 ELSE shared_context END, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
@@ -382,21 +166,21 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 
 func validateUpdateChunkInput(buildID, chunkRef string, req store.UpdateChunkRequest) (string, error) {
 	if buildID == "" || chunkRef == "" {
-		return "", fmt.Errorf("%w: build id and chunk ref are required", ErrInvalidBuildInput)
+		return "", fmt.Errorf("%w: build id and chunk ref are required", store.ErrInvalidBuildInput)
 	}
 	hasField := req.Mode != nil || strings.TrimSpace(req.Repo) != "" ||
 		strings.TrimSpace(req.Title) != "" || strings.TrimSpace(req.Instructions) != "" ||
 		len(req.TargetFiles) > 0 || len(req.TargetSymbols) > 0 ||
 		strings.TrimSpace(req.Effort) != "" || req.DependsOn != nil
 	if !hasField {
-		return "", fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
+		return "", fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", store.ErrInvalidBuildInput)
 	}
 	if req.Mode != nil {
 		if strings.TrimSpace(*req.Mode) == "" {
-			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", ErrInvalidBuildInput)
+			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", store.ErrInvalidBuildInput)
 		}
 		if _, err := store.NormalizeChunkMode(*req.Mode); err != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+			return "", fmt.Errorf("%w: %w", store.ErrInvalidBuildInput, err)
 		}
 	}
 	var normEffort string
@@ -404,7 +188,7 @@ func validateUpdateChunkInput(buildID, chunkRef string, req store.UpdateChunkReq
 		var effErr error
 		normEffort, effErr = store.NormalizeChunkEffort(req.Effort)
 		if effErr != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
+			return "", fmt.Errorf("%w: %w", store.ErrInvalidBuildInput, effErr)
 		}
 	}
 	return normEffort, nil
@@ -433,20 +217,20 @@ func resolveChunkRef(chunks []model.VanadisChunk, chunkRef string) int {
 func applyChunkModeUpdates(chunk *model.VanadisChunk, req store.UpdateChunkRequest, effectiveMode, effectiveRepo string) error {
 	if effectiveMode == "pr" {
 		if effectiveRepo == "" {
-			return fmt.Errorf("%w: repo is required for pr mode", ErrInvalidBuildInput)
+			return fmt.Errorf("%w: repo is required for pr mode", store.ErrInvalidBuildInput)
 		}
 		chunk.Mode = effectiveMode
 		chunk.Repo = effectiveRepo
 		return nil
 	}
 	if strings.TrimSpace(req.Repo) != "" {
-		return fmt.Errorf("%w: action chunk must have empty repo", ErrInvalidBuildInput)
+		return fmt.Errorf("%w: action chunk must have empty repo", store.ErrInvalidBuildInput)
 	}
 	if len(req.TargetFiles) > 0 {
-		return fmt.Errorf("%w: action chunk must not specify target_files", ErrInvalidBuildInput)
+		return fmt.Errorf("%w: action chunk must not specify target_files", store.ErrInvalidBuildInput)
 	}
 	if len(req.TargetSymbols) > 0 {
-		return fmt.Errorf("%w: action chunk must not specify target_symbols", ErrInvalidBuildInput)
+		return fmt.Errorf("%w: action chunk must not specify target_symbols", store.ErrInvalidBuildInput)
 	}
 	chunk.Mode = effectiveMode
 	chunk.Repo = ""
@@ -466,7 +250,7 @@ func applyChunkUpdates(chunk *model.VanadisChunk, req store.UpdateChunkRequest, 
 	}
 	normMode, modeErr := store.NormalizeChunkMode(effectiveMode)
 	if modeErr != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidBuildInput, modeErr)
+		return fmt.Errorf("%w: %w", store.ErrInvalidBuildInput, modeErr)
 	}
 	if err := applyChunkModeUpdates(chunk, req, normMode, effectiveRepo); err != nil {
 		return err
@@ -516,15 +300,15 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 	bErr := tx.QueryRow(ctx, `SELECT status FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID).Scan(&buildStatus)
 	if bErr != nil {
 		if errors.Is(bErr, pgx.ErrNoRows) {
-			return nil, ErrBuildNotFound
+			return nil, store.ErrBuildNotFound
 		}
 		return nil, fmt.Errorf("lock build for update chunk: %w", bErr)
 	}
 	if buildStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, buildStatus)
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", store.ErrBuildConflict, buildID, buildStatus)
 	}
 
-	cRows, err := tx.Query(ctx, selectChunksForUpdateSQL, buildID)
+	cRows, err := tx.Query(ctx, store.SelectChunksForUpdateSQL, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("lock chunks for update: %w", err)
 	}
@@ -540,7 +324,7 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 	}
 	targetChunk := existingChunks[targetIdx]
 	if targetChunk.Status != statusPending {
-		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, targetChunk.ID, targetChunk.Status)
+		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", store.ErrBuildConflict, targetChunk.ID, targetChunk.Status)
 	}
 
 	updatedCandidate := targetChunk
@@ -568,20 +352,20 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 
 func validateAppendChunksInputs(buildID string, inputs []store.CreateChunkInput) error {
 	if buildID == "" || len(inputs) == 0 {
-		return fmt.Errorf("%w: build id and at least one chunk are required", ErrInvalidBuildInput)
+		return fmt.Errorf("%w: build id and at least one chunk are required", store.ErrInvalidBuildInput)
 	}
 	for i, inp := range inputs {
 		if strings.TrimSpace(inp.Title) == "" || strings.TrimSpace(inp.Instructions) == "" {
-			return fmt.Errorf("%w: chunk[%d] title and instructions cannot be empty", ErrInvalidBuildInput, i)
+			return fmt.Errorf("%w: chunk[%d] title and instructions cannot be empty", store.ErrInvalidBuildInput, i)
 		}
 		if id := strings.TrimSpace(inp.ID); id != "" && !store.IsValidVanadisChunkID(id) {
-			return fmt.Errorf("%w: chunk[%d] invalid id %q", ErrInvalidBuildInput, i, id)
+			return fmt.Errorf("%w: chunk[%d] invalid id %q", store.ErrInvalidBuildInput, i, id)
 		}
 		if err := store.ValidateChunkModeAndRepo(i, inp.Mode, inp.Repo, inp.TargetFiles, inp.TargetSymbols); err != nil {
-			return fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+			return fmt.Errorf("%w: %w", store.ErrInvalidBuildInput, err)
 		}
 		if _, err := store.NormalizeChunkEffort(inp.Effort); err != nil {
-			return fmt.Errorf("%w: chunk[%d] %w", ErrInvalidBuildInput, i, err)
+			return fmt.Errorf("%w: chunk[%d] %w", store.ErrInvalidBuildInput, i, err)
 		}
 	}
 	return nil
@@ -595,7 +379,7 @@ func buildAppendedChunks(buildID string, existingIDs map[string]bool, startIndex
 			cid = fmt.Sprintf("%s-chunk-%d", buildID, startIndex+i+1)
 		}
 		if existingIDs[cid] {
-			return nil, fmt.Errorf("%w: duplicate chunk id %q in build %s", ErrBuildConflict, cid, buildID)
+			return nil, fmt.Errorf("%w: duplicate chunk id %q in build %s", store.ErrBuildConflict, cid, buildID)
 		}
 		existingIDs[cid] = true
 		cMode, err := store.NormalizeChunkMode(inp.Mode)
@@ -654,15 +438,15 @@ func (s *PostgresVanadisStore) AppendChunks(ctx context.Context, buildID string,
 	bErr := tx.QueryRow(ctx, `SELECT status FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID).Scan(&buildStatus)
 	if bErr != nil {
 		if errors.Is(bErr, pgx.ErrNoRows) {
-			return nil, ErrBuildNotFound
+			return nil, store.ErrBuildNotFound
 		}
 		return nil, fmt.Errorf("lock build for append chunks: %w", bErr)
 	}
 	if buildStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, buildStatus)
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", store.ErrBuildConflict, buildID, buildStatus)
 	}
 
-	cRows, err := tx.Query(ctx, selectChunksForUpdateSQL, buildID)
+	cRows, err := tx.Query(ctx, store.SelectChunksForUpdateSQL, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("lock chunks for append: %w", err)
 	}
@@ -688,7 +472,7 @@ func (s *PostgresVanadisStore) AppendChunks(ctx context.Context, buildID string,
 	}
 
 	for _, c := range validatedNew {
-		if err := insertBuildChunk(ctx, tx, buildID, c, insertChunkSQL); err != nil {
+		if err := store.InsertBuildChunk(ctx, tx, buildID, c, store.InsertChunkSQL); err != nil {
 			return nil, err
 		}
 	}
@@ -705,7 +489,7 @@ func (s *PostgresVanadisStore) RemoveChunk(ctx context.Context, buildID, chunkRe
 	}
 	buildID, chunkRef = strings.TrimSpace(buildID), strings.TrimSpace(chunkRef)
 	if buildID == "" || chunkRef == "" {
-		return nil, nil, fmt.Errorf("%w: build id and chunk ref are required", ErrInvalidBuildInput)
+		return nil, nil, fmt.Errorf("%w: build id and chunk ref are required", store.ErrInvalidBuildInput)
 	}
 
 	tx, err := s.db.Begin(ctx)
@@ -729,10 +513,10 @@ func (s *PostgresVanadisStore) RemoveChunk(ctx context.Context, buildID, chunkRe
 	}
 	removed := existingChunks[targetIdx]
 	if removed.Status != statusPending {
-		return nil, nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, removed.ID, removed.Status)
+		return nil, nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", store.ErrBuildConflict, removed.ID, removed.Status)
 	}
 	if len(existingChunks) <= 1 {
-		return nil, nil, fmt.Errorf("%w: cannot remove the only chunk of build %s", ErrBuildConflict, buildID)
+		return nil, nil, fmt.Errorf("%w: cannot remove the only chunk of build %s", store.ErrBuildConflict, buildID)
 	}
 
 	remaining := make([]model.VanadisChunk, 0, len(existingChunks)-1)
@@ -743,7 +527,7 @@ func (s *PostgresVanadisStore) RemoveChunk(ctx context.Context, buildID, chunkRe
 
 	validatedRemaining, err := normalizeAndValidateBuildDAG(remaining)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: removing chunk causes invalid DAG: %w", ErrBuildConflict, err)
+		return nil, nil, fmt.Errorf("%w: removing chunk causes invalid DAG: %w", store.ErrBuildConflict, err)
 	}
 
 	delTag, err := tx.Exec(ctx, `DELETE FROM vanadis_chunks WHERE id = $1 AND build_id = $2;`, removed.ID, buildID)
@@ -769,15 +553,15 @@ func lockBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) ([]model
 	bErr := tx.QueryRow(ctx, `SELECT status FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID).Scan(&buildStatus)
 	if bErr != nil {
 		if errors.Is(bErr, pgx.ErrNoRows) {
-			return nil, ErrBuildNotFound
+			return nil, store.ErrBuildNotFound
 		}
 		return nil, fmt.Errorf("lock build: %w", bErr)
 	}
 	if buildStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, buildStatus)
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", store.ErrBuildConflict, buildID, buildStatus)
 	}
 
-	cRows, err := tx.Query(ctx, selectChunksForUpdateSQL, buildID)
+	cRows, err := tx.Query(ctx, store.SelectChunksForUpdateSQL, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("lock chunks: %w", err)
 	}

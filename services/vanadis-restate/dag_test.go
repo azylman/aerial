@@ -347,29 +347,6 @@ func TestIsPRDependencyCodeReady(t *testing.T) {
 	}
 }
 
-func TestMarshalJSONBOrEmpty(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		val  any
-		want string
-	}{
-		{name: "nil_value", val: nil, want: "{}"},
-		{name: "unmarshalable_channel", val: make(chan int), want: "{}"},
-		{name: "empty_map", val: map[string]string{}, want: "{}"},
-		{name: "populated_map", val: map[string]string{"foo": "bar"}, want: `{"foo":"bar"}`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := string(marshalJSONBOrEmpty(tc.val))
-			if got != tc.want {
-				t.Errorf("marshalJSONBOrEmpty() = %s, want %s", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestRelinkDependenciesAfterRemoval_SelfDep(t *testing.T) {
 	t.Parallel()
 

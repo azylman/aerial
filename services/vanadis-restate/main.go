@@ -121,10 +121,10 @@ func isClientReconcileError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, ErrInvalidBuildInput) ||
-		errors.Is(err, ErrBuildNotFound) ||
+	if errors.Is(err, store.ErrInvalidBuildInput) ||
+		errors.Is(err, store.ErrBuildNotFound) ||
 		errors.Is(err, ErrChunkNotFound) ||
-		errors.Is(err, ErrBuildConflict) {
+		errors.Is(err, store.ErrBuildConflict) {
 		return true
 	}
 	if termErr, ok := errors.AsType[restate.TerminalError](err); ok {
@@ -426,11 +426,11 @@ func toTerminalErr(err error) error {
 		return nil
 	}
 	switch {
-	case errors.Is(err, ErrInvalidBuildInput):
+	case errors.Is(err, store.ErrInvalidBuildInput):
 		return restate.ToTerminalError(err, restate.WithErrorCode(400))
-	case errors.Is(err, ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound):
+	case errors.Is(err, store.ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound):
 		return restate.ToTerminalError(err, restate.WithErrorCode(404))
-	case errors.Is(err, ErrBuildConflict):
+	case errors.Is(err, store.ErrBuildConflict):
 		return restate.ToTerminalError(err, restate.WithErrorCode(409))
 	default:
 		return err
@@ -489,14 +489,14 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		buildID = strings.TrimSpace(req.ID)
 	}
 	if buildID == "" {
-		err := fmt.Errorf("%w: build id cannot be empty", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: build id cannot be empty", store.ErrInvalidBuildInput)
 		recordReconcileError(labelCreate, err)
 		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	threadID := strings.TrimSpace(req.ThreadID)
 	objective := strings.TrimSpace(req.Objective)
 	if threadID == "" || objective == "" {
-		err := fmt.Errorf("%w: thread_id and objective cannot be empty", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: thread_id and objective cannot be empty", store.ErrInvalidBuildInput)
 		recordReconcileError(labelCreate, err)
 		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -596,7 +596,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 			return model.VanadisBuild{}, err
 		}
 		if bld.Status == statusCompleted || bld.Status == statusFailed {
-			return *bld, fmt.Errorf("%w: cannot cancel terminal build %s", ErrBuildConflict, bld.Status)
+			return *bld, fmt.Errorf("%w: cannot cancel terminal build %s", store.ErrBuildConflict, bld.Status)
 		}
 		if err := b.store.UpdateBuildStatus(rc, buildID, statusCancelled); err != nil {
 			return model.VanadisBuild{}, err
@@ -626,7 +626,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 // AppendChunks appends chunks to a running build and advances the DAG.
 func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) ([]model.VanadisChunk, error) {
 	if len(req.Chunks) == 0 {
-		err := fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: chunks cannot be empty", store.ErrInvalidBuildInput)
 		recordReconcileError(labelAppendChunks, err)
 		return nil, restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
 	}
@@ -654,7 +654,7 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req store.UpdateChu
 	buildID := restate.Key(ctx)
 	chunkRef := strings.TrimSpace(req.ChunkRef)
 	if chunkRef == "" {
-		err := fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: chunk_ref cannot be empty", store.ErrInvalidBuildInput)
 		recordReconcileError(labelUpdateChunk, err)
 		return model.VanadisChunk{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -683,7 +683,7 @@ func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequ
 	buildID := restate.Key(ctx)
 	targetRef := strings.TrimSpace(req.ChunkRef)
 	if targetRef == "" {
-		err := fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: chunk_ref cannot be empty", store.ErrInvalidBuildInput)
 		recordReconcileError(labelRemoveChunk, err)
 		return restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -762,7 +762,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 	chunkID := strings.TrimSpace(req.ChunkID)
 	reason := strings.TrimSpace(req.Reason)
 	if chunkID == "" || reason == "" {
-		err := fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: chunk_id and reason required", store.ErrInvalidBuildInput)
 		recordReconcileError(labelFailChunk, err)
 		return FailChunkResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -869,7 +869,7 @@ func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, p
 		return gErr
 	}
 	if bld == nil {
-		return ErrBuildNotFound
+		return store.ErrBuildNotFound
 	}
 	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
 		slog.WarnContext(rc, "[vanadis-restate] wake prompt warning", "error", dErr)
@@ -1238,7 +1238,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
-		if errors.Is(err, ErrBuildNotFound) {
+		if errors.Is(err, store.ErrBuildNotFound) {
 			return reconcileStepOutput{BuildStatus: statusNotFound}, nil
 		}
 		return reconcileStepOutput{}, err

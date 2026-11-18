@@ -38,7 +38,7 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 			st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
 			_, _, _, err := st.AttachChunkPR(context.Background(), attachRequest("c1", "aerial"))
 			if tc.wantConflict {
-				assertStoreErr(t, err, ErrBuildConflict, false)
+				assertStoreErr(t, err, store.ErrBuildConflict, false)
 			} else if err != nil {
 				t.Fatal(err)
 			}
@@ -63,24 +63,24 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 		{name: "middle", parent: "failed", status: "failed", index: 1},
 		{name: "final", parent: "failed", status: "failed", index: 2},
 		{name: "duplicate after failure", parent: "failed", status: "failed", previous: 101},
-		{name: "cancelled chunk", parent: "running", status: "cancelled", wantErr: ErrBuildConflict},
-		{name: "completed different PR", parent: "running", status: "completed", previous: 100, wantErr: ErrBuildConflict},
+		{name: "cancelled chunk", parent: "running", status: "cancelled", wantErr: store.ErrBuildConflict},
+		{name: "completed different PR", parent: "running", status: "completed", previous: 100, wantErr: store.ErrBuildConflict},
 		{name: "completed matching PR", parent: "running", status: "completed", previous: 101},
 		{name: "merged matching PR", parent: "running", status: "merged", previous: 101},
-		{name: "merged different PR", parent: "running", status: "merged", previous: 100, wantErr: ErrBuildConflict},
+		{name: "merged different PR", parent: "running", status: "merged", previous: 100, wantErr: store.ErrBuildConflict},
 		{name: "synced matching PR", parent: "running", status: "synced", previous: 101},
-		{name: "synced different PR", parent: "running", status: "synced", previous: 100, wantErr: ErrBuildConflict},
+		{name: "synced different PR", parent: "running", status: "synced", previous: 100, wantErr: store.ErrBuildConflict},
 		{name: "deploying matching PR", parent: "running", status: "deploying", previous: 101},
-		{name: "deploying different PR", parent: "running", status: "deploying", previous: 100, wantErr: ErrBuildConflict},
+		{name: "deploying different PR", parent: "running", status: "deploying", previous: 100, wantErr: store.ErrBuildConflict},
 		{name: "deployed matching PR", parent: "running", status: "deployed", previous: 101},
-		{name: "deployed different PR", parent: "running", status: "deployed", previous: 100, wantErr: ErrBuildConflict},
+		{name: "deployed different PR", parent: "running", status: "deployed", previous: 100, wantErr: store.ErrBuildConflict},
 		{name: "deploy_failed matching PR", parent: "running", status: "deploy_failed", previous: 101},
-		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantErr: ErrBuildConflict},
+		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantErr: store.ErrBuildConflict},
 		{name: "duplicate at cap", parent: "failed", status: "failed", previous: 101, cap: 3},
-		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErr: ErrBuildConflict},
-		{name: "completed parent", parent: "completed", status: "failed", wantErr: ErrBuildConflict},
-		{name: "failed sibling", parent: "failed", status: "failed", sibling: "failed", wantErr: ErrBuildConflict},
-		{name: "cancelled sibling", parent: "failed", status: "failed", sibling: "cancelled", wantErr: ErrBuildConflict},
+		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErr: store.ErrBuildConflict},
+		{name: "completed parent", parent: "completed", status: "failed", wantErr: store.ErrBuildConflict},
+		{name: "failed sibling", parent: "failed", status: "failed", sibling: "failed", wantErr: store.ErrBuildConflict},
+		{name: "cancelled sibling", parent: "failed", status: "failed", sibling: "cancelled", wantErr: store.ErrBuildConflict},
 		{name: "chunk write failure", parent: "failed", status: "failed", failure: "UPDATE vanadis_chunks", wantErr: writeErr},
 		{name: "parent write failure", parent: "failed", status: "failed", failure: "UPDATE vanadis_builds", wantErr: writeErr},
 		{name: "commit failure", parent: "failed", status: "failed", commitErr: writeErr, wantErr: writeErr},

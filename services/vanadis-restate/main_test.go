@@ -631,10 +631,10 @@ func TestToTerminalErr(t *testing.T) {
 		wantCode restate.Code
 	}{
 		{name: "nil error", err: nil, wantNil: true},
-		{name: "invalid build input", err: ErrInvalidBuildInput, wantCode: 400},
-		{name: "build not found", err: ErrBuildNotFound, wantCode: 404},
+		{name: "invalid build input", err: store.ErrInvalidBuildInput, wantCode: 400},
+		{name: "build not found", err: store.ErrBuildNotFound, wantCode: 404},
 		{name: "chunk not found", err: ErrChunkNotFound, wantCode: 404},
-		{name: "build conflict", err: ErrBuildConflict, wantCode: 409},
+		{name: "build conflict", err: store.ErrBuildConflict, wantCode: 409},
 		{name: "unknown error", err: errors.New("something exploded"), wantCode: 0},
 	}
 	for _, tc := range tests {
@@ -875,7 +875,7 @@ func TestBuildObject_Transitions_Extended(t *testing.T) {
 	assert.NoError(t, err)
 
 	// build not found
-	storeNotFound, _ := dbScript{row: errRow(ErrBuildNotFound)}.open()
+	storeNotFound, _ := dbScript{row: errRow(store.ErrBuildNotFound)}.open()
 	boNotFound := NewBuildObject("", nil).WithAuthority(storeNotFound, exec)
 	res, err = boNotFound.Reconcile(ctx, ReconcileBuildRequest{})
 	assert.NoError(t, err)
@@ -1286,7 +1286,7 @@ func TestBuildObject_ReconcileTerminalStatuses(t *testing.T) {
 	}
 
 	// Build not found returns not_found
-	storeNF, _ := dbScript{row: errRow(ErrBuildNotFound)}.open()
+	storeNF, _ := dbScript{row: errRow(store.ErrBuildNotFound)}.open()
 	boNF := NewBuildObject("", nil).WithAuthority(storeNF, nil)
 	outNF, err := boNF.executeAuthoritativeTransition(context.Background(), "b-nf", nil, nil, false)
 	assert.NoError(t, err)
