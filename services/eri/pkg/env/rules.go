@@ -11,6 +11,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
 const (
@@ -133,7 +135,22 @@ func discoverRuleFiles(dir, subfolder, prefix string) ([]ruleSourceFile, error) 
 	return files, nil
 }
 
-func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string) ([]ruleSourceFile, error) {
+func discoverDiscordEngineRules(aerialDir, configDir, eng string) ([]ruleSourceFile, []ruleSourceFile, error) {
+	if eng == "" {
+		return nil, nil, nil
+	}
+	aerialEngine, err := discoverRuleFiles(aerialDir, filepath.Join("discord", eng), fmt.Sprintf("25_aerial_discord_%s_", eng))
+	if err != nil {
+		return nil, nil, err
+	}
+	configEngine, err := discoverRuleFiles(configDir, filepath.Join("discord", eng), fmt.Sprintf("35_user_discord_%s_", eng))
+	if err != nil {
+		return nil, nil, err
+	}
+	return aerialEngine, configEngine, nil
+}
+
+func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string, engine ...string) ([]ruleSourceFile, error) {
 	aerialDir := resolveDir(p.aerialRulesDir, DefaultAerialRulesPaths)
 	configDir := resolveDir(p.configRulesDir, DefaultConfigRulesPaths)
 
@@ -183,6 +200,18 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 		return nil, err
 	}
 
+	// 4b. Engine-specific target rules from aerial and aerial-config:
+	// prefix 25_aerial_discord_<eng>_ and 35_user_discord_<eng>_
+	var aerialEngineTarget, configEngineTarget []ruleSourceFile
+	if target == TargetDiscord && len(engine) > 0 {
+		var engErr error
+		eng := strings.ToLower(strings.TrimSpace(engine[0]))
+		aerialEngineTarget, configEngineTarget, engErr = discoverDiscordEngineRules(aerialDir, configDir, eng)
+		if engErr != nil {
+			return nil, engErr
+		}
+	}
+
 	// 5. Target rules from aerial-config: prefix 30_user_<target>_
 	configTarget, err := discoverRuleFiles(configDir, string(target), fmt.Sprintf("30_user_%s_", target))
 	if err != nil {
@@ -190,7 +219,16 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 	}
 
 	var allRules []ruleSourceFile
-	for _, set := range [][]ruleSourceFile{aerialCommon, aerialPersona, configCommon, configPersona, aerialTarget, configTarget} {
+	for _, set := range [][]ruleSourceFile{
+		aerialCommon,
+		aerialPersona,
+		configCommon,
+		configPersona,
+		aerialTarget,
+		aerialEngineTarget,
+		configTarget,
+		configEngineTarget,
+	} {
 		allRules = append(allRules, set...)
 	}
 
@@ -553,10 +591,28 @@ func (p *Provisioner) linkPrimarySharedAssets(primaryClaude, primaryCodex string
 	}
 }
 
-func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
+func (p *Provisioner) compileDiscordEngineRules(customPrompt string) (map[string][]ruleSourceFile, error) {
+	engines := []string{
+		config.EngineAgy,
+		config.EngineClaude,
+		config.EngineCodex,
+		config.EngineMuse,
+	}
+	compiled := make(map[string][]ruleSourceFile, len(engines))
+	for _, eng := range engines {
+		rules, err := p.compileTargetRules(TargetDiscord, customPrompt, eng)
+		if err != nil {
+			return nil, err
+		}
+		compiled[eng] = rules
+	}
+	return compiled, nil
+}
+
+func (p *Provisioner) syncPrimaryRulesAssets(discordEngineRules map[string][]ruleSourceFile) {
 	primaryClaude := filepath.Join(p.homeDir, ".claude")
 	if p.dataDir == "" {
-		if err := p.syncClaudeMD(discordRules, primaryClaude); err != nil {
+		if err := p.syncClaudeMD(discordEngineRules[config.EngineClaude], primaryClaude); err != nil {
 			log.Printf("[Env] Warning: failed to sync primary CLAUDE.md: %v", err)
 		}
 	} else {
@@ -568,7 +624,7 @@ func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
 	}
 	primaryCodex := filepath.Join(p.homeDir, ".codex")
 	if p.dataDir == "" {
-		if err := p.syncCodexMD(discordRules, primaryCodex); err != nil {
+		if err := p.syncCodexMD(discordEngineRules[config.EngineCodex], primaryCodex); err != nil {
 			log.Printf("[Env] Warning: failed to sync primary AGENTS.md: %v", err)
 		}
 	} else {
@@ -578,7 +634,7 @@ func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
 	}
 	primaryMuse := filepath.Join(p.homeDir, ".config", "muse")
 	if p.dataDir == "" {
-		if err := p.syncCodexMD(discordRules, primaryMuse); err != nil {
+		if err := p.syncCodexMD(discordEngineRules[config.EngineMuse], primaryMuse); err != nil {
 			log.Printf("[Env] Warning: failed to sync primary muse AGENTS.md: %v", err)
 		}
 	} else {
@@ -591,6 +647,51 @@ func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
 	}
 }
 
+func (p *Provisioner) syncRuntimeTargetRules(
+	target RuleTarget,
+	discordEngineRules map[string][]ruleSourceFile,
+	voiceRules, ephemeralRules []ruleSourceFile,
+) {
+	home := p.runtimeHomeDir(target)
+
+	var geminiRules, claudeRules, codexRules, museRules []ruleSourceFile
+	switch target {
+	case TargetDiscord:
+		geminiRules = discordEngineRules[config.EngineAgy]
+		claudeRules = discordEngineRules[config.EngineClaude]
+		codexRules = discordEngineRules[config.EngineCodex]
+		museRules = discordEngineRules[config.EngineMuse]
+	case TargetVoice:
+		geminiRules = voiceRules
+		claudeRules = voiceRules
+		codexRules = voiceRules
+		museRules = voiceRules
+	case TargetEphemeral:
+		geminiRules = ephemeralRules
+		claudeRules = ephemeralRules
+		codexRules = ephemeralRules
+		museRules = ephemeralRules
+	}
+
+	gemini := filepath.Join(home, ".gemini")
+	if err := p.syncRulesToDir(geminiRules, gemini); err != nil {
+		log.Printf("[Env] Warning: failed to sync rules to %s runtime: %v", target, err)
+	}
+	p.provisionRuntimeSharedAssets(home)
+	claudeDir := filepath.Join(home, ".claude")
+	if err := p.syncClaudeMD(claudeRules, claudeDir); err != nil {
+		log.Printf("[Env] Warning: failed to sync %s runtime CLAUDE.md: %v", target, err)
+	}
+	codexDir := filepath.Join(home, ".codex")
+	if err := p.syncCodexMD(codexRules, codexDir); err != nil {
+		log.Printf("[Env] Warning: failed to sync %s runtime AGENTS.md: %v", target, err)
+	}
+	museDir := filepath.Join(home, ".config", "muse")
+	if err := p.syncCodexMD(museRules, museDir); err != nil {
+		log.Printf("[Env] Warning: failed to sync %s runtime muse AGENTS.md: %v", target, err)
+	}
+}
+
 // SyncRules compiles the modular rules into target runtime directories and primary home.
 func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p == nil || p.homeDir == "" {
@@ -599,12 +700,13 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	systemRulesMu.Lock()
 	defer systemRulesMu.Unlock()
 
-	// 1. Compile Discord target rules
-	discordRules, dErr := p.compileTargetRules(TargetDiscord, customPrompt)
+	// 1. Pre-compile Discord rules across all supported engines
+	discordEngineRules, dErr := p.compileDiscordEngineRules(customPrompt)
 	if dErr != nil {
-		log.Printf("[Env] ERROR: Failed to compile Discord rules: %v; retaining existing rules", dErr)
+		log.Printf("[Env] ERROR: Failed to compile Discord engine rules: %v; retaining existing rules", dErr)
 		return dErr
 	}
+	agyRules := discordEngineRules[config.EngineAgy]
 
 	// 2. Compile Voice target rules
 	voiceRules, vErr := p.compileTargetRules(TargetVoice, "")
@@ -620,40 +722,18 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		return eErr
 	}
 
-	// 4. Sync to primary homeDir (.gemini) with Discord target as default
+	// 4. Sync to primary homeDir (.gemini) with agy Discord target as default
 	primaryGemini := filepath.Join(p.homeDir, ".gemini")
-	if err := p.syncRulesToDir(discordRules, primaryGemini); err != nil {
+	if err := p.syncRulesToDir(agyRules, primaryGemini); err != nil {
 		return fmt.Errorf("failed to sync rules to primary home: %w", err)
 	}
-	log.Printf("[Env] Configured modular rules in %s (target: discord)", primaryGemini)
-	p.syncPrimaryRulesAssets(discordRules)
+	log.Printf("[Env] Configured modular rules in %s (target: discord, engine: agy)", primaryGemini)
+	p.syncPrimaryRulesAssets(discordEngineRules)
 
 	// 5. If dataDir is configured, provision isolated runtimes for discord, voice, and ephemeral
 	if p.dataDir != "" {
-		compiled := map[RuleTarget][]ruleSourceFile{
-			TargetDiscord:   discordRules,
-			TargetVoice:     voiceRules,
-			TargetEphemeral: ephemeralRules,
-		}
 		for _, target := range allRuntimeTargets {
-			home := p.runtimeHomeDir(target)
-			gemini := filepath.Join(home, ".gemini")
-			if err := p.syncRulesToDir(compiled[target], gemini); err != nil {
-				log.Printf("[Env] Warning: failed to sync rules to %s runtime: %v", target, err)
-			}
-			p.provisionRuntimeSharedAssets(home)
-			claudeDir := filepath.Join(home, ".claude")
-			if err := p.syncClaudeMD(compiled[target], claudeDir); err != nil {
-				log.Printf("[Env] Warning: failed to sync %s runtime CLAUDE.md: %v", target, err)
-			}
-			codexDir := filepath.Join(home, ".codex")
-			if err := p.syncCodexMD(compiled[target], codexDir); err != nil {
-				log.Printf("[Env] Warning: failed to sync %s runtime AGENTS.md: %v", target, err)
-			}
-			museDir := filepath.Join(home, ".config", "muse")
-			if err := p.syncCodexMD(compiled[target], museDir); err != nil {
-				log.Printf("[Env] Warning: failed to sync %s runtime muse AGENTS.md: %v", target, err)
-			}
+			p.syncRuntimeTargetRules(target, discordEngineRules, voiceRules, ephemeralRules)
 		}
 	}
 
