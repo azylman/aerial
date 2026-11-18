@@ -23,6 +23,10 @@ permissions:
 
 jobs:
   changes:
+    permissions:
+      contents: read
+      packages: write
+      checks: write
     name: Detect Changed Microservices
     runs-on: [self-hosted, ci]
     outputs:
@@ -106,6 +110,9 @@ jobs:
               - 'services/migrator/**'
               - 'services/eri/atlas.hcl'
 
+      - name: Test Build Metadata Publisher
+        run: node --test scripts/build-metadata.test.cjs
+
       - name: Compute Dynamic Build Matrix
         id: set-matrix
         run: |
@@ -158,6 +165,13 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(active)}\n`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_builds=${active.length > 0}\n`);
           '
+
+      - name: Publish Build Selection
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MATRIX_JSON: ${{ steps.set-matrix.outputs.matrix }}
+          HAS_BUILDS: ${{ steps.set-matrix.outputs.has_builds }}
+        run: node scripts/build-metadata.cjs manifest
 
   test:
     name: Run Service Unit Tests
@@ -379,10 +393,19 @@ jobs:
           if-no-files-found: ignore
 
   build-and-push:
+    permissions:
+      contents: read
+      packages: write
+      checks: write
     name: Build & Push Images to GHCR (${{ matrix.service }})
     needs: changes
     if: needs.changes.outputs.has_builds == 'true'
     runs-on: [self-hosted, ci]
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MATRIX_JSON: ${{ needs.changes.outputs.matrix }}
+      HAS_BUILDS: ${{ needs.changes.outputs.has_builds }}
+      SERVICE_JSON: ${{ toJSON(matrix) }}
     strategy:
       fail-fast: false
       matrix:
@@ -391,6 +414,10 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
+
+      - name: Publish Running Image Result
+        id: metadata_running
+        run: node scripts/build-metadata.cjs running
 
       - name: Set up Persistent Local Buildx Builder
         run: |
@@ -455,6 +482,7 @@ jobs:
           echo "exists=false" >> "$GITHUB_OUTPUT"
 
       - name: Push Image from PR Tree Cache (${{ matrix.service }})
+        id: cache_push
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && steps.tree_check.outputs.exists == 'true'
         env:
           OWNER: ${{ steps.repo_owner.outputs.owner }}
@@ -470,6 +498,7 @@ jobs:
             "$SRC"
 
       - name: Build and Push ${{ matrix.service }}
+        id: image_push
         if: steps.tree_check.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
@@ -484,6 +513,17 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             aerial.commit_sha=${{ github.sha }}
             aerial.service=${{ matrix.service }}
+
+      - name: Publish Final Image Result
+        if: always()
+        env:
+          RESULT_CHECK_ID: ${{ steps.metadata_running.outputs.check_id }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          JOB_STATUS: ${{ job.status }}
+          PUSH_ALLOWED: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+          TREE_SHA: ${{ steps.tree_check.outputs.tree_sha }}
+          IMAGE_DIGEST: ${{ steps.image_push.outputs.digest }}
+        run: node scripts/build-metadata.cjs result
 
   roborev:
     name: roborev
@@ -596,6 +636,10 @@ jobs:
           gh pr merge --auto --squash "$PR_URL" || true
 
   build-gate:
+    permissions:
+      contents: read
+      packages: write
+      checks: write
     name: CI Gate
     needs: [changes, test, lint, console-e2e, roborev, build-and-push]
     if: always()
@@ -605,6 +649,7 @@ jobs:
       EVENT_NAME: ${{ github.event_name }}
       HAS_BUILDS: ${{ needs.changes.outputs.has_builds }}
     steps:
+      - uses: actions/checkout@v7
       - name: Verify All Upstream Jobs & Container Builds
         run: |
           set -euo pipefail
@@ -629,6 +674,13 @@ jobs:
             exit 1
           fi
           echo "All required checks and builds passed."
+
+      - name: Publish Final Build Metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MATRIX_JSON: ${{ needs.changes.outputs.matrix }}
+          MATRIX_RESULT: ${{ needs.build-and-push.result }}
+        run: node scripts/build-metadata.cjs final
 
   promote-release:
     name: Promote Images to :latest
