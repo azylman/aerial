@@ -927,37 +927,37 @@ func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
 
 	ctx := context.Background()
 
-	// fetchCheckJobFailureLogs nil or invalid
-	if res := (*Executor)(nil).fetchCheckJobFailureLogs(ctx, "aerial", 123); res != "" {
+	// fetchCheckJobFailureLogsChecked nil or invalid
+	if res, _ := (*Executor)(nil).fetchCheckJobFailureLogsChecked(ctx, "aerial", 123); res != "" {
 		t.Errorf("expected empty string, got %q", res)
 	}
-	if res := exec.fetchCheckJobFailureLogs(ctx, "", 123); res != "" {
+	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "", 123); res != "" {
 		t.Errorf("expected empty string for empty repo, got %q", res)
 	}
-	if res := exec.fetchCheckJobFailureLogs(ctx, "aerial", 0); res != "" {
+	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "aerial", 0); res != "" {
 		t.Errorf("expected empty string for zero jobID, got %q", res)
 	}
-	if res := exec.fetchCheckJobFailureLogs(ctx, "aerial", 999); res != "" {
+	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "aerial", 999); res != "" {
 		t.Errorf("expected empty string for 500 status, got %q", res)
 	}
-	if res := exec.fetchCheckJobFailureLogs(ctx, "aerial", 888); res != "" {
+	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "aerial", 888); res != "" {
 		t.Errorf("expected empty for logs without high signal, got %q", res)
 	}
 
-	// fetchLatestRoboRevComment nil or invalid
-	if res := (*Executor)(nil).fetchLatestRoboRevComment(ctx, "aerial", 10, "sha"); res != "" {
+	// fetchLatestRoboRevCommentChecked nil or invalid
+	if res, _ := (*Executor)(nil).fetchLatestRoboRevCommentChecked(ctx, "aerial", 10, "sha"); res != "" {
 		t.Errorf("expected empty string, got %q", res)
 	}
-	if res := exec.fetchLatestRoboRevComment(ctx, "", 10, "sha"); res != "" {
+	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "", 10, "sha"); res != "" {
 		t.Errorf("expected empty string for empty repo, got %q", res)
 	}
-	if res := exec.fetchLatestRoboRevComment(ctx, "aerial", 0, "sha"); res != "" {
+	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "aerial", 0, "sha"); res != "" {
 		t.Errorf("expected empty string for zero pr, got %q", res)
 	}
-	if res := exec.fetchLatestRoboRevComment(ctx, "aerial", 99, "sha"); res != "" {
+	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "aerial", 99, "sha"); res != "" {
 		t.Errorf("expected empty string for 500 status, got %q", res)
 	}
-	if res := exec.fetchLatestRoboRevComment(ctx, "aerial", 88, "sha"); res != "" {
+	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "aerial", 88, "sha"); res != "" {
 		t.Errorf("expected empty string when no roborev comment found, got %q", res)
 	}
 
@@ -970,7 +970,7 @@ func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
 	defer ghServerHuge.Close()
 	execHuge := NewExecutor("", nil, nil, "token", ghServerHuge.Client())
 	execHuge.gitHubAPIURL = ghServerHuge.URL
-	if res := execHuge.fetchCheckJobFailureLogs(ctx, "aerial", 111); !strings.Contains(res, "FAIL: TestHuge") {
+	if res, _ := execHuge.fetchCheckJobFailureLogsChecked(ctx, "aerial", 111); !strings.Contains(res, "FAIL: TestHuge") {
 		t.Errorf("expected FAIL: TestHuge, got %q", res)
 	}
 
@@ -986,7 +986,7 @@ func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
 	defer ghServerRoboMismatch.Close()
 	execRoboMismatch := NewExecutor("", nil, nil, "token", ghServerRoboMismatch.Client())
 	execRoboMismatch.gitHubAPIURL = ghServerRoboMismatch.URL
-	if res := execRoboMismatch.fetchLatestRoboRevComment(ctx, "aerial", 10, "abcdef1"); res != "" {
+	if res, _ := execRoboMismatch.fetchLatestRoboRevCommentChecked(ctx, "aerial", 10, "abcdef1"); res != "" {
 		t.Errorf("expected empty string for non-matching SHA, got %q", res)
 	}
 }
@@ -1322,7 +1322,7 @@ func TestFetchCheckJobFailureLogs_RepoPathResolution(t *testing.T) {
 
 			exec := NewExecutor("", nil, nil, "token", server.Client())
 			exec.gitHubAPIURL = server.URL
-			res := exec.fetchCheckJobFailureLogs(context.Background(), tc.repo, 123)
+			res, _ := exec.fetchCheckJobFailureLogsChecked(context.Background(), tc.repo, 123)
 			assert.NotEmpty(t, res)
 			assert.Equal(t, tc.wantSubpath, receivedPath)
 		})
@@ -1354,7 +1354,7 @@ func TestFetchLatestRoboRevComment_RepoPathResolution(t *testing.T) {
 
 			exec := NewExecutor("", nil, nil, "token", server.Client())
 			exec.gitHubAPIURL = server.URL
-			res := exec.fetchLatestRoboRevComment(context.Background(), tc.repo, 42, "sha1234")
+			res, _ := exec.fetchLatestRoboRevCommentChecked(context.Background(), tc.repo, 42, "sha1234")
 			assert.NotEmpty(t, res)
 			assert.Equal(t, tc.wantSubpath, receivedPath)
 		})

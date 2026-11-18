@@ -33,6 +33,9 @@ type FailChunkResponse struct {
 	ChunkID     string `json:"chunk_id"`
 	BuildStatus string `json:"build_status"`
 	ChunkStatus string `json:"chunk_status"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	Objective   string `json:"objective,omitempty"`
+	Quiet       bool   `json:"quiet,omitempty"`
 }
 
 // AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
@@ -455,6 +458,13 @@ func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRe
 	switch strings.ToLower(strings.TrimSpace(ev.Status)) {
 	case "completed", dispatchStatusSuccess:
 		return &BuildMutationRequest{Action: mutationActionCompleted, ChunkID: strings.TrimSpace(ev.VanadisChunkID), DispatchID: ev.DispatchID}
+	case statusFailed, statusTimeout, statusCrashed:
+		return &BuildMutationRequest{
+			Action:     mutationChunkFailed,
+			ChunkID:    strings.TrimSpace(ev.VanadisChunkID),
+			DispatchID: ev.DispatchID,
+			Reason:     firstNonEmpty(ev.Error, "dispatch outcome failed"),
+		}
 	default:
 		return nil
 	}
@@ -475,6 +485,21 @@ func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []Vanadis
 	return false
 }
 
+func isFailureCompletionMutation(mutation *BuildMutationRequest, chunks []VanadisChunk) bool {
+	if mutation == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(mutation.Action)) != mutationChunkFailed {
+		return false
+	}
+	for _, chunk := range chunks {
+		if chunk.ID == mutation.ChunkID {
+			return true
+		}
+	}
+	return false
+}
+
 func terminalNotificationRecorded(state *BuildObjectState) bool {
 	return state != nil && state.TerminalNotified
 }
@@ -484,13 +509,21 @@ func normalizeCompletionMutation(mutation *BuildMutationRequest) *BuildMutationR
 		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(mutation.Action)) {
-	case mutationActionCompleted, mutationChunkDeploySuccess:
+	case mutationActionCompleted, mutationChunkDeploySuccess, mutationChunkFailed:
 		normalized := *mutation
 		normalized.ChunkID = strings.TrimSpace(normalized.ChunkID)
 		return &normalized
 	default:
 		return mutation
 	}
+}
+
+func actionFailureAccepted(c VanadisChunk, buildStatus, dispatchID string) bool {
+	if c.Status == statusFailed && (buildStatus == statusRunning || buildStatus == statusFailed) {
+		c.Status = statusRunning
+		buildStatus = statusRunning
+	}
+	return actionFailureAllowed(c, buildStatus, dispatchID)
 }
 
 func failureSkipped(c VanadisChunk, buildStatus, dispatchID string) bool {
@@ -595,11 +628,14 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 	if err := b.validateActionBuild(ctx, buildID, chunkID); err != nil {
 		return err
 	}
-	_, _, failed, err := b.store.FailChunk(ctx, chunkID, mutation.Reason, mutation.DispatchID)
+	bld, chk, failed, err := b.store.FailChunk(ctx, chunkID, mutation.Reason, mutation.DispatchID)
 	if err != nil {
 		return err
 	}
 	if !failed {
+		if bld != nil && chk != nil && chk.Status == statusFailed && bld.Status == statusFailed && (chk.Mode != chunkModeAction || actionFailureAccepted(*chk, bld.Status, mutation.DispatchID)) {
+			return nil
+		}
 		return errActionCompletionSkipped
 	}
 	return nil
@@ -778,7 +814,10 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 		}
 		return b.handleCIRemediationCapReached(rc, chunkID, failCount, ev)
 	}
-	details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+	details, err := b.executor.ResolveCIFailureDetailsChecked(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+	if err != nil {
+		return err
+	}
 	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
 	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
 		if errors.Is(err, errDispatchActive) {
@@ -803,7 +842,9 @@ func (b *BuildObject) handleClosedPREvent(rc restate.RunContext, chunkID string,
 		return fErr
 	}
 	if failed && bld != nil && bld.Status == statusFailed && b.executor != nil {
-		b.notifyChunkFailure(rc, *bld, chunkID, "pr_closed_unmerged")
+		if err := b.notifyChunkFailure(rc, *bld, chunkID, "pr_closed_unmerged"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -816,7 +857,9 @@ func (b *BuildObject) handleDeployFailureEvent(rc restate.RunContext, buildID, c
 		}
 	}
 	if b.executor != nil {
-		b.dispatchThreadWakePrompt(rc, buildID, FormatDeployFailurePrompt(ev))
+		if err := b.dispatchThreadWakePrompt(rc, buildID, FormatDeployFailurePrompt(ev)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -894,10 +937,7 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	}
 
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterPREvent, nil); tErr != nil {
-		if strings.EqualFold(strings.TrimSpace(ev.Event), "deploy_success") {
-			return tErr
-		}
-		slog.WarnContext(ctx, "[vanadis-restate] pr event transition warning", "error", tErr)
+		return toTerminalErr(tErr)
 	}
 	return nil
 }
@@ -1027,7 +1067,7 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 				return false, err
 			}
 			return res != nil && res.CompletionAccepted, nil
-		case "failed", "timeout", "crashed":
+		case statusFailed, statusTimeout, statusCrashed:
 			reason := firstNonEmpty(ev.Error, "dispatch outcome failed")
 			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
 				return false, err
@@ -1046,10 +1086,7 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	rt := b.getRuntime(ctx)
 	mutation := dispatchCompletionMutation(ev)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterDispatch, mutation); tErr != nil {
-		if mutation != nil {
-			return tErr
-		}
-		slog.WarnContext(ctx, "[vanadis-restate] dispatch outcome transition warning", "error", tErr)
+		return toTerminalErr(tErr)
 	}
 	return nil
 }

@@ -100,13 +100,13 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	boStoreUpdateErr := NewBuildObject("", nil).WithAuthority(storeCancelErr, nil)
 	bFStore := VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
 	retFStore, errFStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bFStore, []VanadisChunk{cF})
-	assert.NoError(t, errFStore)
-	assert.Equal(t, statusFailed, retFStore)
+	assert.Error(t, errFStore)
+	assert.Empty(t, retFStore)
 
 	bDStore := VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
 	retDStore, errDStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bDStore, []VanadisChunk{cD})
-	assert.NoError(t, errDStore)
-	assert.Equal(t, statusCompleted, retDStore)
+	assert.Error(t, errDStore)
+	assert.Empty(t, retDStore)
 
 	// 9c. retry recovery when notifyBuildTerminal fails on attempt 1 (vanadis_builds.status remains running) and succeeds on attempt 2
 	var promptAttempt atomic.Int32

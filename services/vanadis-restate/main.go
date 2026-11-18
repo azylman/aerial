@@ -156,10 +156,13 @@ var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 }
 
 const (
-	statusCompleted = "completed"
-	statusFailed    = "failed"
-	statusCancelled = "cancelled"
-	statusNotFound  = "not_found"
+	statusCompleted     = "completed"
+	statusFailed        = "failed"
+	statusCancelled     = "cancelled"
+	statusNotFound      = "not_found"
+	statusCrashed       = "crashed"
+	statusTimeout       = "timeout"
+	mutationChunkFailed = "chunk_failed"
 )
 
 // Config holds runtime configuration for the vanadis-restate worker service.
@@ -564,7 +567,7 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	rt.SetState(BuildObjectState{Build: build, Chunks: validatedChunks})
 	rt.SetLaunched(make(map[string]bool))
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileInitial, nil); tErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] initial transition warning", "error", tErr)
+		return VanadisBuild{}, toTerminalErr(tErr)
 	}
 	return build, nil
 }
@@ -665,7 +668,7 @@ func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID stri
 		return nil, toTerminalErr(err)
 	}
 	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterAppend, nil); tErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] append chunks transition warning", "error", tErr)
+		return nil, toTerminalErr(tErr)
 	}
 	return appended, nil
 }
@@ -694,7 +697,7 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequ
 	}
 	rt := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterUpdateChunk, nil); tErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] update chunk transition warning", "error", tErr)
+		return VanadisChunk{}, toTerminalErr(tErr)
 	}
 	return updated, nil
 }
@@ -732,30 +735,50 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 		return toTerminalErr(err)
 	}
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterRemoveChunk, nil); tErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] remove chunk transition warning", "error", tErr)
+		return toTerminalErr(tErr)
 	}
 	return nil
 }
 
-func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild, chunkID, reason string) {
+func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild, chunkID, reason string) error {
+	if b.executor == nil {
+		return nil
+	}
 	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
 		slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
-	prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk failed: %s", bld.ID, bld.Objective, reason)
-	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] dispatch wake prompt warning", "error", dErr)
+	buildObj := bld
+	var chunks []VanadisChunk
+	if b.store != nil {
+		fetched, fetchedChunks, gErr := b.store.GetBuild(rc, bld.ID)
+		if gErr != nil {
+			return fmt.Errorf("get build %s for failure notification: %w", bld.ID, gErr)
+		}
+		if fetched != nil {
+			buildObj = *fetched
+			chunks = fetchedChunks
+		}
 	}
-	if build, chunks, gErr := b.store.GetBuild(rc, bld.ID); gErr == nil && build != nil {
-		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, bld, chunks, "Build failed: "+reason); sErr != nil {
-			slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
+	var widgetErr error
+	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, buildObj, chunks, "Build failed: "+reason); sErr != nil {
+		slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
+		widgetErr = sErr
+	}
+	var wakeErr error
+	if !buildObj.Quiet {
+		prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk failed: %s", buildObj.ID, buildObj.Objective, reason)
+		if dErr := b.executor.DispatchWakePrompt(rc, buildObj.ThreadID, prompt); dErr != nil {
+			slog.WarnContext(rc, "[vanadis-restate] dispatch wake prompt warning", "error", dErr)
+			wakeErr = dErr
 		}
 	}
 	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, reason); pErr != nil {
 		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 	}
-	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{bld.ID}, reason); pErr != nil {
+	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{buildObj.ID}, reason); pErr != nil {
 		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 	}
+	return errors.Join(widgetErr, wakeErr)
 }
 
 // FailChunk marks a chunk failed and cancels active work if the failure is terminal.
@@ -779,20 +802,39 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 		if err != nil {
 			return FailChunkResponse{}, err
 		}
-		r := FailChunkResponse{
+		resp := FailChunkResponse{
 			Failed:      failed,
 			BuildID:     chk.BuildID,
 			ChunkID:     chk.ID,
 			BuildStatus: bld.Status,
 			ChunkStatus: chk.Status,
 		}
-		if failed && bld.Status == statusFailed && b.executor != nil {
-			b.notifyChunkFailure(rc, *bld, chunkID, reason)
+		if bld != nil {
+			resp.ThreadID = bld.ThreadID
+			resp.Objective = bld.Objective
+			resp.Quiet = bld.Quiet
 		}
-		return r, nil
+		return resp, nil
 	})
 	if err != nil {
 		return FailChunkResponse{}, toTerminalErr(err)
+	}
+	if res.Failed && res.BuildID != "" && res.BuildStatus == statusFailed && res.ChunkStatus == statusFailed && b.executor != nil {
+		_, nErr := runJournaled(ctx, labelFailChunk, "notify-chunk-failure", func(rc restate.RunContext) (bool, error) {
+			bld := VanadisBuild{
+				ID:        res.BuildID,
+				ThreadID:  res.ThreadID,
+				Objective: res.Objective,
+				Quiet:     res.Quiet,
+			}
+			if err := b.notifyChunkFailure(rc, bld, chunkID, reason); err != nil {
+				return false, err
+			}
+			return true, nil
+		})
+		if nErr != nil {
+			return FailChunkResponse{}, toTerminalErr(nErr)
+		}
 	}
 	if res.Failed && res.BuildStatus == statusFailed {
 		rt := b.getRuntime(ctx)
@@ -837,20 +879,27 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachC
 
 	runtime := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(runtime, labelReconcileAfterAttachPR, nil); tErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] attach pr transition warning", "error", tErr)
+		return AttachChunkPRResponse{}, toTerminalErr(tErr)
 	}
 	return attached, nil
 }
 
-func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, prompt string) {
-	if b.executor == nil {
-		return
+func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, prompt string) error {
+	if b.executor == nil || b.store == nil {
+		return nil
 	}
-	if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil && bld != nil {
-		if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
-			slog.WarnContext(rc, "[vanadis-restate] wake prompt warning", "error", dErr)
-		}
+	bld, _, gErr := b.store.GetBuild(rc, buildID)
+	if gErr != nil {
+		return gErr
 	}
+	if bld == nil {
+		return ErrBuildNotFound
+	}
+	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
+		slog.WarnContext(rc, "[vanadis-restate] wake prompt warning", "error", dErr)
+		return dErr
+	}
+	return nil
 }
 
 // Reconcile reconciles the build state on Restate.
@@ -1005,7 +1054,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 			return errActionCompletionSkipped
 		}
 		return nil
-	case "chunk_failed":
+	case mutationChunkFailed:
 		return b.failMutation(ctx, buildID, mutation)
 	case "cancelled":
 		if err := b.store.UpdateBuildStatus(ctx, buildID, statusCancelled); err != nil {
@@ -1141,6 +1190,7 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 		}
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
 			slog.ErrorContext(ctx, "[vanadis-restate] update build status failed", "error", err)
+			return "", err
 		}
 		return statusFailed, nil
 	case allDone && len(chunks) > 0:
@@ -1150,6 +1200,7 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 		}
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusCompleted); err != nil {
 			slog.ErrorContext(ctx, "[vanadis-restate] update build status completed", "error", err)
+			return "", err
 		}
 		return statusCompleted, nil
 	default:
@@ -1170,6 +1221,25 @@ func cloneLaunchedMap(priorLaunched map[string]bool) map[string]bool {
 		}
 	}
 	return launchedMap
+}
+
+func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, mutation *BuildMutationRequest, terminalNotified bool) (bool, error) {
+	if terminalNotified {
+		return true, nil
+	}
+	if build.Status == statusCompleted && isActionCompletionMutation(mutation, chunks) {
+		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully."); nErr != nil {
+			return false, nErr
+		}
+		return true, nil
+	}
+	if build.Status == statusFailed && isFailureCompletionMutation(mutation, chunks) {
+		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, firstNonEmpty(mutation.Reason, "chunk failed"), "VANADIS BUILD FAILED", "Build encountered failures."); nErr != nil {
+			return false, nErr
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool, terminalNotified bool) (reconcileStepOutput, error) {
@@ -1198,13 +1268,10 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		return reconcileStepOutput{}, err
 	}
 
-	if !terminalNotified && build.Status == statusCompleted && isActionCompletionMutation(mutation, chunks) {
-		// The completion transaction may have persisted terminal status before this
-		// journaled continuation ran. Replay its terminal effects as well.
-		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully."); nErr != nil {
-			return reconcileStepOutput{}, nErr
-		}
-		terminalNotified = true
+	var nErr error
+	terminalNotified, nErr = b.replayTerminalMutationEffects(ctx, build, chunks, mutation, terminalNotified)
+	if nErr != nil {
+		return reconcileStepOutput{}, nErr
 	}
 	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
 		return reconcileStepOutput{

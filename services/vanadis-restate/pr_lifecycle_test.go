@@ -255,13 +255,13 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	// notifyChunkFailure error branches
 	ctx := makeObjectMockContext(t, "b-err")
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boErr.notifyChunkFailure(rc, b1, "c1", "reason")
+		assert.Error(t, boErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
 
 	// dispatchThreadWakePrompt error branches
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
+		assert.Error(t, boErr.dispatchThreadWakePrompt(rc, "b-err", "prompt"))
 		return true, nil
 	})
 
@@ -287,7 +287,8 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	_, _ = boStoreErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
 	_, _ = boErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boStoreErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
+		assert.Error(t, boStoreErr.dispatchThreadWakePrompt(rc, "b-err", "prompt"))
+		assert.Error(t, boStoreErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
 	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
@@ -329,7 +330,7 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			wantPromptIn: "[VANADIS BUILD FAILED]",
 		},
 		{
-			name:          "closed_unmerged already terminal skips notifications",
+			name:          "closed_unmerged on already failed chunk skips notifications",
 			event:         "closed_unmerged",
 			prEvent:       pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
 			skipFailApply: true,
@@ -378,7 +379,11 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spy := &checkStatusSpyStore{bannerErr: tc.bannerErr, failErr: tc.failErr, skipFailApply: tc.skipFailApply}
+			spy := &checkStatusSpyStore{
+				bannerErr:     tc.bannerErr,
+				failErr:       tc.failErr,
+				skipFailApply: tc.skipFailApply,
+			}
 			eri := &mockEriClient{}
 			exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
@@ -598,4 +603,266 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			assert.Empty(t, eri.lastCancel)
 		})
 	}
+}
+
+func TestResolveCIFailureDetailsChecked(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		statusCode int
+		headerKey  string
+		headerVal  string
+		isLog      bool
+		isRobo     bool
+		body       string
+		netErr     bool
+		nilExec    bool
+		wantErr    bool
+		wantMatch  string
+	}{
+		{name: "nil executor returns details", nilExec: true, wantMatch: "default-details"},
+		{name: "roborev retryable 500 error", isRobo: true, statusCode: http.StatusInternalServerError, wantErr: true},
+		{name: "roborev retryable 429 error", isRobo: true, statusCode: http.StatusTooManyRequests, wantErr: true},
+		{name: "roborev retryable 403 error", isRobo: true, statusCode: http.StatusForbidden, headerKey: "X-Ratelimit-Remaining", headerVal: "0", wantErr: true},
+		{name: "roborev non-rate-limit 403 falls back to details", isRobo: true, statusCode: http.StatusForbidden, wantMatch: "default-details"},
+		{name: "roborev transport error", isRobo: true, netErr: true, wantErr: true},
+		{name: "roborev 404 falls back to details", isRobo: true, statusCode: http.StatusNotFound, wantMatch: "default-details"},
+		{name: "roborev success match", isRobo: true, statusCode: http.StatusOK, body: `[{"id":1,"body":"## roborev:\n` + "`abc1234`" + `\nCritical finding"}]`, wantMatch: "Critical finding"},
+		{name: "job logs retryable 500 error", isLog: true, statusCode: http.StatusInternalServerError, wantErr: true},
+		{name: "job logs retryable 429 error", isLog: true, statusCode: http.StatusTooManyRequests, wantErr: true},
+		{name: "job logs retryable 403 error", isLog: true, statusCode: http.StatusForbidden, headerKey: "Retry-After", headerVal: "60", wantErr: true},
+		{name: "job logs non-rate-limit 403 falls back to details", isLog: true, statusCode: http.StatusForbidden, wantMatch: "failure"},
+		{name: "job logs transport error", isLog: true, netErr: true, wantErr: true},
+		{name: "job logs 404 falls back to details", isLog: true, statusCode: http.StatusNotFound, wantMatch: "failure"},
+		{name: "job logs success match", isLog: true, statusCode: http.StatusOK, body: "=== RUN TestFailure\n--- FAIL: TestFailure (0.02s)\nFAIL\n", wantMatch: "FAIL: TestFailure"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilExec {
+				got, err := (*Executor)(nil).ResolveCIFailureDetailsChecked(context.Background(), "aerial", 10, "unit-tests", "abc", "", "default-details")
+				assert.NoError(t, err)
+				assert.Equal(t, "default-details", got)
+				return
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.headerKey != "" {
+					w.Header().Set(tc.headerKey, tc.headerVal)
+				}
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+
+			client := server.Client()
+			apiURL := server.URL
+			if tc.netErr {
+				apiURL = "http://127.0.0.1:1"
+			}
+
+			exec := NewExecutor("", nil, nil, "token", client)
+			exec.gitHubAPIURL = apiURL
+
+			checkName := "unit-tests"
+			prNum := 0
+			checkURL := ""
+			details := "failure"
+			if tc.isRobo {
+				checkName = "roborev"
+				prNum = 10
+				details = "default-details"
+			}
+			if tc.isLog {
+				checkURL = "https://github.com/azylman/aerial/actions/runs/1/job/999"
+				details = "failure"
+			}
+
+			got, err := exec.ResolveCIFailureDetailsChecked(context.Background(), "aerial", prNum, checkName, "abc1234", checkURL, details)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Contains(t, got, tc.wantMatch)
+			}
+		})
+	}
+}
+
+func TestActionFailureAcceptedAndCompletionMutation(t *testing.T) {
+	t.Parallel()
+
+	// actionFailureAccepted branches
+	cFailed := VanadisChunk{ID: "c1", Status: statusFailed, Mode: chunkModeAction, StallNudges: 1}
+	assert.True(t, actionFailureAccepted(cFailed, statusRunning, "vanadis-c1-turn-1"))
+	assert.True(t, actionFailureAccepted(cFailed, statusFailed, "vanadis-c1-turn-1"))
+	assert.False(t, actionFailureAccepted(cFailed, statusRunning, "vanadis-c1-turn-0"))
+
+	cRunning := VanadisChunk{ID: "c1", Status: statusRunning, Mode: chunkModeAction, StallNudges: 1}
+	assert.True(t, actionFailureAccepted(cRunning, statusRunning, "vanadis-c1-turn-1"))
+
+	// isFailureCompletionMutation branches
+	assert.False(t, isFailureCompletionMutation(nil, nil))
+	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "other", ChunkID: "c1"}, []VanadisChunk{cRunning}))
+	assert.True(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1"}, []VanadisChunk{cRunning}))
+	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "other"}, []VanadisChunk{cRunning}))
+
+	// dispatchCompletionMutation branches
+	mFail := dispatchCompletionMutation(pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom", DispatchID: "d1"})
+	assert.NotNil(t, mFail)
+	assert.Equal(t, "chunk_failed", mFail.Action)
+	assert.Equal(t, "boom", mFail.Reason)
+	assert.Equal(t, "d1", mFail.DispatchID)
+
+	mComp := dispatchCompletionMutation(pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed", DispatchID: "d1"})
+	assert.NotNil(t, mComp)
+	assert.Equal(t, mutationActionCompleted, mComp.Action)
+
+	mUnknown := dispatchCompletionMutation(pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "unknown"})
+	assert.Nil(t, mUnknown)
+}
+
+func TestBuildObject_TransitionErrorPropagation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		handler string
+		wantErr string
+	}{
+		{"create transition error propagates", "Create", "transition failed"},
+		{"append transition error propagates", "AppendChunks", "transition failed"},
+		{"update chunk transition error propagates", "UpdateChunk", "transition failed"},
+		{"remove chunk transition error propagates", "RemoveChunk", "transition failed"},
+		{"attach pr transition error propagates", "AttachPR", "transition failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b1 := VanadisBuild{ID: "b-trans", Title: "Build", Objective: "Obj", Status: "running", ThreadID: "th-1"}
+			c1 := VanadisChunk{ID: "c1", BuildID: "b-trans", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
+			c2 := VanadisChunk{ID: "c2", BuildID: "b-trans", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
+			store, _ := dbScript{
+				buildRow: &mockRow{b: &b1},
+				chunks:   []VanadisChunk{c1, c2},
+				execTag:  "UPDATE 1",
+				row:      valuesRow("running"),
+				countRow: valuesRow(1),
+				routes: []sqlRoute{
+					{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
+					{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("pr")},
+					{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b-trans")},
+					{match: "RETURNING b.id, c.id, b.thread_id", row: valuesRow("b-trans", "c1", "th-1")},
+					{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b-trans", 0, "medium", true)},
+					{match: "MAX(chunk_index)", row: valuesRow(1)},
+				},
+			}.open()
+
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
+			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
+				rt := newFakeObjectRuntime("b-trans")
+				rt.runStepErr = errors.New("transition failed")
+				return rt
+			}
+
+			ctx := makeObjectMockContext(t, "b-trans")
+			var err error
+			switch tc.handler {
+			case "Create":
+				_, err = bo.Create(ctx, CreateBuildRequest{ID: "b-trans", ThreadID: "th-1", Objective: "Obj", Chunks: []CreateChunkInput{{ID: "c1", Title: "C1", Repo: "aerial", Instructions: "inst", DependsOn: []string{}}}})
+			case "AppendChunks":
+				_, err = bo.AppendChunks(ctx, AppendChunksRequest{Chunks: []CreateChunkInput{{Title: "C3", Repo: "aerial", Instructions: "inst", DependsOn: []string{"c2"}, TargetFiles: []string{"pkg/c.go"}}}})
+			case "UpdateChunk":
+				_, err = bo.UpdateChunk(ctx, UpdateChunkRequest{ChunkRef: "c1", Title: "New Title"})
+			case "RemoveChunk":
+				err = bo.RemoveChunk(ctx, RemoveChunkRequest{ChunkRef: "c1"})
+			case "AttachPR":
+				_, err = bo.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
+			}
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
+	t.Parallel()
+
+	// 1. Replay notifyBuildTerminal on failure continuation when !terminalNotified
+	bFailed := VanadisBuild{ID: "b-failed", Status: statusFailed, ThreadID: "th-1", Objective: "Test failure"}
+	cFailed := VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
+	store, _ := dbScript{
+		buildRow: &mockRow{b: &bFailed},
+		chunks:   []VanadisChunk{cFailed},
+		row:      failRow(statusFailed, statusFailed, 1),
+	}.open()
+	bus := &deploymentEventRecorder{}
+	var queuedPrompts []string
+	eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
+		queuedPrompts = append(queuedPrompts, prompt)
+		return nil
+	}}
+	bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", eri, bus, "token", nil))
+
+	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{
+		Action:     "chunk_failed",
+		ChunkID:    "c1",
+		DispatchID: "vanadis-c1-turn-1",
+		Reason:     "execution error",
+	}, nil, false)
+	assert.NoError(t, err)
+	assert.Equal(t, statusFailed, out.BuildStatus)
+	assert.True(t, out.State.TerminalNotified)
+	assert.Len(t, queuedPrompts, 1)
+	assert.Contains(t, queuedPrompts[0], "[VANADIS BUILD FAILED]")
+	assert.Len(t, bus.events, 1)
+
+	// Second run with terminalNotified=true does not duplicate notification
+	queuedPrompts = nil
+	bus.events = nil
+	out2, err2 := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{
+		Action:     "chunk_failed",
+		ChunkID:    "c1",
+		DispatchID: "vanadis-c1-turn-1",
+	}, nil, true)
+	assert.NoError(t, err2)
+	assert.Equal(t, statusFailed, out2.BuildStatus)
+	assert.Empty(t, queuedPrompts)
+	assert.Empty(t, bus.events)
+
+	// 2. FailMutation retry logic: returns nil when !failed but chunk was already failed and accepted
+	bldAlreadyFailed := VanadisBuild{ID: "b-fail", Status: statusFailed}
+	chkAlreadyFailed := VanadisChunk{ID: "c1", BuildID: "b-fail", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
+	storeRetryOk, _ := dbScript{
+		buildRow: &mockRow{b: &bldAlreadyFailed},
+		chunks:   []VanadisChunk{chkAlreadyFailed},
+		row:      failRow(statusFailed, statusFailed, 1),
+	}.open()
+	boFailRetry := NewBuildObject("", nil).WithAuthority(storeRetryOk, nil)
+	err = boFailRetry.failMutation(context.Background(), "b-fail", &BuildMutationRequest{
+		Action:     "chunk_failed",
+		ChunkID:    "c1",
+		DispatchID: "vanadis-c1-turn-1",
+	})
+	assert.NoError(t, err)
+
+	// 3. FailChunk second journaled step failure propagates before ClearState
+	eriFail := &mockEriClient{
+		promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") },
+	}
+	execFail := NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", nil)
+	bRunning := VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
+	cAction := VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
+	storeFailChunk, _ := dbScript{
+		buildRow: &mockRow{b: &bRunning},
+		chunks:   []VanadisChunk{cAction},
+		row:      failRow("running", "running"),
+	}.open()
+	boFailChunk := NewBuildObject("", nil).WithAuthority(storeFailChunk, execFail)
+	fakeRT := newFakeObjectRuntime("b-running")
+	boFailChunk.runtimeFactory = func(restate.ObjectContext) objectRuntime {
+		return fakeRT
+	}
+	ctxMock := makeObjectMockContext(t, "b-running")
+	_, fErr := boFailChunk.FailChunk(ctxMock, FailChunkRequest{ChunkID: "c1", Reason: "hard error"})
+	assert.Error(t, fErr)
+	assert.False(t, fakeRT.cleared, "ClearState must not be called when notification step fails")
 }
