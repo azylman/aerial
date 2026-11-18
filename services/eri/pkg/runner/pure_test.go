@@ -110,7 +110,7 @@ func TestBuildDaemonArgs(t *testing.T) {
 				SessionID: "sess-muse-123",
 				Model:     "llama-3.3-70b",
 			},
-			[]string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input", "--model llama-3.3-70b"},
+			[]string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input", "-c runtime_capabilities.plugin:goal-reminder:reminder:goal-reminder.enabled=false", "--model llama-3.3-70b"},
 			[]string{"--dangerously-skip-permissions", "--conversation", "--print-timeout", "--verbose", "app-server"},
 		},
 		{
@@ -119,14 +119,14 @@ func TestBuildDaemonArgs(t *testing.T) {
 				SessionID: "sess-muse-effort",
 				Model:     "muse-code-high",
 			},
-			[]string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input", "--model muse-code"},
+			[]string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input", "-c runtime_capabilities.plugin:goal-reminder:reminder:goal-reminder.enabled=false", "--model muse-code"},
 			[]string{"--dangerously-skip-permissions", "--conversation", "--print-timeout"},
 		},
 		{
 			DaemonConfig{
 				Engine: "muse",
 			},
-			[]string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input"},
+			[]string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input", "-c runtime_capabilities.plugin:goal-reminder:reminder:goal-reminder.enabled=false"},
 			[]string{"--model", "--dangerously-skip-permissions", "--conversation", "--print-timeout"},
 		},
 	} {

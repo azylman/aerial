@@ -154,7 +154,7 @@ func BuildDaemonArgs(cfg DaemonConfig) []string {
 		return []string{"app-server", "--listen", "stdio://"}
 	}
 	if cfg.IsMuse() {
-		args := []string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input"}
+		args := []string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input", "-c", "runtime_capabilities.plugin:goal-reminder:reminder:goal-reminder.enabled=false"}
 		if baseModel, _ := parseModelAndEffort(cfg.Model, cfg.Effort, true); baseModel != "" {
 			args = append(args, "--model", baseModel)
 		}
