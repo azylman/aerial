@@ -132,9 +132,9 @@ func TestFormatChannelHistory(t *testing.T) {
 			wantExcludes: []string{"Ancient message from 5 hours ago"},
 		},
 		{
-			name:         "truncation cap at 1000 characters",
-			msgs:         []HistoryMessage{{ID: "msg-long", AuthorName: "Spammer", Role: "User", Content: strings.Repeat("A", 2000), CreatedAt: now.Add(-10 * time.Minute)}},
-			wantContains: []string{strings.Repeat("A", 1000) + "... [truncated]"}, wantExcludes: []string{strings.Repeat("A", 1001)},
+			name:         "truncation cap at 2500 characters",
+			msgs:         []HistoryMessage{{ID: "msg-long", AuthorName: "Spammer", Role: "User", Content: strings.Repeat("A", 3000), CreatedAt: now.Add(-10 * time.Minute)}},
+			wantContains: []string{strings.Repeat("A", 2500) + "... [truncated]"}, wantExcludes: []string{strings.Repeat("A", 2501)},
 		},
 		{
 			name:       "author role formatting and ordering",
@@ -254,8 +254,8 @@ var longWidgetCard = strings.Repeat("h", 250) + strings.Repeat("m", 300) + strin
 func TestFormatSummaryTranscript(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	longUser := strings.Repeat("u", 1000) + strings.Repeat("x", 200)
-	longReply := strings.Repeat("a", 1000) + strings.Repeat("y", 200)
+	longUser := strings.Repeat("u", 2500) + strings.Repeat("x", 200)
+	longReply := strings.Repeat("a", 2500) + strings.Repeat("y", 200)
 	shortWidget := strings.Repeat("s", 400)
 
 	tests := []historyTestCase{
@@ -273,12 +273,12 @@ func TestFormatSummaryTranscript(t *testing.T) {
 			wantExcludes: []string{truncationMarker},
 		},
 		{
-			name: "user message and assistant reply keep the 1000-rune head cut",
+			name: "user message and assistant reply keep the 2500-rune head cut",
 			msgs: []HistoryMessage{
 				{ID: "u-1", AuthorName: "Alex", Role: "User", Content: longUser, CreatedAt: now.Add(-time.Minute)},
 				{ID: "a-1", AuthorName: "Aerial", Role: "Assistant", Content: longReply, CreatedAt: now},
 			},
-			wantContains: []string{strings.Repeat("u", 1000) + truncationMarker, strings.Repeat("a", 1000) + truncationMarker},
+			wantContains: []string{strings.Repeat("u", 2500) + truncationMarker, strings.Repeat("a", 2500) + truncationMarker},
 			wantExcludes: []string{"xxxx", "yyyy"},
 		},
 	}
@@ -730,14 +730,14 @@ func TestFormatPreviousSession(t *testing.T) {
 			},
 		},
 		{
-			name:         "with lastResponse truncation over 600 runes",
+			name:         "with lastResponse truncation over 2500 runes",
 			sessionID:    "sess-valid-456",
-			lastResponse: []string{strings.Repeat("B", 1000)},
+			lastResponse: []string{strings.Repeat("B", 3000)},
 			wantContains: []string{
-				strings.Repeat("B", 600) + "... [truncated]",
+				strings.Repeat("B", 2500) + "... [truncated]",
 			},
 			wantExcludes: []string{
-				strings.Repeat("B", 601),
+				strings.Repeat("B", 2501),
 			},
 		},
 		{

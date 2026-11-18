@@ -776,6 +776,7 @@ func TestRefreshThreadSummaryAtTurnEnd(t *testing.T) {
 		{name: "first summary sends whole window", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1000", "content-1008"}, wantPromptExcludes: []string{"<prior_thread_summary>"}, wantSum: fresh, wantMsgID: "1008"},
 		{name: "watermark at delivered reply is cache hit", cachedSum: prior, cachedMsgID: "1008", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "cache_hit", wantSum: prior, wantMsgID: "1008"},
 		{name: "watermark among newest five is fresh enough", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "fresh_enough", wantSum: prior, wantMsgID: "1004"},
+		{name: "watermark among newest five refreshes when lease will rotate", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, burstID: "1007", turnStatus: "success", rotatingLease: true, wantOutcome: "refreshed", wantLLMPrompts: 1, wantSum: fresh, wantMsgID: "1008"},
 		{name: "llm error leaves stored summary untouched", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", llmErr: errors.New("ephemeral pool busy"), wantOutcome: "failed", wantLLMPrompts: 1, wantSum: prior, wantMsgID: "1001"},
 		{name: "next burst user message excluded from watermark", cachedSum: prior, cachedMsgID: "1001", histMsgs: turnEndHistory(base, 1000, 1009), burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1008"}, wantPromptExcludes: []string{"content-1009"}, wantSum: fresh, wantMsgID: "1008"},
 		{name: "mid-turn follow-up keeps watermark before it", cachedSum: prior, cachedMsgID: "1001", histMsgs: append(turnEndHistory(base, 1000, 1007), HistoryMessage{ID: "1009", Role: "User", AuthorName: "User", Content: "content-1009", CreatedAt: base.Add(9 * time.Minute)}, HistoryMessage{ID: "1010", Role: "Assistant", AuthorName: "Assistant", Content: "content-1010", CreatedAt: base.Add(10 * time.Minute)}), burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1007"}, wantPromptExcludes: []string{"content-1009", "content-1010"}, wantSum: fresh, wantMsgID: "1007"},
@@ -800,6 +801,7 @@ type turnEndRefreshCase struct {
 	histMsgs                   []HistoryMessage
 	burstID, turnStatus        string
 	notThread, dispatch, ephem bool
+	rotatingLease              bool
 	llmErr                     error
 	wantOutcome                string // "" when the refresh is skipped and records no span
 	wantLLMPrompts             int
@@ -807,6 +809,24 @@ type turnEndRefreshCase struct {
 	wantPromptExcludes         []string
 	wantSum, wantMsgID         string
 }
+
+type testTurnEndSessionLease struct {
+	rotating bool
+}
+
+func (*testTurnEndSessionLease) SessionID() string         { return "" }
+func (*testTurnEndSessionLease) PreviousSessionID() string { return "" }
+func (*testTurnEndSessionLease) IsCold() bool              { return false }
+func (*testTurnEndSessionLease) IsEphemeral() bool         { return false }
+func (*testTurnEndSessionLease) TurnCount() int            { return 0 }
+func (*testTurnEndSessionLease) MarkDirty()                {}
+func (*testTurnEndSessionLease) Execute(context.Context, *runner.TurnContext) (*runner.TurnResult, error) {
+	return nil, nil
+}
+func (*testTurnEndSessionLease) Release() error       { return nil }
+func (l *testTurnEndSessionLease) ShouldRotate() bool { return l.rotating }
+
+var _ runner.SessionLease = (*testTurnEndSessionLease)(nil)
 
 // runTurnEndRefreshCase runs refreshThreadSummaryAtTurnEnd against a fake store, history fetcher and
 // LLM that answers llmOut, then checks the span outcome, recorded summarizer prompts and stored summary.
@@ -837,6 +857,7 @@ func runTurnEndRefreshCase(t *testing.T, tc turnEndRefreshCase, llmOut string) {
 	te := &turnExecution{
 		pool: pool, threadID: "th-end", burst: []db.Message{{ID: tc.burstID, ThreadID: "th-end"}},
 		turnStatus: tc.turnStatus, summarizeThread: !tc.notThread, isEphemeral: tc.ephem,
+		lease: &testTurnEndSessionLease{rotating: tc.rotatingLease},
 	}
 	if tc.dispatch {
 		te.dispatch = &db.Dispatch{ID: "d-1"}

@@ -530,12 +530,21 @@ func TestUnifiedSessionLease_DirectMarkDirty(t *testing.T) {
 	if uLease.daemon.IsDirty() {
 		t.Fatalf("expected daemon to not be dirty initially")
 	}
+	if uLease.ShouldRotate() {
+		t.Errorf("expected ShouldRotate() to be false on clean lease")
+	}
 	lease.MarkDirty()
 	if !uLease.daemon.IsDirty() {
 		t.Errorf("expected daemon to be dirty after lease.MarkDirty()")
 	}
+	if !uLease.ShouldRotate() {
+		t.Errorf("expected ShouldRotate() to be true after lease.MarkDirty()")
+	}
 	var nilLease *unifiedSessionLease
 	nilLease.MarkDirty()
+	if nilLease.ShouldRotate() {
+		t.Errorf("expected ShouldRotate() to be false on nil lease")
+	}
 }
 
 func TestUnifiedSessionLease_Release_RotationFailurePaths(t *testing.T) {
