@@ -802,6 +802,43 @@ spec:
       name: nats-password-generator
   updatePolicy: IfNotExists
 ---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: github-webhook-secret-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - GITHUB_WEBHOOK_SECRET
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: github-webhook-secret-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: GITHUB_WEBHOOK_SECRET
+        secretKey: GITHUB_WEBHOOK_SECRET
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    generatorRef:
+      apiVersion: generators.external-secrets.io/v1alpha1
+      kind: Password
+      name: github-webhook-secret-generator
+  updatePolicy: IfNotExists
+---
 apiVersion: external-secrets.io/v1alpha1
 kind: PushSecret
 metadata:

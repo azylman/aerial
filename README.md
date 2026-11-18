@@ -40,7 +40,7 @@ curl -sfL https://get.k3s.io | sh -s - --disable traefik --write-kubeconfig ~/.k
 ### Step 2: Fork Configuration & Bootstrap via Flux CD
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
-3. Install the Flux CLI and bootstrap your private configuration repository (**External Secrets Operator** automatically generates database, Infisical, VictoriaMetrics, and NATS credentials and syncs them into Infisical via `PushSecret`):
+3. Install the Flux CLI and bootstrap your private configuration repository:
 
 ```bash
 export GITHUB_PAT="your-github-pat"
@@ -55,7 +55,7 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
 ```
 
 ### Step 3: Bootstrap Infisical & Populate Application Secrets
-Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your application secrets in project `aerial-8-jn8` (`default` environment). External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, and NATS credentials and syncs them into Infisical via `PushSecret`:
+Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your external application secrets in project `aerial-8-jn8` (`default` environment). External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook (`GITHUB_WEBHOOK_SECRET`) credentials and syncs them into Infisical via `PushSecret`:
 
 ```bash
 # 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token
@@ -69,7 +69,7 @@ export INFISICAL_TOKEN="$(infisical bootstrap \
 kubectl create secret generic infisical-universal-auth \
   --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
 
-# 2. Populate application secrets in Infisical (project slug aerial-8-jn8, default environment)
+# 2. Populate external application secrets in Infisical (project slug aerial-8-jn8, default environment)
 infisical secrets set --env=default \
   DISCORD_BOT_TOKEN="your-discord-bot-token" \
   GITHUB_PAT="$GITHUB_PAT"
@@ -95,7 +95,7 @@ Base manifests in `aerial/k8s/` use portable single-node defaults (single-instan
 
 ---
 
-## 2. System Architecture & Two-Repository GitOps
+## System Architecture & Two-Repository GitOps
 
 Aerial cleanly separates reusable platform, software factory, and agent infrastructure from your personal configuration using a decoupled **Two-Repository GitOps Architecture**:
 
@@ -161,14 +161,14 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 
 ### Defense-in-Depth Agent Guardrails
 
-- **Read-Only Repository & Credential Mounts (`:ro`)**: Live repositories (`/share/aerial`, `/share/aerial-config`), OAuth credentials, and secret bundles are mounted read-only at the container boundary, forcing all changes through isolated scratch clones and reviewed Pull Requests.
+- **Read-Only Repository & Credential Mounts (`:ro`)**: Live repositories (`/share/aerial`, `/share/aerial-config`), OAuth credentials, and secret bundles are mounted read-only at the container boundary, forcing all changes through isolated scratch clones (`scripts/aerial-pr.sh init`) and reviewed Pull Requests.
 - **Child-Process Secret Scrubbing**: Database passwords, GitHub PATs, Discord tokens, and API keys are stripped from the child process environment before spawning `agy`, Claude Code, or Codex so the agent acts strictly through typed MCP servers.
 - **Compiled Pre-Tool Hook Interceptors**: Go pre-tool hooks inspect every agent tool call before execution to block read-only or live-SSH mutations, scan staged git diffs for leaked secrets or private IPs, prevent foreground polling loops, and bound filesystem and telemetry queries.
 - **Outbound & Log Secret Redaction**: Outbound Discord messages and log streams pass through exact and derived-encoding (`base64`, URL, hex, JSON-escaped) secret redaction.
 
 ---
 
-## 3. Closed-Loop Software Factory Workflow
+## Closed-Loop Software Factory Workflow
 
 Where standalone coding agent orchestrators run in local `tmux` sessions without a deployment target, Aerial runs a self-hosted, lights-out delivery pipeline directly on its Kubernetes platform primitives (**Restate**, **NATS JetStream**, and **PostgreSQL 18**):
 
@@ -184,36 +184,32 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
 ```
 
 1. **Dependency-Aware DAG Backlog (`docket-mcp` + Vikunja)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 18 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
-2. **Physical Immutability & Ephemeral Scratch Clones**: Live repositories (`/share/aerial`, `/share/aerial-config`) are mounted strictly **read-only (`:ro`)** inside the agent container. All code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
+2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
 3. **Durable Multi-PR Build Pipelines (`vanadis` + `vanadis-restate`)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
 4. **In-Cluster CI & Automated Code Review (`github-runner` + RoboRev)**: Scale-to-zero **GitHub Actions Runner Controller (ARC)** runner sets execute clean-room test/coverage matrices, publish container images to GHCR, and run automated **RoboRev** LLM code reviews on every Pull Request.
 5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, and publishes completion facts onto **NATS JetStream** to advance dependent build chunks. If CI checks or **RoboRev** fail, `synapse` automatically wakes the agent with the failure context to remediate the branch.
 
 ---
 
-## 4. Built-In Web Interfaces (Glass-Box Operations)
+## Built-In Web Interfaces (Glass-Box Operations)
 
-Unlike black-box background daemons where state is hidden inside CLI logs or local files, Aerial pairs every layer of the platform, software factory, and agent with a built-in web interface. Core subpath views are routed out-of-the-box on `lan-gateway` (`http://<node-ip>/...`), while standalone root-path apps (`headlamp`, `infisical`, `docket-store`, `victorialogs`, `victoriatraces`) resolve in-cluster via CoreDNS (`*.aerial`) and can be exposed on your LAN via `HTTPRoute` hostnames or `kubectl port-forward`:
+Unlike black-box background daemons where state is hidden inside CLI logs or local files, Aerial pairs every layer of the platform, software factory, and agent with a built-in web interface. Core subpath views are routed out-of-the-box on `lan-gateway` (`http://<node-ip>/...`), while standalone root-path apps resolve in-cluster via CoreDNS (`*.aerial`) and can be exposed on your LAN via `HTTPRoute` hostnames or `kubectl port-forward`:
 
-### 1. Platform & Infrastructure Views
-- **Root Service Portal (`homepage`)** (`http://<node-ip>/`) — Unified landing dashboard with live service health monitors and status widgets, merging base defaults with user overrides from `aerial-config`.
-- **Restate Durable Execution UI (`restate`)** (`http://<node-ip>/restate/`) — Built-in **Restate** admin console for inspecting registered services (`Build`, `BuildRouter`), durable Virtual Object state in RocksDB, in-flight invocations, and execution journals.
-- **Metrics, Logs & Traces (`grafana`, `victorialogs`, `victoriatraces`)** (`http://<node-ip>/grafana/`) — Single-click anonymous-admin **Grafana** with pre-provisioned system, PostgreSQL, container, and token dashboards, plus `vmui` query consoles on `Service/victorialogs` and `Service/victoriatraces` (`/select/vmui/`).
-- **Kubernetes & Flux GitOps Explorer (`headlamp`)** (`Service/headlamp`) — Read-only Kubernetes dashboard preloaded with `headlamp-plugin-flux` for inspecting pods, workloads, events, and **Flux CD** Kustomization/HelmRelease rollouts.
-- **Secrets Governance UI (`infisical`)** (`Service/infisical`) — Web vault for managing environment secrets, machine identities, and automated rotation synced into Kubernetes via External Secrets Operator.
-
-### 2. Software Factory Views
-- **DAG Backlog & Issue Board (`docket-store` / Vikunja)** (`Service/docket-store`) — Visual Kanban, list, Gantt, and dependency board for browsing and managing the software factory's task graph.
-
-### 3. AI Agent & Documentation Views
-- **Operator Console (`console`)** (`http://<node-ip>/console/`) — Real-time mission control HUD rendering active agent turns, Vanadis multi-PR build progress, persistent schedules, and semantic memory facts.
-- **Session & Trace Inspector (`agentsview`)** (`http://<node-ip>/agentsview/`) — Full multi-turn conversation transcripts, subagent execution trees, and tool call timelines backed by PostgreSQL.
-- **Living Documentation Portal (`docs`)** (`http://<node-ip>/docs/`) — Docsify web portal rendering architectural specifications, Mermaid diagrams, and operational runbooks.
-- **Headful Browser Viewer (`kernel-browser`)** — Live CDP browser session inspector when headful browser automation is deployed.
+| Interface | Route / Service | Purpose |
+| :--- | :--- | :--- |
+| **Root Service Portal (`homepage`)** | `http://<node-ip>/` | Unified landing dashboard with live service health monitors and status widgets |
+| **Operator Console (`console`)** | `http://<node-ip>/console/` | Real-time mission control HUD for active agent turns, Vanadis multi-PR builds, schedules, and memory facts |
+| **Session & Trace Inspector (`agentsview`)** | `http://<node-ip>/agentsview/` | Full multi-turn conversation transcripts, subagent execution trees, and tool call timelines |
+| **Living Documentation Portal (`docs`)** | `http://<node-ip>/docs/` | Docsify web portal rendering architectural specifications, Mermaid diagrams, and operational runbooks |
+| **Restate Durable Execution UI (`restate`)** | `http://<node-ip>/restate/` | Built-in Restate admin console for `Build` / `BuildRouter` services, RocksDB virtual object state, and execution journals |
+| **Metrics, Logs & Traces (`grafana`, `victorialogs`, `victoriatraces`)** | `http://<node-ip>/grafana/` & `Service/victoria*` (`/select/vmui/`) | Anonymous-admin Grafana with pre-provisioned system/Postgres/container/token dashboards, plus LogsQL and OTLP trace `vmui` consoles |
+| **DAG Backlog & Issue Board (`docket-store` / Vikunja)** | `Service/docket-store` | Visual Kanban, list, Gantt, and dependency board for browsing and managing the software factory's task graph |
+| **Kubernetes & Flux Explorer (`headlamp`)** | `Service/headlamp` | Read-only Kubernetes dashboard preloaded with `headlamp-plugin-flux` for pods, events, and Flux GitOps rollouts |
+| **Secrets Governance UI (`infisical`)** | `Service/infisical` | Web vault for environment secrets, machine identities, and External Secrets Operator sync status |
 
 ---
 
-## 5. Customizing Aerial & Documentation
+## Customizing Aerial & Documentation
 
 All user customization lives in your private config repository (start from [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example)):
 
