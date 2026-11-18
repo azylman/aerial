@@ -54,27 +54,23 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
   --personal
 ```
 
-### Step 3: Connect Infisical & Populate Application Secrets
-Once Flux boots Infisical:
-
-1. **Initialize Infisical & Universal Auth**:
-   - Access the Infisical web UI (e.g. via `kubectl port-forward svc/infisical 8080:8080` to `http://localhost:8080` or via `http://<node-ip>/`).
-   - Create your administrator account and create a project with slug `aerial-8-jn8` (matching `SecretStore/infisical`).
-   - In **Project Settings → Access Control → Machine Identities**, add a machine identity using **Universal Auth** (leave trusted IPs open for cluster pods), generate a Client Secret, and grant it read access to the `default` environment.
-2. **Store Universal Auth Credentials in Kubernetes**:
+### Step 3: Bootstrap Infisical & Populate Application Secrets
+Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your application secrets in project `aerial-8-jn8` (`default` environment):
 
 ```bash
-# External Secrets Operator Universal Auth credentials
+# 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token
+export INFISICAL_TOKEN="$(infisical bootstrap \
+  --domain http://<node-ip> \
+  --email admin@example.com \
+  --password 'your-admin-password' \
+  --organization aerial \
+  | jq -r '.identity.credentials.token')"
+
 kubectl create secret generic infisical-universal-auth \
-  --from-literal=INFISICAL_CLIENT_ID="your-infisical-client-id" \
-  --from-literal=INFISICAL_CLIENT_SECRET="your-infisical-client-secret"
-```
+  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
 
-3. **Populate Application Secrets in Infisical** (in the `default` environment via the Infisical web UI or CLI):
-
-```bash
-# Populate application secrets in Infisical
-infisical secrets set \
+# 2. Populate application secrets in Infisical (project slug aerial-8-jn8, default environment)
+infisical secrets set --env=default \
   DISCORD_BOT_TOKEN="your-discord-bot-token" \
   GITHUB_PAT="$GITHUB_PAT" \
   NATS_AERIAL_PASSWORD="$(openssl rand -hex 16)" \

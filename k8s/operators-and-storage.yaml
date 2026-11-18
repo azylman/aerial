@@ -447,12 +447,9 @@ spec:
     infisical:
       hostAPI: http://infisical.default.svc.cluster.local:8080
       auth:
-        universalAuthCredentials:
-          clientId:
-            key: INFISICAL_CLIENT_ID
-            name: infisical-universal-auth
-          clientSecret:
-            key: INFISICAL_CLIENT_SECRET
+        tokenAuthCredentials:
+          accessToken:
+            key: INFISICAL_TOKEN
             name: infisical-universal-auth
       secretsScope:
         projectSlug: ${INFISICAL_PROJECT_SLUG:=aerial-8-jn8}
