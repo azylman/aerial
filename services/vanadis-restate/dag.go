@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 const (
@@ -15,11 +17,11 @@ const (
 )
 
 // normalizeAndValidateBuildDAG validates the build DAG: explicit depends_on arrays, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
-func normalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error) {
+func normalizeAndValidateBuildDAG(chunks []model.VanadisChunk) ([]model.VanadisChunk, error) {
 	if len(chunks) == 0 {
 		return chunks, nil
 	}
-	out := make([]VanadisChunk, len(chunks))
+	out := make([]model.VanadisChunk, len(chunks))
 	copy(out, chunks)
 
 	idMap := make(map[string]int, len(out))
@@ -50,7 +52,7 @@ func normalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error)
 	return out, nil
 }
 
-func resolveChunkDependencies(out []VanadisChunk, idMap map[string]int) error {
+func resolveChunkDependencies(out []model.VanadisChunk, idMap map[string]int) error {
 	for i := range out {
 		if out[i].DependsOn == nil {
 			return fmt.Errorf("%w: chunk %q must explicitly specify depends_on", ErrInvalidBuildInput, out[i].ID)
@@ -83,7 +85,7 @@ func resolveChunkDependencies(out []VanadisChunk, idMap map[string]int) error {
 	return nil
 }
 
-func checkKahnDAGCycles(out []VanadisChunk, idMap map[string]int) error {
+func checkKahnDAGCycles(out []model.VanadisChunk, idMap map[string]int) error {
 	N := len(out)
 	inDegree := make([]int, N)
 	adj := make([][]int, N)
@@ -120,7 +122,7 @@ func checkKahnDAGCycles(out []VanadisChunk, idMap map[string]int) error {
 	return nil
 }
 
-func buildTransitiveClosure(out []VanadisChunk, idMap map[string]int) [][]bool {
+func buildTransitiveClosure(out []model.VanadisChunk, idMap map[string]int) [][]bool {
 	N := len(out)
 	reach := make([][]bool, N)
 	for i := range N {
@@ -146,7 +148,7 @@ func buildTransitiveClosure(out []VanadisChunk, idMap map[string]int) [][]bool {
 	return reach
 }
 
-func validateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) error {
+func validateConcurrentDisjointPRChunks(out []model.VanadisChunk, reach [][]bool) error {
 	for i, chunkI := range out {
 		if isTerminalChunkStatus(chunkI.Status) {
 			continue
@@ -180,7 +182,7 @@ func validateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) erro
 	return nil
 }
 
-func checkDisjointFiles(a, b VanadisChunk, repo string) error {
+func checkDisjointFiles(a, b model.VanadisChunk, repo string) error {
 	if len(a.TargetFiles) == 0 {
 		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", ErrInvalidBuildInput, a.ID, repo)
 	}
@@ -203,7 +205,7 @@ func checkDisjointFiles(a, b VanadisChunk, repo string) error {
 	return nil
 }
 
-func validateCreateBuildInputs(buildID, threadID, objective string, chunks []VanadisChunk) error {
+func validateCreateBuildInputs(buildID, threadID, objective string, chunks []model.VanadisChunk) error {
 	if buildID == "" || threadID == "" || objective == "" {
 		return errors.New("build id, thread_id, and objective cannot be empty")
 	}
@@ -252,7 +254,7 @@ func marshalJSONBOrEmpty(v any) []byte {
 
 // relinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
 // removing removedID and replacing it with removedDeps.
-func relinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, removedDeps []string) {
+func relinkDependenciesAfterRemoval(remaining []model.VanadisChunk, removedID string, removedDeps []string) {
 	for i := range remaining {
 		c := &remaining[i]
 		if !slices.Contains(c.DependsOn, removedID) {
@@ -278,8 +280,8 @@ func relinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, 
 }
 
 // validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
-func validateUpdateChunkDAG(existing []VanadisChunk, updatedIdx int, updated VanadisChunk) ([]string, error) {
-	candidateChunks := make([]VanadisChunk, len(existing))
+func validateUpdateChunkDAG(existing []model.VanadisChunk, updatedIdx int, updated model.VanadisChunk) ([]string, error) {
+	candidateChunks := make([]model.VanadisChunk, len(existing))
 	copy(candidateChunks, existing)
 	candidateChunks[updatedIdx] = updated
 
@@ -291,8 +293,8 @@ func validateUpdateChunkDAG(existing []VanadisChunk, updatedIdx int, updated Van
 }
 
 // validateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
-func validateAppendChunksDAG(existing []VanadisChunk, appended []VanadisChunk) ([]VanadisChunk, error) {
-	allChunks := make([]VanadisChunk, 0, len(existing)+len(appended))
+func validateAppendChunksDAG(existing []model.VanadisChunk, appended []model.VanadisChunk) ([]model.VanadisChunk, error) {
+	allChunks := make([]model.VanadisChunk, 0, len(existing)+len(appended))
 	allChunks = append(allChunks, existing...)
 	allChunks = append(allChunks, appended...)
 
@@ -300,7 +302,7 @@ func validateAppendChunksDAG(existing []VanadisChunk, appended []VanadisChunk) (
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 	}
-	out := make([]VanadisChunk, len(appended))
+	out := make([]model.VanadisChunk, len(appended))
 	copy(out, appended)
 	for i := range out {
 		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
@@ -308,7 +310,7 @@ func validateAppendChunksDAG(existing []VanadisChunk, appended []VanadisChunk) (
 	return out, nil
 }
 
-func isPRDependencyCodeReady(other VanadisChunk) bool {
+func isPRDependencyCodeReady(other model.VanadisChunk) bool {
 	status := strings.ToLower(strings.TrimSpace(other.Status))
 	if status == statusCompleted {
 		return true
@@ -322,7 +324,7 @@ func isPRDependencyCodeReady(other VanadisChunk) bool {
 	return false
 }
 
-func checkChunkDependenciesReady(chunk VanadisChunk, chunks []VanadisChunk) error {
+func checkChunkDependenciesReady(chunk model.VanadisChunk, chunks []model.VanadisChunk) error {
 	for _, depID := range chunk.DependsOn {
 		depReady := false
 		for _, other := range chunks {

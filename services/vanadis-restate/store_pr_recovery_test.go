@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
@@ -42,11 +43,11 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := dbScript{row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}, {ID: "c2", Status: tc.sibling}}}.open()
+			store, _ := dbScript{row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}, {ID: "c2", Status: tc.sibling}}}.open()
 			err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head)
 			if tc.skip && !tc.legacySeed {
 				forbidden := errors.New("excluded legacy chunk attempted write or commit")
-				legacy, _ := dbScript{execErr: forbidden, commitErr: forbidden, row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, MergeSHA: tc.mergeSHA}}}.open()
+				legacy, _ := dbScript{execErr: forbidden, commitErr: forbidden, row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, MergeSHA: tc.mergeSHA}}}.open()
 				if legacyErr := legacy.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head); !errors.Is(legacyErr, errPRTransitionSkipped) {
 					t.Fatalf("legacy error=%v", legacyErr)
 				}
@@ -87,7 +88,7 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 			if db.buildRow == nil {
 				db.buildRow = buildRow("b1", "failed")
 			}
-			db.chunks = []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}}
+			db.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}}
 			if tc.baseline {
 				db.chunks[0].HeadSHA = ""
 			}
@@ -116,7 +117,7 @@ func TestPostgresVanadisStore_PRRecoveryTransactions(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
 			parent := "failed"
-			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
 			store := recoveryFixtureStore(&mu, &parent, &chunks, tc.failParent)
 			ctx := context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true)
 			if err := store.recoverFailedPR(ctx, "c1", "new"); err != nil {
@@ -156,7 +157,7 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
 			parent := "failed"
-			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "h1"}}
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "h1"}}
 			store := recoveryFixtureStore(&mu, &parent, &chunks, false)
 			chunks[0].HeadSHA = ""
 			assertLegacyBaseline(t, store, &parent, &chunks)
@@ -191,7 +192,7 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 
 type recoveryReadFailureStore struct{ *PostgresVanadisStore }
 
-func (recoveryReadFailureStore) GetBuild(context.Context, string) (*VanadisBuild, []VanadisChunk, error) {
+func (recoveryReadFailureStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	return nil, nil, errors.New("read unavailable")
 }
 
@@ -203,7 +204,7 @@ func TestBuildObject_PRRecoveryAfterRejectedCheck(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
 			parent := "failed"
-			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}}
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}}
 			store := recoveryReadFailureStore{recoveryFixtureStore(&mu, &parent, &chunks, false)}
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"h2"}}`))
@@ -231,17 +232,17 @@ type recoveryLifecycleStore struct {
 	*PostgresVanadisStore
 
 	parent *string
-	chunks *[]VanadisChunk
+	chunks *[]model.VanadisChunk
 }
 
-func (s recoveryLifecycleStore) GetBuild(context.Context, string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: "b1", Status: *s.parent}, *s.chunks, nil
+func (s recoveryLifecycleStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	return &model.VanadisBuild{ID: "b1", Status: *s.parent}, *s.chunks, nil
 }
 
-func (s recoveryLifecycleStore) FailChunk(context.Context, string, string, string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (s recoveryLifecycleStore) FailChunk(context.Context, string, string, string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
 	*s.parent = "failed"
 	(*s.chunks)[0].Status = "failed"
-	return &VanadisBuild{ID: "b1", Status: "failed"}, &(*s.chunks)[0], true, nil
+	return &model.VanadisBuild{ID: "b1", Status: "failed"}, &(*s.chunks)[0], true, nil
 }
 
 func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
@@ -261,7 +262,7 @@ func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
 			parent := "running"
-			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "pr_opened", HeadSHA: "h1"}}
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "pr_opened", HeadSHA: "h1"}}
 			store := recoveryLifecycleStore{recoveryFixtureStore(&mu, &parent, &chunks, false), &parent, &chunks}
 			bo := NewBuildObject("", nil).WithAuthority(store, nil)
 			ctx := mockRunContext{Context: context.Background()}
@@ -299,7 +300,7 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := dbScript{buildRow: buildRow("b1", tc.parent), routes: []sqlRoute{{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)}}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", Status: "failed"}}}.open()
+			store, _ := dbScript{buildRow: buildRow("b1", tc.parent), routes: []sqlRoute{{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", Status: "failed"}}}.open()
 			var observed *StatusWidgetRequest
 			eri := &mockEriClient{widgetFn: func(_ context.Context, req StatusWidgetRequest) (string, error) {
 				observed = &req
@@ -324,11 +325,11 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 	}
 }
 
-func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]VanadisChunk, failParent bool) *PostgresVanadisStore {
+func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *PostgresVanadisStore {
 	return newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 		return pgconn.NewCommandTag("UPDATE 0"), nil
 	}, beginFn: func(context.Context) (pgx.Tx, error) {
-		var local []VanadisChunk
+		var local []model.VanadisChunk
 		var state string
 		locked, closed := false, false
 		tx := &mockTx{
@@ -339,7 +340,7 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]VanadisChunk
 				mu.Lock()
 				locked = true
 				state = *parent
-				local = append([]VanadisChunk(nil), (*chunks)...)
+				local = append([]model.VanadisChunk(nil), (*chunks)...)
 				return buildRow("b1", state)
 			}, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return &mockRows{items: local}, nil },
 			execFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
@@ -374,7 +375,7 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]VanadisChunk
 	}})
 }
 
-func recoveryFixtureChecks(c VanadisChunk) []byte {
+func recoveryFixtureChecks(c model.VanadisChunk) []byte {
 	if c.HeadSHA == "" && c.MergeSHA == "" {
 		return []byte(`{"lint":"passed"}`)
 	}
@@ -383,7 +384,7 @@ func recoveryFixtureChecks(c VanadisChunk) []byte {
 	return raw
 }
 
-func applyRecoveryFixtureHead(chunks []VanadisChunk, args []any, baseline bool) {
+func applyRecoveryFixtureHead(chunks []model.VanadisChunk, args []any, baseline bool) {
 	for i := range chunks {
 		if chunks[i].ID == args[0] {
 			if !baseline {
@@ -394,7 +395,7 @@ func applyRecoveryFixtureHead(chunks []VanadisChunk, args []any, baseline bool) 
 	}
 }
 
-func assertLegacyBaseline(t *testing.T, store *PostgresVanadisStore, parent *string, stored *[]VanadisChunk) {
+func assertLegacyBaseline(t *testing.T, store *PostgresVanadisStore, parent *string, stored *[]model.VanadisChunk) {
 	t.Helper()
 	for _, head := range []string{"h1", "h1"} {
 		err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", head)

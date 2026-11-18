@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // recoverFailedPR rechecks recovery and subsequent head updates under the same parent-first locks
@@ -39,7 +41,7 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 	if !slices.Contains([]string{statusRunning, statusFailed}, b.Status) {
 		return errPRTransitionSkipped
 	}
-	var selected *VanadisChunk
+	var selected *model.VanadisChunk
 	reopen := true
 	for i := range chunks {
 		c := &chunks[i]
@@ -78,7 +80,7 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 	return tx.Commit(ctx)
 }
 
-func failedPRHeadAccepted(c VanadisChunk, head string, verified bool) bool {
+func failedPRHeadAccepted(c model.VanadisChunk, head string, verified bool) bool {
 	// A recovered PR must keep tracking new heads while failed siblings block
 	// the parent. Post-merge, completed, and cancelled chunks remain untouched.
 	switch c.Status {
@@ -93,7 +95,7 @@ func failedPRHeadAccepted(c VanadisChunk, head string, verified bool) bool {
 	return true
 }
 
-func missingFailedPRBaseline(c VanadisChunk, verified bool) bool {
+func missingFailedPRBaseline(c model.VanadisChunk, verified bool) bool {
 	return c.Status == statusFailed && c.HeadSHA == "" && c.Mode == "pr" && c.PRNumber > 0 && strings.TrimSpace(c.MergeSHA) == "" && verified
 }
 

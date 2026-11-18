@@ -11,6 +11,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // The provisional p95 (~233s over 75 intervals) informs this engineering
@@ -66,11 +67,11 @@ func (r restateObjectRuntime) ScheduleDeploymentDeadline(req DeploymentDeadlineR
 	_ = restate.ObjectSend(r.ctx, r.serviceName(), r.Key(), "DeploymentDeadline").Send(req, restate.WithDelay(delay))
 }
 
-func deploymentRevision(c VanadisChunk) string {
+func deploymentRevision(c model.VanadisChunk) string {
 	return firstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
 }
 
-func nextDeploymentAttempt(old deploymentAttempt, c VanadisChunk, start time.Time, retry bool) deploymentAttempt {
+func nextDeploymentAttempt(old deploymentAttempt, c model.VanadisChunk, start time.Time, retry bool) deploymentAttempt {
 	if old.Generation > 0 && old.PRNumber == c.PRNumber && old.Revision == deploymentRevision(c) && !retry {
 		return old
 	}
@@ -80,7 +81,7 @@ func nextDeploymentAttempt(old deploymentAttempt, c VanadisChunk, start time.Tim
 // Reconciliation adopts pre-upgrade deployments once. Chunk.StartedAt is the
 // coding start, not deployment start; absent a deployment event we use adoption
 // time rather than pretend that field is a historical deployment timestamp.
-func (b *BuildObject) syncDeploymentDeadlines(rt objectRuntime, state *BuildObjectState, ev *pubsub.PRLifecycleEvent, retry *BuildMutationRequest) error {
+func (b *BuildObject) syncDeploymentDeadlines(rt objectRuntime, state *model.BuildObjectState, ev *pubsub.PRLifecycleEvent, retry *BuildMutationRequest) error {
 	dr, ok := rt.(deploymentRuntime)
 	if !ok || state == nil {
 		return nil
@@ -224,7 +225,7 @@ func (b *BuildObject) armDeploymentStart(rt objectRuntime, buildID string, ev pu
 		if build == nil || build.Status != statusRunning {
 			return reconcileStepOutput{}, nil
 		}
-		return reconcileStepOutput{State: &BuildObjectState{Build: *build, Chunks: chunks}}, nil
+		return reconcileStepOutput{State: &model.BuildObjectState{Build: *build, Chunks: chunks}}, nil
 	})
 	if err != nil {
 		return err
@@ -236,7 +237,7 @@ func (b *BuildObject) armDeploymentStart(rt objectRuntime, buildID string, ev pu
 	return nil
 }
 
-func validateDeploymentRetry(state *BuildObjectState, attempts map[string]deploymentAttempt, retry *BuildMutationRequest) error {
+func validateDeploymentRetry(state *model.BuildObjectState, attempts map[string]deploymentAttempt, retry *BuildMutationRequest) error {
 	if retry != nil {
 		valid := false
 		for _, c := range state.Chunks {
@@ -299,11 +300,11 @@ func (b *BuildObject) deliverDeploymentDeadline(ctx context.Context, buildID str
 	return result, nil
 }
 
-func deploymentEligible(c VanadisChunk) bool {
+func deploymentEligible(c model.VanadisChunk) bool {
 	return c.Status == statusDeploying && c.PRNumber != 0 && deploymentRevision(c) != ""
 }
 
-func deploymentStartAt(now time.Time, ev *pubsub.PRLifecycleEvent, c VanadisChunk) time.Time {
+func deploymentStartAt(now time.Time, ev *pubsub.PRLifecycleEvent, c model.VanadisChunk) time.Time {
 	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && firstNonEmpty(ev.MergeSHA, ev.HeadSHA) == deploymentRevision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
 		return ev.OccurredAt
 	}

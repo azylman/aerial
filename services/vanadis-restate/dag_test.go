@@ -4,11 +4,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type dagTestCase struct {
 	name       string
-	chunks     []VanadisChunk
+	chunks     []model.VanadisChunk
 	wantErr    bool
 	wantSubstr string
 	wantDeps   [][]string
@@ -53,7 +55,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "single_chunk_missing_depends_on_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial"},
 			},
 			wantErr:    true,
@@ -61,7 +63,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "empty_chunk_id_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "", Mode: "pr", Repo: "aerial"},
 			},
 			wantErr:    true,
@@ -69,7 +71,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "duplicate_chunk_id_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial"},
 				{ID: "c1", Mode: "pr", Repo: "aerial"},
 			},
@@ -78,7 +80,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "empty_dependency_reference_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"   "}},
 			},
 			wantErr:    true,
@@ -86,7 +88,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "duplicate_dependency_deduplicated",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1", "c1"}},
 			},
@@ -94,7 +96,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "multi_chunk_missing_depends_on_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial"},
 			},
@@ -103,7 +105,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "index_string_normalization",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"0"}},
 			},
@@ -111,7 +113,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "self_dependency_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}},
 			},
 			wantErr:    true,
@@ -119,7 +121,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "self_dependency_by_index_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"0"}},
 			},
 			wantErr:    true,
@@ -127,7 +129,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "unknown_dependency_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"missing"}},
 			},
 			wantErr:    true,
@@ -135,7 +137,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "forward_edge",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"1"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 			},
@@ -143,7 +145,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "forward_transitive_chain",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c3"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c3", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}},
@@ -152,7 +154,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "disconnected_nodes_with_forward_edge",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c3"}, TargetFiles: []string{"a.go"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
 				{ID: "c3", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
@@ -161,7 +163,7 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		},
 		{
 			name: "cycle_detected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}},
 			},
@@ -177,7 +179,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 	tests := []dagTestCase{
 		{
 			name: "concurrent_same_repo_pr_empty_target_files_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 			},
@@ -186,7 +188,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 		},
 		{
 			name: "concurrent_same_repo_pr_overlapping_files_rejected",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go", "pkg/b.go"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/b.go", "pkg/c.go"}},
 			},
@@ -195,7 +197,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 		},
 		{
 			name: "concurrent_same_repo_pr_disjoint_files_ok",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/b.go"}},
 			},
@@ -203,7 +205,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 		},
 		{
 			name: "dependent_same_repo_pr_can_overlap_files",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/a.go"}},
 			},
@@ -211,7 +213,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 		},
 		{
 			name: "concurrent_different_repos_can_overlap_files",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial-config", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
 			},
@@ -219,7 +221,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 		},
 		{
 			name: "terminal_chunks_skipped_in_disjoint_check",
-			chunks: []VanadisChunk{
+			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
 				{ID: "c3", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
@@ -235,7 +237,7 @@ func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
 
 	t.Run("update_chunk_cycle_rejected", func(t *testing.T) {
 		t.Parallel()
-		existing := []VanadisChunk{
+		existing := []model.VanadisChunk{
 			{ID: "c1", Mode: "action", DependsOn: []string{}},
 			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
 		}
@@ -249,7 +251,7 @@ func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
 
 	t.Run("update_chunk_overlapping_files_rejected", func(t *testing.T) {
 		t.Parallel()
-		existing := []VanadisChunk{
+		existing := []model.VanadisChunk{
 			{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
 			{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
 		}
@@ -263,10 +265,10 @@ func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
 
 	t.Run("append_chunks_cycle_rejected", func(t *testing.T) {
 		t.Parallel()
-		existing := []VanadisChunk{
+		existing := []model.VanadisChunk{
 			{ID: "c1", Mode: "action", DependsOn: []string{}},
 		}
-		appended := []VanadisChunk{
+		appended := []model.VanadisChunk{
 			{ID: "c2", Mode: "action", DependsOn: []string{"c3"}},
 			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
 		}
@@ -278,10 +280,10 @@ func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
 
 	t.Run("append_chunks_valid_sequential_default", func(t *testing.T) {
 		t.Parallel()
-		existing := []VanadisChunk{
+		existing := []model.VanadisChunk{
 			{ID: "c1", Mode: "action", DependsOn: []string{}},
 		}
-		appended := []VanadisChunk{
+		appended := []model.VanadisChunk{
 			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
 			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
 		}
@@ -296,13 +298,13 @@ func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
 
 	t.Run("relink_dependencies_after_removal_and_update", func(t *testing.T) {
 		t.Parallel()
-		chunks := []VanadisChunk{
+		chunks := []model.VanadisChunk{
 			{ID: "c1", Mode: "action", DependsOn: []string{}},
 			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
 			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
 		}
 		// Remove c2
-		remaining := []VanadisChunk{chunks[0], chunks[2]}
+		remaining := []model.VanadisChunk{chunks[0], chunks[2]}
 		relinkDependenciesAfterRemoval(remaining, chunks[1].ID, chunks[1].DependsOn)
 		if len(remaining[1].DependsOn) != 1 || remaining[1].DependsOn[0] != "c1" {
 			t.Fatalf("expected c3 to depend on c1 after c2 removal, got %+v", remaining[1].DependsOn)
@@ -324,14 +326,14 @@ func TestIsPRDependencyCodeReady(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
-		chunk VanadisChunk
+		chunk model.VanadisChunk
 		want  bool
 	}{
-		{name: "completed status", chunk: VanadisChunk{Status: "completed"}, want: true},
-		{name: "pr mode merged", chunk: VanadisChunk{Mode: "pr", Status: "merged"}, want: true},
-		{name: "pr mode deploying", chunk: VanadisChunk{Mode: "pr", Status: "deploying"}, want: true},
-		{name: "pr mode running", chunk: VanadisChunk{Mode: "pr", Status: "running"}, want: false},
-		{name: "action mode running", chunk: VanadisChunk{Mode: "action", Status: "running"}, want: false},
+		{name: "completed status", chunk: model.VanadisChunk{Status: "completed"}, want: true},
+		{name: "pr mode merged", chunk: model.VanadisChunk{Mode: "pr", Status: "merged"}, want: true},
+		{name: "pr mode deploying", chunk: model.VanadisChunk{Mode: "pr", Status: "deploying"}, want: true},
+		{name: "pr mode running", chunk: model.VanadisChunk{Mode: "pr", Status: "running"}, want: false},
+		{name: "action mode running", chunk: model.VanadisChunk{Mode: "action", Status: "running"}, want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -371,7 +373,7 @@ func TestRelinkDependenciesAfterRemoval_SelfDep(t *testing.T) {
 	t.Parallel()
 
 	// c1 removed, which depended on c2. c2 remaining shouldn't add c2 to its own DependsOn.
-	remaining := []VanadisChunk{
+	remaining := []model.VanadisChunk{
 		{ID: "c2", DependsOn: []string{"c1"}},
 	}
 	relinkDependenciesAfterRemoval(remaining, "c1", []string{"c2"})
@@ -426,7 +428,7 @@ func TestApplyChunkUpdates_Validation(t *testing.T) {
 	strPtr := func(s string) *string { return &s }
 
 	// applyChunkUpdates tests
-	c := VanadisChunk{
+	c := model.VanadisChunk{
 		ID:            "c1",
 		Mode:          "pr",
 		Repo:          "azylman/aerial",
@@ -482,8 +484,8 @@ func TestApplyChunkUpdates_Validation(t *testing.T) {
 
 func TestCheckDisjointFiles_ChunkBEmptyTargetFiles(t *testing.T) {
 	t.Parallel()
-	a := VanadisChunk{ID: "c1", TargetFiles: []string{"a.go"}}
-	b := VanadisChunk{ID: "c2", TargetFiles: nil}
+	a := model.VanadisChunk{ID: "c1", TargetFiles: []string{"a.go"}}
+	b := model.VanadisChunk{ID: "c2", TargetFiles: nil}
 	err := checkDisjointFiles(a, b, "repo")
 	if err == nil || !strings.Contains(err.Error(), "concurrent PR chunk \"c2\" on repo \"repo\" must specify target_files") {
 		t.Fatalf("expected error on chunk b empty target files, got %v", err)
@@ -492,7 +494,7 @@ func TestCheckDisjointFiles_ChunkBEmptyTargetFiles(t *testing.T) {
 
 func TestRelinkDependenciesAfterRemoval_DuplicateDep(t *testing.T) {
 	t.Parallel()
-	remaining := []VanadisChunk{
+	remaining := []model.VanadisChunk{
 		{ID: "c3", DependsOn: []string{"c2", "c1", "c1"}},
 	}
 	relinkDependenciesAfterRemoval(remaining, "c2", []string{"c0"})
@@ -503,7 +505,7 @@ func TestRelinkDependenciesAfterRemoval_DuplicateDep(t *testing.T) {
 
 func TestValidateCreateBuildInputs(t *testing.T) {
 	t.Parallel()
-	validChunk := VanadisChunk{
+	validChunk := model.VanadisChunk{
 		ID:           "c1",
 		BuildID:      "b1",
 		Title:        "Chunk 1",
@@ -519,7 +521,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 		buildID    string
 		threadID   string
 		objective  string
-		chunks     []VanadisChunk
+		chunks     []model.VanadisChunk
 		wantErr    bool
 		wantSubstr string
 	}{
@@ -528,7 +530,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			buildID:    "",
 			threadID:   "th1",
 			objective:  "obj",
-			chunks:     []VanadisChunk{validChunk},
+			chunks:     []model.VanadisChunk{validChunk},
 			wantErr:    true,
 			wantSubstr: "build id, thread_id, and objective cannot be empty",
 		},
@@ -537,7 +539,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			buildID:    "b1",
 			threadID:   "th1",
 			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "", Title: "", Instructions: ""}},
+			chunks:     []model.VanadisChunk{{ID: "", Title: "", Instructions: ""}},
 			wantErr:    true,
 			wantSubstr: "id, title, and instructions cannot be empty",
 		},
@@ -546,7 +548,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			buildID:    "b1",
 			threadID:   "th1",
 			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "invalid/id!", Title: "Title", Instructions: "Inst"}},
+			chunks:     []model.VanadisChunk{{ID: "invalid/id!", Title: "Title", Instructions: "Inst"}},
 			wantErr:    true,
 			wantSubstr: "must be 1..120 characters",
 		},
@@ -555,7 +557,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			buildID:    "b1",
 			threadID:   "th1",
 			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", BuildID: "b2", Title: "Title", Instructions: "Inst"}},
+			chunks:     []model.VanadisChunk{{ID: "c1", BuildID: "b2", Title: "Title", Instructions: "Inst"}},
 			wantErr:    true,
 			wantSubstr: "does not match build id",
 		},
@@ -564,7 +566,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			buildID:    "b1",
 			threadID:   "th1",
 			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", Title: "Title", Instructions: "Inst", Mode: "pr", Repo: "aerial", Effort: "gigantic"}},
+			chunks:     []model.VanadisChunk{{ID: "c1", Title: "Title", Instructions: "Inst", Mode: "pr", Repo: "aerial", Effort: "gigantic"}},
 			wantErr:    true,
 			wantSubstr: "invalid chunk effort",
 		},
@@ -573,7 +575,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			buildID:   "b1",
 			threadID:  "th1",
 			objective: "obj",
-			chunks:    []VanadisChunk{validChunk},
+			chunks:    []model.VanadisChunk{validChunk},
 			wantErr:   false,
 		},
 	}
@@ -599,20 +601,20 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 
 func TestCheckChunkDependenciesReady_ModeAndStatus(t *testing.T) {
 	t.Parallel()
-	chunks := []VanadisChunk{
+	chunks := []model.VanadisChunk{
 		{ID: "c1", Mode: "pr", Status: "deploying"},
 		{ID: "c2", Mode: "action", Status: "completed"},
 		{ID: "c3", Mode: "pr", Status: "running"},
 	}
 	tests := []struct {
 		name    string
-		chunk   VanadisChunk
+		chunk   model.VanadisChunk
 		wantErr bool
 	}{
-		{name: "pr depending on deploying pr", chunk: VanadisChunk{ID: "pr1", Mode: "pr", DependsOn: []string{"c1"}}, wantErr: false},
-		{name: "pr depending on running pr", chunk: VanadisChunk{ID: "pr2", Mode: "pr", DependsOn: []string{"c3"}}, wantErr: true},
-		{name: "action depending on completed action", chunk: VanadisChunk{ID: "act1", Mode: "action", DependsOn: []string{"c2"}}, wantErr: false},
-		{name: "action depending on non-completed chunk", chunk: VanadisChunk{ID: "act2", Mode: "action", DependsOn: []string{"c1"}}, wantErr: true},
+		{name: "pr depending on deploying pr", chunk: model.VanadisChunk{ID: "pr1", Mode: "pr", DependsOn: []string{"c1"}}, wantErr: false},
+		{name: "pr depending on running pr", chunk: model.VanadisChunk{ID: "pr2", Mode: "pr", DependsOn: []string{"c3"}}, wantErr: true},
+		{name: "action depending on completed action", chunk: model.VanadisChunk{ID: "act1", Mode: "action", DependsOn: []string{"c2"}}, wantErr: false},
+		{name: "action depending on non-completed chunk", chunk: model.VanadisChunk{ID: "act2", Mode: "action", DependsOn: []string{"c1"}}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -629,7 +631,7 @@ func TestNormalizeAndValidateBuildDAG_TerminalSkip(t *testing.T) {
 	t.Parallel()
 
 	// Concurrent chunks on same repo where one is terminal (merged/completed) -> disjoint check skipped
-	chunks := []VanadisChunk{
+	chunks := []model.VanadisChunk{
 		{ID: "c1", Mode: "pr", Repo: "aerial", Status: "completed", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
 		{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
 	}

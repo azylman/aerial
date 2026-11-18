@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type gitHubPullRequest struct {
@@ -103,7 +104,7 @@ func isTrustedPRAuthor(login, association, owner string) bool {
 	}
 }
 
-func hasDispatchedChunkAssociation(body string, build VanadisBuild, chunk VanadisChunk) bool {
+func hasDispatchedChunkAssociation(body string, build model.VanadisBuild, chunk model.VanadisChunk) bool {
 	_, rest, ok := strings.CutLast(body, "<!-- aerial-pr:")
 	if !ok {
 		return false
@@ -126,7 +127,7 @@ func hasDispatchedChunkAssociation(body string, build VanadisBuild, chunk Vanadi
 	return buildThread == "" || normalizeDiscordThreadID(trailer.TargetID) == buildThread
 }
 
-func (e *Executor) validateChunkPRAttachment(ctx context.Context, build VanadisBuild, chunk VanadisChunk, ev pubsub.PRLifecycleEvent) error {
+func (e *Executor) validateChunkPRAttachment(ctx context.Context, build model.VanadisBuild, chunk model.VanadisChunk, ev pubsub.PRLifecycleEvent) error {
 	pr, owner, fullRepo, err := e.fetchGitHubPullRequest(ctx, ev.Repo, ev.PRNumber)
 	if err != nil {
 		return err

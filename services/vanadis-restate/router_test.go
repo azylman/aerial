@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type mockInvoker struct {
@@ -158,7 +159,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				chunks: []VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
+				chunks: []model.VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
 			},
 			wantBuildID: "b-thread",
 		},
@@ -173,7 +174,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				chunks: []VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
+				chunks: []model.VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
 			},
 			wantBuildID: "",
 		},
@@ -189,7 +190,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				chunks: []VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
+				chunks: []model.VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
 			},
 			wantBuildID: "",
 		},
@@ -500,14 +501,14 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 		{name: "empty thread id", threadID: "", repo: "aerial", db: dbScript{}, wantErrIs: ErrChunkNotFound},
 		{name: "empty repo", threadID: "123", repo: "", db: dbScript{}, wantErrIs: ErrChunkNotFound},
 		{name: "query error", threadID: "123", repo: "aerial", db: dbScript{queryErr: errors.New("query failed")}, wantErr: true},
-		{name: "scan error", threadID: "123", repo: "aerial", db: dbScript{chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}}, scanErr: errors.New("scan failed")}, wantErr: true},
-		{name: "rows error", threadID: "123", repo: "aerial", db: dbScript{chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}}, rowsErr: errors.New("rows failed")}, wantErr: true},
-		{name: "0 rows not found", threadID: "123", repo: "aerial", db: dbScript{chunks: []VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
+		{name: "scan error", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, scanErr: errors.New("scan failed")}, wantErr: true},
+		{name: "rows error", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, rowsErr: errors.New("rows failed")}, wantErr: true},
+		{name: "0 rows not found", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
 		{name: "1 row unambiguous match", threadID: "123", repo: "aerial", db: dbScript{
-			chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}},
+			chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}},
 		}, wantBuild: "b1", wantChunk: "c1"},
 		{name: "2 rows ambiguous rejection", threadID: "123", repo: "aerial", db: dbScript{
-			chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}, {BuildID: "b1", ID: "c2"}},
+			chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}, {BuildID: "b1", ID: "c2"}},
 		}, wantErrIs: ErrChunkNotFound},
 	}
 	for _, tc := range tests {
@@ -528,7 +529,7 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 type unattachedPREventSpyStore struct {
 	VanadisStore
 
-	chunks          []VanadisChunk
+	chunks          []model.VanadisChunk
 	getBuildErr     error
 	attachErr       error
 	attachedChunkID string
@@ -545,11 +546,11 @@ func (*unattachedPREventSpyStore) GetChunkByPR(_ context.Context, _ string, _ in
 	return &VanadisChunkPRLookup{Matched: false}, nil
 }
 
-func (s *unattachedPREventSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+func (s *unattachedPREventSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	if s.getBuildErr != nil {
 		return nil, nil, s.getBuildErr
 	}
-	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, nil
+	return &model.VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, nil
 }
 
 func (s *unattachedPREventSpyStore) AttachChunkPR(_ context.Context, req AttachChunkPRRequest) (string, string, string, error) {
@@ -604,9 +605,9 @@ func (s *unattachedPREventSpyStore) IncrementChunkCIFailCount(_ context.Context,
 	return 1, nil
 }
 
-func (s *unattachedPREventSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (s *unattachedPREventSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
 	s.failedChunkID = chunkID + ":" + reason
-	return &VanadisBuild{ID: "b1", Status: statusFailed, ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, Status: statusFailed}, true, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusFailed, ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, Status: statusFailed}, true, nil
 }
 
 func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
@@ -617,14 +618,14 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
 	prEv := func(ev, branch, sha, target string, pr int) pubsub.PRLifecycleEvent {
 		return pubsub.PRLifecycleEvent{Event: ev, Repo: "external/aerial", PRNumber: pr, Branch: branch, HeadSHA: sha, TargetID: target}
 	}
-	ch := func(id, status string, pr int, started time.Time) []VanadisChunk {
-		return []VanadisChunk{{ID: id, BuildID: "b1", Mode: "pr", Status: status, Repo: "external/aerial", PRNumber: pr, StartedAt: started}}
+	ch := func(id, status string, pr int, started time.Time) []model.VanadisChunk {
+		return []model.VanadisChunk{{ID: id, BuildID: "b1", Mode: "pr", Status: status, Repo: "external/aerial", PRNumber: pr, StartedAt: started}}
 	}
 
 	tests := []struct {
 		name           string
 		event          pubsub.PRLifecycleEvent
-		chunks         []VanadisChunk
+		chunks         []model.VanadisChunk
 		ghResponse     string
 		withoutExec    bool
 		wantAttached   string
@@ -645,7 +646,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
 		{"nonencoded branch resolved via unambiguous thread and verified trailer", prEv("ci_failed", "feat/custom-branch", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, ""},
 		{"absent event branch resolved via unambiguous thread and verified trailer", prEv("conflict", "", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, ""},
 		{"nonencoded branch rejected without trailer", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"manual PR","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
-		{"nonencoded branch rejected when parallel chunks ambiguous", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), []VanadisChunk{{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "external/aerial", StartedAt: startedAt}, {ID: "chunk-2", BuildID: "b1", Mode: "pr", Status: statusCoding, Repo: "external/aerial", StartedAt: startedAt}}, `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
+		{"nonencoded branch rejected when parallel chunks ambiguous", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), []model.VanadisChunk{{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "external/aerial", StartedAt: startedAt}, {ID: "chunk-2", BuildID: "b1", Mode: "pr", Status: statusCoding, Repo: "external/aerial", StartedAt: startedAt}}, `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
 		{"mismatched head repository rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"other/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
 		{"mismatched head branch ref rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-2-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
 		{"mismatched head sha rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "sha-other", "", 102), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, ""},
@@ -778,7 +779,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
 			exec := NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", api.Client())
 			exec.gitHubAPIURL = api.URL
 			spy := &unattachedPREventSpyStore{
-				chunks: []VanadisChunk{
+				chunks: []model.VanadisChunk{
 					{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "aerial", PRNumber: 0, StartedAt: startedAt},
 				},
 				getBuildErr: tc.getBuildErr,
@@ -824,19 +825,19 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 
 func TestNoPRTurnAction(t *testing.T) {
 	t.Parallel()
-	pr := func(status string, prNumber int) VanadisChunk {
-		return VanadisChunk{ID: "c1", Mode: "pr", Status: status, PRNumber: prNumber}
+	pr := func(status string, prNumber int) model.VanadisChunk {
+		return model.VanadisChunk{ID: "c1", Mode: "pr", Status: status, PRNumber: prNumber}
 	}
 	tests := []struct {
 		name        string
-		chunk       VanadisChunk
+		chunk       model.VanadisChunk
 		buildStatus string
 		dispatchID  string
 		want        noPRAction
 	}{
 		{"running pr chunk launch turn resumes", pr("running", 0), "running", "vanadis-c1-turn-0", noPRActionResume},
 		{"coding pr chunk launch turn resumes", pr("coding", 0), "running", "vanadis-c1-turn-0", noPRActionResume},
-		{"legacy empty mode launch turn resumes", VanadisChunk{ID: "c1", Status: "running"}, "running", "vanadis-c1-turn-0", noPRActionResume},
+		{"legacy empty mode launch turn resumes", model.VanadisChunk{ID: "c1", Status: "running"}, "running", "vanadis-c1-turn-0", noPRActionResume},
 		{"resume turn without pr fails", pr("running", 0), "running", "vanadis-c1-nopr-resume-1", noPRActionFail},
 		{"attached pr ignored", pr("running", 12), "running", "vanadis-c1-turn-0", noPRActionNone},
 		{"pr opened status ignored", pr("pr_opened", 0), "running", "vanadis-c1-turn-0", noPRActionNone},
@@ -847,7 +848,7 @@ func TestNoPRTurnAction(t *testing.T) {
 		{"ci remediation dispatch ignored", pr("running", 0), "running", "vanadis-c1-cifail-abc123-1", noPRActionNone},
 		{"conflict remediation dispatch ignored", pr("running", 0), "running", "vanadis-conflict-c1-abc123", noPRActionNone},
 		{"other chunk resume id ignored", pr("running", 0), "running", "vanadis-c2-nopr-resume-1", noPRActionNone},
-		{"action chunk ignored", VanadisChunk{ID: "c1", Mode: "action", Status: "running"}, "running", "vanadis-c1-turn-0", noPRActionNone},
+		{"action chunk ignored", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running"}, "running", "vanadis-c1-turn-0", noPRActionNone},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -877,13 +878,13 @@ func TestFormatNoPRResumePrompt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name         string
-		chunk        VanadisChunk
+		chunk        model.VanadisChunk
 		chunkPrompt  string
 		wantContains []string
 	}{
 		{
 			name:        "includes recovery steps and original prompt",
-			chunk:       VanadisChunk{ID: "c1"},
+			chunk:       model.VanadisChunk{ID: "c1"},
 			chunkPrompt: "ORIGINAL CHUNK PROMPT",
 			wantContains: []string{
 				"[VANADIS AUTOMATIC RESUME]\nYour previous turn for chunk c1 ended without opening a PR.",
@@ -896,7 +897,7 @@ func TestFormatNoPRResumePrompt(t *testing.T) {
 		},
 		{
 			name:         "trims chunk id",
-			chunk:        VanadisChunk{ID: " c2 "},
+			chunk:        model.VanadisChunk{ID: " c2 "},
 			chunkPrompt:  "P",
 			wantContains: []string{"for chunk c2 ended", "--vanadis-chunk c2'"},
 		},

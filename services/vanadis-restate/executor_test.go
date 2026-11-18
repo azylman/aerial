@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type mockEriClient struct {
@@ -129,8 +130,8 @@ func TestExecutor_PromptAndDispatch(t *testing.T) {
 	bus := pubsub.NewMemoryBus()
 	exec := NewExecutor(t.TempDir(), eri, bus, "test-token", nil)
 
-	b := VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
-	chunks := []VanadisChunk{
+	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
+	chunks := []model.VanadisChunk{
 		{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do step 1", Effort: "high"},
 		{ID: "c2", Title: "Chunk 2", Repo: "aerial", Instructions: "Do step 2", Mode: chunkModeAction},
 	}
@@ -179,8 +180,8 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 	exec := NewExecutor("", eri, nil, "", nil)
 	store, _ := dbScript{execTag: "UPDATE 1"}.open()
 
-	b := VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
-	chunks := []VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
+	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
+	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
 
 	msgID, err := exec.SyncBuildWidget(context.Background(), store, b, chunks, "Notice!")
 	if err != nil || msgID != "widget-msg-456" {
@@ -309,7 +310,7 @@ func TestCIFailureLogExtraction(t *testing.T) {
 
 func TestWidgetFormatting(t *testing.T) {
 	t.Parallel()
-	c := VanadisChunk{
+	c := model.VanadisChunk{
 		ID:     "c1",
 		Status: "open",
 		CIChecks: map[string]string{
@@ -322,7 +323,7 @@ func TestWidgetFormatting(t *testing.T) {
 		t.Errorf("FormatChunkActiveStep = %q, want '1/2 passed'", step)
 	}
 
-	cFailed := VanadisChunk{
+	cFailed := model.VanadisChunk{
 		ID:     "c1-fail",
 		Status: "open",
 		CIChecks: map[string]string{
@@ -334,13 +335,13 @@ func TestWidgetFormatting(t *testing.T) {
 		t.Errorf("FormatChunkActiveStep failed = %q, want empty", stepFailed)
 	}
 
-	cDeploying := VanadisChunk{ID: "c2", Status: "deploying"}
+	cDeploying := model.VanadisChunk{ID: "c2", Status: "deploying"}
 	stepDeploy := FormatChunkActiveStep(cDeploying)
 	if stepDeploy != "Deploying to cluster" {
 		t.Errorf("FormatChunkActiveStep deploying = %q, want 'Deploying to cluster'", stepDeploy)
 	}
 
-	cEmpty := VanadisChunk{ID: "c3", Status: "pending"}
+	cEmpty := model.VanadisChunk{ID: "c3", Status: "pending"}
 	if stepEmpty := FormatChunkActiveStep(cEmpty); stepEmpty != "" {
 		t.Errorf("FormatChunkActiveStep pending = %q, want empty", stepEmpty)
 	}
@@ -454,14 +455,14 @@ func TestExecutor_ResolveCIFailureDetails(t *testing.T) {
 
 func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 	t.Parallel()
-	b := VanadisBuild{
+	b := model.VanadisBuild{
 		ID:            "b-1",
 		Title:         "Build Title",
 		Objective:     "Build Objective",
 		SharedContext: "Shared Context",
 		Tier:          2,
 	}
-	chunks := []VanadisChunk{
+	chunks := []model.VanadisChunk{
 		{
 			ID:           "c-1",
 			Title:        "Chunk 1",
@@ -480,7 +481,7 @@ func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		chunks    []VanadisChunk
+		chunks    []model.VanadisChunk
 		activeIdx int
 		wantErr   bool
 		wantPart  string
@@ -996,31 +997,31 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	ctx := context.Background()
 
 	// nil executor or eri client
-	if err := (*Executor)(nil).ExecuteLaunchChunk(ctx, nil, VanadisBuild{}, nil, 0, ""); err == nil {
+	if err := (*Executor)(nil).ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
 		t.Error("expected error for nil executor")
 	}
 
 	exec := NewExecutor("", &mockEriClient{}, nil, "", nil)
 
 	// out of bounds
-	if err := exec.ExecuteLaunchChunk(ctx, nil, VanadisBuild{}, nil, 0, ""); err == nil {
+	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
 		t.Error("expected error for out of bounds chunk")
 	}
 
 	// activeIdx out of bounds
-	chunks := []VanadisChunk{{ID: "c1"}}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, VanadisBuild{ID: "b1"}, chunks, -1, ""); err == nil {
+	chunks := []model.VanadisChunk{{ID: "c1"}}
+	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, -1, ""); err == nil {
 		t.Error("expected error for negative activeIdx")
 	}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, VanadisBuild{ID: "b1"}, chunks, 2, ""); err == nil {
+	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, 2, ""); err == nil {
 		t.Error("expected error for out of range activeIdx")
 	}
 
 	// store reserve error branch
 	mockStore := &mockStoreForLaunch{reserveErr: errors.New("database locked")}
 	execWithStore := NewExecutor("", &mockEriClient{}, nil, "", nil)
-	chunksForLaunch := []VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
-	if err := execWithStore.ExecuteLaunchChunk(ctx, mockStore, VanadisBuild{ID: "b1"}, chunksForLaunch, 0, ""); err != nil {
+	chunksForLaunch := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
+	if err := execWithStore.ExecuteLaunchChunk(ctx, mockStore, model.VanadisBuild{ID: "b1"}, chunksForLaunch, 0, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1030,7 +1031,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	_ = os.MkdirAll(aerialDir, 0o755)
 	_ = os.WriteFile(filepath.Join(aerialDir, "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644)
 	execShare := NewExecutor(tmpShare, &mockEriClient{}, nil, "", nil)
-	promptWithSpans, err := execShare.FormatChunkPrompt(VanadisBuild{ID: "b1"}, []VanadisChunk{{
+	promptWithSpans, err := execShare.FormatChunkPrompt(model.VanadisBuild{ID: "b1"}, []model.VanadisChunk{{
 		ID:            "c1",
 		Title:         "Chunk 1",
 		Mode:          "pr",
@@ -1093,7 +1094,7 @@ func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
 			t.Parallel()
 			eri := &mockEriClient{}
 			executor := NewExecutor(t.TempDir(), eri, nil, "", nil)
-			err := executor.ExecuteLaunchChunk(context.Background(), &mockStoreForLaunch{reserveErr: tc.reserveErr}, VanadisBuild{ID: "b"}, []VanadisChunk{{ID: "c", Mode: "action", StallNudges: 1}}, 0, "")
+			err := executor.ExecuteLaunchChunk(context.Background(), &mockStoreForLaunch{reserveErr: tc.reserveErr}, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", StallNudges: 1}}, 0, "")
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, !tc.wantError, eri.lastDispatch != nil)
 		})
@@ -1141,8 +1142,8 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			build := VanadisBuild{ID: "b", Status: "running"}
-			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
+			build := model.VanadisBuild{ID: "b", Status: "running"}
+			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []model.VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
 			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, false)
 			assert.Equal(t, tc.wantError, err != nil)
@@ -1180,8 +1181,8 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "dispatch_id": req.ID})
 	}))
 	defer srv.Close()
-	build := VanadisBuild{ID: "b", Status: "running"}
-	chunks := []VanadisChunk{
+	build := model.VanadisBuild{ID: "b", Status: "running"}
+	chunks := []model.VanadisChunk{
 		{ID: "retry", Mode: "action", Status: "running", StallNudges: 1},
 		{ID: "sibling", Mode: "action", Status: "pending"},
 		{ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}},
@@ -1225,7 +1226,7 @@ func TestFormatKustomizationAndJobRollout(t *testing.T) {
 	assert.Contains(t, s, "[`k2`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k2): 🔄 rolling out")
 
 	// FormatChunkActiveStep with kustomizations
-	chunkKust := VanadisChunk{
+	chunkKust := model.VanadisChunk{
 		ID:     "c-kust",
 		Status: statusDeploying,
 		RolloutState: &pubsub.PRRolloutState{
@@ -1236,7 +1237,7 @@ func TestFormatKustomizationAndJobRollout(t *testing.T) {
 	assert.Contains(t, stepKust, "✅ rolled out")
 
 	// FormatChunkActiveStep with jobs
-	chunkJobs := VanadisChunk{
+	chunkJobs := model.VanadisChunk{
 		ID:     "c-jobs",
 		Status: statusDeploying,
 		RolloutState: &pubsub.PRRolloutState{
@@ -1253,7 +1254,7 @@ func TestFormatKustomizationAndJobRollout(t *testing.T) {
 	assert.Contains(t, stepJobs, "`svc-d`: ⏳ building image")
 
 	// FormatChunkActiveStep with container image builds on merged
-	chunkImages := VanadisChunk{
+	chunkImages := model.VanadisChunk{
 		ID:     "c-images",
 		Status: statusMerged,
 		CIChecks: map[string]string{
@@ -1265,7 +1266,7 @@ func TestFormatKustomizationAndJobRollout(t *testing.T) {
 	assert.Contains(t, stepImages, "Building container images (2/2 completed)")
 
 	// FormatChunkActiveStep with matched build job service on merged
-	chunkService := VanadisChunk{
+	chunkService := model.VanadisChunk{
 		ID:     "c-svc",
 		Status: statusMerged,
 		CIChecks: map[string]string{
@@ -1477,13 +1478,13 @@ func TestBuildStatusWidgetChunk(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		chunk    VanadisChunk
+		chunk    model.VanadisChunk
 		wantMode string
 		wantRepo string
 	}{
-		{"PRChunkKeepsRepo", VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config"},
-		{"PRChunkWithoutRepoDefaultsToAerial", VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial"},
-		{"ActionChunkHasNoRepo", VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", ""},
+		{"PRChunkKeepsRepo", model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config"},
+		{"PRChunkWithoutRepoDefaultsToAerial", model.VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial"},
+		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

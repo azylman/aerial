@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // observeJournalCallback inspects the callback error before the SDK mock adapter
@@ -83,11 +84,11 @@ type metadataMutationStore struct {
 	err error
 }
 
-func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req UpdateBuildRequest) (*VanadisBuild, error) {
+func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req UpdateBuildRequest) (*model.VanadisBuild, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &VanadisBuild{ID: id, Title: req.Title}, nil
+	return &model.VanadisBuild{ID: id, Title: req.Title}, nil
 }
 
 //nolint:tparallel // Requests must run in order against the same object after a conflict.
@@ -114,7 +115,7 @@ func TestUpdateBuildConflictThenValid(t *testing.T) {
 			got, err := bo.UpdateBuild(restate.WithMockContext(mc), UpdateBuildRequest{Title: "Updated"})
 			if tc.err == nil {
 				require.NoError(t, err)
-				assert.Equal(t, VanadisBuild{ID: "build", Title: "Updated"}, got)
+				assert.Equal(t, model.VanadisBuild{ID: "build", Title: "Updated"}, got)
 			} else {
 				require.Error(t, err)
 			}
@@ -193,7 +194,7 @@ func TestCreateBuildJournalCallback(t *testing.T) {
 			}
 			observeJournalCallback(t, mc, want, tc.terminal)
 			_, _ = runJournaled(restate.WithMockContext(mc), labelCreate, "create-build-postgres", func(rc restate.RunContext) (bool, error) {
-				return bo.persistBuildCreation(rc, VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}})
+				return bo.persistBuildCreation(rc, model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}})
 			})
 		})
 	}
@@ -202,8 +203,8 @@ func TestCreateBuildJournalCallback(t *testing.T) {
 func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 	t.Parallel()
 	lostAck := errors.New("connection lost after commit")
-	build := VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}
-	chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}}
+	build := model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}
+	chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}}
 	tests := []struct {
 		name string
 		db   dbScript
@@ -270,7 +271,7 @@ func TestCreateBuildConflictAtomicity(t *testing.T) {
 			t.Parallel()
 			tx := &creationTransaction{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
 			store := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
-			err := store.CreateBuild(context.Background(), VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
+			err := store.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
 			require.ErrorIs(t, err, ErrBuildConflict)
 			assert.Empty(t, tx.durable)
 			assert.Empty(t, tx.pending)

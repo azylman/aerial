@@ -9,6 +9,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func (b *BuildObject) retryDeployment(rt objectRuntime, req BuildMutationRequest) (ReconcileBuildResult, error) {
@@ -33,7 +34,7 @@ func (b *BuildObject) retryDeployment(rt objectRuntime, req BuildMutationRequest
 		if !found {
 			return reconcileStepOutput{}, restate.TerminalErrorf("deployment chunk not retryable")
 		}
-		return reconcileStepOutput{State: &BuildObjectState{Build: *build, Chunks: chunks}}, nil
+		return reconcileStepOutput{State: &model.BuildObjectState{Build: *build, Chunks: chunks}}, nil
 	})
 	if err != nil {
 		return ReconcileBuildResult{}, err

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 type deploymentStartStore struct {
@@ -42,7 +43,7 @@ func TestDeploymentStartEvent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c1", PRNumber: 1, MergeSHA: "sha", Status: statusMerged}}}}
+			store := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, MergeSHA: "sha", Status: statusMerged}}}}
 			_, err := (&BuildObject{store: store}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, MergeSHA: "sha", RolloutState: tc.rollout})
 			require.Equal(t, tc.writeErr != nil, err != nil)
 			require.Equal(t, tc.wantLifecycle, store.lifecycleStatus)
@@ -66,7 +67,7 @@ func TestDeploymentRetryResumesAfterClockFailure(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now, nowErr: tc.clockErr, attempts: map[string]deploymentAttempt{"c": {ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1, Delivered: true}}}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
 			b := &BuildObject{store: store}
 			req := BuildMutationRequest{Action: "retry_deployment", ChunkID: "c", Revision: "sha", Generation: 1}
 			_, err := b.retryDeployment(rt, req)
@@ -92,7 +93,7 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
 			b := &BuildObject{store: store}
 			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
 			rc := mockRunContext{Context: context.Background()}

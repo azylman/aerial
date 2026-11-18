@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // RetryActionChunkRequest fences a single operator-requested action retry.
@@ -76,7 +78,7 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req RetryAc
 }
 
 // lockRetryBuildAndChunks follows the parent-first ordering used by existing mutations.
-func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (VanadisBuild, []VanadisChunk, error) {
+func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (model.VanadisBuild, []model.VanadisChunk, error) {
 	b, err := scanBuild(tx.QueryRow(ctx, `SELECT `+buildColumns+` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, nil, ErrBuildNotFound
@@ -93,7 +95,7 @@ func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (Va
 	return b, chunks, err
 }
 
-func retryActionGraphReady(c VanadisChunk, chunks []VanadisChunk) bool {
+func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bool {
 	if err := checkChunkDependenciesReady(c, chunks); err != nil {
 		return false
 	}
@@ -127,8 +129,8 @@ func retryActionGraphReady(c VanadisChunk, chunks []VanadisChunk) bool {
 	return true
 }
 
-func retryActionCandidate(b VanadisBuild, chunks []VanadisChunk, req RetryActionChunkRequest) (VanadisChunk, bool, error) {
-	var selected *VanadisChunk
+func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req RetryActionChunkRequest) (model.VanadisChunk, bool, error) {
+	var selected *model.VanadisChunk
 	for i := range chunks {
 		if chunks[i].ID == req.ChunkID {
 			selected = &chunks[i]
@@ -136,11 +138,11 @@ func retryActionCandidate(b VanadisBuild, chunks []VanadisChunk, req RetryAction
 		}
 	}
 	if selected == nil {
-		return VanadisChunk{}, false, ErrChunkNotFound
+		return model.VanadisChunk{}, false, ErrChunkNotFound
 	}
 	c := *selected
-	conflict := func() (VanadisChunk, bool, error) {
-		return VanadisChunk{}, false, fmt.Errorf("%w: action retry preconditions changed", ErrBuildConflict)
+	conflict := func() (model.VanadisChunk, bool, error) {
+		return model.VanadisChunk{}, false, fmt.Errorf("%w: action retry preconditions changed", ErrBuildConflict)
 	}
 	if c.BuildID != req.BuildID || c.Mode != chunkModeAction || c.PRNumber != 0 || c.StallNudges < 0 {
 		return conflict()
@@ -168,6 +170,6 @@ func validRetryInstructionPair(req RetryActionChunkRequest) bool {
 	return req.ExpectedInstructions != nil && req.ReplacementInstructions != nil && strings.TrimSpace(*req.ExpectedInstructions) != "" && strings.TrimSpace(*req.ReplacementInstructions) != ""
 }
 
-func retryInstructionsMatch(req RetryActionChunkRequest, c VanadisChunk) bool {
+func retryInstructionsMatch(req RetryActionChunkRequest, c model.VanadisChunk) bool {
 	return req.ExpectedInstructions == nil || c.Instructions == *req.ExpectedInstructions
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 const (
@@ -301,7 +302,7 @@ func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubTo
 }
 
 // FormatChunkPrompt renders a structured prompt for executing a specific chunk.
-func (e *Executor) FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int) (string, error) {
+func (e *Executor) FormatChunkPrompt(build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int) (string, error) {
 	root := defaultShareRoot
 	if e != nil && e.shareRoot != "" {
 		root = e.shareRoot
@@ -311,7 +312,7 @@ func (e *Executor) FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, 
 
 // ExecuteLaunchChunk reserves the chunk in PostgreSQL and dispatches it directly to Eri via POST /dispatch.
 // It explicitly DOES NOT publish to aerial.jobs.vanadis.chunk.
-func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, build VanadisBuild, chunks []VanadisChunk, activeIdx int, notice string) error {
+func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int, notice string) error {
 	if e == nil || e.eriClient == nil {
 		return errors.New("executor or eri client is nil")
 	}
@@ -411,7 +412,7 @@ func (e *Executor) DispatchDirectMessage(ctx context.Context, channelID, content
 
 // SyncBuildWidget formats the Discord tracker widget and dispatches it directly to Eri via POST /discord/widget.
 // It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>.
-func (e *Executor) SyncBuildWidget(ctx context.Context, store VanadisStore, build VanadisBuild, chunks []VanadisChunk, notice string) (string, error) {
+func (e *Executor) SyncBuildWidget(ctx context.Context, store VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, notice string) (string, error) {
 	if e == nil || e.eriClient == nil {
 		return "", nil
 	}
@@ -648,7 +649,7 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 // FormatNoPRResumePrompt builds a self-contained resume prompt for a PR chunk
 // whose previous turn ended without opening a PR. It re-includes the full chunk
 // prompt because sessions rotate and an aborted conversation may be damaged.
-func FormatNoPRResumePrompt(chunk VanadisChunk, chunkPrompt string) string {
+func FormatNoPRResumePrompt(chunk model.VanadisChunk, chunkPrompt string) string {
 	chunkID := strings.TrimSpace(chunk.ID)
 	return fmt.Sprintf(`[VANADIS AUTOMATIC RESUME]
 Your previous turn for chunk %s ended without opening a PR. This is the single automatic resume; if this turn also ends without a PR, the chunk and build fail.
@@ -811,7 +812,7 @@ func truncatePromptDetails(s string) string {
 }
 
 // Widget formatting helpers
-func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, deployUIURL ...string) StatusWidgetRequest {
+func buildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChunk, deployUIURL ...string) StatusWidgetRequest {
 	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), statusRunning)
 	baseURL := firstNonEmpty(deployUIURL...)
 	wChunks := make([]StatusWidgetChunk, len(chunks))
@@ -832,7 +833,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, deployUIU
 	}
 }
 
-func buildStatusWidgetChunk(c VanadisChunk, deployUIURL ...string) StatusWidgetChunk {
+func buildStatusWidgetChunk(c model.VanadisChunk, deployUIURL ...string) StatusWidgetChunk {
 	baseURL := firstNonEmpty(deployUIURL...)
 	// Action chunks have no repository; only PR chunks fall back to the default repo.
 	chunkRepo := ""
@@ -1059,7 +1060,7 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 }
 
 // FormatChunkActiveStep formats the step string for a chunk in a widget.
-func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
+func FormatChunkActiveStep(chunk model.VanadisChunk, deployUIURL ...string) string {
 	baseURL := firstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	if cleanStatus == statusOpen || cleanStatus == statusPROpened {
@@ -1238,7 +1239,7 @@ func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []str
 	return spans, allResolved && len(spans) > 0
 }
 
-func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, activeIdx int, shareRoot string) (string, error) {
+func formatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int, shareRoot string) (string, error) {
 	if len(chunks) == 0 {
 		return "", errors.New("chunks slice cannot be empty")
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func TestBuildObject_RecordPRHeadRevision(t *testing.T) {
@@ -58,7 +59,7 @@ func TestBuildObject_RecordPRHeadRevision(t *testing.T) {
 			}
 			bo := NewBuildObject("", nil).WithAuthority(store, executor)
 			if !tc.cold {
-				store.chunks = []VanadisChunk{{ID: "c1", BuildID: "b1", Status: "pr_opened", HeadSHA: "head-b"}}
+				store.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "pr_opened", HeadSHA: "head-b"}}
 			}
 			err := bo.recordPRHeadRevision(context.Background(), "c1", pubsub.PRLifecycleEvent{Repo: tc.repo, PRNumber: 12, HeadSHA: "head-a", OccurredAt: time.Unix(tc.at, 0)})
 			if (err != nil) != tc.wantError {

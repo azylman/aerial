@@ -11,6 +11,8 @@ import (
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func TestDeploymentDeadlineRuntime(t *testing.T) {
@@ -71,7 +73,7 @@ func TestDeploymentDeadlineDeliveryFailures(t *testing.T) {
 			t.Parallel()
 			b := &BuildObject{}
 			if tc.store != nil {
-				tc.store.chunks = []VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}
+				tc.store.chunks = []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}
 				b.store = tc.store
 			}
 			out, err := b.deliverDeploymentDeadline(context.Background(), "b", deploymentAttempt{ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1})

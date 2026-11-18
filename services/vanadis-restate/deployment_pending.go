@@ -10,6 +10,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 const pendingDeploymentKey = "pending_deployment_starts"
@@ -31,7 +32,7 @@ func (r restateObjectRuntime) SetPendingDeploymentStarts(p map[string]pendingDep
 
 // A start can precede the merge webhook. Preserve its original budget separately
 // until authority proves that exact PR/revision merged. ClearAll owns cleanup.
-func (b *BuildObject) syncPendingDeploymentStarts(rt objectRuntime, state *BuildObjectState, ev *pubsub.PRLifecycleEvent) (map[string]time.Time, error) {
+func (b *BuildObject) syncPendingDeploymentStarts(rt objectRuntime, state *model.BuildObjectState, ev *pubsub.PRLifecycleEvent) (map[string]time.Time, error) {
 	dr, ok := rt.(deploymentRuntime)
 	if !ok || b.store == nil || !pendingDeploymentSnapshot(state, ev) {
 		return map[string]time.Time{}, nil
@@ -97,7 +98,7 @@ func (b *BuildObject) syncPendingDeploymentStarts(rt objectRuntime, state *Build
 	return starts, nil
 }
 
-func pendingDeploymentRelevant(chunks []VanadisChunk, ev *pubsub.PRLifecycleEvent) bool {
+func pendingDeploymentRelevant(chunks []model.VanadisChunk, ev *pubsub.PRLifecycleEvent) bool {
 	for _, c := range chunks {
 		if c.PRNumber > 0 && (c.Status == statusMerged || c.Status == statusDeploying || pendingDeploymentTerminal(c.Status) || (pendingDeploymentStartEvent(ev) && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber)) {
 			return true
@@ -106,7 +107,7 @@ func pendingDeploymentRelevant(chunks []VanadisChunk, ev *pubsub.PRLifecycleEven
 	return false
 }
 
-func capturePendingDeploymentStart(pending map[string]pendingDeploymentStart, chunks []VanadisChunk, ev pubsub.PRLifecycleEvent, now time.Time) {
+func capturePendingDeploymentStart(pending map[string]pendingDeploymentStart, chunks []model.VanadisChunk, ev pubsub.PRLifecycleEvent, now time.Time) {
 	for _, c := range chunks {
 		if c.Repo != ev.Repo || c.PRNumber != ev.PRNumber || c.MergeSHA != "" || strings.TrimSpace(ev.MergeSHA) == "" || pendingDeploymentTerminal(c.Status) {
 			continue
@@ -137,11 +138,11 @@ func pendingDeploymentTerminal(status string) bool {
 	return status == statusCompleted || status == statusFailed || status == statusCancelled || status == statusSynced || status == "deployed" || status == statusDeployFailed
 }
 
-func pendingDeploymentObsolete(c VanadisChunk, p pendingDeploymentStart) bool {
+func pendingDeploymentObsolete(c model.VanadisChunk, p pendingDeploymentStart) bool {
 	return c.PRNumber != p.Event.PRNumber || c.Repo != p.Event.Repo || pendingDeploymentTerminal(c.Status) || (c.MergeSHA != "" && c.MergeSHA != p.Event.MergeSHA) || (c.HeadSHA != "" && p.HeadSHA != "" && c.HeadSHA != p.HeadSHA)
 }
 
-func pendingDeploymentChunk(chunks []VanadisChunk, id string) *VanadisChunk {
+func pendingDeploymentChunk(chunks []model.VanadisChunk, id string) *model.VanadisChunk {
 	for i := range chunks {
 		if chunks[i].ID == id {
 			return &chunks[i]
@@ -156,9 +157,9 @@ func (b *BuildObject) promotePendingDeploymentStart(ctx context.Context, id stri
 		return reconcileStepOutput{}, err
 	}
 	if build == nil {
-		return reconcileStepOutput{State: &BuildObjectState{}}, nil
+		return reconcileStepOutput{State: &model.BuildObjectState{}}, nil
 	}
-	snapshot := reconcileStepOutput{State: &BuildObjectState{Build: *build, Chunks: chunks}}
+	snapshot := reconcileStepOutput{State: &model.BuildObjectState{Build: *build, Chunks: chunks}}
 	if build.Status != statusRunning {
 		return snapshot, nil
 	}
@@ -180,14 +181,14 @@ func (b *BuildObject) promotePendingDeploymentStart(ctx context.Context, id stri
 	}
 	c.Status = statusDeploying
 	c.RolloutState = rollout
-	return reconcileStepOutput{State: &BuildObjectState{Build: *build, Chunks: chunks}}, nil
+	return reconcileStepOutput{State: &model.BuildObjectState{Build: *build, Chunks: chunks}}, nil
 }
 
-func pendingDeploymentSnapshot(state *BuildObjectState, ev *pubsub.PRLifecycleEvent) bool {
+func pendingDeploymentSnapshot(state *model.BuildObjectState, ev *pubsub.PRLifecycleEvent) bool {
 	return state != nil && state.Build.Status == statusRunning && pendingDeploymentRelevant(state.Chunks, ev)
 }
 
-func existingDeploymentAttempt(a deploymentAttempt, c VanadisChunk) bool {
+func existingDeploymentAttempt(a deploymentAttempt, c model.VanadisChunk) bool {
 	return a.Generation > 0 && a.PRNumber == c.PRNumber && a.Revision == deploymentRevision(c)
 }
 
@@ -195,7 +196,7 @@ func pendingDeploymentStartEvent(ev *pubsub.PRLifecycleEvent) bool {
 	return ev != nil && strings.EqualFold(strings.TrimSpace(ev.Event), prEventDeployStarted)
 }
 
-func pendingDeploymentPromoted(state *BuildObjectState, p pendingDeploymentStart) bool {
+func pendingDeploymentPromoted(state *model.BuildObjectState, p pendingDeploymentStart) bool {
 	c := pendingDeploymentChunk(state.Chunks, p.ChunkID)
 	return state.Build.Status == statusRunning && c != nil && c.Status == statusDeploying && c.MergeSHA == p.Event.MergeSHA && !pendingDeploymentObsolete(*c, p)
 }

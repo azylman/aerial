@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func TestFirstAttachmentRecovery(t *testing.T) {
@@ -32,8 +33,8 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := VanadisBuild{ID: "b1", Status: tc.parent}
-			store, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
+			b := model.VanadisBuild{ID: "b1", Status: tc.parent}
+			store, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
 			_, _, _, err := store.AttachChunkPR(context.Background(), attachRequest("c1", "aerial"))
 			if tc.wantConflict {
 				assertStoreErr(t, err, ErrBuildConflict, false)
@@ -45,7 +46,7 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 }
 
 func attachmentScript(chunk, build, thread, status, repo string) dbScript {
-	return dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow(build)}}, buildRow: &mockRow{b: &VanadisBuild{ID: build, ThreadID: thread, Status: status}}, chunks: []VanadisChunk{{ID: chunk, BuildID: build, Mode: "pr", Repo: repo, Status: "running"}}}
+	return dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow(build)}}, buildRow: &mockRow{b: &model.VanadisBuild{ID: build, ThreadID: thread, Status: status}}, chunks: []model.VanadisChunk{{ID: chunk, BuildID: build, Mode: "pr", Repo: repo, Status: "running"}}}
 }
 
 // This fixture exercises Go selection and error propagation, not SQL effects or row locking.
@@ -86,12 +87,12 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			chunks := []VanadisChunk{
+			chunks := []model.VanadisChunk{
 				{ID: "before", Status: "completed", Repo: "other", ChunkIndex: 0},
 				{ID: "between", Status: "completed", Repo: "other", ChunkIndex: 1},
 				{ID: "after", Status: "completed", Repo: "other", ChunkIndex: 2},
 			}
-			chunks[tc.index] = VanadisChunk{ID: "selected", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: tc.status, ChunkIndex: tc.index, PRNumber: tc.previous, CIFailCount: tc.cap}
+			chunks[tc.index] = model.VanadisChunk{ID: "selected", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: tc.status, ChunkIndex: tc.index, PRNumber: tc.previous, CIFailCount: tc.cap}
 			if tc.sibling != "" {
 				chunks[(tc.index+1)%3].Status = tc.sibling
 			}
@@ -130,7 +131,7 @@ func TestFirstWorkerFailure(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := firstWorkerFailure(VanadisChunk{Mode: tc.mode, Status: tc.status, PRNumber: tc.previous, CIFailCount: tc.failures})
+			got := firstWorkerFailure(model.VanadisChunk{Mode: tc.mode, Status: tc.status, PRNumber: tc.previous, CIFailCount: tc.failures})
 			if got != tc.want {
 				t.Fatalf("eligible = %v, want %v", got, tc.want)
 			}
@@ -142,7 +143,7 @@ func TestFirstWorkerFailure(t *testing.T) {
 // remediation wake, not persistence of the preceding attachment transaction.
 func TestRecoveredChunkRemediationWake(t *testing.T) {
 	t.Parallel()
-	store, _ := dbScript{buildRow: &mockRow{b: &VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
+	store, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
 	payloads := make(chan BrainDispatchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req BrainDispatchRequest

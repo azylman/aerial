@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func TestDeploymentDeadlineAttempts(t *testing.T) {
@@ -19,15 +20,15 @@ func TestDeploymentDeadlineAttempts(t *testing.T) {
 	tests := []struct {
 		name           string
 		prior          deploymentAttempt
-		chunk          VanadisChunk
+		chunk          model.VanadisChunk
 		retry          bool
 		wantGeneration int
 		wantDeadline   time.Time
 	}{
-		{"first", deploymentAttempt{}, VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "sha"}, false, 1, now.Add(15 * time.Minute)},
-		{"duplicate", old, VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "sha"}, false, 1, old.Deadline},
-		{"explicit same revision retry", old, VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "sha"}, true, 2, now.Add(15 * time.Minute)},
-		{"new revision", old, VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "new"}, false, 2, now.Add(15 * time.Minute)},
+		{"first", deploymentAttempt{}, model.VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "sha"}, false, 1, now.Add(15 * time.Minute)},
+		{"duplicate", old, model.VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "sha"}, false, 1, old.Deadline},
+		{"explicit same revision retry", old, model.VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "sha"}, true, 2, now.Add(15 * time.Minute)},
+		{"new revision", old, model.VanadisChunk{ID: "c", PRNumber: 1, MergeSHA: "new"}, false, 2, now.Add(15 * time.Minute)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,7 +113,7 @@ func TestDeploymentDeadlineLifecycle(t *testing.T) {
 			if !tc.absent {
 				rt.attempts["c"] = deploymentAttempt{ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: tc.generation, Deadline: deadline, Delivered: tc.delivered}
 			}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: tc.revision, Status: tc.status, Repo: "owner/repo", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: tc.revision, Status: tc.status, Repo: "owner/repo", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}}}}}
 			eri := &mockEriClient{}
 			var dispatchIDs []string
 			failDelivery := tc.fail
@@ -160,7 +161,7 @@ func TestDeploymentDeadlineAdoption(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			state := &BuildObjectState{Chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying, StartedAt: now.Add(-time.Hour)}}}
+			state := &model.BuildObjectState{Chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying, StartedAt: now.Add(-time.Hour)}}}
 			b := &BuildObject{}
 			require.NoError(t, b.syncDeploymentDeadlines(rt, state, tc.event, nil))
 			require.Equal(t, tc.wantDeadline, rt.attempts["c"].Deadline)
@@ -190,8 +191,8 @@ func TestDeploymentDeadlineSynchronization(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			state := &BuildObjectState{Chunks: []VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying, Repo: "owner/repo", RolloutState: &pubsub.PRRolloutState{StartedJobs: []string{"one"}}}}}
-			state.Chunks = append(state.Chunks, VanadisChunk{ID: "completed", PRNumber: 2, MergeSHA: "done", Status: statusSynced})
+			state := &model.BuildObjectState{Chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying, Repo: "owner/repo", RolloutState: &pubsub.PRRolloutState{StartedJobs: []string{"one"}}}}}
+			state.Chunks = append(state.Chunks, model.VanadisChunk{ID: "completed", PRNumber: 2, MergeSHA: "done", Status: statusSynced})
 			b := &BuildObject{}
 			require.NoError(t, b.syncDeploymentDeadlines(rt, state, nil, nil))
 			require.Equal(t, now.Add(15*time.Minute), rt.attempts["c"].Deadline)
@@ -234,7 +235,7 @@ func TestDeploymentDeadlineRetryMutation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now, getErr: tc.stateErr, attempts: map[string]deploymentAttempt{"c": {ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1, Deadline: now.Add(-time.Minute), Delivered: true}}}
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{bannerErr: tc.resetErr, chunks: []VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{bannerErr: tc.resetErr, chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
 			b := &BuildObject{store: store, runtimeFactory: func(restate.ObjectContext) objectRuntime { return rt }}
 			_, err := b.Mutate(nil, BuildMutationRequest{Action: "retry_deployment", ChunkID: "c", Revision: tc.revision, Generation: tc.generation})
 			require.Equal(t, tc.wantError, err != nil)
@@ -272,7 +273,7 @@ func TestDeploymentStartValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &checkStatusSpyStore{getBuildErr: tc.storeErr, statusErr: tc.statusErr, chunks: []VanadisChunk{{ID: "c", Status: tc.status, MergeSHA: "sha"}}}
+			store := &checkStatusSpyStore{getBuildErr: tc.storeErr, statusErr: tc.statusErr, chunks: []model.VanadisChunk{{ID: "c", Status: tc.status, MergeSHA: "sha"}}}
 			b := &BuildObject{store: store}
 			valid, _, err := b.recordDeploymentStart(mockRunContext{Context: context.Background()}, "b", "c", pubsub.PRLifecycleEvent{MergeSHA: tc.revision, RolloutState: tc.rollout})
 			require.Equal(t, tc.wantValid, valid)
@@ -297,7 +298,7 @@ func TestDeploymentStartArming(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			store := &checkStatusSpyStore{getBuildErr: tc.storeErr, chunks: []VanadisChunk{{ID: "c", Status: statusDeploying, PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha"}}}
+			store := &checkStatusSpyStore{getBuildErr: tc.storeErr, chunks: []model.VanadisChunk{{ID: "c", Status: statusDeploying, PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha"}}}
 			err := (&BuildObject{store: store}).armDeploymentStart(rt, "b", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now.Add(-time.Minute)})
 			require.Equal(t, tc.wantError, err != nil)
 			if !tc.wantError {
@@ -341,7 +342,7 @@ func TestDeploymentDeadlineSynchronizationFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), getErr: tc.getErr, nowErr: tc.nowErr}
-			state := &BuildObjectState{Chunks: []VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}}
+			state := &model.BuildObjectState{Chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}}
 			b := &BuildObject{store: &checkStatusSpyStore{chunks: state.Chunks}}
 			require.Error(t, b.syncDeploymentDeadlines(rt, state, nil, nil))
 			require.Error(t, b.armDeploymentStart(rt, "b", pubsub.PRLifecycleEvent{}))
@@ -358,7 +359,7 @@ func TestDeploymentRetryLookupFailures(t *testing.T) {
 	}{
 		{"unsupported authority", nil},
 		{"snapshot unavailable", &checkStatusSpyStore{getBuildErr: errors.New("snapshot unavailable")}},
-		{"chunk unavailable", &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "other", PRNumber: 1, Status: statusDeploying}}}},
+		{"chunk unavailable", &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "other", PRNumber: 1, Status: statusDeploying}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -377,9 +378,9 @@ func TestDeploymentRetryLookupFailures(t *testing.T) {
 
 type deadlineLifecycleStore struct{ *checkStatusSpyStore }
 
-func (s *deadlineLifecycleStore) GetBuild(ctx context.Context, id string) (*VanadisBuild, []VanadisChunk, error) {
+func (s *deadlineLifecycleStore) GetBuild(ctx context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	b, c, err := s.checkStatusSpyStore.GetBuild(ctx, id)
-	return b, append([]VanadisChunk(nil), c...), err
+	return b, append([]model.VanadisChunk(nil), c...), err
 }
 
 func (s *deadlineLifecycleStore) UpdateChunkBannerAndStatus(_ context.Context, id, status, banner string) error {
@@ -419,7 +420,7 @@ func TestDeploymentStartPreservesFailure(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
+			store := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
 			b := &BuildObject{store: store}
 			_, err := b.recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", RolloutState: tc.rollout})
 			require.NoError(t, err)
