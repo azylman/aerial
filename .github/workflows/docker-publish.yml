@@ -427,16 +427,35 @@ jobs:
             echo '  mirrors = ["mirror.gcr.io"]' >> /cache/buildkitd.toml.new
             RECREATE=0
             if ! cmp -s /cache/buildkitd.toml.new /cache/buildkitd.toml 2>/dev/null; then
-              mv -f /cache/buildkitd.toml.new /cache/buildkitd.toml
               RECREATE=1
             else
               rm -f /cache/buildkitd.toml.new
             fi
-            if ! docker buildx inspect --bootstrap calibarn-buildkit >/dev/null 2>&1 || [ "$RECREATE" -eq 1 ] || [ ! -f /cache/.buildkitd-mirrored ]; then
-              docker buildx rm -f calibarn-buildkit >/dev/null 2>&1 || true
-              docker rm -f buildx_buildkit_calibarn-buildkit0 >/dev/null 2>&1 || true
-              docker buildx create --name calibarn-buildkit --driver docker-container --driver-opt network=host --config /cache/buildkitd.toml --use --bootstrap
-              touch /cache/.buildkitd-mirrored
+            BUILDER_RUNNING=0
+            if [ "$(docker inspect -f '{{.State.Running}}' buildx_buildkit_calibarn-buildkit0 2>/dev/null || true)" = "true" ]; then
+              BUILDER_RUNNING=1
+            fi
+            INSPECT_OK=0
+            for attempt in 1 2 3; do
+              if docker buildx inspect --bootstrap calibarn-buildkit >/dev/null 2>&1; then
+                INSPECT_OK=1
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then sleep 2; fi
+            done
+            if [ "$INSPECT_OK" -eq 0 ] || [ "$RECREATE" -eq 1 ] || [ ! -f /cache/.buildkitd-mirrored ]; then
+              if [ "$BUILDER_RUNNING" -eq 1 ]; then
+                echo "::warning::calibarn-buildkit is running and may be in use by a concurrent build; skipping builder recreate and deferring it to a later run."
+                rm -f /cache/buildkitd.toml.new
+              else
+                if [ "$RECREATE" -eq 1 ]; then
+                  mv -f /cache/buildkitd.toml.new /cache/buildkitd.toml
+                fi
+                docker buildx rm -f calibarn-buildkit >/dev/null 2>&1 || true
+                docker rm -f buildx_buildkit_calibarn-buildkit0 >/dev/null 2>&1 || true
+                docker buildx create --name calibarn-buildkit --driver docker-container --driver-opt network=host --config /cache/buildkitd.toml --use --bootstrap
+                touch /cache/.buildkitd-mirrored
+              fi
             fi
             cp -f /cache/buildx-config/instances/calibarn-buildkit /root/.docker/buildx/instances/calibarn-buildkit
           ) 200>/cache/buildx.lock
