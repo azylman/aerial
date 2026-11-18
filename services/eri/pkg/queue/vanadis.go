@@ -73,7 +73,7 @@ func (p *WorkerPool) setupDispatchTurn(d db.Dispatch, te *turnExecution) func() 
 			widgetCtx := context.WithoutCancel(te.turnCtxValue())
 			p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
 		}
-		if (p.ctx != nil && p.ctx.Err() != nil) || te.isInterrupted() || strings.TrimSpace(te.turnStatus) == "" {
+		if te.isInterrupted() || strings.TrimSpace(te.turnStatus) == "" {
 			return
 		}
 		if p.EventBus() == nil {
@@ -82,10 +82,37 @@ func (p *WorkerPool) setupDispatchTurn(d db.Dispatch, te *turnExecution) func() 
 			}
 			return
 		}
+		p.publishDispatchOutcomeWithRetries(d, te)
+	}
+}
+
+func (p *WorkerPool) publishDispatchOutcomeWithRetries(d db.Dispatch, te *turnExecution) {
+	delay := 500 * time.Millisecond
+	if p.cfg.RetryDelayOverride > 0 {
+		delay = p.cfg.RetryDelayOverride
+	}
+	var pubErr error
+retryLoop:
+	for attempt := 1; attempt <= 3; attempt++ {
 		pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
-		if err := p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC()); err != nil {
-			log.Printf("[WorkerPool] Warning publishing dispatch outcome for %s: %v", d.ID, err)
-		}
+		pubErr = p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC())
 		cancel()
+		if pubErr == nil {
+			return
+		}
+		if attempt < 3 {
+			var doneCh <-chan struct{}
+			if p.ctx != nil {
+				doneCh = p.ctx.Done()
+			}
+			select {
+			case <-time.After(delay):
+			case <-doneCh:
+				break retryLoop
+			}
+		}
+	}
+	if pubErr != nil {
+		log.Printf("[WorkerPool] Warning publishing dispatch outcome for %s: %v", d.ID, pubErr)
 	}
 }

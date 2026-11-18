@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -192,6 +193,143 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 			delivered := recorder.waitFor(len(tc.wantDelivered))
 			assertAttemptedPublishes(t, trackBus.dispatchPublishes(), tc.wantPublishes)
 			assertDeliveredOutcomes(t, delivered, tc.wantDelivered)
+		})
+	}
+}
+
+type retryFailingBus struct {
+	pubsub.Bus
+
+	mu           sync.Mutex
+	attempts     int
+	failAttempts int
+	afterAttempt func(att int)
+}
+
+func (r *retryFailingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
+	if !strings.HasPrefix(subject, pubsub.SubjectAerialDispatchPrefix) {
+		return r.Bus.Publish(ctx, subject, msgID, payload)
+	}
+	r.mu.Lock()
+	r.attempts++
+	att := r.attempts
+	cb := r.afterAttempt
+	r.mu.Unlock()
+	if cb != nil {
+		cb(att)
+	}
+	if att <= r.failAttempts {
+		return errors.New("simulated jetstream publish error")
+	}
+	return r.Bus.Publish(ctx, subject, msgID, payload)
+}
+
+func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		failAttempts  int
+		cancelPool    bool
+		cancelBefore  bool
+		wantAttempts  int
+		wantPublishes []string
+	}{
+		{
+			name:          "outcome publish succeeds on first attempt",
+			failAttempts:  0,
+			wantAttempts:  1,
+			wantPublishes: []string{"aerial.dispatch.completed"},
+		},
+		{
+			name:          "outcome publish retries and succeeds after transient error",
+			failAttempts:  1,
+			wantAttempts:  2,
+			wantPublishes: []string{"aerial.dispatch.completed"},
+		},
+		{
+			name:          "outcome publish exhausts 3 attempts on continuous error",
+			failAttempts:  5,
+			wantAttempts:  3,
+			wantPublishes: nil,
+		},
+		{
+			name:          "cancelled pool context aborts publish retries",
+			failAttempts:  5,
+			cancelPool:    true,
+			wantAttempts:  1,
+			wantPublishes: nil,
+		},
+		{
+			name:          "cancelled pool context before cleanup still publishes first attempt",
+			failAttempts:  0,
+			cancelBefore:  true,
+			wantAttempts:  1,
+			wantPublishes: []string{"aerial.dispatch.completed"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+			failingBus := &retryFailingBus{Bus: memBus, failAttempts: tc.failAttempts}
+			recorder := newOutcomeRecorder(t, memBus)
+
+			poolCtx, cancelPool := context.WithCancel(context.Background())
+			defer cancelPool()
+
+			pool := &WorkerPool{
+				ctx:      poolCtx,
+				cancel:   cancelPool,
+				eventBus: failingBus,
+				cfg: WorkerPoolConfig{
+					EventBus:           failingBus,
+					RetryDelayOverride: 1 * time.Millisecond,
+				},
+			}
+
+			if tc.cancelBefore {
+				cancelPool()
+			}
+			if tc.cancelPool {
+				failingBus.afterAttempt = func(att int) {
+					if att == 1 {
+						cancelPool()
+					}
+				}
+			}
+
+			disp := outcomeDispatch("disp-retry-"+strings.ReplaceAll(tc.name, " ", "-"), "vanadis", "chunk-retry")
+			te := &turnExecution{
+				pool:        pool,
+				dispatch:    &disp,
+				threadID:    "dispatch-" + disp.ID,
+				triggerType: "dispatch:vanadis",
+				execStart:   time.Now().UTC().Add(-100 * time.Millisecond),
+				turnStatus:  "success",
+				turnCtx:     poolCtx,
+			}
+
+			cleanup := pool.setupDispatchTurn(disp, te)
+			cleanup()
+
+			failingBus.mu.Lock()
+			gotAttempts := failingBus.attempts
+			failingBus.mu.Unlock()
+
+			if gotAttempts != tc.wantAttempts {
+				t.Fatalf("publish attempts = %d, want %d", gotAttempts, tc.wantAttempts)
+			}
+
+			if len(tc.wantPublishes) > 0 {
+				delivered := recorder.waitFor(len(tc.wantPublishes))
+				if len(delivered) != len(tc.wantPublishes) {
+					t.Fatalf("delivered count = %d, want %d", len(delivered), len(tc.wantPublishes))
+				}
+			}
 		})
 	}
 }

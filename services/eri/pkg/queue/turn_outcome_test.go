@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1318,6 +1319,112 @@ func TestTurnExecution_EnrichFailureFromTranscript_TranscriptGuard(t *testing.T)
 			}
 			if gotStderr != tc.wantStderr {
 				t.Errorf("gotStderr = %q, want %q", gotStderr, tc.wantStderr)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		failAttempts int
+		cancelCtx    bool
+		errType      string
+		wantAttempts int
+	}{
+		{
+			name:         "delivery succeeds on first attempt",
+			failAttempts: 0,
+			wantAttempts: 1,
+		},
+		{
+			name:         "delivery succeeds after transient failure",
+			failAttempts: 2,
+			wantAttempts: 3,
+		},
+		{
+			name:         "delivery exhausts all three attempts on persistent error",
+			failAttempts: 5,
+			wantAttempts: 3,
+		},
+		{
+			name:         "cancelled pool context aborts retries immediately",
+			failAttempts: 2,
+			cancelCtx:    true,
+			wantAttempts: 1,
+		},
+		{
+			name:         "partial send error does not retry to avoid duplicates",
+			failAttempts: 3,
+			errType:      "partial_chunk",
+			wantAttempts: 1,
+		},
+		{
+			name:         "permanent client 403 error does not retry",
+			failAttempts: 3,
+			errType:      "forbidden",
+			wantAttempts: 1,
+		},
+		{
+			name:         "transient 429 rate limit retries and succeeds",
+			failAttempts: 1,
+			errType:      "rate_limit",
+			wantAttempts: 2,
+		},
+		{
+			name:         "transient 502 gateway error retries and succeeds",
+			failAttempts: 1,
+			errType:      "server_error",
+			wantAttempts: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var attempts atomic.Int32
+			poolCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelCtx {
+				cancel()
+			}
+
+			pool := New(nil, WorkerPoolConfig{
+				RetryDelayOverride: 1 * time.Millisecond,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					att := int(attempts.Add(1))
+					if att <= tc.failAttempts {
+						switch tc.errType {
+						case "partial_chunk":
+							return errors.New("failed to send message chunk 1: network timeout")
+						case "forbidden":
+							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
+						case "rate_limit":
+							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusTooManyRequests}}
+						case "server_error":
+							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusBadGateway}}
+						default:
+							return errors.New("simulated discord delivery error")
+						}
+					}
+					return nil
+				},
+			})
+			pool.ctx = poolCtx
+			defer pool.Stop()
+
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "chan-deliver-retry",
+			}
+
+			te.deliverDiscordSuccess("final message", nil)
+
+			if got := int(attempts.Load()); got != tc.wantAttempts {
+				t.Fatalf("delivery attempts = %d, want %d", got, tc.wantAttempts)
 			}
 		})
 	}
