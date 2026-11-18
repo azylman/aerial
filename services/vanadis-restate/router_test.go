@@ -775,7 +775,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
 				fmt.Fprint(w, validGitHubPR)
 			}))
 			t.Cleanup(api.Close)
-			exec := NewExecutor(t.TempDir(), nil, nil, "token", api.Client())
+			exec := NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", api.Client())
 			exec.gitHubAPIURL = api.URL
 			spy := &unattachedPREventSpyStore{
 				chunks: []VanadisChunk{

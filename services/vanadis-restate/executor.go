@@ -450,21 +450,58 @@ func (e *Executor) PublishExternalEvent(ctx context.Context, source, eventType s
 	return e.bus.Publish(ctx, subj, evID, payload)
 }
 
+func isRetryableGitHubResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-Ratelimit-Remaining") == "0"
+	}
+	return false
+}
+
+// ResolveCIFailureDetailsChecked extracts failing logs or RoboRev findings for a PR check,
+// returning a retryable error when a GitHub API call fails with a transport error or retryable HTTP status (>= 500, 429, 403).
+func (e *Executor) ResolveCIFailureDetailsChecked(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) (string, error) {
+	if e == nil {
+		return details, nil
+	}
+	if prNumber > 0 && isRoboRevCheck(checkName) {
+		comment, err := e.fetchLatestRoboRevCommentChecked(ctx, repo, prNumber, headSHA)
+		if err != nil {
+			return details, err
+		}
+		if comment != "" {
+			return comment, nil
+		}
+	}
+	if !needsCIJobLogFetch(details) {
+		return details, nil
+	}
+	jobID := extractActionsJobID(checkURL)
+	if jobID <= 0 {
+		return details, nil
+	}
+	logDetails, err := e.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
+	if err != nil {
+		return details, err
+	}
+	if logDetails != "" {
+		return logDetails, nil
+	}
+	return details, nil
+}
+
 // ResolveCIFailureDetails extracts failing logs or RoboRev findings for a PR check.
 func (e *Executor) ResolveCIFailureDetails(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) string {
-	if prNumber > 0 && isRoboRevCheck(checkName) {
-		if comment := e.fetchLatestRoboRevComment(ctx, repo, prNumber, headSHA); comment != "" {
-			return comment
-		}
+	res, err := e.ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
+	if err != nil {
+		return details
 	}
-	if needsCIJobLogFetch(details) {
-		if jobID := extractActionsJobID(checkURL); jobID > 0 {
-			if logDetails := e.fetchCheckJobFailureLogs(ctx, repo, jobID); logDetails != "" {
-				return logDetails
-			}
-		}
-	}
-	return details
+	return res
 }
 
 func (e *Executor) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
@@ -491,38 +528,49 @@ func resolveGitHubRepoPath(repo string) string {
 	return defaultRepoOwner + "/" + clean
 }
 
-func (e *Executor) fetchCheckJobFailureLogs(ctx context.Context, repo string, jobID int64) string {
+func (e *Executor) fetchCheckJobFailureLogsChecked(ctx context.Context, repo string, jobID int64) (string, error) {
 	if e == nil || e.httpClient == nil {
-		return ""
+		return "", nil
 	}
 	repoPath := resolveGitHubRepoPath(repo)
 	if repoPath == "" || jobID <= 0 {
-		return ""
+		return "", nil
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	req, err := e.newGitHubRequest(timeoutCtx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repoPath, jobID), nil)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer resp.Body.Close()
 
+	if isRetryableGitHubResponse(resp) {
+		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return "", nil
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return ""
+		return "", err
 	}
 	if len(body) > 256<<10 {
 		body = body[len(body)-(256<<10):]
 	}
-	return ExtractCIFailureDetails(string(body))
+	return ExtractCIFailureDetails(string(body)), nil
+}
+
+func (e *Executor) fetchCheckJobFailureLogs(ctx context.Context, repo string, jobID int64) string {
+	res, err := e.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
+	if err != nil {
+		return ""
+	}
+	return res
 }
 
 type gitHubIssueComment struct {
@@ -530,31 +578,35 @@ type gitHubIssueComment struct {
 	Body string `json:"body"`
 }
 
-func (e *Executor) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
+func (e *Executor) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
 	repoPath := resolveGitHubRepoPath(repo)
 	if e == nil || repoPath == "" || prNumber <= 0 || e.httpClient == nil {
-		return ""
+		return "", nil
 	}
 	var comments []gitHubIssueComment
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoPath, prNumber)
 	req, err := e.newGitHubRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	resp, err := e.httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return ""
+	if err != nil {
+		return "", err
 	}
 	defer resp.Body.Close()
+
+	if isRetryableGitHubResponse(resp) {
+		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", nil
+	}
 	respBody, rErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if rErr != nil {
-		return ""
+		return "", rErr
 	}
 	if uErr := json.Unmarshal(respBody, &comments); uErr != nil {
-		return ""
+		return "", nil
 	}
 
 	shortSHA := strings.TrimSpace(headSHA)
@@ -569,9 +621,17 @@ func (e *Executor) fetchLatestRoboRevComment(ctx context.Context, repo string, p
 		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
 			continue
 		}
-		return truncatePromptRunes(body, maxRoboRevCommentRunes)
+		return truncatePromptRunes(body, maxRoboRevCommentRunes), nil
 	}
-	return ""
+	return "", nil
+}
+
+func (e *Executor) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
+	res, err := e.fetchLatestRoboRevCommentChecked(ctx, repo, prNumber, headSHA)
+	if err != nil {
+		return ""
+	}
+	return res
 }
 
 // FormatCIFailurePrompt formats the failure prompt when a CI check fails.
@@ -806,7 +866,7 @@ func normalizeWidgetStatus(status string) string {
 		return statusCompleted
 	case statusMerged:
 		return statusMerged
-	case statusFailed, "crashed", "timeout":
+	case statusFailed, statusCrashed, statusTimeout:
 		return statusFailed
 	case statusCancelled:
 		return statusCancelled
