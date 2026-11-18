@@ -427,3 +427,77 @@ func TestStartUsagePollerAndRunner(t *testing.T) {
 		<-calls
 	}
 }
+
+const museUsageFixture = `{"allowance":{"asOfMs":1795020360826,"source":"mint","tier":"Muse Code Power Usage","weekly":{"resetsAtMs":1795392000000,"usedPercent":20},"window":{"resetsAtMs":1795037083000,"usedPercent":8}},"hint":null,"reason":null,"schemaVersion":1}`
+
+func TestMuseUsageToGroups(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, payload string
+		want          []QuotaGroup
+		wantErr       bool
+	}{
+		{name: "live fixture", payload: museUsageFixture, want: []QuotaGroup{{Name: "Muse", Buckets: []QuotaBucket{
+			{ID: "muse-seven-day", Window: "weekly", ResetTime: "2026-11-23T00:00:00Z", RemainingFraction: 0.8},
+			{ID: "muse-five-hour", Window: "5h", ResetTime: "2026-11-18T21:24:43Z", RemainingFraction: 0.92},
+		}}}},
+		{name: "window only", payload: `{"allowance":{"window":{"resetsAtMs":1795037083000,"usedPercent":25}}}`, want: []QuotaGroup{{Name: "Muse", Buckets: []QuotaBucket{
+			{ID: "muse-five-hour", Window: "5h", ResetTime: "2026-11-18T21:24:43Z", RemainingFraction: 0.75},
+		}}}},
+		{name: "clamping and zero reset", payload: `{"allowance":{"weekly":{"resetsAtMs":0,"usedPercent":120},"window":{"usedPercent":-5}}}`, want: []QuotaGroup{{Name: "Muse", Buckets: []QuotaBucket{
+			{ID: "muse-seven-day", Window: "weekly", ResetTime: "", RemainingFraction: 0},
+			{ID: "muse-five-hour", Window: "5h", ResetTime: "", RemainingFraction: 1},
+		}}}},
+		{name: "missing allowance", payload: `{"hint":null}`, wantErr: true},
+		{name: "all null windows", payload: `{"allowance":{"weekly":null,"window":null}}`, wantErr: true},
+		{name: "malformed", payload: `{bad`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := MuseUsageToGroups([]byte(tc.payload))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("MuseUsageToGroups() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("MuseUsageToGroups() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecordMuseUsageJSON(t *testing.T) {
+	tests := []struct {
+		name, payload, wantCheck string
+		wantErr                  bool
+	}{
+		{"fixture", museUsageFixture, `aerial_brain_usage_quota_remaining_fraction{bucket_id="muse-five-hour",disabled="false",group="Muse",window="5h"} 0.92`, false},
+		{"reset gauge", museUsageFixture, `aerial_brain_usage_quota_reset_timestamp_seconds{bucket_id="muse-seven-day",group="Muse",window="weekly"} 1.795392e+09`, false},
+		{"all null", `{"allowance":{"weekly":null}}`, "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testRecordUsageMetricEndpoint(t, RecordMuseUsageJSON, tc.payload, tc.wantCheck, tc.wantErr)
+		})
+	}
+}
+
+func TestMuseUsageRunner(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "mock-muse.sh")
+	body := "#!/bin/sh\nif [ \"$1\" = \"usage\" ] && [ \"$2\" = \"--json\" ]; then echo '" + museUsageFixture + "'; else echo 'bad args' >&2; exit 1; fi\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := NewMuseUsageRunner(script, dir, []string{"HOME=/old", "FOO=bar"})(context.Background())
+	if err != nil || !strings.Contains(string(out), `"Muse Code Power Usage"`) {
+		t.Fatalf("NewMuseUsageRunner failed: err=%v, out=%s", err, string(out))
+	}
+	if got := DefaultMuseUsageRunner("", "", nil, true); got != nil {
+		t.Error("DefaultMuseUsageRunner in test mode = non-nil, want nil")
+	}
+	if got := DefaultMuseUsageRunner("", "", nil, false); got == nil {
+		t.Error("DefaultMuseUsageRunner outside test mode = nil, want non-nil")
+	}
+}

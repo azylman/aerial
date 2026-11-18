@@ -991,6 +991,8 @@ func startBrainEngineUsagePoller(ctx context.Context, cur *config.ConfigData, po
 		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
 	case config.EngineCodex:
 		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultCodexUsageRunner(filepath.Join(cur.DataDir, "codex", "auth.json"), testing.Testing()), metrics.RecordCodexUsageJSON)
+	case config.EngineMuse:
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultMuseUsageRunner(cur.MuseBin, pools.ephemeralHome, pools.env, testing.Testing()), metrics.RecordMuseUsageJSON)
 	}
 }
 
