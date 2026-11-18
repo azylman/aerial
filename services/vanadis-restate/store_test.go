@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -581,59 +580,6 @@ func TestInitPostgres(t *testing.T) {
 			}
 			if tc.pingFail && !closed {
 				t.Fatal("expected pool to be closed on ping failure")
-			}
-		})
-	}
-}
-
-func TestCompletePRDeployment(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, chunkID                string
-		nilDB, evidence, execFailure bool
-		wantErr                      bool
-		rejected                     bool
-	}{
-		{"nil database", "c1", true, false, false, true, false},
-		{"empty id", "", false, false, false, true, false},
-		{"rejected update", "c1", false, false, false, true, true},
-		{"nil evidence", "c1", false, false, false, false, false},
-		{"supplied evidence", "c1", false, true, false, false, false},
-		{"persistence failure", "c1", false, true, true, true, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var gotArgs []any
-			st := newMockStore(mockDB{execFn: func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-				gotArgs = args
-				if tc.execFailure {
-					return pgconn.CommandTag{}, errors.New("database unavailable")
-				}
-				if tc.rejected {
-					return pgconn.NewCommandTag("UPDATE 0"), nil
-				}
-				return pgconn.NewCommandTag("UPDATE 1"), nil
-			}})
-			if tc.nilDB {
-				st = &PostgresVanadisStore{}
-			}
-			var evidence *pubsub.PRRolloutState
-			if tc.evidence {
-				evidence = &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
-			}
-			err := st.CompletePRDeployment(context.Background(), tc.chunkID, evidence)
-			assert.Equal(t, tc.wantErr, err != nil)
-			if tc.wantErr {
-				return
-			}
-
-			if tc.evidence {
-				data, ok := gotArgs[0].([]byte)
-				assert.True(t, ok)
-				assert.Contains(t, string(data), "service")
-			} else {
-				assert.Nil(t, gotArgs[0])
 			}
 		})
 	}

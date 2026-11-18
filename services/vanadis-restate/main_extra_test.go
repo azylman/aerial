@@ -377,7 +377,8 @@ func TestDeploymentSuccessPREvent(t *testing.T) {
 			}
 			st, _ := script.open()
 			observed := &deploymentEvidenceDB{PgxQueryExecer: st.db, chunks: script.chunks}
-			st.db = observed
+			// Rebuild around the observer so the embedded store handle sees it too.
+			st = NewPostgresVanadisStore(observed)
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			if tc.transitionFailure {
 				bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
@@ -520,7 +521,8 @@ func TestDeploymentSuccessBeforeDelayedLifecycle(t *testing.T) {
 			}
 			st, _ := script.open()
 			db := &deploymentEvidenceDB{PgxQueryExecer: st.db, chunks: chunks}
-			st.db = db
+			// Rebuild around the observer so the embedded store handle sees it too.
+			st = NewPostgresVanadisStore(db)
 			bus := &deploymentEventRecorder{}
 			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, bus, "token", nil))
 			ctx := makeObjectMockContext(t, "b1")

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -455,51 +454,6 @@ func actionLaunchKey(chunk model.VanadisChunk) string {
 // holds wherever the lifecycle transition executes.
 var errPRTransitionSkipped = store.ErrPRTransitionSkipped
 
-func (s *PostgresVanadisStore) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
-		return errors.New("chunk_id cannot be empty")
-	}
-	var evidence any
-	if rolloutState != nil {
-		data, err := json.Marshal(rolloutState)
-		if err != nil {
-			return fmt.Errorf("marshal rollout state: %w", err)
-		}
-		evidence = data
-	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled' AND (b.status != 'failed' OR c.status = 'completed');`, evidence, chunkID)
-	if err != nil {
-		return fmt.Errorf("complete pr deployment: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return errPRTransitionSkipped
-	}
-	return nil
-}
-
-// UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening
-// a terminal chunk. Notifications follow only an applied write.
-func (s *PostgresVanadisStore) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	if strings.TrimSpace(chunkID) == "" {
-		return errors.New("chunk_id cannot be empty")
-	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
-	if err != nil {
-		return fmt.Errorf("update pr lifecycle status: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return errPRTransitionSkipped
-	}
-	return nil
-}
-
 func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRequest {
 	switch strings.ToLower(strings.TrimSpace(ev.Status)) {
 	case "completed", dispatchStatusSuccess:
@@ -683,15 +637,7 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 	return nil
 }
 
-type prHeadVerifiedContextKey struct{}
-
-func prHeadVerifiedFromContext(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	verified, ok := ctx.Value(prHeadVerifiedContextKey{}).(bool)
-	return ok && verified
-}
+type prHeadVerifiedContextKey = store.PrHeadVerifiedContextKey
 
 func (b *BuildObject) recordPRHeadRevision(ctx context.Context, chunkID string, ev pubsub.PRLifecycleEvent) error {
 	headSHA := strings.TrimSpace(ev.HeadSHA)
@@ -1242,123 +1188,6 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 	mutation := &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunkID, DispatchID: ev.DispatchID, Reason: noPRFailureReason}
 	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterNoPRFail, mutation); tErr != nil {
 		return toTerminalErr(tErr)
-	}
-	return nil
-}
-
-func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, checkName, checkState string) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	id := strings.TrimSpace(chunkID)
-	name := strings.TrimSpace(checkName)
-	sha := strings.TrimSpace(headSHA)
-	if id == "" || name == "" {
-		return errors.New("chunk_id and check_name cannot be empty")
-	}
-	const q = `UPDATE vanadis_chunks
-SET ci_checks = jsonb_set(
-        CASE
-            WHEN (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha', '{_merge_sha}', to_jsonb($4::text), true)
-            WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
-            ELSE COALESCE(ci_checks, '{}'::jsonb)
-        END,
-        ARRAY[$1],
-        to_jsonb($2::text),
-        true
-    ),
-    status = CASE
-        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
-            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
-            WHERE key NOT LIKE '\_%' AND value = 'failed'
-        ) THEN 'pr_opened'
-        ELSE status
-    END,
-    banner = CASE
-        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
-            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
-            WHERE key NOT LIKE '\_%' AND value = 'failed'
-        ) THEN ''
-        ELSE banner
-    END,
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = $3
-  AND status NOT IN ('deploying', 'deployed', 'completed', 'failed', 'cancelled')
-  AND (
-      $4 = ''
-      OR ((status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND (
-          COALESCE(ci_checks->>'_merge_sha', '') = $4
-          OR (COALESCE(ci_checks->>'_merge_sha', '') = '' AND COALESCE(ci_checks->>'_head_sha', '') IS DISTINCT FROM $4)
-      ))
-      OR (status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND (
-          COALESCE(ci_checks->>'_head_sha', '') = ''
-          OR ci_checks->>'_head_sha' = $4
-      ))
-  );`
-	tag, err := s.db.Exec(ctx, q, name, strings.TrimSpace(checkState), id, sha)
-	switch {
-	case err != nil:
-		return fmt.Errorf("record pr check status: %w", err)
-	case tag.RowsAffected() == 0:
-		return errPRTransitionSkipped
-	default:
-		return nil
-	}
-}
-
-func (s *PostgresVanadisStore) ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	id := strings.TrimSpace(chunkID)
-	if id == "" {
-		return errors.New("chunk_id cannot be empty")
-	}
-	cleanHead := strings.TrimSpace(headSHA)
-	cleanMerge := strings.TrimSpace(mergeSHA)
-	if cleanMerge != "" {
-		const mergeQ = `UPDATE vanadis_chunks
-SET ci_checks = CASE
-        WHEN COALESCE(ci_checks->>'_merge_sha', '') = $3
-            THEN jsonb_strip_nulls(COALESCE(ci_checks, '{}'::jsonb) || jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
-        ELSE jsonb_strip_nulls(jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
-    END,
-    banner = '',
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
-		tag, err := s.db.Exec(ctx, mergeQ, id, cleanHead, cleanMerge)
-		if err != nil {
-			return fmt.Errorf("reset merge check state: %w", err)
-		}
-		if tag.RowsAffected() == 0 {
-			return errPRTransitionSkipped
-		}
-		return nil
-	}
-	const syncQ = `UPDATE vanadis_chunks AS c
-SET ci_checks = CASE
-        WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN c.ci_checks - '_merge_sha'
-        WHEN $2 != '' THEN jsonb_build_object('_head_sha', $2::text)
-        ELSE '{}'::jsonb
-    END,
-    banner = '',
-    status = CASE WHEN c.status IN ('ci_failed', 'conflict') THEN 'pr_opened' ELSE c.status END,
-    updated_at = CURRENT_TIMESTAMP
-FROM vanadis_builds AS b
-WHERE c.id = $1
-  AND b.id = c.build_id
-  AND c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed', 'failed', 'cancelled')
-  AND COALESCE(c.ci_checks->>'_merge_sha', '') = ''
-  AND b.status NOT IN ('completed', 'failed', 'cancelled')
-  AND ($3::boolean OR $2 = '' OR COALESCE(c.ci_checks->>'_head_sha', '') = '' OR LOWER(c.ci_checks->>'_head_sha') = LOWER($2));`
-	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead, prHeadVerifiedFromContext(ctx))
-	if err != nil {
-		return fmt.Errorf("reset pr check state: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return s.recoverFailedPR(ctx, id, cleanHead)
 	}
 	return nil
 }

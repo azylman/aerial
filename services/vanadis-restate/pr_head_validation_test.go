@@ -11,11 +11,12 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 func TestBuildObject_RecordPRHeadRevision(t *testing.T) {
 	t.Parallel()
-	if prHeadVerifiedFromContext(nil) {
+	if store.PrHeadVerifiedFromContext(nil) {
 		t.Fatal("expected false for nil context")
 	}
 	tests := []struct {
@@ -53,22 +54,22 @@ func TestBuildObject_RecordPRHeadRevision(t *testing.T) {
 			defer api.Close()
 			executor := NewExecutor("", nil, nil, "", api.Client())
 			executor.gitHubAPIURL = api.URL
-			store := &checkStatusSpyStore{}
+			spy := &checkStatusSpyStore{}
 			if tc.cold {
-				store.getBuildErr = errors.New("read unavailable")
+				spy.getBuildErr = errors.New("read unavailable")
 			}
-			bo := NewBuildObject("", nil).WithAuthority(store, executor)
+			bo := NewBuildObject("", nil).WithAuthority(spy, executor)
 			if !tc.cold {
-				store.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "pr_opened", HeadSHA: "head-b"}}
+				spy.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "pr_opened", HeadSHA: "head-b"}}
 			}
 			err := bo.recordPRHeadRevision(context.Background(), "c1", pubsub.PRLifecycleEvent{Repo: tc.repo, PRNumber: 12, HeadSHA: "head-a", OccurredAt: time.Unix(tc.at, 0)})
 			if (err != nil) != tc.wantError {
 				t.Fatalf("err=%v", err)
 			}
-			if tc.wantError && len(store.resets) != 0 {
-				t.Fatalf("rejected head mutated storage: %v", store.resets)
+			if tc.wantError && len(spy.resets) != 0 {
+				t.Fatalf("rejected head mutated storage: %v", spy.resets)
 			}
-			if got := store.chunk("c1").HeadSHA; got != tc.wantHead {
+			if got := spy.chunk("c1").HeadSHA; got != tc.wantHead {
 				t.Fatalf("head=%s want=%s", got, tc.wantHead)
 			}
 		})
