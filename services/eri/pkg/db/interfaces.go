@@ -128,6 +128,7 @@ type TranscriptStep struct {
 // the store's own stack; reads take a stack filter where empty matches every stack.
 type TranscriptStore interface {
 	GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error)
+	GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error)
 	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
 	SetSessionEngine(ctx context.Context, sessionID, engine string) error
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error

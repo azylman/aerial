@@ -161,6 +161,60 @@ func (s *SQLTranscriptStore) GetSessionSyncStates(ctx context.Context) (results 
 	return results, nil
 }
 
+func (s *SQLTranscriptStore) GetKnownTurnSessionIDs(ctx context.Context) (results map[string]bool, err error) {
+	defer recordTranscriptQuery("get_known_turn_session_ids", time.Now(), &err)
+	if checkWriterErr := s.checkWriter(); checkWriterErr != nil {
+		return nil, checkWriterErr
+	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	query := `SELECT conversation_id, 1 AS allowed FROM messages WHERE conversation_id <> ''
+UNION
+SELECT conversation_id, 1 AS allowed FROM sessions WHERE conversation_id <> '' AND session_id NOT LIKE 'heartbeat-%'
+UNION
+SELECT previous_conversation_id, 1 AS allowed FROM sessions WHERE previous_conversation_id <> '' AND session_id NOT LIKE 'heartbeat-%'
+UNION
+SELECT conversation_id, CASE WHEN source = 'heartbeat' THEN 0 ELSE 1 END AS allowed FROM dispatches WHERE conversation_id <> ''
+UNION
+SELECT conversation_id, 0 AS allowed FROM sessions WHERE conversation_id <> '' AND session_id LIKE 'heartbeat-%'
+UNION
+SELECT previous_conversation_id, 0 AS allowed FROM sessions WHERE previous_conversation_id <> '' AND session_id LIKE 'heartbeat-%'`
+
+	rows, err := s.db.QueryContext(queryCtx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query known turn session ids: %w", err)
+	}
+	defer rows.Close()
+
+	var hasAnyRow bool
+	for rows.Next() {
+		var (
+			convID  string
+			allowed int
+		)
+		if err := rows.Scan(&convID, &allowed); err != nil {
+			return nil, fmt.Errorf("scan known turn session id: %w", err)
+		}
+		if !hasAnyRow {
+			hasAnyRow = true
+			results = make(map[string]bool)
+		}
+		if allowed == 1 {
+			if trimmed := strings.TrimSpace(convID); trimmed != "" {
+				results[trimmed] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate known turn session ids: %w", err)
+	}
+	if !hasAnyRow {
+		return nil, nil //nolint:nilnil // nil map signifies empty turn tables across all turn sources
+	}
+	return results, nil
+}
+
 func (s *SQLTranscriptStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) (err error) {
 	defer recordTranscriptQuery("upsert_session_summary", time.Now(), &err)
 	if checkWriterErr := s.checkWriter(); checkWriterErr != nil {

@@ -129,6 +129,17 @@ func (r *routedTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[s
 	return s.GetSessionSyncStates(ctx)
 }
 
+func (r *routedTranscriptStore) GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error) {
+	shared, local, err := r.resolveIndex()
+	if err != nil {
+		return nil, err
+	}
+	if local != nil {
+		return local.GetKnownTurnSessionIDs(ctx)
+	}
+	return shared.GetKnownTurnSessionIDs(ctx)
+}
+
 func (r *routedTranscriptStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
 	s, err := r.resolve()
 	if err != nil {

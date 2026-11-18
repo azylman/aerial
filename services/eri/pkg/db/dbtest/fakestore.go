@@ -939,7 +939,10 @@ func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionI
 			f.sessions[normKey] = &db.SessionInfo{ThreadID: normKey, InternalSessionID: newSessionID, CreatedAt: now, UpdatedAt: now}
 			return nil
 		}
-		s.PreviousSessionID, s.InternalSessionID, s.TurnCount, s.UpdatedAt = s.InternalSessionID, newSessionID, 0, now
+		if s.InternalSessionID != "" && s.InternalSessionID != newSessionID {
+			s.PreviousSessionID = s.InternalSessionID
+		}
+		s.InternalSessionID, s.TurnCount, s.UpdatedAt = newSessionID, 0, now
 		return nil
 	})
 }
@@ -1021,6 +1024,63 @@ func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.Ses
 			}
 		}
 		return res, nil
+	})
+}
+
+func (f *FakeStore) hasAnyTurnRowLocked() bool {
+	for _, m := range f.messages {
+		if m != nil && strings.TrimSpace(m.ConversationID) != "" {
+			return true
+		}
+	}
+	for _, s := range f.sessions {
+		if s != nil && (strings.TrimSpace(s.InternalSessionID) != "" || strings.TrimSpace(s.PreviousSessionID) != "") {
+			return true
+		}
+	}
+	for _, d := range f.dispatches {
+		if d != nil && strings.TrimSpace(d.ConversationID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *FakeStore) collectKnownTurnSessionIDsLocked() map[string]bool {
+	res := make(map[string]bool)
+	for _, m := range f.messages {
+		if m != nil {
+			if cid := strings.TrimSpace(m.ConversationID); cid != "" {
+				res[cid] = true
+			}
+		}
+	}
+	for _, s := range f.sessions {
+		if s != nil && !strings.HasPrefix(s.ThreadID, "heartbeat-") {
+			if cid := strings.TrimSpace(s.InternalSessionID); cid != "" {
+				res[cid] = true
+			}
+			if prev := strings.TrimSpace(s.PreviousSessionID); prev != "" {
+				res[prev] = true
+			}
+		}
+	}
+	for _, d := range f.dispatches {
+		if d != nil && d.Source != "heartbeat" {
+			if cid := strings.TrimSpace(d.ConversationID); cid != "" {
+				res[cid] = true
+			}
+		}
+	}
+	return res
+}
+
+func (f *FakeStore) GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error) {
+	return withFakeLock(f, "GetKnownTurnSessionIDs", func() (map[string]bool, error) {
+		if !f.hasAnyTurnRowLocked() {
+			return nil, nil
+		}
+		return f.collectKnownTurnSessionIDsLocked(), nil
 	})
 }
 
