@@ -110,7 +110,8 @@ type activeTurn struct {
 type proxyCall struct {
 	daemonHeader string
 	body         string
-	wantParent   byte   // 0 = no span and no traceparent
+	traceparent  string // inbound traceparent header the MCP client sends; "" = none
+	wantParent   byte   // 0 = no span, inbound traceparent forwarded unchanged
 	wantCallID   string // gen_ai.tool.call.id on the client span; "" = absent
 }
 
@@ -238,6 +239,29 @@ func TestTraceProxy(t *testing.T) {
 			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: claudeToolsCall("create", "toolu_8"), wantParent: 1, wantCallID: "toolu_8"}},
 		},
 		{
+			name:  "unattributed call parents on the engine's inbound traceparent",
+			turns: twoTurns,
+			calls: []proxyCall{{body: toolsCall("create"), traceparent: "00-0a050000000000000000000000000000-0b05000000000000-01", wantParent: 5}},
+		},
+		{
+			name:  "unattributed tools/list parents on the engine's inbound traceparent",
+			calls: []proxyCall{{daemonHeader: "p9/nobody", body: toolsList, traceparent: "00-0a050000000000000000000000000000-0b05000000000000-01", wantParent: 5}},
+		},
+		{
+			name:  "turn attribution outranks the inbound traceparent",
+			turns: twoTurns[:1],
+			calls: []proxyCall{{body: toolsCall("create"), traceparent: "00-0a050000000000000000000000000000-0b05000000000000-01", wantParent: 1}},
+		},
+		{
+			name:  "invalid inbound traceparent forwards unchanged without a span",
+			turns: twoTurns,
+			calls: []proxyCall{{body: toolsCall("create"), traceparent: "00-00000000000000000000000000000000-0b05000000000000-01"}},
+		},
+		{
+			name:  "methodless request ignores the inbound traceparent",
+			calls: []proxyCall{{body: pingReply, traceparent: "00-0a050000000000000000000000000000-0b05000000000000-01"}},
+		},
+		{
 			name:  "non tools/call methods never claim a tool span",
 			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket//": 9}}},
 			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: toolsList, wantParent: 1}},
@@ -296,6 +320,9 @@ func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, se
 	if call.daemonHeader != "" {
 		req.Header.Set("X-Eri-Daemon", call.daemonHeader)
 	}
+	if call.traceparent != "" {
+		req.Header.Set("Traceparent", call.traceparent)
+	}
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatalf("call %d: %v", i, err)
@@ -309,8 +336,8 @@ func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, se
 		t.Errorf("call %d: upstream saw %+v", i, got)
 	}
 	if call.wantParent == 0 {
-		if got.traceparent != "" || len(rec.ch) != 0 {
-			t.Errorf("call %d: traceparent %q, %d spans; want none", i, got.traceparent, len(rec.ch))
+		if got.traceparent != call.traceparent || len(rec.ch) != 0 {
+			t.Errorf("call %d: traceparent %q, %d spans; want %q and no span", i, got.traceparent, len(rec.ch), call.traceparent)
 		}
 		return
 	}
