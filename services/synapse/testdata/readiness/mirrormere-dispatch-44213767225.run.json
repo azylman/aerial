@@ -1,0 +1,14 @@
+{
+  "id": 44213767225,
+  "run_number": 1690,
+  "run_attempt": 1,
+  "path": ".github/workflows/ci.yml",
+  "event": "workflow_dispatch",
+  "head_sha": "62d0d57b408cdb273684d6440d77eada1d9d75d7",
+  "head_branch": "main",
+  "status": "completed",
+  "conclusion": "success",
+  "repository": {
+    "full_name": "azylman/mirrormere"
+  }
+}

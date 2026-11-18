@@ -41,6 +41,7 @@ type PRRegisterRequest struct {
 
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
+	LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (PRBuildLifecycle, error)
 	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata BuildMetadata) (bool, error)
 	LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (BuildMetadata, bool, error)
 	RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error)
@@ -694,7 +695,7 @@ func (r *PostgresPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo str
 	if err != nil {
 		return false, err
 	}
-	if _, err = ParseBuildMetadata(raw); err != nil {
+	if _, err = parseStoredBuildMetadata(raw); err != nil {
 		return false, err
 	}
 	repo = normalizeRepo(repo)
@@ -748,7 +749,7 @@ func (r *PostgresPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo strin
 	if err != nil || !found || len(raw) == 0 {
 		return m, false, err
 	}
-	m, err = ParseBuildMetadata(raw)
+	m, err = parseStoredBuildMetadata(raw)
 	if err != nil {
 		return m, false, err
 	}
@@ -756,4 +757,28 @@ func (r *PostgresPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo strin
 		return m, false, fmt.Errorf("stored metadata identity mismatch")
 	}
 	return m, true, nil
+}
+
+// PRBuildLifecycle is the registry lifecycle fence image-build consumers read
+// without inspecting transport metadata.
+type PRBuildLifecycle struct {
+	Status   string
+	HeadSHA  string
+	MergeSHA string
+	Started  bool
+}
+
+// LoadPRBuildLifecycle returns the PR's status, revisions and whether any
+// deployment job has started. A missing PR yields a zero lifecycle.
+func (r *PostgresPRRegistry) LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (PRBuildLifecycle, error) {
+	var state PRBuildLifecycle
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return state, nil
+	}
+	query := `SELECT status, COALESCE(head_sha, ''), COALESCE(merge_sha, ''),
+ CASE WHEN jsonb_typeof(metadata->'started_jobs') = 'array' THEN jsonb_array_length(metadata->'started_jobs') > 0 ELSE false END
+ FROM pr_registry WHERE repo = $1 AND pr_number = $2;`
+	_, err := r.queryRowScan(ctx, "load build lifecycle", query, []any{&state.Status, &state.HeadSHA, &state.MergeSHA, &state.Started}, repo, prNumber)
+	return state, err
 }

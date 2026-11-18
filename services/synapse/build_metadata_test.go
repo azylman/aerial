@@ -7,27 +7,6 @@ import (
 	"testing"
 )
 
-func TestMetadataTransportTotals(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		checks        map[string]string
-		total, failed int
-	}{
-		{"neutral transport", map[string]string{"build-metadata": "passed", "build-metadata-result": "failed", "Unit Tests": "passed"}, 1, 0},
-		{"ordinary failure", map[string]string{"build-metadata-like": "failed"}, 1, 1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, _, total, _, failed := analyzeBuildChecks(tc.checks)
-			if total != tc.total || failed != tc.failed {
-				t.Fatalf("total=%d failed=%d", total, failed)
-			}
-		})
-	}
-}
-
 func TestParseBuildMetadata(t *testing.T) {
 	t.Parallel()
 	fixture, err := os.ReadFile("testdata/build-metadata-v1.json")
@@ -105,6 +84,9 @@ func TestBuildMetadataValidationCases(t *testing.T) {
 		{"cancelled result", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"cancelled","source_attempt":1}]`, true},
 		{"invalid state", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"unknown","source_attempt":1}]`, false},
 		{"empty final", `"kind":"manifest"`, `"kind":"final"`, true},
+		{"manual dispatch event", `"event":"push"`, `"event":"workflow_dispatch"`, true},
+		{"unsupported event", `"event":"push"`, `"event":"schedule"`, false},
+		{"progress wire kind", `"kind":"manifest"`, `"kind":"progress"`, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

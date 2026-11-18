@@ -569,39 +569,40 @@ func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEve
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, aOpts...)
 }
 
+// isWaitingForImageBuild reports whether a PR's deployment must still wait for
+// images from its producer workflow. Only repositories with an image producer
+// ever wait, and only while the PR is pre-deploy: a started deployment, a
+// watcher-owned rollout or a terminal status always ends the wait. Within that
+// window a missing, unreadable, manifest-only or in-progress snapshot keeps
+// waiting (unknown never means no deployment); only an explicit empty final
+// selection lets a deploy event complete the PR.
 func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, prNumber int) bool {
-	if s == nil || s.registry == nil || strings.TrimSpace(repo) == "" || prNumber <= 0 {
+	repo = normalizeRepo(repo)
+	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 || metadataWorkflowPath(repo) == "" {
 		return false
 	}
-	pgReg, ok := s.registry.(*PostgresPRRegistry)
-	if !ok || pgReg == nil || pgReg.pool == nil {
-		return false
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	var status string
-	var metaBytes []byte
-	err := pgReg.pool.QueryRow(qCtx, `SELECT status, COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normalizeRepo(repo), prNumber).Scan(&status, &metaBytes)
+	lifecycle, err := s.registry.LoadPRBuildLifecycle(ctx, repo, prNumber)
 	if err != nil {
+		slog.WarnContext(ctx, "[synapse] [deploy] error loading build lifecycle", "repo", repo, "pr", prNumber, "error", err)
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(lifecycle.Status)) {
+	case prOpen, prCIFailed, prConflict, prMerged, prSynced:
+	default:
 		return false
 	}
-	normStatus := strings.ToLower(strings.TrimSpace(status))
-	if normStatus != prOpen && normStatus != prMerged && normStatus != "synced" {
+	if lifecycle.Started {
 		return false
 	}
-	var meta map[string]any
-	if len(metaBytes) > 0 {
-		if uErr := json.Unmarshal(metaBytes, &meta); uErr != nil {
-			meta = nil
-		}
-	}
-	if len(extractStringSliceFromMetadata(meta, "started_jobs")) > 0 {
+	if watched, watchErr := s.registry.HasKustomizationRequests(ctx, repo, prNumber); watchErr == nil && watched {
 		return false
 	}
-	checks := extractChecksFromJSONOrMetadata("", meta)
-	checkJobs, passedBuildJobs, total, passed, failed := analyzeBuildChecks(checks)
-	_ = total + passed + failed + len(passedBuildJobs)
-	return len(checkJobs) > 0
+	m, found, err := s.registry.LoadPRBuildMetadata(ctx, repo, prNumber)
+	if err != nil {
+		slog.WarnContext(ctx, "[synapse] [deploy] error loading build metadata", "repo", repo, "pr", prNumber, "error", err)
+		return true
+	}
+	return !found || m.Kind != buildMetadataFinal || len(m.Selected) > 0
 }
 
 func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt DeployEvent) bool {

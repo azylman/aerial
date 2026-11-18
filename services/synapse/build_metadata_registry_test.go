@@ -35,6 +35,8 @@ func TestRecordPRBuildMetadata(t *testing.T) {
 		{name: "updated", repo: "owner/repo", want: true},
 		{name: "final", repo: "owner/repo", kind: "final", want: true},
 		{name: "transport result rejected", repo: "owner/repo", kind: "result", wantErr: true},
+		{name: "progress snapshot stored", repo: "owner/repo", kind: "progress", want: true},
+		{name: "invalid snapshot rejected", repo: "owner/repo", kind: "unknown", wantErr: true},
 		{name: "wrong repo", repo: "owner/other", wantErr: true},
 		{name: "nil pool", repo: "owner/repo", nilPool: true},
 		{name: "nil receiver", repo: "owner/repo", nilReceiver: true},
@@ -118,6 +120,44 @@ func TestLoadPRBuildMetadata(t *testing.T) {
 			}
 			if got && m.RunID != 1 {
 				t.Fatal("wrong run identity")
+			}
+		})
+	}
+}
+
+func TestLoadPRBuildLifecycle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo string
+		pr         int
+		nilPool    bool
+		dbErr      error
+		want       PRBuildLifecycle
+		wantErr    bool
+	}{
+		{"merged with started deploy", "owner/repo", 1, false, nil, PRBuildLifecycle{Status: prMerged, HeadSHA: "head", MergeSHA: "merge", Started: true}, false},
+		{"absent PR", "owner/repo", 1, false, pgx.ErrNoRows, PRBuildLifecycle{}, false},
+		{"database error", "owner/repo", 1, false, errors.New("offline"), PRBuildLifecycle{}, true},
+		{"nil pool", "owner/repo", 1, true, nil, PRBuildLifecycle{}, false},
+		{"invalid PR", "owner/repo", 0, false, nil, PRBuildLifecycle{}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewPostgresPRRegistry(&mockSynapsePgxPool{queryRowFn: func(context.Context, string, ...any) pgx.Row {
+				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
+					if tc.dbErr != nil {
+						return tc.dbErr
+					}
+					return scanValues(dest, prMerged, "head", "merge", true)
+				}}
+			}})
+			if tc.nilPool {
+				r.pool = nil
+			}
+			got, err := r.LoadPRBuildLifecycle(context.Background(), tc.repo, tc.pr)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("got=%+v err=%v", got, err)
 			}
 		})
 	}

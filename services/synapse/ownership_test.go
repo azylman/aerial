@@ -171,9 +171,9 @@ func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
 				DefaultOwner:       tc.defaultOwner,
 				WebhookForwardURLs: tc.forwardURLs,
 			}
-			srv := newTestRouter(cfg, mockServer.Client(), reg, disp)
+			srv := newTestRouter(legacyFixtureConfig(cfg), legacyFixtureClient(mockServer.Client()), reg, disp)
 
-			err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 1, "main", "success", "sha123", "target-123", tc.prNum)
+			err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", workflowRunEvent{ID: 1, Attempt: 1, HeadSHA: legacyFixtureHead}, "main", "success", "target-123", tc.prNum)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

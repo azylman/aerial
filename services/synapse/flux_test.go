@@ -32,28 +32,15 @@ func scanPreImagePRRow(dest ...any) error {
 	return nil
 }
 
-func scanPreImageStatusRow(status string, dest ...any) error {
-	if len(dest) < 2 {
-		return nil
-	}
-	if s, ok := dest[0].(*string); ok {
-		*s = status
-	}
-	if b, ok := dest[1].(*[]byte); ok {
-		*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
-	}
-	return nil
-}
-
 func newMockPreImageKustomizationPool(status string) *mockSynapsePgxPool {
 	return &mockSynapsePgxPool{
 		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
 				return mockSynapsePgxRow{scanFn: scanPreImagePRRow}
 			}
-			if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+			if strings.Contains(sql, "SELECT status, COALESCE(head_sha") {
 				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-					return scanPreImageStatusRow(status, dest...)
+					return scanValues(dest, status, legacyFixtureHead, legacyFixtureHead, false)
 				}}
 			}
 			return mockSynapsePgxRow{}
