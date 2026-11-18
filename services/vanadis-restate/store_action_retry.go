@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -44,7 +44,7 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req RetryAc
 	}
 	defer func() {
 		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] retry action rollback: %v", rbErr)
+			slog.ErrorContext(ctx, "[vanadis] retry action rollback failed", "error", rbErr)
 		}
 	}()
 	b, chunks, err := lockRetryBuildAndChunks(ctx, tx, req.BuildID)

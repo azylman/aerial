@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -430,7 +431,7 @@ func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepNa
 		return
 	}
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, fmt.Sprintf("⚠️ Reconcile backing off (%s): %v", stepName, transErr)); err != nil {
-		log.Printf("[vanadis-restate] sync widget error on transition failure: %v", err)
+		slog.ErrorContext(ctx, "[vanadis-restate] sync widget error on transition failure", "error", err)
 	}
 }
 
@@ -496,7 +497,7 @@ func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build VanadisB
 	}
 	if b.executor != nil && !build.Quiet {
 		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, build, chunks, ""); sErr != nil {
-			log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+			slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
 		}
 	}
 	return true, nil
@@ -563,7 +564,7 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	rt.SetState(BuildObjectState{Build: build, Chunks: validatedChunks})
 	rt.SetLaunched(make(map[string]bool))
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileInitial, nil); tErr != nil {
-		log.Printf("[vanadis-restate] initial transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] initial transition warning", "error", tErr)
 	}
 	return build, nil
 }
@@ -583,7 +584,7 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 			_, chunks, gErr := b.store.GetBuild(rc, buildID)
 			if gErr == nil {
 				if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *updated, chunks, "Build updated: "+updated.Title); sErr != nil {
-					log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+					slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", sErr)
 				}
 			}
 		}
@@ -625,14 +626,14 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		if b.executor != nil {
 			for _, c := range chunks {
 				if cErr := b.executor.CancelChunkDispatch(rc, c.ID); cErr != nil {
-					log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", c.ID, cErr)
+					slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
 				}
 			}
 			if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
-				log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+				slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", sErr)
 			}
 			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
-				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
 			}
 		}
 		return *bld, nil
@@ -664,7 +665,7 @@ func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID stri
 		return nil, toTerminalErr(err)
 	}
 	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterAppend, nil); tErr != nil {
-		log.Printf("[vanadis-restate] append chunks transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] append chunks transition warning", "error", tErr)
 	}
 	return appended, nil
 }
@@ -693,7 +694,7 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequ
 	}
 	rt := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterUpdateChunk, nil); tErr != nil {
-		log.Printf("[vanadis-restate] update chunk transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] update chunk transition warning", "error", tErr)
 	}
 	return updated, nil
 }
@@ -722,7 +723,7 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 		}
 		if b.executor != nil && removedChunk != nil {
 			if cErr := b.executor.CancelChunkDispatch(rc, removedChunk.ID); cErr != nil {
-				log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", removedChunk.ID, cErr)
+				slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", removedChunk.ID, "error", cErr)
 			}
 		}
 		return true, nil
@@ -731,29 +732,29 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 		return toTerminalErr(err)
 	}
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterRemoveChunk, nil); tErr != nil {
-		log.Printf("[vanadis-restate] remove chunk transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] remove chunk transition warning", "error", tErr)
 	}
 	return nil
 }
 
 func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild, chunkID, reason string) {
 	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
-		log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", chunkID, cErr)
+		slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
 	prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk failed: %s", bld.ID, bld.Objective, reason)
 	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
-		log.Printf("[vanadis-restate] dispatch wake prompt warning: %v", dErr)
+		slog.WarnContext(rc, "[vanadis-restate] dispatch wake prompt warning", "error", dErr)
 	}
 	if build, chunks, gErr := b.store.GetBuild(rc, bld.ID); gErr == nil && build != nil {
 		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, bld, chunks, "Build failed: "+reason); sErr != nil {
-			log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+			slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
 		}
 	}
 	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, reason); pErr != nil {
-		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 	}
 	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{bld.ID}, reason); pErr != nil {
-		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 	}
 }
 
@@ -819,7 +820,7 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachC
 		if exec := b.executor; exec != nil {
 			if bld, chunks, gErr := store.GetBuild(rc, bID); gErr == nil && bld != nil {
 				if _, sErr := exec.SyncBuildWidget(rc, store, *bld, chunks, ""); sErr != nil {
-					log.Printf("[vanadis-restate] sync widget error on attach pr: %v", sErr)
+					slog.ErrorContext(ctx, "[vanadis-restate] sync widget error on attach pr", "error", sErr)
 				}
 			}
 		}
@@ -836,7 +837,7 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachC
 
 	runtime := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(runtime, labelReconcileAfterAttachPR, nil); tErr != nil {
-		log.Printf("[vanadis-restate] attach pr transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] attach pr transition warning", "error", tErr)
 	}
 	return attached, nil
 }
@@ -847,7 +848,7 @@ func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, p
 	}
 	if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil && bld != nil {
 		if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
-			log.Printf("[vanadis-restate] wake prompt warning: %v", dErr)
+			slog.WarnContext(rc, "[vanadis-restate] wake prompt warning", "error", dErr)
 		}
 	}
 }
@@ -987,7 +988,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 		}
 		if b.executor != nil {
 			if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "merged", []string{mutation.ChunkID}, ""); err != nil {
-				log.Printf("[vanadis-restate] publish event warning: %v", err)
+				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 			}
 		}
 	case mutationChunkDeploySuccess:
@@ -1008,11 +1009,11 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 		return b.failMutation(ctx, buildID, mutation)
 	case "cancelled":
 		if err := b.store.UpdateBuildStatus(ctx, buildID, statusCancelled); err != nil {
-			log.Printf("[vanadis-restate] update build status warning: %v", err)
+			slog.WarnContext(ctx, "[vanadis-restate] update build status warning", "error", err)
 		}
 		if b.executor != nil {
 			if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", "cancelled", []string{buildID}, mutation.Reason); err != nil {
-				log.Printf("[vanadis-restate] publish event warning: %v", err)
+				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 			}
 		}
 	}
@@ -1101,16 +1102,16 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBui
 		return
 	}
 	if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", status, []string{build.ID}, reason); err != nil {
-		log.Printf("[vanadis-restate] publish event warning: %v", err)
+		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 	}
 	if !build.Quiet {
 		prompt := fmt.Sprintf("[%s]\nBuild ID: %s\nObjective: %s\n\n%s", promptHeader, build.ID, build.Objective, promptMsg)
 		if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
-			log.Printf("[vanadis-restate] wake prompt warning: %v", err)
+			slog.WarnContext(ctx, "[vanadis-restate] wake prompt warning", "error", err)
 		}
 	}
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build "+status); err != nil {
-		log.Printf("[vanadis-restate] sync widget warning: %v", err)
+		slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
 	}
 }
 
@@ -1130,14 +1131,14 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 	switch {
 	case hasFailed:
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
-			log.Printf("[vanadis-restate] update build status failed: %v", err)
+			slog.ErrorContext(ctx, "[vanadis-restate] update build status failed", "error", err)
 		}
 		build.Status = statusFailed
 		b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", "Build encountered failures.")
 		return statusFailed
 	case allDone && len(chunks) > 0:
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusCompleted); err != nil {
-			log.Printf("[vanadis-restate] update build status completed: %v", err)
+			slog.ErrorContext(ctx, "[vanadis-restate] update build status completed", "error", err)
 		}
 		build.Status = statusCompleted
 		b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully.")
@@ -1145,7 +1146,7 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 	default:
 		if b.executor != nil {
 			if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, ""); err != nil {
-				log.Printf("[vanadis-restate] sync widget warning: %v", err)
+				slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
 			}
 		}
 		return statusRunning
@@ -1376,6 +1377,7 @@ func main() {
 
 	_, flushTracing := initTracingFn(ctx, "vanadis-restate", tracing.DefaultConfigPath)
 	defer flushTracing()
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[vanadis-restate] Error: %v", err)

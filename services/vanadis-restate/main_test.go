@@ -603,6 +603,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
+	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe() // slog handlers look up the span context.
 	mc.EXPECT().Key().Return(key).Maybe()
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()

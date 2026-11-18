@@ -208,7 +208,7 @@ func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) 
 	}
 	chunk, build, err := s.store.GetChunk(r.Context(), trimmed)
 	if err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldChunk: chunk, fieldBuild: build})
@@ -252,7 +252,7 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	}
 	var resp AttachChunkPRResponse
 	if err := s.callRestateIngress(r.Context(), "/BuildRouter/RouteAttachPR", req, &resp); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
@@ -316,12 +316,12 @@ func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if strings.TrimSpace(req.Title) == "" && strings.TrimSpace(req.Objective) == "" && strings.TrimSpace(req.SharedContext) == "" {
-		writeStoreErr(w, fmt.Errorf("%w: at least one of title, objective, or shared_context must be provided", ErrInvalidBuildInput))
+		writeStoreErr(r.Context(), w, fmt.Errorf("%w: at least one of title, objective, or shared_context must be provided", ErrInvalidBuildInput))
 		return
 	}
 	var updated VanadisBuild
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/UpdateBuild", buildID), req, &updated); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: statusUpdated, fieldBuild: updated})
@@ -334,12 +334,12 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 	}
 	build, chunks, err := s.store.GetBuild(r.Context(), buildID)
 	if err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	idx := resolveChunkRef(chunks, chunkRef)
 	if idx < 0 {
-		writeStoreErr(w, ErrChunkNotFound)
+		writeStoreErr(r.Context(), w, ErrChunkNotFound)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldChunk: chunks[idx], fieldBuild: build})
@@ -351,13 +351,13 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if _, err := validateUpdateChunkInput(buildID, chunkRef, req); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	req.ChunkRef = chunkRef
 	var updated VanadisChunk
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/UpdateChunk", buildID), req, &updated); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: statusUpdated, fieldChunk: updated})
@@ -369,12 +369,12 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if len(req.Chunks) == 0 {
-		writeStoreErr(w, fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput))
+		writeStoreErr(r.Context(), w, fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput))
 		return
 	}
 	var appended []VanadisChunk
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/AppendChunks", buildID), req, &appended); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: "appended", fieldBuildID: buildID, fieldChunks: appended})
@@ -393,7 +393,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 	}
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/RemoveChunk", buildID), req, nil); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	var remaining []VanadisChunk

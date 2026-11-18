@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"sort"
 	"strings"
@@ -507,7 +507,7 @@ func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *Resol
 	}
 	trimmedSHA := strings.TrimSpace(res.HeadSHA)
 	if err == nil && regHeadSHA != "" && !strings.EqualFold(regHeadSHA, trimmedSHA) && (regMergeSHA == "" || !strings.EqualFold(regMergeSHA, trimmedSHA)) {
-		log.Printf("[synapse] [github] ignoring stale CI failure on %s#%d for superseded commit %s (current head_sha=%s)", res.Repo, res.PRNumber, res.HeadSHA, regHeadSHA)
+		slog.InfoContext(ctx, "[synapse] [github] ignoring stale CI failure for superseded commit", "repo", res.Repo, "pr", res.PRNumber, "head_sha", res.HeadSHA, "current_head_sha", regHeadSHA)
 		return true
 	}
 	return false

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -117,7 +117,7 @@ func (r *PostgresPRRegistry) execReturningTargetID(ctx context.Context, repo str
 		return "", err
 	}
 	if !found {
-		log.Printf("[synapse] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+		slog.InfoContext(ctx, "[synapse] [registry] pr not found in registry (untracked)", "repo", repo, "pr", prNumber)
 		return "", nil
 	}
 	return targetID, nil
@@ -470,7 +470,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 		}
 		if len(metaBytes) > 0 {
 			if err := json.Unmarshal(metaBytes, &p.Metadata); err != nil {
-				log.Printf("[synapse] [registry] failed to unmarshal metadata for pr %s#%d: %v", p.Repo, p.PRNumber, err)
+				slog.WarnContext(ctx, "[synapse] [registry] failed to unmarshal metadata", "repo", p.Repo, "pr", p.PRNumber, "error", err)
 			}
 		}
 		prs = append(prs, p)

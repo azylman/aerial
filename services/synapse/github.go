@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -50,7 +51,7 @@ func (s *RouterServer) publishPRLifecycleEvent(ctx context.Context, ev pubsub.PR
 	subject := pubsub.SubjectAerialPRPrefix + strings.TrimSpace(ev.Event)
 	msgID := fmt.Sprintf("pr-life-%s-%d-%s-%d", strings.ReplaceAll(ev.Repo, "/", "-"), ev.PRNumber, ev.Event, ev.OccurredAt.UnixNano())
 	if err := s.bus.Publish(ctx, subject, msgID, ev); err != nil {
-		log.Printf("[synapse] [pr_lifecycle] error publishing event %s for %s#%d: %v", ev.Event, ev.Repo, ev.PRNumber, err)
+		slog.ErrorContext(ctx, "[synapse] [pr_lifecycle] error publishing event", "event", ev.Event, "repo", ev.Repo, "pr", ev.PRNumber, "error", err)
 		return err
 	}
 	return nil
@@ -159,7 +160,7 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 	}
 	s.recordFailedCISHA(repo, pr.Number, pr.Head.SHA)
 	if err := s.transitionRegisteredConflict(ctx, repo, pr.Number, pr.Head.Ref, pr.Head.SHA); err != nil {
-		log.Printf("[synapse] [registry] error transitioning PR #%d to conflict: %v", pr.Number, err)
+		slog.ErrorContext(ctx, "[synapse] [registry] error transitioning PR to conflict", "pr", pr.Number, "error", err)
 	}
 }
 
@@ -202,7 +203,7 @@ func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNum
 		return
 	}
 	if targetID, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, prNumber); closeErr != nil {
-		log.Printf("[synapse] [registry] warning closing stale PR #%d with missing head ref: %v", prNumber, closeErr)
+		slog.WarnContext(ctx, "[synapse] [registry] error closing stale PR with missing head ref", "pr", prNumber, "error", closeErr)
 	} else {
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        prClosedUnmerged,
@@ -264,7 +265,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 				s.handleStaleOpenPR(ctx, normRepo, pr.Number)
 				continue
 			}
-			log.Printf("[synapse] [github] warning updating open PR #%d branch: %v", pr.Number, err)
+			slog.WarnContext(ctx, "[synapse] [github] error updating open PR branch", "pr", pr.Number, "error", err)
 			continue
 		}
 		if conflict {
@@ -288,7 +289,7 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 		TargetID: targetID,
 		PRNumber: prNum,
 	}); err != nil {
-		log.Printf("[synapse] [dispatcher] error dispatching git_push for %s: %v", repo, err)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching git_push", "repo", repo, "error", err)
 		return fmt.Errorf("dispatch git_push: %w", err)
 	}
 	return nil
@@ -358,7 +359,7 @@ func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []s
 func (s *RouterServer) startWorkflowRunPRDeploying(ctx context.Context, repo string, prNum int, headSHA, targetID string, workloads []string) error {
 	tID, err := s.registry.TransitionDeploying(ctx, repo, prNum, workloads)
 	if err != nil {
-		log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error transitioning pr to deploying", "repo", repo, "pr", prNum, "error", err)
 		return fmt.Errorf("transition pr deploying: %w", err)
 	}
 	if tID != "" {
@@ -384,7 +385,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	finalAttempt := isFinalAttemptFromContext(ctx)
 	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
 	if err != nil {
-		log.Printf("[synapse] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", runID, "repo", repo, "error", err)
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
 
@@ -395,7 +396,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	}
 	refs, err := s.dispatcher.DiscoverImageKustomizations(ctx, imageNames)
 	if err != nil {
-		log.Printf("[synapse] [dispatcher] error discovering kustomizations for %s images %v: %v", repo, imageNames, err)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error discovering kustomizations for images", "repo", repo, "images", imageNames, "error", err)
 		return fmt.Errorf("discover image kustomizations: %w", err)
 	}
 	trackPR := s.registry != nil && prNum > 0
@@ -431,7 +432,7 @@ func (s *RouterServer) hasUnrecordedKustomizationRequests(ctx context.Context, r
 
 func (s *RouterServer) handleFinalAttemptDeployFailure(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, causeErr error) {
 	if fErr := s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, causeErr); fErr != nil {
-		log.Printf("[synapse] [dispatcher] error handling deploy failure for %s#%d: %v", repo, prNum, fErr)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error handling deploy failure", "repo", repo, "pr", prNum, "error", fErr)
 	}
 }
 
@@ -439,7 +440,7 @@ func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, rep
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
-			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
+			slog.ErrorContext(ctx, "[synapse] [dispatcher] error recording kustomization requests", "repo", repo, "pr", prNum, "error", err)
 			if finalAttempt {
 				s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
 			}
@@ -461,7 +462,7 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 	}
 	tID, branch, hSHA, mSHA, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
 	if err != nil {
-		log.Printf("[synapse] [dispatcher] warning: failed resolving pr %s#%d: %v", repo, prNum, err)
+		slog.WarnContext(ctx, "[synapse] [dispatcher] failed resolving pr", "repo", repo, "pr", prNum, "error", err)
 	}
 	if targetID == "" {
 		targetID = tID
@@ -479,7 +480,7 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 
 	newTID, updated, fErr := s.registry.AtomicTransitionDeployFailed(ctx, repo, prNum)
 	if fErr != nil {
-		log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploy_failed: %v", repo, prNum, fErr)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error transitioning pr to deploy_failed", "repo", repo, "pr", prNum, "error", fErr)
 		return fmt.Errorf("transition deploy failed: %w", fErr)
 	}
 	if !updated {
@@ -514,7 +515,7 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		return fmt.Errorf("publish deploy failed event: %w", pErr)
 	}
 	if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, repo, prNum); ackErr != nil {
-		log.Printf("[synapse] [dispatcher] warning: failed acknowledging deploy_failed_published for %s#%d: %v", repo, prNum, ackErr)
+		slog.WarnContext(ctx, "[synapse] [dispatcher] failed acknowledging deploy_failed_published", "repo", repo, "pr", prNum, "error", ackErr)
 	}
 	return nil
 }
@@ -528,7 +529,7 @@ func (s *RouterServer) promoteWorkflowRunImages(ctx context.Context, images []st
 			req := base
 			req.Image = img
 			if _, err := s.dispatcher.PromoteImageTag(ctx, req); err != nil {
-				log.Printf("[synapse] [dispatcher] error promoting image %s: %v", img, err)
+				slog.ErrorContext(ctx, "[synapse] [dispatcher] error promoting image", "image", img, "error", err)
 				errs[i] = fmt.Errorf("promote image %s: %w", img, err)
 			}
 		})
@@ -749,12 +750,12 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		s.teeGitHubWebhook(r.Context(), reqPath, r, event, body)
 	}
 	if s.bus == nil {
-		log.Printf("[synapse] [github] ERROR: event bus not initialized")
+		slog.ErrorContext(r.Context(), "[synapse] [github] event bus not initialized")
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
 		return
 	}
 	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
-		log.Printf("[synapse] [github] ERROR: failed to publish job to jetstream: %v", err)
+		slog.ErrorContext(r.Context(), "[synapse] [github] failed to publish job to jetstream", "error", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 		return
 	}
@@ -784,7 +785,7 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 	}
 	if s.registry != nil {
 		if prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err != nil {
-			log.Printf("[synapse] [registry] %s failed resolving PR by SHA %s locally: %v", res.Event, res.HeadSHA, err)
+			slog.WarnContext(ctx, "[synapse] [registry] failed resolving PR by SHA locally", "event", res.Event, "head_sha", res.HeadSHA, "error", err)
 		} else if prNum > 0 {
 			res.PRNumber = prNum
 			if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
@@ -796,7 +797,7 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 		}
 	}
 	if prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA); err != nil {
-		log.Printf("[synapse] [github] %s failed resolving PR for commit %s: %v", res.Event, res.HeadSHA, err)
+		slog.WarnContext(ctx, "[synapse] [github] failed resolving PR for commit", "event", res.Event, "head_sha", res.HeadSHA, "error", err)
 	} else {
 		res.PRNumber = prNum
 		if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
@@ -815,7 +816,7 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 		return
 	}
 	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID); err != nil {
-		log.Printf("[synapse] [registry] warning self-healing dependabot PR %s#%d on CI failure: %v", res.Repo, res.PRNumber, err)
+		slog.WarnContext(ctx, "[synapse] [registry] error self-healing dependabot PR on CI failure", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 	}
 }
 
@@ -879,7 +880,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	}
 	if res.PRNumber > 0 && res.HeadSHA != "" && s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA) {
 		if cascadeErr := s.checkOpenPRConflicts(ctx, res.Repo); cascadeErr != nil {
-			log.Printf("[synapse] [github] error checking open pr conflicts on ci failure for %s: %v", res.Repo, cascadeErr)
+			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on ci failure", "repo", res.Repo, "error", cascadeErr)
 		}
 	}
 	return err
@@ -927,10 +928,10 @@ func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitH
 		return false
 	}
 	if err := s.rerunWorkflowRunFailedJobs(ctx, res.Repo, p.WorkflowRun.ID); err != nil {
-		log.Printf("[synapse] [github] warning: failed auto-rerunning failed jobs for workflow run %d on %s: %v", p.WorkflowRun.ID, res.Repo, err)
+		slog.WarnContext(ctx, "[synapse] [github] failed auto-rerunning failed jobs for workflow run", "run_id", p.WorkflowRun.ID, "repo", res.Repo, "error", err)
 		return false
 	}
-	log.Printf("[synapse] [github] successfully triggered rerun-failed-jobs for workflow run %d on %s (attempt 1)", p.WorkflowRun.ID, res.Repo)
+	slog.InfoContext(ctx, "[synapse] [github] successfully triggered rerun-failed-jobs for workflow run (attempt 1)", "run_id", p.WorkflowRun.ID, "repo", res.Repo)
 	return true
 }
 
@@ -991,7 +992,7 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 	}
 
 	if !isPRMergeConflict(pr) {
-		log.Printf("[synapse] [github] ignoring auto_merge_disabled on %s#%d (mergeable_state=%q)", res.Repo, res.PRNumber, pr.MergeableState)
+		slog.InfoContext(ctx, "[synapse] [github] ignoring auto_merge_disabled", "repo", res.Repo, "pr", res.PRNumber, "mergeable_state", pr.MergeableState)
 		return nil
 	}
 
@@ -1077,7 +1078,7 @@ func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *Resolved
 	}
 	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID)
 	if err != nil {
-		log.Printf("[synapse] [registry] warning registering dependabot PR %s#%d: %v", res.Repo, res.PRNumber, err)
+		slog.WarnContext(ctx, "[synapse] [registry] error registering dependabot PR", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 		return
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
@@ -1103,8 +1104,7 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 	}
 	res.Sender = p.Sender.Login
 	res.ResolutionSource = "pull_request_payload"
-	log.Printf("[synapse] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
-		res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
+	slog.InfoContext(ctx, "[synapse] [github] [pull_request] event", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "branch", res.Branch, "merged", p.PullRequest.Merged, "sender", res.Sender, "delivery", delivery)
 
 	s.handleDependabotPROpen(ctx, res, p)
 
@@ -1158,7 +1158,7 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
 	if err != nil {
-		log.Printf("[synapse] [registry] warning recording check status for %s#%d check %q: %v", res.Repo, res.PRNumber, res.CheckName, err)
+		slog.WarnContext(ctx, "[synapse] [registry] error recording check status", "repo", res.Repo, "pr", res.PRNumber, "check", res.CheckName, "error", err)
 		return
 	}
 	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -1193,8 +1193,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		return res, nil
 	}
 	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
-	log.Printf("[synapse] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
-		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
+	slog.InfoContext(ctx, "[synapse] [github] [check_run] event", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
 
 	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
@@ -1217,7 +1216,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	}
 	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && isGateAggregatorCheck(res.CheckName) && res.PRNumber > 0 {
 		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-			log.Printf("[synapse] [github] error checking open pr conflicts on gate success for %s: %v", res.Repo, err)
+			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on gate success", "repo", res.Repo, "error", err)
 		}
 	}
 	return res, nil
@@ -1236,8 +1235,7 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	res.Status = p.WorkflowRun.Status
 	res.Conclusion = p.WorkflowRun.Conclusion
 	s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
-	log.Printf("[synapse] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
-		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
+	slog.InfoContext(ctx, "[synapse] [github] [workflow_run] event", "repo", res.Repo, "workflow", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
 
 	if s.tryRerunFailedMainWorkflowRun(ctx, p, res) {
 		return res, nil
@@ -1266,8 +1264,7 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 	if res.PRNumber > 0 {
 		res.MergeSHA = res.HeadSHA
 	}
-	log.Printf("[synapse] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
-		res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, res.Delivery)
+	slog.InfoContext(ctx, "[synapse] [github] [push] event", "repo", res.Repo, "ref", p.Ref, "head_sha", res.HeadSHA, "resolved_pr", res.PRNumber, "branch", res.Branch, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", res.Delivery)
 
 	if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
 		targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
@@ -1323,7 +1320,7 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 
 	s.clearUpdatedPRsForMainCommit(res.Repo, res.HeadSHA)
 	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-		log.Printf("[synapse] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
+		slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts", "repo", res.Repo, "error", err)
 	}
 	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 		return nil, err
@@ -1355,7 +1352,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 	case "push":
 		return s.processGitHubPushEvent(ctx, body, res)
 	default:
-		log.Printf("[synapse] [github] [unhandled] event=%s delivery=%s payload_size=%d bytes", event, delivery, len(body))
+		slog.InfoContext(ctx, "[synapse] [github] [unhandled] event", "event", event, "delivery", delivery, "payload_size_bytes", len(body))
 		res.ResolutionSource = "unhandled_event"
 		return res, nil
 	}
@@ -1470,7 +1467,7 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 	var comments []GitHubIssueComment
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
 	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
-		log.Printf("[synapse] [github] warning fetching roborev comments for %s#%d: %v", repo, prNumber, err)
+		slog.WarnContext(ctx, "[synapse] [github] error fetching roborev comments", "repo", repo, "pr", prNumber, "error", err)
 		return ""
 	}
 	shortSHA := strings.TrimSpace(headSHA)

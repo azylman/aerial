@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -41,32 +41,32 @@ func nakBackoffDelay(numDelivered uint64) time.Duration {
 	return time.Duration(1<<shift) * time.Second
 }
 
-func termJobIfExhausted(msg pubsub.Message, maxDeliver uint64, jobName string) bool {
+func termJobIfExhausted(ctx context.Context, msg pubsub.Message, maxDeliver uint64, jobName string) bool {
 	if msg.NumDelivered() >= maxDeliver {
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming %s job: %v", jobName, termErr)
+			slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
 		}
 		return true
 	}
 	return false
 }
 
-func handleJetStreamJob[T any](msg pubsub.Message, maxDeliver uint64, jobName string, process func(args T) error) error {
+func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliver uint64, jobName string, process func(args T) error) error {
 	var args T
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling %s job: %v", jobName, err)
+		slog.ErrorContext(ctx, "[synapse] [jetstream] error unmarshaling job", "job", jobName, "error", err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming %s job: %v", jobName, termErr)
+			slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
 		}
 		return nil
 	}
 	if err := process(args); err != nil {
-		log.Printf("[synapse] [jetstream] error processing %s job: %v", jobName, err)
-		if termJobIfExhausted(msg, maxDeliver, jobName) {
+		slog.ErrorContext(ctx, "[synapse] [jetstream] error processing job", "job", jobName, "error", err)
+		if termJobIfExhausted(ctx, msg, maxDeliver, jobName) {
 			return nil
 		}
 		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error naking %s job: %v", jobName, nakErr)
+			slog.WarnContext(ctx, "[synapse] [jetstream] error naking job", "job", jobName, "error", nakErr)
 		}
 		return err
 	}
@@ -89,8 +89,8 @@ func isFinalAttemptFromContext(ctx context.Context) bool {
 func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
 	isFinal := msg.NumDelivered() >= maxDeliverGitHubWebhook
 	jobCtx := withFinalAttempt(ctx, isFinal)
-	return handleJetStreamJob(msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
-		log.Printf("[synapse] [jetstream] processing github job event=%s delivery=%s final=%v", args.Event, args.Delivery, isFinal)
+	return handleJetStreamJob(ctx, msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
+		slog.InfoContext(ctx, "[synapse] [jetstream] processing github job", "event", args.Event, "delivery", args.Delivery, "final", isFinal)
 		_, err := s.ProcessGitHubEvent(jobCtx, args.Event, args.Delivery, args.Body)
 		return err
 	})
@@ -98,8 +98,8 @@ func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) 
 
 // HandleDeployJob processes an aerial.jobs.synapse.deploy job message from JetStream.
 func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) error {
-	return handleJetStreamJob(msg, maxDeliverDeployWebhook, "deploy", func(args DeployWebhookArgs) error {
-		log.Printf("[synapse] [jetstream] processing deploy job event=%s job_name=%s", args.Event.Event, args.Event.JobName)
+	return handleJetStreamJob(ctx, msg, maxDeliverDeployWebhook, "deploy", func(args DeployWebhookArgs) error {
+		slog.InfoContext(ctx, "[synapse] [jetstream] processing deploy job", "event", args.Event.Event, "job_name", args.Event.JobName)
 		_, err := s.ProcessDeployEvent(ctx, args.Event)
 		return err
 	})
@@ -111,9 +111,9 @@ func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) 
 func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.Message) (err error) {
 	var args DiscordIngressArgs
 	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling discord ingress job: %v", uErr)
+		slog.ErrorContext(ctx, "[synapse] [jetstream] error unmarshaling discord ingress job", "error", uErr)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming discord ingress job: %v", termErr)
+			slog.WarnContext(ctx, "[synapse] [jetstream] error terming discord ingress job", "error", termErr)
 		}
 		return nil
 	}
@@ -122,7 +122,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	defer span.End()
 	defer func() { markDiscordJobSpan(span, err) }()
 
-	if termJobIfExhausted(msg, maxDeliverDiscordIngress, "discord ingress") {
+	if termJobIfExhausted(ctx, msg, maxDeliverDiscordIngress, "discord ingress") {
 		RecordJobDropped(QueueDiscordIngress, "discord_ingress", "max_retries_exhausted")
 		return nil
 	}
@@ -150,7 +150,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		if isStale {
 			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
 			if termErr := msg.Term(); termErr != nil {
-				log.Printf("[synapse] [jetstream] warning: error terming expired discord ingress job: %v", termErr)
+				slog.WarnContext(ctx, "[synapse] [jetstream] error terming expired discord ingress job", "error", termErr)
 			}
 			return nil
 		}
@@ -161,7 +161,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		if is4xxClientError(pErr) {
 			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
 			if termErr := msg.Term(); termErr != nil {
-				log.Printf("[synapse] [jetstream] warning: error terming client 4xx discord ingress job: %v", termErr)
+				slog.WarnContext(ctx, "[synapse] [jetstream] error terming client 4xx discord ingress job", "error", termErr)
 			}
 			return nil
 		}
@@ -179,9 +179,9 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) error {
 	var args DiscordInteractionArgs
 	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling discord interaction job: %v", uErr)
+		slog.ErrorContext(ctx, "[synapse] [jetstream] error unmarshaling discord interaction job", "error", uErr)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming discord interaction job: %v", termErr)
+			slog.WarnContext(ctx, "[synapse] [jetstream] error terming discord interaction job", "error", termErr)
 		}
 		return nil
 	}
@@ -192,9 +192,9 @@ func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubs
 	defer func() { markDiscordJobSpan(span, procErr) }()
 
 	if pErr := s.ProcessDiscordInteraction(ctx, args); pErr != nil {
-		log.Printf("[synapse] [jetstream] error processing discord interaction job: %v", pErr)
+		slog.ErrorContext(ctx, "[synapse] [jetstream] error processing discord interaction job", "error", pErr)
 		procErr = pErr
-		_ = termJobIfExhausted(msg, maxDeliverDiscordInteraction, "discord interaction")
+		_ = termJobIfExhausted(ctx, msg, maxDeliverDiscordInteraction, "discord interaction")
 		return nil
 	}
 	return nil
@@ -218,10 +218,10 @@ func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 	}
 	for _, spec := range specs {
 		if _, err := s.bus.ConsumeQueue(ctx, spec.subject, spec.queue, spec.handler); err != nil {
-			log.Printf("[synapse] warning: failed to subscribe %s: %v", spec.queue, err)
+			slog.WarnContext(ctx, "[synapse] failed to subscribe", "queue", spec.queue, "error", err)
 			return fmt.Errorf("subscribe %s: %w", spec.queue, err)
 		}
-		log.Printf("[synapse] Subscribed %s queue consumer to %s", spec.queue, spec.subject)
+		slog.InfoContext(ctx, "[synapse] subscribed queue consumer", "queue", spec.queue, "subject", spec.subject)
 	}
 	return nil
 }

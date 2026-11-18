@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -143,16 +144,16 @@ func nakBackoffDelay(delivered uint64) time.Duration {
 	return time.Duration(1<<shift) * time.Second
 }
 
-func settleFailedDelivery(msg pubsub.Message) {
+func settleFailedDelivery(ctx context.Context, msg pubsub.Message) {
 	if msg.NumDelivered() >= 3 {
 		if err := msg.Term(); err != nil {
-			log.Printf("[vanadis-nats] error terming message after %d deliveries: %v", msg.NumDelivered(), err)
+			slog.ErrorContext(ctx, "[vanadis-nats] error terming message", "deliveries", msg.NumDelivered(), "error", err)
 		}
 		return
 	}
 	delay := nakBackoffDelay(msg.NumDelivered())
 	if err := msg.NakWithDelay(delay); err != nil {
-		log.Printf("[vanadis-nats] error naking message with delay %v: %v", delay, err)
+		slog.ErrorContext(ctx, "[vanadis-nats] error naking message", "delay", delay, "error", err)
 	}
 }
 
@@ -202,7 +203,7 @@ func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempoten
 	targetURL := fmt.Sprintf("%s%s", b.cfg.RestateIngressURL, endpoint)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
-		settleFailedDelivery(msg)
+		settleFailedDelivery(ctx, msg)
 		return fmt.Errorf("create request to %s: %w", targetURL, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -212,13 +213,13 @@ func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempoten
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
-		settleFailedDelivery(msg)
+		settleFailedDelivery(ctx, msg)
 		return fmt.Errorf("post to restate ingress %s: %w", targetURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 500 {
-		settleFailedDelivery(msg)
+		settleFailedDelivery(ctx, msg)
 		return fmt.Errorf("restate ingress error (status %d)", resp.StatusCode)
 	}
 	return nil
@@ -228,7 +229,7 @@ func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempoten
 func (b *NATSBridge) HandlePRLifecycleEvent(ctx context.Context, msg pubsub.Message) error {
 	var ev pubsub.PRLifecycleEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-		log.Printf("[vanadis-nats] warning: failed to unmarshal pr lifecycle event: %v", err)
+		slog.WarnContext(ctx, "[vanadis-nats] failed to unmarshal pr lifecycle event", "error", err)
 		return nil
 	}
 	ev.Event = strings.ToLower(strings.TrimSpace(ev.Event))
@@ -249,7 +250,7 @@ func (b *NATSBridge) HandlePRLifecycleEvent(ctx context.Context, msg pubsub.Mess
 func (b *NATSBridge) HandleDispatchOutcomeEvent(ctx context.Context, msg pubsub.Message) error {
 	var ev pubsub.DispatchOutcomeEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-		log.Printf("[vanadis-nats] warning: failed to unmarshal dispatch outcome event: %v", err)
+		slog.WarnContext(ctx, "[vanadis-nats] failed to unmarshal dispatch outcome event", "error", err)
 		return nil
 	}
 
@@ -276,7 +277,7 @@ func (b *NATSBridge) HandleDispatchOutcomeEvent(ctx context.Context, msg pubsub.
 func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Message) error {
 	var args pubsub.WidgetSyncJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[vanadis-nats] warning: failed to unmarshal widget sync event: %v", err)
+		slog.WarnContext(ctx, "[vanadis-nats] failed to unmarshal widget sync event", "error", err)
 		return nil
 	}
 
@@ -393,6 +394,7 @@ func runMain() error {
 
 	_, flushTracing := initTracingFn(ctx, "vanadis-nats", tracing.DefaultConfigPath)
 	defer flushTracing()
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	if err := runAppFn(ctx, cfg); err != nil {
 		return err
