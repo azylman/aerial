@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -814,6 +817,25 @@ func extractPRNumberFromCommitMessage(msg string) int {
 	return 0
 }
 
+func verifyGitHubWebhookSignature(secret, signatureHeader string, body []byte) bool {
+	trimmedSecret := strings.TrimSpace(secret)
+	if trimmedSecret == "" {
+		return false
+	}
+	if !strings.HasPrefix(signatureHeader, "sha256=") {
+		return false
+	}
+	sigHex := strings.TrimPrefix(signatureHeader, "sha256=")
+	expectedSig, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(trimmedSecret))
+	mac.Write(body)
+	actualSig := mac.Sum(nil)
+	return hmac.Equal(actualSig, expectedSig)
+}
+
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-Github-Event")
 	if strings.TrimSpace(event) == "" {
@@ -824,6 +846,14 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 
 	body, ok := readWebhookBody(w, r, 5<<20)
 	if !ok {
+		return
+	}
+	var webhookSecret string
+	if s != nil && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
+		webhookSecret = s.cfgSrc.Current().GitHubWebhookSecret
+	}
+	if !verifyGitHubWebhookSignature(webhookSecret, r.Header.Get("X-Hub-Signature-256"), body) {
+		httpkit.WriteJSON(w, http.StatusUnauthorized, map[string]string{fieldError: "invalid github webhook signature"})
 		return
 	}
 	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {

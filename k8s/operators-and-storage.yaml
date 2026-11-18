@@ -540,6 +540,9 @@ spec:
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
+    - remoteRef:
+        key: GITHUB_WEBHOOK_SECRET
+      secretKey: GITHUB_WEBHOOK_SECRET
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore

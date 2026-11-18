@@ -245,18 +245,84 @@ func TestForwardRawWebhookToPeers(t *testing.T) {
 	}
 }
 
+type teePayloadFallbackCase struct {
+	name        string
+	nilServer   bool
+	forwardURLs map[string]string
+	event       string
+	payload     string
+	contentType string
+	signature   string
+	wantCalls   int
+	wantSig     string
+}
+
+func runTeeGitHubWebhookFallbackCase(t *testing.T, tc teePayloadFallbackCase) {
+	t.Helper()
+	t.Parallel()
+	var calls atomic.Int32
+	var recContentType string
+	var recSignature string
+	var mu sync.Mutex
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		mu.Lock()
+		recContentType = r.Header.Get("Content-Type")
+		recSignature = r.Header.Get("X-Hub-Signature-256")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	urls := tc.forwardURLs
+	if len(urls) > 0 {
+		urls = map[string]string{"peer": ts.URL}
+	}
+
+	var srv *RouterServer
+	if !tc.nilServer {
+		srv = &RouterServer{
+			httpClient: ts.Client(),
+			cfgSrc: fixedConfig(Config{
+				BotID:              "aerial",
+				WebhookForwardURLs: urls,
+			}),
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(tc.payload))
+	if tc.contentType != "" {
+		req.Header.Set("Content-Type", tc.contentType)
+	}
+	if tc.signature != "" {
+		req.Header.Set("X-Hub-Signature-256", tc.signature)
+	}
+	srv.teeGitHubWebhook(context.Background(), "/api/webhooks/github", req, tc.event, []byte(tc.payload))
+
+	if int(calls.Load()) != tc.wantCalls {
+		t.Errorf("calls = %d, want %d", calls.Load(), tc.wantCalls)
+	}
+	if tc.wantCalls > 0 && tc.contentType == "" {
+		mu.Lock()
+		if recContentType != "application/json" {
+			t.Errorf("expected Content-Type application/json, got %q", recContentType)
+		}
+		mu.Unlock()
+	}
+	if tc.wantSig != "" {
+		mu.Lock()
+		if recSignature != tc.wantSig {
+			t.Errorf("expected X-Hub-Signature-256 %q, got %q", tc.wantSig, recSignature)
+		}
+		mu.Unlock()
+	}
+}
+
 func TestTeeGitHubWebhook_PayloadFallbacks(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		nilServer   bool
-		forwardURLs map[string]string
-		event       string
-		payload     string
-		contentType string
-		wantCalls   int
-	}{
+	tests := []teePayloadFallbackCase{
 		{name: "nil server", nilServer: true, event: "push"},
 		{name: "empty forward URLs", forwardURLs: nil, event: "push"},
 		{
@@ -274,6 +340,16 @@ func TestTeeGitHubWebhook_PayloadFallbacks(t *testing.T) {
 			payload:     `{"ref":"refs/heads/feature","head_commit":{"id":"commit_sha"}}`,
 			contentType: "application/json",
 			wantCalls:   1,
+		},
+		{
+			name:        "push preserves X-Hub-Signature-256 header",
+			forwardURLs: map[string]string{"peer": "target"},
+			event:       "push",
+			payload:     `{"ref":"refs/heads/main","after":"sha1"}`,
+			contentType: "application/json",
+			signature:   "sha256=testsignature123",
+			wantCalls:   1,
+			wantSig:     "sha256=testsignature123",
 		},
 		{
 			name:        "pull_request invalid json payload returns early",
@@ -307,52 +383,7 @@ func TestTeeGitHubWebhook_PayloadFallbacks(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var calls atomic.Int32
-			var recContentType string
-			var mu sync.Mutex
-
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				mu.Lock()
-				recContentType = r.Header.Get("Content-Type")
-				mu.Unlock()
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer ts.Close()
-
-			urls := tc.forwardURLs
-			if len(urls) > 0 {
-				urls = map[string]string{"peer": ts.URL}
-			}
-
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{
-					httpClient: ts.Client(),
-					cfgSrc: fixedConfig(Config{
-						BotID:              "aerial",
-						WebhookForwardURLs: urls,
-					}),
-				}
-			}
-
-			req := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(tc.payload))
-			if tc.contentType != "" {
-				req.Header.Set("Content-Type", tc.contentType)
-			}
-			srv.teeGitHubWebhook(context.Background(), "/api/webhooks/github", req, tc.event, []byte(tc.payload))
-
-			if int(calls.Load()) != tc.wantCalls {
-				t.Errorf("calls = %d, want %d", calls.Load(), tc.wantCalls)
-			}
-			if tc.wantCalls > 0 && tc.contentType == "" {
-				mu.Lock()
-				defer mu.Unlock()
-				if recContentType != "application/json" {
-					t.Errorf("expected Content-Type application/json, got %q", recContentType)
-				}
-			}
+			runTeeGitHubWebhookFallbackCase(t, tc)
 		})
 	}
 }
