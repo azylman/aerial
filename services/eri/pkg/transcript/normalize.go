@@ -97,6 +97,16 @@ var agyToolKinds = map[string]string{
 	"search_web":                 ToolKindWeb,
 	"invoke_subagent":            ToolKindSubagent,
 	"manage_subagents":           ToolKindSubagent,
+	"read_file":                  ToolKindRead,
+	"write_file":                 ToolKindWrite,
+	"read_resource":              ToolKindRead,
+	"call_mcp_tool":              ToolKindOther,
+	"list_resources":             ToolKindOther,
+	"ask_question":               ToolKindOther,
+	"define_subagent":            ToolKindSubagent,
+	"send_message":               ToolKindSubagent,
+	"run_workflow":               ToolKindSubagent,
+	"manage_task":                ToolKindTask,
 }
 
 // NormalizeToolKind maps an engine-native tool name to its engine-agnostic kind.
@@ -169,10 +179,15 @@ func toolEngineMask(name string) int {
 	if _, ok := codexToolKinds[name]; ok {
 		return engineMaskCodex
 	}
-	if _, ok := museToolKinds[name]; ok {
+	_, inMuse := museToolKinds[name]
+	_, inAgy := agyToolKinds[name]
+	if inMuse && inAgy {
+		return 0
+	}
+	if inMuse {
 		return engineMaskMuse
 	}
-	if _, ok := agyToolKinds[name]; ok || strings.HasPrefix(name, "mcp_") {
+	if inAgy || strings.HasPrefix(name, "mcp_") {
 		return engineMaskAgy
 	}
 	return 0
