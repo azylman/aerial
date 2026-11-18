@@ -175,7 +175,7 @@ func resolveWorkflowRunTestCases() []resolveWorkflowRunCase {
 func runResolveWorkflowRunImagesCase(ctx context.Context, t *testing.T, srv *RouterServer, tc resolveWorkflowRunCase) {
 	t.Helper()
 	t.Parallel()
-	images, err := srv.resolveWorkflowRunImages(ctx, tc.repo, tc.runID)
+	images, err := srv.resolveLegacyWorkflowRunImages(ctx, tc.repo, tc.runID)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("resolveWorkflowRunImages() err = %v, wantErr %v", err, tc.wantErr)
 	}
@@ -321,7 +321,7 @@ func runDispatchWorkflowRunCase(ctx context.Context, t *testing.T, tc dispatchWo
 		resolveTargetID: "100000000000000001",
 		resolveBranch:   "feat/test",
 	}
-	srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
+	srv := NewRouterServer(fixedConfig(legacyFixtureConfig(Config{GitHubAPIURL: ts.URL})), legacyFixtureClient(ts.Client()))
 	if disp != nil {
 		srv.SetDispatcher(disp)
 	}
@@ -331,7 +331,7 @@ func runDispatchWorkflowRunCase(ctx context.Context, t *testing.T, tc dispatchWo
 	if tc.isGitPush {
 		err = srv.dispatchGitPush(ctx, "azylman/aerial", tc.ref, tc.commit, "100000000000000001", 1)
 	} else {
-		err = srv.dispatchWorkflowRunImages(ctx, "azylman/aerial", 12345, tc.headBranch, tc.conclusion, "sha123", "100000000000000001", 42)
+		err = srv.dispatchWorkflowRunImages(ctx, "azylman/aerial", workflowRunEvent{ID: 12345, Attempt: 1, HeadSHA: legacyFixtureHead}, tc.headBranch, tc.conclusion, "100000000000000001", 42)
 	}
 
 	if (err != nil) != tc.wantErr {

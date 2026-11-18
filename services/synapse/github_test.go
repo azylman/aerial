@@ -402,7 +402,8 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	if tc.disp != nil {
 		disp = tc.disp
 	}
-	srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner}, mockServer.Client(), reg, disp, inserters...)
+	cfg := legacyFixtureConfig(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner})
+	srv := newTestRouter(cfg, legacyFixtureClient(mockServer.Client()), reg, disp, inserters...)
 	srv.onProcessed = func(string, string) {}
 	if tc.priorEvent != nil {
 		if _, err := srv.ProcessGitHubEvent(ctx, tc.priorEvent.event, tc.priorEvent.delivery, []byte(tc.priorEvent.payload)); err != nil {
@@ -1144,7 +1145,7 @@ func processGitHubEventCasesPart6() []ghEventCase {
 		},
 		{
 			name: "workflow_run on main with expected deploy jobs defers prompt until deploy_success", event: "workflow_run", delivery: "del-wf-mirrormere-expected",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge222","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			payload: `{"action":"completed","workflow_run":{"id":800,"run_attempt":1,"name":"Continuous Delivery","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 222, resolveBranch: "feat/ui-deploy", resolveTargetID: "100000000000000002", hasExpectedRes: true},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  222, wantPrompts: 0,
@@ -1158,7 +1159,7 @@ func processGitHubEventCasesPart6() []ghEventCase {
 		},
 		{
 			name: "workflow_run on main completeNoDeployWorkflowRun HasExpectedDeployJobs error propagates", event: "workflow_run", delivery: "del-wf-mirrormere-has-expected-err",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			payload: `{"action":"completed","workflow_run":{"id":800,"run_attempt":1,"name":"Continuous Delivery","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "100000000000000002", hasExpectedErr: errors.New("simulated has expected deploy jobs error")},
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
@@ -1277,7 +1278,6 @@ type dispatchWorkflowRunImagesCase struct {
 	name                   string
 	isFinalAttempt         bool
 	targetID               string
-	headSHA                string
 	resolveErr             error
 	deployFailedTID        string
 	deployFailedErr        error
@@ -1349,18 +1349,14 @@ func runDispatchWorkflowRunImagesCase(ctx context.Context, t *testing.T, tc disp
 		DefaultOwner:    true,
 		SystemChannelID: "100000000000000001",
 	}
-	srv := newTestRouter(cfg, mockServer.Client(), reg, disp)
+	srv := newTestRouter(legacyFixtureConfig(cfg), legacyFixtureClient(mockServer.Client()), reg, disp)
 	srv.bus = bus
 
-	headSHA := "sha123"
-	if tc.headSHA != "" {
-		headSHA = tc.headSHA
-	}
 	testCtx := ctx
 	if tc.isFinalAttempt {
 		testCtx = withFinalAttempt(ctx, true)
 	}
-	err := srv.dispatchWorkflowRunImages(testCtx, "azylman/aerial", 1, "main", "success", headSHA, tc.targetID, tc.prNum)
+	err := srv.dispatchWorkflowRunImages(testCtx, "azylman/aerial", workflowRunEvent{ID: 1, Attempt: 1, HeadSHA: legacyFixtureHead}, "main", "success", tc.targetID, tc.prNum)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("dispatchWorkflowRunImages() err = %v, wantErr = %v", err, tc.wantErr)
 	}

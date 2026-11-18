@@ -631,25 +631,6 @@ func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 	}
 }
 
-func TestExtractChecksFromJSONOrMetadata_Unit(t *testing.T) {
-	t.Parallel()
-	res := extractChecksFromJSONOrMetadata(`{"lint":"passed"}`, nil)
-	if res["lint"] != "passed" {
-		t.Errorf("expected lint passed, got %v", res)
-	}
-	resBad := extractChecksFromJSONOrMetadata(`{bad`, map[string]any{"ci_checks": map[string]any{"unit": "passed"}})
-	if resBad["unit"] != "passed" {
-		t.Errorf("expected unit passed, got %v", resBad)
-	}
-	resMapStr := extractChecksFromJSONOrMetadata("", map[string]any{"ci_checks": map[string]string{"build": "failed"}})
-	if resMapStr["build"] != "failed" {
-		t.Errorf("expected build failed, got %v", resMapStr)
-	}
-	if extractChecksFromJSONOrMetadata("", nil) != nil {
-		t.Errorf("expected nil for empty checks and nil meta")
-	}
-}
-
 func TestRecordFailedCISHA_Unit(t *testing.T) {
 	t.Parallel()
 	var nilSrv *RouterServer
@@ -699,22 +680,6 @@ func TestPublishDeployLifecycleEvent_Unit(t *testing.T) {
 	}
 	if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].JobName != "git-sync" {
 		t.Errorf("expected jobName git-sync, got %v", bus.publishedPREvents)
-	}
-}
-
-func TestAnalyzeBuildChecks_Unit(t *testing.T) {
-	t.Parallel()
-	jobs, passedJobs, total, passed, failed := analyzeBuildChecks(map[string]string{
-		"Build & Push Images (eri)": "passed",
-		"Lint":                      "failed",
-		"Test":                      "in_progress",
-		"":                          "",
-	})
-	if total != 3 || passed != 1 || failed != 1 {
-		t.Errorf("got total=%d passed=%d failed=%d", total, passed, failed)
-	}
-	if !passedJobs["eri"] || len(jobs) != 1 || jobs[0] != "eri" {
-		t.Errorf("unexpected jobs=%v passedJobs=%v", jobs, passedJobs)
 	}
 }
 
@@ -1193,9 +1158,9 @@ func runKubeRolloutCase(t *testing.T, tc kubeRolloutTestCase, configMapPath, kus
 	disp := NewDefaultOutboundDispatcher("", ts.Client())
 	disp.SetKubeConfig(ts.URL, "test-token")
 	reg := &mockPRRegistry{resolveTargetID: "100000000000000001"}
-	srv := newTestRouter(Config{GitHubAPIURL: ts.URL, DefaultOwner: true}, ts.Client(), reg, disp)
+	srv := newTestRouter(legacyFixtureConfig(Config{GitHubAPIURL: ts.URL, DefaultOwner: true}), legacyFixtureClient(ts.Client()), reg, disp)
 
-	err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 7, "main", "success", "abcdef1234567890abcdef1234567890abcdef12", "100000000000000001", 42)
+	err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", workflowRunEvent{ID: 7, Attempt: 1, HeadSHA: legacyFixtureHead}, "main", "success", "100000000000000001", 42)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
 	}

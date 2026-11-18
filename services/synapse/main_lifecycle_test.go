@@ -19,192 +19,40 @@ import (
 
 func TestIsWaitingForImageBuild(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-
-	tests := []isWaitingForImageBuildCase{
-		{
-			name:       "nil server returns false",
-			serverNil:  true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "nil registry returns false",
-			nilReg:     true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "empty repo returns false",
-			repo:       "",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "zero prNumber returns false",
-			repo:       "azylman/aerial",
-			prNumber:   0,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "non-postgres registry returns false",
-			mockReg:    true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "nil pool returns false",
-			nilPool:    true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "query error returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			queryErr:   errors.New("db error"),
-			wantResult: false,
-		},
-		{
-			name:       "unsupported status returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "deploying",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "invalid metadata unmarshals to nil and returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{invalid json`,
-			wantResult: false,
-		},
-		{
-			name:       "started_jobs non-empty returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"started_jobs":["aerial-synapse"],"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "no build checks in metadata returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Go Unit Tests":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "open status with build checks returns true",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "open",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: true,
-		},
-		{
-			name:       "merged status with build checks returns true",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: true,
-		},
-		{
-			name:       "synced status with build checks returns true",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "synced",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: true,
-		},
+	engine := []BuildSelection{{Service: "engine", ImageName: "aerial-engine"}}
+	tests := []struct {
+		name, repo, status, kind string
+		started, found, watch    bool
+		selected                 []BuildSelection
+		lifecycleErr, err        error
+		want                     bool
+	}{
+		{"absent snapshot keeps waiting", "example/aerial", prMerged, "", false, false, false, nil, nil, nil, true},
+		{"unreadable snapshot keeps waiting", "example/aerial", prMerged, "", false, false, false, nil, nil, errors.New("invalid"), true},
+		{"lifecycle unavailable keeps waiting", "example/aerial", prMerged, "", false, false, false, nil, errors.New("offline"), nil, true},
+		{"manifest-only empty selection keeps waiting", "example/aerial", prMerged, buildMetadataManifest, false, true, false, []BuildSelection{}, nil, nil, true},
+		{"in-progress selection keeps waiting", "example/aerial", prSynced, buildMetadataProgress, false, true, false, engine, nil, nil, true},
+		{"explicit empty final completes", "example/aerial", prMerged, buildMetadataFinal, false, true, false, []BuildSelection{}, nil, nil, false},
+		{"explicit empty final on open PR", "example/aerial-sidecars", prOpen, buildMetadataFinal, false, true, false, []BuildSelection{}, nil, nil, false},
+		{"selected images wait for promotion", "example/mirrormere", prMerged, buildMetadataFinal, false, true, false, engine, nil, nil, true},
+		{"conflicted PR with selection waits", "example/aerial", prConflict, buildMetadataFinal, false, true, false, engine, nil, nil, true},
+		{"started deployment ends wait", "example/aerial", prMerged, buildMetadataFinal, true, true, false, engine, nil, nil, false},
+		{"watcher-owned rollout ends wait", "example/aerial", prMerged, buildMetadataFinal, false, true, true, engine, nil, nil, false},
+		{"deploying is terminal", "example/aerial", statusDeploying, "", false, false, false, nil, nil, nil, false},
+		{"deployed is terminal", "example/aerial", "deployed", "", false, false, false, nil, nil, nil, false},
+		{"deploy failed is terminal", "example/aerial", "deploy_failed", "", false, false, false, nil, nil, nil, false},
+		{"unregistered PR", "example/aerial", "", "", false, false, false, nil, nil, nil, false},
+		{"repository without image producer", "example/aerial-config", prMerged, "", false, false, false, nil, nil, nil, false},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runIsWaitingForImageBuildCase(ctx, t, tc)
-		})
-	}
-}
-
-type isWaitingForImageBuildCase struct {
-	name       string
-	serverNil  bool
-	nilReg     bool
-	mockReg    bool
-	nilPool    bool
-	repo       string
-	prNumber   int
-	status     string
-	metadata   string
-	queryErr   error
-	wantResult bool
-}
-
-func newWaitingImageMockPool(status, metadata string, queryErr error) *mockSynapsePgxPool {
-	return &mockSynapsePgxPool{
-		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-			if queryErr != nil {
-				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-					return queryErr
-				}}
+			reg := &mockPRRegistry{buildLifecycle: PRBuildLifecycle{Status: tc.status, Started: tc.started}, buildLifecycleErr: tc.lifecycleErr, buildMetadata: BuildMetadata{Kind: tc.kind, Selected: tc.selected}, buildMetadataFound: tc.found, buildMetadataErr: tc.err, hasKustomizationReqs: tc.watch}
+			srv := newTestRouter(Config{}, nil, reg, nil)
+			if got := srv.isWaitingForImageBuild(context.Background(), tc.repo, 42); got != tc.want {
+				t.Fatalf("wait=%v want %v", got, tc.want)
 			}
-			return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-				if len(dest) >= 2 {
-					if s, ok := dest[0].(*string); ok {
-						*s = status
-					}
-					if b, ok := dest[1].(*[]byte); ok && metadata != "" {
-						*b = []byte(metadata)
-					}
-				}
-				return nil
-			}}
-		},
-	}
-}
-
-func runIsWaitingForImageBuildCase(ctx context.Context, t *testing.T, tc isWaitingForImageBuildCase) {
-	t.Helper()
-	if tc.serverNil {
-		var nilSrv *RouterServer
-		if got := nilSrv.isWaitingForImageBuild(ctx, tc.repo, tc.prNumber); got != tc.wantResult {
-			t.Errorf("isWaitingForImageBuild() = %v, want %v", got, tc.wantResult)
-		}
-		return
-	}
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	switch {
-	case tc.mockReg:
-		srv.SetRegistry(&mockPRRegistry{})
-	case tc.nilPool:
-		srv.SetRegistry(NewPostgresPRRegistry(nil))
-	case !tc.nilReg:
-		srv.SetRegistry(NewPostgresPRRegistry(newWaitingImageMockPool(tc.status, tc.metadata, tc.queryErr)))
-	}
-	got := srv.isWaitingForImageBuild(ctx, tc.repo, tc.prNumber)
-	if got != tc.wantResult {
-		t.Errorf("isWaitingForImageBuild() = %v, want %v", got, tc.wantResult)
+		})
 	}
 }
 

@@ -1,0 +1,14 @@
+{
+  "id": 44221326112,
+  "run_number": 4878,
+  "run_attempt": 1,
+  "path": ".github/workflows/docker-publish.yml",
+  "event": "pull_request",
+  "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+  "head_branch": "feature",
+  "status": "completed",
+  "conclusion": "success",
+  "repository": {
+    "full_name": "azylman/aerial"
+  }
+}

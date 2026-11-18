@@ -677,15 +677,15 @@ func runHandleImagePromotionCase(t *testing.T, tc handleImagePromotionCase) {
 		DefaultOwner:    true,
 		SystemChannelID: "100000000000000001",
 	}
-	srv := newTestRouter(cfg, mockServer.Client(), reg, disp)
+	srv := newTestRouter(legacyFixtureConfig(cfg), legacyFixtureClient(mockServer.Client()), reg, disp)
 	srv.bus = bus
 
 	payload := `{
 		"action": "completed",
 		"workflow_run": {
-			"id": 100,
+			"id": 100,"run_attempt":1,
 			"name": "Continuous Delivery",
-			"head_sha": "sha123",
+			"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"head_branch": "main",
 			"status": "completed",
 			"conclusion": "success",

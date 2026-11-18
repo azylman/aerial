@@ -133,13 +133,20 @@ type prStatusCall struct {
 }
 
 type mockPRRegistry struct {
-	mergedCalls         []prCall
-	syncCalls           []prCall
-	closedUnmergedCalls []prCall
-	ciFailedCalls       []prCall
-	ciFailedBySHACalls  []prCall
-	backfillCalls       []prCall
-	resolveBySHACalls   []prCall
+	recordedBuildMetadata  []BuildMetadata
+	recordBuildMetadataErr error
+	buildLifecycle         PRBuildLifecycle
+	buildMetadata          BuildMetadata
+	buildMetadataFound     bool
+	buildMetadataErr       error
+	buildLifecycleErr      error
+	mergedCalls            []prCall
+	syncCalls              []prCall
+	closedUnmergedCalls    []prCall
+	ciFailedCalls          []prCall
+	ciFailedBySHACalls     []prCall
+	backfillCalls          []prCall
+	resolveBySHACalls      []prCall
 
 	mergedTargetID   string
 	syncTargetID     string
@@ -1199,10 +1206,15 @@ func TestSetupPostgres(t *testing.T) {
 	}
 }
 
-func (*mockPRRegistry) RecordPRBuildMetadata(context.Context, string, int, BuildMetadata) (bool, error) {
-	return false, nil
+func (m *mockPRRegistry) RecordPRBuildMetadata(_ context.Context, _ string, _ int, metadata BuildMetadata) (bool, error) {
+	m.recordedBuildMetadata = append(m.recordedBuildMetadata, metadata)
+	return m.recordBuildMetadataErr == nil, m.recordBuildMetadataErr
 }
 
-func (*mockPRRegistry) LoadPRBuildMetadata(context.Context, string, int) (BuildMetadata, bool, error) {
-	return BuildMetadata{}, false, nil
+func (m *mockPRRegistry) LoadPRBuildMetadata(context.Context, string, int) (BuildMetadata, bool, error) {
+	return m.buildMetadata, m.buildMetadataFound, m.buildMetadataErr
+}
+
+func (m *mockPRRegistry) LoadPRBuildLifecycle(context.Context, string, int) (PRBuildLifecycle, error) {
+	return m.buildLifecycle, m.buildLifecycleErr
 }

@@ -469,7 +469,7 @@ func resolveImageTag(repo, imageRef string) (tagKey, imageName, workloadName str
 	if workloadName == "" || strings.EqualFold(workloadName, "none") {
 		return "", "", ""
 	}
-	switch cleanRepoName(repo) {
+	switch repo[strings.LastIndex(repo, "/")+1:] {
 	case "aerial":
 		imageName = "aerial-" + strings.TrimPrefix(workloadName, "aerial-")
 	case "aerial-sidecars":

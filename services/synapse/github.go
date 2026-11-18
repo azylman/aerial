@@ -76,6 +76,11 @@ func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNu
 	if err := json.Unmarshal(metaBytes, &meta); err != nil || meta == nil {
 		return nil
 	}
+	// Only the identity-validated snapshot for the PR's current revision renders.
+	delete(meta, "build_metadata")
+	if m, found, err := s.registry.LoadPRBuildMetadata(ctx, repo, prNum); err == nil && found {
+		meta["build_metadata"] = m
+	}
 	return buildPRRolloutState(meta)
 }
 
@@ -392,14 +397,23 @@ func (s *RouterServer) startWorkflowRunPRDeploying(ctx context.Context, repo str
 	return nil
 }
 
-func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
+func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, run workflowRunEvent, headBranch, conclusion, targetID string, prNum int) error {
 	if !s.shouldDispatchWorkflowRunImages(ctx, repo, headBranch, conclusion, prNum) {
 		return nil
 	}
 	finalAttempt := isFinalAttemptFromContext(ctx)
-	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
+	headSHA := run.HeadSHA
+	trackPR := s.registry != nil && prNum > 0
+	images, err := s.resolveWorkflowRunImages(ctx, repo, run, prNum)
+	if errors.Is(err, errStaleWorkflowEvent) || errors.Is(err, errNotImageWorkflow) {
+		slog.InfoContext(ctx, "[synapse] [dispatcher] skipping workflow run image promotion", "run_id", run.ID, "attempt", run.Attempt, "repo", repo, "reason", err)
+		return nil
+	}
 	if err != nil {
-		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", runID, "repo", repo, "error", err)
+		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", run.ID, "attempt", run.Attempt, "repo", repo, "error", err)
+		if finalAttempt && trackPR {
+			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+		}
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
 
@@ -413,7 +427,6 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error discovering kustomizations for images", "repo", repo, "images", imageNames, "error", err)
 		return fmt.Errorf("discover image kustomizations: %w", err)
 	}
-	trackPR := s.registry != nil && prNum > 0
 
 	// Phase b: mark the PR deploying before any tag can roll out.
 	if len(refs) > 0 && trackPR {
@@ -607,6 +620,8 @@ type GitHubWorkflowRunPayload struct {
 	WorkflowRun struct {
 		ID           int64              `json:"id"`
 		Name         string             `json:"name"`
+		Path         string             `json:"path"`
+		Event        string             `json:"event"`
 		HeadSHA      string             `json:"head_sha"`
 		HeadBranch   string             `json:"head_branch"`
 		RunAttempt   int                `json:"run_attempt"`
@@ -1207,6 +1222,9 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	res.Status = p.CheckRun.Status
 	res.Conclusion = p.CheckRun.Conclusion
 	if isBuildMetadataCheck(res.CheckName) {
+		if err := s.handleBuildMetadataCheck(ctx, p, res); err != nil {
+			return nil, err
+		}
 		return res, nil
 	}
 	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
@@ -1256,6 +1274,7 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
 	slog.InfoContext(ctx, "[synapse] [github] [workflow_run] event", "repo", res.Repo, "workflow", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
 
+	s.handleWorkflowRunBuildMetadata(ctx, p, res)
 	if s.tryRerunFailedMainWorkflowRun(ctx, p, res) {
 		return res, nil
 	}
@@ -1265,7 +1284,7 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 		return nil, err
 	}
 	if p.Action == ghStatusCompleted && p.WorkflowRun.Status == ghStatusCompleted {
-		if err := s.dispatchWorkflowRunImages(ctx, res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
+		if err := s.dispatchWorkflowRunImages(ctx, res.Repo, workflowRunEvent{ID: p.WorkflowRun.ID, Attempt: p.WorkflowRun.RunAttempt, HeadSHA: res.HeadSHA}, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.TargetID, res.PRNumber); err != nil {
 			return nil, err
 		}
 	}

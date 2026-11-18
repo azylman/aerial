@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +100,9 @@ func buildPRRolloutState(meta map[string]any) *pubsub.PRRolloutState {
 	deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
 	jobStates := extractStringMapFromMetadata(meta, "job_states")
 	kustStatuses := extractStringMapFromMetadata(meta, "kustomization_statuses")
+	if m, ok := metadataSnapshot(meta); ok {
+		expectedJobs, jobStates = mergeStructuredBuildState(m, expectedJobs, jobStates)
+	}
 	if len(expectedJobs) == 0 && len(startedJobs) == 0 && len(deployedJobs) == 0 && len(jobStates) == 0 && len(kustStatuses) == 0 {
 		return nil
 	}
@@ -112,6 +114,73 @@ func buildPRRolloutState(meta map[string]any) *pubsub.PRRolloutState {
 		KustomizationStatuses: kustStatuses,
 	}
 }
+
+// metadataSnapshot reads the identity-validated build snapshot that
+// loadPRRolloutState placed in meta; raw registry JSON is revalidated.
+func metadataSnapshot(meta map[string]any) (BuildMetadata, bool) {
+	switch v := meta["build_metadata"].(type) {
+	case BuildMetadata:
+		return v, true
+	case nil:
+		return BuildMetadata{}, false
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return BuildMetadata{}, false
+		}
+		m, err := parseStoredBuildMetadata(raw)
+		return m, err == nil
+	}
+}
+
+// mergeStructuredBuildState adds every selected service to the expected jobs and
+// derives its image card state, never overriding a deployment-reported state.
+func mergeStructuredBuildState(m BuildMetadata, expectedJobs []string, jobStates map[string]string) ([]string, map[string]string) {
+	if len(m.Selected) == 0 {
+		return expectedJobs, jobStates
+	}
+	if jobStates == nil {
+		jobStates = make(map[string]string, len(m.Selected))
+	}
+	for _, sel := range m.Selected {
+		expectedJobs = append(expectedJobs, sel.Service)
+		key := strings.ToLower(sel.Service)
+		if jobStates[key] == "" {
+			jobStates[key] = structuredServiceState(m, sel.Service)
+		}
+	}
+	return dedupeTrimmedStrings(expectedJobs), jobStates
+}
+
+// structuredServiceState maps a service's snapshot result onto its card state.
+// Services without a result in the snapshot (including inherited results while
+// the current attempt is unfinished) are pending.
+func structuredServiceState(m BuildMetadata, service string) string {
+	for _, r := range m.Results {
+		if r.Service != service {
+			continue
+		}
+		switch {
+		case r.State == buildResultRunning:
+			return imageStateBuilding
+		case r.State == conclusionSuccess && r.Pushed:
+			return imageStateBuilt
+		case r.State == conclusionSuccess:
+			return imageStateUnpublished
+		default:
+			return imageStateFailed
+		}
+	}
+	return imageStatePending
+}
+
+const (
+	imageStatePending     = "image_pending"
+	imageStateBuilding    = "image_building"
+	imageStateBuilt       = "image_built"
+	imageStateUnpublished = "image_unpublished"
+	imageStateFailed      = "image_failed"
+)
 
 func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt DeployEvent, eventName, status string) error {
 	jobName := evt.JobName
@@ -131,71 +200,6 @@ func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt Depl
 		Quiet:        s.isDependabotPRNumber(ctx, evt.Repo, evt.PRNumber),
 		OccurredAt:   time.Now().UTC(),
 	})
-}
-
-func extractChecksFromJSONOrMetadata(ciChecksJSON string, meta map[string]any) map[string]string {
-	var checks map[string]string
-	if trimmedChecks := strings.TrimSpace(ciChecksJSON); trimmedChecks != "" && trimmedChecks != "{}" {
-		if err := json.Unmarshal([]byte(trimmedChecks), &checks); err != nil {
-			checks = nil
-		}
-	}
-	if len(checks) == 0 && meta != nil {
-		if rawChecks, ok := meta["ci_checks"]; ok && rawChecks != nil {
-			switch c := rawChecks.(type) {
-			case map[string]any:
-				checks = make(map[string]string, len(c))
-				for k, v := range c {
-					if s, ok := v.(string); ok {
-						checks[k] = s
-					}
-				}
-			case map[string]string:
-				checks = c
-			}
-		}
-	}
-	return checks
-}
-
-func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBuildJobs map[string]bool, total, passed, failed int) {
-	matchedServices := make(map[string]struct{})
-	passedBuildJobs = make(map[string]bool)
-
-	for checkName, state := range checks {
-		if isBuildMetadataCheck(checkName) {
-			continue
-		}
-		s := strings.ToLower(strings.TrimSpace(state))
-		switch s {
-		case statusPassed:
-			passed++
-			total++
-		case statusFailed:
-			failed++
-			total++
-		default:
-			if s != "" {
-				total++
-			}
-		}
-
-		if svc, ok := buildJobService(checkName); ok {
-			matchedServices[svc] = struct{}{}
-			if s == statusPassed {
-				passedBuildJobs[strings.ToLower(svc)] = true
-			}
-		}
-	}
-
-	if len(matchedServices) > 0 {
-		for svc := range matchedServices {
-			checkJobs = append(checkJobs, svc)
-		}
-		sort.Strings(checkJobs)
-		checkJobs = dedupeTrimmedStrings(checkJobs)
-	}
-	return checkJobs, passedBuildJobs, total, passed, failed
 }
 
 func prCheckKey(repo string, prNumber int) string {
@@ -567,7 +571,11 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	})
 }
 
-func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
+// resolveLegacyWorkflowRunImages is the bounded compatibility adapter for runs
+// whose exact executed workflow blob is in the immutable legacy allowlist. It
+// infers services from historical job and step names and must never be reached
+// for metadata-capable producer runs.
+func (s *RouterServer) resolveLegacyWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || runID <= 0 {
 		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")

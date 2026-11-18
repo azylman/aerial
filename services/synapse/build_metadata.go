@@ -53,8 +53,25 @@ const (
 	buildMetadataManifest = "manifest"
 	buildMetadataFinal    = "final"
 	buildMetadataResult   = "result"
-	buildMetadataPush     = "push"
+	// buildMetadataProgress is a normalized registry snapshot, never a producer wire kind.
+	buildMetadataProgress = "progress"
+
+	buildMetadataCheckName       = "build-metadata"
+	buildMetadataResultCheckName = "build-metadata-result"
+
+	buildEventPush     = "push"
+	buildEventDispatch = "workflow_dispatch"
+
+	buildResultRunning   = "running"
+	buildResultFailure   = "failure"
+	buildResultCancelled = "cancelled"
 )
+
+// isMainBuildEvent reports whether a producer event builds the default branch
+// itself (as opposed to a PR's synthetic merge revision).
+func isMainBuildEvent(event string) bool {
+	return event == buildEventPush || event == buildEventDispatch
+}
 
 var (
 	metadataSHA  = regexp.MustCompile(`^[a-f0-9]{40}$`)
@@ -63,7 +80,7 @@ var (
 )
 
 func isBuildMetadataCheck(name string) bool {
-	return name == "build-metadata" || name == "build-metadata-result"
+	return name == buildMetadataCheckName || name == buildMetadataResultCheckName
 }
 
 func isDependabotAppCheck(appSlug string) bool {
@@ -75,7 +92,14 @@ func validWorkflowPath(path string) bool {
 }
 
 // ParseBuildMetadata validates structure only. It never authorizes promotion.
-func ParseBuildMetadata(raw []byte) (BuildMetadata, error) {
+func ParseBuildMetadata(raw []byte) (BuildMetadata, error) { return parseBuildMetadata(raw, false) }
+
+// parseStoredBuildMetadata additionally accepts normalized progress snapshots.
+func parseStoredBuildMetadata(raw []byte) (BuildMetadata, error) {
+	return parseBuildMetadata(raw, true)
+}
+
+func parseBuildMetadata(raw []byte, stored bool) (BuildMetadata, error) {
 	var m BuildMetadata
 	if len(raw) == 0 || len(raw) > 65536 {
 		return m, fmt.Errorf("invalid metadata size")
@@ -91,7 +115,7 @@ func ParseBuildMetadata(raw []byte) (BuildMetadata, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return m, fmt.Errorf("trailing metadata")
 	}
-	if !validBuildMetadataIdentity(m) {
+	if !validBuildMetadataIdentity(m) || (!stored && m.Kind == buildMetadataProgress) {
 		return m, fmt.Errorf("invalid metadata identity")
 	}
 	if err := validateBuildMetadataResults(m); err != nil {
@@ -105,11 +129,11 @@ func validBuildMetadataIdentity(m BuildMetadata) bool {
 }
 
 func validBuildMetadataRun(m BuildMetadata) bool {
-	return m.Version == 1 && (m.Kind == buildMetadataManifest || m.Kind == buildMetadataFinal || m.Kind == buildMetadataResult) && metadataRepo.MatchString(m.Repository) && validWorkflowPath(m.WorkflowPath) && m.RunID > 0 && m.RunNumber > 0 && m.RunAttempt > 0
+	return m.Version == 1 && (m.Kind == buildMetadataManifest || m.Kind == buildMetadataFinal || m.Kind == buildMetadataResult || m.Kind == buildMetadataProgress) && metadataRepo.MatchString(m.Repository) && validWorkflowPath(m.WorkflowPath) && m.RunID > 0 && m.RunNumber > 0 && m.RunAttempt > 0
 }
 
 func validBuildMetadataSource(m BuildMetadata) bool {
-	return metadataSHA.MatchString(m.SourceSHA) && metadataSHA.MatchString(m.ExecutionSHA) && (m.Event == buildMetadataPush || m.Event == "pull_request") && (m.PRNumber == nil || *m.PRNumber > 0)
+	return metadataSHA.MatchString(m.SourceSHA) && metadataSHA.MatchString(m.ExecutionSHA) && (m.Event == ghEventPullRequest || isMainBuildEvent(m.Event)) && (m.PRNumber == nil || *m.PRNumber > 0)
 }
 
 func validateBuildMetadataResults(m BuildMetadata) error {
@@ -143,7 +167,7 @@ func validateBuildMetadataResults(m BuildMetadata) error {
 }
 
 func validBuildResultState(s string) bool {
-	return s == "running" || s == conclusionSuccess || s == "failure" || s == "cancelled"
+	return s == buildResultRunning || s == conclusionSuccess || s == buildResultFailure || s == buildResultCancelled
 }
 
 // rejectDuplicateMetadataKeys rejects ambiguous objects at every nesting level.
@@ -187,26 +211,28 @@ func rejectDuplicateMetadataKeys(dec *json.Decoder) error {
 }
 
 type GitHubCheckRunsResponse struct {
-	CheckRuns []struct {
-		ID         int64  `json:"id"`
-		HeadSHA    string `json:"head_sha"`
-		ExternalID string `json:"external_id"`
-		App        struct {
-			ID   int64  `json:"id"`
-			Slug string `json:"slug"`
-		} `json:"app"`
-		CheckSuite struct {
-			ID int64 `json:"id"`
-		} `json:"check_suite"`
-		Output struct {
-			Title   string `json:"title"`
-			Summary string `json:"summary"`
-			Text    string `json:"text"`
-		} `json:"output"`
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	} `json:"check_runs"`
+	CheckRuns []GitHubMetadataCheck `json:"check_runs"`
+}
+
+type GitHubMetadataCheck struct {
+	ID         int64  `json:"id"`
+	HeadSHA    string `json:"head_sha"`
+	ExternalID string `json:"external_id"`
+	App        struct {
+		ID   int64  `json:"id"`
+		Slug string `json:"slug"`
+	} `json:"app"`
+	CheckSuite struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
+	Output struct {
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+		Text    string `json:"text"`
+	} `json:"output"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
 }
 
 func validBuildMetadataTransport(m BuildMetadata) bool {
