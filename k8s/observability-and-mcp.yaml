@@ -135,8 +135,6 @@ data:
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', COALESCE(title, '') || ' ' || COALESCE(description, ''))) STORED;
     CREATE INDEX IF NOT EXISTS idx_tasks_embedding_hnsw ON tasks USING hnsw (embedding vector_cosine_ops);
     CREATE INDEX IF NOT EXISTS idx_tasks_fts_tokens ON tasks USING gin (fts_tokens);
-  github-mcp.yaml: |
-    port: "8080"
   infisical-mcp.yaml: |
     port: "8080"
     infisical_host_url: "http://infisical.aerial"
@@ -1892,8 +1890,16 @@ spec:
         app.kubernetes.io/name: github-mcp
     spec:
       containers:
-        - image: ghcr.io/azylman/aerial-github-mcp:${TAG_AERIAL_GITHUB_MCP:=latest}
-          imagePullPolicy: Always
+        - args:
+            - http
+            - --port
+            - "8080"
+            - --exclude-tools
+            - create_pull_request,merge_pull_request,push_files,create_or_update_file,delete_file
+          command:
+            - /server/github-mcp-server
+          image: ghcr.io/github/github-mcp-server@sha256:ffced0d76e77428532a2ced185516992d77fd146d69eec2f244e6237d1a97796
+          imagePullPolicy: IfNotPresent
           name: github-mcp
           ports:
             - containerPort: 8080
@@ -1911,18 +1917,6 @@ spec:
             requests:
               cpu: 50m
               memory: 64Mi
-          volumeMounts:
-            - mountPath: /config/config.yaml
-              name: config
-              subPath: github-mcp.yaml
-            - mountPath: /local/config.yaml
-              name: config
-              subPath: github-mcp.yaml
-      volumes:
-        - configMap:
-            defaultMode: 420
-            name: mcp-configs
-          name: config
 ---
 apiVersion: v1
 kind: Service
