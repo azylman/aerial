@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"slices"
@@ -352,14 +353,14 @@ func resolveThreadTurnWatermark(ctx context.Context, store Store, threadID strin
 func buildFactExtractionPrompt(ctx context.Context, store Store, threadID, transcript string) string {
 	priorSummary, priorTurns, ctxErr := store.GetThreadContextBeforeWatermark(ctx, threadID, 2)
 	if ctxErr != nil {
-		log.Printf("[Memory] Warning: failed to get thread context before watermark (thread=%s): %v", threadID, ctxErr)
+		slog.WarnContext(ctx, "[Memory] failed to get thread context before watermark", "thread_id", threadID, "error", ctxErr)
 		priorSummary = ""
 		priorTurns = nil
 	}
 
 	retrievedFacts, toolCalls, trajErr := store.GetThreadTrajectoryContext(ctx, threadID)
 	if trajErr != nil {
-		log.Printf("[Memory] Warning: failed to get thread trajectory context (thread=%s): %v", threadID, trajErr)
+		slog.WarnContext(ctx, "[Memory] failed to get thread trajectory context", "thread_id", threadID, "error", trajErr)
 		retrievedFacts = nil
 		toolCalls = nil
 	}
@@ -413,7 +414,7 @@ func reinforceExtractedFactIDs(ctx context.Context, store Store, ids []int64) {
 		if rid > 0 && !seenReinforced[rid] {
 			seenReinforced[rid] = true
 			if err := store.ReinforceFact(ctx, rid); err != nil {
-				log.Printf("[Memory] Warning: Failed to reinforce trajectory fact ID %d: %v", rid, err)
+				slog.WarnContext(ctx, "[Memory] failed to reinforce trajectory fact", "fact_id", rid, "error", err)
 			} else {
 				RecordFactStored("reinforced")
 			}
@@ -424,23 +425,23 @@ func reinforceExtractedFactIDs(ctx context.Context, store Store, ids []int64) {
 func stageSingleProceduralCandidate(ctx context.Context, store Store, client OllamaClient, threadID string, item ExtractedProceduralItem, pendingExisting []ProceduralCandidate) ([]ProceduralCandidate, bool) {
 	admit, reason := EvaluateProceduralCandidateAdmission(item)
 	if !admit {
-		log.Printf("[Memory] Procedural candidate rejected (%s): trigger=%q", reason, item.Trigger)
+		slog.InfoContext(ctx, "[Memory] procedural candidate rejected", "reason", reason, "trigger", item.Trigger)
 		return pendingExisting, true
 	}
 
 	emb, err := client.GenerateEmbedding(ctx, FormatProceduralCandidateEmbeddingText(item), false, 1)
 	if err != nil {
-		log.Printf("[Memory] Warning: failed to generate embedding for procedural candidate trigger %q: %v", item.Trigger, err)
+		slog.WarnContext(ctx, "[Memory] failed to generate embedding for procedural candidate", "trigger", item.Trigger, "error", err)
 		return pendingExisting, false
 	}
 	if len(emb) != ExpectedEmbeddingDim {
-		log.Printf("[Memory] Warning: procedural candidate embedding dimension %d != %d", len(emb), ExpectedEmbeddingDim)
+		slog.WarnContext(ctx, "[Memory] procedural candidate embedding dimension mismatch", "got", len(emb), "want", ExpectedEmbeddingDim)
 		return pendingExisting, false
 	}
 
 	trimmedLoadedSkill := strings.TrimSpace(item.LoadedSkill)
 	if isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID, emb, pendingExisting) {
-		log.Printf("[Memory] Skipping near-duplicate procedural candidate: trigger=%q skill=%q", item.Trigger, item.LoadedSkill)
+		slog.InfoContext(ctx, "[Memory] skipping near-duplicate procedural candidate", "trigger", item.Trigger, "skill", item.LoadedSkill)
 		return pendingExisting, true
 	}
 
@@ -470,7 +471,7 @@ func stageSingleProceduralCandidate(ctx context.Context, store Store, client Oll
 
 	newID, err := store.InsertProceduralCandidate(ctx, cand)
 	if err != nil {
-		log.Printf("[Memory] Warning: failed to insert procedural candidate %q: %v", cand.Trigger, err)
+		slog.WarnContext(ctx, "[Memory] failed to insert procedural candidate", "trigger", cand.Trigger, "error", err)
 		return pendingExisting, false
 	}
 	cand.ID = newID
@@ -488,7 +489,7 @@ func stageProceduralCandidates(ctx context.Context, store Store, client OllamaCl
 	allOk := true
 	pendingExisting, err := store.GetPendingProceduralCandidates(ctx)
 	if err != nil {
-		log.Printf("[Memory] Warning: failed to get pending procedural candidates: %v", err)
+		slog.WarnContext(ctx, "[Memory] failed to get pending procedural candidates", "error", err)
 		allOk = false
 		pendingExisting = nil
 	}
@@ -531,9 +532,9 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 
 	transcript := formatExtractableTurns(turns)
 	if strings.TrimSpace(transcript) == "" {
-		log.Printf("[Memory] Empty extractable turns for thread %s, marking watermark.", threadID)
+		slog.InfoContext(ctx, "[Memory] empty extractable turns, marking watermark", "thread_id", threadID)
 		if err = store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
-			log.Printf("[Memory] Warning updating conversation fact watermark for empty transcript (thread=%s): %v", threadID, err)
+			slog.WarnContext(ctx, "[Memory] error updating conversation fact watermark for empty transcript", "thread_id", threadID, "error", err)
 		}
 		return nil
 	}
@@ -569,7 +570,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 
 	if allSucceeded {
 		if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
-			log.Printf("[Memory] Warning updating conversation fact watermark (thread=%s): %v", threadID, err)
+			slog.WarnContext(ctx, "[Memory] error updating conversation fact watermark", "thread_id", threadID, "error", err)
 		}
 	}
 	return nil
@@ -601,13 +602,13 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 		}
 		if validIDs[targetID] {
 			if err := store.DeleteFact(ctx, targetID); err != nil {
-				log.Printf("[Memory] Error deleting fact %d: %v", targetID, err)
+				slog.ErrorContext(ctx, "[Memory] error deleting fact", "fact_id", targetID, "error", err)
 				return false
 			}
 			RecordFactStored("deleted")
 			return true
 		}
-		log.Printf("[Memory] Tier 3 delete rejected: ID %d not in whitelisted neighbors (NOOP)", targetID)
+		slog.InfoContext(ctx, "[Memory] tier 3 delete rejected: ID not in whitelisted neighbors (NOOP)", "fact_id", targetID)
 		return true
 	case "UPDATE":
 		targetID := dec.SupersedesID
@@ -620,15 +621,15 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 				factText = item.FactText
 			}
 			if err := store.UpdateFact(ctx, targetID, factText, emb); err != nil {
-				log.Printf("[Memory] Error updating fact %d: %v", targetID, err)
+				slog.ErrorContext(ctx, "[Memory] error updating fact", "fact_id", targetID, "error", err)
 				return false
 			}
 			RecordFactStored("updated")
 			return true
 		}
-		log.Printf("[Memory] Tier 3 update rejected: ID %d not in whitelisted neighbors; falling back to ADD", targetID)
+		slog.InfoContext(ctx, "[Memory] tier 3 update rejected: ID not in whitelisted neighbors; falling back to ADD", "fact_id", targetID)
 		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting fallback fact: %v", err)
+			slog.ErrorContext(ctx, "[Memory] error inserting fallback fact", "error", err)
 			return false
 		}
 		RecordFactStored("inserted")
@@ -639,14 +640,14 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 			targetID = neighbors[0].Fact.ID
 		}
 		if err := store.ReinforceFact(ctx, targetID); err != nil {
-			log.Printf("[Memory] Error reinforcing NOOP fact %d: %v", targetID, err)
+			slog.ErrorContext(ctx, "[Memory] error reinforcing NOOP fact", "fact_id", targetID, "error", err)
 			return false
 		}
 		RecordFactStored("reinforced")
 		return true
 	default: // "ADD" or fallback
 		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting fact: %v", err)
+			slog.ErrorContext(ctx, "[Memory] error inserting fact", "error", err)
 			return false
 		}
 		RecordFactStored("inserted")
@@ -668,24 +669,24 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	emb, err := client.GenerateEmbedding(ctx, item.FactText, false, 1)
 	if err != nil {
-		log.Printf("[Memory] Warning: Failed to generate embedding for candidate fact %q: %v", item.FactText, err)
+		slog.WarnContext(ctx, "[Memory] failed to generate embedding for candidate fact", "fact", item.FactText, "error", err)
 		return false
 	}
 	if len(emb) != ExpectedEmbeddingDim {
-		log.Printf("[Memory] Warning: Candidate fact embedding dimension %d != %d", len(emb), ExpectedEmbeddingDim)
+		slog.WarnContext(ctx, "[Memory] candidate fact embedding dimension mismatch", "got", len(emb), "want", ExpectedEmbeddingDim)
 		return false
 	}
 
 	neighbors, err := store.FindNearestScoredFacts(ctx, emb, 5, 0.60)
 	if err != nil {
-		log.Printf("[Memory] Warning: FindNearestScoredFacts error for %q: %v", item.FactText, err)
+		slog.WarnContext(ctx, "[Memory] FindNearestScoredFacts error", "fact", item.FactText, "error", err)
 		return false
 	}
 
 	// Tier 1: len(neighbors) == 0 (maxSim < 0.60)
 	if len(neighbors) == 0 {
 		if _, err = store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting Tier 1 fact: %v", err)
+			slog.ErrorContext(ctx, "[Memory] error inserting tier 1 fact", "error", err)
 			return false
 		}
 		RecordFactStored("inserted")
@@ -695,7 +696,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	// Tier 2: neighbors[0].Score > 0.88
 	if neighbors[0].Score > 0.88 {
 		if err = store.ReinforceFact(ctx, neighbors[0].Fact.ID); err != nil {
-			log.Printf("[Memory] Error reinforcing Tier 2 fact id=%d: %v", neighbors[0].Fact.ID, err)
+			slog.ErrorContext(ctx, "[Memory] error reinforcing tier 2 fact", "fact_id", neighbors[0].Fact.ID, "error", err)
 			return false
 		}
 		RecordFactStored("reinforced")
@@ -705,7 +706,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	// Tier 3: 0.60 <= neighbors[0].Score <= 0.88
 	if llmFunc == nil {
 		if _, err = store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting Tier 3 fallback fact: %v", err)
+			slog.ErrorContext(ctx, "[Memory] error inserting tier 3 fallback fact", "error", err)
 			return false
 		}
 		RecordFactStored("inserted")
@@ -715,9 +716,9 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	reconcilePrompt := buildCandidateReconcilePrompt(item, neighbors)
 	resp, err := llmFunc(ctx, reconcilePrompt)
 	if err != nil {
-		log.Printf("[Memory] Tier 3 reconciliation LLM error: %v", err)
+		slog.WarnContext(ctx, "[Memory] tier 3 reconciliation LLM error", "error", err)
 		if _, err = store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting Tier 3 fallback fact on LLM error: %v", err)
+			slog.ErrorContext(ctx, "[Memory] error inserting tier 3 fallback fact on LLM error", "error", err)
 			return false
 		}
 		RecordFactStored("inserted")
@@ -726,9 +727,9 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	decisionPayload, err := parseFactsJSON(resp)
 	if err != nil || len(decisionPayload.Facts) == 0 {
-		log.Printf("[Memory] Tier 3 parse error (%v); falling back to ADD", err)
+		slog.WarnContext(ctx, "[Memory] tier 3 parse error; falling back to ADD", "error", err)
 		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting Tier 3 fallback fact on parse error: %v", err)
+			slog.ErrorContext(ctx, "[Memory] error inserting tier 3 fallback fact on parse error", "error", err)
 			return false
 		}
 		RecordFactStored("inserted")

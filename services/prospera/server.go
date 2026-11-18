@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -85,20 +86,20 @@ func nakBackoffDelay(numDelivered uint64) time.Duration {
 	return time.Duration(1<<shift) * time.Second
 }
 
-func nakOrDropJob(msg pubsub.Message, jobName, entityID string, err error) error {
+func nakOrDropJob(ctx context.Context, msg pubsub.Message, jobName, entityID string, err error) error {
 	if msg == nil {
 		return err
 	}
 	delivered := msg.NumDelivered()
 	if delivered >= 5 {
-		log.Printf("prospera: dropping %s job for %s after %d deliveries: %v", jobName, entityID, delivered, err)
+		slog.ErrorContext(ctx, "prospera: dropping job after max deliveries", "job", jobName, "entity_id", entityID, "delivered", delivered, "error", err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("prospera: term %s job after max deliveries: %v", jobName, termErr)
+			slog.WarnContext(ctx, "prospera: term job after max deliveries failed", "job", jobName, "error", termErr)
 		}
 		return nil
 	}
 	if nakErr := msg.NakWithDelay(nakBackoffDelay(delivered)); nakErr != nil {
-		log.Printf("prospera: nak %s job error: %v", jobName, nakErr)
+		slog.WarnContext(ctx, "prospera: nak job error", "job", jobName, "error", nakErr)
 	}
 	return err
 }
@@ -141,23 +142,23 @@ func (s *Server) HandleReportJob(ctx context.Context, msg pubsub.Message) error 
 	}
 	var args pubsub.ProsperaReportJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("prospera: unmarshal report job error: %v", err)
+		slog.ErrorContext(ctx, "prospera: unmarshal report job error", "error", err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("prospera: term invalid report job: %v", termErr)
+			slog.WarnContext(ctx, "prospera: term invalid report job failed", "error", termErr)
 		}
 		return nil
 	}
 	callID := strings.TrimSpace(args.CallID)
 	if callID == "" {
-		log.Printf("prospera: empty call_id in report job")
+		slog.ErrorContext(ctx, "prospera: empty call_id in report job")
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("prospera: term empty call_id report job: %v", termErr)
+			slog.WarnContext(ctx, "prospera: term empty call_id report job failed", "error", termErr)
 		}
 		return nil
 	}
 
 	if err := s.reporter.DeliverCallReport(ctx, callID); err != nil {
-		return nakOrDropJob(msg, "report", callID, err)
+		return nakOrDropJob(ctx, msg, "report", callID, err)
 	}
 	return nil
 }
@@ -169,18 +170,18 @@ func (s *Server) HandleVoicemailJob(ctx context.Context, msg pubsub.Message) err
 	}
 	var args pubsub.ProsperaVoicemailJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("prospera: unmarshal voicemail job error: %v", err)
+		slog.ErrorContext(ctx, "prospera: unmarshal voicemail job error", "error", err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("prospera: term invalid voicemail job: %v", termErr)
+			slog.WarnContext(ctx, "prospera: term invalid voicemail job failed", "error", termErr)
 		}
 		return nil
 	}
 	callID := strings.TrimSpace(args.CallID)
 	recURL := strings.TrimSpace(args.RecordingURL)
 	if callID == "" || recURL == "" {
-		log.Printf("prospera: missing call_id or recording_url in voicemail job")
+		slog.ErrorContext(ctx, "prospera: missing call_id or recording_url in voicemail job")
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("prospera: term incomplete voicemail job: %v", termErr)
+			slog.WarnContext(ctx, "prospera: term incomplete voicemail job failed", "error", termErr)
 		}
 		return nil
 	}
@@ -190,7 +191,7 @@ func (s *Server) HandleVoicemailJob(ctx context.Context, msg pubsub.Message) err
 	}
 
 	if err := s.reporter.ProcessVoicemailRecording(ctx, callID, recURL); err != nil {
-		return nakOrDropJob(msg, "voicemail", callID, err)
+		return nakOrDropJob(ctx, msg, "voicemail", callID, err)
 	}
 	return nil
 }
@@ -205,9 +206,9 @@ func (s *Server) HandleSMSJob(ctx context.Context, msg pubsub.Message) error {
 	}
 	var args pubsub.ProsperaSMSJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("prospera: unmarshal sms job error: %v", err)
+		slog.ErrorContext(ctx, "prospera: unmarshal sms job error", "error", err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("prospera: term invalid sms job: %v", termErr)
+			slog.WarnContext(ctx, "prospera: term invalid sms job failed", "error", termErr)
 		}
 		return nil
 	}
@@ -223,7 +224,7 @@ func (s *Server) HandleSMSJob(ctx context.Context, msg pubsub.Message) error {
 	}
 
 	if err := s.reporter.DeliverInboundSMS(ctx, voiceMsg); err != nil {
-		return nakOrDropJob(msg, "sms", args.MessageSID, err)
+		return nakOrDropJob(ctx, msg, "sms", args.MessageSID, err)
 	}
 	return nil
 }
@@ -354,7 +355,7 @@ func (s *Server) resolveAndBindCall(ctx context.Context, r *http.Request, callSi
 	}
 	if call.ProviderCallSID == "" && callSid != "" {
 		if bindErr := s.store.BindProviderCallSID(ctx, call.CallID, callSid); bindErr != nil {
-			log.Printf("server: bind provider sid: %v", bindErr)
+			slog.WarnContext(ctx, "server: bind provider sid failed", "call_id", call.CallID, "error", bindErr)
 		}
 	}
 	return call
@@ -426,7 +427,7 @@ func (s *Server) handleInboundVoiceRouting(cfg *Config, w http.ResponseWriter, r
 		var findErr error
 		recentCall, findErr = s.store.FindRecentOutboundCall(r.Context(), normFrom, window)
 		if findErr != nil {
-			log.Printf("server: find recent outbound call: %v", findErr)
+			slog.WarnContext(r.Context(), "server: find recent outbound call failed", "error", findErr)
 		}
 	}
 	if recentCall != nil {
@@ -470,7 +471,7 @@ func (s *Server) connectInboundStream(ctx context.Context, cfg *Config, w http.R
 
 	if s.store != nil {
 		if createErr := s.store.CreateInboundCall(ctx, c); createErr != nil {
-			log.Printf("server: create inbound call: %v", createErr)
+			slog.ErrorContext(ctx, "server: create inbound call failed", "call_id", c.CallID, "error", createErr)
 		}
 	}
 	token, issueErr := s.tokenMgr.Issue(callID, 30*time.Second)
@@ -499,7 +500,7 @@ func (s *Server) routeVoicemailRecording(ctx context.Context, cfg *Config, w htt
 	}
 	if s.store != nil {
 		if createErr := s.store.CreateInboundCall(ctx, c); createErr != nil {
-			log.Printf("server: create inbound voicemail call: %v", createErr)
+			slog.ErrorContext(ctx, "server: create inbound voicemail call failed", "call_id", c.CallID, "error", createErr)
 		}
 	}
 	greeting := "Please leave a message after the tone."
@@ -533,13 +534,13 @@ func (s *Server) handleTwilioAMD(w http.ResponseWriter, r *http.Request) {
 
 	if s.sessionMgr != nil && callSid != "" {
 		if amdErr := s.sessionMgr.HandleAMDWebhook(r.Context(), callSid, answeredBy); amdErr != nil {
-			log.Printf("server: handle amd webhook: %v", amdErr)
+			slog.WarnContext(r.Context(), "server: handle amd webhook failed", "call_sid", callSid, "error", amdErr)
 		}
 	}
 
 	if call != nil {
 		if updateErr := s.store.UpdateCallState(r.Context(), call.CallID, call.State, "", answeredBy); updateErr != nil {
-			log.Printf("server: update amd call state: %v", updateErr)
+			slog.ErrorContext(r.Context(), "server: update amd call state failed", "call_id", call.CallID, "error", updateErr)
 		}
 	}
 
@@ -575,7 +576,7 @@ func (s *Server) handleTwilioStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if updateErr := s.store.UpdateCallState(r.Context(), call.CallID, status, "", ""); updateErr != nil {
-		log.Printf("server: update call state on status webhook: %v", updateErr)
+		slog.ErrorContext(r.Context(), "server: update call state on status webhook failed", "call_id", call.CallID, "error", updateErr)
 	}
 
 	if isTerminalState(status) && s.reporter != nil {
@@ -601,7 +602,7 @@ func (s *Server) triggerPostCallReportIfPending(ctx context.Context, callID stri
 		if pubErr == nil {
 			return
 		}
-		log.Printf("server: publish report job failed for %s, falling back to goroutine: %v", cleanID, pubErr)
+		slog.WarnContext(ctx, "server: publish report job failed, falling back to goroutine", "call_id", cleanID, "error", pubErr)
 	}
 
 	s.bgWg.Add(1)
@@ -609,7 +610,7 @@ func (s *Server) triggerPostCallReportIfPending(ctx context.Context, callID stri
 		defer s.bgWg.Done()
 		// The report outlives the request that triggered it.
 		if delivErr := s.reporter.DeliverCallReport(context.WithoutCancel(ctx), id); delivErr != nil {
-			log.Printf("server: deliver call report: %v", delivErr)
+			slog.ErrorContext(ctx, "server: deliver call report failed", "call_id", id, "error", delivErr)
 		}
 	}(cleanID)
 }
@@ -645,7 +646,7 @@ func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
 			writeXML(w, "<Response/>")
 			return
 		}
-		log.Printf("server: publish voicemail job failed for %s, falling back to goroutine: %v", call.CallID, pubErr)
+		slog.WarnContext(r.Context(), "server: publish voicemail job failed, falling back to goroutine", "call_id", call.CallID, "error", pubErr)
 	}
 
 	// Processing outlives the webhook request that triggered it.
@@ -654,7 +655,7 @@ func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
 	go func(id, url string) {
 		defer s.bgWg.Done()
 		if procErr := s.reporter.ProcessVoicemailRecording(bgCtx, id, url); procErr != nil {
-			log.Printf("server: process voicemail recording: %v", procErr)
+			slog.ErrorContext(bgCtx, "server: process voicemail recording failed", "call_id", id, "error", procErr)
 		}
 	}(call.CallID, recURL)
 
@@ -721,7 +722,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 
 	if s.store != nil {
 		if _, saveErr := s.store.SaveVoiceMessage(r.Context(), msg); saveErr != nil {
-			log.Printf("server: save voice message: %v", saveErr)
+			slog.ErrorContext(r.Context(), "server: save voice message failed", "message_sid", msg.MessageSID, "error", saveErr)
 		}
 	}
 
@@ -745,7 +746,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 			writeXML(w, "<Response/>")
 			return
 		}
-		log.Printf("server: publish sms job failed for %s, falling back to goroutine: %v", msgSid, pubErr)
+		slog.WarnContext(r.Context(), "server: publish sms job failed, falling back to goroutine", "message_sid", msgSid, "error", pubErr)
 	}
 
 	// Delivery outlives the webhook request that triggered it.
@@ -754,7 +755,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 	go func(vMsg VoiceMessage) {
 		defer s.bgWg.Done()
 		if delivErr := s.reporter.DeliverInboundSMS(bgCtx, vMsg); delivErr != nil {
-			log.Printf("server: deliver inbound sms: %v", delivErr)
+			slog.ErrorContext(bgCtx, "server: deliver inbound sms failed", "message_sid", vMsg.MessageSID, "error", delivErr)
 		}
 	}(msg)
 

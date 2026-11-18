@@ -254,9 +254,9 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	resolvedPath := ResolveConfigPath(configPath)
 	cfg, err := LoadConfigFile(resolvedPath)

@@ -762,7 +762,7 @@ func TestNakOrDropJob(t *testing.T) {
 				}
 				pubMsg = msg
 			}
-			err := nakOrDropJob(pubMsg, "test", "id1", errors.New("underlying error"))
+			err := nakOrDropJob(context.Background(), pubMsg, "test", "id1", errors.New("underlying error"))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("nakOrDropJob() err = %v, wantErr = %v", err, tc.wantErr)
 			}

@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -56,7 +57,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Check if the request is attempting to call a blocked tool
 	isBlocked, reqID, toolName, err := IsBlockedToolCall(bodyBytes, p.blockedTools)
 	if err == nil && isBlocked {
-		log.Printf("[Proxy] Blocked tool call attempted for %q. Returning JSON-RPC error.", toolName)
+		slog.InfoContext(r.Context(), "[Proxy] blocked tool call attempted; returning JSON-RPC error", "tool", toolName)
 		errBytes := BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled. Outbound replies to the user are automatically delivered by Aerial Brain at the end of the turn.", toolName))
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Del("Transfer-Encoding")
@@ -90,11 +91,11 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer func() {
+	defer func(ctx context.Context) {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("[Proxy] Warning: failed to close upstream response body: %v", closeErr)
+			slog.WarnContext(ctx, "[Proxy] failed to close upstream response body", "error", closeErr)
 		}
-	}()
+	}(r.Context())
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -103,7 +104,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		respBytes = p.rewriteResponse(bodyBytes, toolName, respBytes)
+		respBytes = p.rewriteResponse(r.Context(), bodyBytes, toolName, respBytes)
 	}
 
 	// Copy response headers
@@ -120,19 +121,19 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // rewriteResponse applies proxy-side shaping to a successful upstream response:
 // tools/list filtering, initialize instruction injection, and search result shaping.
-func (p *ProxyHandler) rewriteResponse(reqBytes []byte, toolName string, respBytes []byte) []byte {
+func (p *ProxyHandler) rewriteResponse(ctx context.Context, reqBytes []byte, toolName string, respBytes []byte) []byte {
 	switch {
 	case IsToolsListRequest(reqBytes):
 		filtered, err := FilterToolsResponse(respBytes, p.blockedTools)
 		if err != nil {
-			log.Printf("[Proxy] Warning: failed to filter tools/list response: %v", err)
+			slog.WarnContext(ctx, "[Proxy] failed to filter tools/list response", "error", err)
 			return respBytes
 		}
 		return filtered
 	case IsInitializeRequest(reqBytes):
 		injected, err := InjectInstructions(respBytes, ServerInstructions)
 		if err != nil {
-			log.Printf("[Proxy] Warning: failed to inject initialize instructions: %v", err)
+			slog.WarnContext(ctx, "[Proxy] failed to inject initialize instructions", "error", err)
 			return respBytes
 		}
 		return injected

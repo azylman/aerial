@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -51,7 +52,7 @@ func flushActiveSessions(ctx context.Context, sessionMgr *CallSessionManager, re
 
 	for _, id := range callIDs {
 		if err := reporter.FlushLiveTranscript(ctx, id); err != nil {
-			log.Printf("prospera: flush transcript %s: %v", id, err)
+			slog.ErrorContext(ctx, "prospera: flush transcript failed", "call_id", id, "error", err)
 		}
 	}
 }
@@ -199,6 +200,7 @@ func main() {
 	}()
 
 	_, flushTracing := tracing.Init(ctx, "prospera", tracing.DefaultConfigPath)
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	err = runAppFn(ctx, cfgSrc)
 	flushTracing()
