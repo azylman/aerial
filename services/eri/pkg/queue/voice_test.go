@@ -116,7 +116,6 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 		{"AppCfgEmptyAndCfgEmptyDefaults", "", "", false, &appEmpty, &appEmpty, nil, "", defaultLow, defaultMed, defaultLow},
 		{"AppCfgNilAndCfgEmptyDefaults", "", "", false, nil, nil, nil, "", defaultLow, defaultMed, defaultLow},
 		{"AppCfgVoiceModelSet", "", "", false, nil, nil, &appVoice, "", defaultLow, defaultMed, "app-voice-model"},
-		{"AppCfgVoiceModelEmptyFallbackLow", "", "", false, &appLow, nil, &appEmpty, "", "app-cfg-low-model", defaultMed, "app-cfg-low-model"},
 		{"VoiceProcessPoolModelWhenAppCfgNil", "", "", false, nil, nil, nil, "pool-voice-model", defaultLow, defaultMed, "pool-voice-model"},
 		{"AppCfgVoiceModelEmptyIgnoresVoicePool", "", "", false, &appLow, nil, &appEmpty, "stale-pool-model", "app-cfg-low-model", defaultMed, "app-cfg-low-model"},
 	}

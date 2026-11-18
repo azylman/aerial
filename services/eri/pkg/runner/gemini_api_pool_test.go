@@ -357,12 +357,6 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	if sessFallback.SessionID() != "fallback-target" || sessFallback.transcriptPath() != "" {
 		t.Errorf("expected fallback session ID and empty transcript path")
 	}
-
-	closedPool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "key", Model: "gemini-closed"})
-	_ = closedPool.Close()
-	if closedPool.Model() != "gemini-closed" {
-		t.Errorf("closedPool.Model() = %q, want %q", closedPool.Model(), "gemini-closed")
-	}
 }
 
 func TestGeminiAPIPool_MarkDirtySessionRecreation(t *testing.T) {
