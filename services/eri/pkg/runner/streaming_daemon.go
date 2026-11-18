@@ -150,6 +150,7 @@ type StreamingDaemon struct {
 	stdout         io.ReadCloser
 	stderrCloser   io.Closer
 	stderrTail     *tailBuffer
+	spawnSpanCtx   trace.SpanContext
 	mu             sync.RWMutex
 	stdinMu        sync.Mutex
 	state          DaemonState
@@ -167,6 +168,7 @@ type StreamingDaemon struct {
 	lastStdoutNano atomic.Int64
 	closeCh        chan struct{}
 	readerWg       sync.WaitGroup
+	stderrWg       sync.WaitGroup
 	watchdogWg     sync.WaitGroup
 	closeOnce      sync.Once
 	closed         atomic.Bool
@@ -250,25 +252,22 @@ func StartStreamingDaemon(lifetime, startup context.Context, cfg DaemonConfig, s
 	}
 
 	tail := newTailBuffer(4096)
-	if stderr != nil {
-		go func() {
-			defer closeStreamQuietly(stderr, "stderr")
-			if _, copyErr := io.Copy(tail, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, os.ErrClosed) {
-				log.Printf("[StreamingDaemon] Warning: error copying stderr: %v", copyErr)
-			}
-		}()
-	}
-
 	d := &StreamingDaemon{
 		cfg: cfg, spawner: spawner, handle: handle, stdin: stdin,
 		stdout: stdout, stderrCloser: stderr, stderrTail: tail,
-		state: StateStarting, lastUsed: time.Now(),
+		spawnSpanCtx: trace.SpanContextFromContext(startup),
+		state:        StateStarting, lastUsed: time.Now(),
 		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
 		claudeToolIDs: make(map[string]int),
 		seenMemoryIDs: make(map[string]bool),
 		closeCh:       make(chan struct{}),
 	}
 	d.lastStdoutNano.Store(time.Now().UnixNano())
+
+	if stderr != nil {
+		d.stderrWg.Add(1)
+		go d.readStderrLoop(stderr) //nolint:contextcheck // Correlation resolves per active TurnContext.Ctx, not daemon startup.
+	}
 
 	if err := startup.Err(); err != nil {
 		d.closeOnStartupError("cancelled")
@@ -513,6 +512,7 @@ func (d *StreamingDaemon) closeInternal() error {
 			}
 		}
 		d.readerWg.Wait()
+		d.stderrWg.Wait()
 
 		d.inflightMu.Lock()
 		remaining := d.inflight

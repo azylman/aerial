@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -397,12 +398,21 @@ func TestStartUsagePollerAndRunner(t *testing.T) {
 	StartUsagePoller(context.Background(), time.Second, func(context.Context) ([]byte, error) { return nil, nil }, nil)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "mock-agy.sh")
+	argsFile := filepath.Join(dir, "args.txt")
 	payload := `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"G","buckets":[{"id":"b1","window":"5h","remaining_fraction":0.75}]}]}}}`
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '"+payload+"'\n"), 0o755); err != nil {
+	scriptBody := fmt.Sprintf("#!/bin/sh\necho \"$@\" > %q\necho '%s'\n", argsFile, payload)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := NewAgyUsageRunner(script, dir, []string{"HOME=/old", "FOO=bar"})(context.Background()); err != nil || !strings.Contains(string(out), `"b1"`) {
 		t.Fatalf("NewAgyUsageRunner failed: err=%v, out=%s", err, string(out))
+	}
+	capturedArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed reading captured args: %v", err)
+	}
+	if !strings.Contains(string(capturedArgs), "--log-file "+os.DevNull) {
+		t.Fatalf("expected --log-file %s in args: %s", os.DevNull, string(capturedArgs))
 	}
 	if DefaultUsageRunner("", "", nil, true) != nil || DefaultUsageRunner("", "", nil, false) == nil {
 		t.Fatal("unexpected DefaultUsageRunner test airgapping behavior")

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -33,6 +35,7 @@ const (
 type AgyEnvInput struct {
 	BaseEnv        []string
 	HomeDir        string
+	Engine         string
 	APIKey         string
 	TargetID       string
 	VanadisChunkID string
@@ -520,4 +523,54 @@ func deduplicateRetrievedMemory(prompt string, seen map[string]bool) string {
 	}
 	replacement := openTag + "\n" + strings.Join(kept, "\n") + "\n" + closeTag
 	return prompt[:startIdx] + replacement + prompt[blockEnd+len(closeTag):]
+}
+
+var glogHeaderRegexp = regexp.MustCompile(`^([IWEF])\d{4}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+([^:\s]+:\d+)\]\s*(.*)$`)
+
+// ParseAndFilterStderrLine parses and redacts a single line of agent stderr, mapping glog
+// severities to slog levels, filtering benign authentication noise, and detecting warnings.
+func ParseAndFilterStderrLine(engine, rawLine string) (level slog.Level, msg, sourceFile string, keep bool) {
+	_ = engine
+	trimmed := strings.TrimRight(rawLine, "\r\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return slog.LevelInfo, "", "", false
+	}
+	redacted := strings.TrimSpace(tracing.Redact(trimmed))
+	if redacted == "" {
+		return slog.LevelInfo, "", "", false
+	}
+
+	if submatches := glogHeaderRegexp.FindStringSubmatch(redacted); len(submatches) == 4 {
+		severity := submatches[1]
+		sourceFile = submatches[2]
+		msg = strings.TrimSpace(submatches[3])
+		if msg == "" {
+			return slog.LevelInfo, "", "", false
+		}
+		if strings.Contains(msg, "You are not logged into Antigravity.") || strings.Contains(msg, "Auth mode is unspecified, skipping fetchAvailableModels") {
+			return slog.LevelInfo, "", "", false
+		}
+		switch severity {
+		case "I":
+			level = slog.LevelInfo
+		case "W":
+			level = slog.LevelWarn
+		case "E", "F":
+			level = slog.LevelError
+		default:
+			level = slog.LevelInfo
+		}
+		return level, msg, sourceFile, true
+	}
+
+	msg = redacted
+	if strings.Contains(msg, "You are not logged into Antigravity.") || strings.Contains(msg, "Auth mode is unspecified, skipping fetchAvailableModels") {
+		return slog.LevelInfo, "", "", false
+	}
+	level = slog.LevelInfo
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "warn") || strings.Contains(lower, "fatal") || strings.Contains(lower, "panic") {
+		level = slog.LevelWarn
+	}
+	return level, msg, "", true
 }
