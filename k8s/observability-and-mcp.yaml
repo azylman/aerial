@@ -2364,6 +2364,13 @@ spec:
               value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.node.name=$(NODE_NAME),service.version=${TAG_AERIAL_PROSPERA:=latest}
             - name: CONFIG_PATH
               value: /share/aerial-config/services/prospera/prospera.yaml
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
+            - name: NATS_URL
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:

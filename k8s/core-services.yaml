@@ -106,8 +106,13 @@ spec:
               value: http://eri.aerial
             - name: HARO_URL
               value: http://haro.aerial
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
             - name: NATS_URL
-              value: nats://nats.aerial:4222
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: AERIAL_INTERNAL_ERI_URL
               value: http://127.0.0.1:8080
             - name: GIT_TERMINAL_PROMPT
@@ -462,6 +467,8 @@ spec:
               value: "4025"
             - name: RESTATE_INGRESS_URL
               value: http://restate.restate.svc.cluster.local:8080
+            - name: AGENT_NAME
+              value: aerial
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -534,10 +541,17 @@ spec:
               value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.node.name=$(NODE_NAME),service.version=${TAG_AERIAL_VANADIS_NATS:=latest}
             - name: PORT
               value: "4027"
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
             - name: NATS_URL
-              value: nats://nats.aerial:4222
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: RESTATE_INGRESS_URL
               value: http://restate.restate.svc.cluster.local:8080
+            - name: AGENT_NAME
+              value: aerial
           image: ghcr.io/azylman/aerial-vanadis-nats:${TAG_AERIAL_VANADIS_NATS:=latest}
           imagePullPolicy: Always
           name: vanadis-nats
@@ -697,6 +711,13 @@ spec:
               value: "4008"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/coven/coven.yaml
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
+            - name: NATS_URL
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1054,6 +1075,13 @@ spec:
               value: http://eri.aerial
             - name: VANADIS_URL
               value: http://vanadis.aerial
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
+            - name: NATS_URL
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1327,6 +1355,13 @@ spec:
               value: /share/aerial-config/services/synapse/synapse.yaml
             - name: ERI_URL
               value: http://eri.aerial
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
+            - name: NATS_URL
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: DISCORD_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -2090,8 +2125,15 @@ spec:
               value: http://vanadis.aerial:4025
             - name: ERI_URL
               value: http://eri.aerial
+            - name: AGENT_NAME
+              value: aerial
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
             - name: NATS_URL
-              value: nats://nats.aerial:4222
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:

@@ -719,4 +719,20 @@ spec:
               users: [{ user: "suletta", password: "{{ .suletta_password }}" }]
             }
           }
-          no_auth_user: aerial
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nats-aerial-client
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: NATS_AERIAL_PASSWORD
+      secretKey: NATS_AERIAL_PASSWORD
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
