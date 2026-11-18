@@ -320,7 +320,7 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	t.Parallel()
 	var nilPool *GeminiAPIPool
-	if nilPool.PrewarmedTargets() != nil || nilPool.sanitizeError(nil) != nil {
+	if nilPool.PrewarmedTargets() != nil || nilPool.sanitizeError(nil) != nil || nilPool.Model() != "" {
 		t.Errorf("expected empty/nil from nilPool accessors")
 	}
 	nilPool.MarkDirty()
@@ -330,6 +330,9 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 		APIKey: "my-api-key", Model: "gemini-2.5-pro", PrewarmedTargets: []string{"initial-1", "initial-2"},
 	})
 	defer pool.Close()
+	if pool.Model() != "gemini-2.5-pro" {
+		t.Errorf("pool.Model() = %q, want %q", pool.Model(), "gemini-2.5-pro")
+	}
 	if pool.cfg.HTTPClient == nil {
 		t.Errorf("expected non-nil HTTPClient")
 	}

@@ -1248,7 +1248,7 @@ func updatePoolModel(pool runner.AgentPool, model string) {
 	}
 }
 
-func (p *WorkerPool) reconcilePoolModelsAndVoiceTargets(poolByKey map[PoolKey]runner.AgentPool, voicePool runner.AgentPool, hasExplicitAppCfg bool, voiceTargets []string, voiceModel string) {
+func (p *WorkerPool) reconcilePoolModelsAndVoiceTargets(poolByKey map[PoolKey]runner.AgentPool, voicePool runner.AgentPool, hasExplicitAppCfg bool, voiceTargets []string) {
 	if hasExplicitAppCfg {
 		for _, k := range AllValidPoolKeys() {
 			updatePoolModel(poolByKey[k], p.poolModelForEffort(k.Effort))
@@ -1261,10 +1261,7 @@ func (p *WorkerPool) reconcilePoolModelsAndVoiceTargets(poolByKey map[PoolKey]ru
 		targetUpdater.UpdatePrewarmedTargets(voiceTargets)
 	}
 	if hasExplicitAppCfg {
-		if voiceModel == "" {
-			voiceModel = p.LowEffortModel()
-		}
-		updatePoolModel(voicePool, voiceModel)
+		updatePoolModel(voicePool, p.VoiceModel())
 	}
 }
 
@@ -1279,16 +1276,12 @@ func (p *WorkerPool) MarkDirty() {
 	hasExplicitAppCfg := p.hasExplicitAppCfg
 	poolByKey := maps.Clone(p.pools)
 	var voiceTargets []string
-	var voiceModel string
 	if p.appCfg != nil {
 		voiceTargets = p.appCfg.VoicePrewarmedTargets()
-		if cur := p.appCfg.Current(); cur != nil {
-			voiceModel = strings.TrimSpace(cur.Voice.Model)
-		}
 	}
 	p.mu.Unlock()
 
-	p.reconcilePoolModelsAndVoiceTargets(poolByKey, voicePool, hasExplicitAppCfg, voiceTargets, voiceModel)
+	p.reconcilePoolModelsAndVoiceTargets(poolByKey, voicePool, hasExplicitAppCfg, voiceTargets)
 
 	for _, pool := range pools {
 		if md, ok := pool.(interface{ MarkDirty() }); ok {
@@ -1312,6 +1305,23 @@ func (p *WorkerPool) LowEffortModel() string {
 		return strings.TrimSpace(p.cfg.LowEffortModel)
 	}
 	return def
+}
+
+// VoiceModel returns the configured voice model name, falling back to LowEffortModel.
+func (p *WorkerPool) VoiceModel() string {
+	if p != nil && p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.Voice.Model) != "" {
+			return strings.TrimSpace(cur.Voice.Model)
+		}
+	}
+	if p != nil && !p.hasExplicitAppCfg && p.voiceProcessPool != nil {
+		if m, ok := p.voiceProcessPool.(interface{ Model() string }); ok {
+			if mod := strings.TrimSpace(m.Model()); mod != "" {
+				return mod
+			}
+		}
+	}
+	return p.LowEffortModel()
 }
 
 // MediumEffortModel returns the configured medium effort reasoning model name.
