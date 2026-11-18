@@ -472,7 +472,10 @@ func (p *Provisioner) chownProvisionedPaths() {
 	chownTree(filepath.Join(p.homeDir, ".gemini"))
 	chownTree(filepath.Join(p.homeDir, ".claude"))
 	chownTree(filepath.Join(p.homeDir, ".codex"))
+	ignore(chownPath(filepath.Join(p.homeDir, ".config"), 1000, 1000))
 	chownTree(filepath.Join(p.homeDir, ".config", "muse"))
+	ignore(chownPath(filepath.Join(p.homeDir, ".local"), 1000, 1000))
+	ignore(chownPath(filepath.Join(p.homeDir, ".local", "share"), 1000, 1000))
 	chownTree(filepath.Join(p.homeDir, ".local", "share", "muse"))
 
 	for _, target := range allRuntimeTargets {
@@ -498,9 +501,12 @@ func (p *Provisioner) chownProvisionedPaths() {
 		rtCodex := filepath.Join(rtHome, ".codex")
 		ignore(chownPath(rtCodex, 1000, 1000))
 		chownTree(rtCodex)
+		ignore(chownPath(filepath.Join(rtHome, ".config"), 1000, 1000))
 		rtMuseConfig := filepath.Join(rtHome, ".config", "muse")
 		ignore(chownPath(rtMuseConfig, 1000, 1000))
 		chownTree(rtMuseConfig)
+		ignore(chownPath(filepath.Join(rtHome, ".local"), 1000, 1000))
+		ignore(chownPath(filepath.Join(rtHome, ".local", "share"), 1000, 1000))
 		rtMuseShare := filepath.Join(rtHome, ".local", "share", "muse")
 		ignore(chownPath(rtMuseShare, 1000, 1000))
 		chownTree(rtMuseShare)
@@ -541,6 +547,9 @@ func (*Provisioner) writeAtomic(targetPath, content string) error {
 	}
 	if err := f.Close(); err != nil {
 		return err
+	}
+	if getEuid() == 0 {
+		ignore(chownPath(tmpName, 1000, 1000))
 	}
 
 	if err := os.Rename(tmpName, targetPath); err != nil {
