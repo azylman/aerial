@@ -222,25 +222,7 @@ export KUBECONFIG=~/.kube/config
 sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 ```
 
-### Step 2: Install Cluster Operators
-Install Flux CD, Gateway API CRDs, and deploy the core cluster operators for PostgreSQL, external secrets, Gateway API routing, metrics, runners, and workflows:
-
-```bash
-# 1. Install Flux CLI and controllers
-curl -s https://fluxcd.io/install.sh | sudo bash
-flux install
-
-# 2. Install Gateway API standard CRDs for NGINX Gateway Fabric
-kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.8.1" | kubectl apply -f -
-
-# 3. Apply declarative cluster operators
-kubectl apply -f https://raw.githubusercontent.com/azylman/aerial/main/k8s/operators.yaml
-
-# 4. Wait for operators to become ready
-kubectl wait --for=condition=Ready helmrelease --all -A --timeout=5m
-```
-
-### Step 3: Fork Configuration & Bootstrap Secrets
+### Step 2: Fork Configuration & Bootstrap Secrets
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
 3. Pre-create the initial Kubernetes secrets so CloudNativePG and core services boot immediately:
@@ -326,23 +308,27 @@ kubectl create secret generic shared-secrets \
 
 </details>
 
-### Step 4: Deploy Stack via Flux CD
-Apply your private configuration repository's Kustomizations via Flux CD:
+### Step 3: Install Flux CD & Deploy Stack
+Install Flux CD and apply your private configuration repository's Kustomizations (Flux automatically installs Gateway API CRDs and all cluster operators via `aerial-operators`, waits for their CRDs and webhooks to become ready, and then reconciles `aerial-core` and `aerial-config`):
 
 ```bash
-# 1. Configure Git authentication for your private configuration repository
+# 1. Install Flux CLI and controllers
+curl -s https://fluxcd.io/install.sh | sudo bash
+flux install
+
+# 2. Configure Git authentication for your private configuration repository
 flux create secret git github-auth \
   --namespace flux-system \
   --url=https://github.com/your-username/my-aerial-config.git \
   --username=git \
   --password="$GITHUB_PAT"
 
-# 2. Apply your private config repository's Flux manifests
+# 3. Apply your private config repository's Flux manifests
 git clone https://github.com/your-username/my-aerial-config.git
 kubectl apply -k my-aerial-config/k8s
 ```
 
-### Step 5: Authenticate Agent CLI & Verify Rollout
+### Step 4: Authenticate Agent CLI & Verify Rollout
 1. Authenticate your preferred execution engine (for example, `agy` via Google OAuth):
    ```bash
    kubectl exec -it deployment/eri -c eri -- agy
