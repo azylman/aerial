@@ -314,7 +314,7 @@ jobs:
       - name: Lint Docsify Custom Plugins
         if: needs.changes.outputs.docs == 'true'
         run: |
-          node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js
+          node --check services/docs-service/app/assets/js/plugins/docsify-mermaid.js
 
       - name: Hold Failure Until RoboRev Completes
         if: failure() && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'

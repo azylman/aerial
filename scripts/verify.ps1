@@ -283,7 +283,7 @@ if ($Staged) {
     }
 
     if ($stagedFiles | Where-Object { $_ -like "services/docs-service/*" -or $_ -like "docs-service/*" }) {
-        Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+        Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
     }
 
     Write-Host "✅ [Aerial Verify] Fast pre-commit checks passed cleanly." -ForegroundColor Green
@@ -302,7 +302,7 @@ foreach ($svc in $goServices) {
 }
 
 Write-Host "=== 2. Frontend & Script Syntax Checks ===" -ForegroundColor Yellow
-Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
 
 Write-Host "=== 3. Unit Test Suites ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {
