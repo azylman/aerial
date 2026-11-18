@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -946,6 +947,45 @@ func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
 	}
 	if d1.State() != StateClosed || d2.State() != StateClosed || d3.State() != StateClosed {
 		t.Errorf("expected all daemons to be closed, got d1=%v, d2=%v, d3=%v", d1.State(), d2.State(), d3.State())
+	}
+}
+
+func TestUnifiedProcessPool_ConfigThreading(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.DiscardHandler)
+	tests := []struct {
+		name       string
+		poolStack  string
+		poolLogger *slog.Logger
+		wantStack  string
+		wantLogger *slog.Logger
+	}{
+		{name: "with stack and logger", poolStack: "dev", poolLogger: logger, wantStack: "dev", wantLogger: logger},
+		{name: "empty defaults", poolStack: "", poolLogger: nil, wantStack: "", wantLogger: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var captured DaemonConfig
+			mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+				onSpawn: func(cfg DaemonConfig) { captured = cfg },
+			})
+			pool := NewUnifiedProcessPool(PoolConfig{
+				Stack:  tc.poolStack,
+				Logger: tc.poolLogger,
+			}, mock)
+			defer pool.Close()
+			d, err := pool.GetOrCreate(context.Background(), "t1", "")
+			if err != nil || d == nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if captured.Stack != tc.wantStack {
+				t.Errorf("captured.Stack = %q, want %q", captured.Stack, tc.wantStack)
+			}
+			if captured.Logger != tc.wantLogger {
+				t.Errorf("captured.Logger = %v, want %v", captured.Logger, tc.wantLogger)
+			}
+		})
 	}
 }
 

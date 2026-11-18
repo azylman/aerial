@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,6 +48,8 @@ type DaemonConfig struct {
 	WatchdogIdleTimeout     time.Duration
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
+	Stack                   string
+	Logger                  *slog.Logger
 }
 
 // IsClaude returns true if the configured Engine is "claude" (case-insensitive).
@@ -161,7 +164,7 @@ func BuildDaemonArgs(cfg DaemonConfig) []string {
 		return buildClaudeDaemonArgs(cfg)
 	}
 
-	args := []string{"--dangerously-skip-permissions", "--input-format", formatStreamJSON, "--output-format", formatStreamJSON}
+	args := []string{"--dangerously-skip-permissions", "--log-file", "/dev/stderr", "--input-format", formatStreamJSON, "--output-format", formatStreamJSON}
 	if cfg.SessionID != "" {
 		args = append(args, "--conversation", cfg.SessionID)
 	}

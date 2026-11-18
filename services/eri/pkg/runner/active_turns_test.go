@@ -81,6 +81,13 @@ func assertActiveTurnRegistry(t *testing.T, r *ActiveTurnRegistry, tc activeTurn
 	if ok != (tc.wantSpan != 0) || (ok && !sc.Equal(testTurnSpan(tc.wantSpan))) {
 		t.Errorf("Get(%q) = %v, %v; want span %d", tc.get, sc.SpanID(), ok, tc.wantSpan)
 	}
+	turn, turnSC, turnOK := r.Turn(tc.get)
+	if turnOK != (tc.wantSpan != 0) || (turnOK && !turnSC.Equal(testTurnSpan(tc.wantSpan))) {
+		t.Errorf("Turn(%q) span = %v, %v; want span %d", tc.get, turnSC.SpanID(), turnOK, tc.wantSpan)
+	}
+	if turnOK && turn.DaemonID != tc.get {
+		t.Errorf("Turn(%q) daemon = %q; want %q", tc.get, turn.DaemonID, tc.get)
+	}
 	tool, ok := r.ToolSpan(context.Background(), tc.get, "github", "get_me", "toolu_1")
 	if ok != (tc.wantToolSpan != 0) || (ok && !tool.Equal(testTurnSpan(tc.wantToolSpan))) {
 		t.Errorf("ToolSpan(%q) = %v, %v; want span %d", tc.get, tool.SpanID(), ok, tc.wantToolSpan)

@@ -92,6 +92,17 @@ func (r *ActiveTurnRegistry) Clear(daemonID string) {
 	delete(r.entries, daemonID)
 }
 
+// Turn returns the active turn and its root span context for daemonID.
+func (r *ActiveTurnRegistry) Turn(daemonID string) (ActiveTurn, trace.SpanContext, bool) {
+	if r == nil || daemonID == "" {
+		return ActiveTurn{}, trace.SpanContext{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.entries[daemonID]
+	return e.turn, e.sc, ok
+}
+
 // Get returns the span context of daemonID's active turn.
 func (r *ActiveTurnRegistry) Get(daemonID string) (trace.SpanContext, bool) {
 	if r == nil || daemonID == "" {

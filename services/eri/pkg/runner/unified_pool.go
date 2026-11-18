@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,8 @@ import (
 type PoolConfig struct {
 	Engine, ClaudeBin, CodexBin, MuseBin                          string
 	AgyBin, Model, DefaultModel, Cwd, GeminiHomeDir, Timezone     string
+	Stack                                                         string
+	Logger                                                        *slog.Logger
 	TargetModels                                                  map[string]string // Deprecated: pools are now model-bound. Ignored.
 	Env, PrewarmedTargets                                         []string
 	MaxIdle, TargetLockTimeout, HandshakeTimeout                  time.Duration
@@ -370,6 +373,8 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 		WatchdogInterval: watchdogInterval, WatchdogIdleTimeout: watchdogIdleTimeout,
 		MemoryRetriever:         cfg.MemoryRetriever,
 		AmbientContextRetriever: cfg.AmbientContextRetriever,
+		Stack:                   cfg.Stack,
+		Logger:                  cfg.Logger,
 	}, nil
 }
 

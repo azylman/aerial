@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -34,9 +35,9 @@ func TestBuildDaemonArgs(t *testing.T) {
 		contains []string
 		omits    []string
 	}{
-		{DaemonConfig{SessionID: "sess-abc", Model: "gemini-test"}, []string{"--dangerously-skip-permissions", "--input-format stream-json", "--output-format stream-json", "--conversation sess-abc", "--model gemini-test", "--print-timeout 60m"}, nil},
-		{DaemonConfig{Timeout: 15 * time.Minute}, []string{"--print-timeout 15m"}, []string{"--conversation", "--model"}},
-		{DaemonConfig{Timeout: 45 * time.Second}, []string{"--print-timeout 45s"}, nil},
+		{DaemonConfig{SessionID: "sess-abc", Model: "gemini-test"}, []string{"--dangerously-skip-permissions", "--log-file /dev/stderr", "--input-format stream-json", "--output-format stream-json", "--conversation sess-abc", "--model gemini-test", "--print-timeout 60m"}, nil},
+		{DaemonConfig{Timeout: 15 * time.Minute}, []string{"--log-file /dev/stderr", "--print-timeout 15m"}, []string{"--conversation", "--model"}},
+		{DaemonConfig{Timeout: 45 * time.Second}, []string{"--log-file /dev/stderr", "--print-timeout 45s"}, nil},
 		{
 			DaemonConfig{
 				Engine:        "claude",
@@ -650,6 +651,60 @@ func TestCompileLeasePrompt(t *testing.T) {
 					t.Errorf("compileLeasePrompt() = %q, missing %q", got, w)
 				}
 			}
+		})
+	}
+}
+
+type parseStderrLineCase struct {
+	name, engine, line, wantMsg, wantSource string
+	wantLevel                               slog.Level
+	wantKeep                                bool
+}
+
+func assertParseAndFilterStderrLine(t *testing.T, tc parseStderrLineCase) {
+	t.Helper()
+	gotLevel, gotMsg, gotSource, gotKeep := ParseAndFilterStderrLine(tc.engine, tc.line)
+	if gotKeep != tc.wantKeep {
+		t.Fatalf("ParseAndFilterStderrLine() keep = %v, want %v", gotKeep, tc.wantKeep)
+	}
+	if !tc.wantKeep {
+		return
+	}
+	if gotLevel != tc.wantLevel {
+		t.Errorf("level = %v, want %v", gotLevel, tc.wantLevel)
+	}
+	if gotMsg != tc.wantMsg {
+		t.Errorf("msg = %q, want %q", gotMsg, tc.wantMsg)
+	}
+	if gotSource != tc.wantSource {
+		t.Errorf("source = %q, want %q", gotSource, tc.wantSource)
+	}
+}
+
+func TestParseAndFilterStderrLine(t *testing.T) {
+	t.Parallel()
+	tests := []parseStderrLineCase{
+		{name: "glog info", engine: "agy", line: "I1118 09:24:54.123456 12345 client.go:42] Successfully connected to backend", wantLevel: slog.LevelInfo, wantMsg: "Successfully connected to backend", wantSource: "client.go:42", wantKeep: true},
+		{name: "glog warn", engine: "agy", line: "W1118 09:24:54.123456 12345 auth.go:10] Token refreshing soon", wantLevel: slog.LevelWarn, wantMsg: "Token refreshing soon", wantSource: "auth.go:10", wantKeep: true},
+		{name: "glog error", engine: "agy", line: "E1118 09:24:54.123456 12345 db.go:99] Connection failed to database", wantLevel: slog.LevelError, wantMsg: "Connection failed to database", wantSource: "db.go:99", wantKeep: true},
+		{name: "glog fatal", engine: "agy", line: "F1118 09:24:54.123456 12345 main.go:1] Fatal runtime crash", wantLevel: slog.LevelError, wantMsg: "Fatal runtime crash", wantSource: "main.go:1", wantKeep: true},
+		{name: "benign noise unauthenticated", engine: "agy", line: "I1118 09:24:54.123456 12345 client.go:42] You are not logged into Antigravity.", wantKeep: false},
+		{name: "benign noise auth mode unspecified", engine: "agy", line: "I1118 09:24:54.123456 12345 client.go:42] Auth mode is unspecified, skipping fetchAvailableModels", wantKeep: false},
+		{name: "benign noise non-glog", engine: "agy", line: "Warning: You are not logged into Antigravity. Please login.", wantKeep: false},
+		{name: "secret redaction in glog", engine: "agy", line: "I1118 09:24:54.123456 12345 auth.go:42] User token is ghp_1234567890abcdefghijklmnopqrstuvwxyz for request", wantLevel: slog.LevelInfo, wantMsg: "User token is [REDACTED] for request", wantSource: "auth.go:42", wantKeep: true},
+		{name: "non-glog warning on error keyword", engine: "claude", line: "An error occurred while reading config file", wantLevel: slog.LevelWarn, wantMsg: "An error occurred while reading config file", wantKeep: true},
+		{name: "non-glog warning on fatal keyword", engine: "codex", line: "fatal: branch not found", wantLevel: slog.LevelWarn, wantMsg: "fatal: branch not found", wantKeep: true},
+		{name: "non-glog warning on panic keyword", engine: "muse", line: "panic: runtime error dereference", wantLevel: slog.LevelWarn, wantMsg: "panic: runtime error dereference", wantKeep: true},
+		{name: "non-glog warning on warn keyword", engine: "agy", line: "warning: deprecated flag used", wantLevel: slog.LevelWarn, wantMsg: "warning: deprecated flag used", wantKeep: true},
+		{name: "non-glog regular info", engine: "agy", line: "Server listening on port 8080", wantLevel: slog.LevelInfo, wantMsg: "Server listening on port 8080", wantKeep: true},
+		{name: "empty line", engine: "agy", line: "", wantKeep: false},
+		{name: "whitespace line with newline", engine: "agy", line: "   \r\n", wantKeep: false},
+		{name: "glog empty message", engine: "agy", line: "I1118 09:24:54.123456 12345 client.go:42]   \n", wantKeep: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertParseAndFilterStderrLine(t, tc)
 		})
 	}
 }

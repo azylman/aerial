@@ -410,7 +410,7 @@ func DefaultUsageRunner(agyBin, homeDir string, baseEnv []string, isTest bool) U
 }
 
 func NewAgyUsageRunner(agyBin, homeDir string, baseEnv []string) UsageRunnerFunc {
-	return newExecUsageRunner(agyBin, "agy", homeDir, baseEnv, "--print", "/usage", "--output-format", "json")
+	return newExecUsageRunner(agyBin, "agy", homeDir, baseEnv, "--log-file", os.DevNull, "--print", "/usage", "--output-format", "json")
 }
 
 // newExecUsageRunner runs a CLI usage subcommand with HOME pinned to homeDir.
