@@ -640,8 +640,9 @@ func (b *JetStreamBus) dispatch(subCtx context.Context, m *nats.Msg, group strin
 
 	meta, err := m.Metadata()
 	wrapped := &jsMessage{
-		raw: m,
-		bus: b,
+		raw:  m,
+		bus:  b,
+		done: subCtx.Done(),
 	}
 	if err == nil {
 		wrapped.meta = meta
@@ -714,6 +715,7 @@ func (s *jsSubscription) Unsubscribe() error {
 type jsMessage struct {
 	raw     *nats.Msg
 	bus     Bus
+	done    <-chan struct{}
 	spanCtx trace.SpanContext // process span; Snooze republishes as its child
 	mu      sync.Mutex
 	settled bool
@@ -810,6 +812,44 @@ func (m *jsMessage) Term() error {
 	return err
 }
 
+// waitSnoozeDelay synchronously holds the message delivery for delay, heartbeating via
+// InProgress on each hbInterval tick so JetStream AckWait does not expire. Synchronous
+// waiting ensures the original message is acknowledged only after publishContinuation
+// succeeds, maintaining at-least-once delivery without premature acknowledgment.
+// The wait aborts immediately when m.done receives, returning context.Canceled so the
+// caller leaves the delivery unacknowledged for clean redelivery on shutdown.
+func (m *jsMessage) waitSnoozeDelay(delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	hbInterval := 10 * time.Second
+	if jsb, ok := m.bus.(*JetStreamBus); ok && jsb != nil && jsb.heartbeatInterval > 0 {
+		hbInterval = jsb.heartbeatInterval
+	}
+	if hbInterval > durableAckWait/2 {
+		hbInterval = durableAckWait / 2
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(hbInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.done:
+			return context.Canceled
+		case <-timer.C:
+			return nil
+		case <-ticker.C:
+			if inProgErr := m.InProgress(); inProgErr != nil {
+				log.Printf("[pubsub] warning: snooze heartbeat failed: %v", inProgErr)
+			}
+		}
+	}
+}
+
 func (m *jsMessage) Snooze(delay time.Duration) error {
 	m.mu.Lock()
 	if m.settled {
@@ -852,24 +892,17 @@ func (m *jsMessage) Snooze(delay time.Duration) error {
 		return m.bus.Publish(ctx, m.Subject(), rotatedMsgID, m.Data())
 	}
 
-	if delay > 0 {
-		m.mu.Lock()
-		m.settled = true
-		m.mu.Unlock()
-
-		time.AfterFunc(delay, func() {
-			if pubErr := publishContinuation(); pubErr != nil {
-				log.Printf("[pubsub] warning: background snooze publish failed: %v", pubErr)
-			}
-		})
-	} else {
-		if err := publishContinuation(); err != nil {
-			return fmt.Errorf("snooze publish continuation: %w", err)
-		}
-		m.mu.Lock()
-		m.settled = true
-		m.mu.Unlock()
+	if err := m.waitSnoozeDelay(delay); err != nil {
+		return fmt.Errorf("snooze delay: %w", err)
 	}
+
+	if err := publishContinuation(); err != nil {
+		return fmt.Errorf("snooze publish continuation: %w", err)
+	}
+
+	m.mu.Lock()
+	m.settled = true
+	m.mu.Unlock()
 
 	err := m.raw.Ack()
 	if isMessageNotFoundError(err) {

@@ -136,6 +136,10 @@ func (b *NATSBridge) StartConsumers(ctx context.Context) error {
 	return nil
 }
 
+func isRetryableIngressStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+}
+
 func nakBackoffDelay(delivered uint64) time.Duration {
 	if delivered <= 1 {
 		return 1 * time.Second
@@ -145,12 +149,6 @@ func nakBackoffDelay(delivered uint64) time.Duration {
 }
 
 func settleFailedDelivery(ctx context.Context, msg pubsub.Message) {
-	if msg.NumDelivered() >= 3 {
-		if err := msg.Term(); err != nil {
-			slog.ErrorContext(ctx, "[vanadis-nats] error terming message", "deliveries", msg.NumDelivered(), "error", err)
-		}
-		return
-	}
 	delay := nakBackoffDelay(msg.NumDelivered())
 	if err := msg.NakWithDelay(delay); err != nil {
 		slog.ErrorContext(ctx, "[vanadis-nats] error naking message", "delay", delay, "error", err)
@@ -203,7 +201,9 @@ func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempoten
 	targetURL := fmt.Sprintf("%s%s", b.cfg.RestateIngressURL, endpoint)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
-		settleFailedDelivery(ctx, msg)
+		if termErr := msg.Term(); termErr != nil {
+			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on request creation failure", "error", termErr)
+		}
 		return fmt.Errorf("create request to %s: %w", targetURL, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -218,9 +218,15 @@ func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempoten
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 500 {
+	if resp.StatusCode < 200 || isRetryableIngressStatus(resp.StatusCode) {
 		settleFailedDelivery(ctx, msg)
 		return fmt.Errorf("restate ingress error (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		if termErr := msg.Term(); termErr != nil {
+			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on non-retryable restate status", "status", resp.StatusCode, "error", termErr)
+		}
+		return nil
 	}
 	return nil
 }
@@ -260,7 +266,7 @@ func (b *NATSBridge) HandleDispatchOutcomeEvent(ctx context.Context, msg pubsub.
 	if ev.DispatchID == "healthcheck-ping" || ev.VanadisChunkID == "" {
 		return nil
 	}
-	if status != "completed" && status != "failed" && status != "timeout" {
+	if status != "completed" && status != "failed" && status != "timeout" && status != "crashed" {
 		return nil
 	}
 	ev.Status = status
