@@ -18,6 +18,12 @@ const (
 	StateClosed    DaemonState = "CLOSED"
 )
 
+// Default watchdog timing thresholds for mid-turn agy rescue.
+const (
+	DefaultWatchdogInterval    = 5 * time.Second
+	DefaultWatchdogIdleTimeout = 20 * time.Second
+)
+
 type DaemonConfig struct {
 	Engine                  string
 	ClaudeBin               string
@@ -36,6 +42,9 @@ type DaemonConfig struct {
 	TurnEnvFile             string
 	Timeout                 time.Duration
 	TranscriptRescuer       func(ctx context.Context, convID string, since time.Time) string
+	TerminalTurnRescuer     func(ctx context.Context, convID string, since time.Time) string
+	WatchdogInterval        time.Duration
+	WatchdogIdleTimeout     time.Duration
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
 }
@@ -171,9 +180,10 @@ func BuildDaemonArgs(cfg DaemonConfig) []string {
 	return args
 }
 
-// rescueTranscript keeps recovery within the turn lifetime, including scans that
-// return text concurrently with cancellation. Nil contexts support legacy manual turns.
-func (d *StreamingDaemon) rescueTranscript(turn *TurnContext) string {
+func (d *StreamingDaemon) invokeRescuer(turn *TurnContext, rescuer func(ctx context.Context, convID string, since time.Time) string) string {
+	if rescuer == nil || d.SessionID() == "" {
+		return ""
+	}
 	ctx := turn.Ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -181,9 +191,26 @@ func (d *StreamingDaemon) rescueTranscript(turn *TurnContext) string {
 	if ctx.Err() != nil {
 		return ""
 	}
-	rescued := d.cfg.TranscriptRescuer(ctx, d.SessionID(), turn.CreatedAt)
+	rescued := rescuer(ctx, d.SessionID(), turn.CreatedAt)
 	if ctx.Err() != nil {
 		return ""
 	}
 	return rescued
+}
+
+// rescueTranscript keeps recovery within the turn lifetime, including scans that
+// return text concurrently with cancellation. Nil contexts support legacy manual turns.
+func (d *StreamingDaemon) rescueTranscript(turn *TurnContext) string {
+	d.mu.RLock()
+	rescuer := d.cfg.TranscriptRescuer
+	d.mu.RUnlock()
+	return d.invokeRescuer(turn, rescuer)
+}
+
+// rescueTerminalTurn extracts a quiescent terminal turn response for watchdog recovery.
+func (d *StreamingDaemon) rescueTerminalTurn(turn *TurnContext) string {
+	d.mu.RLock()
+	rescuer := d.cfg.TerminalTurnRescuer
+	d.mu.RUnlock()
+	return d.invokeRescuer(turn, rescuer)
 }

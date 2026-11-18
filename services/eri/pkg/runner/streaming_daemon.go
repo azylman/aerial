@@ -164,7 +164,10 @@ type StreamingDaemon struct {
 	inFlightTools  map[int]inFlightToolCall
 	claudeToolIDs  map[string]int
 	seenMemoryIDs  map[string]bool
+	lastStdoutNano atomic.Int64
+	closeCh        chan struct{}
 	readerWg       sync.WaitGroup
+	watchdogWg     sync.WaitGroup
 	closeOnce      sync.Once
 	closed         atomic.Bool
 }
@@ -263,7 +266,9 @@ func StartStreamingDaemon(lifetime, startup context.Context, cfg DaemonConfig, s
 		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
 		claudeToolIDs: make(map[string]int),
 		seenMemoryIDs: make(map[string]bool),
+		closeCh:       make(chan struct{}),
 	}
+	d.lastStdoutNano.Store(time.Now().UnixNano())
 
 	if err := startup.Err(); err != nil {
 		d.closeOnStartupError("cancelled")
@@ -286,6 +291,10 @@ func StartStreamingDaemon(lifetime, startup context.Context, cfg DaemonConfig, s
 	}
 	d.readerWg.Add(1)
 	go d.readStdoutLoop(reader) //nolint:contextcheck // Recovery uses each queued TurnContext.Ctx, not the daemon lifetime.
+	if !d.cfg.IsClaude() && !d.cfg.IsCodex() && !d.cfg.IsMuse() {
+		d.watchdogWg.Add(1)
+		go d.watchdogLoop(lifetime)
+	}
 	return d, nil
 }
 
@@ -440,6 +449,11 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 		return err
 	}
 
+	if turnCtx != nil && turnCtx.CreatedAt.IsZero() {
+		turnCtx.CreatedAt = time.Now()
+	}
+	d.lastStdoutNano.Store(time.Now().UnixNano())
+
 	d.inflightMu.Lock()
 	d.inflight = append(d.inflight, turnCtx)
 	d.inflightMu.Unlock()
@@ -466,13 +480,20 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	return nil
 }
 
-func (d *StreamingDaemon) Close() error {
+func (d *StreamingDaemon) closeInternal() error {
+	if d == nil {
+		return nil
+	}
 	var closeErr error
 	d.closeOnce.Do(func() {
 		d.closed.Store(true)
 		d.mu.Lock()
 		d.state = StateClosed
 		d.mu.Unlock()
+
+		if d.closeCh != nil {
+			close(d.closeCh)
+		}
 
 		closeStreamQuietly(d.stdin, "stdin")
 		closeStreamQuietly(d.stdout, "stdout")
@@ -507,16 +528,13 @@ func (d *StreamingDaemon) Close() error {
 	return closeErr
 }
 
-func (d *StreamingDaemon) drainInFlightToolsLocked() []inFlightToolCall {
-	if len(d.inFlightTools) == 0 {
+func (d *StreamingDaemon) Close() error {
+	if d == nil {
 		return nil
 	}
-	dangling := make([]inFlightToolCall, 0, len(d.inFlightTools))
-	for _, rec := range d.inFlightTools {
-		dangling = append(dangling, rec)
-	}
-	d.inFlightTools = make(map[int]inFlightToolCall)
-	return dangling
+	closeErr := d.closeInternal()
+	d.watchdogWg.Wait()
+	return closeErr
 }
 
 func (d *StreamingDaemon) tryRescueTurnOnEOF(turn *TurnContext) bool {
@@ -580,6 +598,7 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 			d.handleStdoutEOF(err)
 			return
 		}
+		d.lastStdoutNano.Store(time.Now().UnixNano())
 		d.dispatchNDJSONLine(line)
 	}
 }

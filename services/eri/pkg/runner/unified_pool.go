@@ -29,6 +29,9 @@ type PoolConfig struct {
 	Env, PrewarmedTargets                                         []string
 	MaxIdle, TargetLockTimeout, HandshakeTimeout                  time.Duration
 	TranscriptRescuer                                             func(ctx context.Context, convID string, since time.Time) string
+	TerminalTurnRescuer                                           func(ctx context.Context, convID string, since time.Time) string
+	WatchdogInterval                                              time.Duration
+	WatchdogIdleTimeout                                           time.Duration
 	MemoryRetriever                                               MemoryRetriever
 	AmbientContextRetriever                                       AmbientContextRetriever
 	SessionManager                                                *session.Manager
@@ -74,6 +77,12 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 	}
 	if cfg.MaxIdle <= 0 {
 		cfg.MaxIdle = 24 * time.Hour
+	}
+	if cfg.WatchdogInterval <= 0 {
+		cfg.WatchdogInterval = DefaultWatchdogInterval
+	}
+	if cfg.WatchdogIdleTimeout <= 0 {
+		cfg.WatchdogIdleTimeout = DefaultWatchdogIdleTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	resolvedModel := cfg.Model
@@ -123,6 +132,19 @@ func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(ctx context.Conte
 	p.cfg.TranscriptRescuer = rescuer
 	for _, d := range p.daemons {
 		d.SetTranscriptRescuer(rescuer)
+	}
+}
+
+// SetTerminalTurnRescuer updates the terminal turn rescuer callback on the pool and its active daemons.
+func (p *UnifiedProcessPool) SetTerminalTurnRescuer(rescuer func(ctx context.Context, convID string, since time.Time) string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.TerminalTurnRescuer = rescuer
+	for _, d := range p.daemons {
+		d.SetTerminalTurnRescuer(rescuer)
 	}
 }
 
@@ -330,12 +352,23 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 		initTurnCount = initialTurns[0]
 	}
 
+	watchdogInterval := cfg.WatchdogInterval
+	if watchdogInterval <= 0 {
+		watchdogInterval = DefaultWatchdogInterval
+	}
+	watchdogIdleTimeout := cfg.WatchdogIdleTimeout
+	if watchdogIdleTimeout <= 0 {
+		watchdogIdleTimeout = DefaultWatchdogIdleTimeout
+	}
+
 	return DaemonConfig{
 		Engine: cfg.Engine, ClaudeBin: cfg.ClaudeBin, CodexBin: cfg.CodexBin, MuseBin: cfg.MuseBin, ResumeSession: resumeSession,
 		ThreadID: targetKey, SessionID: trimmedSess, InitialTurnCount: initTurnCount,
 		Model: cfg.Model, AgyBin: cfg.AgyBin, Cwd: cfg.Cwd, Env: daemonEnv,
 		GeminiHomeDir: cfg.GeminiHomeDir, TurnEnvFile: turnEnvFile, Timeout: cfg.HandshakeTimeout,
-		TranscriptRescuer: cfg.TranscriptRescuer, MemoryRetriever: cfg.MemoryRetriever,
+		TranscriptRescuer: cfg.TranscriptRescuer, TerminalTurnRescuer: cfg.TerminalTurnRescuer,
+		WatchdogInterval: watchdogInterval, WatchdogIdleTimeout: watchdogIdleTimeout,
+		MemoryRetriever:         cfg.MemoryRetriever,
 		AmbientContextRetriever: cfg.AmbientContextRetriever,
 	}, nil
 }
