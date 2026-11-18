@@ -250,7 +250,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	boErr := NewBuildObject("", nil).WithAuthority(store, execErr)
 
 	// notifyBuildTerminal error branches
-	boErr.notifyBuildTerminal(context.Background(), &b1, []VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG")
+	assert.Error(t, boErr.notifyBuildTerminal(context.Background(), &b1, []VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG"))
 
 	// notifyChunkFailure error branches
 	ctx := makeObjectMockContext(t, "b-err")

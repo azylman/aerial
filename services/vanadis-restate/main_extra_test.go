@@ -81,15 +81,84 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	_ = boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"})
 	_ = boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom"})
 
-	// 9. evaluateBuildTerminalStatus with store error
+	// 9. evaluateBuildTerminalStatus error branches and retry recovery
+	// 9a. evaluateBuildTerminalStatus failing on notifyBuildTerminal (execErr)
 	boTermErr := NewBuildObject("", nil).WithAuthority(storeCancelErr, execErr)
 	bF := VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
 	cF := VanadisChunk{ID: "c1", Status: "failed"}
-	_ = boTermErr.evaluateBuildTerminalStatus(context.Background(), &bF, []VanadisChunk{cF})
+	retF, errF := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bF, []VanadisChunk{cF})
+	assert.Error(t, errF)
+	assert.Empty(t, retF)
 
 	bD := VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
 	cD := VanadisChunk{ID: "c1", Status: "completed"}
-	_ = boTermErr.evaluateBuildTerminalStatus(context.Background(), &bD, []VanadisChunk{cD})
+	retD, errD := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bD, []VanadisChunk{cD})
+	assert.Error(t, errD)
+	assert.Empty(t, retD)
+
+	// 9b. evaluateBuildTerminalStatus failing on UpdateBuildStatus (storeCancelErr with nil executor)
+	boStoreUpdateErr := NewBuildObject("", nil).WithAuthority(storeCancelErr, nil)
+	bFStore := VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
+	retFStore, errFStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bFStore, []VanadisChunk{cF})
+	assert.NoError(t, errFStore)
+	assert.Equal(t, statusFailed, retFStore)
+
+	bDStore := VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
+	retDStore, errDStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bDStore, []VanadisChunk{cD})
+	assert.NoError(t, errDStore)
+	assert.Equal(t, statusCompleted, retDStore)
+
+	// 9c. retry recovery when notifyBuildTerminal fails on attempt 1 (vanadis_builds.status remains running) and succeeds on attempt 2
+	var promptAttempt atomic.Int32
+	flakyEri := &mockEriClient{
+		promptFn: func(context.Context, string, string) error {
+			if promptAttempt.Add(1) == 1 {
+				return errors.New("transient prompt error")
+			}
+			return nil
+		},
+	}
+	execFlaky := NewExecutor(t.TempDir(), flakyEri, pubsub.NewMemoryBus(), "token", nil)
+	spyStore := &terminalRetrySpyStore{}
+	boRetry := NewBuildObject("", nil).WithAuthority(spyStore, execFlaky)
+
+	bRetry := VanadisBuild{ID: "b-retry", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
+	// Attempt 1: notifyBuildTerminal fails
+	retRetry1, errRetry1 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []VanadisChunk{cD})
+	assert.Error(t, errRetry1)
+	assert.Empty(t, retRetry1)
+	assert.Empty(t, spyStore.updatedStatus)
+
+	// Attempt 2: retry succeeds
+	retRetry2, errRetry2 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []VanadisChunk{cD})
+	assert.NoError(t, errRetry2)
+	assert.Equal(t, statusCompleted, retRetry2)
+	assert.Equal(t, statusCompleted, spyStore.updatedStatus)
+
+	// 9d. evaluateBuildTerminalStatus default branch widget sync warning
+	bRunning := VanadisBuild{ID: "b-run", Status: "running", ThreadID: "th-1"}
+	cRunning := VanadisChunk{ID: "c1", Status: "running"}
+	retRun, errRun := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bRunning, []VanadisChunk{cRunning})
+	assert.NoError(t, errRun)
+	assert.Equal(t, statusRunning, retRun)
+
+	// 9e. notifyBuildTerminal nil executor returns nil
+	boNilExec := NewBuildObject("", nil).WithAuthority(storeCancelErr, nil)
+	assert.NoError(t, boNilExec.notifyBuildTerminal(context.Background(), &bD, []VanadisChunk{cD}, statusCompleted, "", "H", "M"))
+
+	// 9f. executeAuthoritativeTransition fails when notifyBuildTerminal fails during continuation
+	storeCompCont, _ := dbScript{buildRow: &mockRow{b: &VanadisBuild{ID: "b-cont", Status: statusCompleted}}, chunks: []VanadisChunk{cD}}.open()
+	boContErr := NewBuildObject("", nil).WithAuthority(storeCompCont, execErr)
+	_, errCont := boContErr.executeAuthoritativeTransition(context.Background(), "b-cont", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-0"}, nil, false)
+	assert.Error(t, errCont)
+
+	// 9g. executeAuthoritativeTransition fails when evaluateBuildTerminalStatus fails
+	bFailRunning := VanadisBuild{ID: "b-fail-trans", Status: statusRunning, ThreadID: "th-1"}
+	cFailChunk := VanadisChunk{ID: "c1", BuildID: "b-fail-trans", Status: statusFailed}
+	storeTransErr, _ := dbScript{buildRow: &mockRow{b: &bFailRunning}, chunks: []VanadisChunk{cFailChunk}, execTag: "UPDATE 1"}.open()
+	boTransErr := NewBuildObject("", nil).WithAuthority(storeTransErr, execErr)
+	_, errTrans := boTransErr.executeAuthoritativeTransition(context.Background(), "b-fail-trans", nil, nil, false)
+	assert.Error(t, errTrans)
 
 	// 10. UpdateBuild with widget sync error
 	storeUpdOk, _ := dbScript{
@@ -107,6 +176,21 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 
 	// 12. AttachPR widget sync error
 	_, _ = boUpdWidgetErr.AttachPR(ctxCancel, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+}
+
+type terminalRetrySpyStore struct {
+	VanadisStore
+
+	updatedStatus string
+}
+
+func (s *terminalRetrySpyStore) UpdateBuildStatus(_ context.Context, _ string, status string) error {
+	s.updatedStatus = status
+	return nil
+}
+
+func (*terminalRetrySpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
+	return nil
 }
 
 type badReader struct{}
