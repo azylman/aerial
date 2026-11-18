@@ -1212,37 +1212,56 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 		return nil, waitErr
 	}
 	l.evaluateEmptyResponseOutcome(ctx, &turnCopy, res)
+	l.mu.Lock()
 	l.turnCount++
 	l.isCold = false
+	l.mu.Unlock()
 	return res, nil
+}
+
+func (l *unifiedSessionLease) evaluateRotation() (bool, string) {
+	if l == nil || l.pool == nil {
+		return false, ""
+	}
+	l.mu.RLock()
+	cancelRot := l.cancelRotation
+	targetKey := l.targetKey
+	d := l.daemon
+	poolClosed := l.pool.isClosed()
+	turnCount := l.turnCount
+	l.mu.RUnlock()
+
+	if cancelRot || strings.Contains(targetKey, "-ondemand-") || (d != nil && d.State() == StateClosed && !poolClosed) {
+		return false, ""
+	}
+	shouldRotate, reason := l.pool.ShouldRotate(d)
+	maxTurns := DefaultMaxSessionTurns
+	if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
+		maxTurns = l.pool.cfg.MaxSessionTurns
+	}
+	if !shouldRotate && turnCount >= maxTurns {
+		shouldRotate, reason = true, fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
+	}
+	return shouldRotate, reason
+}
+
+func (l *unifiedSessionLease) ShouldRotate() bool {
+	shouldRotate, _ := l.evaluateRotation()
+	return shouldRotate
 }
 
 func (l *unifiedSessionLease) Release() error {
 	var releaseErr error
 	l.releaseOnce.Do(func() {
 		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
-		l.mu.RLock()
-		cancelRot := l.cancelRotation
-		targetKey := l.targetKey
-		d := l.daemon
-		poolClosed := l.pool.isClosed()
-		turnCount := l.turnCount
-		oldSessionID := l.sessionID
-		l.mu.RUnlock()
-		if cancelRot || strings.Contains(targetKey, "-ondemand-") || (d != nil && d.State() == StateClosed && !poolClosed) {
-			return
-		}
-		shouldRotate, reason := l.pool.ShouldRotate(d)
-		maxTurns := DefaultMaxSessionTurns
-		if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
-			maxTurns = l.pool.cfg.MaxSessionTurns
-		}
-		if !shouldRotate && turnCount >= maxTurns {
-			shouldRotate, reason = true, fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
-		}
+		shouldRotate, reason := l.evaluateRotation()
 		if !shouldRotate {
 			return
 		}
+		l.mu.RLock()
+		targetKey := l.targetKey
+		oldSessionID := l.sessionID
+		l.mu.RUnlock()
 
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)

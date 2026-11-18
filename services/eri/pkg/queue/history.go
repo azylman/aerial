@@ -29,8 +29,8 @@ const (
 
 const (
 	maxHistoryAge                  = 4 * time.Hour
-	maxHistoryContentRunes         = 1000
-	maxPreviousSessionContextRunes = 600
+	maxHistoryContentRunes         = 2500
+	maxPreviousSessionContextRunes = 2500
 	truncationMarker               = "... [truncated]"
 	historyFetchMaxAttempts        = 3
 	historyFetchAttemptTimeout     = 2 * time.Second
@@ -139,7 +139,7 @@ func formatHistoryBlock(messages []HistoryMessage, maxAge time.Duration, header 
 	return sb.String()
 }
 
-// FormatChannelHistory filters out messages older than 4 hours, truncates oversized content to 1,000 runes,
+// FormatChannelHistory filters out messages older than 4 hours, truncates oversized content to 2,500 runes,
 // sorts messages chronologically, and formats them inside a secure <CHANNEL_HISTORY> block.
 func FormatChannelHistory(messages []HistoryMessage, tzOpt ...string) string {
 	return formatHistoryBlock(messages, maxHistoryAge, channelHistoryHeader, headContentCap, tzOpt...)

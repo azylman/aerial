@@ -528,6 +528,16 @@ func (te *turnExecution) loadThreadColdStartSummary(ctx context.Context, getTurn
 	return cachedSum, summaryOutcomeStale
 }
 
+func (te *turnExecution) leaseWillRotate() bool {
+	if te == nil || te.lease == nil {
+		return false
+	}
+	if rot, ok := te.lease.(interface{ ShouldRotate() bool }); ok {
+		return rot.ShouldRotate()
+	}
+	return false
+}
+
 // refreshThreadSummaryAtTurnEnd brings the saved thread summary up to date after a successful thread turn
 // delivered its reply. It runs synchronously while the session lease is held, so the thread's next burst
 // waits behind it, and ctx cancellation (shutdown, /interrupt) aborts it. Failures only leave the previous
@@ -561,7 +571,7 @@ func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, 
 	if hadPrior && lastMsgID == watermark {
 		return summaryOutcomeCacheHit, nil
 	}
-	if hadPrior && slices.Contains(newestHistoryMessageIDs(histMsgs, summaryFreshWindow), lastMsgID) {
+	if hadPrior && !te.leaseWillRotate() && slices.Contains(newestHistoryMessageIDs(histMsgs, summaryFreshWindow), lastMsgID) {
 		return summaryOutcomeFreshEnough, nil
 	}
 	var opts []ThreadSummaryOption
