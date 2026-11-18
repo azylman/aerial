@@ -37,32 +37,14 @@ Install vanilla `k3s` with Traefik disabled (**NGINX Gateway Fabric** handles in
 curl -sfL https://get.k3s.io | sh -s - --disable traefik --write-kubeconfig ~/.kube/config --write-kubeconfig-mode 600
 ```
 
-### Step 2: Fork Configuration, Bootstrap Database Secrets & Deploy via Flux CD
+### Step 2: Fork Configuration & Bootstrap via Flux CD
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
-3. Pre-create only `postgres-aerial-role` and `infisical-secret`:
+3. Install the Flux CLI and bootstrap your private configuration repository (an in-cluster bootstrap Job automatically generates `postgres-aerial-role`, `infisical-secret`, internal NATS credentials, and provisions Infisical Universal Auth into `infisical-universal-auth` on first boot):
 
 ```bash
 export GITHUB_PAT="your-github-pat"
-export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
-export AUTH_SECRET="$(openssl rand -hex 16)"
-export ENCRYPTION_KEY="$(openssl rand -hex 16)"
 
-# 1. CloudNativePG PostgreSQL credentials
-kubectl create secret generic postgres-aerial-role \
-  --type=kubernetes.io/basic-auth \
-  --from-literal=username=aerial \
-  --from-literal=password="$POSTGRES_PASSWORD"
-
-# 2. Infisical database and encryption credentials
-kubectl create secret generic infisical-secret \
-  --from-literal=AUTH_SECRET="$AUTH_SECRET" \
-  --from-literal=ENCRYPTION_KEY="$ENCRYPTION_KEY"
-```
-
-4. Install Flux CLI and bootstrap your private configuration repository:
-
-```bash
 curl -s https://fluxcd.io/install.sh | sudo bash
 GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
   --owner=your-username \
@@ -72,20 +54,32 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
   --personal
 ```
 
-### Step 3: Connect Infisical & Populate Application Secrets
-Once Flux boots Infisical, create `infisical-universal-auth` (`INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`) and write only `DISCORD_BOT_TOKEN` and `GITHUB_PAT` to Infisical:
+### Step 3: Populate Application Secrets in Infisical
+Once Flux boots Infisical and completes `Job/infisical-bootstrap`, populate only `DISCORD_BOT_TOKEN` and `GITHUB_PAT` in Infisical using the auto-provisioned Universal Auth credentials in `Secret/infisical-universal-auth`:
 
 ```bash
-# 1. External Secrets Operator Universal Auth credentials
-kubectl create secret generic infisical-universal-auth \
-  --from-literal=INFISICAL_CLIENT_ID="your-infisical-client-id" \
-  --from-literal=INFISICAL_CLIENT_SECRET="your-infisical-client-secret"
+# 1. Obtain an access token via Universal Auth login against Service/infisical (exposes standard HTTP port)
+INFISICAL_IP="$(kubectl get svc infisical -o jsonpath='{.spec.clusterIP}')"
+CLIENT_ID="$(kubectl get secret infisical-universal-auth -o jsonpath='{.data.INFISICAL_CLIENT_ID}' | base64 -d)"
+CLIENT_SECRET="$(kubectl get secret infisical-universal-auth -o jsonpath='{.data.INFISICAL_CLIENT_SECRET}' | base64 -d)"
+PROJECT_ID="$(kubectl get secret infisical-universal-auth -o jsonpath='{.data.INFISICAL_PROJECT_ID}' | base64 -d)"
+
+ACCESS_TOKEN="$(curl -fsS -X POST "http://${INFISICAL_IP}/api/v1/auth/universal-auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"clientId\":\"${CLIENT_ID}\",\"clientSecret\":\"${CLIENT_SECRET}\"}" \
+  | jq -r .accessToken)"
 
 # 2. Populate application secrets in Infisical
 infisical secrets set \
+  --domain="http://${INFISICAL_IP}/api" \
+  --token="$ACCESS_TOKEN" \
+  --projectId="$PROJECT_ID" \
+  --env=default \
   DISCORD_BOT_TOKEN="your-discord-bot-token" \
   GITHUB_PAT="$GITHUB_PAT"
 ```
+
+> **Note & Recovery Path**: Universal Auth client credentials are scoped to `Secret/infisical-universal-auth` for External Secrets Operator and MCP microservices. Root instance administrator credentials (`INFISICAL_ADMIN_EMAIL`, `INFISICAL_ADMIN_PASSWORD`, `INFISICAL_TOKEN`) are isolated in `Secret/infisical-admin`. Note that Kubernetes RBAC allows secret creation in the `default` namespace while strictly bounding read and patch operations to the four bootstrap secrets via `resourceNames`. If an instance was bootstrapped externally or credentials need manual restoration, patch `Secret/infisical-admin` directly (`kubectl patch secret infisical-admin --type=merge -p '{"stringData":{"INFISICAL_TOKEN":"<token>","INFISICAL_IDENTITY_ID":"<id>"}}'`) or populate `Secret/infisical-universal-auth` (`INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`) before running the bootstrap Job (to re-trigger the Job after manual updates or credential rotation, delete it with `kubectl delete job infisical-bootstrap` so Flux automatically recreates it).
 
 ### Step 4: Authenticate Agent CLI & Verify Rollout
 1. Authenticate your preferred execution engine (for example, `agy` via Google OAuth):
