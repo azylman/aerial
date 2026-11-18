@@ -1455,11 +1455,15 @@ func TestBuildObject_AuthorityCoverageExtra(t *testing.T) {
 	// evaluateBuildTerminalStatus paths (all completed vs has failed)
 	bCompleted := VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
 	cCompleted := VanadisChunk{ID: "c1", Status: "completed"}
-	_ = bo.evaluateBuildTerminalStatus(context.Background(), &bCompleted, []VanadisChunk{cCompleted})
+	termStatus, err := bo.evaluateBuildTerminalStatus(context.Background(), &bCompleted, []VanadisChunk{cCompleted})
+	assert.NoError(t, err)
+	assert.Equal(t, statusCompleted, termStatus)
 
 	bFailed := VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
 	cFailed := VanadisChunk{ID: "c1", Status: "failed"}
-	_ = bo.evaluateBuildTerminalStatus(context.Background(), &bFailed, []VanadisChunk{cFailed})
+	termStatus, err = bo.evaluateBuildTerminalStatus(context.Background(), &bFailed, []VanadisChunk{cFailed})
+	assert.NoError(t, err)
+	assert.Equal(t, statusFailed, termStatus)
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }

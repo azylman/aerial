@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -218,6 +220,11 @@ func (c *HTTPEriClient) CancelDispatch(ctx context.Context, chunkID string) erro
 	return err
 }
 
+func deterministicPromptMessageID(threadID, prompt string) string {
+	sum := sha256.Sum256([]byte(threadID + "\x00" + prompt))
+	return "vanadis-prompt-" + hex.EncodeToString(sum[:16])
+}
+
 func (c *HTTPEriClient) Prompt(ctx context.Context, threadID, prompt string) error {
 	cleanThreadID, cleanPrompt := strings.TrimSpace(threadID), strings.TrimSpace(prompt)
 	if cleanThreadID == "" || cleanPrompt == "" {
@@ -226,6 +233,7 @@ func (c *HTTPEriClient) Prompt(ctx context.Context, threadID, prompt string) err
 	payload := map[string]string{
 		"channel_id": cleanThreadID,
 		"prompt":     cleanPrompt,
+		"message_id": deterministicPromptMessageID(cleanThreadID, cleanPrompt),
 	}
 	_, err := c.postEriJSON(ctx, "/prompt", payload, 4<<10)
 	return err
