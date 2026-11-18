@@ -13,6 +13,7 @@ import (
 	"github.com/pgvector/pgvector-go"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (
@@ -177,7 +178,7 @@ func NewSQLStoreWithBrainURL(db DBTX, brainURL string, client *http.Client) *SQL
 	return &SQLStore{
 		db:         db,
 		brainURL:   cleanURL,
-		httpClient: client,
+		httpClient: tracing.Client(client),
 	}
 }
 
@@ -205,7 +206,7 @@ func (s *SQLStore) getHTTPClient() *http.Client {
 	if s != nil && s.httpClient != nil {
 		return s.httpClient
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return tracing.Client(&http.Client{Timeout: 15 * time.Second})
 }
 
 func (s *SQLStore) checkDB() error {

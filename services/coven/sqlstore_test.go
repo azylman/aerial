@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite"
 )
 
@@ -152,16 +153,25 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 }
 
 func TestSQLStore_FetchBrainJSON(t *testing.T) {
-	ctx := context.Background()
+	t.Parallel()
+	// A sampled remote parent with a hand-written trace ID: the eri request must carry it.
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+		SpanID:     trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), parent)
 
 	tests := []struct {
-		name       string
-		token      string
-		emptyURL   bool
-		serverCode int
-		serverBody string
-		wantErr    bool
-		wantVal    string
+		name                  string
+		token                 string
+		emptyURL              bool
+		serverCode            int
+		serverBody            string
+		wantErr               bool
+		wantVal               string
+		wantTraceparentPrefix string
 	}{
 		{
 			name:     "UnconfiguredBrainURLFailsFast",
@@ -169,34 +179,39 @@ func TestSQLStore_FetchBrainJSON(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:       "SuccessWithToken",
-			token:      "secret-token",
-			serverCode: http.StatusOK,
-			serverBody: `{"val":"hello"}`,
-			wantErr:    false,
-			wantVal:    "hello",
+			name:                  "SuccessWithToken",
+			token:                 "secret-token",
+			serverCode:            http.StatusOK,
+			serverBody:            `{"val":"hello"}`,
+			wantErr:               false,
+			wantVal:               "hello",
+			wantTraceparentPrefix: "00-4bf92f3577b34da6a3ce929d0e0e4736-",
 		},
 		{
-			name:       "NonOKStatus",
-			serverCode: http.StatusNotFound,
-			serverBody: `not found`,
-			wantErr:    true,
+			name:                  "NonOKStatus",
+			serverCode:            http.StatusNotFound,
+			serverBody:            `not found`,
+			wantErr:               true,
+			wantTraceparentPrefix: "00-4bf92f3577b34da6a3ce929d0e0e4736-",
 		},
 		{
-			name:       "InvalidJSON",
-			serverCode: http.StatusOK,
-			serverBody: `{bad json}`,
-			wantErr:    true,
+			name:                  "InvalidJSON",
+			serverCode:            http.StatusOK,
+			serverBody:            `{bad json}`,
+			wantErr:               true,
+			wantTraceparentPrefix: "00-4bf92f3577b34da6a3ce929d0e0e4736-",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotAuthHeader string
+			t.Parallel()
+			var gotAuthHeader, gotTraceparent string
 			var srvCalls int
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				srvCalls++
 				gotAuthHeader = r.Header.Get("Authorization")
+				gotTraceparent = r.Header.Get("Traceparent")
 				w.WriteHeader(tc.serverCode)
 				_, _ = w.Write([]byte(tc.serverBody))
 			}))
@@ -207,11 +222,8 @@ func TestSQLStore_FetchBrainJSON(t *testing.T) {
 				brainURL = ""
 			}
 
-			store := &SQLStore{
-				brainURL:   brainURL,
-				httpClient: srv.Client(),
-				brainToken: tc.token,
-			}
+			store := NewSQLStoreWithBrainURL(nil, brainURL, srv.Client())
+			store.SetBrainToken(tc.token)
 			var dst struct {
 				Val string `json:"val"`
 			}
@@ -221,6 +233,9 @@ func TestSQLStore_FetchBrainJSON(t *testing.T) {
 			}
 			if tc.emptyURL && srvCalls != 0 {
 				t.Errorf("server calls = %d, want 0 on unconfigured brain URL", srvCalls)
+			}
+			if !strings.HasPrefix(gotTraceparent, tc.wantTraceparentPrefix) || (tc.wantTraceparentPrefix == "") != (gotTraceparent == "") {
+				t.Errorf("traceparent = %q, want prefix %q", gotTraceparent, tc.wantTraceparentPrefix)
 			}
 			if !tc.wantErr {
 				if dst.Val != tc.wantVal {
