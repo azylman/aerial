@@ -193,38 +193,23 @@ Aerial ships with a unified metrics, logs, and distributed tracing pipeline back
 
 Aerial boots out-of-the-box on a single vanilla `k3s` node with no custom node labels or hardware affinity required, and scales cleanly to multi-node clusters via declarative Flux patches.
 
-### Step 1: Install Single-Node k3s & Prepare Storage
-Install vanilla `k3s` with Traefik disabled (**NGINX Gateway Fabric** handles ingress routing) and create the hostPath directory for persistent agent session data:
+### Step 1: Install Single-Node k3s
+Install vanilla `k3s` with Traefik disabled (**NGINX Gateway Fabric** handles ingress routing) and user-accessible kubeconfig:
 
 ```bash
-# 1. Install single-node k3s without Traefik
-curl -sfL https://get.k3s.io | sh -s - --disable traefik
-
-# 2. Configure kubeconfig access
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown $(id -u):$(id -g) ~/.kube/config
-export KUBECONFIG=~/.kube/config
-
-# 3. Create hostPath directory for eri & agentsview session data
-sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
+curl -sfL https://get.k3s.io | sh -s - --disable traefik --write-kubeconfig ~/.kube/config --write-kubeconfig-mode 600
 ```
 
-### Step 2: Fork Configuration & Bootstrap Secrets
+### Step 2: Fork Configuration, Bootstrap Database Secrets & Deploy via Flux CD
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
-3. Pre-create the 3 initial Kubernetes bootstrap secrets to break the PostgreSQL/Infisical/External Secrets Operator chicken-and-egg loop:
-
-<details>
-<summary><strong>Bootstrap Kubernetes Secrets (click to expand)</strong></summary>
+3. Pre-create only `postgres-aerial-role` and `infisical-secret`:
 
 ```bash
 export GITHUB_PAT="your-github-pat"
 export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
 export AUTH_SECRET="$(openssl rand -hex 16)"
 export ENCRYPTION_KEY="$(openssl rand -hex 16)"
-export INFISICAL_CLIENT_ID="your-infisical-client-id"
-export INFISICAL_CLIENT_SECRET="your-infisical-client-secret"
 
 # 1. CloudNativePG PostgreSQL credentials
 kubectl create secret generic postgres-aerial-role \
@@ -234,48 +219,35 @@ kubectl create secret generic postgres-aerial-role \
 
 # 2. Infisical database and encryption credentials
 kubectl create secret generic infisical-secret \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   --from-literal=AUTH_SECRET="$AUTH_SECRET" \
   --from-literal=ENCRYPTION_KEY="$ENCRYPTION_KEY"
-
-# 3. External Secrets Operator Universal Auth credentials
-kubectl create secret generic infisical-universal-auth \
-  --from-literal=INFISICAL_CLIENT_ID="$INFISICAL_CLIENT_ID" \
-  --from-literal=INFISICAL_CLIENT_SECRET="$INFISICAL_CLIENT_SECRET"
 ```
 
-Once Flux boots Infisical, write core secrets (`DISCORD_BOT_TOKEN`, `GITHUB_PAT`, `POSTGRES_PASSWORD`, `AUTH_SECRET`, `ENCRYPTION_KEY`, `VICTORIA_ADMIN_AUTH_KEY`) once to Infisical (`infisical secrets set` or the Infisical web UI at `http://infisical.aerial/`) so External Secrets Operator fans out all service secrets automatically:
+4. Install Flux CLI and bootstrap your private configuration repository:
 
 ```bash
+curl -s https://fluxcd.io/install.sh | sudo bash
+GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
+  --owner=your-username \
+  --repository=my-aerial-config \
+  --branch=main \
+  --path=k8s \
+  --personal
+```
+
+### Step 3: Connect Infisical & Populate Application Secrets
+Once Flux boots Infisical, create `infisical-universal-auth` (`INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`) and write only `DISCORD_BOT_TOKEN` and `GITHUB_PAT` to Infisical:
+
+```bash
+# 1. External Secrets Operator Universal Auth credentials
+kubectl create secret generic infisical-universal-auth \
+  --from-literal=INFISICAL_CLIENT_ID="your-infisical-client-id" \
+  --from-literal=INFISICAL_CLIENT_SECRET="your-infisical-client-secret"
+
+# 2. Populate application secrets in Infisical
 infisical secrets set \
   DISCORD_BOT_TOKEN="your-discord-bot-token" \
-  GITHUB_PAT="$GITHUB_PAT" \
-  POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  AUTH_SECRET="$AUTH_SECRET" \
-  ENCRYPTION_KEY="$ENCRYPTION_KEY" \
-  VICTORIA_ADMIN_AUTH_KEY="$(openssl rand -hex 16)"
-```
-
-</details>
-
-### Step 3: Install Flux CD & Deploy Stack
-Install Flux CD and apply your private configuration repository's Kustomizations (Flux automatically installs Gateway API CRDs and all cluster operators via `aerial-operators`, waits for their CRDs and webhooks to become ready, and then reconciles `aerial-core` and `aerial-config`):
-
-```bash
-# 1. Install Flux CLI and controllers
-curl -s https://fluxcd.io/install.sh | sudo bash
-flux install
-
-# 2. Configure Git authentication for your private configuration repository
-flux create secret git github-auth \
-  --namespace flux-system \
-  --url=https://github.com/your-username/my-aerial-config.git \
-  --username=git \
-  --password="$GITHUB_PAT"
-
-# 3. Apply your private config repository's Flux manifests
-git clone https://github.com/your-username/my-aerial-config.git
-kubectl apply -k my-aerial-config/k8s
+  GITHUB_PAT="$GITHUB_PAT"
 ```
 
 ### Step 4: Authenticate Agent CLI & Verify Rollout

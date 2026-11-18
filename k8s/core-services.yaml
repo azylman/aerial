@@ -121,8 +121,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: eri-secret
+                  key: password
+                  name: postgres-aerial-role
                   optional: true
             - name: GEMINI_HARNESS_API_KEY
               valueFrom:
@@ -462,9 +462,11 @@ spec:
               value: "4025"
             - name: RESTATE_INGRESS_URL
               value: http://restate.restate.svc.cluster.local:8080
-          envFrom:
-            - secretRef:
-                name: postgres-secret
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/azylman/aerial-vanadis:${TAG_AERIAL_VANADIS:=latest}
           imagePullPolicy: Always
           name: vanadis
@@ -612,8 +614,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/azylman/aerial-migrator:${TAG_AERIAL_MIGRATOR:=latest}
           imagePullPolicy: Always
           name: migrate-core
@@ -695,6 +697,11 @@ spec:
               value: "4008"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/coven/coven.yaml
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           envFrom:
             - secretRef:
                 name: coven-secret
@@ -848,8 +855,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
             - name: AGENTSVIEW_PG_URL
               value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
           image: ghcr.io/azylman/agentsview:latest
@@ -923,8 +930,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
             - name: AGENTSVIEW_PG_URL
               value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
           image: ghcr.io/azylman/agentsview:latest
@@ -944,13 +951,13 @@ spec:
         - command:
             - /bin/sh
             - -c
-            - "psql -h postgres -U aerial -d aerial -c \"DO \\$\\$ BEGIN IF to_regclass('agentsview.sessions') IS NOT NULL THEN UPDATE agentsview.sessions SET owner_marker = '', machine = '${AGENTSVIEW_PG_MACHINE:=local}' WHERE owner_marker != ''; END IF; END \\$\\$;\""
+            - "chown 1000:1000 /data && psql -h postgres -U aerial -d aerial -c \"DO \\$\\$ BEGIN IF to_regclass('agentsview.sessions') IS NOT NULL THEN UPDATE agentsview.sessions SET owner_marker = '', machine = '${AGENTSVIEW_PG_MACHINE:=local}' WHERE owner_marker != ''; END IF; END \\$\\$;\""
           env:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: reconcile-agentsview-owner
           resources:
@@ -960,6 +967,12 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /data
+              name: brain-data
       securityContext:
         runAsGroup: 1000
         runAsUser: 1000
@@ -1037,9 +1050,11 @@ spec:
               value: http://eri.aerial
             - name: VANADIS_URL
               value: http://vanadis.aerial
-          envFrom:
-            - secretRef:
-                name: postgres-secret
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/azylman/aerial-haro:${TAG_AERIAL_HARO:=latest}
           imagePullPolicy: Always
           name: haro
@@ -1314,6 +1329,11 @@ spec:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
                   optional: true
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           envFrom:
             - secretRef:
                 name: synapse-secret
@@ -1868,8 +1888,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: infisical-secret
+                  key: password
+                  name: postgres-aerial-role
             - name: DB_CONNECTION_URI
               value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/infisical?sslmode=disable
           envFrom:
@@ -2062,9 +2082,11 @@ spec:
                 secretKeyRef:
                   key: GITHUB_PAT
                   name: vanadis-secret
-          envFrom:
-            - secretRef:
-                name: postgres-secret
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/azylman/aerial-vanadis-restate:${TAG_AERIAL_VANADIS_RESTATE:=latest}
           imagePullPolicy: Always
           name: vanadis-restate

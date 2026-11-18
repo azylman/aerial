@@ -1232,8 +1232,8 @@ spec:
             - name: GF_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
             - name: GF_DATABASE_SSL_MODE
               value: "disable"
             - name: GF_SERVER_ROOT_URL
@@ -1245,8 +1245,8 @@ spec:
             - name: GF_SECURITY_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
             - name: GF_AUTH_ANONYMOUS_ENABLED
@@ -1965,9 +1965,19 @@ spec:
         - env:
             - name: PORT
               value: "8080"
+            - name: INFISICAL_UNIVERSAL_AUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: INFISICAL_CLIENT_ID
+                  name: infisical-universal-auth
+            - name: INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: INFISICAL_CLIENT_SECRET
+                  name: infisical-universal-auth
           envFrom:
             - secretRef:
-                name: infisical-mcp-secret
+                name: infisical-universal-auth
           image: ghcr.io/azylman/aerial-infisical-mcp:${TAG_AERIAL_INFISICAL_MCP:=latest}
           imagePullPolicy: Always
           livenessProbe:
@@ -2354,9 +2364,15 @@ spec:
               value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.node.name=$(NODE_NAME),service.version=${TAG_AERIAL_PROSPERA:=latest}
             - name: CONFIG_PATH
               value: /share/aerial-config/services/prospera/prospera.yaml
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           envFrom:
             - secretRef:
                 name: prospera-secret
+                optional: true
           image: ghcr.io/azylman/aerial-prospera:${TAG_AERIAL_PROSPERA:=latest}
           imagePullPolicy: Always
           name: prospera
@@ -2494,8 +2510,8 @@ spec:
             - name: VIKUNJA_SERVICE_SECRET
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
             - name: VIKUNJA_DATABASE_TYPE
               value: postgres
             - name: VIKUNJA_DATABASE_HOST
@@ -2509,8 +2525,8 @@ spec:
             - name: VIKUNJA_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
           image: vikunja/vikunja:latest
           name: docket-store
           ports:
@@ -2586,8 +2602,8 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: init-docket-schema
           resources:
@@ -2623,9 +2639,11 @@ spec:
               value: /config/config.yaml
             - name: POSTGRES_DB
               value: "docket"
-          envFrom:
-            - secretRef:
-                name: postgres-secret
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
           image: ghcr.io/azylman/aerial-docket-mcp:${TAG_AERIAL_DOCKET_MCP:=latest}
           name: docket-mcp
           ports:
