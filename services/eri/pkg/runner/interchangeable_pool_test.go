@@ -13,11 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
 func (p *InterchangeablePool) Workers() []string {
@@ -706,9 +709,9 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 		attribute.Int("gen_ai.usage.input_tokens", 0), attribute.Int("gen_ai.usage.output_tokens", 0),
 		attribute.Int("gen_ai.usage.cache_read.input_tokens", 0), attribute.Int("gen_ai.usage.cache_creation.input_tokens", 0),
 	}
-	agentAttrs := func(u []attribute.KeyValue) []attribute.KeyValue {
+	agentAttrs := func(target string, u []attribute.KeyValue) []attribute.KeyValue {
 		return append([]attribute.KeyValue{
-			attribute.String("gen_ai.operation.name", "invoke_agent"), attribute.String("aerial.ephemeral.target", "vision:caption"),
+			attribute.String("gen_ai.operation.name", "invoke_agent"), attribute.String("aerial.ephemeral.target", target),
 			attribute.String("gen_ai.request.model", "claude-sonnet-5-5"), attribute.String("gen_ai.provider.name", "anthropic"),
 		}, u...)
 	}
@@ -717,45 +720,49 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 	emptyReplyAttr := attribute.String("gen_ai.output.messages", `[{"role":"assistant","parts":[{"type":"text","content":""}]}]`)
 	tests := []struct {
 		name       string
+		target     string
 		poolClosed bool
 		capture    bool // pool records prompt/response content
 		reply      string
 		wantResp   string
 		wantErr    string
+		wantDeltas map[string]float64
 		wantSpans  []wantEphemeralSpan
 	}{
 		{
-			name: "success nests invoke_agent under caller and chat under invoke_agent", reply: okReply, wantResp: "a caption",
+			name: "success nests invoke_agent under caller and chat under invoke_agent", target: "vision:caption-success", reply: okReply, wantResp: "a caption",
+			wantDeltas: map[string]float64{"input": 120, "output": 30, "cache_read": 80, "total": 150},
 			wantSpans: []wantEphemeralSpan{
-				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(usage)},
+				{name: "invoke_agent", parent: "caller", attrs: agentAttrs("vision:caption-success", usage)},
 				{name: "chat", parent: "invoke_agent", attrs: append([]attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, usage...)},
 			},
 		},
 		{
-			name: "captured content on success", capture: true, reply: okReply, wantResp: "a caption",
+			name: "captured content on success", target: "vision:caption-capture", capture: true, reply: okReply, wantResp: "a caption",
+			wantDeltas: map[string]float64{"input": 120, "output": 30, "cache_read": 80, "total": 150},
 			wantSpans: []wantEphemeralSpan{
-				{name: "invoke_agent", parent: "caller", attrs: append(agentAttrs(usage), promptAttr, captionAttr)},
+				{name: "invoke_agent", parent: "caller", attrs: append(agentAttrs("vision:caption-capture", usage), promptAttr, captionAttr)},
 				{name: "chat", parent: "invoke_agent", attrs: append([]attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, usage...)},
 			},
 		},
 		{
-			name: "captured content on error keeps the prompt", capture: true, reply: errReply, wantErr: "model overloaded",
+			name: "captured content on error keeps the prompt", target: "vision:caption-err-capture", capture: true, reply: errReply, wantErr: "model overloaded",
 			wantSpans: []wantEphemeralSpan{
-				{name: "invoke_agent", parent: "caller", attrs: append(agentAttrs(zeroUsage), promptAttr, emptyReplyAttr), statusCode: codes.Error, statusDesc: "model overloaded"},
+				{name: "invoke_agent", parent: "caller", attrs: append(agentAttrs("vision:caption-err-capture", zeroUsage), promptAttr, emptyReplyAttr), statusCode: codes.Error, statusDesc: "model overloaded"},
 				{name: "chat", parent: "invoke_agent", attrs: []attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, statusCode: codes.Error, statusDesc: "model overloaded"},
 			},
 		},
 		{
-			name: "lease acquire error", poolClosed: true,
+			name: "lease acquire error", target: "vision:caption-lease-err", poolClosed: true,
 			wantErr: "failed to acquire leased session: interchangeable pool is closed",
 			wantSpans: []wantEphemeralSpan{
-				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "failed to acquire leased session: interchangeable pool is closed"},
+				{name: "invoke_agent", parent: "caller", attrs: agentAttrs("vision:caption-lease-err", zeroUsage), statusCode: codes.Error, statusDesc: "failed to acquire leased session: interchangeable pool is closed"},
 			},
 		},
 		{
-			name: "execute error", reply: errReply, wantErr: "model overloaded",
+			name: "execute error", target: "vision:caption-exec-err", reply: errReply, wantErr: "model overloaded",
 			wantSpans: []wantEphemeralSpan{
-				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "model overloaded"},
+				{name: "invoke_agent", parent: "caller", attrs: agentAttrs("vision:caption-exec-err", zeroUsage), statusCode: codes.Error, statusDesc: "model overloaded"},
 				{name: "chat", parent: "invoke_agent", attrs: []attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, statusCode: codes.Error, statusDesc: "model overloaded"},
 			},
 		},
@@ -773,13 +780,30 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 			ctx, caller := tp.Tracer("test").Start(context.Background(), "caller")
 			defer caller.End()
 
-			resp, err := pool.ExecuteEphemeral(ctx, "vision:caption", "describe this frame")
+			targetKey := tc.target
+			if targetKey == "" {
+				targetKey = "vision:caption"
+			}
+			channelLabel := metrics.SanitizeChannelLabel(targetKey)
+
+			baseline := make(map[string]float64, len(tc.wantDeltas))
+			for tokenType := range tc.wantDeltas {
+				baseline[tokenType] = testutil.ToFloat64(metrics.TokensTotal.WithLabelValues(tokenType, "claude-sonnet-5-5", channelLabel))
+			}
+
+			resp, err := pool.ExecuteEphemeral(ctx, targetKey, "describe this frame")
 			gotErr := ""
 			if err != nil {
 				gotErr = err.Error()
 			}
 			if resp != tc.wantResp || gotErr != tc.wantErr {
 				t.Fatalf("ExecuteEphemeral = (%q, %q), want (%q, %q)", resp, gotErr, tc.wantResp, tc.wantErr)
+			}
+			for tokenType, want := range tc.wantDeltas {
+				got := testutil.ToFloat64(metrics.TokensTotal.WithLabelValues(tokenType, "claude-sonnet-5-5", channelLabel)) - baseline[tokenType]
+				if got != want {
+					t.Errorf("tokens_total{type=%q,model=%q,channel=%q} delta = %v, want %v", tokenType, "claude-sonnet-5-5", channelLabel, got, want)
+				}
 			}
 			assertEphemeralSpans(t, rec.Ended(), caller.SpanContext().SpanID(), tc.wantSpans)
 		})
