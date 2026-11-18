@@ -294,7 +294,7 @@ func TestHandleDeploySyncSuccess(t *testing.T) {
 			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
 			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
 			evt := DeployEvent{Event: "sync_success", Repo: "azylman/aerial", PRNumber: 42, CommitSHA: "sha-sync", TargetID: lifecycleTargetID, Timestamp: time.Now().UTC()}
-			srv.handleDeploySyncSuccess(context.Background(), evt, tc.hasExpected)
+			_ = srv.handleDeploySyncSuccess(context.Background(), evt, tc.hasExpected)
 			assertPREvents(t, bus, tc.want)
 		})
 	}

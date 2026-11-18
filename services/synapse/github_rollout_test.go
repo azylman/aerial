@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -1223,6 +1224,238 @@ func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runKubeRolloutCase(t, tc, configMapPath, kustPrefix)
+		})
+	}
+}
+
+func TestHasFailedCIForSHA_ResponseHandling(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantResult bool
+	}{
+		{
+			name:       "404 not found treats as not failed",
+			status:     http.StatusNotFound,
+			body:       `{"message":"Not Found"}`,
+			wantResult: false,
+		},
+		{
+			name:       "500 internal server error fails closed",
+			status:     http.StatusInternalServerError,
+			body:       `{"message":"Internal Server Error"}`,
+			wantResult: true,
+		},
+		{
+			name:       "403 rate limited fails closed",
+			status:     http.StatusForbidden,
+			body:       `{"message":"API rate limit exceeded"}`,
+			wantResult: true,
+		},
+		{
+			name:       "200 success with failed check returns true",
+			status:     http.StatusOK,
+			body:       `{"check_runs":[{"name":"Unit Tests","status":"completed","conclusion":"failure"}]}`,
+			wantResult: true,
+		},
+		{
+			name:       "200 success with pending check returns true",
+			status:     http.StatusOK,
+			body:       `{"check_runs":[{"name":"Unit Tests","status":"in_progress"}]}`,
+			wantResult: true,
+		},
+		{
+			name:       "200 success with all passed returns false",
+			status:     http.StatusOK,
+			body:       `{"check_runs":[{"name":"Unit Tests","status":"completed","conclusion":"success"}]}`,
+			wantResult: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			srv := newTestRouter(Config{GitHubAPIURL: ts.URL}, ts.Client(), nil, nil)
+			got := srv.hasFailedCIForSHA(context.Background(), "azylman/aerial", 42, "head123")
+			if got != tc.wantResult {
+				t.Errorf("hasFailedCIForSHA() = %v, want %v", got, tc.wantResult)
+			}
+		})
+	}
+}
+
+func TestTransitionRegisteredConflict_DedupAndRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		initialConflictInDB bool
+		firstCallUpdated    bool
+		firstSHA            string
+		secondSHA           string
+		callClearFailedCI   bool
+		wantFirstHandled    bool
+		wantSecondHandled   bool
+		wantPublishedCount  int
+	}{
+		{
+			name:                "first transition publishes event and second call with same sha dedupes",
+			initialConflictInDB: false,
+			firstCallUpdated:    true,
+			firstSHA:            "sha-conflict-1",
+			secondSHA:           "sha-conflict-1",
+			wantFirstHandled:    true,
+			wantSecondHandled:   true,
+			wantPublishedCount:  1,
+		},
+		{
+			name:                "already in conflict status publishes event once and dedupes on retry",
+			initialConflictInDB: true,
+			firstCallUpdated:    false,
+			firstSHA:            "sha-conflict-1",
+			secondSHA:           "sha-conflict-1",
+			wantFirstHandled:    true,
+			wantSecondHandled:   true,
+			wantPublishedCount:  1,
+		},
+		{
+			name:                "different head sha re-publishes conflict event",
+			initialConflictInDB: true,
+			firstCallUpdated:    false,
+			firstSHA:            "sha-conflict-1",
+			secondSHA:           "sha-conflict-2",
+			wantFirstHandled:    true,
+			wantSecondHandled:   true,
+			wantPublishedCount:  2,
+		},
+		{
+			name:                "clearing failed CI SHA resets dedup map allowing re-publish",
+			initialConflictInDB: true,
+			firstCallUpdated:    false,
+			firstSHA:            "sha-conflict-1",
+			secondSHA:           "sha-conflict-1",
+			callClearFailedCI:   true,
+			wantFirstHandled:    true,
+			wantSecondHandled:   true,
+			wantPublishedCount:  2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			reg := &mockPRRegistry{
+				conflictTargetID: "100000000000000001",
+				conflictUpdated:  tc.firstCallUpdated,
+			}
+			if tc.initialConflictInDB {
+				reg.resolveTargetID = "100000000000000001"
+			}
+			srv := newTestRouter(Config{}, nil, reg, nil, bus)
+
+			handled1, err1 := srv.transitionRegisteredConflict(context.Background(), "azylman/aerial", 42, "feat/branch", tc.firstSHA)
+			if err1 != nil {
+				t.Fatalf("first transitionRegisteredConflict error = %v", err1)
+			}
+			if handled1 != tc.wantFirstHandled {
+				t.Errorf("first handled = %v, want %v", handled1, tc.wantFirstHandled)
+			}
+
+			if tc.callClearFailedCI {
+				srv.clearFailedCISHA("azylman/aerial", 42)
+			}
+
+			reg.conflictUpdated = false
+			reg.resolveTargetID = "100000000000000001"
+
+			handled2, err2 := srv.transitionRegisteredConflict(context.Background(), "azylman/aerial", 42, "feat/branch", tc.secondSHA)
+			if err2 != nil {
+				t.Fatalf("second transitionRegisteredConflict error = %v", err2)
+			}
+			if handled2 != tc.wantSecondHandled {
+				t.Errorf("second handled = %v, want %v", handled2, tc.wantSecondHandled)
+			}
+
+			if len(bus.publishedPREvents) != tc.wantPublishedCount {
+				t.Errorf("published events count = %d, want %d", len(bus.publishedPREvents), tc.wantPublishedCount)
+			}
+		})
+	}
+}
+
+func TestCIFailureTransition_RollbackAndRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+	}{
+		{
+			name: "publish error rolls back check state and retry succeeds when already ci_failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{err: errors.New("nats publish failed")}
+			reg := &mockPRRegistry{
+				ciFailedTargetID: "100000000000000001",
+				ciFailedUpdated:  false,
+				resolveHeadSHA:   "sha-ci-fail",
+				buildLifecycle:   PRBuildLifecycle{Status: prCIFailed},
+			}
+			srv := newTestRouter(Config{}, nil, reg, nil, bus)
+
+			res := &ResolvedGitHubEvent{
+				Event:      ghEventCheckRun,
+				Repo:       "azylman/aerial",
+				PRNumber:   42,
+				HeadSHA:    "sha-ci-fail",
+				CheckName:  "unit-tests",
+				Conclusion: conclusionFailure,
+			}
+
+			err1 := srv.handleCIFailureTransition(context.Background(), res, "test failure", "https://ci/1")
+			if err1 == nil {
+				t.Fatalf("first handleCIFailureTransition err = nil, want error")
+			}
+
+			entry := srv.loadMatchingFailedCheckState(res.Repo, res.PRNumber, res.HeadSHA)
+			if entry == nil {
+				t.Fatalf("expected non-nil failedCheckState entry")
+			}
+			if entry.activeFailed["unit-tests"] {
+				t.Fatalf("expected active failure for unit-tests to be rolled back, got %v", entry.activeFailed)
+			}
+
+			bus.err = nil
+			reg.ciFailedUpdated = false
+
+			resRetry := &ResolvedGitHubEvent{
+				Event:      ghEventCheckRun,
+				Repo:       "azylman/aerial",
+				PRNumber:   42,
+				HeadSHA:    "sha-ci-fail",
+				CheckName:  "unit-tests",
+				Conclusion: conclusionFailure,
+			}
+			err2 := srv.handleCIFailureTransition(context.Background(), resRetry, "test failure", "https://ci/1")
+			if err2 != nil {
+				t.Fatalf("retry handleCIFailureTransition err = %v, want nil", err2)
+			}
+			if len(bus.publishedPREvents) != 1 {
+				t.Errorf("published events = %d, want 1", len(bus.publishedPREvents))
+			}
 		})
 	}
 }
