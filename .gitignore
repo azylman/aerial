@@ -36,3 +36,7 @@ PR_DESCRIPTION.md
 
 # Locally built code-health analyzer binary
 /scripts/code-health/code-health
+
+# Go test binaries
+*.test
+*.test.exe
