@@ -466,7 +466,7 @@ spec:
             - name: PORT
               value: "4025"
             - name: RESTATE_INGRESS_URL
-              value: http://restate.restate.svc.cluster.local:8080
+              value: http://restate.aerial:8080
             - name: AGENT_NAME
               value: aerial
             - name: POSTGRES_PASSWORD
@@ -549,7 +549,7 @@ spec:
             - name: NATS_URL
               value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: RESTATE_INGRESS_URL
-              value: http://restate.restate.svc.cluster.local:8080
+              value: http://restate.aerial:8080
             - name: AGENT_NAME
               value: aerial
           image: ghcr.io/azylman/aerial-vanadis-nats:${TAG_AERIAL_VANADIS_NATS:=latest}
@@ -2092,7 +2092,7 @@ spec:
   replicas: 1
   restate:
     register:
-      cluster: restate
+      url: http://restate.aerial:9070
   selector:
     matchLabels:
       app.kubernetes.io/name: vanadis-restate
