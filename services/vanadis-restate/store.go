@@ -176,7 +176,7 @@ type VanadisStore interface {
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
 	RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, checkName, checkState string) error
 	ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error
-	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error)
+	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string, headSHA ...string) (int, error)
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -309,6 +309,7 @@ func applyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
 		return
 	}
 	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
+	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
 	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
 	for k := range checks {
 		if strings.HasPrefix(k, "_") {
@@ -1415,7 +1416,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 	}
 }
 
-func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error) {
+func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string, headSHA ...string) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("database connection is nil")
 	}
@@ -1423,16 +1424,21 @@ func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, ch
 	if id == "" {
 		return 0, errors.New("chunk_id cannot be empty")
 	}
+	var cleanSHA string
+	if len(headSHA) > 0 {
+		cleanSHA = strings.TrimSpace(headSHA[0])
+	}
 	const q = `UPDATE vanadis_chunks
 SET ci_fail_count = ci_fail_count + 1,
     status = 'ci_failed',
     banner = $1,
+    ci_checks = CASE WHEN $3 != '' THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_remediated_sha}', to_jsonb($3::text), true) ELSE ci_checks END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = $2
   AND status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed', 'failed', 'cancelled')
 RETURNING ci_fail_count;`
 	var failCount int
-	err := s.db.QueryRow(ctx, q, strings.TrimSpace(banner), id).Scan(&failCount)
+	err := s.db.QueryRow(ctx, q, strings.TrimSpace(banner), id, cleanSHA).Scan(&failCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, errPRTransitionSkipped
 	}

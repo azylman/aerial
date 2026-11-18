@@ -711,7 +711,11 @@ func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID s
 	return bld, chunk, nil
 }
 
-func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *VanadisBuild, chunk VanadisChunk, dispatchID, prompt string) error {
+func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *VanadisBuild, chunk VanadisChunk, dispatchID, prompt string, skipIfActive ...bool) error {
+	skip := true
+	if len(skipIfActive) > 0 {
+		skip = skipIfActive[0]
+	}
 	return b.executor.DispatchChunkRemediation(rc, BrainDispatchRequest{
 		ID:             dispatchID,
 		Source:         "vanadis-restate",
@@ -720,7 +724,7 @@ func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bl
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
 		Prompt:         prompt,
 		Effort:         capChunkEffort(chunk.Effort),
-		SkipIfActive:   true,
+		SkipIfActive:   skip,
 	})
 }
 
@@ -804,10 +808,11 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 	if err != nil {
 		return err
 	}
+	cleanHead := strings.TrimSpace(ev.HeadSHA)
 	if chunk.CIFailCount >= maxCIRemediationAttempts {
 		var failCount int
 		if b.store != nil {
-			failCount, err = b.store.IncrementChunkCIFailCount(rc, chunkID, banner)
+			failCount, err = b.store.IncrementChunkCIFailCount(rc, chunkID, banner, cleanHead)
 			if err != nil {
 				return err
 			}
@@ -819,14 +824,15 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 		return err
 	}
 	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
-	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
+	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
+	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
 		if errors.Is(err, errDispatchActive) {
 			return nil
 		}
 		return err
 	}
 	if b.store != nil {
-		if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner); err != nil {
+		if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner, cleanHead); err != nil {
 			return err
 		}
 	}

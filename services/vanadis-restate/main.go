@@ -273,6 +273,7 @@ type VanadisChunk struct {
 	CIFailCount        int                    `json:"ci_fail_count"`
 	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
 	HeadSHA            string                 `json:"head_sha,omitempty"`
+	RemediatedSHA      string                 `json:"remediated_sha,omitempty"`
 	MergeSHA           string                 `json:"merge_sha,omitempty"`
 	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Banner             string                 `json:"banner,omitempty"`
