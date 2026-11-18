@@ -77,20 +77,16 @@ func (m *mockEriClient) Message(ctx context.Context, channelID, content string) 
 
 func TestHTTPEriClient(t *testing.T) {
 	t.Parallel()
+	var gotPromptPayload map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/dispatch":
-			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case "/dispatch/cancel":
-			w.WriteHeader(http.StatusOK)
 		case "/prompt":
-			w.WriteHeader(http.StatusOK)
+			_ = json.NewDecoder(r.Body).Decode(&gotPromptPayload)
 		case "/discord/widget":
-			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"message_id":"widget-msg-999"}`))
-		case "/discord/message":
-			w.WriteHeader(http.StatusOK)
+		case "/dispatch/cancel", "/discord/message":
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -100,22 +96,25 @@ func TestHTTPEriClient(t *testing.T) {
 	client := NewHTTPEriClient(srv.URL, srv.Client())
 
 	ctx := context.Background()
-	if err := client.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err != nil {
-		t.Fatalf("Dispatch err = %v", err)
-	}
-	if err := client.CancelDispatch(ctx, "c1"); err != nil {
-		t.Fatalf("CancelDispatch err = %v", err)
-	}
-	if err := client.Prompt(ctx, "th1", "wake up"); err != nil {
-		t.Fatalf("Prompt err = %v", err)
-	}
+	assert.NoError(t, client.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}))
+	assert.NoError(t, client.CancelDispatch(ctx, "c1"))
+	assert.NoError(t, client.Prompt(ctx, "th1", "wake up"))
+	const wantMsgID = "vanadis-prompt-ad174723f0a135a9c1f7db8600f6ecb0"
+	assert.Equal(t, wantMsgID, gotPromptPayload["message_id"])
+	assert.Equal(t, "th1", gotPromptPayload["channel_id"])
+	assert.Equal(t, "wake up", gotPromptPayload["prompt"])
+	assert.NoError(t, client.Prompt(ctx, "th1", "wake up"))
+	assert.Equal(t, wantMsgID, gotPromptPayload["message_id"])
+	assert.NoError(t, client.Prompt(ctx, "th1", "other prompt"))
+	assert.NotEqual(t, wantMsgID, gotPromptPayload["message_id"])
+	assert.NoError(t, client.Prompt(ctx, "th2", "wake up"))
+	assert.NotEqual(t, wantMsgID, gotPromptPayload["message_id"])
+	assert.NoError(t, client.Prompt(ctx, "", "wake up"))
+	assert.NoError(t, client.Prompt(ctx, "th1", ""))
 	msgID, err := client.Widget(ctx, StatusWidgetRequest{ID: "b1"})
-	if err != nil || msgID != "widget-msg-999" {
-		t.Fatalf("Widget msgID = %q err = %v", msgID, err)
-	}
-	if err := client.Message(ctx, "ch1", "hello"); err != nil {
-		t.Fatalf("Message err = %v", err)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, "widget-msg-999", msgID)
+	assert.NoError(t, client.Message(ctx, "ch1", "hello"))
 
 	// Test errors
 	badClient := NewHTTPEriClient("http://invalid.localhost:99", srv.Client())

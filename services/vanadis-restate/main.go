@@ -1097,25 +1097,30 @@ func (b *BuildObject) shouldScheduleReconcile(out reconcileStepOutput) bool {
 	return b.store != nil && out.Error == errDispatchActive.Error() && out.BuildStatus == statusRunning
 }
 
-func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, status, reason, promptHeader, promptMsg string) {
+func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, status, reason, promptHeader, promptMsg string) error {
 	if b.executor == nil {
-		return
+		return nil
 	}
 	if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", status, []string{build.ID}, reason); err != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 	}
+	var wakeErr error
 	if !build.Quiet {
 		prompt := fmt.Sprintf("[%s]\nBuild ID: %s\nObjective: %s\n\n%s", promptHeader, build.ID, build.Objective, promptMsg)
 		if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] wake prompt warning", "error", err)
+			wakeErr = err
 		}
 	}
+	var widgetErr error
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build "+status); err != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
+		widgetErr = err
 	}
+	return errors.Join(wakeErr, widgetErr)
 }
 
-func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk) string {
+func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk) (string, error) {
 	allDone := true
 	hasFailed := false
 	for _, c := range chunks {
@@ -1130,27 +1135,41 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 
 	switch {
 	case hasFailed:
+		build.Status = statusFailed
+		if err := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", "Build encountered failures."); err != nil {
+			return "", err
+		}
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
 			slog.ErrorContext(ctx, "[vanadis-restate] update build status failed", "error", err)
 		}
-		build.Status = statusFailed
-		b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", "Build encountered failures.")
-		return statusFailed
+		return statusFailed, nil
 	case allDone && len(chunks) > 0:
+		build.Status = statusCompleted
+		if err := b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully."); err != nil {
+			return "", err
+		}
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusCompleted); err != nil {
 			slog.ErrorContext(ctx, "[vanadis-restate] update build status completed", "error", err)
 		}
-		build.Status = statusCompleted
-		b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully.")
-		return statusCompleted
+		return statusCompleted, nil
 	default:
 		if b.executor != nil {
 			if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, ""); err != nil {
 				slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
 			}
 		}
-		return statusRunning
+		return statusRunning, nil
 	}
+}
+
+func cloneLaunchedMap(priorLaunched map[string]bool) map[string]bool {
+	launchedMap := make(map[string]bool, len(priorLaunched))
+	for k, v := range priorLaunched {
+		if v {
+			launchedMap[k] = true
+		}
+	}
+	return launchedMap
 }
 
 func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool, terminalNotified bool) (reconcileStepOutput, error) {
@@ -1182,7 +1201,9 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	if !terminalNotified && build.Status == statusCompleted && isActionCompletionMutation(mutation, chunks) {
 		// The completion transaction may have persisted terminal status before this
 		// journaled continuation ran. Replay its terminal effects as well.
-		b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully.")
+		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully."); nErr != nil {
+			return reconcileStepOutput{}, nErr
+		}
 		terminalNotified = true
 	}
 	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
@@ -1192,13 +1213,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		}, nil
 	}
 
-	launchedMap := make(map[string]bool, len(priorLaunched))
-	for k, v := range priorLaunched {
-		if v {
-			launchedMap[k] = true
-		}
-	}
-
+	launchedMap := cloneLaunchedMap(priorLaunched)
 	launchedChunks, err := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
 	deferred := errors.Is(err, errDispatchActive)
 	if err != nil && !deferred {
@@ -1208,7 +1223,10 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	if deferred {
 		recoveryReason = errDispatchActive.Error()
 	}
-	finalStatus := b.evaluateBuildTerminalStatus(ctx, build, chunks)
+	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks)
+	if err != nil {
+		return reconcileStepOutput{}, err
+	}
 	build.Status = finalStatus
 
 	return reconcileStepOutput{
@@ -1216,7 +1234,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		Error:          recoveryReason,
 		LaunchedChunks: launchedChunks,
 		LaunchedMap:    launchedMap,
-		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted},
+		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted || finalStatus == statusFailed},
 	}, nil
 }
 
