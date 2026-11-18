@@ -256,7 +256,7 @@ spec:
                 readOnly: true
                 subPath: claude-oauth-token
               - mountPath: /local/postgres-password
-                name: oauth-token
+                name: postgres-password
                 readOnly: true
                 subPath: postgres-password
               - mountPath: /local/codex-auth.json
@@ -286,10 +286,16 @@ spec:
                   path: claude-oauth-token
                 - key: CODEX_AUTH_JSON
                   path: codex-auth.json
-                - key: POSTGRES_PASSWORD
-                  path: postgres-password
               optional: true
               secretName: roborev-runner-secret
+          - name: postgres-password
+            secret:
+              defaultMode: 384
+              items:
+                - key: password
+                  path: postgres-password
+              optional: true
+              secretName: postgres-aerial-role
           - hostPath:
               path: /var/lib/aerial/roborev-cache/brain
               type: DirectoryOrCreate
@@ -455,28 +461,6 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: infisical-universal-auth
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: INFISICAL_CLIENT_ID
-      secretKey: INFISICAL_CLIENT_ID
-    - remoteRef:
-        key: INFISICAL_CLIENT_SECRET
-      secretKey: INFISICAL_CLIENT_SECRET
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
-    deletionPolicy: Retain
-    name: infisical-universal-auth
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
   name: shared-secrets
   namespace: default
 spec:
@@ -492,35 +476,6 @@ spec:
     creationPolicy: Owner
     deletionPolicy: Retain
     name: shared-secrets
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: postgres-aerial-role
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
-    deletionPolicy: Retain
-    template:
-      data:
-        password: "{{ .POSTGRES_PASSWORD }}"
-        username: aerial
-      metadata:
-        annotations:
-          # Bump to make CNPG re-apply the managed role password from this secret.
-          aerial.io/role-password-resync: "2026-11-10"
-        labels:
-          cnpg.io/reload: "true"
-      type: kubernetes.io/basic-auth
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -542,31 +497,10 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: postgres-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
-    deletionPolicy: Retain
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
   name: coven-secret
   namespace: default
 spec:
   data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
@@ -584,9 +518,6 @@ metadata:
   namespace: default
 spec:
   data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
@@ -608,9 +539,6 @@ spec:
         key: DISCORD_BOT_TOKEN
       secretKey: DISCORD_BOT_TOKEN
     - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-    - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
   refreshInterval: 1m
@@ -630,9 +558,6 @@ spec:
     - remoteRef:
         key: DISCORD_BOT_TOKEN
       secretKey: DISCORD_BOT_TOKEN
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
@@ -664,29 +589,19 @@ spec:
   target:
     creationPolicy: Owner
 ---
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
 metadata:
-  name: infisical-secret
+  name: victoria-admin-key-generator
   namespace: default
 spec:
-  data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-    - remoteRef:
-        key: AUTH_SECRET
-      secretKey: AUTH_SECRET
-    - remoteRef:
-        key: ENCRYPTION_KEY
-      secretKey: ENCRYPTION_KEY
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
-    deletionPolicy: Retain
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - VICTORIA_ADMIN_AUTH_KEY
+  symbols: 0
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -694,17 +609,17 @@ metadata:
   name: victoria-admin-secret
   namespace: default
 spec:
-  data:
-    - remoteRef:
-        key: VICTORIA_ADMIN_AUTH_KEY
-      secretKey: VICTORIA_ADMIN_AUTH_KEY
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: victoria-admin-key-generator
+  refreshInterval: "0"
   target:
     creationPolicy: Owner
     deletionPolicy: Retain
+    name: victoria-admin-secret
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -729,40 +644,9 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: infisical-mcp-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: INFISICAL_CLIENT_ID
-      secretKey: INFISICAL_CLIENT_ID
-    - remoteRef:
-        key: INFISICAL_CLIENT_SECRET
-      secretKey: INFISICAL_CLIENT_SECRET
-    - remoteRef:
-        key: INFISICAL_CLIENT_ID
-      secretKey: INFISICAL_UNIVERSAL_AUTH_CLIENT_ID
-    - remoteRef:
-        key: INFISICAL_CLIENT_SECRET
-      secretKey: INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
-    deletionPolicy: Retain
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
   name: prospera-secret
   namespace: default
 spec:
-  data:
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
   dataFrom:
     - find:
         name:
@@ -784,9 +668,6 @@ spec:
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
   dataFrom:
     - find:
         name:
