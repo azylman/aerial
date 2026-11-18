@@ -481,6 +481,8 @@ spec:
                 name: ci-cache
               - mountPath: /tmp
                 name: tmp
+              - mountPath: /actions-runner/_work
+                name: work
         volumes:
           - hostPath:
               path: /var/run/docker.sock
@@ -493,6 +495,10 @@ spec:
               medium: Memory
               sizeLimit: 2Gi
             name: tmp
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+            name: work
   valuesFrom:
     - kind: Secret
       name: git-sync-secret
