@@ -399,6 +399,7 @@ func TestHandlePRLifecycleEvent_Validation(t *testing.T) {
 			wantEventName: "synchronize",
 			wantPRNumber:  10,
 			wantErr:       false,
+			wantTermed:    true,
 		},
 		{
 			name:          "restate 404 terminal ack",
@@ -409,6 +410,7 @@ func TestHandlePRLifecycleEvent_Validation(t *testing.T) {
 			wantEventName: "check_updated",
 			wantPRNumber:  10,
 			wantErr:       false,
+			wantTermed:    true,
 		},
 	}
 
@@ -451,7 +453,7 @@ func TestHandlePRLifecycleEvent_ErrorsAndRetries(t *testing.T) {
 			wantNakDelay:  2 * time.Second,
 		},
 		{
-			name:          "restate 500 attempt 3 terms",
+			name:          "restate 500 attempt 3 naks with 4s",
 			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
 			delivered:     3,
 			serverStatus:  http.StatusInternalServerError,
@@ -460,7 +462,21 @@ func TestHandlePRLifecycleEvent_ErrorsAndRetries(t *testing.T) {
 			wantEventName: "opened",
 			wantPRNumber:  10,
 			wantErr:       true,
-			wantTermed:    true,
+			wantNaked:     true,
+			wantNakDelay:  4 * time.Second,
+		},
+		{
+			name:          "restate 429 attempt 3 naks with 4s",
+			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
+			delivered:     3,
+			serverStatus:  http.StatusTooManyRequests,
+			wantRequests:  1,
+			wantRepo:      "azylman/aerial",
+			wantEventName: "opened",
+			wantPRNumber:  10,
+			wantErr:       true,
+			wantNaked:     true,
+			wantNakDelay:  4 * time.Second,
 		},
 		{
 			name:         "transport error naks with delay",
@@ -473,14 +489,23 @@ func TestHandlePRLifecycleEvent_ErrorsAndRetries(t *testing.T) {
 			wantNakDelay: 1 * time.Second,
 		},
 		{
+			name:         "transport error attempt 3 naks with 4s",
+			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
+			delivered:    3,
+			closeServer:  true,
+			wantRequests: 0,
+			wantErr:      true,
+			wantNaked:    true,
+			wantNakDelay: 4 * time.Second,
+		},
+		{
 			name:         "request creation error on invalid url",
 			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
 			delivered:    1,
 			overrideURL:  "://invalid-url\x7f",
 			wantRequests: 0,
 			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
+			wantTermed:   true,
 		},
 		{
 			name:          "custom MsgID header used as idempotency key",
@@ -650,6 +675,17 @@ func TestHandleDispatchOutcomeEvent_Filtering(t *testing.T) {
 			wantErr:        false,
 			wantKey:        "dispatch:disp-3:chk-3:timeout",
 		},
+		{
+			name:           "crashed status forwards to restate",
+			msgData:        `{"dispatch_id":"disp-4","vanadis_chunk_id":"chk-4","status":"crashed"}`,
+			serverStatus:   http.StatusOK,
+			wantRequests:   1,
+			wantDispatchID: "disp-4",
+			wantChunkID:    "chk-4",
+			wantStatus:     "crashed",
+			wantErr:        false,
+			wantKey:        "dispatch:disp-4:chk-4:crashed",
+		},
 	}
 
 	for _, tc := range tests {
@@ -673,6 +709,7 @@ func TestHandleDispatchOutcomeEvent_Errors(t *testing.T) {
 			wantChunkID:    "chk-1",
 			wantStatus:     "completed",
 			wantErr:        false,
+			wantTermed:     true,
 		},
 		{
 			name:           "restate 500 attempt 1 naks with delay",
@@ -688,7 +725,7 @@ func TestHandleDispatchOutcomeEvent_Errors(t *testing.T) {
 			wantNakDelay:   1 * time.Second,
 		},
 		{
-			name:           "restate 500 attempt 3 terms",
+			name:           "restate 500 attempt 3 naks with 4s",
 			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
 			delivered:      3,
 			serverStatus:   http.StatusInternalServerError,
@@ -697,7 +734,31 @@ func TestHandleDispatchOutcomeEvent_Errors(t *testing.T) {
 			wantChunkID:    "chk-1",
 			wantStatus:     "completed",
 			wantErr:        true,
-			wantTermed:     true,
+			wantNaked:      true,
+			wantNakDelay:   4 * time.Second,
+		},
+		{
+			name:           "restate 429 attempt 3 naks with 4s",
+			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
+			delivered:      3,
+			serverStatus:   http.StatusTooManyRequests,
+			wantRequests:   1,
+			wantDispatchID: "disp-1",
+			wantChunkID:    "chk-1",
+			wantStatus:     "completed",
+			wantErr:        true,
+			wantNaked:      true,
+			wantNakDelay:   4 * time.Second,
+		},
+		{
+			name:         "transport error attempt 3 naks with 4s",
+			msgData:      `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
+			delivered:    3,
+			closeServer:  true,
+			wantRequests: 0,
+			wantErr:      true,
+			wantNaked:    true,
+			wantNakDelay: 4 * time.Second,
 		},
 		{
 			name:         "transport error naks with delay",
@@ -912,6 +973,17 @@ func TestHandleWidgetSyncEvent(t *testing.T) {
 			wantNaked:    true,
 			wantNakDelay: 1 * time.Second,
 		},
+		{
+			name:         "repo and pr_number restate 500 attempt 2 naks with delay",
+			msgData:      `{"repo":"azylman/aerial","pr_number":42}`,
+			delivered:    2,
+			serverStatus: http.StatusInternalServerError,
+			wantRequests: 1,
+			wantPath:     "/BuildRouter/RoutePREvent/send",
+			wantErr:      true,
+			wantNaked:    true,
+			wantNakDelay: 2 * time.Second,
+		},
 	}
 
 	for _, tc := range tests {
@@ -929,7 +1001,6 @@ func TestSettleFailedDelivery_Direct(t *testing.T) {
 		name         string
 		delivered    uint64
 		nakErr       error
-		termErr      error
 		wantNaked    bool
 		wantTermed   bool
 		wantNakDelay time.Duration
@@ -942,15 +1013,16 @@ func TestSettleFailedDelivery_Direct(t *testing.T) {
 			wantNakDelay: 1 * time.Second,
 		},
 		{
-			name:       "delivered 3 with term error logs warning",
-			delivered:  3,
-			termErr:    errors.New("term network err"),
-			wantTermed: true,
+			name:         "delivered 3 naks with 4s backoff",
+			delivered:    3,
+			wantNaked:    true,
+			wantNakDelay: 4 * time.Second,
 		},
 		{
-			name:       "delivered 5 terms",
-			delivered:  5,
-			wantTermed: true,
+			name:         "delivered 5 naks with 16s backoff",
+			delivered:    5,
+			wantNaked:    true,
+			wantNakDelay: 16 * time.Second,
 		},
 	}
 
@@ -960,7 +1032,6 @@ func TestSettleFailedDelivery_Direct(t *testing.T) {
 			msg := &testMsg{
 				delivered: tc.delivered,
 				nakErr:    tc.nakErr,
-				termErr:   tc.termErr,
 			}
 			settleFailedDelivery(context.Background(), msg)
 			assert.Equal(t, tc.wantNaked, msg.naked.Load())
@@ -1032,6 +1103,32 @@ func TestIdempotencyKeys(t *testing.T) {
 				got := dispatchIdempotencyKey(subMsg, tc.dispEvent)
 				assert.Equal(t, tc.wantResult, got)
 			}
+		})
+	}
+}
+
+func TestIsRetryableIngressStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		code int
+		want bool
+	}{
+		{name: "200 ok is not retryable", code: http.StatusOK, want: false},
+		{name: "400 bad request is not retryable", code: http.StatusBadRequest, want: false},
+		{name: "404 not found is not retryable", code: http.StatusNotFound, want: false},
+		{name: "408 request timeout is retryable", code: http.StatusRequestTimeout, want: true},
+		{name: "429 too many requests is retryable", code: http.StatusTooManyRequests, want: true},
+		{name: "500 internal server error is retryable", code: http.StatusInternalServerError, want: true},
+		{name: "502 bad gateway is retryable", code: http.StatusBadGateway, want: true},
+		{name: "503 service unavailable is retryable", code: http.StatusServiceUnavailable, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isRetryableIngressStatus(tc.code))
 		})
 	}
 }
@@ -1122,6 +1219,15 @@ func TestRunApp(t *testing.T) {
 			},
 			useDefaultBus: true,
 			wantErrMsg:    "nats_url is required",
+		},
+		{
+			name: "default bus factory connects and fails on invalid url",
+			cfg: Config{
+				Port:    "0",
+				NATSURL: "://",
+			},
+			useDefaultBus: true,
+			wantErrMsg:    "connect to nats",
 		},
 		{
 			name: "invalid health port causes listen error",

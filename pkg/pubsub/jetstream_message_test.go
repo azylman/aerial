@@ -313,44 +313,160 @@ type plainBus struct {
 	Bus
 }
 
+func setupSnoozeRawMsg(t *testing.T, boundSub bool, dialer *recordingNatsDialer, header nats.Header) (*nats.Msg, func()) {
+	t.Helper()
+	if !boundSub {
+		return &nats.Msg{
+			Subject: "aerial.jobs.snooze",
+			Data:    []byte("s"),
+			Header:  header,
+		}, func() {}
+	}
+
+	nc, err := nats.Connect("nats://127.0.0.1:4222",
+		nats.SetCustomDialer(dialer),
+		nats.Timeout(1*time.Second),
+		nats.NoReconnect(),
+		nats.MaxReconnects(0),
+	)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	sub, err := nc.SubscribeSync("aerial.jobs.snooze")
+	if err != nil {
+		nc.Close()
+		t.Fatalf("SubscribeSync failed: %v", err)
+	}
+
+	raw := &nats.Msg{
+		Subject: "aerial.jobs.snooze",
+		Reply:   "test.reply.inbox",
+		Sub:     sub,
+		Data:    []byte("s"),
+		Header:  header,
+	}
+	return raw, func() { nc.Close() }
+}
+
+func countInProgressTokens(dialer *recordingNatsDialer, reply string) int {
+	var count int
+	for _, tok := range dialer.ackTokens(reply) {
+		if tok == "+WPI" {
+			count++
+		}
+	}
+	return count
+}
+
 func TestJSMessage_Snooze(t *testing.T) {
 	t.Parallel()
 
 	errContinuation := errors.New("continuation pub failed")
 	tests := []struct {
-		name       string
-		header     nats.Header
-		publishErr error
-		plainBus   bool
-		wantErr    error
+		name              string
+		delay             time.Duration
+		hbInterval        time.Duration
+		header            nats.Header
+		publishErr        error
+		plainBus          bool
+		boundSub          bool
+		cancelCtx         bool
+		wantErr           error
+		wantSettled       bool
+		wantMinInProgress int
+		wantMaxInProgress int
 	}{
 		{
-			name:    "unbound message without msg id publishes then fails to ack",
-			wantErr: nats.ErrMsgNotBound,
+			name:        "unbound message without msg id publishes then fails to ack",
+			wantErr:     nats.ErrMsgNotBound,
+			wantSettled: true,
 		},
 		{
-			name:       "continuation publish failure is returned",
-			publishErr: errContinuation,
-			wantErr:    errContinuation,
+			name:        "continuation publish failure is returned",
+			publishErr:  errContinuation,
+			wantErr:     errContinuation,
+			wantSettled: false,
 		},
 		{
-			name:     "existing snooze sequence on a non-header publisher bus",
-			header:   nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}},
-			plainBus: true,
-			wantErr:  nats.ErrMsgNotBound,
+			name:        "existing snooze sequence on a non-header publisher bus",
+			header:      nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}},
+			plainBus:    true,
+			wantErr:     nats.ErrMsgNotBound,
+			wantSettled: true,
+		},
+		{
+			name:        "delay with continuation publish failure does not settle",
+			delay:       5 * time.Millisecond,
+			publishErr:  errContinuation,
+			wantErr:     errContinuation,
+			wantSettled: false,
+		},
+		{
+			name:              "bound message with delay exceeding heartbeat interval triggers in progress and settles",
+			delay:             15 * time.Millisecond,
+			hbInterval:        3 * time.Millisecond,
+			boundSub:          true,
+			wantSettled:       true,
+			wantMinInProgress: 1,
+			wantMaxInProgress: 100,
+		},
+		{
+			name:              "bound message with delay below heartbeat interval settles without in progress",
+			delay:             5 * time.Millisecond,
+			hbInterval:        50 * time.Millisecond,
+			boundSub:          true,
+			wantSettled:       true,
+			wantMinInProgress: 0,
+			wantMaxInProgress: 0,
+		},
+		{
+			name:        "canceled context aborts snooze delay and leaves message unsettled",
+			delay:       1 * time.Hour,
+			cancelCtx:   true,
+			wantErr:     context.Canceled,
+			wantSettled: false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var bus Bus = newJetStreamBusWithContext(nil, &mockJetStream{publishErr: tc.publishErr})
+			jsBus := newJetStreamBusWithContext(nil, &mockJetStream{publishErr: tc.publishErr})
+			if tc.hbInterval > 0 {
+				jsBus.heartbeatInterval = tc.hbInterval
+			}
+			var bus Bus = jsBus
 			if tc.plainBus {
 				bus = plainBus{bus}
 			}
-			msg := &jsMessage{raw: &nats.Msg{Subject: "aerial.jobs.snooze", Data: []byte("s"), Header: tc.header}, bus: bus}
-			if err := msg.Snooze(0); !errors.Is(err, tc.wantErr) {
-				t.Errorf("Snooze(0) = %v, want %v", err, tc.wantErr)
+
+			dialer := &recordingNatsDialer{}
+			raw, cleanup := setupSnoozeRawMsg(t, tc.boundSub, dialer, tc.header)
+			defer cleanup()
+
+			var doneCh <-chan struct{}
+			if tc.cancelCtx {
+				c, cancel := context.WithCancel(context.Background())
+				cancel()
+				doneCh = c.Done()
+			}
+			msg := &jsMessage{raw: raw, bus: bus, done: doneCh}
+			err := msg.Snooze(tc.delay)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("Snooze(%v) = %v, want %v", tc.delay, err, tc.wantErr)
+			}
+			msg.mu.Lock()
+			settled := msg.settled
+			msg.mu.Unlock()
+			if settled != tc.wantSettled {
+				t.Errorf("settled = %v, want %v", settled, tc.wantSettled)
+			}
+			if tc.boundSub {
+				gotIP := countInProgressTokens(dialer, "test.reply.inbox")
+				if gotIP < tc.wantMinInProgress || gotIP > tc.wantMaxInProgress {
+					t.Errorf("inProgress tokens = %d, want between %d and %d", gotIP, tc.wantMinInProgress, tc.wantMaxInProgress)
+				}
 			}
 		})
 	}
