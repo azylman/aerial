@@ -326,6 +326,7 @@ spec:
                   - aura-farming
                   - vision
                   - gatus
+                  - prospera
     - ports:
         - port: 4317
           protocol: TCP
@@ -518,6 +519,9 @@ spec:
                   - synapse
                   - gatus
                   - coverage-ingest
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: edge-gateway
   podSelector:
     matchLabels:
       app.kubernetes.io/name: prospera
