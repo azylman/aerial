@@ -487,7 +487,6 @@ func (p *WorkerPool) buildChunkStepDeliveryRequestLocked(chunkID, activeStep str
 	}
 
 	deliveryReq := cloneStatusWidgetRequest(req, false)
-	deliveryReq.SkipSink = true
 	deliveryReq.Chunks[chunkIdx].ActiveStep = activeStep
 	for i := range deliveryReq.Chunks {
 		if i != chunkIdx && isWidgetChunkInProgress(deliveryReq.Chunks[i].Status) {
