@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/ollama"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // OllamaClient provides embedding generation capabilities.
@@ -41,9 +42,9 @@ func NewOllamaClient(cfg *OllamaConfig) *Client {
 	if numCtx <= 0 {
 		numCtx = DefaultOllamaNumCtx
 	}
-	httpClient := &http.Client{
+	httpClient := tracing.Client(&http.Client{
 		Timeout: 3 * time.Second,
-	}
+	})
 	retryDelay := 50 * time.Millisecond
 	c := &Client{
 		baseURL:     baseURL,
