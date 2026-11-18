@@ -247,7 +247,14 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	// Methodless requests (responses to server pings, empty POSTs, the standalone SSE GET)
 	// are client housekeeping, not agent work, so they never join a turn.
 	if method != "" {
-		if parent, callID, ok := p.parentSpan(ctx, target, server, r.Header.Get(env.DaemonHeader), method, tool, body); ok {
+		parent, callID, ok := p.parentSpan(ctx, target, server, r.Header.Get(env.DaemonHeader), method, tool, body)
+		if !ok {
+			// Turn attribution is authoritative; only when it resolves nothing does the
+			// engine's own context (TRACEPARENT it inherited at daemon spawn and forwards on
+			// its MCP requests) parent the span, instead of the call going untraced.
+			parent, ok = inboundSpanContext(ctx, r.Header)
+		}
+		if ok {
 			attrs = append(attrs, attrMCPServer.String(server))
 			if callID != "" {
 				attrs = append(attrs, attrGenAIToolCallID.String(callID))
@@ -309,6 +316,14 @@ func (p *TraceProxy) parentSpan(ctx context.Context, target, server, daemonHeade
 		return sc, callID, true
 	}
 	return turnSpan, callID, true
+}
+
+// inboundSpanContext returns the valid W3C traceparent (with tracestate) an MCP client sent
+// in h, if any; ctx is the proxy route's request context, which carries no span of its own. Long-lived daemons carry their daemon.spawn context, so this parents a call
+// under the spawn trace when no turn claims it.
+func inboundSpanContext(ctx context.Context, h http.Header) (trace.SpanContext, bool) {
+	sc := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(ctx, propagation.HeaderCarrier(h)))
+	return sc, sc.IsValid()
 }
 
 // owner resolves the daemon behind a proxied request and its turn span. Claude Code names its
