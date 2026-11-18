@@ -225,17 +225,18 @@ sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 ### Step 2: Fork Configuration & Bootstrap Secrets
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
-3. Pre-create the initial Kubernetes secrets so CloudNativePG and core services boot immediately:
+3. Pre-create the 3 initial Kubernetes bootstrap secrets to break the PostgreSQL/Infisical/External Secrets Operator chicken-and-egg loop:
 
 <details>
 <summary><strong>Bootstrap Kubernetes Secrets (click to expand)</strong></summary>
 
 ```bash
-export DISCORD_BOT_TOKEN="your-discord-bot-token"
 export GITHUB_PAT="your-github-pat"
 export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
 export AUTH_SECRET="$(openssl rand -hex 16)"
 export ENCRYPTION_KEY="$(openssl rand -hex 16)"
+export INFISICAL_CLIENT_ID="your-infisical-client-id"
+export INFISICAL_CLIENT_SECRET="your-infisical-client-secret"
 
 # 1. CloudNativePG PostgreSQL credentials
 kubectl create secret generic postgres-aerial-role \
@@ -243,67 +244,28 @@ kubectl create secret generic postgres-aerial-role \
   --from-literal=username=aerial \
   --from-literal=password="$POSTGRES_PASSWORD"
 
-kubectl create secret generic postgres-secret \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
-
-# 2. Git-sync and core service credentials
-kubectl create secret generic git-sync-secret \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT"
-
-kubectl create secret generic synapse-secret \
-  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT"
-
-kubectl create secret generic coven-secret \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT"
-
-kubectl create secret generic eri-secret \
-  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT" \
-  --from-literal=GEMINI_HARNESS_API_KEY=""
-
-kubectl create secret generic discord-mcp-secret \
-  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
-  --from-literal=DISCORD_TOKEN="$DISCORD_BOT_TOKEN"
-
-kubectl create secret generic vanadis-secret \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT"
-
-# 3. Observability, runner, and MCP service secrets
-kubectl create secret generic victoriametrics-secret \
-  --from-literal=HA_METRICS_TOKEN=""
-
-kubectl create secret generic prospera-secret \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --from-literal=GEMINI_HARNESS_API_KEY="" \
-  --from-literal=TWILIO_AUTH_TOKEN=""
-
-kubectl create secret generic roborev-runner-secret \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT" \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
-
-# 4. Infisical bootstrap (if using Infisical for secret governance)
+# 2. Infisical database and encryption credentials
 kubectl create secret generic infisical-secret \
   --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   --from-literal=AUTH_SECRET="$AUTH_SECRET" \
   --from-literal=ENCRYPTION_KEY="$ENCRYPTION_KEY"
 
+# 3. External Secrets Operator Universal Auth credentials
 kubectl create secret generic infisical-universal-auth \
-  --from-literal=INFISICAL_CLIENT_ID="" \
-  --from-literal=INFISICAL_CLIENT_SECRET=""
+  --from-literal=INFISICAL_CLIENT_ID="$INFISICAL_CLIENT_ID" \
+  --from-literal=INFISICAL_CLIENT_SECRET="$INFISICAL_CLIENT_SECRET"
+```
 
-kubectl create secret generic infisical-mcp-secret \
-  --from-literal=INFISICAL_CLIENT_ID="" \
-  --from-literal=INFISICAL_CLIENT_SECRET=""
+Once Flux boots Infisical, write core secrets (`DISCORD_BOT_TOKEN`, `GITHUB_PAT`, `POSTGRES_PASSWORD`, `AUTH_SECRET`, `ENCRYPTION_KEY`, `VICTORIA_ADMIN_AUTH_KEY`) once to Infisical (`infisical secrets set` or the Infisical web UI at `http://infisical.aerial/`) so External Secrets Operator fans out all service secrets automatically:
 
-kubectl create secret generic shared-secrets \
-  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
-  --from-literal=GITHUB_PAT="$GITHUB_PAT" \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+```bash
+infisical secrets set \
+  DISCORD_BOT_TOKEN="your-discord-bot-token" \
+  GITHUB_PAT="$GITHUB_PAT" \
+  POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  AUTH_SECRET="$AUTH_SECRET" \
+  ENCRYPTION_KEY="$ENCRYPTION_KEY" \
+  VICTORIA_ADMIN_AUTH_KEY="$(openssl rand -hex 16)"
 ```
 
 </details>

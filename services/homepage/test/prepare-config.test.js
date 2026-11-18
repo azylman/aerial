@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const prepareConfig = require('../prepare-config');
-const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
+const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback, escapeShellValue } = prepareConfig;
 
 test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof run, 'function');
@@ -18,6 +18,7 @@ test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof safeRead, 'function');
   assert.equal(typeof writeAtomic, 'function');
   assert.equal(typeof copyFallback, 'function');
+  assert.equal(typeof escapeShellValue, 'function');
   assert.equal(prepareConfig.startWatcher, undefined);
 });
 
@@ -153,6 +154,87 @@ test('prepare-config: candidate config fallback when /local/homepage.yaml is com
     } else {
       delete process.env.CONFIG_PATH;
     }
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('prepare-config: run generates runtime.env with generic HOMEPAGE_VAR_<KEY> entries and safe shell literals', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-env-test-'));
+  const userDir = path.join(tmpBase, 'user');
+  const coreDir = path.join(tmpBase, 'core');
+  const targetDir = path.join(tmpBase, 'target');
+  const configFile = path.join(tmpBase, 'homepage.yaml');
+
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.mkdirSync(coreDir, { recursive: true });
+  fs.mkdirSync(targetDir, { recursive: true });
+
+  const mockConfig = {
+    port: '3005',
+    allowed_hosts: 'aerial.lan',
+    log_level: 'debug',
+    node_tls_reject_unauthorized: 0,
+    unifi_url: 'https://unifi.lan:8443',
+    unifi_user: 'aerial-bot',
+    qnap_user: 'qnap-admin',
+    custom_token: 'my-secret-key',
+    refresh_seconds: 15,
+    enable_feature: true,
+    disable_feature: false,
+    empty_str: '',
+    nested_obj: { nested_key: 'value' },
+    list_val: ['item1'],
+    shell_syntax_token: 'abc$HOME $(whoami) `id`',
+    quote_token: "it's \"tricky\"",
+    'invalid key with space': 'skip-me',
+    'invalid.key.dot': 'skip-me',
+    'invalid-key-hyphen': 'skip-me'
+  };
+
+  const stubYaml = {
+    load: (str) => JSON.parse(str),
+    dump: (obj) => JSON.stringify(obj)
+  };
+
+  fs.writeFileSync(configFile, JSON.stringify(mockConfig), 'utf8');
+
+  try {
+    run({ coreDir, userDir, targetDir, yaml: stubYaml, candidatePaths: [configFile] });
+
+    const envPath = path.join(targetDir, 'runtime.env');
+    assert.ok(fs.existsSync(envPath), 'runtime.env should be generated');
+
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const lines = envContent.trim().split('\n');
+
+    assert.ok(lines.includes("PORT='3005'"));
+    assert.ok(lines.includes("HOMEPAGE_ALLOWED_HOSTS='aerial.lan'"));
+    assert.ok(lines.includes("LOG_LEVEL='debug'"));
+    assert.ok(lines.includes("NODE_TLS_REJECT_UNAUTHORIZED='0'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_UNIFI_URL='https://unifi.lan:8443'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_UNIFI_USER='aerial-bot'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_QNAP_USER='qnap-admin'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_CUSTOM_TOKEN='my-secret-key'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_REFRESH_SECONDS='15'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_ENABLE_FEATURE='true'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_DISABLE_FEATURE='false'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_SHELL_SYNTAX_TOKEN='abc$HOME $(whoami) `id`'"));
+    assert.ok(lines.includes("HOMEPAGE_VAR_QUOTE_TOKEN='it'\\''s \"tricky\"'"));
+
+    assert.ok(!envContent.includes('HOMEPAGE_VAR_PORT'));
+    assert.ok(!envContent.includes('EMPTY_STR'));
+    assert.ok(!envContent.includes('NESTED_OBJ'));
+    assert.ok(!envContent.includes('LIST_VAL'));
+    assert.ok(!envContent.includes('INVALID KEY WITH SPACE'));
+    assert.ok(!envContent.includes('INVALID.KEY.DOT'));
+    assert.ok(!envContent.includes('INVALID-KEY-HYPHEN'));
+
+    // Verify sourcing in POSIX /bin/sh preserves literal values without shell expansion
+    const { execFileSync } = require('child_process');
+    const shScript = `set -a; . "${envPath}"; set +a; printf '%s|%s' "$HOMEPAGE_VAR_SHELL_SYNTAX_TOKEN" "$HOMEPAGE_VAR_QUOTE_TOKEN"`;
+    const shOut = execFileSync('/bin/sh', ['-c', shScript], { encoding: 'utf8' });
+    assert.equal(shOut, `abc$HOME $(whoami) \`id\`|it's "tricky"`);
+  } finally {
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 });
