@@ -750,7 +750,11 @@ func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild
 	buildObj := bld
 	var chunks []VanadisChunk
 	if b.store != nil {
-		if fetched, fetchedChunks, gErr := b.store.GetBuild(rc, bld.ID); gErr == nil && fetched != nil {
+		fetched, fetchedChunks, gErr := b.store.GetBuild(rc, bld.ID)
+		if gErr != nil {
+			return fmt.Errorf("get build %s for failure notification: %w", bld.ID, gErr)
+		}
+		if fetched != nil {
 			buildObj = *fetched
 			chunks = fetchedChunks
 		}
@@ -798,20 +802,31 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 		if err != nil {
 			return FailChunkResponse{}, err
 		}
-		return FailChunkResponse{
+		resp := FailChunkResponse{
 			Failed:      failed,
 			BuildID:     chk.BuildID,
 			ChunkID:     chk.ID,
 			BuildStatus: bld.Status,
 			ChunkStatus: chk.Status,
-		}, nil
+		}
+		if bld != nil {
+			resp.ThreadID = bld.ThreadID
+			resp.Objective = bld.Objective
+			resp.Quiet = bld.Quiet
+		}
+		return resp, nil
 	})
 	if err != nil {
 		return FailChunkResponse{}, toTerminalErr(err)
 	}
 	if res.Failed && res.BuildID != "" && res.BuildStatus == statusFailed && res.ChunkStatus == statusFailed && b.executor != nil {
 		_, nErr := runJournaled(ctx, labelFailChunk, "notify-chunk-failure", func(rc restate.RunContext) (bool, error) {
-			bld := VanadisBuild{ID: res.BuildID}
+			bld := VanadisBuild{
+				ID:        res.BuildID,
+				ThreadID:  res.ThreadID,
+				Objective: res.Objective,
+				Quiet:     res.Quiet,
+			}
 			if err := b.notifyChunkFailure(rc, bld, chunkID, reason); err != nil {
 				return false, err
 			}

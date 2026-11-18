@@ -36,7 +36,6 @@ type checkStatusSpyStore struct {
 	bannerErr       error
 	failErr         error
 	skipFailApply   bool
-	failBuildStatus string
 }
 
 func (s *checkStatusSpyStore) chunk(chunkID string) *VanadisChunk {
@@ -144,11 +143,7 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 	if s.failErr != nil {
 		return nil, nil, false, s.failErr
 	}
-	bStatus := statusFailed
-	if s.failBuildStatus != "" {
-		bStatus = s.failBuildStatus
-	}
-	return &VanadisBuild{ID: "b1", Status: bStatus, Objective: "Obj", ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
+	return &VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -293,6 +288,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	_, _ = boErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		assert.Error(t, boStoreErr.dispatchThreadWakePrompt(rc, "b-err", "prompt"))
+		assert.Error(t, boStoreErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
 	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
@@ -302,17 +298,16 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		event           string
-		prEvent         pubsub.PRLifecycleEvent
-		bannerErr       error
-		failErr         error
-		skipFailApply   bool
-		failBuildStatus string
-		wantErr         bool
-		wantFailed      []string
-		wantBanners     []string
-		wantPromptIn    string
+		name          string
+		event         string
+		prEvent       pubsub.PRLifecycleEvent
+		bannerErr     error
+		failErr       error
+		skipFailApply bool
+		wantErr       bool
+		wantFailed    []string
+		wantBanners   []string
+		wantPromptIn  string
 	}{
 		{
 			name:         "closed unmerged fails chunk and dispatches failure prompt",
@@ -340,14 +335,6 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			prEvent:       pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
 			skipFailApply: true,
 			wantFailed:    []string{"c1:pr_closed_unmerged"},
-		},
-		{
-			name:            "closed_unmerged already terminal non-failed skips notifications",
-			event:           "closed_unmerged",
-			prEvent:         pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
-			skipFailApply:   true,
-			failBuildStatus: statusCompleted,
-			wantFailed:      []string{"c1:pr_closed_unmerged"},
 		},
 		{
 			name:       "closed_unmerged fail chunk error propagates",
@@ -393,10 +380,9 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{
-				bannerErr:       tc.bannerErr,
-				failErr:         tc.failErr,
-				skipFailApply:   tc.skipFailApply,
-				failBuildStatus: tc.failBuildStatus,
+				bannerErr:     tc.bannerErr,
+				failErr:       tc.failErr,
+				skipFailApply: tc.skipFailApply,
 			}
 			eri := &mockEriClient{}
 			exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)

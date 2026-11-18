@@ -33,6 +33,9 @@ type FailChunkResponse struct {
 	ChunkID     string `json:"chunk_id"`
 	BuildStatus string `json:"build_status"`
 	ChunkStatus string `json:"chunk_status"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	Objective   string `json:"objective,omitempty"`
+	Quiet       bool   `json:"quiet,omitempty"`
 }
 
 // AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
