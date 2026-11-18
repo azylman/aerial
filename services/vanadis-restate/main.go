@@ -48,6 +48,7 @@ const (
 	labelReconcileAfterAttachPR    = "reconcile-after-attach-pr"
 	labelReconcileAfterPREvent     = "reconcile-after-pr-event"
 	labelReconcileAfterDispatch    = "reconcile-after-dispatch-outcome"
+	labelReconcileAfterNoPRFail    = "reconcile-after-nopr-fail"
 	labelRoutePREvent              = "RoutePREvent"
 	labelRouteDispatchOutcome      = "RouteDispatchOutcome"
 	labelRouteAttachPR             = "RouteAttachPR"
@@ -74,6 +75,7 @@ var reconcileErrorHandlerLabels = []string{
 	labelReconcileAfterAttachPR,
 	labelReconcileAfterPREvent,
 	labelReconcileAfterDispatch,
+	labelReconcileAfterNoPRFail,
 	labelRoutePREvent,
 	labelRouteDispatchOutcome,
 	labelRouteAttachPR,

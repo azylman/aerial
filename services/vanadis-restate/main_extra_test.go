@@ -641,27 +641,80 @@ func TestActionCompletionContinuation(t *testing.T) {
 	}
 }
 
+// noPRFailStore layers stateful chunk failure over the scripted store so the
+// failure transition observes its own write.
+type noPRFailStore struct {
+	VanadisStore
+
+	failedChunk, failReason string
+}
+
+func (s *noPRFailStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
+	s.failedChunk, s.failReason = chunkID, reason
+	return &VanadisBuild{ID: "b1", Status: statusFailed}, &VanadisChunk{ID: chunkID, Mode: "pr", Status: statusFailed}, true, nil
+}
+
+func (s *noPRFailStore) GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	bld, chunks, err := s.VanadisStore.GetBuild(ctx, buildID)
+	if err != nil || s.failedChunk == "" {
+		return bld, chunks, err
+	}
+	bld.Status = statusFailed
+	for i := range chunks {
+		if chunks[i].ID == s.failedChunk {
+			chunks[i].Status = statusFailed
+		}
+	}
+	return bld, chunks, nil
+}
+
 func TestDispatchCompletionContinuation(t *testing.T) {
 	t.Parallel()
+	actionDone := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}
+	prRunning := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "running", Repo: "aerial", Title: "Chunk 1", Instructions: "Do step 1"}
+	prOpened := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 7, Repo: "aerial", Title: "Chunk 1"}
 	tests := []struct {
 		name, identity, chunkID string
+		chunk                   VanadisChunk
+		buildStatus             string
 		transitionFailure       bool
-		wantErr                 bool
+		dispatchErr, widgetErr  error
+		wantErr                 string
 		wantEvents              int
+		wantDispatchID          string
+		wantSession             string
+		wantPromptPrefix        string
+		wantFailReason          string
+		wantPrompts             []string
 	}{
-		{"current completed generation resumes", "vanadis-c1-turn-1", "c1", false, false, 1},
-		{"stale completed generation suppressed", "vanadis-c1-turn-0", "c1", false, false, 0},
-		{"continuation error remains retryable", "vanadis-c1-turn-1", "c1", true, true, 0},
-		{"whitespace identity resumes", "vanadis-c1-turn-1", " c1 ", false, false, 1},
+		{"current completed generation resumes", "vanadis-c1-turn-1", "c1", actionDone, "completed", false, nil, nil, "", 1, "", "", "", "", []string{"[VANADIS BUILD COMPLETED]\nBuild ID: b1\nObjective: \n\nAll chunks completed successfully."}},
+		{"stale completed generation suppressed", "vanadis-c1-turn-0", "c1", actionDone, "completed", false, nil, nil, "", 0, "", "", "", "", nil},
+		{"continuation error remains retryable", "vanadis-c1-turn-1", "c1", actionDone, "completed", true, nil, nil, "continuation unavailable", 0, "", "", "", "", nil},
+		{"whitespace identity resumes", "vanadis-c1-turn-1", " c1 ", actionDone, "completed", false, nil, nil, "", 1, "", "", "", "", []string{"[VANADIS BUILD COMPLETED]\nBuild ID: b1\nObjective: \n\nAll chunks completed successfully."}},
+		{"pr launch turn without pr resumes once", "vanadis-c1-turn-0", "c1", prRunning, "running", false, nil, nil, "", 0, "vanadis-c1-nopr-resume-1", "vanadis-c1", "[VANADIS AUTOMATIC RESUME]\nYour previous turn for chunk c1 ended without opening a PR.", "", nil},
+		{"pr resume turn without pr fails and wakes thread", "vanadis-c1-nopr-resume-1", "c1", prRunning, "running", false, nil, nil, "", 1, "", "", "", "chunk turn ended without opening a PR (after one automatic resume)", []string{"[VANADIS BUILD FAILED]\nBuild ID: b1\nObjective: \n\nBuild encountered failures."}},
+		{"pr launch turn with attached pr ignored", "vanadis-c1-turn-0", "c1", prOpened, "running", false, nil, nil, "", 0, "", "", "", "", nil},
+		{"pr resume dispatch failure stays retryable", "vanadis-c1-turn-0", "c1", prRunning, "running", false, errors.New("eri unavailable"), nil, "eri unavailable", 0, "vanadis-c1-nopr-resume-1", "vanadis-c1", "[VANADIS AUTOMATIC RESUME]\n", "", nil},
+		{"pr resume widget failure still resumes", "vanadis-c1-turn-0", "c1", prRunning, "running", false, nil, errors.New("widget down"), "", 0, "vanadis-c1-nopr-resume-1", "vanadis-c1", "[VANADIS AUTOMATIC RESUME]\n", "", nil},
+		{"pr no-pr failure transition error stays retryable", "vanadis-c1-nopr-resume-1", "c1", prRunning, "running", true, nil, nil, "continuation unavailable", 0, "", "", "", "", nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			build := VanadisBuild{ID: "b1", Status: "completed", ThreadID: "thread"}
-			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}}
-			store, _ := (dbScript{row: &mockRow{b: &build}, chunks: chunks}).open()
+			build := VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "thread"}
+			scripted, _ := (dbScript{row: &mockRow{b: &build}, chunks: []VanadisChunk{tc.chunk}}).open()
+			store := &noPRFailStore{VanadisStore: scripted}
 			bus := &deploymentEventRecorder{}
-			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", &mockEriClient{}, bus, "token", nil))
+			var prompts []string
+			eri := &mockEriClient{
+				promptFn: func(_ context.Context, _, prompt string) error {
+					prompts = append(prompts, prompt)
+					return nil
+				},
+				dispatchFn: func(context.Context, BrainDispatchRequest) error { return tc.dispatchErr },
+				widgetFn:   func(context.Context, StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
+			}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", eri, bus, "token", nil))
 			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
 				rt := newFakeObjectRuntime("b1")
 				if tc.transitionFailure {
@@ -670,12 +723,25 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 				return rt
 			}
 			err := bo.OnDispatchOutcome(makeObjectMockContext(t, "b1"), pubsub.DispatchOutcomeEvent{VanadisChunkID: tc.chunkID, DispatchID: tc.identity, Status: "completed"})
-			if tc.wantErr {
-				assert.ErrorContains(t, err, "continuation unavailable")
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
 			} else {
 				assert.NoError(t, err)
 			}
 			assert.Len(t, bus.events, tc.wantEvents)
+			assert.Equal(t, tc.wantPrompts, prompts)
+			assert.Equal(t, tc.wantFailReason, store.failReason)
+			if tc.wantDispatchID == "" {
+				assert.Nil(t, eri.lastDispatch)
+				return
+			}
+			require.NotNil(t, eri.lastDispatch)
+			assert.Equal(t, tc.wantDispatchID, eri.lastDispatch.ID)
+			assert.Equal(t, tc.wantSession, eri.lastDispatch.SessionID)
+			assert.Equal(t, "thread", eri.lastDispatch.TargetID)
+			assert.False(t, eri.lastDispatch.SkipIfActive)
+			assert.True(t, strings.HasPrefix(eri.lastDispatch.Prompt, tc.wantPromptPrefix), eri.lastDispatch.Prompt)
+			assert.Contains(t, eri.lastDispatch.Prompt, "Do step 1")
 		})
 	}
 }

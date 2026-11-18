@@ -645,6 +645,23 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	)
 }
 
+// FormatNoPRResumePrompt builds a self-contained resume prompt for a PR chunk
+// whose previous turn ended without opening a PR. It re-includes the full chunk
+// prompt because sessions rotate and an aborted conversation may be damaged.
+func FormatNoPRResumePrompt(chunk VanadisChunk, chunkPrompt string) string {
+	chunkID := strings.TrimSpace(chunk.ID)
+	return fmt.Sprintf(`[VANADIS AUTOMATIC RESUME]
+Your previous turn for chunk %s ended without opening a PR. This is the single automatic resume; if this turn also ends without a PR, the chunk and build fail.
+
+Before doing anything else, check whether a PR already exists for this chunk's branch (branch name contains "vanadis-%s"): an attach failure can leave an open PR that Vanadis has not recorded. If one exists, re-run '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "<commit_msg>" --vanadis-chunk %s' from its checkout only if needed to attach it.
+
+Otherwise, finish the work and verification below and submit via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "<commit_msg>" --vanadis-chunk %s'. Call fail_chunk with a reason only if genuinely blocked. Never end the turn while a background command is still needed for the next step; run it in the foreground and wait for it.
+
+The original chunk instructions follow.
+
+%s`, chunkID, chunkID, chunkID, chunkID, chunkPrompt)
+}
+
 // FormatConflictPrompt formats the conflict prompt when merge conflict is detected.
 func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
 	shortRepo := firstNonEmpty(cleanRepoName(ev.Repo), "aerial")
