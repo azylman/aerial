@@ -16,25 +16,7 @@ RUN npm run build
 RUN npm prune --omit=dev --ignore-scripts
 
 # -----------------------------------------------------------------------------
-# Stage 2: Build Go proxy wrapper binary
-# -----------------------------------------------------------------------------
-FROM golang:1.27.3-alpine AS go-build
-WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY mcp/discord-mcp/go.mod mcp/discord-mcp/go.sum* ./mcp/discord-mcp/
-WORKDIR /src/mcp/discord-mcp
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
-
-COPY pkg/ /src/pkg/
-COPY mcp/discord-mcp/ ./
-
-# Build statically linked Go proxy with compiler cache mounts
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /discord-mcp .
-
-# -----------------------------------------------------------------------------
-# Stage 3: Production Runtime
+# Stage 2: Production Runtime
 # -----------------------------------------------------------------------------
 FROM node:22-alpine
 WORKDIR /app
@@ -47,17 +29,8 @@ COPY --from=node-build --link /app/build ./build
 COPY --from=node-build --link /app/package.json ./
 COPY --from=node-build --link /app/node_modules ./node_modules
 
-# Copy Go wrapper binary
-COPY --from=go-build --link /discord-mcp /app/discord-mcp
+ENV PORT=8080
 
-ENV PORT=4001
-ENV UPSTREAM_PORT=4005
-ENV NODE_BIN=node
-ENV APP_PATH=build/app.js
+EXPOSE 8080
 
-EXPOSE 4001
-
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
-  CMD wget -q --spider http://127.0.0.1:4001/health || exit 1
-
-CMD ["/app/discord-mcp"]
+CMD ["node", "build/app.js", "--transport", "http", "--port", "8080"]
