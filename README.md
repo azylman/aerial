@@ -4,44 +4,25 @@ A tightly integrated **self-hosted application platform** for your homelab, **au
 
 Where standard GitOps homelabs stop at cluster infrastructure, standalone coding orchestrators lack a deployment target, and chat assistants lack durable infrastructure, Aerial unifies all three into a closed loop—so **your agent can build, ship, and operate stateful applications on your homelab autonomously**:
 
-1. **Self-Hosted Application Platform**: Goes beyond basic container hosting to give your homelab a declarative Kubernetes compute fabric and edge routing (**k3s**, **NGINX Gateway Fabric**, **CoreDNS**, **Infisical** secret governance), stateful distributed primitives (**Restate** durable execution, **NATS JetStream** event streaming, and **CloudNativePG PostgreSQL 18 + `pgvector`**), and batteries-included observability (**VictoriaMetrics**, **`vmalert`**, **VictoriaLogs**, **VictoriaTraces**, and **Grafana**).
-2. **Autonomous Software Factory**: Runs a lights-out, spec-to-production delivery loop (*DAG Backlog → Multi-Agent Plan & Review → Durable Multi-PR Rollout → In-Cluster CI & LLM Review → Self-Healing Flux GitOps*) built directly on the platform's primitives—combining dependency-aware DAG issue tracking backed by **Vikunja**, multi-agent architecture and review panels, durable multi-PR build pipelines on **Restate** and **NATS JetStream**, scale-to-zero in-cluster **GitHub Actions Runner Controller (ARC)** runners with **RoboRev** automated code review, and event-driven **Flux CD** push GitOps with proactive CI self-healing.
-3. **Multimodal AI Agent**: Connects your self-improving assistant directly to your homelab and software factory in the channels you already use—running a configurable multi-engine agent execution core (`agy`, Claude Code, and Codex), real-time Discord, voice, and **Twilio** PSTN telephony pipelines, persistent cron/heartbeat/event-watch scheduling, and procedural skill synthesis with hybrid RRF semantic memory, while letting you customize it to your needs by writing custom **Model Context Protocol (MCP)** connectors for the software you use and custom skills for your own workflows.
+1. **Self-Hosted Application Platform**: Gives your homelab a declarative Kubernetes compute fabric, LAN and edge gateway routing, centralized secret management, durable workflow state machines, persistent event streaming, relational and vector storage, and unified metrics, logs, and distributed tracing.
+2. **Autonomous Software Factory**: Runs a lights-out, spec-to-production delivery loop (*DAG Backlog → Multi-Agent Plan & Review → Durable Multi-PR Rollout → In-Cluster CI & LLM Review → Self-Healing Flux GitOps*) directly on the platform's primitives—taking features from dependency-tracked issues through isolated scratch Pull Requests, scale-to-zero in-cluster CI and automated code review, and push-driven GitOps rollouts with proactive CI failure remediation.
+3. **Multimodal AI Agent**: Connects your assistant directly to your homelab and software factory over Discord, real-time voice, and phone/SMS—backed by persistent cron, heartbeat, and event-watch scheduling, hybrid semantic memory, and extensible **Model Context Protocol (MCP)** connectors and custom `SKILL.md` workflows.
 
 ---
 
 ## Tech Stack
 
-Built in **Go (1.27)** and orchestrated as a resilient Kubernetes platform that scales from a single vanilla node to heterogeneous multi-node clusters:
-
-### 1. Self-Hosted Application Platform
-- **Cluster Orchestration**: **Kubernetes (`k3s`)** — Runs out-of-the-box on a single node or scales across multi-node clusters (with optional NixOS Colmena provisioning and Spegel P2P OCI registry), managing distributed daemons, batch jobs, specialized hardware nodes (such as GPU inference or touch kiosks), and rolling deployments.
-- **Service Discovery & Ingress**: **NGINX Gateway Fabric** + **CoreDNS** — Declarative Kubernetes Gateway API routing for LAN and external edge webhook traffic paired with internal cluster DNS resolution.
-- **Relational & Vector Persistence**: **CloudNativePG (PostgreSQL 18 + `pgvector`)** — High-availability PostgreSQL cluster with strict single-service table ownership, vector similarity indexing, and native Prometheus metrics.
-- **Durable Workflow Execution**: **Restate Durable Execution** — Kubernetes Restate Operator managing stateful cluster instances backed by RocksDB for fault-tolerant, exactly-once workflow and virtual object state machines.
-- **Event Streaming & Messaging**: **NATS JetStream** — High-performance durable event bus and message broker powering idempotent ingress, edge webhook fan-out, and asynchronous job queues.
-- **Secrets Governance**: **Infisical + Valkey 9 + External Secrets Operator** — Centralized secret management and automated rotation syncing scoped per-service Kubernetes Secrets with zero plaintext disk persistence.
-- **Observability & Telemetry**:
-  - **Metrics**: **VictoriaMetrics** (TSDB) + **`vmalert`** + **Grafana** (dashboards) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
-  - **Logs**: **Fluent Bit** (DaemonSet collection & transforms) + **VictoriaLogs** (LogsQL log analytics, 60-day retention)
-  - **Traces**: **VictoriaTraces** (OTLP distributed trace store, 30-day retention)
-
-### 2. Autonomous Software Factory
-- **Issue & Dependency-Aware Backlog Tracking**: **Vikunja** — DAG task graph and backlog engine backed by PostgreSQL 18 for tracking multi-stage epics, dependencies, and deferred discoveries.
-- **Durable Multi-PR Build Pipelines**: **Restate + NATS JetStream** — Stateful DAG build orchestration coordinating multi-chunk, cross-repository Pull Request rollouts and event-driven state transitions.
-- **In-Cluster CI & Automated Code Review**: **GitHub Actions Runner Controller (ARC)** + **RoboRev** — Scale-to-zero self-hosted Kubernetes runner sets paired with automated LLM code review gates on every Pull Request.
-- **Declarative Schema Migrations**: **Ariga Atlas** — Declarative SQL schema management, automated migration diffing, and checksum verification via Kubernetes jobs.
-- **Self-Healing Push GitOps**: **Flux CD** — Event-driven GitOps controllers reconciling Kubernetes Kustomizations continuously on webhook push and image promotion events, paired with automated CI failure remediation.
-
-### 3. Multimodal AI Agent
-- **Configurable Agent Execution Engines**: **`agy`, Claude Code, and Codex** — Multi-engine execution core supporting subagent review panels, Subagent-Driven Development (SDD), and effort-tiered model routing.
-- **Multimodal Communication Pipelines**: **Discord Gateway/REST, Real-Time Voice, and Twilio PSTN** — Bi-directional chat, low-latency voice audio pipelines (with optional STT/TTS sidecars), and autonomous outbound/inbound PSTN phone call and SMS orchestration.
-- **Persistent Scheduling & Event Watches**: **Cron, Heartbeat & Event-Watch Engine** — PostgreSQL-backed scheduler evaluating recurring cron jobs, silent edge-triggered heartbeats, one-shot timers, and deterministic system event watches.
-- **Semantic Memory & Procedural Skills**: **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** — Reciprocal Rank Fusion semantic fact retrieval, temporal decay scoring, and automatic procedural skill synthesis from completed workflows.
-- **Custom Connectors & Workflow Skills**: **Streamable HTTP MCP Servers & Custom Skills (`SKILL.md`)** — Easily customized to your needs by writing custom MCP connectors for the software and APIs you use and custom progressive-disclosure skills for your own workflows.
-- **Browser Automation, Credentials & Agentic Commerce**: **Kernel Browser + 1Password CLI + Stripe Link (`@stripe/link-cli`)** — Headful CDP browser control via Kernel, scoped vault credential retrieval via 1Password CLI, and one-time virtual payment tokens via Stripe Link.
-- **Defense-in-Depth Agent Guardrails**: **Read-Only Volume Mounts (`:ro`), Child-Process Secret Scrubbing & Pre-Tool Interceptors** — Live repositories, OAuth credentials, and secret bundles are mounted read-only at the container boundary to force changes through isolated scratch clones and reviewed Pull Requests; database credentials, GitHub PATs, Discord tokens, and API keys are stripped from the agent CLI's environment before spawning turns so the agent acts strictly through typed MCP servers; compiled Go pre-tool hooks inspect every `agy`, Claude Code, and Codex tool call before execution to block read-only or live-SSH mutations, scan staged git diffs for leaked secrets or private IPs, prevent foreground polling loops, and bound filesystem and telemetry queries; and all outbound messages and log streams pass through exact and derived-encoding secret redaction.
-- **Session Observability**: **AgentsView** — Web transcript, session history, and execution trace inspector backed by PostgreSQL.
+| Layer | Technologies & Role |
+| :--- | :--- |
+| **Language & Cluster Runtime** | **Go 1.27** microservices on **Kubernetes (`k3s`)** (single-node out of the box or multi-node with optional **NixOS Colmena** provisioning and **Spegel** P2P OCI registry caching) |
+| **Networking & Ingress** | **NGINX Gateway Fabric** (Kubernetes Gateway API for LAN apps and external edge webhooks) and **CoreDNS** (internal service discovery) |
+| **Databases & State** | **CloudNativePG** (**PostgreSQL 18** + **`pgvector`** for relational state, vector embeddings, and hybrid RRF search) and **Valkey 9** (caching) |
+| **Workflows & Event Bus** | **Restate** (RocksDB-backed durable execution for workflow and virtual object state machines) and **NATS JetStream** (durable event streams, webhook fan-out, and work-queue job consumers) |
+| **Secrets Governance** | **Infisical** + **External Secrets Operator** (centralized vault syncing scoped Kubernetes Secrets in-memory with zero plaintext disk persistence) |
+| **Observability** | **VictoriaMetrics** (TSDB) + **`vmalert`** (MAD anomaly and alert rules), **Fluent Bit** + **VictoriaLogs** (LogsQL log analytics, 60-day retention), **VictoriaTraces** (OTLP distributed tracing, 30-day retention), **Grafana**, **Headlamp** (Kubernetes/Flux UI), and **Prometheus Exporters** (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**) |
+| **Software Factory & GitOps** | **Vikunja** (DAG issue and backlog graph), **GitHub Actions Runner Controller (ARC)** (scale-to-zero in-cluster CI runners), **RoboRev** (automated LLM code review gate), **Ariga Atlas** (declarative SQL schema migrations), and **Flux CD** (webhook-driven push GitOps) |
+| **Agent Core & Memory** | Configurable CLI execution engines (**`agy`**, **Claude Code**, **Codex**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
+| **Multimodal I/O & Browser Automation** | **Discord Gateway/REST**, **Real-Time Voice** (with optional STT/TTS sidecars), **Twilio PSTN** (inbound/outbound voice calls and SMS), **Kernel Browser** (headful CDP browser control), **1Password CLI** (scoped vault credential retrieval), and **Stripe Link** (`@stripe/link-cli` one-time virtual payment tokens) |
 
 ---
 
@@ -108,6 +89,13 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │ Docket Issue Tracker MCP     │ VictoriaLogs/Traces MCP      │ Fluent Bit Log DaemonSet      │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
 ```
+
+### Defense-in-Depth Agent Guardrails
+
+- **Read-Only Repository & Credential Mounts (`:ro`)**: Live repositories (`/share/aerial`, `/share/aerial-config`), OAuth credentials, and secret bundles are mounted read-only at the container boundary, forcing all changes through isolated scratch clones and reviewed Pull Requests.
+- **Child-Process Secret Scrubbing**: Database passwords, GitHub PATs, Discord tokens, and API keys are stripped from the child process environment before spawning `agy`, Claude Code, or Codex so the agent acts strictly through typed MCP servers.
+- **Compiled Pre-Tool Hook Interceptors**: Go pre-tool hooks inspect every agent tool call before execution to block read-only or live-SSH mutations, scan staged git diffs for leaked secrets or private IPs, prevent foreground polling loops, and bound filesystem and telemetry queries.
+- **Outbound & Log Secret Redaction**: Outbound Discord messages and log streams pass through exact and derived-encoding (`base64`, URL, hex, JSON-escaped) secret redaction.
 
 ---
 
