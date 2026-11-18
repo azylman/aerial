@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -421,18 +422,27 @@ func newExecUsageRunner(bin, defaultBin, homeDir string, baseEnv []string, args 
 	}
 	var env []string
 	for _, e := range baseEnv {
-		if !strings.HasPrefix(e, "HOME=") {
+		if !strings.HasPrefix(e, "HOME=") &&
+			!strings.HasPrefix(e, "XDG_CONFIG_HOME=") &&
+			!strings.HasPrefix(e, "XDG_DATA_HOME=") &&
+			!strings.HasPrefix(e, "MUSE_AUTH_PATH=") {
 			env = append(env, e)
 		}
 	}
-	if strings.TrimSpace(homeDir) != "" {
-		env = append(env, "HOME="+strings.TrimSpace(homeDir))
+	if h := strings.TrimSpace(homeDir); h != "" {
+		env = append(env,
+			"HOME="+h,
+			"XDG_CONFIG_HOME="+filepath.Join(h, ".config"),
+			"XDG_DATA_HOME="+filepath.Join(h, ".local", "share"),
+			"MUSE_AUTH_PATH="+filepath.Join(h, ".config", "muse", "auth.json"),
+		)
 	}
 	return func(ctx context.Context) ([]byte, error) {
 		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(runCtx, resolved, args...)
 		cmd.Env = env
+		configureUsageCmd(cmd)
 		return cmd.Output()
 	}
 }

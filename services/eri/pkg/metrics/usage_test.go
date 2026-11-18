@@ -496,13 +496,45 @@ func TestMuseUsageRunner(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	script := filepath.Join(dir, "mock-muse.sh")
-	body := "#!/bin/sh\nif [ \"$1\" = \"usage\" ] && [ \"$2\" = \"--json\" ]; then echo '" + museUsageFixture + "'; else echo 'bad args' >&2; exit 1; fi\n"
+	body := `#!/bin/sh
+if [ "$1" = "usage" ] && [ "$2" = "--json" ]; then
+	echo "HOME=$HOME"
+	echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
+	echo "XDG_DATA_HOME=$XDG_DATA_HOME"
+	echo "MUSE_AUTH_PATH=$MUSE_AUTH_PATH"
+	echo '` + museUsageFixture + `'
+else
+	echo 'bad args' >&2
+	exit 1
+fi
+`
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out, err := NewMuseUsageRunner(script, dir, []string{"HOME=/old", "FOO=bar"})(context.Background())
+	baseEnv := []string{
+		"HOME=/old",
+		"XDG_CONFIG_HOME=/old/config",
+		"XDG_DATA_HOME=/old/data",
+		"MUSE_AUTH_PATH=/old/auth.json",
+		"FOO=bar",
+	}
+	out, err := NewMuseUsageRunner(script, dir, baseEnv)(context.Background())
 	if err != nil || !strings.Contains(string(out), `"Muse Code Power Usage"`) {
 		t.Fatalf("NewMuseUsageRunner failed: err=%v, out=%s", err, string(out))
+	}
+	wantEnvChecks := []string{
+		"HOME=" + dir,
+		"XDG_CONFIG_HOME=" + filepath.Join(dir, ".config"),
+		"XDG_DATA_HOME=" + filepath.Join(dir, ".local", "share"),
+		"MUSE_AUTH_PATH=" + filepath.Join(dir, ".config", "muse", "auth.json"),
+	}
+	for _, check := range wantEnvChecks {
+		if !strings.Contains(string(out), check) {
+			t.Errorf("NewMuseUsageRunner output missing expected env %q; got output:\n%s", check, string(out))
+		}
+	}
+	if strings.Contains(string(out), "/old") {
+		t.Errorf("NewMuseUsageRunner output contains leaked old env; got output:\n%s", string(out))
 	}
 	if got := DefaultMuseUsageRunner("", "", nil, true); got != nil {
 		t.Error("DefaultMuseUsageRunner in test mode = non-nil, want nil")
