@@ -497,6 +497,16 @@ func (p *GeminiAPIPool) UpdatePrewarmedTargets(targets []string) {
 	p.cfg.PrewarmedTargets = append([]string(nil), targets...)
 }
 
+// Model returns the configured Gemini model name.
+func (p *GeminiAPIPool) Model() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return strings.TrimSpace(p.cfg.Model)
+}
+
 func (p *GeminiAPIPool) MarkDirty() {
 	if p == nil {
 		return

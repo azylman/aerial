@@ -109,6 +109,16 @@ func (m *mockVoicePool) Close() error {
 }
 
 func (m *mockVoicePool) MarkDirty() { atomic.AddInt32(&m.markDirtyCalled, 1) }
+
+func (m *mockVoicePool) Model() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.model
+}
+
 func (m *mockVoicePool) UpdatePrewarmedTargets(t []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -148,6 +158,13 @@ func (f *swappablePoolFactory) factory() (AgentPool, string, error) {
 	return f.pool, f.fp, f.err
 }
 
+func assertDynamicVoicePoolModel(t *testing.T, p *DynamicVoicePool, want string) {
+	t.Helper()
+	if got := p.Model(); got != want {
+		t.Errorf("Model() = %q, want %q", got, want)
+	}
+}
+
 func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -160,6 +177,7 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 		nilPool.Close() != nil || nilPool.Fingerprint() != "" || nilPool.CurrentPool() != nil {
 		t.Error("unexpected nilPool safety behavior")
 	}
+	assertDynamicVoicePoolModel(t, nilPool, "")
 
 	mock1 := newMockVoicePool("gemini-2.5-flash")
 	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) { return mock1, "fp-1", nil })
@@ -175,6 +193,7 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 		err != nil || lease.SessionID() != "kiosk-kitchen" {
 		t.Fatalf("unexpected delegation/passthrough behavior")
 	}
+	assertDynamicVoicePoolModel(t, dyn, "gemini-2.5-flash")
 
 	dyn.Close()
 	dyn.MarkDirty()
@@ -182,6 +201,7 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	if atomic.LoadInt32(&mock1.closeCalled) != 1 || dyn.Close() != nil || dyn.Initialize(ctx) == nil || clErr == nil {
 		t.Error("expected error on closed dynamic pool methods")
 	}
+	assertDynamicVoicePoolModel(t, dyn, "")
 
 	fakeL := &fakeSessionLease{sessID: "lease-123"}
 	mockLeased := newMockVoicePool("m3")

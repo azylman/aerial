@@ -60,7 +60,7 @@ func (p *WorkerPool) executeCustomVoiceRunner(ctx context.Context, turnPrompt, d
 	if err != nil {
 		runStatus = outcomeError
 	}
-	metrics.RecordRunnerExecution(runStatus, p.LowEffortModel(), "voice", time.Since(start))
+	metrics.RecordRunnerExecution(runStatus, p.VoiceModel(), "voice", time.Since(start))
 	return reply, conv, true, err
 }
 
@@ -132,7 +132,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return reply, conv, customErr
 	}
 
-	model := p.LowEffortModel()
+	model := p.VoiceModel()
 	start := time.Now()
 	// The invoke_agent span nests under the caller's (the /voice/ask server span) so a voice
 	// turn gets the same invoke_agent -> chat/execute_tool -> mcp tree as a Discord turn.
