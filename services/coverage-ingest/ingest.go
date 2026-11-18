@@ -49,9 +49,11 @@ type Config struct {
 	Targets      []Target      `yaml:"targets"`
 	FlushTimeout time.Duration `yaml:"flush_timeout"`
 	// ConnectRetryWindow bounds retries of a flush dial refused with ECONNREFUSED. It
-	// runs inside the per-target FlushTimeout; zero disables retries.
+	// runs inside the per-target FlushTimeout. Like flush_timeout, an omitted or zero
+	// value takes the default; the window is a safety bound, not an opt-in feature.
 	ConnectRetryWindow time.Duration `yaml:"connect_retry_window"`
-	// ConnectRetryInterval is the wait between refused dials.
+	// ConnectRetryInterval is the wait between refused dials; omitted or zero takes the
+	// default.
 	ConnectRetryInterval time.Duration `yaml:"connect_retry_interval"`
 }
 

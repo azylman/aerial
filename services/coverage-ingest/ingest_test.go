@@ -54,6 +54,11 @@ func TestParseConfig(t *testing.T) {
 			yaml: "targets:\n  - service: haro\n    url: http://haro.aerial/debug/coverage/flush\n",
 			want: Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
 		},
+		{
+			name: "explicit zero retry durations take the defaults",
+			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 0s\nconnect_retry_interval: 0s\n",
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+		},
 		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets"},
 		{name: "missing url", yaml: "targets:\n  - service: eri\n", wantErr: "target 0 needs service and url"},
 		{name: "blank service", yaml: "targets:\n  - service: ' '\n    url: http://x\n", wantErr: "target 0 needs service and url"},
