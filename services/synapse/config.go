@@ -18,36 +18,38 @@ import (
 
 // Config holds runtime configuration for synapse.
 type Config struct {
-	Port                string
-	KubeAPIServer       string
-	KubeToken           string
-	GitHubToken         string
-	GitHubAPIURL        string
-	PostgresURL         string
-	FluxReceiverURL     string
-	BrainURL            string
-	EriURL              string
-	NATSURL             string
-	SystemChannelID     string
-	DiscordToken        string
-	AutoUpdatePRAuthors []string
-	BotID               string
-	DefaultOwner        bool
-	WebhookForwardURLs  map[string]string
+	LegacyBuildWorkflows []LegacyBuildWorkflow
+	Port                 string
+	KubeAPIServer        string
+	KubeToken            string
+	GitHubToken          string
+	GitHubAPIURL         string
+	PostgresURL          string
+	FluxReceiverURL      string
+	BrainURL             string
+	EriURL               string
+	NATSURL              string
+	SystemChannelID      string
+	DiscordToken         string
+	AutoUpdatePRAuthors  []string
+	BotID                string
+	DefaultOwner         bool
+	WebhookForwardURLs   map[string]string
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	Port                string            `yaml:"port"`
-	FluxReceiverURL     string            `yaml:"flux_receiver_url"`
-	EriURL              string            `yaml:"eri_url"`
-	NATSURL             string            `yaml:"nats_url"`
-	SystemChannelID     string            `yaml:"system_channel_id"`
-	SystemChannel       string            `yaml:"system_channel"`
-	AutoUpdatePRAuthors []string          `yaml:"auto_update_pr_authors"`
-	BotID               string            `yaml:"bot_id"`
-	DefaultOwner        bool              `yaml:"default_owner"`
-	WebhookForwardURLs  map[string]string `yaml:"webhook_forward_urls"`
+	LegacyBuildWorkflows []LegacyBuildWorkflow `yaml:"legacy_build_workflows"`
+	Port                 string                `yaml:"port"`
+	FluxReceiverURL      string                `yaml:"flux_receiver_url"`
+	EriURL               string                `yaml:"eri_url"`
+	NATSURL              string                `yaml:"nats_url"`
+	SystemChannelID      string                `yaml:"system_channel_id"`
+	SystemChannel        string                `yaml:"system_channel"`
+	AutoUpdatePRAuthors  []string              `yaml:"auto_update_pr_authors"`
+	BotID                string                `yaml:"bot_id"`
+	DefaultOwner         bool                  `yaml:"default_owner"`
+	WebhookForwardURLs   map[string]string     `yaml:"webhook_forward_urls"`
 }
 
 var (
@@ -130,6 +132,9 @@ func LoadConfigStrict(configPath string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if _, err := normalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows); err != nil {
+		return Config{}, err
+	}
 	return buildConfig(fileCfg), nil
 }
 
@@ -200,6 +205,10 @@ func readRouterYAML(configPath string) (RouterYAMLConfig, error) {
 // buildConfig layers environment overrides and the aerial config fallback on
 // top of the decoded YAML file.
 func buildConfig(fileCfg RouterYAMLConfig) Config {
+	legacy, err := normalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows)
+	if err != nil {
+		log.Printf("[Synapse] invalid legacy workflows: %v", err)
+	}
 	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
 	var aerialBotID string
@@ -225,22 +234,23 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 	kubeToken := os.Getenv("KUBE_TOKEN")
 
 	return Config{
-		Port:                firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		KubeAPIServer:       strings.TrimRight(kubeServer, "/"),
-		KubeToken:           kubeToken,
-		GitHubToken:         os.Getenv("GITHUB_PAT"),
-		GitHubAPIURL:        strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
-		PostgresURL:         pgURL,
-		FluxReceiverURL:     strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
-		BrainURL:            strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		EriURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		NATSURL:             firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
-		SystemChannelID:     strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
-		DiscordToken:        os.Getenv("DISCORD_TOKEN"),
-		AutoUpdatePRAuthors: autoUpdateAuthors,
-		BotID:               botID,
-		DefaultOwner:        defaultOwner,
-		WebhookForwardURLs:  normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
+		LegacyBuildWorkflows: legacy,
+		Port:                 firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
+		KubeAPIServer:        strings.TrimRight(kubeServer, "/"),
+		KubeToken:            kubeToken,
+		GitHubToken:          os.Getenv("GITHUB_PAT"),
+		GitHubAPIURL:         strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		PostgresURL:          pgURL,
+		FluxReceiverURL:      strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
+		BrainURL:             strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
+		EriURL:               strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
+		NATSURL:              firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
+		SystemChannelID:      strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
+		DiscordToken:         os.Getenv("DISCORD_TOKEN"),
+		AutoUpdatePRAuthors:  autoUpdateAuthors,
+		BotID:                botID,
+		DefaultOwner:         defaultOwner,
+		WebhookForwardURLs:   normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
 	}
 }
 
@@ -377,4 +387,29 @@ func truncatePromptRunes(s string, maxRunes int) string {
 		return s
 	}
 	return string(runes[:maxRunes]) + "... (truncated)"
+}
+
+// LegacyBuildWorkflow pins one immutable historical producer revision.
+type LegacyBuildWorkflow struct {
+	Repository   string `yaml:"repository"`
+	WorkflowPath string `yaml:"workflow_path"`
+	BlobSHA      string `yaml:"blob_sha"`
+}
+
+func normalizeLegacyBuildWorkflows(raw []LegacyBuildWorkflow) ([]LegacyBuildWorkflow, error) {
+	out := make([]LegacyBuildWorkflow, 0, len(raw))
+	seen := map[LegacyBuildWorkflow]bool{}
+	for _, v := range raw {
+		v.Repository = strings.ToLower(strings.TrimSpace(v.Repository))
+		v.WorkflowPath = strings.TrimSpace(v.WorkflowPath)
+		v.BlobSHA = strings.ToLower(strings.TrimSpace(v.BlobSHA))
+		if !metadataRepo.MatchString(v.Repository) || !validWorkflowPath(v.WorkflowPath) || !metadataSHA.MatchString(v.BlobSHA) {
+			return nil, fmt.Errorf("invalid legacy build workflow")
+		}
+		if !seen[v] {
+			out = append(out, v)
+			seen[v] = true
+		}
+	}
+	return out, nil
 }
