@@ -55,10 +55,10 @@ func TestRunJournaledCallback(t *testing.T) {
 		err  error
 		code restate.Code
 	}{
-		{"wrapped invalid", fmt.Errorf("validation: %w", ErrInvalidBuildInput), 400},
-		{"missing build", ErrBuildNotFound, 404},
+		{"wrapped invalid", fmt.Errorf("validation: %w", store.ErrInvalidBuildInput), 400},
+		{"missing build", store.ErrBuildNotFound, 404},
 		{"missing chunk", ErrChunkNotFound, 404},
-		{"conflict", ErrBuildConflict, 409},
+		{"conflict", store.ErrBuildConflict, 409},
 		{"already terminal", terminal, 422},
 		{"transient", transient, 0},
 		{"success", nil, 0},
@@ -95,7 +95,7 @@ func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req st
 //nolint:tparallel // Requests must run in order against the same object after a conflict.
 func TestUpdateBuildConflictThenValid(t *testing.T) {
 	t.Parallel()
-	st := &metadataMutationStore{err: ErrBuildConflict}
+	st := &metadataMutationStore{err: store.ErrBuildConflict}
 	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 	rt := newFakeObjectRuntime("build")
 	bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
@@ -104,7 +104,7 @@ func TestUpdateBuildConflictThenValid(t *testing.T) {
 		err  error
 		code restate.Code
 	}{
-		{"conflict", ErrBuildConflict, 409},
+		{"conflict", store.ErrBuildConflict, 409},
 		{"valid", nil, 0},
 	}
 	for _, tc := range tests {
@@ -140,7 +140,7 @@ func TestRouterJournalLookupErrors(t *testing.T) {
 		storageErr  error
 		callbackErr error
 	}{
-		{"missing build", ErrBuildNotFound, nil},
+		{"missing build", store.ErrBuildNotFound, nil},
 		{"missing chunk", ErrChunkNotFound, nil},
 		{"storage retry", transient, transient},
 	}
@@ -191,7 +191,7 @@ func TestCreateBuildJournalCallback(t *testing.T) {
 			mc := mocks.NewMockContext(t)
 			want := dbErr
 			if tc.terminal != 0 {
-				want = fmt.Errorf("%w: chunk %q in build %q already exists", ErrBuildConflict, "c1", "b1")
+				want = fmt.Errorf("%w: chunk %q in build %q already exists", store.ErrBuildConflict, "c1", "b1")
 			}
 			observeJournalCallback(t, mc, want, tc.terminal)
 			_, _ = runJournaled(restate.WithMockContext(mc), labelCreate, "create-build-postgres", func(rc restate.RunContext) (bool, error) {
@@ -273,7 +273,7 @@ func TestCreateBuildConflictAtomicity(t *testing.T) {
 			tx := &creationTransaction{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
 			st := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
 			err := st.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
-			require.ErrorIs(t, err, ErrBuildConflict)
+			require.ErrorIs(t, err, store.ErrBuildConflict)
 			assert.Empty(t, tx.durable)
 			assert.Empty(t, tx.pending)
 		})

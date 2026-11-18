@@ -34,7 +34,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	b1 := model.VanadisBuild{ID: "b-more", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-more", ChunkIndex: 0, Title: "C1", Status: "pending", Mode: "action"}
 
-	// 1. Cancel on already terminal build -> ErrBuildConflict
+	// 1. Cancel on already terminal build -> store.ErrBuildConflict
 	bTerm := model.VanadisBuild{ID: "b-term", Status: "completed", ThreadID: "th-1"}
 	storeTerm, _ := dbScript{buildRow: &mockRow{b: &bTerm}}.open()
 	boTerm := NewBuildObject("", nil).WithAuthority(storeTerm, nil)
@@ -440,6 +440,10 @@ func (db *deploymentEvidenceDB) Exec(ctx context.Context, query string, args ...
 			chunk.Status = status
 		}
 	}
+	// Snapshot on write as well as on read: store reads increasingly bypass
+	// this wrapper as methods promote to the embedded store, so a trailing
+	// read snapshot is no longer guaranteed.
+	db.observed = *chunk
 	return tag, nil
 }
 
@@ -1220,23 +1224,23 @@ func TestReconcileErrorsMetric(t *testing.T) {
 			wantServerInc: 0,
 		},
 		{
-			name:          "ErrInvalidBuildInput routes to client errors",
+			name:          "store.ErrInvalidBuildInput routes to client errors",
 			handler:       "test-handler-invalid",
-			err:           ErrInvalidBuildInput,
+			err:           store.ErrInvalidBuildInput,
 			wantClientInc: 1,
 			wantServerInc: 0,
 		},
 		{
-			name:          "wrapped ErrInvalidBuildInput routes to client errors",
+			name:          "wrapped store.ErrInvalidBuildInput routes to client errors",
 			handler:       "test-handler-wrapped-invalid",
-			err:           fmt.Errorf("validation error: %w", ErrInvalidBuildInput),
+			err:           fmt.Errorf("validation error: %w", store.ErrInvalidBuildInput),
 			wantClientInc: 1,
 			wantServerInc: 0,
 		},
 		{
-			name:          "ErrBuildNotFound routes to client errors",
+			name:          "store.ErrBuildNotFound routes to client errors",
 			handler:       "test-handler-build-not-found",
-			err:           ErrBuildNotFound,
+			err:           store.ErrBuildNotFound,
 			wantClientInc: 1,
 			wantServerInc: 0,
 		},
@@ -1248,9 +1252,9 @@ func TestReconcileErrorsMetric(t *testing.T) {
 			wantServerInc: 0,
 		},
 		{
-			name:          "ErrBuildConflict routes to client errors",
+			name:          "store.ErrBuildConflict routes to client errors",
 			handler:       "test-handler-conflict",
-			err:           ErrBuildConflict,
+			err:           store.ErrBuildConflict,
 			wantClientInc: 1,
 			wantServerInc: 0,
 		},

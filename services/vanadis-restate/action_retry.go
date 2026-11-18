@@ -20,7 +20,7 @@ func (b *BuildObject) RetryActionChunk(ctx restate.ObjectContext, req store.Retr
 	}
 	rt := b.getRuntime(ctx)
 	if !retryActionRequestMatches(req, rt.Key()) {
-		return store.RetryActionChunkResult{}, toTerminalErr(fmt.Errorf("%w: build key, chunk, expected dispatch and reason are required", ErrInvalidBuildInput))
+		return store.RetryActionChunkResult{}, toTerminalErr(fmt.Errorf("%w: build key, chunk, expected dispatch and reason are required", store.ErrInvalidBuildInput))
 	}
 	reset, err := rt.RunReconcileStep("retry-action-reset", func(runCtx context.Context) (reconcileStepOutput, error) {
 		result, err := b.store.RetryActionChunk(runCtx, req)

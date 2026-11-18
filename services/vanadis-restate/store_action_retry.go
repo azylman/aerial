@@ -19,10 +19,10 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req store.R
 		return nil, errors.New("database connection is nil")
 	}
 	if strings.TrimSpace(req.BuildID) == "" || strings.TrimSpace(req.ChunkID) == "" || strings.TrimSpace(req.ExpectedDispatchID) == "" || strings.TrimSpace(req.Reason) == "" {
-		return nil, fmt.Errorf("%w: build, chunk, expected dispatch and reason are required", ErrInvalidBuildInput)
+		return nil, fmt.Errorf("%w: build, chunk, expected dispatch and reason are required", store.ErrInvalidBuildInput)
 	}
 	if !validRetryInstructionPair(req) {
-		return nil, fmt.Errorf("%w: expected_instructions and replacement_instructions must be paired and nonblank", ErrInvalidBuildInput)
+		return nil, fmt.Errorf("%w: expected_instructions and replacement_instructions must be paired and nonblank", store.ErrInvalidBuildInput)
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -44,7 +44,7 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req store.R
 	if !replay {
 		// PostgreSQL stores stall_nudges as an integer; never wrap a generation.
 		if c.StallNudges >= 2147483647 {
-			return nil, fmt.Errorf("%w: generation exhausted", ErrBuildConflict)
+			return nil, fmt.Errorf("%w: generation exhausted", store.ErrBuildConflict)
 		}
 		const reset = `UPDATE vanadis_chunks SET instructions = COALESCE($2, instructions), status = 'pending', stall_nudges = stall_nudges + 1, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', merge_awakeable_id = '', deploy_awakeable_id = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
 		if _, err := tx.Exec(ctx, reset, c.ID, req.ReplacementInstructions); err != nil {
@@ -65,12 +65,12 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req store.R
 func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (model.VanadisBuild, []model.VanadisChunk, error) {
 	b, err := store.ScanBuild(tx.QueryRow(ctx, `SELECT `+store.BuildColumns+` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return b, nil, ErrBuildNotFound
+		return b, nil, store.ErrBuildNotFound
 	}
 	if err != nil {
 		return b, nil, err
 	}
-	rows, err := tx.Query(ctx, selectChunksForUpdateSQL, buildID)
+	rows, err := tx.Query(ctx, store.SelectChunksForUpdateSQL, buildID)
 	if err != nil {
 		return b, nil, err
 	}
@@ -126,7 +126,7 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	}
 	c := *selected
 	conflict := func() (model.VanadisChunk, bool, error) {
-		return model.VanadisChunk{}, false, fmt.Errorf("%w: action retry preconditions changed", ErrBuildConflict)
+		return model.VanadisChunk{}, false, fmt.Errorf("%w: action retry preconditions changed", store.ErrBuildConflict)
 	}
 	if c.BuildID != req.BuildID || c.Mode != chunkModeAction || c.PRNumber != 0 || c.StallNudges < 0 {
 		return conflict()

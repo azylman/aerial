@@ -19,7 +19,7 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, req store.Atta
 		return "", "", "", errors.New("database connection is nil")
 	}
 	if req.PRNumber <= 0 {
-		return "", "", "", fmt.Errorf("%w: chunk id or repo, and valid pr number are required", ErrInvalidBuildInput)
+		return "", "", "", fmt.Errorf("%w: chunk id or repo, and valid pr number are required", store.ErrInvalidBuildInput)
 	}
 	chunkID := strings.TrimSpace(req.ChunkID)
 	if chunkID != "" {
@@ -40,7 +40,7 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 	if mode == chunkModeAction {
 		repo := store.NormalizeRepo(req.Repo)
 		if repo == "" {
-			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", ErrInvalidBuildInput)
+			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", store.ErrInvalidBuildInput)
 		}
 		candidates := store.RepoMatchCandidates(repo)
 		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status = 'failed' OR (c.repo = ANY($4) AND c.pr_number = $2 AND c.status IN ('ci_failed', 'conflict', 'merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed')) THEN c.status ELSE 'pr_opened' END, banner = CASE WHEN c.status IN ('ci_failed', 'conflict') AND (NOT (c.repo = ANY($4)) OR c.pr_number IS DISTINCT FROM $2) THEN '' ELSE c.banner END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.repo = '' OR c.repo = ANY($4)) AND (c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed') OR (c.repo = ANY($4) AND c.pr_number = $2)) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
@@ -91,12 +91,12 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 	}
 	c := *selected
 	if !attachmentMatches(c, b, req) {
-		return "", "", "", ErrBuildConflict
+		return "", "", "", store.ErrBuildConflict
 	}
 
 	recoverWorker := firstWorkerFailure(c)
 	if recoverWorker && !attachmentRecoveryAllowed(b, chunks, c.ID) {
-		return "", "", "", ErrBuildConflict
+		return "", "", "", store.ErrBuildConflict
 	}
 
 	// Recovery clears only worker failure evidence; CI budgets and dispatch identity survive.
@@ -118,7 +118,7 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store.AttachChunkPRRequest) (string, string, string, error) {
 	repo := store.NormalizeRepo(req.Repo)
 	if repo == "" {
-		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", ErrInvalidBuildInput)
+		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", store.ErrInvalidBuildInput)
 	}
 	tx, txErr := s.db.Begin(ctx)
 	if txErr != nil {
@@ -178,7 +178,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store
 	if _, err := tx.Exec(ctx, bQ, build.ID, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone build %s: %w", buildID, err)
 	}
-	if err := insertBuildChunk(ctx, tx, buildID, chunk, insertChunkSQL); err != nil {
+	if err := store.InsertBuildChunk(ctx, tx, buildID, chunk, store.InsertChunkSQL); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone chunk %s: %w", chunkID, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -196,13 +196,13 @@ func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, ch
 	var isCancelled bool
 	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR c.status IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed') OR b.status IN ('cancelled', 'completed')));`, chunkID).Scan(&isCancelled)
 	if cancErr == nil && isCancelled {
-		return fmt.Errorf("%w: chunk %s or parent build is in terminal status", ErrBuildConflict, chunkID)
+		return fmt.Errorf("%w: chunk %s or parent build is in terminal status", store.ErrBuildConflict, chunkID)
 	}
 	candidates := store.RepoMatchCandidates(repo)
 	var repoMismatch bool
 	mismatchErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks WHERE id = $1 AND repo != '' AND NOT (repo = ANY($2)));`, chunkID, candidates).Scan(&repoMismatch)
 	if mismatchErr == nil && repoMismatch {
-		return fmt.Errorf("%w: chunk %s has mismatching repo", ErrBuildConflict, chunkID)
+		return fmt.Errorf("%w: chunk %s has mismatching repo", store.ErrBuildConflict, chunkID)
 	}
 	return fmt.Errorf("attach pr failed for chunk %s #%d", chunkID, prNumber)
 }

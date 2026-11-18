@@ -176,7 +176,7 @@ func (s *BuildRouterService) getInvoker(ctx restate.Context) buildObjectInvoker 
 }
 
 func isLookupNotFound(err error) bool {
-	return errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildNotFound)
+	return errors.Is(err, ErrChunkNotFound) || errors.Is(err, store.ErrBuildNotFound)
 }
 
 func canFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
@@ -227,7 +227,7 @@ func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string
 func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifecycleEvent) error {
 	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" || ev.PRNumber <= 0 {
-		err := fmt.Errorf("%w: repo and pr_number required", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: repo and pr_number required", store.ErrInvalidBuildInput)
 		recordReconcileError(labelRoutePREvent, err)
 		return restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -260,7 +260,7 @@ func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub
 		}
 		bID, err := s.store.LookupChunkBuildID(rc, chunkID)
 		if err != nil {
-			if errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildNotFound) {
+			if errors.Is(err, ErrChunkNotFound) || errors.Is(err, store.ErrBuildNotFound) {
 				return "", nil
 			}
 			return "", err
@@ -284,7 +284,7 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 	req.ChunkID = strings.TrimSpace(req.ChunkID)
 	req.Repo = strings.TrimSpace(req.Repo)
 	if req.PRNumber <= 0 || (req.ChunkID == "" && req.Repo == "") {
-		err := fmt.Errorf("%w: chunk_id or repo, and pr_number required", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: chunk_id or repo, and pr_number required", store.ErrInvalidBuildInput)
 		recordReconcileError(labelRouteAttachPR, err)
 		return AttachChunkPRResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -320,7 +320,7 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req FailChunkRe
 	chunkID := strings.TrimSpace(req.ChunkID)
 	reason := strings.TrimSpace(req.Reason)
 	if chunkID == "" || reason == "" {
-		err := fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput)
+		err := fmt.Errorf("%w: chunk_id and reason required", store.ErrInvalidBuildInput)
 		recordReconcileError(labelRouteFailChunk, err)
 		return FailChunkResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
@@ -1074,7 +1074,7 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 
 	build, chunks, gErr := b.store.GetBuild(rc, buildID)
 	if gErr != nil {
-		if errors.Is(gErr, ErrBuildNotFound) {
+		if errors.Is(gErr, store.ErrBuildNotFound) {
 			return "", nil
 		}
 		return "", gErr
@@ -1101,7 +1101,7 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 		Quiet:    ev.Quiet,
 	})
 	if aErr != nil {
-		if errors.Is(aErr, ErrBuildConflict) || errors.Is(aErr, ErrChunkNotFound) {
+		if errors.Is(aErr, store.ErrBuildConflict) || errors.Is(aErr, ErrChunkNotFound) {
 			return "", nil
 		}
 		return "", aErr
