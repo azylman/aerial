@@ -341,6 +341,7 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 		daemonEnv = BuildAgyEnv(AgyEnvInput{
 			BaseEnv:      cfg.Env,
 			HomeDir:      home,
+			Engine:       cfg.Engine,
 			TargetID:     targetKey,
 			TurnEnvFile:  turnEnvFile,
 			Timezone:     cfg.Timezone,

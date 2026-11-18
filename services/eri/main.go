@@ -354,7 +354,7 @@ func buildGeminiVoicePool(cur *config.ConfigData, lowEffortModel string, prewarm
 	return voicePool, geminiModel, apiKey, mcpServers, true
 }
 
-func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome, lowEffortModel, mcpProxyPort string, prewarmedTargets []string, spawner runner.DaemonSpawner, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) runner.AgentPool {
+func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome, lowEffortModel, mcpProxyPort, stack string, prewarmedTargets []string, spawner runner.DaemonSpawner, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) runner.AgentPool {
 	runtimeBase := cur.DataDir
 	if runtimeBase == "" && cfg != nil {
 		runtimeBase = cfg.DataDir()
@@ -382,6 +382,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 		AmbientContextRetriever: ambRetriever,
 		SessionManager:          voiceSessionMgr,
 		MCPProxyPort:            mcpProxyPort,
+		Stack:                   stack,
 	}, spawner)
 }
 
@@ -452,7 +453,7 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 // wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
 // mcpProxyPort points agy/Claude voice daemons at the loopback MCP trace proxy ("" when tracing
 // is off), exactly as basePoolCfg does for the Discord and ephemeral pools.
-func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, lowEffortModel, mcpProxyPort string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
+func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, lowEffortModel, mcpProxyPort, stack string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
 	var memoryRetriever runner.MemoryRetriever
 	if len(memRetriever) > 0 {
 		memoryRetriever = memRetriever[0]
@@ -499,7 +500,7 @@ func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, 
 			if cur != nil && strings.TrimSpace(cur.Voice.Model) != "" {
 				effectiveModel = strings.TrimSpace(cur.Voice.Model)
 			}
-			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, effectiveModel, mcpProxyPort, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
+			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, effectiveModel, mcpProxyPort, stack, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
 		}
 
 		fingerprint := computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey, cur, prewarmedTargets, mcpServers)
@@ -596,6 +597,7 @@ func buildBrainProcessPools(
 	spawner runner.DaemonSpawner,
 	mcpProxyPort string,
 	traceContent bool,
+	stack string,
 ) brainPools {
 	lowEffortModel, mediumEffortModel := resolveBrainModelDefaults(cur)
 	runtimeBase := cur.DataDir
@@ -633,6 +635,7 @@ func buildBrainProcessPools(
 			SessionManager:      sessionMgr,
 			PrewarmedTargets:    prewarmed,
 			MCPProxyPort:        mcpProxyPort,
+			Stack:               stack,
 		}
 		if home == discordHome {
 			pcfg.MemoryRetriever = memoryRetriever
@@ -642,7 +645,7 @@ func buildBrainProcessPools(
 
 	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker", traceContent)
-	voicePool := createVoiceProcessPool(ctx, cfg, voiceHome, lowEffortModel, mcpProxyPort, spawner, memoryRetriever)
+	voicePool := createVoiceProcessPool(ctx, cfg, voiceHome, lowEffortModel, mcpProxyPort, stack, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
 	return brainPools{
@@ -918,21 +921,26 @@ func mcpTraceRoutes(tracingEnabled bool, port string) (*env.MCPProxyRoutes, stri
 	return env.NewMCPProxyRoutes(port), port
 }
 
-// registerMCPTraceProxy mounts the loopback MCP trace proxy when tracing routes exist.
-func registerMCPTraceProxy(mux *http.ServeMux, routes *env.MCPProxyRoutes, turns *runner.ActiveTurnRegistry) {
-	if routes == nil {
-		return
+// registerMCPTraceProxy mounts the loopback MCP trace proxy when tracing routes exist,
+// and always mounts the loopback OTel log receiver for agent process diagnostics.
+func registerMCPTraceProxy(mux *http.ServeMux, routes *env.MCPProxyRoutes, turns *runner.ActiveTurnRegistry, stack ...string) {
+	if routes != nil {
+		mcp.NewTraceProxy(mcp.TraceProxyConfig{Upstreams: routes, Turns: turns}).Register(mux)
 	}
-	mcp.NewTraceProxy(mcp.TraceProxyConfig{Upstreams: routes, Turns: turns}).Register(mux)
+	var stackName string
+	if len(stack) > 0 {
+		stackName = stack[0]
+	}
+	mcp.NewOTelLogProxy(mcp.OTelLogProxyConfig{Turns: turns, Stack: stackName}).Register(mux)
 }
 
 // brainHandler wraps mux with request metrics and server spans, except for the loopback MCP
-// trace proxy: its requests are agents' MCP calls, which the proxy itself parents under the
-// calling turn, so a server span there would only add an orphan root trace per call.
+// trace proxy and OTel log receiver: their requests are agents' MCP calls and logs, which
+// are parented under the calling turn, so a server span there would only add an orphan root trace.
 func brainHandler(mux http.Handler) http.Handler {
 	traced := tracing.Middleware("eri", metricsMiddleware(mux))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, env.MCPProxyPathPrefix) {
+		if strings.HasPrefix(r.URL.Path, env.MCPProxyPathPrefix) || strings.HasPrefix(r.URL.Path, env.OTelLogsPathPrefix) {
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -1061,7 +1069,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	pools := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
+	pools := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent, appOpts.agentName)
 	defer closeAllBrainPools(pools.all)
 
 	startBrainEngineUsagePoller(ctx, cur, pools)
@@ -1118,7 +1126,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		<-gitSyncReloads.done
 	}()
 	registerGitSyncReload(mux, gitSyncReloads)
-	registerMCPTraceProxy(mux, mcpRoutes, activeTurns)
+	registerMCPTraceProxy(mux, mcpRoutes, activeTurns, appOpts.agentName)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)

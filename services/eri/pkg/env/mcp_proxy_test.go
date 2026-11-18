@@ -199,6 +199,13 @@ func TestEnsureTargetCodexConfigTOML_MCPProxy(t *testing.T) {
 			name:      "tracing enabled routes url through proxy with env_http_headers",
 			proxyPort: "8080",
 			wantCodexSubs: []string{
+				"[otel]",
+				`log_user_prompt = false`,
+				`log_agent_responses = false`,
+				`log_sse_deltas = false`,
+				`log_guardian_assessments = false`,
+				`tool_result = { max_bytes = 0 }`,
+				`endpoint = "http://127.0.0.1:8080/internal/otel/v1/logs/voice"`,
 				`url = "http://127.0.0.1:8080/internal/mcp-proxy/voice/docket"`,
 				`env_http_headers = { "X-Eri-Daemon" = "ERI_DAEMON_ID" }`,
 				`url = "http://127.0.0.1:8080/internal/mcp-proxy/voice/kernel"`,
@@ -295,12 +302,26 @@ func TestFormatCodexConfigTOML(t *testing.T) {
 			},
 		},
 		{
-			name:      "proxyBase matching url sets env_http_headers",
+			name:      "proxyBase matching url sets env_http_headers and otel block",
 			raw:       json.RawMessage(`{"mcpServers":{"proxied":{"url":"http://127.0.0.1:8080/mcp"}}}`),
 			proxyBase: "http://127.0.0.1:8080",
 			contains: []string{
+				`[otel]`,
+				`log_user_prompt = false`,
+				`log_agent_responses = false`,
+				`tool_result = { max_bytes = 0 }`,
+				`endpoint = "http://127.0.0.1:8080/internal/otel/v1/logs"`,
 				`[mcp_servers.proxied]`,
 				`env_http_headers = { "X-Eri-Daemon" = "ERI_DAEMON_ID" }`,
+			},
+		},
+		{
+			name:      "proxyBase with target suffix in path",
+			raw:       json.RawMessage(`null`),
+			proxyBase: "http://127.0.0.1:8080/internal/mcp-proxy/voice",
+			contains: []string{
+				`[otel]`,
+				`endpoint = "http://127.0.0.1:8080/internal/otel/v1/logs/voice"`,
 			},
 		},
 		{

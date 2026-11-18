@@ -416,9 +416,41 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to sync hooks: %w", err)
 	}
 
+	p.pruneAgyLogDirs()
 	p.chownProvisionedPaths()
 
 	return nil
+}
+
+func (p *Provisioner) pruneAgyLogDirs() {
+	if p == nil {
+		return
+	}
+	var roots []string
+	if p.homeDir != "" {
+		roots = append(roots, p.homeDir)
+	}
+	if p.dataDir != "" {
+		for _, target := range allRuntimeTargets {
+			roots = append(roots, p.runtimeHomeDir(target))
+		}
+	}
+	for _, root := range roots {
+		logDir := filepath.Join(root, ".gemini", "antigravity-cli", "log")
+		fi, err := os.Lstat(logDir)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(logDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.Type().IsRegular() && strings.HasPrefix(entry.Name(), "cli-") && strings.HasSuffix(entry.Name(), ".log") {
+				ignore(os.Remove(filepath.Join(logDir, entry.Name())))
+			}
+		}
+	}
 }
 
 func chownTree(root string) {

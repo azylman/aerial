@@ -155,6 +155,8 @@ func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
 		{name: "ordinary route gets a server span", path: "/prompt", wantSpans: 1},
 		{name: "health probe is untraced", path: "/health", wantSpans: 0},
 		{name: "MCP proxy route is left to the proxy", path: "/internal/mcp-proxy/discord/docket", wantSpans: 0},
+		{name: "OTel logs route is left to the receiver", path: "/internal/otel/v1/logs", wantSpans: 0},
+		{name: "OTel logs target route is left to the receiver", path: "/internal/otel/v1/logs/voice", wantSpans: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,6 +211,15 @@ func TestRegisterMCPTraceProxy(t *testing.T) {
 			mux.ServeHTTP(w, req)
 			if w.Code != tc.wantStatus {
 				t.Errorf("announce status = %d, want %d", w.Code, tc.wantStatus)
+			}
+
+			// OTel log receiver is mounted in both cases
+			otelReq := httptest.NewRequest(http.MethodPost, "/internal/otel/v1/logs", strings.NewReader(`{}`))
+			otelReq.RemoteAddr = "127.0.0.1:4000"
+			otelW := httptest.NewRecorder()
+			mux.ServeHTTP(otelW, otelReq)
+			if otelW.Code != http.StatusOK {
+				t.Errorf("otel logs status = %d, want %d", otelW.Code, http.StatusOK)
 			}
 		})
 	}

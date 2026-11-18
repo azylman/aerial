@@ -101,11 +101,11 @@ func (d *StreamingDaemon) waitForMuseHandshake(ctx context.Context, reader *bufi
 	initReq := codexRPCRequest{
 		JSONRPC: codexRPCVersion,
 		ID:      1,
-		Method:  "initialize",
+		Method:  rpcMethodInitialize,
 		Params: map[string]any{
-			"clientInfo": map[string]any{
-				"name":    "eri",
-				"version": "1.0.0",
+			rpcClientInfoKey: map[string]any{
+				rpcNameKey:    "eri",
+				rpcVersionKey: rpcClientVersion,
 			},
 		},
 	}

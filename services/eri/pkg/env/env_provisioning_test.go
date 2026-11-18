@@ -1095,3 +1095,118 @@ func TestProvisionMuseAuthState(t *testing.T) {
 		})
 	}
 }
+
+func setupPruneTestFiles(baseDir string, setupFiles []string) {
+	for _, spec := range setupFiles {
+		if rel, ok := strings.CutPrefix(spec, "file:"); ok {
+			full := filepath.Join(baseDir, rel)
+			_ = os.MkdirAll(filepath.Dir(full), 0o755)
+			_ = os.WriteFile(full, []byte("data"), 0o644)
+			continue
+		}
+		if rel, ok := strings.CutPrefix(spec, "dir:"); ok {
+			full := filepath.Join(baseDir, rel)
+			_ = os.MkdirAll(full, 0o755)
+			continue
+		}
+		if rest, ok := strings.CutPrefix(spec, "symlink:"); ok {
+			parts := strings.Split(rest, "->")
+			target := filepath.Join(baseDir, parts[0])
+			link := filepath.Join(baseDir, parts[1])
+			_ = os.MkdirAll(filepath.Dir(link), 0o755)
+			_ = os.Symlink(target, link)
+		}
+	}
+}
+
+func TestPruneAgyLogDirs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		nilProv       bool
+		withDataDir   bool
+		setupFiles    []string
+		wantRemoved   []string
+		wantPreserved []string
+	}{
+		{
+			name:    "nil provisioner is safe",
+			nilProv: true,
+		},
+		{
+			name:        "removes cli-*.log and preserves other entries across primary and runtimes",
+			withDataDir: true,
+			setupFiles: []string{
+				"file:primary/.gemini/antigravity-cli/log/cli-12345.log",
+				"file:primary/.gemini/antigravity-cli/log/cli-debug.log",
+				"file:primary/.gemini/antigravity-cli/log/other.log",
+				"file:primary/.gemini/antigravity-cli/log/cli-info.txt",
+				"dir:primary/.gemini/antigravity-cli/log/cli-sub.log",
+				"file:runtimes/discord/.gemini/antigravity-cli/log/cli-999.log",
+				"file:runtimes/discord/.gemini/antigravity-cli/log/keep.log",
+				"file:runtimes/voice/.gemini/antigravity-cli/log/cli-voice.log",
+				"file:runtimes/ephemeral/.gemini/antigravity-cli/log/cli-eph.log",
+			},
+			wantRemoved: []string{
+				"primary/.gemini/antigravity-cli/log/cli-12345.log",
+				"primary/.gemini/antigravity-cli/log/cli-debug.log",
+				"runtimes/discord/.gemini/antigravity-cli/log/cli-999.log",
+				"runtimes/voice/.gemini/antigravity-cli/log/cli-voice.log",
+				"runtimes/ephemeral/.gemini/antigravity-cli/log/cli-eph.log",
+			},
+			wantPreserved: []string{
+				"primary/.gemini/antigravity-cli/log/other.log",
+				"primary/.gemini/antigravity-cli/log/cli-info.txt",
+				"primary/.gemini/antigravity-cli/log/cli-sub.log",
+				"runtimes/discord/.gemini/antigravity-cli/log/keep.log",
+			},
+		},
+		{
+			name:        "preserves symlink log file",
+			withDataDir: false,
+			setupFiles: []string{
+				"file:primary/target.txt",
+				"symlink:primary/target.txt->primary/.gemini/antigravity-cli/log/cli-symlink.log",
+			},
+			wantPreserved: []string{
+				"primary/.gemini/antigravity-cli/log/cli-symlink.log",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilProv {
+				var p *Provisioner
+				p.pruneAgyLogDirs()
+				return
+			}
+
+			baseDir := t.TempDir()
+			primaryHome := filepath.Join(baseDir, "primary")
+			var dataDir string
+			if tc.withDataDir {
+				dataDir = baseDir
+			}
+
+			setupPruneTestFiles(baseDir, tc.setupFiles)
+
+			p := newDisabledProvisioner(t, primaryHome, dataDir)
+			p.pruneAgyLogDirs()
+
+			for _, rel := range tc.wantRemoved {
+				full := filepath.Join(baseDir, rel)
+				if _, err := os.Lstat(full); !os.IsNotExist(err) {
+					t.Errorf("expected %s to be removed, but it exists", rel)
+				}
+			}
+			for _, rel := range tc.wantPreserved {
+				full := filepath.Join(baseDir, rel)
+				if _, err := os.Lstat(full); err != nil {
+					t.Errorf("expected %s to be preserved, got err: %v", rel, err)
+				}
+			}
+		})
+	}
+}

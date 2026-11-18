@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/guard"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 const (
@@ -61,6 +62,7 @@ type ActiveTurns interface {
 	DaemonByConversation(conversationID string) (daemonID, target string, ok bool)
 	SoleDaemonInTarget(target string) (daemonID string, ok bool)
 	ToolSpan(ctx context.Context, daemonID, server, tool, callID string) (trace.SpanContext, bool)
+	Turn(daemonID string) (runner.ActiveTurn, trace.SpanContext, bool)
 }
 
 type announcement struct {
