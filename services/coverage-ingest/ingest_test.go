@@ -42,24 +42,39 @@ func TestParseConfig(t *testing.T) {
 			want: Config{Targets: []Target{
 				{Service: "eri", URL: "http://eri.aerial/debug/coverage/flush"},
 				{Service: "eri", URL: "http://eri-miorine.aerial/debug/coverage/flush"},
-			}, FlushTimeout: 90 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+			}, FlushTimeout: 90 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
 		},
 		{
 			name: "explicit connect retry",
 			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 10s\nconnect_retry_interval: 250ms\n",
-			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 10 * time.Second, ConnectRetryInterval: 250 * time.Millisecond},
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 10 * time.Second, ConnectRetryInterval: 250 * time.Millisecond, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
 		},
 		{
 			name: "default timeout",
 			yaml: "targets:\n  - service: haro\n    url: http://haro.aerial/debug/coverage/flush\n",
-			want: Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+			want: Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
 		},
 		{
 			name: "explicit zero retry durations take the defaults",
 			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 0s\nconnect_retry_interval: 0s\n",
-			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
 		},
-		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets"},
+		{
+			name: "push only with explicit server settings",
+			yaml: "push_services: [photos-sync]\npull_interval: 1m\nlisten: ':9090'\nmax_push_bytes: 1024\n",
+			want: Config{PushServices: []string{"photos-sync"}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: time.Minute, Listen: ":9090", MaxPushBytes: 1024},
+		},
+		{
+			name: "pull targets and distinct push services",
+			yaml: "targets:\n  - service: eri\n    url: http://x\npush_services: [photos-sync, backup]\n",
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, PushServices: []string{"photos-sync", "backup"}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
+		},
+		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets or push_services"},
+		{name: "blank push service", yaml: "push_services: ['']\n", wantErr: "push_services 0 is empty"},
+		{name: "duplicate push service", yaml: "push_services: [photos-sync, photos-sync]\n", wantErr: `push service "photos-sync" is listed twice`},
+		{name: "push service also pulled", yaml: "targets:\n  - service: eri\n    url: http://x\npush_services: [eri]\n", wantErr: `push service "eri" is also a pull target`},
+		{name: "negative pull interval", yaml: "push_services: [p]\npull_interval: -1m\n", wantErr: "pull_interval must not be negative"},
+		{name: "negative max push bytes", yaml: "push_services: [p]\nmax_push_bytes: -1\n", wantErr: "max_push_bytes must not be negative"},
 		{name: "missing url", yaml: "targets:\n  - service: eri\n", wantErr: "target 0 needs service and url"},
 		{name: "blank service", yaml: "targets:\n  - service: ' '\n    url: http://x\n", wantErr: "target 0 needs service and url"},
 		{name: "negative timeout", yaml: "targets:\n  - service: eri\n    url: http://x\nflush_timeout: -1s\n", wantErr: "flush_timeout must not be negative"},
@@ -541,7 +556,7 @@ func TestIngest(t *testing.T) {
 			}
 			runner := &fakeRunner{out: []byte(tc.runnerOut), err: tc.runnerErr}
 			store := &fakeStore{errs: tc.storeErrs}
-			err := Ingest(context.Background(), cfg, srv.Client(), runner, store)
+			err := NewServer(cfg, srv.Client(), runner, store).Ingest(context.Background(), cfg)
 			if len(tc.wantErrs) == 0 && err != nil {
 				t.Fatalf("Ingest error = %v, want nil", err)
 			}
@@ -654,9 +669,8 @@ func TestFetchTargetErrors(t *testing.T) {
 func TestRun(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	srv := newFlushServer(t, nil)
 	writeFile(t, filepath.Join(dir, "bad.yaml"), "targets: [\n")
-	writeFile(t, filepath.Join(dir, "down.yaml"), "targets:\n  - service: eri\n    url: "+srv.URL+"/missing\nflush_timeout: 2s\n")
+	writeFile(t, filepath.Join(dir, "badlisten.yaml"), "push_services: [photos-sync]\nlisten: '127.0.0.1:-1'\n")
 	tests := []struct {
 		name       string
 		args       []string
@@ -667,7 +681,7 @@ func TestRun(t *testing.T) {
 		{name: "missing config flag", args: nil, wantCode: 2, wantStderr: "-config is required"},
 		{name: "unreadable config", args: []string{"-config", filepath.Join(dir, "absent.yaml")}, wantCode: 1, wantStderr: "read config"},
 		{name: "invalid config", args: []string{"-config", filepath.Join(dir, "bad.yaml")}, wantCode: 1, wantStderr: "parse config"},
-		{name: "failing target exits non-zero", args: []string{"-config", filepath.Join(dir, "down.yaml")}, wantCode: 1},
+		{name: "unusable listen address", args: []string{"-config", filepath.Join(dir, "badlisten.yaml")}, wantCode: 1, wantStderr: "listen:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -726,7 +740,7 @@ func TestIngestEnvFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(tc.envKey, tc.envVal)
 			cfg := Config{Targets: []Target{{Service: "eri", URL: "http://127.0.0.1:1/debug/coverage/flush"}}}
-			err := Ingest(context.Background(), cfg, nil, &fakeRunner{}, &fakeStore{})
+			err := NewServer(cfg, nil, &fakeRunner{}, &fakeStore{}).Ingest(context.Background(), cfg)
 			assertErrContains(t, err, tc.wantErr)
 		})
 	}
