@@ -107,6 +107,25 @@ func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServer
 	}
 }
 
+// StripProxyPolicyFields removes loopback proxy policy configuration fields from servers
+// so clients like agy do not receive unknown proxy-only keys.
+func StripProxyPolicyFields(servers map[string]any) {
+	for name, v := range servers {
+		entry, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		delete(entry, "instructions")
+		delete(entry, "enabledTools")
+		delete(entry, "enabled_tools")
+		delete(entry, "disabledTools")
+		delete(entry, "disabled_tools")
+		delete(entry, "responseFilters")
+		delete(entry, "response_filters")
+		servers[name] = entry
+	}
+}
+
 // LoadTargetMCPConfig constructs the merged MCP configuration partitioned for target runtime.
 // Headers are emitted verbatim with the credentials declared in config. Server URLs are too,
 // unless MCP tracing is enabled (WithMCPProxy): then HTTP servers point at eri's loopback
@@ -123,6 +142,7 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	if p != nil {
 		p.mcpProxy.rewrite(target, mergedServers)
 	}
+	StripProxyPolicyFields(mergedServers)
 
 	finalConfig := map[string]any{
 		mcpKeyMCPServers: mergedServers,
@@ -161,6 +181,13 @@ func ConvertMCPConfigForClaude(rawConfig json.RawMessage) json.RawMessage {
 		}
 		newMap := make(map[string]any, len(srvMap))
 		maps.Copy(newMap, srvMap)
+		delete(newMap, "disabledTools")
+		delete(newMap, "disabled_tools")
+		delete(newMap, "enabledTools")
+		delete(newMap, "enabled_tools")
+		delete(newMap, "instructions")
+		delete(newMap, "responseFilters")
+		delete(newMap, "response_filters")
 		var serverURL string
 		if u, ok := newMap["serverUrl"].(string); ok && u != "" {
 			serverURL = u

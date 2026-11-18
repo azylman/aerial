@@ -3,22 +3,27 @@ package mcp_test
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/itchyny/gojq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/guard"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -526,4 +531,500 @@ func TestAnnouncementStore(t *testing.T) {
 			}
 		})
 	}
+}
+
+type upstreamPolicyMap struct {
+	upstreams map[string]string
+	policies  map[string]env.ServerPolicy
+}
+
+func (m upstreamPolicyMap) Upstream(target, server string) (string, bool) {
+	u, ok := m.upstreams[target+"/"+server]
+	return u, ok
+}
+
+func (m upstreamPolicyMap) Policy(target, server string) (env.ServerPolicy, bool) {
+	p, ok := m.policies[target+"/"+server]
+	return p, ok
+}
+
+func compileJQ(t *testing.T, expr string) *gojq.Code {
+	t.Helper()
+	query, err := gojq.Parse(expr)
+	if err != nil {
+		t.Fatalf("parse jq %q: %v", expr, err)
+	}
+	code, err := gojq.Compile(query, gojq.WithVariables([]string{"$args"}))
+	if err != nil {
+		t.Fatalf("compile jq %q: %v", expr, err)
+	}
+	return code
+}
+
+type blockedToolCase struct {
+	name        string
+	policy      env.ServerPolicy
+	rawReq      string
+	wantBlocked bool
+	wantReqID   any
+	wantTool    string
+}
+
+func blockedToolTestCases() []blockedToolCase {
+	return []blockedToolCase{
+		{
+			name:        "empty policy allows any tool",
+			policy:      env.ServerPolicy{},
+			rawReq:      toolsCall("delete"),
+			wantBlocked: false,
+		},
+		{
+			name:        "disabled tool blocked",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      toolsCall("delete"),
+			wantBlocked: true,
+			wantReqID:   float64(1),
+			wantTool:    "delete",
+		},
+		{
+			name:        "disabled tool check is case-insensitive",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      toolsCall("DELETE"),
+			wantBlocked: true,
+			wantReqID:   float64(1),
+			wantTool:    "DELETE",
+		},
+		{
+			name:        "disabled tool check trims whitespace",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `{"jsonrpc":"2.0","id":"req-42","method":"tools/call","params":{"name":"  delete  "}}`,
+			wantBlocked: true,
+			wantReqID:   "req-42",
+			wantTool:    "  delete  ",
+		},
+		{
+			name:        "enabled tools whitelist allows permitted tool",
+			policy:      env.ServerPolicy{EnabledTools: map[string]bool{"read": true}},
+			rawReq:      toolsCall("read"),
+			wantBlocked: false,
+		},
+		{
+			name:        "enabled tools whitelist blocks unlisted tool",
+			policy:      env.ServerPolicy{EnabledTools: map[string]bool{"read": true}},
+			rawReq:      toolsCall("write"),
+			wantBlocked: true,
+			wantReqID:   float64(1),
+			wantTool:    "write",
+		},
+		{
+			name:        "disabled tool outranks whitelist",
+			policy:      env.ServerPolicy{EnabledTools: map[string]bool{"read": true}, DisabledTools: map[string]bool{"read": true}},
+			rawReq:      toolsCall("read"),
+			wantBlocked: true,
+			wantReqID:   float64(1),
+			wantTool:    "read",
+		},
+		{
+			name:        "non tools/call method allowed regardless of disabled tools",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"search": true}},
+			rawReq:      toolsList,
+			wantBlocked: false,
+		},
+		{
+			name:        "batch request with a blocked tool fails closed",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `[` + toolsCall("read") + `,` + toolsCall("delete") + `]`,
+			wantBlocked: true,
+			wantReqID:   float64(1),
+			wantTool:    "delete",
+		},
+		{
+			name:        "batch request with permitted tools passes",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `[` + toolsCall("read") + `,` + toolsCall("search") + `]`,
+			wantBlocked: false,
+		},
+		{
+			name:        "malformed json passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `{malformed`,
+			wantBlocked: false,
+		},
+		{
+			name:        "malformed params passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":""}`,
+			wantBlocked: false,
+		},
+		{
+			name:        "empty request body is not blocked",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      "",
+			wantBlocked: false,
+		},
+		{
+			name:        "notification passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+			wantBlocked: false,
+		},
+		{
+			name:        "batch malformed json passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `[{bad`,
+			wantBlocked: false,
+		},
+		{
+			name:        "batch non-object item passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `[123]`,
+			wantBlocked: false,
+		},
+		{
+			name:        "scalar request passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `"scalar"`,
+			wantBlocked: false,
+		},
+		{
+			name:        "tools/call without params passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`,
+			wantBlocked: false,
+		},
+		{
+			name:        "tools/call with whitespace-only tool name passes through to upstream",
+			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
+			rawReq:      `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"   "}}`,
+			wantBlocked: false,
+		},
+	}
+}
+
+func TestIsBlockedToolCall(t *testing.T) {
+	t.Parallel()
+	for _, tc := range blockedToolTestCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			blocked, reqID, tool := mcp.IsBlockedToolCall([]byte(tc.rawReq), tc.policy)
+			if blocked != tc.wantBlocked {
+				t.Fatalf("blocked = %v, want %v", blocked, tc.wantBlocked)
+			}
+			if tc.wantBlocked {
+				if reqID != tc.wantReqID {
+					t.Errorf("reqID = %v, want %v", reqID, tc.wantReqID)
+				}
+				if tool != tc.wantTool {
+					t.Errorf("tool = %q, want %q", tool, tc.wantTool)
+				}
+			}
+		})
+	}
+}
+
+type traceProxyShapingCase struct {
+	name            string
+	path            string
+	body            string
+	wantStatusCode  int
+	wantContentType string
+	wantSub         string
+	dontWantSub     string
+	wantUpstream    bool
+}
+
+func handleShapingUpstream(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/list":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"allowed_tool"},{"name":"blocked_tool"}]}}`))
+	case "/init":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2024-11-05"}}`))
+	case "/call":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"items\":[{\"name\":\"item1\",\"junk\":true}]}"}]}}`))
+	case "/call_fail":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"items\":[{\"name\":\"fail_item\"}]}"}]}}`))
+	case "/call_gzip":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(`{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"{\"items\":[{\"name\":\"gzip_item\",\"junk\":true}]}"}]}}`))
+		_ = gz.Close()
+		_, _ = w.Write(buf.Bytes())
+	case "/sse":
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"tools\":[{\"name\":\"allowed_tool\"},{\"name\":\"blocked_tool\"}]}}\n\n"))
+	case "/error":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"{\"items\":[{\"name\":\"unshaped\",\"junk\":true}]}"}]}}`))
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}
+}
+
+func resolveShapingTarget(baseURL, body, name string) string {
+	switch {
+	case strings.Contains(body, "initialize"):
+		return baseURL + "/init"
+	case strings.Contains(body, "fail_tool"):
+		return baseURL + "/call_fail"
+	case strings.Contains(body, "filter_tool"):
+		return baseURL + "/call"
+	case strings.Contains(body, "gzip_tool"):
+		return baseURL + "/call_gzip"
+	case strings.Contains(body, "error_tool"):
+		return baseURL + "/error"
+	case strings.Contains(name, "sse"):
+		return baseURL + "/sse"
+	default:
+		return baseURL + "/list"
+	}
+}
+
+func runTraceProxyShapingCase(t *testing.T, filterCode *gojq.Code, tc traceProxyShapingCase) {
+	t.Helper()
+	var upstreamCalled atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled.Add(1)
+		handleShapingUpstream(w, r)
+	}))
+	defer upstream.Close()
+
+	failFilter := compileJQ(t, "error(\"filter failed\")")
+	proxyRoutes := upstreamPolicyMap{
+		upstreams: map[string]string{
+			"discord/serverA": resolveShapingTarget(upstream.URL, tc.body, tc.name),
+		},
+		policies: map[string]env.ServerPolicy{
+			"discord/serverA": {
+				Instructions:  "Server instructions",
+				DisabledTools: map[string]bool{"blocked_tool": true},
+				ResponseFilters: map[string]*gojq.Code{
+					"error_tool":  filterCode,
+					"filter_tool": filterCode,
+					"fail_tool":   failFilter,
+					"gzip_tool":   filterCode,
+				},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mcp.NewTraceProxy(mcp.TraceProxyConfig{
+		Upstreams: proxyRoutes,
+		Turns:     runner.NewActiveTurnRegistry(),
+	}).Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := srv.Client().Post(srv.URL+tc.path, "application/json", strings.NewReader(tc.body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != tc.wantStatusCode {
+		t.Errorf("status = %d, want %d", resp.StatusCode, tc.wantStatusCode)
+	}
+	if tc.wantContentType != "" {
+		if gotCT := resp.Header.Get("Content-Type"); !strings.Contains(gotCT, tc.wantContentType) {
+			t.Errorf("Content-Type = %q, want containing %q", gotCT, tc.wantContentType)
+		}
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	bodyStr := string(bodyBytes)
+	if !strings.Contains(bodyStr, tc.wantSub) {
+		t.Errorf("response body missing %q, got: %s", tc.wantSub, bodyStr)
+	}
+	if tc.dontWantSub != "" && strings.Contains(bodyStr, tc.dontWantSub) {
+		t.Errorf("response body unexpectedly contained %q, got: %s", tc.dontWantSub, bodyStr)
+	}
+	wasCalled := upstreamCalled.Load() > 0
+	if wasCalled != tc.wantUpstream {
+		t.Errorf("upstream called = %v, want %v", wasCalled, tc.wantUpstream)
+	}
+}
+
+func TestTraceProxy_ShapingAndPolicy(t *testing.T) {
+	t.Parallel()
+	filterCode := compileJQ(t, ".items[] | {name: .name, query: $args.q}")
+	tests := []traceProxyShapingCase{
+		{
+			name:            "blocked tool call returns 200 -32601 error immediately without calling upstream",
+			path:            "/internal/mcp-proxy/discord/serverA",
+			body:            `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"blocked_tool","arguments":{}}}`,
+			wantStatusCode:  http.StatusOK,
+			wantContentType: "application/json",
+			wantSub:         `"code":-32601`,
+			dontWantSub:     `item1`,
+			wantUpstream:    false,
+		},
+		{
+			name:           "tools/list response filtered",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+			wantStatusCode: http.StatusOK,
+			wantSub:        `"name":"allowed_tool"`,
+			dontWantSub:    `"name":"blocked_tool"`,
+			wantUpstream:   true,
+		},
+		{
+			name:           "initialize injects instructions",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":2,"method":"initialize"}`,
+			wantStatusCode: http.StatusOK,
+			wantSub:        `"instructions":"Server instructions"`,
+			wantUpstream:   true,
+		},
+		{
+			name:           "tools/call applies jq response filter with $args",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"filter_tool","arguments":{"q":"hello"}}}`,
+			wantStatusCode: http.StatusOK,
+			wantSub:        `\"name\":\"item1\",\"query\":\"hello\"`,
+			dontWantSub:    `junk`,
+			wantUpstream:   true,
+		},
+		{
+			name:           "gzipped tools/call response is uncompressed and shaped",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"gzip_tool","arguments":{"q":"gzip_q"}}}`,
+			wantStatusCode: http.StatusOK,
+			wantSub:        `\"name\":\"gzip_item\",\"query\":\"gzip_q\"`,
+			dontWantSub:    `junk`,
+			wantUpstream:   true,
+		},
+		{
+			name:           "sse tools/list stream is shaped in place preserving sse framing",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":5,"method":"tools/list"}`,
+			wantStatusCode: http.StatusOK,
+			wantSub:        `data: {"id":5,"jsonrpc":"2.0","result":{"tools":[{"name":"allowed_tool"}]}}`,
+			dontWantSub:    `blocked_tool`,
+			wantUpstream:   true,
+		},
+		{
+			name:           "upstream 500 error skips shaping and forwards verbatim",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"error_tool"}}`,
+			wantStatusCode: http.StatusInternalServerError,
+			wantSub:        `junk`,
+			wantUpstream:   true,
+		},
+		{
+			name:           "tools/call filter failure fails open and forwards unshaped response",
+			path:           "/internal/mcp-proxy/discord/serverA",
+			body:           `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fail_tool"}}`,
+			wantStatusCode: http.StatusOK,
+			wantSub:        `fail_item`,
+			wantUpstream:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runTraceProxyShapingCase(t, filterCode, tc)
+		})
+	}
+}
+
+func TestTraceProxy_StreamsSSE_Shaped(t *testing.T) {
+	t.Parallel()
+
+	event1Written := make(chan struct{})
+	event1Read := make(chan struct{})
+	streamDone := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
+		_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"allowed_tool\"},{\"name\":\"blocked_tool\"}]}}\n\n"))
+		flusher.Flush()
+		close(event1Written)
+
+		<-event1Read
+		_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"allowed_tool_2\"},{\"name\":\"blocked_tool\"}]}}\n\n"))
+		flusher.Flush()
+		<-streamDone
+	}))
+	defer upstream.Close()
+
+	proxyRoutes := upstreamPolicyMap{
+		upstreams: map[string]string{
+			"discord/serverA": upstream.URL,
+		},
+		policies: map[string]env.ServerPolicy{
+			"discord/serverA": {
+				DisabledTools: map[string]bool{"blocked_tool": true},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mcp.NewTraceProxy(mcp.TraceProxyConfig{
+		Upstreams: proxyRoutes,
+		Turns:     runner.NewActiveTurnRegistry(),
+	}).Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/serverA", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("client do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	<-event1Written
+
+	line1, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read line 1: %v", err)
+	}
+	if !strings.Contains(line1, `"name":"allowed_tool"`) || strings.Contains(line1, `"blocked_tool"`) {
+		t.Errorf("line1 = %s, want allowed_tool and no blocked_tool", line1)
+	}
+
+	_, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read delimiter: %v", err)
+	}
+
+	close(event1Read)
+
+	line2, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read line 2: %v", err)
+	}
+	if !strings.Contains(line2, `"name":"allowed_tool_2"`) || strings.Contains(line2, `"blocked_tool"`) {
+		t.Errorf("line2 = %s, want allowed_tool_2 and no blocked_tool", line2)
+	}
+
+	close(streamDone)
 }

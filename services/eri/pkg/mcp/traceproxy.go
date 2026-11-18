@@ -2,13 +2,17 @@ package mcp
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,6 +226,80 @@ func (p *TraceProxy) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (*TraceProxy) shapeResponse(ctx context.Context, resp *http.Response, rpcMethod, tool string, reqBody []byte, policy env.ServerPolicy) error {
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		upstreamBody := resp.Body
+		pr, pw := io.Pipe()
+		resp.Body = pr
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
+		resp.Header.Del("Transfer-Encoding")
+		go func() {
+			defer upstreamBody.Close()
+			if err := ShapeSSEStream(ctx, upstreamBody, pw, rpcMethod, tool, reqBody, policy); err != nil {
+				if closeErr := pw.CloseWithError(err); closeErr != nil {
+					return
+				}
+				return
+			}
+			if closeErr := pw.Close(); closeErr != nil {
+				return
+			}
+		}()
+		return nil
+	}
+
+	limited := io.LimitReader(resp.Body, maxProxyRequestBytes+1)
+	respBytes, err := io.ReadAll(limited)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if len(respBytes) > maxProxyRequestBytes {
+		resp.Body = io.NopCloser(bytes.NewReader(respBytes))
+		return nil
+	}
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gz, gzErr := gzip.NewReader(bytes.NewReader(respBytes))
+		if gzErr == nil {
+			decompressed, readErr := io.ReadAll(io.LimitReader(gz, maxProxyRequestBytes))
+			if closeErr := gz.Close(); closeErr == nil && readErr == nil {
+				respBytes = decompressed
+				resp.Header.Del("Content-Encoding")
+			}
+		}
+	}
+	// Runtime filter errors (e.g. unexpected schema variation or iterator error)
+	// deliberately fail open to avoid hard-failing an agent turn over a cosmetic shaping issue.
+	out, shapeErr := ShapeResponseBody(ctx, respBytes, resp.Header.Get("Content-Type"), rpcMethod, tool, reqBody, policy)
+	if shapeErr != nil || len(out) == 0 {
+		out = respBytes
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(out))
+	resp.ContentLength = int64(len(out))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	resp.Header.Del("Transfer-Encoding")
+	return nil
+}
+
+func (p *TraceProxy) clientSpanParent(ctx context.Context, target, server, method, tool string, headers http.Header, body []byte, attrs []attribute.KeyValue) (trace.SpanContext, []attribute.KeyValue, bool) {
+	if method == "" {
+		return trace.SpanContext{}, nil, false
+	}
+	parent, callID, ok := p.parentSpan(ctx, target, server, headers.Get(env.DaemonHeader), method, tool, body)
+	if !ok {
+		parent, ok = inboundSpanContext(ctx, headers)
+	}
+	if !ok {
+		return trace.SpanContext{}, nil, false
+	}
+	attrs = append(attrs, attrMCPServer.String(server))
+	if callID != "" {
+		attrs = append(attrs, attrGenAIToolCallID.String(callID))
+	}
+	return parent, attrs, true
+}
+
 func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	target, server := r.PathValue("target"), r.PathValue("server")
 	upstreamURL, ok := p.upstreams.Upstream(target, server)
@@ -234,35 +312,39 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid MCP upstream", http.StatusBadGateway)
 		return
 	}
+
+	var policy env.ServerPolicy
+	var hasPolicy bool
+	if pr, ok := p.upstreams.(PolicyResolver); ok {
+		policy, hasPolicy = pr.Policy(target, server)
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyRequestBytes))
 	if err != nil {
 		http.Error(w, "unreadable request body", http.StatusBadRequest)
 		return
 	}
+
+	if hasPolicy && r.Method == http.MethodPost {
+		if blocked, reqID, toolName := IsBlockedToolCall(body, policy); blocked {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write(BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled.", toolName))); err != nil {
+				return
+			}
+			return
+		}
+	}
+
 	attrs := tracing.MCPRequestAttrs(body)
 	method, tool := mcpMethodAndTool(attrs)
 
 	ctx := r.Context()
 	var span trace.Span
-	// Methodless requests (responses to server pings, empty POSTs, the standalone SSE GET)
-	// are client housekeeping, not agent work, so they never join a turn.
-	if method != "" {
-		parent, callID, ok := p.parentSpan(ctx, target, server, r.Header.Get(env.DaemonHeader), method, tool, body)
-		if !ok {
-			// Turn attribution is authoritative; only when it resolves nothing does the
-			// engine's own context (TRACEPARENT it inherited at daemon spawn and forwards on
-			// its MCP requests) parent the span, instead of the call going untraced.
-			parent, ok = inboundSpanContext(ctx, r.Header)
-		}
-		if ok {
-			attrs = append(attrs, attrMCPServer.String(server))
-			if callID != "" {
-				attrs = append(attrs, attrGenAIToolCallID.String(callID))
-			}
-			ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, parent), "mcp "+server+" "+method,
-				trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
-			defer span.End()
-		}
+	if parent, spanAttrs, ok := p.clientSpanParent(ctx, target, server, method, tool, r.Header, body, attrs); ok {
+		ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, parent), "mcp "+server+" "+method,
+			trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(spanAttrs...))
+		defer span.End()
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -271,6 +353,9 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 			pr.Out.URL = &u
 			pr.Out.Host = ""
 			pr.Out.Header.Del(env.DaemonHeader)
+			if hasActivePolicy(policy) {
+				pr.Out.Header.Del("Accept-Encoding")
+			}
 			if span != nil {
 				propagation.TraceContext{}.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
 			}
@@ -283,6 +368,9 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 				if resp.StatusCode >= http.StatusInternalServerError {
 					span.SetStatus(codes.Error, "")
 				}
+			}
+			if resp.StatusCode == http.StatusOK && needsResponseShaping(r.Method, method, tool, policy) {
+				return p.shapeResponse(ctx, resp, method, tool, body, policy)
 			}
 			return nil
 		},
