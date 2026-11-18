@@ -451,8 +451,9 @@ func actionLaunchKey(chunk model.VanadisChunk) string {
 	return chunk.ID
 }
 
-// errPRTransitionSkipped means the persisted row rejected a stale lifecycle transition.
-var errPRTransitionSkipped = errors.New("pr lifecycle transition not applied")
+// errPRTransitionSkipped aliases the store package sentinel so errors.Is identity
+// holds wherever the lifecycle transition executes.
+var errPRTransitionSkipped = store.ErrPRTransitionSkipped
 
 func (s *PostgresVanadisStore) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
 	if s == nil || s.db == nil {

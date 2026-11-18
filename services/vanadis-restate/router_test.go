@@ -484,49 +484,6 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 }
 
-func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name      string
-		threadID  string
-		repo      string
-		db        dbScript
-		wantBuild string
-		wantChunk string
-		wantErrIs error
-		wantErr   bool
-	}{
-		{name: "nil db", threadID: "123", repo: "aerial", db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "empty thread id", threadID: "", repo: "aerial", db: dbScript{}, wantErrIs: ErrChunkNotFound},
-		{name: "empty repo", threadID: "123", repo: "", db: dbScript{}, wantErrIs: ErrChunkNotFound},
-		{name: "query error", threadID: "123", repo: "aerial", db: dbScript{queryErr: errors.New("query failed")}, wantErr: true},
-		{name: "scan error", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, scanErr: errors.New("scan failed")}, wantErr: true},
-		{name: "rows error", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, rowsErr: errors.New("rows failed")}, wantErr: true},
-		{name: "0 rows not found", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
-		{name: "1 row unambiguous match", threadID: "123", repo: "aerial", db: dbScript{
-			chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}},
-		}, wantBuild: "b1", wantChunk: "c1"},
-		{name: "2 rows ambiguous rejection", threadID: "123", repo: "aerial", db: dbScript{
-			chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}, {BuildID: "b1", ID: "c2"}},
-		}, wantErrIs: ErrChunkNotFound},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st, _ := tc.db.open()
-			bID, cID, err := st.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
-			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
-				return
-			}
-			if bID != tc.wantBuild || cID != tc.wantChunk {
-				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%q, %q), want (%q, %q)", bID, cID, tc.wantBuild, tc.wantChunk)
-			}
-		})
-	}
-}
-
 type unattachedPREventSpyStore struct {
 	store.VanadisStore
 

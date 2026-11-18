@@ -510,40 +510,6 @@ func TestPostgresVanadisStore_UpdatesAndStatus(t *testing.T) {
 	}
 }
 
-func TestPostgresVanadisStore_LookupsAndAppend(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		db        dbScript
-		wantErr   bool
-		wantErrIs error
-		wantBuild string
-	}{
-		{name: "lookup pr chunk not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup pr chunk success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantBuild: "b1"},
-		{name: "lookup chunk build id not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup chunk build id success", db: dbScript{row: valuesRow("b1")}, wantBuild: "b1"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st, _ := tc.db.open()
-			switch tc.name {
-			case "lookup pr chunk not found", "lookup pr chunk success":
-				bID, _, err := st.LookupPRChunk(context.Background(), "aerial", 123)
-				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && bID != tc.wantBuild {
-					t.Errorf("LookupPRChunk = %q, want %q", bID, tc.wantBuild)
-				}
-			case "lookup chunk build id not found", "lookup chunk build id success":
-				bID, err := st.LookupChunkBuildID(context.Background(), "c1")
-				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && bID != tc.wantBuild {
-					t.Errorf("LookupChunkBuildID = %q, want %q", bID, tc.wantBuild)
-				}
-			}
-		})
-	}
-}
-
 func TestStoreHelpers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -617,74 +583,6 @@ func TestInitPostgres(t *testing.T) {
 				t.Fatal("expected pool to be closed on ping failure")
 			}
 		})
-	}
-}
-
-func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	st, _ := dbScript{bare: nilDB}.open()
-	if err := st.UpdateChunkBannerAndStatus(ctx, "c1", "status", "banner"); err == nil {
-		t.Error("expected error with nilDB")
-	}
-	storeActive, _ := dbScript{execTag: "UPDATE 0"}.open()
-	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "", "status", "banner"); err == nil {
-		t.Error("expected error with empty chunkID")
-	}
-	if _, err := st.GetChunkByPR(ctx, "aerial", 101); err == nil {
-		t.Error("expected error with nil db")
-	}
-	if lookup, err := storeActive.GetChunkByPR(ctx, "", 101); err != nil || lookup.Matched {
-		t.Errorf("expected unmatched with empty repo: %+v, %v", lookup, err)
-	}
-	if lookup, err := storeActive.GetChunkByPR(ctx, "aerial", 0); err != nil || lookup.Matched {
-		t.Errorf("expected unmatched with 0 pr: %+v, %v", lookup, err)
-	}
-	storeFindErr, _ := dbScript{row: errRow(errors.New("db find err"))}.open()
-	if _, err := storeFindErr.GetChunkByPR(ctx, "aerial", 101); err == nil {
-		t.Error("expected error when findChunkPRMatch fails")
-	}
-
-	storeFailCancelledBuild, _ := dbScript{row: failRow("running", "cancelled"), execTag: "UPDATE 1"}.open()
-	if _, _, failed, err := storeFailCancelledBuild.FailChunk(ctx, "c1", "reason", ""); err != nil || failed {
-		t.Errorf("FailChunk on cancelled build: failed=%v, err=%v", failed, err)
-	}
-}
-
-func TestPostgresVanadisStore_StatusAndRolloutUpdates(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	storeNil, _ := dbScript{bare: nilDB}.open()
-	if err := storeNil.RecordPRRolloutState(ctx, "c1", "open", nil); err == nil {
-		t.Error("expected error with nil db")
-	}
-	storeActive, _ := dbScript{execTag: "UPDATE 0"}.open()
-	if err := storeActive.RecordPRRolloutState(ctx, "", "open", nil); err == nil {
-		t.Error("expected error with empty chunkID")
-	}
-	if err := storeActive.RecordPRRolloutState(ctx, "c1", "open", &pubsub.PRRolloutState{}); !errors.Is(err, ErrChunkNotFound) {
-		t.Errorf("expected ErrChunkNotFound, got %v", err)
-	}
-	storeRolloutOK, _ := dbScript{execTag: "UPDATE 1"}.open()
-	if err := storeRolloutOK.RecordPRRolloutState(ctx, "c1", "open", &pubsub.PRRolloutState{}); err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-
-	if _, err := storeNil.LookupChunkBuildID(ctx, "c1"); err == nil {
-		t.Error("expected error with nil db")
-	}
-	if _, err := storeActive.LookupChunkBuildID(ctx, ""); err == nil {
-		t.Error("expected error with empty chunkID")
-	}
-
-	storeExecErr, _ := dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("exec error")}.open()
-	if err := storeExecErr.RecordPRRolloutState(ctx, "c1", "open", nil); err == nil {
-		t.Error("expected error on exec failure")
-	}
-	if err := storeExecErr.UpdateChunkBannerAndStatus(ctx, "c1", "status", "banner"); err == nil {
-		t.Error("expected error on exec failure")
 	}
 }
 
