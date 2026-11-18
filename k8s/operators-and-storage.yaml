@@ -752,6 +752,120 @@ spec:
   target:
     creationPolicy: Owner
 ---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: nats-password-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - NATS_AERIAL_PASSWORD
+    - NATS_MIORINE_PASSWORD
+    - NATS_SULETTA_PASSWORD
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: nats-passwords-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: NATS_AERIAL_PASSWORD
+        secretKey: NATS_AERIAL_PASSWORD
+    - match:
+        remoteRef:
+          remoteKey: NATS_MIORINE_PASSWORD
+        secretKey: NATS_MIORINE_PASSWORD
+    - match:
+        remoteRef:
+          remoteKey: NATS_SULETTA_PASSWORD
+        secretKey: NATS_SULETTA_PASSWORD
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    generatorRef:
+      apiVersion: generators.external-secrets.io/v1alpha1
+      kind: Password
+      name: nats-password-generator
+  updatePolicy: IfNotExists
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: postgres-aerial-role-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: POSTGRES_PASSWORD
+        secretKey: password
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    secret:
+      name: postgres-aerial-role
+  updatePolicy: IfNotExists
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: infisical-secret-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: AUTH_SECRET
+        secretKey: AUTH_SECRET
+    - match:
+        remoteRef:
+          remoteKey: ENCRYPTION_KEY
+        secretKey: ENCRYPTION_KEY
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    secret:
+      name: infisical-secret
+  updatePolicy: IfNotExists
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: victoria-admin-secret-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: VICTORIA_ADMIN_AUTH_KEY
+        secretKey: VICTORIA_ADMIN_AUTH_KEY
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    secret:
+      name: victoria-admin-secret
+  updatePolicy: IfNotExists
+---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:

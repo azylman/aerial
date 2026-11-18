@@ -40,7 +40,7 @@ curl -sfL https://get.k3s.io | sh -s - --disable traefik --write-kubeconfig ~/.k
 ### Step 2: Fork Configuration & Bootstrap via Flux CD
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
-3. Install the Flux CLI and bootstrap your private configuration repository (**External Secrets Operator** automatically generates `postgres-aerial-role` and `infisical-secret` on first boot):
+3. Install the Flux CLI and bootstrap your private configuration repository (**External Secrets Operator** automatically generates database, Infisical, VictoriaMetrics, and NATS credentials and syncs them into Infisical via `PushSecret`):
 
 ```bash
 export GITHUB_PAT="your-github-pat"
@@ -55,7 +55,7 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
 ```
 
 ### Step 3: Bootstrap Infisical & Populate Application Secrets
-Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your application secrets in project `aerial-8-jn8` (`default` environment):
+Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your application secrets in project `aerial-8-jn8` (`default` environment). External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, and NATS credentials and syncs them into Infisical via `PushSecret`:
 
 ```bash
 # 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token
@@ -72,10 +72,7 @@ kubectl create secret generic infisical-universal-auth \
 # 2. Populate application secrets in Infisical (project slug aerial-8-jn8, default environment)
 infisical secrets set --env=default \
   DISCORD_BOT_TOKEN="your-discord-bot-token" \
-  GITHUB_PAT="$GITHUB_PAT" \
-  NATS_AERIAL_PASSWORD="$(openssl rand -hex 16)" \
-  NATS_MIORINE_PASSWORD="$(openssl rand -hex 16)" \
-  NATS_SULETTA_PASSWORD="$(openssl rand -hex 16)"
+  GITHUB_PAT="$GITHUB_PAT"
 ```
 
 ### Step 4: Authenticate Agent CLI & Verify Rollout
