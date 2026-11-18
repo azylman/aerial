@@ -34,6 +34,7 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   gh_repo=""
   pr_num=""
   has_review_types=0
+  review_types_arg=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -95,10 +96,12 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
         ;;
       --review-types)
         has_review_types=1
+        review_types_arg="${2:-}"
         shift 2
         ;;
       --review-types=*)
         has_review_types=1
+        review_types_arg="${1#*=}"
         shift
         ;;
       *)
@@ -196,12 +199,24 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     ref="${merge_base}..${head_sha}"
   fi
 
+  if [[ -z "${review_types_arg}" ]]; then
+    repo_roborev_toml=$(git show origin/main:.roborev.toml 2>/dev/null || cat .roborev.toml 2>/dev/null || true)
+    if [[ -n "${repo_roborev_toml}" ]]; then
+      if echo "${repo_roborev_toml}" | grep -qE 'review_types[[:space:]]*=[[:space:]]*\[[[:space:]]*"default"[[:space:]]*\]'; then
+        review_types_arg="default"
+      fi
+    fi
+  fi
+
   if [[ -n "${ref}" ]]; then
     if [[ -n "${branch}" && -n "${head_sha}" ]]; then
       git update-ref "refs/heads/${branch}" "${head_sha}" 2>/dev/null || true
     fi
 
     cmd_args=(review --wait)
+    if [[ "${review_types_arg}" == "default" ]]; then
+      cmd_args+=(--panel none)
+    fi
     if [[ -z "${explicit_ref}" && -n "${branch}" && -n "${base_sha}" ]]; then
       cmd_args+=(--branch="${branch}" --base="${base_sha}")
     else
@@ -370,7 +385,7 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   fi
 
   if [[ "${has_review_types}" -eq 0 ]]; then
-    exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}" --review-types default
+    exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}" --review-types "${review_types_arg:-default,test-value}"
   fi
   exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}"
 fi

@@ -1493,7 +1493,7 @@ fi
 rm -f "$STATE_DIR/mock_review_output"
 unset MOCK_REVIEW_RC
 
-# Subtest: generated config.toml from entrypoint.sh sets review_types = ["default"] and does not contain test-value or default_panel
+# Subtest: generated config.toml from entrypoint.sh sets review_types = ["default", "test-value"], default_panel = "ci", and members = ["default", "test-value"]
 CONFIG_GEN_TEST="$TEST_ROOT/config-gen-test.sh"
 cat << 'CONFIG_GEN_EOF' > "$CONFIG_GEN_TEST"
 #!/usr/bin/env bash
@@ -1523,17 +1523,43 @@ rm -f "$STATE_DIR/claude-oauth-token"
 bash "$CONFIG_GEN_TEST"
 gemini_cfg=$(cat "$TEST_ROOT/gen-config.toml")
 
-if echo "$codex_cfg" | grep -q 'review_types = \["default"\]' && \
-   ! echo "$codex_cfg" | grep -q 'test-value' && \
-   ! echo "$codex_cfg" | grep -q 'default_panel' && \
-   echo "$claude_cfg" | grep -q 'review_types = \["default"\]' && \
-   ! echo "$claude_cfg" | grep -q 'test-value' && \
-   ! echo "$claude_cfg" | grep -q 'default_panel' && \
-   echo "$gemini_cfg" | grep -q 'review_types = \["default"\]' && \
-   ! echo "$gemini_cfg" | grep -q 'test-value' && \
-   ! echo "$gemini_cfg" | grep -q 'default_panel'; then
-  echo 'entrypoint_single_review_config:ok'
+if echo "$codex_cfg" | grep -q 'review_types = \["default", "test-value"\]' && \
+   echo "$codex_cfg" | grep -q 'default_panel = "ci"' && \
+   echo "$codex_cfg" | grep -q 'members = \["default", "test-value"\]' && \
+   echo "$claude_cfg" | grep -q 'review_types = \["default", "test-value"\]' && \
+   echo "$claude_cfg" | grep -q 'default_panel = "ci"' && \
+   echo "$claude_cfg" | grep -q 'members = \["default", "test-value"\]' && \
+   echo "$gemini_cfg" | grep -q 'review_types = \["default", "test-value"\]' && \
+   echo "$gemini_cfg" | grep -q 'default_panel = "ci"' && \
+   echo "$gemini_cfg" | grep -q 'members = \["default", "test-value"\]'; then
+  echo 'entrypoint_global_panel_config:ok'
 fi
+
+# Subtest: roborev-wrapper omits --panel none by default
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low >/dev/null 2>&1)
+if ! grep -q -- "--panel none" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
+  echo 'wrapper_default_omits_panel_none:ok'
+fi
+
+# Subtest: roborev-wrapper passes --panel none when --review-types default is passed
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low --review-types default >/dev/null 2>&1)
+if grep -q -- "review --wait --panel none" "$CALL_LOG"; then
+  echo 'wrapper_flag_sets_panel_none:ok'
+fi
+
+# Subtest: roborev-wrapper passes --panel none when .roborev.toml sets review_types = ["default"]
+cat << 'TOML_EOF' > "$REPO_DIR/.roborev.toml"
+[ci]
+review_types = ["default"]
+TOML_EOF
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low >/dev/null 2>&1)
+if grep -q -- "review --wait --panel none" "$CALL_LOG"; then
+  echo 'wrapper_toml_sets_panel_none:ok'
+fi
+rm -f "$REPO_DIR/.roborev.toml"
 CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
@@ -1549,7 +1575,10 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'run_as_ubuntu:ok' &
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' && echo true || echo false)" "github-runner entrypoint and roborev wrapper export unified /data/cache paths and migrate go-mod"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_pass_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Passed when roborev.real exits 0 with low findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_fail_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Complete when roborev.real exits 1 with findings"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_single_review_config:ok' && echo true || echo false)" "github-runner entrypoint config.toml sets review_types = ['default'] without test-value or default_panel"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_global_panel_config:ok' && echo true || echo false)" "github-runner entrypoint config.toml sets review_types = ['default', 'test-value'], default_panel = 'ci', and members = ['default', 'test-value']"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_default_omits_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper omits --panel none by default"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_flag_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when --review-types default is passed"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_toml_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when .roborev.toml sets review_types = ['default']"
 
 # Case 18: Vanadis PR attach and direct attachment in submit_scratch
 VANADIS_ATTACH_CHECK=$(bash -c "

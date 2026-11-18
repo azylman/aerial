@@ -89,7 +89,8 @@ if [ -n "${SEED_CODEX_AUTH}" ] && [ -s "${SEED_CODEX_AUTH}" ]; then
 fi
 
 # Pre-populate global /root/.roborev/config.toml with cluster-wide review guidelines,
-# global exclude_patterns (honored even by security specialist reviews), and engine defaults.
+# global exclude_patterns (honored even by security specialist reviews), engine defaults,
+# and a 2-member default+test-value review panel for daemon-backed CI reviews.
 # review_guidelines must stay above the first [table] header: once a header opens,
 # TOML scopes later keys to that table and roborev silently drops them.
 if [ -s "/root/.codex/auth.json" ] && command -v codex >/dev/null 2>&1; then
@@ -104,6 +105,11 @@ EOF
     # roborev reads synthesis backups only inside [ci] and [review.panels.*];
     # a top-level synthesis_backup_* key is silently ignored.
     CI_SYNTHESIS_BACKUP='synthesis_backup_agent = "claude-code"'
+    PANEL_SYNTHESIS_BACKUP=$(cat <<'EOF'
+synthesis_backup_agent = "claude-code"
+synthesis_backup_model = "sonnet"
+EOF
+)
   else
     BACKUP_AGENT_SETTINGS=$(cat <<'EOF'
 default_backup_agent = "gemini"
@@ -111,6 +117,7 @@ review_backup_agent = "gemini"
 EOF
 )
     CI_SYNTHESIS_BACKUP='synthesis_backup_agent = "gemini"'
+    PANEL_SYNTHESIS_BACKUP='synthesis_backup_agent = "gemini"'
   fi
 
   cat > /root/.roborev/config.toml <<EOF
@@ -153,10 +160,35 @@ exclude_patterns = [
 
 [ci]
 agents = ["codex"]
-review_types = ["default"]
+review_types = ["default", "test-value"]
 min_severity = "medium"
 upsert_comments = true
 ${CI_SYNTHESIS_BACKUP}
+
+[review]
+default_panel = "ci"
+
+[review.subagents.default]
+agent = "codex"
+model = "gpt-6.1-sol"
+reasoning = "low"
+review_type = "default"
+
+[review.subagents.test-value]
+agent = "codex"
+model = "gpt-6.1-sol"
+reasoning = "low"
+review_type = "test-value"
+instructions = """
+Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
+"""
+
+[review.panels.ci]
+members = ["default", "test-value"]
+synthesis_agent = "codex"
+synthesis_model = "gpt-6.1-sol"
+synthesis_reasoning = "low"
+${PANEL_SYNTHESIS_BACKUP}
 EOF
 elif [ -s "/root/.roborev/claude-oauth-token" ] && command -v claude >/dev/null 2>&1; then
   cat > /root/.roborev/config.toml <<'EOF'
@@ -197,9 +229,34 @@ exclude_patterns = [
 
 [ci]
 agents = ["claude-code"]
-review_types = ["default"]
+review_types = ["default", "test-value"]
 min_severity = "medium"
 upsert_comments = true
+
+[review]
+default_panel = "ci"
+
+[review.subagents.default]
+agent = "claude-code"
+model = "sonnet"
+reasoning = "low"
+review_type = "default"
+
+[review.subagents.test-value]
+agent = "claude-code"
+model = "sonnet"
+reasoning = "low"
+review_type = "test-value"
+instructions = """
+Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
+"""
+
+[review.panels.ci]
+members = ["default", "test-value"]
+synthesis_agent = "claude-code"
+synthesis_model = "sonnet"
+synthesis_reasoning = "low"
+synthesis_backup_agent = "gemini"
 EOF
 else
   cat > /root/.roborev/config.toml <<'EOF'
@@ -238,9 +295,30 @@ exclude_patterns = [
 
 [ci]
 agents = ["gemini"]
-review_types = ["default"]
+review_types = ["default", "test-value"]
 min_severity = "medium"
 upsert_comments = true
+
+[review]
+default_panel = "ci"
+
+[review.subagents.default]
+agent = "gemini"
+reasoning = "low"
+review_type = "default"
+
+[review.subagents.test-value]
+agent = "gemini"
+reasoning = "low"
+review_type = "test-value"
+instructions = """
+Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
+"""
+
+[review.panels.ci]
+members = ["default", "test-value"]
+synthesis_agent = "gemini"
+synthesis_reasoning = "low"
 EOF
 fi
 
