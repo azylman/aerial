@@ -207,69 +207,21 @@ func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 		{
 			name: "ephemeral prompts filtered: thread summary, thread title, and fact extraction",
 			files: []sessionFileFixture{
-				{
-					sessionID: "sess-valid-real-task",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Normal user task that should be indexed"}` + "\n",
-					age:       1 * time.Hour,
-				},
-				{
-					sessionID: "sess-ephemeral-thread-summary",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Synthesize the following Discord thread transcript into a concise memory block. Focus on context."}` + "\n",
-					age:       1 * time.Hour,
-				},
-				{
-					sessionID: "sess-ephemeral-thread-title",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title."}` + "\n",
-					age:       1 * time.Hour,
-				},
-				{
-					sessionID: "sess-ephemeral-coven-facts",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Analyze the following conversation transcript and extract any key durable atomic facts from this session."}` + "\n",
-					age:       1 * time.Hour,
-				},
+				{sessionID: "sess-valid-real-task", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Normal user task that should be indexed"}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-ephemeral-thread-summary", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Synthesize the following Discord thread transcript into a concise memory block. Focus on context."}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-ephemeral-thread-title", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title."}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-ephemeral-coven-facts", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Analyze the following conversation transcript and extract any key durable atomic facts from this session."}` + "\n", age: 1 * time.Hour},
 			},
-			wantScanned:       4,
-			wantSynced:        1,
-			wantStepsInserted: 1,
-			wantSummaries:     1,
-			wantSummaryText:   "Normal user task that should be indexed",
+			wantScanned: 4, wantSynced: 1, wantStepsInserted: 1, wantSummaries: 1, wantSummaryText: "Normal user task that should be indexed",
 		},
 		{
 			name: "multi-session LLM error short-circuits to step 0 prompt and unsettled",
 			files: []sessionFileFixture{
-				{
-					sessionID: "sess-err-multi-001",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Alpha task prompt"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Alpha reply"}`,
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
-				{
-					sessionID: "sess-err-multi-002",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Beta task prompt"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Beta reply"}`,
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
-				{
-					sessionID: "sess-err-multi-003",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Gamma task prompt"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Gamma reply"}`,
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
+				{sessionID: "sess-err-multi-001", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Alpha task prompt"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Alpha reply"}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-err-multi-002", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Beta task prompt"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Beta reply"}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-err-multi-003", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Gamma task prompt"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Gamma reply"}` + "\n", age: 1 * time.Hour},
 			},
-			llmMode:           "error",
-			idleThreshold:     5 * time.Minute,
-			wantMaxLLMCalls:   1,
-			wantScanned:       3,
-			wantSynced:        3,
-			wantSummaries:     0,
-			wantSummariesZero: true,
-			wantSettled:       new(false),
+			llmMode: "error", idleThreshold: 5 * time.Minute, wantMaxLLMCalls: 1, wantScanned: 3, wantSynced: 3, wantSummaries: 0, wantSummariesZero: true, wantSettled: new(false),
 			wantSessionSummaries: map[string]string{
 				"sess-err-multi-001": "Alpha task prompt",
 				"sess-err-multi-002": "Beta task prompt",
@@ -277,17 +229,42 @@ func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 			},
 		},
 		{
-			name: "active session not settled",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-active-008",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Active work in progress"}` + "\n",
-					age:       10 * time.Second,
-				},
-			},
+			name:              "active session not settled",
+			files:             []sessionFileFixture{{sessionID: "sess-active-008", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Active work in progress"}` + "\n", age: 10 * time.Second}},
 			idleThreshold:     10 * time.Minute,
 			wantStepsInserted: 1,
 			wantSettled:       new(false),
+		},
+		{
+			name: "subagent transcripts with SYSTEM_MESSAGE sender skipped",
+			files: []sessionFileFixture{
+				{sessionID: "sess-valid-primary-task", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Primary conversation prompt"}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-subagent-worker", content: `{"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"The following is a <SYSTEM_MESSAGE> from your parent agent: inspect files. sender=parent-123"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Inspecting files","tool_calls":[{"name":"view_file","args":{"Path":"/share/aerial/go.mod"}}]}` + "\n", age: 1 * time.Hour},
+			},
+			wantScanned: 2, wantSynced: 1, wantStepsInserted: 1, wantSummaries: 1, wantSummaryText: "Primary conversation prompt",
+		},
+		{
+			name: "silent heartbeat transcripts with non-prompt tool calls skipped",
+			files: []sessionFileFixture{
+				{sessionID: "sess-valid-primary-task-2", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Regular user request"}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-silent-heartbeat-instructions", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<\\HEARTBEAT_INSTRUCTIONS>\nYour direct text response is suppressed.\n</\\HEARTBEAT_INSTRUCTIONS>\n<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nCheck cluster health"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Checking metrics","tool_calls":[{"name":"mcp_victoriametrics_query","args":{"query":"up"}}]}` + "\n" + `{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:04Z","content":"All systems nominal, remaining silent."}` + "\n", age: 1 * time.Hour},
+				{sessionID: "sess-silent-heartbeat-watermark", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nCheck disk usage"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Checking disk","tool_calls":[{"name":"run_command","args":{"CommandLine":"df -h"}}]}` + "\n", age: 1 * time.Hour},
+			},
+			wantScanned: 3, wantSynced: 1, wantStepsInserted: 1, wantSummaries: 1, wantSummaryText: "Regular user request",
+		},
+		{
+			name: "escalating heartbeat transcripts with prompt tool call indexed",
+			files: []sessionFileFixture{
+				{sessionID: "sess-escalating-heartbeat", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<\\HEARTBEAT_INSTRUCTIONS>\nEvaluate check\n</\\HEARTBEAT_INSTRUCTIONS>\n<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nAlert check"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"curl -sS -f -X POST http://eri.aerial/prompt -H \"Content-Type: application/json\" -d '{\"title\":\"Escalated Issue\"}'"}}]}` + "\n", age: 1 * time.Hour},
+			},
+			wantScanned: 1, wantSynced: 1, wantStepsInserted: 2, wantSummaries: 1,
+		},
+		{
+			name: "codex preamble steps skipped when extracting step0Prompt",
+			files: []sessionFileFixture{
+				{sessionID: "sess-codex-preamble", content: `{"type":"session_meta","payload":{"id":"sess-codex-preamble"}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"# AGENTS.md instructions for system operation\nStrict rules follow."}]}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"<environment_context>\nHostname: calibarn\n</environment_context>"}]}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Inspect files in repository"}]}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Inspecting repository files now."}]}}` + "\n", age: 1 * time.Hour},
+			},
+			wantScanned: 1, wantSynced: 1, wantSummaries: 1, wantSummaryText: "Inspect files in repository",
 		},
 	}
 }
@@ -902,11 +879,16 @@ func TestIsEphemeralSummarizerPrompt(t *testing.T) {
 			prompt: "Analyze the following conversation transcript and extract any key durable atomic facts",
 			want:   true,
 		},
-		{
-			name:   "coven fact extraction with extra text",
-			prompt: "Analyze the following conversation transcript and extract any key durable atomic facts from the session.",
-			want:   true,
-		},
+		{name: "coven fact extraction with extra text", prompt: "Analyze the following conversation transcript and extract any key durable atomic facts from the session.", want: true},
+		{name: "coven fact extraction atomic facts variant", prompt: "Analyze the following conversation transcript and extract any key atomic facts from this session.", want: true},
+		{name: "memory reconciliation classifier", prompt: "You are a memory reconciliation classifier. Reconcile these memories.", want: true},
+		{name: "memory consolidation engine", prompt: "You are a memory consolidation engine. Consolidate facts.", want: true},
+		{name: "expert AI skill designer", prompt: "You are an expert AI skill designer. Create a skill for testing.", want: true},
+		{name: "girl gang reviewer role", prompt: "Role: TheGirlGangReviewer\nReview this diff.", want: true},
+		{name: "consolidated girl gang act", prompt: "Act as consolidated Girl Gang and review the plan.", want: true},
+		{name: "audit the following", prompt: "Audit the following code changes for safety.", want: true},
+		{name: "you are The Girl Gang capitalized", prompt: "You are The Girl Gang. Review the proposed changes.", want: true},
+		{name: "you are the Girl Gang lowercase", prompt: "You are the Girl Gang. Perform a review.", want: true},
 	}
 
 	for _, tc := range tests {

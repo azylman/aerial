@@ -307,11 +307,7 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 	if claudeProjectsDir != "" {
 		claudeBases = append(claudeBases, claudeProjectsDir)
 	}
-	claudeBases = append(claudeBases,
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "claude", "projects")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "claude", "projects")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", ".claude", "projects")),
-	)
+	claudeBases = append(claudeBases, filepath.Clean(filepath.Join(targetBrainDir, "..", "claude", "projects")), filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "claude", "projects")), filepath.Clean(filepath.Join(targetBrainDir, "..", ".claude", "projects")))
 	discoverClaudeProjectSessions(claudeBases, discovered)
 
 	// Also discover Codex sessions from Codex sessions directories
@@ -319,11 +315,7 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 	if codexSessionsDir != "" {
 		codexBases = append(codexBases, codexSessionsDir)
 	}
-	codexBases = append(codexBases,
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "codex", "sessions")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "codex", "sessions")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", ".codex", "sessions")),
-	)
+	codexBases = append(codexBases, filepath.Clean(filepath.Join(targetBrainDir, "..", "codex", "sessions")), filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "codex", "sessions")), filepath.Clean(filepath.Join(targetBrainDir, "..", ".codex", "sessions")))
 	discoverCodexSessions(codexBases, discovered)
 
 	// Also discover Muse sessions from Muse sessions directories
@@ -556,11 +548,7 @@ func discoverClaudeProjectSessions(claudeBases []string, discovered map[string]d
 }
 
 func findClaudeTranscriptFile(brainDir, sessionID string) string {
-	for _, claudeBase := range []string{
-		filepath.Clean(filepath.Join(brainDir, "..", "claude", "projects")),
-		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "claude", "projects")),
-		filepath.Clean(filepath.Join(brainDir, "..", ".claude", "projects")),
-	} {
+	for _, claudeBase := range []string{filepath.Clean(filepath.Join(brainDir, "..", "claude", "projects")), filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "claude", "projects")), filepath.Clean(filepath.Join(brainDir, "..", ".claude", "projects"))} {
 		if entries, err := os.ReadDir(claudeBase); err == nil {
 			for _, entry := range entries {
 				if entry.IsDir() {
@@ -576,11 +564,7 @@ func findClaudeTranscriptFile(brainDir, sessionID string) string {
 }
 
 func findCodexTranscriptFile(brainDir, sessionID string) string {
-	for _, codexBase := range []string{
-		filepath.Clean(filepath.Join(brainDir, "..", "codex", "sessions")),
-		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "codex", "sessions")),
-		filepath.Clean(filepath.Join(brainDir, "..", ".codex", "sessions")),
-	} {
+	for _, codexBase := range []string{filepath.Clean(filepath.Join(brainDir, "..", "codex", "sessions")), filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "codex", "sessions")), filepath.Clean(filepath.Join(brainDir, "..", ".codex", "sessions"))} {
 		if fi, err := os.Stat(codexBase); err != nil || !fi.IsDir() {
 			continue
 		}
@@ -690,6 +674,11 @@ func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolNames []string
 	return effectiveToolName, nil
 }
 
+func isCodexSystemPreamble(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	return strings.HasPrefix(trimmed, "# AGENTS.md instructions") || strings.HasPrefix(trimmed, "<environment_context>")
+}
+
 func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
 	if st.firstParsedStep == -1 {
 		st.firstParsedStep = raw.StepIndex
@@ -707,10 +696,10 @@ func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
 	if raw.Type == stepTypeUserInput || raw.Source == stepSourceUserExplicit {
 		trimmedContent = CleanPromptEnvelope(trimmedContent)
 	}
-	if raw.StepIndex == 0 && (raw.Type == stepTypeUserInput || raw.Source == stepSourceUserExplicit) && st.step0Prompt == "" {
-		st.step0Prompt = trimmedContent
-	} else if raw.Type == stepTypeUserInput && st.step0Prompt == "" {
-		st.step0Prompt = trimmedContent
+	if !isCodexSystemPreamble(trimmedContent) && st.step0Prompt == "" {
+		if raw.Type == stepTypeUserInput || (raw.StepIndex == 0 && raw.Source == stepSourceUserExplicit) {
+			st.step0Prompt = trimmedContent
+		}
 	}
 
 	// Collect dialogue lines for settled session summary
@@ -1277,6 +1266,15 @@ var ephemeralPromptPrefixes = []string{
 	"Synthesize the following Discord thread transcript into a concise memory block.",
 	"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title.",
 	"Analyze the following conversation transcript and extract any key durable atomic facts",
+	"Analyze the following conversation transcript and extract any key atomic facts",
+	"You are a memory reconciliation classifier.",
+	"You are a memory consolidation engine.",
+	"You are an expert AI skill designer",
+	"Role: TheGirlGangReviewer",
+	"Act as consolidated Girl Gang",
+	"Audit the following ",
+	"You are The Girl Gang",
+	"You are the Girl Gang",
 }
 
 func isEphemeralSummarizerPrompt(prompt string) bool {
@@ -1287,6 +1285,33 @@ func isEphemeralSummarizerPrompt(prompt string) bool {
 		}
 	}
 	return false
+}
+
+func isSubagentTranscript(st transcriptScanState) bool {
+	return st.step0Prompt == "" && len(st.parsedSteps) > 0 &&
+		st.parsedSteps[0].Type == "SYSTEM_MESSAGE" && strings.Contains(st.parsedSteps[0].Content, "sender=")
+}
+
+func isSilentHeartbeatSession(st transcriptScanState) bool {
+	if !strings.Contains(st.step0Prompt, `<\HEARTBEAT_INSTRUCTIONS>`) &&
+		!strings.Contains(st.step0Prompt, "<HEARTBEAT_INSTRUCTIONS>") &&
+		!strings.Contains(st.step0Prompt, "<HEARTBEAT_WATERMARK>") {
+		return false
+	}
+	for _, raw := range st.parsedSteps {
+		if raw.Type == stepTypeUserInput || raw.Source == stepSourceUserExplicit {
+			continue
+		}
+		for _, tc := range raw.ToolCalls {
+			if strings.Contains(string(tc.Args), "/prompt") {
+				return false
+			}
+		}
+		if raw.Type == "RUN_COMMAND" && strings.Contains(raw.Content, "/prompt") {
+			return false
+		}
+	}
+	return true
 }
 
 func generateSettledSummaryText(
@@ -1437,7 +1462,7 @@ func syncSingleSession(
 	if err != nil {
 		return false, err
 	}
-	if st.maxStepIndex < 0 || isEphemeralSummarizerPrompt(st.step0Prompt) {
+	if st.maxStepIndex < 0 || isEphemeralSummarizerPrompt(st.step0Prompt) || isSubagentTranscript(st) || isSilentHeartbeatSession(st) {
 		return false, nil
 	}
 
