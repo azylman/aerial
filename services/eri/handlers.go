@@ -30,7 +30,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/guard"
-	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -97,6 +96,29 @@ func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
 	return channelID
 }
 
+func handleDuplicatePrompt(ctx context.Context, w http.ResponseWriter, store db.Store, rawID, channelID string) bool {
+	msgID := strings.TrimSpace(rawID)
+	if msgID == "" || store == nil {
+		return false
+	}
+	exists, err := store.MessageExists(ctx, msgID)
+	if err != nil {
+		log.Printf("[HTTP] Failed to check existing prompt message %s: %v", msgID, err)
+		writeErr(w, http.StatusInternalServerError, "Failed to check existing prompt message")
+		return true
+	}
+	if exists {
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			jsonKeyStatus:    statusAlreadyExists,
+			jsonKeyChannelID: channelID,
+			jsonKeySessionID: channelID,
+			jsonKeyMessageID: msgID,
+		})
+		return true
+	}
+	return false
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -137,6 +159,10 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 				jsonKeyChannelID: channelID,
 				jsonKeySessionID: channelID,
 			})
+			return
+		}
+
+		if handleDuplicatePrompt(r.Context(), w, store, req.MessageID, channelID) {
 			return
 		}
 
@@ -286,7 +312,7 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 	}
 	if exists {
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus: "already_exists", jsonKeyDispatchID: dispatchID,
+			jsonKeyStatus: statusAlreadyExists, jsonKeyDispatchID: dispatchID,
 			jsonKeyMessageID: dispatchID, jsonKeySessionID: sessionID,
 		})
 		return true
@@ -362,7 +388,7 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		if !inserted {
 			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				jsonKeyStatus:     "already_exists",
+				jsonKeyStatus:     statusAlreadyExists,
 				jsonKeyDispatchID: dispatchID,
 				jsonKeyMessageID:  dispatchID,
 				jsonKeySessionID:  sessionID,
@@ -1121,37 +1147,31 @@ func parseTasksFilter(q url.Values) (db.TasksFilter, bool) {
 		}
 	}
 	if threadID := strings.TrimSpace(q.Get("thread_id")); threadID != "" {
-		filter.ThreadID = threadID
-		hasFilter = true
+		filter.ThreadID, hasFilter = threadID, true
 	}
 	if adminParam := strings.TrimSpace(q.Get("is_admin")); adminParam != "" {
 		if val, err := strconv.ParseBool(adminParam); err == nil {
-			filter.IsAdmin = &val
-			hasFilter = true
+			filter.IsAdmin, hasFilter = &val, true
 		}
 	}
 	if sinceParam := strings.TrimSpace(q.Get("since")); sinceParam != "" {
 		if t, err := time.Parse(time.RFC3339, sinceParam); err == nil {
-			filter.Since = t
-			hasFilter = true
+			filter.Since, hasFilter = t, true
 		}
 	}
 	if afterParam := strings.TrimSpace(q.Get("after_row_id")); afterParam != "" {
 		if id, err := strconv.ParseInt(afterParam, 10, 64); err == nil {
-			filter.AfterRowID = id
-			hasFilter = true
+			filter.AfterRowID, hasFilter = id, true
 		}
 	}
 	if beforeParam := strings.TrimSpace(q.Get("before_row_id")); beforeParam != "" {
 		if id, err := strconv.ParseInt(beforeParam, 10, 64); err == nil {
-			filter.BeforeRowID = id
-			hasFilter = true
+			filter.BeforeRowID, hasFilter = id, true
 		}
 	}
 	if limitParam := strings.TrimSpace(q.Get("limit")); limitParam != "" {
 		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 {
-			filter.Limit = l
-			hasFilter = true
+			filter.Limit, hasFilter = l, true
 		}
 	}
 	return filter, hasFilter
@@ -1196,11 +1216,7 @@ func handleTasks(store db.Store, poolOpt ...*queue.WorkerPool) http.HandlerFunc 
 				cached := cache.tasks
 				cache.mu.Unlock()
 				setNoCacheJSONHeaders(w)
-				httpkit.WriteJSON(w, http.StatusOK, TasksResponse{
-					Status: "ok",
-					Total:  len(cached),
-					Tasks:  cached,
-				})
+				httpkit.WriteJSON(w, http.StatusOK, TasksResponse{Status: "ok", Total: len(cached), Tasks: cached})
 				return
 			}
 			cache.mu.Unlock()
@@ -1219,7 +1235,6 @@ func handleTasks(store db.Store, poolOpt ...*queue.WorkerPool) http.HandlerFunc 
 		}
 
 		tasks := sanitizeActiveTasks(rawTasks, poolOpt...)
-
 		if !hasFilter {
 			cache.mu.Lock()
 			cache.tasks = tasks
@@ -1228,11 +1243,7 @@ func handleTasks(store db.Store, poolOpt ...*queue.WorkerPool) http.HandlerFunc 
 		}
 
 		setNoCacheJSONHeaders(w)
-		httpkit.WriteJSON(w, http.StatusOK, TasksResponse{
-			Status: "ok",
-			Total:  len(tasks),
-			Tasks:  tasks,
-		})
+		httpkit.WriteJSON(w, http.StatusOK, TasksResponse{Status: "ok", Total: len(tasks), Tasks: tasks})
 	}
 }
 
@@ -1309,22 +1320,10 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 		ic := &discordgo.InteractionCreate{Interaction: &interaction}
 		router := activeInteractionRouter.Load()
 		if router == nil {
-			var haroURL, covenURL string
-			if fc := currentFunnelConfig(); fc != nil && fc.Current() != nil {
-				haroURL = fc.Current().HaroURL
-				covenURL = fc.Current().CovenURL
-			}
-			router = interactions.NewRouter(interactions.InteractionDeps{
-				Store: store, Pool: pool, PoolProvider: funnelPool.Load,
-				Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
-			})
-			activeInteractionRouter.Store(router)
+			router = initFunnelInteractionRouter(store, pool)
 		}
 		router.Handle(r.Context(), dgSession, ic)
-
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus: "ok",
-		})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{jsonKeyStatus: "ok"})
 	}
 }
 

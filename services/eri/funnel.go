@@ -716,3 +716,21 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 	openDiscordSessionWithRetry(ctx, dg)
 	return dg
 }
+
+func initFunnelInteractionRouter(store db.Store, pool *queue.WorkerPool) *interactions.Router {
+	router := activeInteractionRouter.Load()
+	if router != nil {
+		return router
+	}
+	var haroURL, covenURL string
+	if fc := currentFunnelConfig(); fc != nil && fc.Current() != nil {
+		haroURL = fc.Current().HaroURL
+		covenURL = fc.Current().CovenURL
+	}
+	router = interactions.NewRouter(interactions.InteractionDeps{
+		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
+		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
+	})
+	activeInteractionRouter.Store(router)
+	return router
+}

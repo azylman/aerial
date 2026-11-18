@@ -221,6 +221,16 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 
 	inactiveStore := dbtest.NewFakeStore()
 
+	existingMsgStore := dbtest.NewFakeStore()
+	_ = existingMsgStore.InsertMessage(context.Background(), db.Message{
+		ID:       "msg-existing-123",
+		ThreadID: "1542423172400291873",
+		Status:   db.StatusCompleted,
+	})
+
+	msgExistsErrStore := dbtest.NewFakeStore()
+	msgExistsErrStore.FailNext("MessageExists", errors.New("simulated message exists failure"))
+
 	errStore := dbtest.NewFakeStore()
 	errStore.FailNext("HasActiveThreadTurn", errors.New("simulated db failure"))
 
@@ -252,6 +262,20 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
 			wantStatus: http.StatusOK,
 			wantSubstr: `"status":"skipped_active"`,
+		},
+		{
+			name:       "duplicate message_id returns 200 already_exists",
+			store:      existingMsgStore,
+			body:       `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-existing-123"}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"status":"already_exists"`,
+		},
+		{
+			name:       "message_exists store error returns 500",
+			store:      msgExistsErrStore,
+			body:       `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-check-err"}`,
+			wantStatus: http.StatusInternalServerError,
+			wantSubstr: "Failed to check existing prompt message",
 		},
 		{
 			name:       "no active turn exists returns 202 accepted",
