@@ -433,6 +433,39 @@ spec:
     storageClassName: local-path
     storageRequestBytes: 10737418240
 ---
+# Blue/green standby for side-by-side Restate upgrades; clients reach the live cluster via the restate.aerial CoreDNS alias.
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-green
+spec:
+  cluster:
+    autoProvision: true
+  compute:
+    env:
+      - name: RESTATE_AUTO_PROVISION
+        value: "false"
+      - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
+        value: 256 MiB
+      - name: RESTATE_TRACING_ENDPOINT
+        value: http://victoriatraces.default.svc.cluster.local:4317
+    image: docker.io/restatedev/restate:1.8.1-hotfix.2@sha256:e3a11e7c694cfe0c134eca1652992c068bef0bcba3caeec9d2a3b3bc50daa62e
+    nodeSelector:
+      storage-tier: nvme
+    replicas: 1
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+  security:
+    disableNetworkPolicies: true
+  storage:
+    storageClassName: local-path
+    storageRequestBytes: 10737418240
+---
 apiVersion: external-secrets.io/v1
 kind: SecretStore
 metadata:
