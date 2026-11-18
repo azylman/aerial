@@ -12,7 +12,7 @@ import (
 var synapseConfigKeysToClear = []string{
 	"PORT", "KUBE_API_SERVER",
 	"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
-	"GITHUB_PAT", "GITHUB_API_URL",
+	"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
 	"DATABASE_URL", "POSTGRES_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
 	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
 	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
@@ -23,27 +23,26 @@ var synapseConfigKeysToClear = []string{
 
 func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	tests := []struct {
-		name           string
-		env            map[string]string
-		wantPort       string
-		wantKubeServer string
-		wantKubeTok    string
-		wantGHTok      string
-		wantGHURL      string
-		wantPGURL      string
-		wantFluxURL    string
-		wantBrainURL   string
-		wantEriURL     string
-		wantSysChan    string
-		wantDiscTok    string
-		wantNATSURL    string
-		wantEmptyURL   bool
+		name                string
+		env                 map[string]string
+		wantPort            string
+		wantKubeServer      string
+		wantKubeTok         string
+		wantGHTok           string
+		wantGHURL           string
+		wantGHWebhookSecret string
+		wantPGURL           string
+		wantFluxURL         string
+		wantBrainURL        string
+		wantEriURL          string
+		wantSysChan         string
+		wantDiscTok         string
+		wantNATSURL         string
+		wantEmptyURL        bool
 	}{
 		{
-			name: "primary port env",
-			env: map[string]string{
-				"PORT": "9999",
-			},
+			name:      "primary port env",
+			env:       map[string]string{"PORT": "9999"},
 			wantPort:  "9999",
 			wantGHURL: "https://api.github.com",
 			wantPGURL: "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
@@ -57,41 +56,32 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantEmptyURL: true,
 		},
 		{
-			name: "primary kube envs",
-			env: map[string]string{
-				"KUBE_API_SERVER": "https://kube.aerial:6443/",
-				"KUBE_TOKEN":      "secret-token",
-			},
+			name:           "primary kube envs",
+			env:            map[string]string{"KUBE_API_SERVER": "https://kube.aerial:6443/", "KUBE_TOKEN": "secret-token"},
 			wantKubeServer: "https://kube.aerial:6443",
 			wantKubeTok:    "secret-token",
 		},
 		{
-			name: "fallback kube host and port",
-			env: map[string]string{
-				"KUBERNETES_SERVICE_HOST": "10.43.0.1",
-				"KUBERNETES_SERVICE_PORT": "443",
-			},
+			name:           "fallback kube host and port",
+			env:            map[string]string{"KUBERNETES_SERVICE_HOST": "10.43.0.1", "KUBERNETES_SERVICE_PORT": "443"},
 			wantKubeServer: "https://10.43.0.1:443",
 		},
 		{
-			name: "github and postgres primary envs",
-			env: map[string]string{
-				"GITHUB_PAT":     "pat123",
-				"GITHUB_API_URL": "https://api.github.test/",
-				"DATABASE_URL":   "postgres://custom:pass@db:5432/customdb",
-			},
+			name:      "github and postgres primary envs",
+			env:       map[string]string{"GITHUB_PAT": "pat123", "GITHUB_API_URL": "https://api.github.test/", "DATABASE_URL": "postgres://custom:pass@db:5432/customdb"},
 			wantGHTok: "pat123",
 			wantGHURL: "https://api.github.test",
 			wantPGURL: "postgres://custom:pass@db:5432/customdb",
 		},
 		{
+			name:                "github webhook secret primary env",
+			env:                 map[string]string{"GITHUB_WEBHOOK_SECRET": "secret-webhook-key"},
+			wantGHWebhookSecret: "secret-webhook-key",
+		},
+		{
 			name: "decomposed postgres envs",
 			env: map[string]string{
-				"POSTGRES_HOST":     "custom-pg.aerial",
-				"POSTGRES_PORT":     "5432",
-				"POSTGRES_USER":     "aerial",
-				"POSTGRES_PASSWORD": "custom_pass",
-				"POSTGRES_DB":       "aerial",
+				"POSTGRES_HOST": "custom-pg.aerial", "POSTGRES_PORT": "5432", "POSTGRES_USER": "aerial", "POSTGRES_PASSWORD": "custom_pass", "POSTGRES_DB": "aerial",
 			},
 			wantPGURL: "postgres://aerial:custom_pass@custom-pg.aerial:5432/aerial?sslmode=disable",
 		},
@@ -106,25 +96,19 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantDiscTok: "bot-secret-token-123",
 		},
 		{
-			name: "eri url primary env",
-			env: map[string]string{
-				"ERI_URL": "http://eri-primary.aerial:8088",
-			},
+			name:         "eri url primary env",
+			env:          map[string]string{"ERI_URL": "http://eri-primary.aerial:8088"},
 			wantBrainURL: "http://eri-primary.aerial:8088",
 			wantEriURL:   "http://eri-primary.aerial:8088",
 		},
 		{
-			name: "flux receiver url primary env",
-			env: map[string]string{
-				"FLUX_RECEIVER_URL": "http://flux-receiver.aerial/webhook/",
-			},
+			name:        "flux receiver url primary env",
+			env:         map[string]string{"FLUX_RECEIVER_URL": "http://flux-receiver.aerial/webhook/"},
 			wantFluxURL: "http://flux-receiver.aerial/webhook",
 		},
 		{
-			name: "nats url primary env",
-			env: map[string]string{
-				"NATS_URL": "nats://custom-nats:4222",
-			},
+			name:        "nats url primary env",
+			env:         map[string]string{"NATS_URL": "nats://custom-nats:4222"},
 			wantNATSURL: "nats://custom-nats:4222",
 		},
 	}
@@ -132,7 +116,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	keysToClear := []string{
 		"PORT", "KUBE_API_SERVER",
 		"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
-		"GITHUB_PAT", "GITHUB_API_URL",
+		"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
 		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "HARO_URL", "NATS_URL",
@@ -154,6 +138,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.KubeToken, tc.wantKubeTok, "KubeToken"},
 				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
+				{cfg.GitHubWebhookSecret, tc.wantGHWebhookSecret, "GitHubWebhookSecret"},
 				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
 				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},

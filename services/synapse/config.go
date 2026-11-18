@@ -24,6 +24,7 @@ type Config struct {
 	KubeToken            string
 	GitHubToken          string
 	GitHubAPIURL         string
+	GitHubWebhookSecret  string
 	PostgresURL          string
 	FluxReceiverURL      string
 	BrainURL             string
@@ -253,6 +254,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		KubeToken:            kubeToken,
 		GitHubToken:          os.Getenv("GITHUB_PAT"),
 		GitHubAPIURL:         strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
 		PostgresURL:          pgURL,
 		FluxReceiverURL:      strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
 		BrainURL:             strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),

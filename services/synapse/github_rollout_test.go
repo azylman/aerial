@@ -961,7 +961,8 @@ func TestHandleGitHubWebhook_TeeAndForwarding(t *testing.T) {
 				ownedSHAs: tc.ownedSHAs,
 			}
 			cfg := Config{
-				BotID: "aerial",
+				BotID:               "aerial",
+				GitHubWebhookSecret: testGitHubWebhookSecret,
 				WebhookForwardURLs: map[string]string{
 					"bot_a":  serverA.URL,
 					"bot_b":  serverB.URL,
@@ -972,9 +973,10 @@ func TestHandleGitHubWebhook_TeeAndForwarding(t *testing.T) {
 			srv := newTestRouter(cfg, serverA.Client(), reg, nil, bus)
 
 			headers := map[string]string{
-				"X-Github-Event":    tc.event,
-				"X-Github-Delivery": "del-test-1234",
-				"Content-Type":      "application/json",
+				"X-Github-Event":      tc.event,
+				"X-Github-Delivery":   "del-test-1234",
+				"X-Hub-Signature-256": signTestGitHubWebhook(testGitHubWebhookSecret, tc.payload),
+				"Content-Type":        "application/json",
 			}
 			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/api/webhooks/github", strings.NewReader(tc.payload), headers)
 			if rec.Code != http.StatusOK {

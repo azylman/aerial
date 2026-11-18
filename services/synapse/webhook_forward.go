@@ -305,6 +305,9 @@ func (s *RouterServer) teeGitHubWebhook(ctx context.Context, reqPath string, r *
 	if del := r.Header.Get("X-Github-Delivery"); del != "" {
 		fwdHeaders.Set("X-Github-Delivery", del)
 	}
+	if sig := r.Header.Get("X-Hub-Signature-256"); sig != "" {
+		fwdHeaders.Set("X-Hub-Signature-256", sig)
+	}
 
 	switch event {
 	case ghEventPullRequest:

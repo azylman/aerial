@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,12 +21,22 @@ import (
 
 // --- 3. GitHub Webhook HTTP Handler & Event Processing ---
 
+const testGitHubWebhookSecret = "test-secret"
+
+func signTestGitHubWebhook(secret, payload string) string {
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(secret)))
+	mac.Write([]byte(payload))
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
 type ghWebhookTestCase struct {
 	name, path, wantMetricSubstr string
 	body                         io.Reader
 	headers                      map[string]string
 	bus                          *mockEventBus
 	hasBus                       bool
+	webhookSecret                string
+	noWebhookSecret              bool
 	wantStatus, wantInserted     int
 }
 
@@ -58,7 +71,11 @@ func assertGitHubWebhookResponse(t *testing.T, tc ghWebhookTestCase, rec *httpte
 func runGitHubWebhookCase(t *testing.T, tc ghWebhookTestCase) {
 	t.Helper()
 	t.Parallel()
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	secret := tc.webhookSecret
+	if secret == "" && !tc.noWebhookSecret {
+		secret = testGitHubWebhookSecret
+	}
+	srv := NewRouterServer(fixedConfig(Config{GitHubWebhookSecret: secret}), nil)
 	if tc.bus != nil {
 		srv.SetEventBus(tc.bus)
 	}
@@ -95,14 +112,24 @@ func runGitHubWebhookCase(t *testing.T, tc ghWebhookTestCase) {
 func TestHandleGitHubWebhook(t *testing.T) {
 	t.Parallel()
 
+	pingBody := `{"zen":"Keep it simple"}`
+	validPingSig := signTestGitHubWebhook(testGitHubWebhookSecret, pingBody)
+
 	tests := []ghWebhookTestCase{
 		{name: "missing X-GitHub-Event header", path: "/api/webhooks/github", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
 		{name: "read error in body", path: "/api/webhooks/github", body: errReader{}, headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusBadRequest},
-		{name: "bus nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
-		{name: "bus publish error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, bus: &mockEventBus{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
-		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, bus: &mockEventBus{}, wantStatus: http.StatusOK, wantInserted: 1},
-		{name: "bus only success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-bus-1"}, hasBus: true, wantStatus: http.StatusOK},
-		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, bus: &mockEventBus{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "bus nil", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-Hub-Signature-256": validPingSig}, wantStatus: http.StatusInternalServerError},
+		{name: "bus publish error", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-Hub-Signature-256": validPingSig}, bus: &mockEventBus{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
+		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234", "X-Hub-Signature-256": validPingSig}, bus: &mockEventBus{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "bus only success", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-bus-1", "X-Hub-Signature-256": validPingSig}, hasBus: true, wantStatus: http.StatusOK},
+		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234", "X-Hub-Signature-256": validPingSig}, bus: &mockEventBus{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "empty secret fails closed without signature", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping"}, noWebhookSecret: true, wantStatus: http.StatusUnauthorized},
+		{name: "empty secret fails closed even with signature header", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-Hub-Signature-256": validPingSig}, noWebhookSecret: true, wantStatus: http.StatusUnauthorized},
+		{name: "secret configured missing signature header", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping"}, webhookSecret: testGitHubWebhookSecret, wantStatus: http.StatusUnauthorized},
+		{name: "secret configured malformed signature prefix", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-Hub-Signature-256": "sha1=1234"}, webhookSecret: testGitHubWebhookSecret, wantStatus: http.StatusUnauthorized},
+		{name: "secret configured malformed signature hex", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-Hub-Signature-256": "sha256=invalidhex!"}, webhookSecret: testGitHubWebhookSecret, wantStatus: http.StatusUnauthorized},
+		{name: "secret configured mismatched hmac digest", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-Hub-Signature-256": "sha256=0000000000000000000000000000000000000000000000000000000000000000"}, webhookSecret: testGitHubWebhookSecret, wantStatus: http.StatusUnauthorized},
+		{name: "secret configured valid hmac digest", path: "/api/webhooks/github", body: strings.NewReader(pingBody), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-sig-1", "X-Hub-Signature-256": validPingSig}, bus: &mockEventBus{}, webhookSecret: testGitHubWebhookSecret, wantStatus: http.StatusOK, wantInserted: 1},
 	}
 
 	for _, tc := range tests {
