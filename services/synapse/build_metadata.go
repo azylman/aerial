@@ -66,6 +66,10 @@ func isBuildMetadataCheck(name string) bool {
 	return name == "build-metadata" || name == "build-metadata-result"
 }
 
+func isDependabotAppCheck(appSlug string) bool {
+	return strings.EqualFold(strings.TrimSpace(appSlug), "dependabot")
+}
+
 func validWorkflowPath(path string) bool {
 	return strings.HasPrefix(path, ".github/workflows/") && !strings.Contains(strings.TrimPrefix(path, ".github/workflows/"), "/") && (strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml")) && !strings.Contains(path, "..")
 }
@@ -188,7 +192,8 @@ type GitHubCheckRunsResponse struct {
 		HeadSHA    string `json:"head_sha"`
 		ExternalID string `json:"external_id"`
 		App        struct {
-			ID int64 `json:"id"`
+			ID   int64  `json:"id"`
+			Slug string `json:"slug"`
 		} `json:"app"`
 		CheckSuite struct {
 			ID int64 `json:"id"`
