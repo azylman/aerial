@@ -46,6 +46,9 @@ type sessionFileFixture struct {
 type syncTranscriptsScenarioCase struct {
 	name                  string
 	files                 []sessionFileFixture
+	seedMessages          []db.Message
+	seedSessions          []db.SessionInfo
+	seedDispatches        []db.Dispatch
 	priorSummary          *db.SessionSummary
 	llmMode               string
 	withEmbedder          bool
@@ -206,6 +209,9 @@ func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 		},
 		{
 			name: "ephemeral prompts filtered: thread summary, thread title, and fact extraction",
+			seedMessages: []db.Message{
+				{ID: "m-valid-1", ConversationID: "sess-valid-real-task"},
+			},
 			files: []sessionFileFixture{
 				{sessionID: "sess-valid-real-task", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Normal user task that should be indexed"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-ephemeral-thread-summary", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Synthesize the following Discord thread transcript into a concise memory block. Focus on context."}` + "\n", age: 1 * time.Hour},
@@ -237,6 +243,9 @@ func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 		},
 		{
 			name: "subagent transcripts with SYSTEM_MESSAGE sender skipped",
+			seedMessages: []db.Message{
+				{ID: "m-valid-sub-1", ConversationID: "sess-valid-primary-task"},
+			},
 			files: []sessionFileFixture{
 				{sessionID: "sess-valid-primary-task", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Primary conversation prompt"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-subagent-worker", content: `{"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"The following is a <SYSTEM_MESSAGE> from your parent agent: inspect files. sender=parent-123"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Inspecting files","tool_calls":[{"name":"view_file","args":{"Path":"/share/aerial/go.mod"}}]}` + "\n", age: 1 * time.Hour},
@@ -245,6 +254,15 @@ func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 		},
 		{
 			name: "silent heartbeat transcripts with non-prompt tool calls skipped",
+			seedMessages: []db.Message{
+				{ID: "m-valid-hb-1", ConversationID: "sess-valid-primary-task-2"},
+			},
+			seedDispatches: []db.Dispatch{
+				{ID: "disp-silent-hb-1", Source: "heartbeat", ConversationID: "sess-silent-heartbeat-instructions"},
+			},
+			seedSessions: []db.SessionInfo{
+				{ThreadID: "heartbeat-test", InternalSessionID: "sess-silent-heartbeat-watermark"},
+			},
 			files: []sessionFileFixture{
 				{sessionID: "sess-valid-primary-task-2", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Regular user request"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-silent-heartbeat-instructions", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<\\HEARTBEAT_INSTRUCTIONS>\nYour direct text response is suppressed.\n</\\HEARTBEAT_INSTRUCTIONS>\n<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nCheck cluster health"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Checking metrics","tool_calls":[{"name":"mcp_victoriametrics_query","args":{"query":"up"}}]}` + "\n" + `{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:04Z","content":"All systems nominal, remaining silent."}` + "\n", age: 1 * time.Hour},
@@ -254,6 +272,9 @@ func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 		},
 		{
 			name: "escalating heartbeat transcripts with prompt tool call indexed",
+			seedDispatches: []db.Dispatch{
+				{ID: "disp-esc-1", Source: "cron", ConversationID: "sess-escalating-heartbeat"},
+			},
 			files: []sessionFileFixture{
 				{sessionID: "sess-escalating-heartbeat", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<\\HEARTBEAT_INSTRUCTIONS>\nEvaluate check\n</\\HEARTBEAT_INSTRUCTIONS>\n<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nAlert check"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"curl -sS -f -X POST http://eri.aerial/prompt -H \"Content-Type: application/json\" -d '{\"title\":\"Escalated Issue\"}'"}}]}` + "\n", age: 1 * time.Hour},
 			},
@@ -273,6 +294,11 @@ func advancedExtendedScenarioCases() []syncTranscriptsScenarioCase {
 	return []syncTranscriptsScenarioCase{
 		{
 			name: "batch limit caps synced sessions and skips summarizer transcripts",
+			seedMessages: []db.Message{
+				{ID: "m-b1", ConversationID: "sess-batch-001"},
+				{ID: "m-b2", ConversationID: "sess-batch-002"},
+				{ID: "m-b3", ConversationID: "sess-batch-003"},
+			},
 			files: []sessionFileFixture{
 				{sessionID: "sess-batch-000-summarizer", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nSummarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n</USER_REQUEST>"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-batch-001", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 1"}` + "\n", age: 1 * time.Hour},
@@ -524,6 +550,20 @@ func runSyncTranscriptsScenarioCase(t *testing.T, tc syncTranscriptsScenarioCase
 		}
 	}
 
+	for _, m := range tc.seedMessages {
+		if err := store.InsertMessage(ctx, m); err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+	}
+	for _, s := range tc.seedSessions {
+		store.SetSessionInfo(s)
+	}
+	for _, d := range tc.seedDispatches {
+		if _, err := store.InsertDispatch(ctx, d); err != nil {
+			t.Fatalf("seed dispatch: %v", err)
+		}
+	}
+
 	for _, f := range tc.files {
 		writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-f.age))
 	}
@@ -578,9 +618,10 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 type mockTranscriptStore struct {
 	db.TranscriptStore
 
-	failGetSyncStates bool
-	failBatchInsert   bool
-	failUpsertSummary bool
+	failGetSyncStates    bool
+	failGetKnownSessions bool
+	failBatchInsert      bool
+	failUpsertSummary    bool
 }
 
 func (m *mockTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
@@ -588,6 +629,13 @@ func (m *mockTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[str
 		return nil, errors.New("simulated sync states query failure")
 	}
 	return m.TranscriptStore.GetSessionSyncStates(ctx)
+}
+
+func (m *mockTranscriptStore) GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error) {
+	if m.failGetKnownSessions {
+		return nil, errors.New("simulated known turn session ids failure")
+	}
+	return m.TranscriptStore.GetKnownTurnSessionIDs(ctx)
 }
 
 func (m *mockTranscriptStore) UpsertSessionSummary(ctx context.Context, summary db.SessionSummary) error {
@@ -604,38 +652,40 @@ func (m *mockTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, st
 	return m.TranscriptStore.BatchInsertTranscriptSteps(ctx, steps)
 }
 
-func newMockTranscriptStore(base db.TranscriptStore, failGetSyncStates, failBatchInsert, failUpsertSummary bool) *mockTranscriptStore {
+func newMockTranscriptStore(base db.TranscriptStore, failGetSyncStates, failGetKnownSessions, failBatchInsert, failUpsertSummary bool) *mockTranscriptStore {
 	return &mockTranscriptStore{
-		TranscriptStore:   base,
-		failGetSyncStates: failGetSyncStates,
-		failBatchInsert:   failBatchInsert,
-		failUpsertSummary: failUpsertSummary,
+		TranscriptStore:      base,
+		failGetSyncStates:    failGetSyncStates,
+		failGetKnownSessions: failGetKnownSessions,
+		failBatchInsert:      failBatchInsert,
+		failUpsertSummary:    failUpsertSummary,
 	}
 }
 
 type syncTranscriptsErrorCase struct {
-	name                string
-	nilStore            bool
-	emptyBrainDir       bool
-	nonExistentBrainDir bool
-	cancelCtx           bool
-	hasSession          bool
-	socketFile          bool
-	emptyFile           bool
-	prePopActive        bool
-	activeFile          bool
-	failGetSyncStates   bool
-	failBatchInsert     bool
-	failUpsertSummary   bool
-	opts                SyncOptions
-	zeroOpts            bool
-	wantErr             bool
-	isContextCanceled   bool
-	wantSubstr          string
-	wantSweepErrors     int
-	wantSynced          int
-	wantSummaries       int
-	wantStepsInserted   int
+	name                 string
+	nilStore             bool
+	emptyBrainDir        bool
+	nonExistentBrainDir  bool
+	cancelCtx            bool
+	hasSession           bool
+	socketFile           bool
+	emptyFile            bool
+	prePopActive         bool
+	activeFile           bool
+	failGetSyncStates    bool
+	failGetKnownSessions bool
+	failBatchInsert      bool
+	failUpsertSummary    bool
+	opts                 SyncOptions
+	zeroOpts             bool
+	wantErr              bool
+	isContextCanceled    bool
+	wantSubstr           string
+	wantSweepErrors      int
+	wantSynced           int
+	wantSummaries        int
+	wantStepsInserted    int
 }
 
 func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
@@ -645,6 +695,7 @@ func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
 		{name: "non-existent brain dir returns error", nonExistentBrainDir: true, wantErr: true},
 		{name: "context cancelled returns context canceled error", hasSession: true, cancelCtx: true, zeroOpts: true, wantErr: true, isContextCanceled: true},
 		{name: "error loading session sync states propagated", hasSession: true, failGetSyncStates: true, wantErr: true, wantSubstr: "load session sync states"},
+		{name: "error loading known turn session ids propagated", hasSession: true, failGetKnownSessions: true, wantErr: true, wantSubstr: "load known turn session ids"},
 		{name: "unopenable socket file recorded as error in sweep", socketFile: true, wantSweepErrors: 1},
 		{name: "batch insert error increments errors and inserts 0 steps", hasSession: true, failBatchInsert: true, wantSweepErrors: 1, wantStepsInserted: 0},
 		{name: "upsert settled session error increments errors and generates 0 summaries", hasSession: true, failUpsertSummary: true, wantSweepErrors: 1, wantSummaries: 0},
@@ -667,8 +718,8 @@ func setupErrorCaseStore(tc syncTranscriptsErrorCase) db.TranscriptStore {
 			IsSettled:       false,
 		})
 	}
-	if tc.failGetSyncStates || tc.failBatchInsert || tc.failUpsertSummary {
-		return newMockTranscriptStore(fakeStore, tc.failGetSyncStates, tc.failBatchInsert, tc.failUpsertSummary)
+	if tc.failGetSyncStates || tc.failGetKnownSessions || tc.failBatchInsert || tc.failUpsertSummary {
+		return newMockTranscriptStore(fakeStore, tc.failGetSyncStates, tc.failGetKnownSessions, tc.failBatchInsert, tc.failUpsertSummary)
 	}
 	return fakeStore
 }
@@ -837,66 +888,73 @@ func TestFindTranscriptFile_AlternativeLocations(t *testing.T) {
 	}
 }
 
-func TestIsEphemeralSummarizerPrompt(t *testing.T) {
+func TestIsAllowedTranscriptSession(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
-		name   string
-		prompt string
-		want   bool
+		name      string
+		sessionID string
+		exists    bool
+		known     map[string]bool
+		want      bool
 	}{
 		{
-			name:   "empty prompt",
-			prompt: "",
-			want:   false,
+			name:      "already exists in sync states with nil known",
+			sessionID: "sess-1",
+			exists:    true,
+			known:     nil,
+			want:      true,
 		},
 		{
-			name:   "ordinary prompt",
-			prompt: "How do I deploy Aerial to k3s?",
-			want:   false,
+			name:      "already exists in sync states with populated known not containing id",
+			sessionID: "sess-1",
+			exists:    true,
+			known:     map[string]bool{"sess-2": true},
+			want:      true,
 		},
 		{
-			name:   "settled summary canonical",
-			prompt: "Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities.",
-			want:   true,
+			name:      "new session with nil known (hermetic test fixtures / no turn rows)",
+			sessionID: "sess-hermetic",
+			exists:    false,
+			known:     nil,
+			want:      true,
 		},
 		{
-			name:   "settled summary with leading whitespace",
-			prompt: "  \n  Summarize the following agent conversation transcript in 2-3 concise sentences.",
-			want:   true,
+			name:      "new session in known turn session ids",
+			sessionID: "sess-turn-active",
+			exists:    false,
+			known:     map[string]bool{"sess-turn-active": true, "sess-turn-prev": true},
+			want:      true,
 		},
 		{
-			name:   "discord thread summary canonical",
-			prompt: "Synthesize the following Discord thread transcript into a concise memory block. Focus on context.",
-			want:   true,
+			name:      "new session not in known turn session ids",
+			sessionID: "sess-untracked-ephemeral",
+			exists:    false,
+			known:     map[string]bool{"sess-other": true},
+			want:      false,
 		},
 		{
-			name:   "discord thread title canonical",
-			prompt: "Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title.",
-			want:   true,
+			name:      "new session with empty known map",
+			sessionID: "sess-empty-known",
+			exists:    false,
+			known:     map[string]bool{},
+			want:      false,
 		},
 		{
-			name:   "coven fact extraction canonical",
-			prompt: "Analyze the following conversation transcript and extract any key durable atomic facts",
-			want:   true,
+			name:      "new session with false in known map",
+			sessionID: "sess-disallowed",
+			exists:    false,
+			known:     map[string]bool{"sess-disallowed": false},
+			want:      false,
 		},
-		{name: "coven fact extraction with extra text", prompt: "Analyze the following conversation transcript and extract any key durable atomic facts from the session.", want: true},
-		{name: "coven fact extraction atomic facts variant", prompt: "Analyze the following conversation transcript and extract any key atomic facts from this session.", want: true},
-		{name: "memory reconciliation classifier", prompt: "You are a memory reconciliation classifier. Reconcile these memories.", want: true},
-		{name: "memory consolidation engine", prompt: "You are a memory consolidation engine. Consolidate facts.", want: true},
-		{name: "expert AI skill designer", prompt: "You are an expert AI skill designer. Create a skill for testing.", want: true},
-		{name: "girl gang reviewer role", prompt: "Role: TheGirlGangReviewer\nReview this diff.", want: true},
-		{name: "consolidated girl gang act", prompt: "Act as consolidated Girl Gang and review the plan.", want: true},
-		{name: "audit the following", prompt: "Audit the following code changes for safety.", want: true},
-		{name: "you are The Girl Gang capitalized", prompt: "You are The Girl Gang. Review the proposed changes.", want: true},
-		{name: "you are the Girl Gang lowercase", prompt: "You are the Girl Gang. Perform a review.", want: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := isEphemeralSummarizerPrompt(tc.prompt)
+			got := isAllowedTranscriptSession(tc.sessionID, tc.exists, tc.known)
 			if got != tc.want {
-				t.Fatalf("isEphemeralSummarizerPrompt(%q) = %v, want %v", tc.prompt, got, tc.want)
+				t.Fatalf("isAllowedTranscriptSession(%q, %v, %v) = %v, want %v", tc.sessionID, tc.exists, tc.known, got, tc.want)
 			}
 		})
 	}
@@ -1347,131 +1405,6 @@ func TestEngineForPath(t *testing.T) {
 			if got := engineForPath(tc.brainDir, tc.path); got != tc.want {
 				t.Errorf("engineForPath(%q, %q) = %q, want %q", tc.brainDir, tc.path, got, tc.want)
 			}
-		})
-	}
-}
-
-type syncSessionTranscriptTestCase struct {
-	name           string
-	nilStore       bool
-	sessionID      string
-	hasTranscript  bool
-	transcriptData string
-	secondPass     bool
-	wantErr        bool
-	errContains    string
-	wantSteps      int
-	wantSkipped    int
-	wantSynced     int
-}
-
-func runSyncSessionTranscriptTest(t *testing.T, tc syncSessionTranscriptTestCase) {
-	t.Helper()
-	ctx := context.Background()
-	tempDir := t.TempDir()
-
-	var store db.TranscriptStore
-	if !tc.nilStore {
-		store = dbtest.NewFakeStore()
-	}
-
-	if tc.hasTranscript && tc.sessionID != "" {
-		writeTranscriptFile(t, tempDir, tc.sessionID, tc.transcriptData, time.Now().Add(-5*time.Minute))
-	} else if tc.hasTranscript && tc.sessionID == "" {
-		writeTranscriptFile(t, tempDir, "fallback-sess", tc.transcriptData, time.Now().Add(-5*time.Minute))
-	}
-
-	opts := SyncOptions{
-		BrainDir:      tempDir,
-		BatchLimit:    10,
-		IdleThreshold: 10 * time.Minute,
-		HeadLimit:     1000,
-		TailLimit:     1000,
-	}
-
-	if tc.secondPass && store != nil {
-		_, firstErr := SyncSessionTranscript(ctx, store, tempDir, tc.sessionID, opts)
-		if firstErr != nil {
-			t.Fatalf("first pass SyncSessionTranscript failed: %v", firstErr)
-		}
-	}
-
-	stats, err := SyncSessionTranscript(ctx, store, tempDir, tc.sessionID, opts)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error containing %q, got nil", tc.errContains)
-		}
-		if !strings.Contains(err.Error(), tc.errContains) {
-			t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if stats.StepsInserted != tc.wantSteps {
-		t.Errorf("stats.StepsInserted = %d, want %d", stats.StepsInserted, tc.wantSteps)
-	}
-	if stats.SkippedUnchanged != tc.wantSkipped {
-		t.Errorf("stats.SkippedUnchanged = %d, want %d", stats.SkippedUnchanged, tc.wantSkipped)
-	}
-	if stats.Synced != tc.wantSynced {
-		t.Errorf("stats.Synced = %d, want %d", stats.Synced, tc.wantSynced)
-	}
-}
-
-func TestSyncSessionTranscript_TableDriven(t *testing.T) {
-	t.Parallel()
-	const sampleJSONL = "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"content\":\"hello\"}\n{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"world\"}\n"
-
-	tests := []syncSessionTranscriptTestCase{
-		{
-			name:        "nil store returns error",
-			nilStore:    true,
-			sessionID:   "sess-nil",
-			wantErr:     true,
-			errContains: "transcript store cannot be nil",
-		},
-		{
-			name:           "empty session id falls back to SyncTranscripts",
-			sessionID:      "",
-			hasTranscript:  true,
-			transcriptData: sampleJSONL,
-			wantSteps:      2,
-			wantSynced:     1,
-		},
-		{
-			name:          "nonexistent transcript file returns zero stats and nil error",
-			sessionID:     "sess-missing",
-			hasTranscript: false,
-			wantSteps:     0,
-			wantSynced:    0,
-		},
-		{
-			name:           "valid session transcript indexes steps into database",
-			sessionID:      "sess-valid",
-			hasTranscript:  true,
-			transcriptData: sampleJSONL,
-			wantSteps:      2,
-			wantSynced:     1,
-		},
-		{
-			name:           "second pass on unchanged transcript skips sync",
-			sessionID:      "sess-unchanged",
-			hasTranscript:  true,
-			transcriptData: sampleJSONL,
-			secondPass:     true,
-			wantSteps:      0,
-			wantSkipped:    1,
-			wantSynced:     0,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSyncSessionTranscriptTest(t, tc)
 		})
 	}
 }

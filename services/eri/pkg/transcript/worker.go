@@ -92,6 +92,13 @@ func isSessionUnchanged(ctx context.Context, store db.TranscriptStore, sessionID
 	return true
 }
 
+// isAllowedTranscriptSession reports whether sessionID is permitted for transcript indexing.
+// Existing indexed sessions are always permitted. For new sessions, known holds the stack's
+// turn conversation IDs; a nil map indicates a hermetic fixture or empty database.
+func isAllowedTranscriptSession(sessionID string, exists bool, known map[string]bool) bool {
+	return exists || known == nil || known[sessionID]
+}
+
 // SyncSessionTranscript indexes a single session's transcript file into transcript_steps and sessions
 // without scanning the entire brain directory. When sessionID is empty, it falls back to SyncTranscripts.
 func SyncSessionTranscript(
@@ -156,6 +163,18 @@ func SyncSessionTranscript(
 		return stats, nil
 	}
 
+	if !exists {
+		known, kErr := store.GetKnownTurnSessionIDs(ctx)
+		if kErr != nil {
+			stats.Duration = time.Since(start)
+			return stats, fmt.Errorf("load known turn session ids: %w", kErr)
+		}
+		if !isAllowedTranscriptSession(sessionID, exists, known) {
+			stats.Duration = time.Since(start)
+			return stats, nil
+		}
+	}
+
 	synced, err := syncSingleSession(ctx, store, sessionID, engine, transcriptPath, mtime, state, exists, opt.Embedder, opt.LLMFunc, opt, &stats)
 	if err != nil {
 		stats.Errors++
@@ -170,6 +189,24 @@ func SyncSessionTranscript(
 	backfillSessionEngines(ctx, store)
 	stats.Duration = time.Since(start)
 	return stats, nil
+}
+
+func wrapSweeperLLM(llmFunc LLMClientFunc) LLMClientFunc {
+	if llmFunc == nil {
+		return nil
+	}
+	var llmFailed bool
+	return func(callCtx context.Context, prompt string) (string, error) {
+		if llmFailed {
+			return "", errors.New("llm disabled for sweep due to prior error")
+		}
+		res, err := llmFunc(callCtx, prompt)
+		if err != nil {
+			llmFailed = true
+			return "", err
+		}
+		return res, nil
+	}
 }
 
 // SyncTranscripts scans the brain directory and Claude project directories for session transcripts,
@@ -196,21 +233,7 @@ func SyncTranscripts(
 		llmFunc = opts.LLMFunc
 	}
 
-	var llmFailed bool
-	var activeLLMFunc LLMClientFunc
-	if llmFunc != nil {
-		activeLLMFunc = func(callCtx context.Context, prompt string) (string, error) {
-			if llmFailed {
-				return "", errors.New("llm disabled for sweep due to prior error")
-			}
-			res, err := llmFunc(callCtx, prompt)
-			if err != nil {
-				llmFailed = true
-				return "", err
-			}
-			return res, nil
-		}
-	}
+	activeLLMFunc := wrapSweeperLLM(llmFunc)
 	opts.LLMFunc = activeLLMFunc
 
 	targetBrainDir, opts, err := normalizeSyncOptions(brainDir, opts)
@@ -226,6 +249,11 @@ func SyncTranscripts(
 	syncStates, err := store.GetSessionSyncStates(ctx)
 	if err != nil {
 		return stats, fmt.Errorf("load session sync states: %w", err)
+	}
+
+	known, err := store.GetKnownTurnSessionIDs(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("load known turn session ids: %w", err)
 	}
 
 	discovered := discoverSessions(targetBrainDir, entries, opts.ClaudeProjectsDir, opts.CodexSessionsDir, opts.MuseSessionsDir)
@@ -257,6 +285,10 @@ func SyncTranscripts(
 		state, exists := syncStates[sessionID]
 		if isSessionUnchanged(ctx, store, sessionID, found.engine, mtime, state, exists, opts.IdleThreshold) {
 			stats.SkippedUnchanged++
+			continue
+		}
+
+		if !isAllowedTranscriptSession(sessionID, exists, known) {
 			continue
 		}
 
@@ -1261,59 +1293,6 @@ func buildTranscriptStepsToInsert(
 
 const settledSummaryPromptPrefix = "Summarize the following agent conversation transcript in 2-3 concise sentences."
 
-var ephemeralPromptPrefixes = []string{
-	settledSummaryPromptPrefix,
-	"Synthesize the following Discord thread transcript into a concise memory block.",
-	"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title.",
-	"Analyze the following conversation transcript and extract any key durable atomic facts",
-	"Analyze the following conversation transcript and extract any key atomic facts",
-	"You are a memory reconciliation classifier.",
-	"You are a memory consolidation engine.",
-	"You are an expert AI skill designer",
-	"Role: TheGirlGangReviewer",
-	"Act as consolidated Girl Gang",
-	"Audit the following ",
-	"You are The Girl Gang",
-	"You are the Girl Gang",
-}
-
-func isEphemeralSummarizerPrompt(prompt string) bool {
-	trimmed := strings.TrimSpace(prompt)
-	for _, prefix := range ephemeralPromptPrefixes {
-		if strings.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isSubagentTranscript(st transcriptScanState) bool {
-	return st.step0Prompt == "" && len(st.parsedSteps) > 0 &&
-		st.parsedSteps[0].Type == "SYSTEM_MESSAGE" && strings.Contains(st.parsedSteps[0].Content, "sender=")
-}
-
-func isSilentHeartbeatSession(st transcriptScanState) bool {
-	if !strings.Contains(st.step0Prompt, `<\HEARTBEAT_INSTRUCTIONS>`) &&
-		!strings.Contains(st.step0Prompt, "<HEARTBEAT_INSTRUCTIONS>") &&
-		!strings.Contains(st.step0Prompt, "<HEARTBEAT_WATERMARK>") {
-		return false
-	}
-	for _, raw := range st.parsedSteps {
-		if raw.Type == stepTypeUserInput || raw.Source == stepSourceUserExplicit {
-			continue
-		}
-		for _, tc := range raw.ToolCalls {
-			if strings.Contains(string(tc.Args), "/prompt") {
-				return false
-			}
-		}
-		if raw.Type == "RUN_COMMAND" && strings.Contains(raw.Content, "/prompt") {
-			return false
-		}
-	}
-	return true
-}
-
 func generateSettledSummaryText(
 	ctx context.Context,
 	sessionID string,
@@ -1462,7 +1441,7 @@ func syncSingleSession(
 	if err != nil {
 		return false, err
 	}
-	if st.maxStepIndex < 0 || isEphemeralSummarizerPrompt(st.step0Prompt) || isSubagentTranscript(st) || isSilentHeartbeatSession(st) {
+	if st.maxStepIndex < 0 {
 		return false, nil
 	}
 

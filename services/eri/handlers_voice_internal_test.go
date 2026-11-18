@@ -133,7 +133,9 @@ func newVoiceHandler(cfg queue.WorkerPoolConfig) (http.HandlerFunc, func()) {
 
 func runVoiceAskSSESuccess(t *testing.T) {
 	t.Helper()
+	store := dbtest.NewFakeStore()
 	handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
+		Store: store,
 		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 			if onStatus != nil {
 				onStatus("⚡ Checking smart lights...")
@@ -156,6 +158,14 @@ func runVoiceAskSSESuccess(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing SSE event %q in body:\n%s", want, body)
 		}
+	}
+
+	gotConvID, err := store.GetSessionID(context.Background(), "voice-sess-test-456")
+	if err != nil {
+		t.Fatalf("GetSessionID voice-sess-test-456 failed: %v", err)
+	}
+	if gotConvID != "sess-test-456" {
+		t.Errorf("persisted voice conversation id = %q, want %q", gotConvID, "sess-test-456")
 	}
 }
 
@@ -295,7 +305,9 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 	})
 
 	t.Run("JSON_Success", func(t *testing.T) {
+		store := dbtest.NewFakeStore()
 		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
+			Store: store,
 			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 				return "The temperature is 72 degrees.", "sess-json-789", nil
 			},
@@ -310,11 +322,69 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Reply != "The temperature is 72 degrees." || resp.SessionID != "sess-json-789" {
 			t.Fatalf("unexpected JSON response: %+v, err: %v", resp, err)
 		}
+		gotConvID, err := store.GetSessionID(context.Background(), "voice-sess-json-789")
+		if err != nil {
+			t.Fatalf("GetSessionID failed: %v", err)
+		}
+		if gotConvID != "sess-json-789" {
+			t.Errorf("persisted voice conversation id = %q, want %q", gotConvID, "sess-json-789")
+		}
 	})
 
 	t.Run("Errors", func(t *testing.T) {
 		runVoiceAskSSEErrors(t)
 	})
+}
+
+func TestPersistVoiceConversationID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilPool     bool
+		nilStore    bool
+		sessionID   string
+		convID      string
+		failStore   bool
+		wantPersist bool
+	}{
+		{name: "nil pool", nilPool: true, sessionID: "s1", convID: "c1"},
+		{name: "nil store in pool", nilStore: true, sessionID: "s1", convID: "c1"},
+		{name: "empty sessionID", sessionID: "", convID: "c1"},
+		{name: "whitespace sessionID", sessionID: "   ", convID: "c1"},
+		{name: "empty convID", sessionID: "s1", convID: ""},
+		{name: "whitespace convID", sessionID: "s1", convID: "   "},
+		{name: "store error logged", sessionID: "s-err", convID: "c-err", failStore: true},
+		{name: "success persisted", sessionID: "s-ok", convID: "c-ok", wantPersist: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var pool *queue.WorkerPool
+			var store *dbtest.FakeStore
+			if !tc.nilPool {
+				if !tc.nilStore {
+					store = dbtest.NewFakeStore()
+					if tc.failStore {
+						store.FailNext("RotateSessionID", errors.New("simulated rotate failure"))
+					}
+					pool = newTestWorkerPool(store)
+				} else {
+					pool = newTestWorkerPool(nil)
+				}
+				pool.Start()
+				defer pool.Stop()
+			}
+			persistVoiceConversationID(context.Background(), pool, tc.sessionID, tc.convID)
+			if tc.wantPersist && store != nil {
+				got, err := store.GetSessionID(context.Background(), "voice-"+tc.sessionID)
+				if err != nil || got != tc.convID {
+					t.Fatalf("GetSessionID = %q, err = %v, want %q", got, err, tc.convID)
+				}
+			}
+		})
+	}
 }
 
 func TestHandleInternalDiscordMessage(t *testing.T) {
