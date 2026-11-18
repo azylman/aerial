@@ -155,7 +155,7 @@ func TestRoutedTranscriptStore_HotReload(t *testing.T) {
 	}
 }
 
-func TestRoutedTranscriptStore_Unavailable(t *testing.T) {
+func TestRoutedTranscriptStore_ErrorPaths(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -173,6 +173,7 @@ func TestRoutedTranscriptStore_Unavailable(t *testing.T) {
 			ctx := context.Background()
 			errs := map[string]error{
 				"GetSessionSyncStates":       c1(s.GetSessionSyncStates(ctx)),
+				"GetKnownTurnSessionIDs":     c1(s.GetKnownTurnSessionIDs(ctx)),
 				"UpsertSessionSummary":       s.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"}),
 				"SetSessionEngine":           s.SetSessionEngine(ctx, "s", "agy"),
 				"BatchInsertTranscriptSteps": s.BatchInsertTranscriptSteps(ctx, []TranscriptStep{{SessionID: "s"}}),
@@ -258,6 +259,53 @@ func TestSharedTranscripts_SyncStatesScopedToStack(t *testing.T) {
 			}
 			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
 				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_GetKnownTurnSessionIDsScopedToLocalStack(t *testing.T) {
+	t.Parallel()
+	shared, a, b := newSharedStackPair(t)
+	routedB, ok := b.(*routedTranscriptStore)
+	if !ok {
+		t.Fatalf("b is %T, want *routedTranscriptStore", b)
+	}
+
+	// Seed shared (Stack A primary) with Stack A turn provenance.
+	if _, err := shared.Exec("INSERT INTO messages (id, conversation_id) VALUES ('m-a', 'conv-stack-a')"); err != nil {
+		t.Fatalf("seed shared messages failed: %v", err)
+	}
+	// Seed Stack B local primary DB with Stack B turn provenance.
+	if _, err := routedB.primary.Exec("INSERT INTO messages (id, conversation_id) VALUES ('m-b', 'conv-stack-b')"); err != nil {
+		t.Fatalf("seed stack b messages failed: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		store   TranscriptStore
+		wantIDs []string
+	}{
+		{name: "stack a reads shared db provenance", store: a, wantIDs: []string{"conv-stack-a"}},
+		{name: "stack b reads its own local primary db provenance rather than shared db", store: b, wantIDs: []string{"conv-stack-b"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tc.store.GetKnownTurnSessionIDs(context.Background())
+			if err != nil {
+				t.Fatalf("GetKnownTurnSessionIDs failed: %v", err)
+			}
+			if got == nil {
+				t.Fatalf("expected non-nil map, got nil")
+			}
+			if len(got) != len(tc.wantIDs) {
+				t.Fatalf("got %d session IDs (%v), want %d (%v)", len(got), got, len(tc.wantIDs), tc.wantIDs)
+			}
+			for _, wantID := range tc.wantIDs {
+				if !got[wantID] {
+					t.Errorf("missing expected session ID %q in got %+v", wantID, got)
+				}
 			}
 		})
 	}

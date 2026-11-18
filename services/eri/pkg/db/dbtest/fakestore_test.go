@@ -414,6 +414,16 @@ func assertFakeStoreUnrotatedSessions(ctx context.Context, t *testing.T, s *Fake
 	}
 }
 
+func assertRotateSessionIDIdempotency(ctx context.Context, t *testing.T, s *FakeStore) {
+	t.Helper()
+	mustOK(t, s.RotateSessionID(ctx, "th-1", "sess-2"), "RotateSessionID repeated")
+	curr, _ := s.GetSessionID(ctx, "th-1")
+	prev, _ := s.GetPreviousSessionID(ctx, "th-1")
+	if curr != "sess-2" || prev != "sess-1-v2" {
+		t.Errorf("post-repeated-rotation state: curr=%q (want sess-2), prev=%q (want sess-1-v2)", curr, prev)
+	}
+}
+
 func TestFakeStoreSessionOperations(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
@@ -446,6 +456,7 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	if curr != "sess-2" || prev != "sess-1-v2" || turns != 0 {
 		t.Errorf("post-rotation state: curr=%q, prev=%q, turns=%d", curr, prev, turns)
 	}
+	assertRotateSessionIDIdempotency(ctx, t, s)
 	_ = s.RotateSessionID(ctx, "th-brand-new", "sess-init")
 
 	if sum, wm, err := s.GetThreadSummary(ctx, "th-1"); err != nil || sum != "" || wm != "" {
@@ -1232,4 +1243,117 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	}
 
 	assertFakeStoreEngineLifecycleAndErrors(ctx, t, store)
+}
+
+type fakeStoreKnownTurnCase struct {
+	name       string
+	failNext   error
+	closed     bool
+	messages   []db.Message
+	sessions   []db.SessionInfo
+	dispatches []db.Dispatch
+	wantErr    error
+	wantNil    bool
+	wantIDs    []string
+}
+
+func runFakeStoreKnownTurnCase(t *testing.T, tc fakeStoreKnownTurnCase) {
+	t.Helper()
+	s := NewFakeStore()
+	ctx := context.Background()
+	for _, m := range tc.messages {
+		_ = s.InsertMessage(ctx, m)
+	}
+	for _, sess := range tc.sessions {
+		s.SetSessionInfo(sess)
+	}
+	for _, d := range tc.dispatches {
+		_, _ = s.InsertDispatch(ctx, d)
+	}
+	if tc.failNext != nil {
+		s.FailNext("GetKnownTurnSessionIDs", tc.failNext)
+	}
+	if tc.closed {
+		_ = s.Close()
+	}
+	got, err := s.GetKnownTurnSessionIDs(ctx)
+	if tc.wantErr != nil {
+		if !errors.Is(err, tc.wantErr) {
+			t.Fatalf("expected error %v, got %v", tc.wantErr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.wantNil {
+		if got != nil {
+			t.Fatalf("expected nil map, got %+v", got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("expected non-nil map, got nil")
+	}
+	if len(got) != len(tc.wantIDs) {
+		t.Fatalf("got %d session IDs (%v), want %d (%v)", len(got), got, len(tc.wantIDs), tc.wantIDs)
+	}
+	for _, wantID := range tc.wantIDs {
+		if !got[wantID] {
+			t.Errorf("missing expected session ID %q in got %+v", wantID, got)
+		}
+	}
+}
+
+func TestFakeStore_GetKnownTurnSessionIDs(t *testing.T) {
+	t.Parallel()
+	simErr := errors.New("provenance query down")
+	tests := []fakeStoreKnownTurnCase{
+		{
+			name:     "simulated fail next error",
+			failNext: simErr,
+			wantErr:  simErr,
+		},
+		{
+			name:    "closed store returns ErrConnDone",
+			closed:  true,
+			wantErr: sql.ErrConnDone,
+		},
+		{
+			name:    "empty store returns nil",
+			wantNil: true,
+		},
+		{
+			name: "heartbeat only returns empty non-nil map",
+			sessions: []db.SessionInfo{
+				{ThreadID: "heartbeat-health", InternalSessionID: "hb-conv-1", PreviousSessionID: "hb-prev-1"},
+			},
+			dispatches: []db.Dispatch{
+				{ID: "d-hb", Source: "heartbeat", ConversationID: "hb-disp-1"},
+			},
+			wantIDs: []string{},
+		},
+		{
+			name: "populated store filters heartbeat and returns allowed ids",
+			messages: []db.Message{
+				{ID: "m1", ConversationID: "conv-msg-1"},
+				{ID: "m2", ConversationID: ""},
+			},
+			sessions: []db.SessionInfo{
+				{ThreadID: "discord-100", InternalSessionID: "conv-sess-1", PreviousSessionID: "conv-prev-1"},
+				{ThreadID: "heartbeat-poll", InternalSessionID: "hb-ignored-1", PreviousSessionID: "hb-ignored-2"},
+			},
+			dispatches: []db.Dispatch{
+				{ID: "d1", Source: "cron", ConversationID: "conv-disp-1"},
+				{ID: "d2", Source: "heartbeat", ConversationID: "hb-disp-ignored"},
+			},
+			wantIDs: []string{"conv-msg-1", "conv-sess-1", "conv-prev-1", "conv-disp-1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runFakeStoreKnownTurnCase(t, tc)
+		})
+	}
 }
