@@ -298,13 +298,11 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
         short_sha=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
       fi
 
-      # RoboRev review --wait exits 0 when the review command finishes without crashing,
-      # regardless of whether findings are present in body_out. The CI gate (.github/workflows/docker-publish.yml)
-      # and Synapse webhook router identify passes strictly by the '^## roborev: Review Passed' header.
-      # Only emit 'Review Passed' when rc==0, body_out is non-empty, and no actionable findings or failures exist.
+      # Upstream roborev.real review --wait computes the canonical structured verdict
+      # from Document.Passed(minSeverity) and exits 0 on a PASS verdict and non-zero (1)
+      # on a FAIL verdict or job error. Only emit 'Review Passed' when rc==0 and body_out is non-empty.
       has_findings=0
-      if [[ "${rc}" -ne 0 || ! -s "${body_out}" ]] || \
-         grep -qiE "(\*\*Agent assessment:\*\*\s*Fail|^## Findings|\*\*Severity:\*\*\s*(critical|high|medium)|^### [0-9]+\.\s*(critical|high|medium)|Synthesis unavailable)" "${body_out}"; then
+      if [[ "${rc}" -ne 0 || ! -s "${body_out}" ]]; then
         has_findings=1
       fi
 
@@ -372,7 +370,7 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   fi
 
   if [[ "${has_review_types}" -eq 0 ]]; then
-    exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}" --review-types default,test-value
+    exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}" --review-types default
   fi
   exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}"
 fi

@@ -1266,7 +1266,13 @@ echo "[token=${CLAUDE_CODE_OAUTH_TOKEN:-}]" >> "${CALL_LOG}"
 case "${1:-}" in
   list) cat "${STATE_DIR}/jobs.json" ;;
   show) cat "${STATE_DIR}/show.json" ;;
-  review) printf 'Review (by gemini)\n------------------------------------------------------------\nNo issues found.\n' ;;
+  review)
+    if [ -f "${STATE_DIR}/mock_review_output" ]; then
+      cat "${STATE_DIR}/mock_review_output"
+      exit "${MOCK_REVIEW_RC:-0}"
+    fi
+    printf 'Review (by gemini)\n------------------------------------------------------------\nNo issues found.\n'
+    ;;
   *) exit 0 ;;
 esac
 MOCK_EOF
@@ -1454,6 +1460,80 @@ if echo "$cache_out" | grep -q "GOCACHE=$TEST_ROOT/mock_data/cache/go-build" &&
    [ -L "$TEST_ROOT/mock_data/cache" ]; then
   echo 'cache_exports:ok'
 fi
+
+# Subtest: roborev.real review exits 0 with findings header and low severity emits Review Passed
+cat << 'MOCK_REVIEW_BODY_PASS' > "$STATE_DIR/mock_review_output"
+Review (by codex)
+------------------------------------------------------------
+## Findings
+
+### 1. Low: Minor style suggestion
+Consider renaming variable for clarity.
+MOCK_REVIEW_BODY_PASS
+export MOCK_REVIEW_RC=0
+pass_with_findings_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low)
+if echo "$pass_with_findings_out" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
+  echo 'native_verdict_pass_findings:ok'
+fi
+
+# Subtest: roborev.real review exits 1 with findings emits Review Complete
+cat << 'MOCK_REVIEW_BODY_FAIL' > "$STATE_DIR/mock_review_output"
+Review (by codex)
+------------------------------------------------------------
+## Findings
+
+### 1. Medium: Potential nil pointer dereference
+Ensure ptr is non-nil before access.
+MOCK_REVIEW_BODY_FAIL
+export MOCK_REVIEW_RC=1
+fail_with_findings_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low || true)
+if echo "$fail_with_findings_out" | grep -q "^## roborev: Review Complete (\`${COMMIT2_SHORT}\`)"; then
+  echo 'native_verdict_fail_findings:ok'
+fi
+rm -f "$STATE_DIR/mock_review_output"
+unset MOCK_REVIEW_RC
+
+# Subtest: generated config.toml from entrypoint.sh sets review_types = ["default"] and does not contain test-value or default_panel
+CONFIG_GEN_TEST="$TEST_ROOT/config-gen-test.sh"
+cat << 'CONFIG_GEN_EOF' > "$CONFIG_GEN_TEST"
+#!/usr/bin/env bash
+set -euo pipefail
+CONFIG_GEN_EOF
+# Extract the config.toml generation block up to chmod 0600 /root/.roborev/config.toml
+awk '/if \[ -s "\/root\/.codex\/auth.json" \]/ {flag=1} flag {print} flag && /chmod 0600 \/root\/.roborev\/config.toml/ {flag=0; exit}' "$ENTRYPOINT_FILE" \
+  | sed -e "s|/root/.roborev/config.toml|$TEST_ROOT/gen-config.toml|g" \
+        -e "s|/root/.codex/auth.json|$STATE_DIR/codex-auth.json|g" \
+        -e "s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" \
+        -e "s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" >> "$CONFIG_GEN_TEST"
+chmod +x "$CONFIG_GEN_TEST"
+
+# Run for codex config
+touch "$STATE_DIR/codex-auth.json"
+bash "$CONFIG_GEN_TEST"
+codex_cfg=$(cat "$TEST_ROOT/gen-config.toml")
+
+# Run for claude config
+rm -f "$STATE_DIR/codex-auth.json"
+touch "$STATE_DIR/claude-oauth-token"
+bash "$CONFIG_GEN_TEST"
+claude_cfg=$(cat "$TEST_ROOT/gen-config.toml")
+
+# Run for gemini config
+rm -f "$STATE_DIR/claude-oauth-token"
+bash "$CONFIG_GEN_TEST"
+gemini_cfg=$(cat "$TEST_ROOT/gen-config.toml")
+
+if echo "$codex_cfg" | grep -q 'review_types = \["default"\]' && \
+   ! echo "$codex_cfg" | grep -q 'test-value' && \
+   ! echo "$codex_cfg" | grep -q 'default_panel' && \
+   echo "$claude_cfg" | grep -q 'review_types = \["default"\]' && \
+   ! echo "$claude_cfg" | grep -q 'test-value' && \
+   ! echo "$claude_cfg" | grep -q 'default_panel' && \
+   echo "$gemini_cfg" | grep -q 'review_types = \["default"\]' && \
+   ! echo "$gemini_cfg" | grep -q 'test-value' && \
+   ! echo "$gemini_cfg" | grep -q 'default_panel'; then
+  echo 'entrypoint_single_review_config:ok'
+fi
 CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
@@ -1467,6 +1547,9 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_gemi
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-hydrogen-low on headless invocations while preserving --version, subcommands, and explicit --model"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'run_as_ubuntu:ok' && echo true || echo false)" "github-runner entrypoint defines run_as_ubuntu and drops privileges for config, run, and cleanup"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' && echo true || echo false)" "github-runner entrypoint and roborev wrapper export unified /data/cache paths and migrate go-mod"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_pass_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Passed when roborev.real exits 0 with low findings"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_fail_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Complete when roborev.real exits 1 with findings"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_single_review_config:ok' && echo true || echo false)" "github-runner entrypoint config.toml sets review_types = ['default'] without test-value or default_panel"
 
 # Case 18: Vanadis PR attach and direct attachment in submit_scratch
 VANADIS_ATTACH_CHECK=$(bash -c "
