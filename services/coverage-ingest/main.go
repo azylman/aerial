@@ -1,20 +1,28 @@
-// Command coverage-ingest is a one-shot collector, run by a CronJob, that pulls
-// in-memory Go coverage counters from every configured /debug/coverage/flush target,
-// merges them per service, and upserts production_code_coverage.
+// Command coverage-ingest is the always-on production coverage collector. It pulls
+// in-memory Go coverage counters from every configured /debug/coverage/flush target on
+// an interval, accepts flush archives pushed by short-lived jobs, merges counters per
+// service, and upserts production_code_coverage.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// shutdownTimeout bounds how long in-flight pushes may finish after SIGTERM; after it,
+// their contexts are cancelled and their connections closed.
+const shutdownTimeout = 30 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -23,8 +31,9 @@ func main() {
 	os.Exit(code)
 }
 
-// run parses flags, loads config, and ingests once. Database settings come from the
-// standard libpq PG* environment (PGHOST, PGUSER, PGPASSWORD, PGDATABASE, ...).
+// run parses flags and loads config, then serves pushes and runs the pull loop until
+// ctx ends. Database settings come from the standard libpq PG* environment (PGHOST,
+// PGUSER, PGPASSWORD, PGDATABASE, ...).
 func run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("coverage-ingest", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -54,11 +63,51 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 	defer pool.Close()
-
-	if err := Ingest(ctx, cfg, &http.Client{}, ExecCovdata{GoBin: *goBin}, PostgresStore{DB: pool}); err != nil {
-		log.Printf("[coverage-ingest] finished with failures: %v", err)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Listen)
+	if err != nil {
+		errLog.Printf("listen: %v", err)
 		return 1
 	}
-	log.Printf("[coverage-ingest] ingested %d targets", len(cfg.Targets))
-	return 0
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := NewServer(cfg, &http.Client{}, ExecCovdata{GoBin: *goBin}, PostgresStore{DB: pool})
+	// Request contexts outlive ctx so in-flight pushes may finish during the grace period,
+	// and are cancelled explicitly once it expires.
+	reqCtx, cancelReqs := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelReqs()
+	httpSrv := &http.Server{
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return reqCtx },
+	}
+	pullDone := make(chan struct{})
+	go func() {
+		defer close(pullDone)
+		srv.PullLoop(ctx, *configPath)
+	}()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpSrv.Serve(ln) }()
+	log.Printf("[coverage-ingest] serving pushes on %s, pulling %d targets every %s", ln.Addr(), len(cfg.Targets), cfg.PullInterval)
+
+	code := 0
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		errLog.Printf("serve: %v", err)
+		code = 1
+	}
+	cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancelShutdown()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errLog.Printf("shutdown: %v", err)
+		code = 1
+		cancelReqs()
+		if cErr := httpSrv.Close(); cErr != nil {
+			errLog.Printf("close: %v", cErr)
+		}
+	}
+	<-pullDone
+	return code
 }
