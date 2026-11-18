@@ -962,7 +962,7 @@ func TestSettleFailedDelivery_Direct(t *testing.T) {
 				nakErr:    tc.nakErr,
 				termErr:   tc.termErr,
 			}
-			settleFailedDelivery(msg)
+			settleFailedDelivery(context.Background(), msg)
 			assert.Equal(t, tc.wantNaked, msg.naked.Load())
 			assert.Equal(t, tc.wantTermed, msg.termed.Load())
 			if tc.wantNakDelay > 0 {

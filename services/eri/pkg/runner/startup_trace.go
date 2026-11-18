@@ -28,10 +28,13 @@ func startChildOf(ctx context.Context, name string, opts ...trace.SpanStartOptio
 // engineName is the aerial.agent.engine value for a daemon config.
 func (c DaemonConfig) engineName() string {
 	if c.IsCodex() {
-		return "codex"
+		return engineCodex
+	}
+	if c.IsMuse() {
+		return engineMuse
 	}
 	if c.IsClaude() {
-		return "claude"
+		return engineClaude
 	}
 	return "agy"
 }

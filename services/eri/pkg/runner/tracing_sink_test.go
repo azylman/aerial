@@ -284,6 +284,9 @@ func TestProviderForModel(t *testing.T) {
 		{name: "codex model", model: "codex-test", want: "openai"},
 		{name: "alias prefix without boundary", model: "opusx", want: ""},
 		{name: "alias not at start", model: "mysonnet", want: ""},
+		{name: "muse model", model: "muse-code", want: "meta"},
+		{name: "llama model", model: "llama-3.3-70b-instruct", want: "meta"},
+		{name: "muse mixed case", model: "Meta-Muse-1.0", want: "meta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1405,6 +1405,53 @@ if grep -q "^--model gemini-4-hydrogen-low --output-format stream-json --print-t
    grep -q "^--model gemini-4-argon-medium --print explicit$" "$AGY_LOG"; then
   echo 'agy_model_pin:ok'
 fi
+
+# Subtest for run_as_ubuntu privilege drop
+MOCK_SETPRIV="$TEST_ROOT/bin/setpriv"
+cat << 'SETPRIV_EOF' > "$MOCK_SETPRIV"
+#!/usr/bin/env bash
+echo "[setpriv] $*" >> "$CALL_LOG"
+while [[ "${1:-}" == --* ]]; do
+  shift
+done
+exec "$@"
+SETPRIV_EOF
+chmod +x "$MOCK_SETPRIV"
+
+eval "$(awk '/^run_as_ubuntu\(\)/ {flag=1} flag {print} flag && /^}/ {flag=0; exit}' "$ENTRYPOINT_FILE")"
+(PATH="$TEST_ROOT/bin:$PATH" run_as_ubuntu echo "priv_drop_test" >/dev/null 2>&1)
+if grep -q "\[setpriv\] --reuid=ubuntu --regid=ubuntu --init-groups env -u RUNNER_ALLOW_RUNASROOT HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu echo priv_drop_test" "$CALL_LOG"; then
+  echo 'run_as_ubuntu:ok'
+fi
+
+# Subtest for /data/cache/go-build and /data/cache/go/pkg/mod export + migration
+mkdir -p "$TEST_ROOT/actions-runner"
+CACHE_ENV_TEST="$TEST_ROOT/cache-env-test.sh"
+cat << 'CACHE_TEST_EOF' > "$CACHE_ENV_TEST"
+#!/usr/bin/env bash
+set -euo pipefail
+CACHE_TEST_EOF
+awk '/flock 200/ {seen=1} /if \[ -d "\/cache" \]; then/ {flag=1; buf=""} flag {buf=buf $0 "\n"} flag && /^fi$/ {flag=0; if (buf ~ /flock 200/) {printf "%s", buf; exit}}' "$ENTRYPOINT_FILE" \
+  | sed -e "s|/data/cache|__DATA_CACHE__|g" -e "s|/cache|__CACHE__|g" -e "s|/data|__DATA__|g" -e "s|/actions-runner|__ACTIONS_RUNNER__|g" \
+        -e "s|__DATA_CACHE__|$TEST_ROOT/mock_data/cache|g" -e "s|__CACHE__|$TEST_ROOT/mock_cache|g" -e "s|__DATA__|$TEST_ROOT/mock_data|g" -e "s|__ACTIONS_RUNNER__|$TEST_ROOT/actions-runner|g" >> "$CACHE_ENV_TEST"
+cat << 'CACHE_ASSERT_EOF' >> "$CACHE_ENV_TEST"
+echo "GOCACHE=$GOCACHE"
+echo "GOPATH=$GOPATH"
+echo "GOMODCACHE=$GOMODCACHE"
+echo "GOLANGCI_LINT_CACHE=$GOLANGCI_LINT_CACHE"
+CACHE_ASSERT_EOF
+chmod +x "$CACHE_ENV_TEST"
+
+mkdir -p "$TEST_ROOT/mock_cache/go-mod"
+echo "mod-content" > "$TEST_ROOT/mock_cache/go-mod/file.txt"
+cache_out=$(bash "$CACHE_ENV_TEST")
+if echo "$cache_out" | grep -q "GOCACHE=$TEST_ROOT/mock_data/cache/go-build" &&
+   echo "$cache_out" | grep -q "GOMODCACHE=$TEST_ROOT/mock_data/cache/go/pkg/mod" &&
+   [ -L "$TEST_ROOT/mock_cache/go-mod" ] &&
+   [ -f "$TEST_ROOT/mock_cache/go/pkg/mod/file.txt" ] &&
+   [ -L "$TEST_ROOT/mock_data/cache" ]; then
+  echo 'cache_exports:ok'
+fi
 CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
@@ -1416,6 +1463,8 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_remap_gemini:
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_claude:ok' && echo true || echo false)" "github-runner roborev wrapper falls back from codex to claude-code when claude token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper falls back from codex to gemini when both codex and claude are absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-hydrogen-low on headless invocations while preserving --version, subcommands, and explicit --model"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'run_as_ubuntu:ok' && echo true || echo false)" "github-runner entrypoint defines run_as_ubuntu and drops privileges for config, run, and cleanup"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' && echo true || echo false)" "github-runner entrypoint and roborev wrapper export unified /data/cache paths and migrate go-mod"
 
 # Case 18: Vanadis PR attach and direct attachment in submit_scratch
 VANADIS_ATTACH_CHECK=$(bash -c "

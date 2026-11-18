@@ -479,7 +479,6 @@ func (p *Provisioner) chownProvisionedPaths() {
 		for _, dir := range []string{
 			filepath.Join(p.dataDir, "brain"),
 			filepath.Join(p.dataDir, "conversations"),
-			filepath.Join(p.dataDir, "cache"),
 			filepath.Join(p.dataDir, "claude"),
 			filepath.Join(p.dataDir, "codex"),
 			filepath.Join(p.dataDir, "muse"),

@@ -90,6 +90,8 @@ var exactSecretKeys = map[string]struct{}{
 	"UBEREATS_MCP_TOKEN":              {},
 	"OPENAI_API_KEY":                  {},
 	"CODEX_API_KEY":                   {},
+	"META_API_KEY":                    {},
+	"MODEL_API_KEY":                   {},
 }
 
 var secretSuffixes = []string{
@@ -135,7 +137,7 @@ func FilterAgyBaseEnv(env []string) []string {
 }
 
 func filterHomeEnv(env []string) []string {
-	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "MUSE_AUTH_PATH")
 }
 
 // traceCarrierEnvKeys are the OpenTelemetry env-carrier keys a child process reads its parent
@@ -203,7 +205,16 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 
 	cmdEnv = append(cmdEnv, "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug")
 	if h := strings.TrimSpace(input.HomeDir); h != "" {
-		cmdEnv = append(cmdEnv, "HOME="+h, "USERPROFILE="+h, "GEMINI_CLI_HOME="+h, "CLAUDE_CONFIG_DIR="+filepath.Join(h, ".claude"), "CODEX_HOME="+filepath.Join(h, ".codex"))
+		cmdEnv = append(cmdEnv,
+			"HOME="+h,
+			"USERPROFILE="+h,
+			"GEMINI_CLI_HOME="+h,
+			"CLAUDE_CONFIG_DIR="+filepath.Join(h, ".claude"),
+			"CODEX_HOME="+filepath.Join(h, ".codex"),
+			"XDG_CONFIG_HOME="+filepath.Join(h, ".config"),
+			"XDG_DATA_HOME="+filepath.Join(h, ".local", "share"),
+			"MUSE_AUTH_PATH="+filepath.Join(h, ".config", "muse", "auth.json"),
+		)
 	}
 	if k := strings.TrimSpace(input.APIKey); k != "" {
 		cmdEnv = append(cmdEnv, "GEMINI_API_KEY="+k, "ANTIGRAVITY_API_KEY="+k, "GOOGLE_GENAI_API_KEY="+k)
@@ -458,4 +469,55 @@ func injectRetrievedContext(ctx context.Context, prompt, memQuery string, amb Am
 		fetch("<retrieved_memory>", "MemoryRetriever", "memory.retrieve", memTimeout, func(c context.Context) (string, error) { return mem(c, q) })
 	}
 	return payloadPrompt
+}
+
+func extractMemoryLineID(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "- [id:") {
+		return ""
+	}
+	rest := trimmed[len("- [id:"):]
+	if end := strings.IndexByte(rest, ']'); end > 0 {
+		return rest[:end]
+	}
+	return ""
+}
+
+func deduplicateRetrievedMemory(prompt string, seen map[string]bool) string {
+	const openTag, closeTag = "<retrieved_memory>", "</retrieved_memory>"
+	startIdx := strings.Index(prompt, openTag)
+	if startIdx < 0 || seen == nil {
+		return prompt
+	}
+	endRel := strings.Index(prompt[startIdx:], closeTag)
+	if endRel < 0 {
+		return prompt
+	}
+	blockStart := startIdx + len(openTag)
+	blockEnd := startIdx + endRel
+	inner := strings.Trim(prompt[blockStart:blockEnd], "\r\n")
+	if inner == "" {
+		return prompt
+	}
+	lines := strings.Split(inner, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if id := extractMemoryLineID(line); id != "" {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == len(lines) {
+		return prompt
+	}
+	if len(kept) == 0 {
+		after := strings.TrimPrefix(strings.TrimPrefix(prompt[blockEnd+len(closeTag):], "\r\n"), "\n")
+		after = strings.TrimPrefix(strings.TrimPrefix(after, "\r\n"), "\n")
+		return strings.TrimSpace(prompt[:startIdx] + after)
+	}
+	replacement := openTag + "\n" + strings.Join(kept, "\n") + "\n" + closeTag
+	return prompt[:startIdx] + replacement + prompt[blockEnd+len(closeTag):]
 }

@@ -310,6 +310,9 @@ func assertChownPaths(t *testing.T, chowned []string) {
 		if strings.Contains(cp, "target-skill") || strings.Contains(cp, "symlink-test") {
 			t.Errorf("symlink or symlink target was unexpectedly chowned: %s", cp)
 		}
+		if strings.Contains(cp, filepath.Join("cache", "go-build")) || strings.Contains(cp, "artifact.bin") {
+			t.Errorf("cache file was unexpectedly chowned during Sync: %s", cp)
+		}
 	}
 }
 
@@ -436,6 +439,7 @@ func runSyncCase(t *testing.T, tc syncCase) {
 		writeTestFile(t, filepath.Join(symlinkTarget, "SKILL.md"), "skill body")
 		symlinkPath := filepath.Join(p.homeDir, ".gemini", "symlink-test")
 		_ = os.Symlink(symlinkTarget, symlinkPath)
+		writeTestFile(t, filepath.Join(p.dataDir, "cache", "go-build", "artifact.bin"), "bin")
 	}
 
 	injectSyncFailure(t, tc, p)

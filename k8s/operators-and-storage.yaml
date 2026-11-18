@@ -187,111 +187,6 @@ spec:
   name: docket
   owner: aerial
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: cloudnative-pg
-  namespace: flux-system
-spec:
-  interval: 1h
-  url: https://cloudnative-pg.github.io/charts
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: cnpg-system
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: cnpg
-  namespace: cnpg-system
-spec:
-  chart:
-    spec:
-      chart: cloudnative-pg
-      sourceRef:
-        kind: HelmRepository
-        name: cloudnative-pg
-        namespace: flux-system
-      version: 0.29.1
-  interval: 30m
-  values:
-    # The control-plane node runs CI next to the API server; under load,
-    # lease renewals miss the 10s default deadline and the operator restarts,
-    # taking its admission webhook down mid-reconcile.
-    additionalArgs:
-      - --leader-lease-duration=60
-      - --leader-renew-deadline=40
----
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: victoriametrics
-  namespace: flux-system
-spec:
-  interval: 1h
-  url: https://victoriametrics.github.io/helm-charts/
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: vm-operator
-  namespace: default
-spec:
-  chart:
-    spec:
-      chart: victoria-metrics-operator
-      sourceRef:
-        kind: HelmRepository
-        name: victoriametrics
-        namespace: flux-system
-      version: 0.68.2
-  interval: 30m
-  values:
-    admissionWebhooks:
-      enabled: false
-    crds:
-      cleanup:
-        enabled: false
-      plain: true
-    fullnameOverride: vm-operator
-    operator:
-      disable_prometheus_converter: true
----
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: actions-runner-controller
-  namespace: flux-system
-spec:
-  interval: 1h
-  type: oci
-  url: oci://ghcr.io/actions/actions-runner-controller-charts
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: arc-systems
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: arc-controller
-  namespace: arc-systems
-spec:
-  chart:
-    spec:
-      chart: gha-runner-scale-set-controller
-      sourceRef:
-        kind: HelmRepository
-        name: actions-runner-controller
-        namespace: flux-system
-      version: 0.15.1
-  interval: 30m
-  values:
-    fullnameOverride: arc-controller
----
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -475,6 +370,10 @@ spec:
                 name: docker-sock
               - mountPath: /cache
                 name: ci-cache
+              - mountPath: /tmp
+                name: tmp
+              - mountPath: /actions-runner/_work
+                name: work
         volumes:
           - hostPath:
               path: /var/run/docker.sock
@@ -483,72 +382,20 @@ spec:
               path: /var/lib/aerial/ci-cache
               type: DirectoryOrCreate
             name: ci-cache
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 2Gi
+            name: tmp
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+            name: work
   valuesFrom:
     - kind: Secret
       name: git-sync-secret
       optional: true
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
----
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: stakater
-  namespace: flux-system
-spec:
-  interval: 24h
-  url: https://stakater.github.io/stakater-charts
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: reloader
-  namespace: default
-spec:
-  chart:
-    spec:
-      chart: reloader
-      sourceRef:
-        kind: HelmRepository
-        name: stakater
-        namespace: flux-system
-      version: 2.2.19
-  interval: 30m
-  values:
-    reloader:
-      watchGlobally: true
----
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: restate-operator
-  namespace: flux-system
-spec:
-  interval: 1h
-  type: oci
-  url: oci://ghcr.io/restatedev
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: restate-operator
-  namespace: default
-spec:
-  chart:
-    spec:
-      chart: restate-operator-helm
-      sourceRef:
-        kind: HelmRepository
-        name: restate-operator
-        namespace: flux-system
-      version: 2.8.2
-  install:
-    crds: CreateReplace
-  interval: 30m
-  upgrade:
-    crds: CreateReplace
-  values:
-    installCrds: true
 ---
 apiVersion: restate.dev/v1
 kind: RestateCluster

@@ -139,7 +139,7 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 		case interface {
 			UpdateEngine(engine, claudeBin string, codexBin ...string)
 		}:
-			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin)
+			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
 		case interface {
 			UpdateEngine(engine, claudeBin string)
 		}:
@@ -161,7 +161,7 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 				case interface {
 					UpdateEngine(engine, claudeBin string, codexBin ...string)
 				}:
-					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin)
+					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
 				case interface {
 					UpdateEngine(engine, claudeBin string)
 				}:
@@ -259,27 +259,6 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 		return baseEnv
 	}
 	cacheBase := filepath.Join(runtimeBase, "cache")
-	for _, dir := range []string{
-		filepath.Join(cacheBase, "go-build"),
-		filepath.Join(cacheBase, "go", "pkg", "mod"),
-		filepath.Join(cacheBase, "golangci-lint"),
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			log.Printf("[WARN] Failed to create cache directory %q: %v", dir, err)
-		}
-	}
-	if getEuid() == 0 {
-		if walkErr := filepath.Walk(cacheBase, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
-				if cErr := chownFile(path, 1000, 1000); cErr != nil {
-					log.Printf("[WARN] Failed to chown cache directory %q: %v", path, cErr)
-				}
-			}
-			return nil
-		}); walkErr != nil {
-			log.Printf("[WARN] Failed to walk cache directory %q for chown: %v", cacheBase, walkErr)
-		}
-	}
 
 	envMap := make(map[string]bool)
 	for _, e := range baseEnv {
@@ -386,6 +365,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 		Engine:                  cur.GetEngine(),
 		ClaudeBin:               cur.ClaudeBin,
 		CodexBin:                cur.CodexBin,
+		MuseBin:                 cur.MuseBin,
 		GeminiHomeDir:           voiceHome,
 		Model:                   lowEffortModel,
 		AgyBin:                  cur.AgyBin,
@@ -424,6 +404,11 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 		if cur != nil && ((cur.CodexBin != "" && cur.CodexBin != "codex") || cur.GetEngine() == config.EngineCodex) {
 			b.WriteString("codexBin:")
 			b.WriteString(cur.CodexBin)
+			b.WriteString("\n")
+		}
+		if cur != nil && ((cur.MuseBin != "" && cur.MuseBin != "muse") || cur.GetEngine() == config.EngineMuse) {
+			b.WriteString("museBin:")
+			b.WriteString(cur.MuseBin)
 			b.WriteString("\n")
 		}
 	}
@@ -555,8 +540,6 @@ func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentP
 }
 
 var (
-	getEuid       = os.Geteuid
-	chownFile     = os.Lchown
 	onServerReady func(addr string)
 	openDefaultDB = db.New
 )
@@ -633,6 +616,7 @@ func buildBrainProcessPools(
 			Engine:            cur.GetEngine(),
 			ClaudeBin:         cur.ClaudeBin,
 			CodexBin:          cur.CodexBin,
+			MuseBin:           cur.MuseBin,
 			GeminiHomeDir:     home,
 			Model:             model,
 			AgyBin:            cur.AgyBin,

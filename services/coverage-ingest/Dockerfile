@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-# One-shot production coverage collector (run by a CronJob). The runtime image keeps the
-# Go toolchain because ingest shells out to `go tool covdata func`. The collector itself is
+# Always-on production coverage collector (a Deployment): pulls flush targets on an
+# interval and accepts pushed archives on :8080. The runtime image keeps the Go toolchain
+# because ingest shells out to `go tool covdata func`. The collector itself is
 # deliberately NOT built with -cover.
 FROM golang:1.27.3-alpine AS builder
 
@@ -16,7 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM golang:1.27.3-alpine
 
 # Go distributions no longer ship a prebuilt covdata; install it into GOTOOLDIR so
-# `go tool covdata` runs it directly instead of compiling it on every CronJob run.
+# `go tool covdata` runs it directly instead of compiling it on every ingest.
 RUN CGO_ENABLED=0 go install -trimpath cmd/covdata && \
     test -x "$(go env GOTOOLDIR)/covdata" && \
     go clean -cache && rm -rf /root/.cache && \
@@ -29,5 +30,6 @@ COPY --link --from=builder /bin/coverage-ingest /bin/coverage-ingest
 
 ENV GOCACHE=/tmp/go-build GOTOOLCHAIN=local
 USER 10001:10001
+EXPOSE 8080
 
 ENTRYPOINT ["/bin/coverage-ingest"]

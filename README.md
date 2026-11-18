@@ -156,96 +156,17 @@ Unlike black-box background daemons where state is hidden inside CLI logs or loc
 
 ---
 
-## 4. Extensibility & Customization Guide
+## 4. Customizing Aerial & Documentation
 
-Aerial is designed to be customized from your private `aerial-config` repository across four layers without forking the core engine:
+All user customization lives in your private config repository (start from [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example)):
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                  4 WAYS TO EXTEND AERIAL                                    │
-├─────────────────────────────┬──────────────────────────┬────────────────────┬───────────────┤
-│ 1. CONFIG & PERSONA         │ 2. CUSTOM SKILLS         │ 3. MCP CONNECTORS  │ 4. WORKLOADS  │
-│ config.yaml, rules, channels│ SKILL.md workflow guides │ Custom HTTP APIs   │ Extra k8s apps│
-└─────────────────────────────┴──────────────────────────┴────────────────────┴───────────────┘
-```
-
-### Layer 1: Configuration, Persona & Channel Policies (`config.yaml`, `rules/`, `channels/`)
-
-1. **`config.yaml` (Models, Admin Allowlist & Channel Policies)**:
-   Changes to `config.yaml` (synced via `git-sync`) hot-reload in memory via `SIGHUP` with zero downtime; if invalid YAML is committed, Aerial retains its **Last Known Good Configuration (LKGC)** and alerts `system_channel`.
-   ```yaml
-   model: "gemini-3.8-flash-high"
-   medium_effort_model: "gemini-3.8-flash-medium"
-   low_effort_model: "gemini-3.8-flash-low"
-   timezone: "America/Los_Angeles"
-   system_channel: "aerial-dev"
-
-   # Discord Snowflake IDs or usernames authorized for admin/infrastructure operations
-   admin_users:
-     - "123456789012345678"
-
-   channels:
-     default:
-       mode: "threads"           # "threads" | "channel" | "ignore" (use "ignore" for default-deny servers)
-       effort: "high"            # "high" | "medium" | "low"
-       ignore_bots: true
-       ambient_wake_threshold: 0.80
-
-     general:
-       mode: "channel"
-       effort: "medium"
-       wake_mode: "classifier"   # "classifier" (2-tier ambient score) | "mention" (@ping/reply only) | "all"
-       ignore_bots: true
-       ambient_wake_threshold: 0.80
-       # Optional lifecycle webhook interceptors (see docs/specs/2026-09-22-channel-lifecycle-webhooks.md)
-       hooks:
-         on_wake:
-           url: "http://sidecar-service.aerial/hooks/wake"
-           timeout_ms: 2000
-           on_timeout: "classify"
-   ```
-2. **Modular Rules (`rules/{common,persona,discord,voice}/`)**:
-   Define your personal persona, tone guidelines, user identity, and runtime preferences in `aerial-config/rules/`. User rules take precedence over base engine rules in `aerial/rules/` and are automatically synced into each target runtime (`discord`, `voice`, `ephemeral`).
-3. **Per-Channel Instructions (`channels/<channel-name>.md`)**:
-   Drop Markdown files into `channels/<channel-name>.md` in your config repo to give specific Discord channels (and their child threads) dedicated instructions and operating constraints, automatically discovered and injected inside `<CHANNEL_INSTRUCTIONS>`.
-
-### Layer 2: Custom Workflow Skills (`custom-skills/`)
-
-Skills use **Progressive Disclosure**—only skill names and descriptions are loaded into the base prompt, and the agent reads the full `SKILL.md` runbook on demand when relevant. Place custom skills in `custom-skills/{common,discord,voice}/<skill-name>/SKILL.md` in your config repo; they are automatically symlinked into each runtime with highest priority (shadowing built-in skills of the same name).
-
-```markdown
----
-name: weather-alerts
-description: "Check regional weather forecasts and send alert summaries via Discord."
----
-
-# Weather Alerts Runbook
-1. Query weather API using MCP tools.
-2. Format forecast summary for Discord.
-```
-
-### Layer 3: Custom MCP Connectors (`mcp_servers` in `config.yaml`)
-
-Aerial connects to Model Context Protocol (MCP) servers over Streamable HTTP, resolving internal cluster services via CoreDNS (`*.aerial`, `*.lan`):
-- **Built-In Autodiscovered MCPs**: `scheduler` (`http://haro.aerial/mcp`), `memory` (`http://coven.aerial/mcp`), `vanadis` (`http://vanadis.aerial/mcp`), `docket` (`http://docket-mcp.aerial/mcp`), `discord` (`http://discord-mcp.aerial/mcp`), `github` (`http://github-mcp.aerial/mcp`), `victorialogs` (`http://victorialogs-mcp.aerial/mcp`), and `victoriatraces` (`http://victoriatraces-mcp.aerial/mcp`), plus optional cluster MCPs (`kubernetes-mcp`, `infisical-mcp`, `victoriametrics-mcp`, `kernel-mcp`).
-- **Adding Custom Connectors**: Register any internal microservice or external HTTP MCP server per runtime (`common`, `discord`, `voice`, `ephemeral`) in `config.yaml` with dynamic `${VAR}` secret interpolation:
-  ```yaml
-  mcp_servers:
-    common:
-      brave-search:
-        serverUrl: "http://brave-mcp.aerial/mcp"
-    discord:
-      kubernetes:
-        serverUrl: "http://kubernetes-mcp.aerial/mcp"
-      custom-remote-api:
-        serverUrl: "https://mcp.example.com/mcp"
-        headers:
-          Authorization: "Bearer ${CUSTOM_API_KEY}"
-  ```
-
-### Layer 4: Custom Kubernetes Workloads (`k8s/*.yaml`)
-
-Deploy additional applications, hardware bridges, or background workers onto the cluster by placing declarative Kubernetes manifests and Kustomizations in `k8s/` within your `aerial-config` repository. **Flux CD** continuously reconciles them alongside the core platform.
+| Goal | What's Covered | Start Here |
+| :--- | :--- | :--- |
+| **Configure models, channels & persona** | Effort-tiered models, Discord channel wake policies, admin allowlists, and persona rules | [`config.yaml` & `rules/`](https://github.com/azylman/aerial-config-example) |
+| **Add custom workflow skills** | On-demand `SKILL.md` runbooks compatible with the `agentskills.io` standard | [`custom-skills/`](https://github.com/azylman/aerial-config-example/tree/main/custom-skills) |
+| **Connect custom MCP servers** | Registering internal or remote Streamable HTTP MCP tools and secrets | [`mcp_servers` in `config.yaml`](https://github.com/azylman/aerial-config-example/blob/main/config.yaml) |
+| **Intercept or enrich channel turns** | Lifecycle webhooks (`on_wake`, `pre_turn`, `post_turn`) for custom sidecars | [Channel Lifecycle Webhooks](docs/specs/2026-09-22-channel-lifecycle-webhooks.md) |
+| **Deploy extra apps or scale nodes** | Adding Kubernetes workloads, HA Postgres, TLS, and GPU/kiosk node pinning | [`k8s/` Overlays](https://github.com/azylman/aerial-config-example/tree/main/k8s) |
 
 ---
 
@@ -302,26 +223,21 @@ sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 ```
 
 ### Step 2: Install Cluster Operators
-Install the cluster operators for PostgreSQL, external secrets, and Gateway API routing (`restate-operator`, `vm-operator`, `reloader`, and `arc-controller` are deployed automatically via Flux CD `HelmRelease` manifests in `k8s/operators-and-storage.yaml`):
+Install Flux CD, Gateway API CRDs, and deploy the core cluster operators for PostgreSQL, external secrets, Gateway API routing, metrics, runners, and workflows:
 
 ```bash
-# 1. CloudNativePG (PostgreSQL 18 + pgvector operator). Install it before Flux so its
-#    CRDs exist on first reconcile; the `cnpg` HelmRelease in k8s/operators-and-storage.yaml
-#    then adopts this release and owns its values.
-helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm upgrade --install cnpg cnpg/cloudnative-pg --version 0.29.1 \
-  --namespace cnpg-system --create-namespace
+# 1. Install Flux CLI and controllers
+curl -s https://fluxcd.io/install.sh | sudo bash
+flux install
 
-# 2. External Secrets Operator (Infisical secret synchronization)
-helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
-helm upgrade --install external-secrets external-secrets/external-secrets \
-  --namespace external-secrets --create-namespace
+# 2. Install Gateway API standard CRDs for NGINX Gateway Fabric
+kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.8.1" | kubectl apply -f -
 
-# 3. NGINX Gateway Fabric (Gateway API implementation)
-kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.4.2" | kubectl apply -f -
-helm upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
-  --namespace nginx-gateway --create-namespace
+# 3. Apply declarative cluster operators
+kubectl apply -f https://raw.githubusercontent.com/azylman/aerial/main/k8s/operators.yaml
+
+# 4. Wait for operators to become ready
+kubectl wait --for=condition=Ready helmrelease --all -A --timeout=5m
 ```
 
 ### Step 3: Fork Configuration & Bootstrap Secrets
@@ -411,21 +327,17 @@ kubectl create secret generic shared-secrets \
 </details>
 
 ### Step 4: Deploy Stack via Flux CD
-Install **Flux CD** and apply your private configuration repository's Kustomizations:
+Apply your private configuration repository's Kustomizations via Flux CD:
 
 ```bash
-# 1. Install Flux CLI and controllers
-curl -s https://fluxcd.io/install.sh | sudo bash
-flux install
-
-# 2. Configure Git authentication for your private configuration repository
+# 1. Configure Git authentication for your private configuration repository
 flux create secret git github-auth \
   --namespace flux-system \
   --url=https://github.com/your-username/my-aerial-config.git \
   --username=git \
   --password="$GITHUB_PAT"
 
-# 3. Apply your private config repository's Flux manifests
+# 2. Apply your private config repository's Flux manifests
 git clone https://github.com/your-username/my-aerial-config.git
 kubectl apply -k my-aerial-config/k8s
 ```
@@ -447,36 +359,3 @@ Base manifests in `aerial/k8s/` use portable single-node defaults (single-instan
 - **Hardware & Role Pinning**: Attach `nodeSelector` and taint/toleration rules to schedule GPU inference sidecars on GPU nodes, databases on storage nodes, and display workloads on touch kiosks.
 - **TLS & Custom Domains**: Patch `Gateway/lan-gateway` with Let's Encrypt HTTPS listeners and custom domain `HTTPRoute` rules.
 - **Shared NAS Mounts**: Attach SMB or NFS CSI volumes across worker nodes.
-
----
-
-## 7. Component Modules
-
-| Service | Pillar | Description |
-| :--- | :--- | :--- |
-| **`postgres`** | Platform | CloudNativePG PostgreSQL 18 + `pgvector` cluster with native Prometheus metrics backing service state, CAS queues, semantic memory, schedules, and Vikunja/Infisical/Grafana databases. |
-| **`restate`** | Platform | Kubernetes Restate Operator managing `RestateCluster` instances with RocksDB persistence and built-in Admin Web UI (`/restate/`). |
-| **`nats`** | Platform | NATS 2 JetStream broker StatefulSet backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`). |
-| **`lan-gateway`** / **`edge-gateway`** | Platform | NGINX Gateway Fabric controllers routing internal LAN web interfaces and external Cloudflare tunnel webhooks with OTLP trace propagation. |
-| **`coredns`** | Platform | Kubernetes CoreDNS daemon rewriting internal DNS queries (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`). |
-| **`infisical`** / **`valkey`** | Platform | Centralized secret management vault and Valkey 9 cache syncing secrets into Kubernetes via External Secrets Operator. |
-| **`victoriametrics`** / **`vmalert`** | Platform | Single-node TSDB (5-year retention, declarative `vm-operator` scrapes) paired with MAD anomaly detection and alerting rules. |
-| **`victorialogs`** / **`fluent-bit`** | Platform | LogsQL log store (60-day retention) ingesting container and `journald` logs scrubbed in-flight by Fluent Bit Lua secret filters. |
-| **`victoriatraces`** | Platform | OTLP distributed trace store (30-day retention) receiving gateway, Restate, and microservice spans. |
-| **`grafana`** | Platform | Pre-provisioned observability HUD backed by PostgreSQL with metrics, LogsQL, and Jaeger trace datasources. |
-| **`headlamp`** | Platform | Read-only Kubernetes cluster and Flux CD GitOps web explorer preloaded with `headlamp-plugin-flux`. |
-| **`homepage`** | Platform | Root service discovery portal (`gethomepage/homepage`) merging base and user service widgets. |
-| **`node-exporter`** | Platform | Host telemetry DaemonSet exporting CPU, memory, disk, and thermal metrics. |
-| **`docket-store`** / **`docket-mcp`** | Factory | Vikunja issue tracker and Streamable HTTP MCP server providing dependency-aware DAG task management and hybrid RRF search. |
-| **`vanadis`** | Factory | Multi-chunk build queue orchestrator serving HTTP/MCP APIs and JIT symbol line-slice resolution. |
-| **`vanadis-restate`** / **`vanadis-nats`** | Factory | Restate durable execution worker (`Build` Virtual Object and `BuildRouter`) and NATS JetStream event bridge driving multi-PR DAG rollouts. |
-| **`github-runner`** | Factory | Scale-to-zero Actions Runner Controller (ARC) runner sets executing CI test matrices and automated **RoboRev** LLM code reviews. |
-| **`synapse`** | Factory & Agent | Edge ingestion gateway owning the Discord Gateway WebSocket, NATS JetStream ingress queues, Flux image tag promotion, and CI self-healing wakes. |
-| **`eri`** | Agent | Multi-protocol Go execution core running `agy`, Claude Code, and Codex with PostgreSQL session memory, read-only mounts (`:ro`), child-process secret scrubbing, and pre-tool hook guardrails. |
-| **`haro`** | Agent | Persistent cron, one-shot, silent heartbeat, and deterministic event-watch scheduler (`http://haro.aerial/mcp`). |
-| **`coven`** | Agent | Semantic fact extraction, hybrid RRF memory search, ACT-R temporal decay, and procedural skill synthesis MCP server (`http://coven.aerial/mcp`). |
-| **`prospera`** | Agent | Autonomous Twilio PSTN voice call and SMS interaction agent. |
-| **`console`** | Agent | Real-time web operator HUD (`/console/`) rendering active turns, Vanadis builds, schedules, and memory facts. |
-| **`agentsview`** | Agent | Web transcript, session history, and tool execution trace inspector (`/agentsview/`) backed by PostgreSQL. |
-| **`docs`** | Agent | Living documentation portal (`/docs/`) serving Markdown specifications and Mermaid diagrams via Docsify. |
-| **`kubernetes-mcp`** / **`infisical-mcp`** / **`discord-mcp`** / **`github-mcp`** / **`kernel-mcp`** / **`victoriametrics-mcp`** / **`victorialogs-mcp`** / **`victoriatraces-mcp`** | Agent | Modular Streamable HTTP MCP microservices providing typed cluster, secret, Discord, GitHub, browser, and telemetry tools to the agent. |

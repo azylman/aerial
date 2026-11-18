@@ -1,7 +1,7 @@
 // Package tracing is the single home of OpenTelemetry setup for every Aerial Go service.
 //
 // Services load their settings with LoadConfig, install the global tracer provider and
-// W3C TraceContext propagator with Setup, wrap inbound handlers with Middleware and
+// W3C TraceContext + Baggage propagator with Setup, wrap inbound handlers with Middleware and
 // outbound clients with Transport. Span attributes never carry request content: no tool
 // arguments, credentials, URL paths or query strings. Prompt and response text is recorded
 // only when an operator sets capture_content, and then only through ContentAttr, which
@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"gopkg.in/yaml.v3"
@@ -98,31 +99,77 @@ func (c Config) sampleRatio() float64 {
 	return c.SampleRatio
 }
 
-// Setup installs the global W3C TraceContext propagator and tracer provider for service.
-// A disabled config installs a noop provider: no spans are exported, but inbound
-// traceparent headers are still extracted and forwarded on outbound calls. The returned
-// shutdown flushes pending spans and must be called on SIGTERM.
+// Setup installs the global W3C TraceContext + Baggage propagator and tracer provider for
+// service. A disabled config installs a noop provider: no spans are exported, but inbound
+// traceparent and baggage headers are still extracted and forwarded on outbound calls. The
+// returned shutdown flushes pending spans and must be called on SIGTERM.
+//
+// The YAML config is the source of truth; the standard OpenTelemetry SDK variables are the
+// only override layer. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT
+// replaces the YAML endpoint, OTEL_TRACES_SAMPLER (with OTEL_TRACES_SAMPLER_ARG) replaces the
+// YAML ratio sampler, and OTEL_RESOURCE_ATTRIBUTES / OTEL_SERVICE_NAME extend or override the
+// resource (see newResource).
 func Setup(ctx context.Context, service string, cfg Config) (func(context.Context) error, error) {
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	if !cfg.Enabled {
 		otel.SetTracerProvider(noop.NewTracerProvider())
 		return func(context.Context) error { return nil }, nil
 	}
-	exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+	env := envOverrides(os.Getenv)
+	var exporterOpts []otlptracehttp.Option
+	if !env.endpoint {
+		exporterOpts = append(exporterOpts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+	}
+	exporter, err := otlptracehttp.New(ctx, exporterOpts...)
 	if err != nil {
 		otel.SetTracerProvider(noop.NewTracerProvider())
 		return func(context.Context) error { return nil }, fmt.Errorf("create otlp exporter: %w", err)
 	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.sampleRatio()))),
-		sdktrace.WithResource(resource.NewSchemaless(
-			attribute.String("service.name", service),
-			AttrStack.String(cfg.Stack),
-		)),
-	)
+	res, err := newResource(ctx, service, cfg)
+	if err != nil {
+		// resource.New still returns every attribute it could detect; a malformed
+		// OTEL_RESOURCE_ATTRIBUTES must not turn tracing off.
+		log.Printf("[Tracing] Partial resource detection: %v", err)
+	}
+	opts := []sdktrace.TracerProviderOption{sdktrace.WithBatcher(exporter), sdktrace.WithResource(res)}
+	if !env.sampler {
+		opts = append(opts, sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.sampleRatio()))))
+	}
+	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 	return tp.Shutdown, nil
+}
+
+// sdkEnvOverrides reports which YAML settings a standard OTEL_* SDK variable replaces.
+type sdkEnvOverrides struct {
+	endpoint bool // otlptracehttp reads OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT
+	sampler  bool // the SDK reads OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG
+}
+
+func envOverrides(getenv func(string) string) sdkEnvOverrides {
+	set := func(key string) bool { return strings.TrimSpace(getenv(key)) != "" }
+	return sdkEnvOverrides{
+		endpoint: set("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") || set("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		sampler:  set("OTEL_TRACES_SAMPLER"),
+	}
+}
+
+// newResource describes service with semantic-convention attributes: service.name,
+// service.namespace (the stack, omitted when empty), the telemetry.sdk.* attributes, and the
+// legacy aerial.stack kept for existing saved queries. OTEL_RESOURCE_ATTRIBUTES (k8s.*,
+// service.version) and OTEL_SERVICE_NAME are applied last, so they win per SDK precedence.
+func newResource(ctx context.Context, service string, cfg Config) (*resource.Resource, error) {
+	attrs := []attribute.KeyValue{semconv.ServiceName(service)}
+	if cfg.Stack != "" {
+		attrs = append(attrs, semconv.ServiceNamespace(cfg.Stack))
+	}
+	attrs = append(attrs, AttrStack.String(cfg.Stack))
+	return resource.New(ctx,
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(attrs...),
+		resource.WithTelemetrySDK(),
+		resource.WithFromEnv(),
+	)
 }
 
 // DefaultConfigPath is where every traced service reads its config, mounted from the optional
@@ -202,7 +249,8 @@ func Traceparent(ctx context.Context) string {
 // "<METHOD> <route pattern>" (operation when no route matched). When Middleware wraps a
 // handler the mux already routed, the span is named up front so next may rename it (e.g.
 // "mcp tools/call"); when it wraps a whole mux, the name is set after routing. Attributes
-// never include the URL path or query string.
+// never include the URL path or query string. Probe paths (/health, /healthz, /readyz,
+// /livez, /metrics) are served without a span.
 func Middleware(operation string, next http.Handler) http.Handler {
 	return newMiddleware(otel.GetTracerProvider(), otel.GetTextMapPropagator(), operation, next)
 }
@@ -210,6 +258,11 @@ func Middleware(operation string, next http.Handler) http.Handler {
 func newMiddleware(tp trace.TracerProvider, prop propagation.TextMapPropagator, operation string, next http.Handler) http.Handler {
 	tracer := tp.Tracer(ScopeName)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if probePaths[r.URL.Path] {
+			// Health and scrape probes are served untraced: no span, no extracted context.
+			next.ServeHTTP(w, r)
+			return
+		}
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		name, attrs := operation, []attribute.KeyValue{attribute.String("http.request.method", r.Method)}
 		preRouted := routeFromPattern(r.Pattern)
@@ -233,6 +286,15 @@ func newMiddleware(tp trace.TracerProvider, prop propagation.TextMapPropagator, 
 			span.SetStatus(codes.Error, "")
 		}
 	})
+}
+
+// probePaths are liveness, readiness and metrics endpoints that Middleware never traces.
+var probePaths = map[string]bool{
+	"/health":  true,
+	"/healthz": true,
+	"/readyz":  true,
+	"/livez":   true,
+	"/metrics": true,
 }
 
 // routeFromPattern strips the optional method and host from a ServeMux pattern.

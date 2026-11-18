@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -551,10 +551,10 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	}
 	if b.executor != nil && !alreadyCompleted {
 		if cErr := b.executor.CancelChunkDispatch(ctx, mutation.ChunkID); cErr != nil {
-			log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", mutation.ChunkID, cErr)
+			slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", mutation.ChunkID, "error", cErr)
 		}
 		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
-			log.Printf("[vanadis-restate] publish event warning: %v", err)
+			slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 		}
 	}
 
@@ -584,7 +584,7 @@ func (b *BuildObject) completeActionDeploymentMutation(ctx context.Context, muta
 	}
 	if b.executor != nil && res.Advanced {
 		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
-			log.Printf("[vanadis-restate] publish event warning: %v", err)
+			slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 		}
 	}
 	return nil
@@ -697,13 +697,13 @@ func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunk
 		return nil
 	}
 	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
-		log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", chunkID, cErr)
+		slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
 	if !bld.Quiet {
 		targetID := strings.TrimSpace(bld.ThreadID)
 		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts)
 		if mErr := b.executor.DispatchDirectMessage(rc, targetID, content); mErr != nil {
-			log.Printf("[vanadis-restate] direct alert message warning: %v", mErr)
+			slog.WarnContext(rc, "[vanadis-restate] direct alert message warning", "error", mErr)
 		}
 	}
 	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
@@ -712,13 +712,13 @@ func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunk
 		chunks = append(chunks, *chk)
 	}
 	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, capBanner); sErr != nil {
-		log.Printf("[vanadis-restate] sync build widget warning: %v", sErr)
+		slog.WarnContext(rc, "[vanadis-restate] sync build widget warning", "error", sErr)
 	}
 	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, "ci_remediation_cap_reached"); pErr != nil {
-		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 	}
 	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{bld.ID}, "ci_remediation_cap_reached"); pErr != nil {
-		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 	}
 	return nil
 }
@@ -842,10 +842,10 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 		}
 		if b.executor != nil {
 			if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
-				log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", chunkID, cErr)
+				slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 			}
 			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
-				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+				slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 			}
 		}
 	case "closed", "closed_unmerged":
@@ -897,7 +897,7 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 		if strings.EqualFold(strings.TrimSpace(ev.Event), "deploy_success") {
 			return tErr
 		}
-		log.Printf("[vanadis-restate] pr event transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] pr event transition warning", "error", tErr)
 	}
 	return nil
 }
@@ -925,7 +925,7 @@ func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string
 	refreshedBuild, refreshedChunks, rErr := b.store.GetBuild(rc, buildID)
 	if rErr == nil && refreshedBuild != nil {
 		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *refreshedBuild, refreshedChunks, ""); sErr != nil {
-			log.Printf("[vanadis-restate] sync build widget warning: %v", sErr)
+			slog.WarnContext(rc, "[vanadis-restate] sync build widget warning", "error", sErr)
 		}
 	}
 }
@@ -1049,7 +1049,7 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 		if mutation != nil {
 			return tErr
 		}
-		log.Printf("[vanadis-restate] dispatch outcome transition warning: %v", tErr)
+		slog.WarnContext(ctx, "[vanadis-restate] dispatch outcome transition warning", "error", tErr)
 	}
 	return nil
 }
@@ -1178,13 +1178,13 @@ func (b *BuildObject) refreshFailedPRWidget(ctx context.Context, buildID, event 
 	}
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
-		log.Printf("[vanadis-restate] recovery widget read warning: %v", err)
+		slog.WarnContext(ctx, "[vanadis-restate] recovery widget read warning", "error", err)
 		return
 	}
 	if build.Status != statusFailed {
 		return
 	}
 	if _, err = b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build failed"); err != nil {
-		log.Printf("[vanadis-restate] recovery widget sync warning: %v", err)
+		slog.WarnContext(ctx, "[vanadis-restate] recovery widget sync warning", "error", err)
 	}
 }

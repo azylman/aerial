@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,24 @@ import (
 
 // defaultFlushTimeout bounds a single flush request when the config omits flush_timeout.
 const defaultFlushTimeout = 60 * time.Second
+
+// defaultConnectRetryWindow bounds how long a refused flush dial is retried when the
+// config omits connect_retry_window. A new pod's IP reaches the NetworkPolicy allow sets
+// a few seconds after start, and until then protected targets REJECT the connection.
+const defaultConnectRetryWindow = 30 * time.Second
+
+// defaultConnectRetryInterval is the wait between refused dials when the config omits
+// connect_retry_interval.
+const defaultConnectRetryInterval = time.Second
+
+// defaultPullInterval is the wait between pull rounds when the config omits pull_interval.
+const defaultPullInterval = 15 * time.Minute
+
+// defaultListen is the push server's listen address when the config omits listen.
+const defaultListen = ":8080"
+
+// defaultMaxPushBytes caps a pushed coverage archive when the config omits max_push_bytes.
+const defaultMaxPushBytes int64 = 64 << 20
 
 // maxArchiveEntryBytes caps a single extracted coverage file so a misbehaving target
 // cannot fill the collector's scratch disk.
@@ -38,6 +57,22 @@ type Target struct {
 type Config struct {
 	Targets      []Target      `yaml:"targets"`
 	FlushTimeout time.Duration `yaml:"flush_timeout"`
+	// ConnectRetryWindow bounds retries of a flush dial refused with ECONNREFUSED. It
+	// runs inside the per-target FlushTimeout. Like flush_timeout, an omitted or zero
+	// value takes the default; the window is a safety bound, not an opt-in feature.
+	ConnectRetryWindow time.Duration `yaml:"connect_retry_window"`
+	// ConnectRetryInterval is the wait between refused dials; omitted or zero takes the
+	// default.
+	ConnectRetryInterval time.Duration `yaml:"connect_retry_interval"`
+	// PushServices lists the services allowed to POST coverage archives. A push service
+	// may not also be a pull target: both paths prune the same service's rows.
+	PushServices []string `yaml:"push_services"`
+	// PullInterval is the wait between pull rounds; omitted or zero takes the default.
+	PullInterval time.Duration `yaml:"pull_interval"`
+	// Listen is the push server's listen address, read once at startup.
+	Listen string `yaml:"listen"`
+	// MaxPushBytes caps a pushed archive body; omitted or zero takes the default.
+	MaxPushBytes int64 `yaml:"max_push_bytes"`
 }
 
 // CoverageRow is one function's coverage within a service.
@@ -47,7 +82,7 @@ type CoverageRow struct {
 	Percent  float64
 }
 
-// ParseConfig decodes and validates collector YAML, applying the default flush timeout.
+// ParseConfig decodes and validates collector YAML, applying defaults.
 func ParseConfig(data []byte) (Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -55,19 +90,54 @@ func ParseConfig(data []byte) (Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	if len(cfg.Targets) == 0 {
-		return Config{}, errors.New("config: no targets")
+	if len(cfg.Targets) == 0 && len(cfg.PushServices) == 0 {
+		return Config{}, errors.New("config: no targets or push_services")
 	}
+	pulled := map[string]bool{}
 	for i, t := range cfg.Targets {
 		if strings.TrimSpace(t.Service) == "" || strings.TrimSpace(t.URL) == "" {
 			return Config{}, fmt.Errorf("config: target %d needs service and url", i)
 		}
+		pulled[t.Service] = true
 	}
-	if cfg.FlushTimeout < 0 {
-		return Config{}, errors.New("config: flush_timeout must not be negative")
+	pushed := map[string]bool{}
+	for i, name := range cfg.PushServices {
+		switch {
+		case strings.TrimSpace(name) == "":
+			return Config{}, fmt.Errorf("config: push_services %d is empty", i)
+		case pushed[name]:
+			return Config{}, fmt.Errorf("config: push service %q is listed twice", name)
+		case pulled[name]:
+			return Config{}, fmt.Errorf("config: push service %q is also a pull target", name)
+		}
+		pushed[name] = true
 	}
-	if cfg.FlushTimeout == 0 {
-		cfg.FlushTimeout = defaultFlushTimeout
+	if cfg.MaxPushBytes < 0 {
+		return Config{}, errors.New("config: max_push_bytes must not be negative")
+	}
+	if cfg.MaxPushBytes == 0 {
+		cfg.MaxPushBytes = defaultMaxPushBytes
+	}
+	if cfg.Listen == "" {
+		cfg.Listen = defaultListen
+	}
+	durations := []struct {
+		name  string
+		value *time.Duration
+		def   time.Duration
+	}{
+		{"flush_timeout", &cfg.FlushTimeout, defaultFlushTimeout},
+		{"connect_retry_window", &cfg.ConnectRetryWindow, defaultConnectRetryWindow},
+		{"connect_retry_interval", &cfg.ConnectRetryInterval, defaultConnectRetryInterval},
+		{"pull_interval", &cfg.PullInterval, defaultPullInterval},
+	}
+	for _, d := range durations {
+		if *d.value < 0 {
+			return Config{}, fmt.Errorf("config: %s must not be negative", d.name)
+		}
+		if *d.value == 0 {
+			*d.value = d.def
+		}
 	}
 	return cfg, nil
 }
@@ -267,19 +337,16 @@ func groupTargets(targets []Target) ([]string, map[string][]Target) {
 }
 
 // fetchTarget creates dir, POSTs a flush request, and extracts the archive into it.
-func fetchTarget(ctx context.Context, client *http.Client, timeout time.Duration, t Target, dir string) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+// The whole fetch is bounded by cfg.FlushTimeout.
+func fetchTarget(ctx context.Context, client *http.Client, cfg Config, t Target, dir string) error {
+	ctx, cancel := context.WithTimeout(ctx, cfg.FlushTimeout)
 	defer cancel()
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return fmt.Errorf("create target dir: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.URL, http.NoBody)
+	resp, err := postFlush(ctx, client, cfg, t)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("flush: %w", err)
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -296,9 +363,52 @@ func fetchTarget(ctx context.Context, client *http.Client, timeout time.Duration
 	return nil
 }
 
-// Ingest flushes every target, merges counters per service, and upserts each service.
-// Failing targets are logged and skipped; the returned error names every failure.
-func Ingest(ctx context.Context, cfg Config, client *http.Client, runner CovdataRunner, store CoverageStore) error {
+// postFlush POSTs the flush request, retrying dials refused with ECONNREFUSED every
+// cfg.ConnectRetryInterval while the next attempt still fits in cfg.ConnectRetryWindow
+// and ctx is live. Any other error fails immediately; giving up returns the last error.
+func postFlush(ctx context.Context, client *http.Client, cfg Config, t Target) (*http.Response, error) {
+	start := time.Now()
+	for attempt := 1; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.URL, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("[coverage-ingest] target %s (%s): connected after %d attempts", t.Service, t.URL, attempt)
+			}
+			return resp, nil
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) || !waitRetry(ctx, cfg, time.Since(start)) {
+			if attempt > 1 {
+				log.Printf("[coverage-ingest] target %s (%s): gave up after %d refused attempts", t.Service, t.URL, attempt)
+			}
+			return nil, fmt.Errorf("flush: %w", err)
+		}
+	}
+}
+
+// waitRetry waits one retry interval and reports whether another attempt may run. It
+// returns false without waiting when retries are disabled or the wait would overrun the
+// retry window, and false early when ctx ends.
+func waitRetry(ctx context.Context, cfg Config, elapsed time.Duration) bool {
+	if cfg.ConnectRetryInterval <= 0 || elapsed+cfg.ConnectRetryInterval > cfg.ConnectRetryWindow {
+		return false
+	}
+	timer := time.NewTimer(cfg.ConnectRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// Ingest flushes every target in cfg, merges counters per service, and upserts each
+// service. Failing targets are logged and skipped; the returned error names every failure.
+func (s *Server) Ingest(ctx context.Context, cfg Config) error {
 	workDir, err := os.MkdirTemp("", "coverage-ingest-*")
 	if err != nil {
 		return fmt.Errorf("create work dir: %w", err)
@@ -315,7 +425,7 @@ func Ingest(ctx context.Context, cfg Config, client *http.Client, runner Covdata
 		var dirs []string
 		for ti, t := range groups[service] {
 			dir := filepath.Join(workDir, fmt.Sprintf("%d-%d", si, ti))
-			if err := fetchTarget(ctx, client, cfg.FlushTimeout, t, dir); err != nil {
+			if err := fetchTarget(ctx, s.client, cfg, t, dir); err != nil {
 				log.Printf("[coverage-ingest] skipping target %s (%s): %v", t.Service, t.URL, err)
 				errs = append(errs, fmt.Errorf("target %s (%s): %w", t.Service, t.URL, err))
 				continue
@@ -325,7 +435,7 @@ func Ingest(ctx context.Context, cfg Config, client *http.Client, runner Covdata
 		if len(dirs) == 0 {
 			continue
 		}
-		if err := ingestService(ctx, service, dirs, runner, store); err != nil {
+		if err := s.ingestService(ctx, service, dirs); err != nil {
 			log.Printf("[coverage-ingest] service %s failed: %v", service, err)
 			errs = append(errs, fmt.Errorf("service %s: %w", service, err))
 		}
@@ -333,8 +443,17 @@ func Ingest(ctx context.Context, cfg Config, client *http.Client, runner Covdata
 	return errors.Join(errs...)
 }
 
-func ingestService(ctx context.Context, service string, dirs []string, runner CovdataRunner, store CoverageStore) error {
-	out, err := runner.Func(ctx, dirs)
+// ingestService converts dirs into one service's rows and upserts them. s.sem serializes
+// every call so pull rounds and pushes never run covdata or upserts concurrently; a
+// caller whose ctx ends while waiting gives up with ctx's error.
+func (s *Server) ingestService(ctx context.Context, service string, dirs []string) error {
+	select {
+	case s.sem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("wait for ingest slot: %w", ctx.Err())
+	}
+	defer func() { <-s.sem }()
+	out, err := s.runner.Func(ctx, dirs)
 	if err != nil {
 		return err
 	}
@@ -342,7 +461,7 @@ func ingestService(ctx context.Context, service string, dirs []string, runner Co
 	if len(rows) == 0 {
 		return errors.New("covdata report has no functions")
 	}
-	if err := store.UpsertService(ctx, service, rows); err != nil {
+	if err := s.store.UpsertService(ctx, service, rows); err != nil {
 		return err
 	}
 	log.Printf("[coverage-ingest] %s: upserted %d functions from %d sources", service, len(rows), len(dirs))

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -320,7 +320,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 		return fmt.Errorf("reserve action generation: %w", reserveErr)
 	}
 	if reserveErr != nil && !errors.Is(reserveErr, ErrChunkNotFound) {
-		log.Printf("[vanadis-restate] warning: failed reserving chunk %s for launch: %v", chunk.ID, reserveErr)
+		slog.WarnContext(ctx, "[vanadis-restate] failed reserving chunk for launch", "chunk_id", chunk.ID, "error", reserveErr)
 	}
 
 	prompt, err := e.FormatChunkPrompt(build, chunks, activeIdx)
@@ -417,7 +417,7 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, store VanadisStore, buil
 	}
 	if msgID != "" && msgID != build.StatusMessageID && store != nil {
 		if uErr := store.UpdateBuildStatusMessageID(ctx, build.ID, msgID); uErr != nil {
-			log.Printf("[vanadis-restate] warning: update status message id: %v", uErr)
+			slog.WarnContext(ctx, "[vanadis-restate] update status message id failed", "error", uErr)
 		}
 	}
 	return msgID, nil

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -104,7 +104,7 @@ func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, tar
 		return
 	}
 	if err := s.evaluateEventTriggers(ctx, source, eventType, cleanTargets, contextHeader); err != nil {
-		log.Printf("[synapse] [event-triggers] error evaluating triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
+		slog.ErrorContext(ctx, "[synapse] [event-triggers] error evaluating triggers", "source", source, "targets", cleanTargets, "event_type", eventType, "error", err)
 	}
 }
 
@@ -318,7 +318,7 @@ func (s *RouterServer) handleAlertsWebhook(w http.ResponseWriter, r *http.Reques
 		msg := formatVMAlertMessage(alert)
 		if err := s.dispatcher.DispatchDirectMessage(r.Context(), DirectMessageRequest{ChannelID: channelID, Content: msg}); err != nil {
 			s.firingAlerts.Delete(fp)
-			log.Printf("[synapse] [alerts] error dispatching alert %s: %v", fp, err)
+			slog.ErrorContext(r.Context(), "[synapse] [alerts] error dispatching alert", "fingerprint", fp, "error", err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to dispatch alert message"})
 			return
 		}

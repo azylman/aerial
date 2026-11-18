@@ -365,7 +365,7 @@ func TestRestateDeadlineResponse(t *testing.T) {
 			s := &VanadisServer{httpClient: &http.Client{Transport: deadlineTransport{t, tc.cause}}, restateCfg: RestateConfig{RestateIngressURL: "http://restate.invalid"}}
 			err := s.callRestateIngress(context.Background(), "/Build/example/Create", nil, nil)
 			rec := httptest.NewRecorder()
-			writeStoreErr(rec, err)
+			writeStoreErr(context.Background(), rec, err)
 			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.message) {
 				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
 			}
