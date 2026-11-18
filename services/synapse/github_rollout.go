@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -220,6 +222,8 @@ func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
 	s.nonRoboRevFailedSHAs.Delete(key)
 	s.cancelledCheckSHAs.Delete(key)
 	s.failedCheckRuns.Delete(key)
+	s.collaboratorAlertedSHAs.Delete(key)
+	s.collaboratorConflictSHAs.Delete(key)
 }
 
 func canonicalFailedCheckKey(checkName string) string {
@@ -561,4 +565,272 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 		Quiet:        isDependabotBranch(res.Branch),
 		OccurredAt:   time.Now().UTC(),
 	})
+}
+
+func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || runID <= 0 {
+		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")
+	}
+	var jobsResp GitHubWorkflowJobsResponse
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, runID), 5<<20, &jobsResp); err != nil {
+		return nil, err
+	}
+
+	if hasSkippedImagePromotionJob(jobsResp.Jobs) {
+		return nil, nil
+	}
+
+	owner := "azylman"
+	if parts := strings.Split(repo, "/"); len(parts) == 2 {
+		owner = strings.ToLower(parts[0])
+	}
+
+	var rawImages []string
+	for _, job := range jobsResp.Jobs {
+		if job.Status != ghStatusCompleted || job.Conclusion != conclusionSuccess || !hasExecutedBuildStep(job.Steps) {
+			continue
+		}
+		if service, ok := buildJobService(job.Name); ok {
+			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
+		}
+	}
+	return dedupeTrimmedStrings(rawImages), nil
+}
+
+func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
+	repo = normalizeRepo(repo)
+	if s == nil || repo == "" || prNumber <= 0 {
+		return ""
+	}
+	var comments []GitHubIssueComment
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
+		slog.WarnContext(ctx, "[synapse] [github] error fetching roborev comments", "repo", repo, "pr", prNumber, "error", err)
+		return ""
+	}
+	shortSHA := strings.TrimSpace(headSHA)
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	for _, comment := range slices.Backward(comments) {
+		body := strings.TrimSpace(comment.Body)
+		if !strings.Contains(body, "## roborev:") {
+			continue
+		}
+		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
+			continue
+		}
+		return truncatePromptRunes(body, maxRoboRevCommentRunes)
+	}
+	return ""
+}
+
+func formatCollaboratorPRTarget(repo string, prNumber int, prTitle, branch, headSHA string) string {
+	normRepo := normalizeRepo(repo)
+	cleanTitle := strings.TrimSpace(prTitle)
+	cleanBranch := strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	shortSHA := strings.TrimSpace(headSHA)
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+
+	prLink := fmt.Sprintf("[%s#%d](https://github.com/%s/pull/%d)", normRepo, prNumber, normRepo, prNumber)
+	if normRepo == "" {
+		prLink = fmt.Sprintf("PR #%d", prNumber)
+	}
+
+	var meta []string
+	if cleanTitle != "" {
+		meta = append(meta, fmt.Sprintf("%q", cleanTitle))
+	}
+	if cleanBranch != "" {
+		meta = append(meta, "branch: "+cleanBranch)
+	}
+	if shortSHA != "" {
+		meta = append(meta, "commit: "+shortSHA)
+	}
+	if len(meta) > 0 {
+		return fmt.Sprintf("%s (%s)", prLink, strings.Join(meta, ", "))
+	}
+	return prLink
+}
+
+func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL string) string {
+	cleanMention := strings.TrimSpace(mention)
+	cleanCheckName := strings.TrimSpace(checkName)
+	target := formatCollaboratorPRTarget(repo, prNumber, prTitle, branch, headSHA)
+
+	var header strings.Builder
+	if cleanMention != "" {
+		header.WriteString(cleanMention)
+		header.WriteString(" ")
+	}
+	if cleanCheckName != "" {
+		fmt.Fprintf(&header, "CI check %q failed for %s.", cleanCheckName, target)
+	} else {
+		fmt.Fprintf(&header, "CI check failed for %s.", target)
+	}
+
+	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
+		fmt.Fprintf(&header, "\nCheck URL: %s", cleanURL)
+	}
+
+	return header.String()
+}
+
+func formatCollaboratorConflictMessage(mention, repo string, prNumber int, prTitle, branch, headSHA string) string {
+	target := formatCollaboratorPRTarget(repo, prNumber, prTitle, branch, headSHA)
+	cleanMention := strings.TrimSpace(mention)
+	if cleanMention != "" {
+		return fmt.Sprintf("%s Merge conflict with `main` detected on %s — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.", cleanMention, target)
+	}
+	return fmt.Sprintf("Merge conflict with `main` detected on %s — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.", target)
+}
+
+func recordCollaboratorSHAAlert(m *sync.Map, repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if m == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	prev, loaded := m.Swap(prCheckKey(repo, prNumber), headSHA)
+	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
+}
+
+func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo string, prNumber int, expectedSHA string, pr GitHubPullRequest) (GitHubPullRequest, string, string, bool, error) {
+	if s == nil || prNumber <= 0 {
+		return pr, "", "", false, nil
+	}
+	if strings.TrimSpace(pr.User.Login) == "" {
+		var fetched GitHubPullRequest
+		path := fmt.Sprintf("/repos/%s/pulls/%d", normalizeRepo(repo), prNumber)
+		if err := s.getGitHubJSON(ctx, path, 2<<20, &fetched); err != nil {
+			return pr, "", "", false, err
+		}
+		pr = fetched
+	}
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if pr.Merged {
+		return pr, "", "", false, nil
+	}
+	if pr.State != "" && !strings.EqualFold(pr.State, "open") {
+		return pr, "", "", false, nil
+	}
+	if expectedSHA != "" && pr.Head.SHA != "" && !strings.EqualFold(pr.Head.SHA, expectedSHA) {
+		return pr, "", "", false, nil
+	}
+	if ParseAerialPRMetadata(pr.GetBody()).OK() {
+		return pr, "", "", false, nil
+	}
+	channelID, mention, ok := s.lookupCollaboratorCIAlert(repo, pr.User.Login)
+	if !ok || channelID == "" {
+		return pr, "", "", false, nil
+	}
+	return pr, channelID, mention, true, nil
+}
+
+func (s *RouterServer) dispatchCollaboratorDM(ctx context.Context, dedup *sync.Map, repo string, prNumber int, sha, channelID, msg string) error {
+	normSHA := strings.TrimSpace(sha)
+	if s == nil || s.dispatcher == nil || channelID == "" || normSHA == "" || isZeroSHA(normSHA) {
+		return nil
+	}
+	if !recordCollaboratorSHAAlert(dedup, repo, prNumber, normSHA) {
+		return nil
+	}
+	req := DirectMessageRequest{
+		ChannelID: channelID,
+		Content:   msg,
+	}
+	if err := s.dispatcher.DispatchDirectMessage(ctx, req); err != nil {
+		if dedup != nil {
+			dedup.CompareAndDelete(prCheckKey(repo, prNumber), normSHA)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo string, pr GitHubPullRequest) error {
+	if s == nil || !s.hasCollaboratorCIAlertsForRepo(repo) {
+		return nil
+	}
+	resolvedPR, channelID, mention, ok, err := s.resolveCollaboratorAlertTarget(ctx, repo, pr.Number, pr.Head.SHA, pr)
+	if err != nil || !ok {
+		return err
+	}
+	branch := firstNonEmpty(resolvedPR.Head.Ref, pr.Head.Ref)
+	sha := firstNonEmpty(resolvedPR.Head.SHA, pr.Head.SHA)
+	msg := formatCollaboratorConflictMessage(mention, repo, resolvedPR.Number, resolvedPR.Title, branch, sha)
+	return s.dispatchCollaboratorDM(ctx, &s.collaboratorConflictSHAs, repo, resolvedPR.Number, sha, channelID, msg)
+}
+
+func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, checkURL string) error {
+	if s == nil || res == nil || res.TargetID != "" || res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) || !s.hasCollaboratorCIAlertsForRepo(res.Repo) {
+		return nil
+	}
+	resolvedPR, channelID, mention, ok, err := s.resolveCollaboratorAlertTarget(ctx, res.Repo, res.PRNumber, res.HeadSHA, GitHubPullRequest{
+		Number: res.PRNumber,
+		Head:   GitHubPRRef{Ref: res.Branch, SHA: res.HeadSHA},
+	})
+	if err != nil || !ok {
+		return err
+	}
+	branch := firstNonEmpty(resolvedPR.Head.Ref, res.Branch)
+	sha := firstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
+	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
+	return s.dispatchCollaboratorDM(ctx, &s.collaboratorAlertedSHAs, res.Repo, resolvedPR.Number, sha, channelID, msg)
+}
+
+func (s *RouterServer) handleMergeOrPromotionFailure(ctx context.Context, res *ResolvedGitHubEvent, details string) (bool, error) {
+	if s.isMergeSHAFailure(ctx, res) || (res.Event == ghEventWorkflowRun && isMainBranch(res.Branch) && res.PRNumber > 0) {
+		if res.Event == ghEventWorkflowRun {
+			return true, s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *RouterServer) recordNonGateCheckFailure(res *ResolvedGitHubEvent) bool {
+	if res == nil || res.Event != ghEventCheckRun || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName) {
+		return false
+	}
+	if !isRoboRevCheck(res.CheckName) {
+		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+	}
+	return s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+}
+
+func syncPRFallbackFields(res *ResolvedGitHubEvent, pr GitHubPullRequest) GitHubPullRequest {
+	if res == nil {
+		return pr
+	}
+	if pr.Number == 0 && res.PRNumber > 0 {
+		pr.Number = res.PRNumber
+	}
+	if pr.Head.Ref == "" && res.Branch != "" {
+		pr.Head.Ref = res.Branch
+	}
+	if pr.Head.SHA == "" && res.HeadSHA != "" {
+		pr.Head.SHA = res.HeadSHA
+	}
+	return pr
+}
+
+func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) (GitHubPullRequest, bool, error) {
+	if !isPRMergeabilityUnknown(pr) || res.PRNumber <= 0 || normalizeRepo(res.Repo) == "" {
+		return pr, true, nil
+	}
+	var fetched GitHubPullRequest
+	path := fmt.Sprintf("/repos/%s/pulls/%d", normalizeRepo(res.Repo), res.PRNumber)
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &fetched); err != nil {
+		return pr, false, err
+	}
+	if fetched.Merged || (fetched.State != "" && !strings.EqualFold(fetched.State, "open")) {
+		return pr, false, nil
+	}
+	if res.HeadSHA != "" && fetched.Head.SHA != "" && !strings.EqualFold(fetched.Head.SHA, strings.TrimSpace(res.HeadSHA)) {
+		return pr, false, nil
+	}
+	return syncPRFallbackFields(res, fetched), true, nil
 }

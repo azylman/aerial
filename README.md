@@ -223,26 +223,21 @@ sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 ```
 
 ### Step 2: Install Cluster Operators
-Install the cluster operators for PostgreSQL, external secrets, and Gateway API routing (`restate-operator`, `vm-operator`, `reloader`, and `arc-controller` are deployed automatically via Flux CD `HelmRelease` manifests in `k8s/operators-and-storage.yaml`):
+Install Flux CD, Gateway API CRDs, and deploy the core cluster operators for PostgreSQL, external secrets, Gateway API routing, metrics, runners, and workflows:
 
 ```bash
-# 1. CloudNativePG (PostgreSQL 18 + pgvector operator). Install it before Flux so its
-#    CRDs exist on first reconcile; the `cnpg` HelmRelease in k8s/operators-and-storage.yaml
-#    then adopts this release and owns its values.
-helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm upgrade --install cnpg cnpg/cloudnative-pg --version 0.29.1 \
-  --namespace cnpg-system --create-namespace
+# 1. Install Flux CLI and controllers
+curl -s https://fluxcd.io/install.sh | sudo bash
+flux install
 
-# 2. External Secrets Operator (Infisical secret synchronization)
-helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
-helm upgrade --install external-secrets external-secrets/external-secrets \
-  --namespace external-secrets --create-namespace
+# 2. Install Gateway API standard CRDs for NGINX Gateway Fabric
+kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.8.1" | kubectl apply -f -
 
-# 3. NGINX Gateway Fabric (Gateway API implementation)
-kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.4.2" | kubectl apply -f -
-helm upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
-  --namespace nginx-gateway --create-namespace
+# 3. Apply declarative cluster operators
+kubectl apply -f https://raw.githubusercontent.com/azylman/aerial/main/k8s/operators.yaml
+
+# 4. Wait for operators to become ready
+kubectl wait --for=condition=Ready helmrelease --all -A --timeout=5m
 ```
 
 ### Step 3: Fork Configuration & Bootstrap Secrets
@@ -332,21 +327,17 @@ kubectl create secret generic shared-secrets \
 </details>
 
 ### Step 4: Deploy Stack via Flux CD
-Install **Flux CD** and apply your private configuration repository's Kustomizations:
+Apply your private configuration repository's Kustomizations via Flux CD:
 
 ```bash
-# 1. Install Flux CLI and controllers
-curl -s https://fluxcd.io/install.sh | sudo bash
-flux install
-
-# 2. Configure Git authentication for your private configuration repository
+# 1. Configure Git authentication for your private configuration repository
 flux create secret git github-auth \
   --namespace flux-system \
   --url=https://github.com/your-username/my-aerial-config.git \
   --username=git \
   --password="$GITHUB_PAT"
 
-# 3. Apply your private config repository's Flux manifests
+# 2. Apply your private config repository's Flux manifests
 git clone https://github.com/your-username/my-aerial-config.git
 kubectl apply -k my-aerial-config/k8s
 ```

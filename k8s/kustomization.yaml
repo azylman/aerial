@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - namespaces-and-coredns.yaml
+  - operators.yaml
   - operators-and-storage.yaml
   - gateways-and-networkpolicies.yaml
   - core-services.yaml

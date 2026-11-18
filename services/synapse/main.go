@@ -59,6 +59,8 @@ type RouterServer struct {
 	cancelledCheckSHAs       sync.Map
 	failedCheckSHAs          sync.Map
 	failedCheckRuns          sync.Map
+	collaboratorAlertedSHAs  sync.Map
+	collaboratorConflictSHAs sync.Map
 	updatedForCurrentMain    sync.Map
 	lastMainPushSHA          sync.Map
 	deploySuccessDispatched  sync.Map

@@ -35,21 +35,30 @@ type Config struct {
 	BotID                string
 	DefaultOwner         bool
 	WebhookForwardURLs   map[string]string
+	CollaboratorCIAlerts []CollaboratorCIAlertRule
+}
+
+// CollaboratorCIAlertRule defines a notification rule for unregistered collaborator pull requests.
+type CollaboratorCIAlertRule struct {
+	Repo      string            `yaml:"repo"`
+	ChannelID string            `yaml:"channel_id"`
+	Authors   map[string]string `yaml:"authors"`
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow `yaml:"legacy_build_workflows"`
-	Port                 string                `yaml:"port"`
-	FluxReceiverURL      string                `yaml:"flux_receiver_url"`
-	EriURL               string                `yaml:"eri_url"`
-	NATSURL              string                `yaml:"nats_url"`
-	SystemChannelID      string                `yaml:"system_channel_id"`
-	SystemChannel        string                `yaml:"system_channel"`
-	AutoUpdatePRAuthors  []string              `yaml:"auto_update_pr_authors"`
-	BotID                string                `yaml:"bot_id"`
-	DefaultOwner         bool                  `yaml:"default_owner"`
-	WebhookForwardURLs   map[string]string     `yaml:"webhook_forward_urls"`
+	LegacyBuildWorkflows []LegacyBuildWorkflow     `yaml:"legacy_build_workflows"`
+	Port                 string                    `yaml:"port"`
+	FluxReceiverURL      string                    `yaml:"flux_receiver_url"`
+	EriURL               string                    `yaml:"eri_url"`
+	NATSURL              string                    `yaml:"nats_url"`
+	SystemChannelID      string                    `yaml:"system_channel_id"`
+	SystemChannel        string                    `yaml:"system_channel"`
+	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
+	BotID                string                    `yaml:"bot_id"`
+	DefaultOwner         bool                      `yaml:"default_owner"`
+	WebhookForwardURLs   map[string]string         `yaml:"webhook_forward_urls"`
+	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
 }
 
 var (
@@ -84,17 +93,17 @@ func normalizeWebhookForwardURLs(raw map[string]string) map[string]string {
 	return out
 }
 
-func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []string) (string, string, []string) {
+func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, string, []string, []CollaboratorCIAlertRule) {
 	data, err := os.ReadFile(path)
 	if err != nil && path == "/share/aerial-config/config.yaml" {
 		data, err = os.ReadFile("/config/config.yaml")
 	}
 	if err != nil {
-		return sysChan, botID, autoUpdateAuthors
+		return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 	}
 	var aerialCfg RouterYAMLConfig
 	if err := yaml.Unmarshal(data, &aerialCfg); err != nil {
-		return sysChan, botID, autoUpdateAuthors
+		return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 	}
 	if sysChan == "" {
 		sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
@@ -105,7 +114,10 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 	if len(autoUpdateAuthors) == 0 {
 		autoUpdateAuthors = dedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
 	}
-	return sysChan, botID, autoUpdateAuthors
+	if len(collaboratorAlerts) == 0 {
+		collaboratorAlerts = normalizeCollaboratorCIAlerts(aerialCfg.CollaboratorCIAlerts)
+	}
+	return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 }
 
 // ConfigSource yields the live synapse configuration snapshot. Callers read
@@ -211,9 +223,10 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 	}
 	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
+	collaboratorAlerts := normalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
 	var aerialBotID string
-	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "") && synapseAerialConfigPath != "" {
-		sysChan, aerialBotID, autoUpdateAuthors = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors)
+	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "" || len(collaboratorAlerts) == 0) && synapseAerialConfigPath != "" {
+		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
 	}
 
 	botID := strings.TrimSpace(firstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, "aerial"))
@@ -251,7 +264,87 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		BotID:                botID,
 		DefaultOwner:         defaultOwner,
 		WebhookForwardURLs:   normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
+		CollaboratorCIAlerts: collaboratorAlerts,
 	}
+}
+
+func normalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	var out []CollaboratorCIAlertRule
+	for _, rule := range rules {
+		repo := normalizeRepo(rule.Repo)
+		chanID := NormalizeDiscordTargetID(rule.ChannelID)
+		if repo == "" || !IsValidDiscordSnowflake(chanID) {
+			continue
+		}
+		cleanedAuthors := make(map[string]string)
+		for k, v := range rule.Authors {
+			author := strings.ToLower(strings.TrimSpace(k))
+			mention := strings.TrimSpace(v)
+			if author != "" && mention != "" {
+				cleanedAuthors[author] = mention
+			}
+		}
+		if len(cleanedAuthors) == 0 {
+			continue
+		}
+		out = append(out, CollaboratorCIAlertRule{
+			Repo:      repo,
+			ChannelID: chanID,
+			Authors:   cleanedAuthors,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// hasCollaboratorCIAlertsForRepo reports whether any collaborator alert rules are configured for repo.
+func (s *RouterServer) hasCollaboratorCIAlertsForRepo(repo string) bool {
+	if s == nil || s.cfgSrc == nil {
+		return false
+	}
+	cfg := s.cfgSrc.Current()
+	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
+		return false
+	}
+	targetRepo := normalizeRepo(repo)
+	if targetRepo == "" {
+		return false
+	}
+	for _, rule := range cfg.CollaboratorCIAlerts {
+		if strings.EqualFold(rule.Repo, targetRepo) {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupCollaboratorCIAlert finds the matching channel ID and user mention for an author in repo.
+func (s *RouterServer) lookupCollaboratorCIAlert(repo, author string) (channelID, mention string, ok bool) {
+	if s == nil || s.cfgSrc == nil {
+		return "", "", false
+	}
+	cfg := s.cfgSrc.Current()
+	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
+		return "", "", false
+	}
+	targetRepo := normalizeRepo(repo)
+	cleanAuthor := strings.ToLower(strings.TrimSpace(author))
+	if targetRepo == "" || cleanAuthor == "" {
+		return "", "", false
+	}
+	for _, rule := range cfg.CollaboratorCIAlerts {
+		if strings.EqualFold(rule.Repo, targetRepo) {
+			if m, found := rule.Authors[cleanAuthor]; found && strings.TrimSpace(m) != "" {
+				return rule.ChannelID, strings.TrimSpace(m), true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func randomNonce() string {

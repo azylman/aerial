@@ -128,13 +128,13 @@ func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
 	})
 }
 
-func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo string, prNumber int, branch, headSHA string) error {
+func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo string, prNumber int, branch, headSHA string) (bool, error) {
 	if s.registry == nil {
-		return nil
+		return false, nil
 	}
 	targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, repo, prNumber)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if updated {
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -149,9 +149,16 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 			Quiet:        isDependabotBranch(branch),
 			OccurredAt:   time.Now().UTC(),
 		})
-		return nil
+		return true, nil
 	}
-	return nil
+	if targetID != "" {
+		return true, nil
+	}
+	resolvedTID, _, _, _, rErr := s.registry.ResolvePRByNumber(ctx, repo, prNumber)
+	if rErr == nil && resolvedTID != "" {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, pr GitHubPullRequest) {
@@ -159,8 +166,15 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.Number), strings.TrimSpace(pr.Head.SHA))
 	}
 	s.recordFailedCISHA(repo, pr.Number, pr.Head.SHA)
-	if err := s.transitionRegisteredConflict(ctx, repo, pr.Number, pr.Head.Ref, pr.Head.SHA); err != nil {
+	handled, err := s.transitionRegisteredConflict(ctx, repo, pr.Number, pr.Head.Ref, pr.Head.SHA)
+	if err != nil {
 		slog.ErrorContext(ctx, "[synapse] [registry] error transitioning PR to conflict", "pr", pr.Number, "error", err)
+		return
+	}
+	if !handled {
+		if alertErr := s.notifyCollaboratorConflict(ctx, repo, pr); alertErr != nil {
+			slog.ErrorContext(ctx, "[synapse] [github] error notifying collaborator conflict", "repo", repo, "pr", pr.Number, "error", alertErr)
+		}
 	}
 }
 
@@ -820,23 +834,24 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 	}
 }
 
-func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional bool) error {
+func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional bool) (bool, error) {
 	s.healDependabotPR(ctx, res)
 	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 	if err != nil {
-		return err
+		return false, err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
-	if updated || (emitAdditional && res.TargetID != "") {
-		return s.completeCIFailureTransition(ctx, res, details, checkURL)
+	shouldComplete := updated || (emitAdditional && res.TargetID != "")
+	if shouldComplete {
+		return true, s.completeCIFailureTransition(ctx, res, details, checkURL)
 	}
-	return nil
+	return shouldComplete, nil
 }
 
-func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) (bool, error) {
 	targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
 	if err != nil {
-		return err
+		return false, err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	emitAdditional := false
@@ -849,34 +864,34 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 			emitAdditional = s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 		}
 	}
-	if updated || (emitAdditional && res.TargetID != "") {
-		return s.completeCIFailureTransition(ctx, res, details, checkURL)
+	shouldComplete := updated || (emitAdditional && res.TargetID != "")
+	if shouldComplete {
+		return true, s.completeCIFailureTransition(ctx, res, details, checkURL)
 	}
-	return nil
+	return shouldComplete, nil
 }
 
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
 	}
-	if s.isMergeSHAFailure(ctx, res) || (res.Event == ghEventWorkflowRun && isMainBranch(res.Branch) && res.PRNumber > 0) {
-		if res.Event == ghEventWorkflowRun {
-			return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
-		}
-		return nil
+	if handled, err := s.handleMergeOrPromotionFailure(ctx, res, details); handled {
+		return err
 	}
-	emitAdditional := false
-	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) && !isBuildMetadataCheck(res.CheckName) {
-		if !isRoboRevCheck(res.CheckName) {
-			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
-		}
-		emitAdditional = s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
-	}
-	var err error
+	emitAdditional := s.recordNonGateCheckFailure(res)
+	var (
+		updated bool
+		err     error
+	)
 	if res.PRNumber > 0 {
-		err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL, emitAdditional)
+		updated, err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL, emitAdditional)
 	} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-		err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
+		updated, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
+	}
+	if err == nil && !updated && res.TargetID == "" {
+		if notifyErr := s.notifyCollaboratorCIFailure(ctx, res, checkURL); notifyErr != nil {
+			return notifyErr
+		}
 	}
 	if res.PRNumber > 0 && res.HeadSHA != "" && s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA) {
 		if cascadeErr := s.checkOpenPRConflicts(ctx, res.Repo); cascadeErr != nil {
@@ -980,16 +995,12 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 }
 
 func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
-	if isPRMergeabilityUnknown(pr) && res.PRNumber > 0 && normalizeRepo(res.Repo) != "" {
-		var fetched GitHubPullRequest
-		if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls/%d", normalizeRepo(res.Repo), res.PRNumber), 2<<20, &fetched); err != nil {
-			return err
-		}
-		if fetched.Merged || (fetched.State != "" && !strings.EqualFold(fetched.State, "open")) || (res.HeadSHA != "" && fetched.Head.SHA != "" && !strings.EqualFold(fetched.Head.SHA, strings.TrimSpace(res.HeadSHA))) {
-			return nil
-		}
-		pr = fetched
+	pr = syncPRFallbackFields(res, pr)
+	resolved, ok, err := s.resolveAutoMergeDisabledPR(ctx, res, pr)
+	if err != nil || !ok {
+		return err
 	}
+	pr = resolved
 
 	if !isPRMergeConflict(pr) {
 		slog.InfoContext(ctx, "[synapse] [github] ignoring auto_merge_disabled", "repo", res.Repo, "pr", res.PRNumber, "mergeable_state", pr.MergeableState)
@@ -1000,7 +1011,11 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
 	s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA)
-	return s.transitionRegisteredConflict(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA)
+	handled, err := s.transitionRegisteredConflict(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA)
+	if err != nil || handled {
+		return err
+	}
+	return s.notifyCollaboratorConflict(ctx, res.Repo, pr)
 }
 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
@@ -1032,6 +1047,8 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.failedCheckRuns.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.collaboratorAlertedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.collaboratorConflictSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return err
@@ -1200,6 +1217,8 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.failedCheckRuns.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.collaboratorAlertedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.collaboratorConflictSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return nil, err
@@ -1426,63 +1445,4 @@ func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha str
 	}
 	s.recordCommitSHAPR(repo, sha, selected.Number, selected.Head.Ref)
 	return selected.Number, selected.Head.Ref, nil
-}
-
-func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || runID <= 0 {
-		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")
-	}
-	var jobsResp GitHubWorkflowJobsResponse
-	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, runID), 5<<20, &jobsResp); err != nil {
-		return nil, err
-	}
-
-	if hasSkippedImagePromotionJob(jobsResp.Jobs) {
-		return nil, nil
-	}
-
-	owner := "azylman"
-	if parts := strings.Split(repo, "/"); len(parts) == 2 {
-		owner = strings.ToLower(parts[0])
-	}
-
-	var rawImages []string
-	for _, job := range jobsResp.Jobs {
-		if job.Status != ghStatusCompleted || job.Conclusion != conclusionSuccess || !hasExecutedBuildStep(job.Steps) {
-			continue
-		}
-		if service, ok := buildJobService(job.Name); ok {
-			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
-		}
-	}
-	return dedupeTrimmedStrings(rawImages), nil
-}
-
-func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
-	repo = normalizeRepo(repo)
-	if s == nil || repo == "" || prNumber <= 0 {
-		return ""
-	}
-	var comments []GitHubIssueComment
-	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
-	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
-		slog.WarnContext(ctx, "[synapse] [github] error fetching roborev comments", "repo", repo, "pr", prNumber, "error", err)
-		return ""
-	}
-	shortSHA := strings.TrimSpace(headSHA)
-	if len(shortSHA) > 7 {
-		shortSHA = shortSHA[:7]
-	}
-	for _, comment := range slices.Backward(comments) {
-		body := strings.TrimSpace(comment.Body)
-		if !strings.Contains(body, "## roborev:") {
-			continue
-		}
-		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
-			continue
-		}
-		return truncatePromptRunes(body, maxRoboRevCommentRunes)
-	}
-	return ""
 }
