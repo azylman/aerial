@@ -754,10 +754,12 @@ func checkOpenPRConflictsTestCases() []checkOpenPRConflictsTestCase {
 	p1 := checkOpenPRConflictsCasesPart1()
 	p2 := checkOpenPRConflictsCasesPart2()
 	p3 := checkOpenPRConflictsCasesPart3()
-	all := make([]checkOpenPRConflictsTestCase, 0, len(p1)+len(p2)+len(p3))
+	p4 := checkOpenPRConflictsCasesPart4()
+	all := make([]checkOpenPRConflictsTestCase, 0, len(p1)+len(p2)+len(p3)+len(p4))
 	all = append(all, p1...)
 	all = append(all, p2...)
 	all = append(all, p3...)
+	all = append(all, p4...)
 	return all
 }
 
@@ -1083,6 +1085,42 @@ func checkOpenPRConflictsCasesPart3() []checkOpenPRConflictsTestCase {
 			prStatusCodes:        []int{http.StatusAccepted},
 			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
 			wantCachedFailedSHAs: map[int]string{550: "head550"},
+		},
+	}
+}
+
+func checkOpenPRConflictsCasesPart4() []checkOpenPRConflictsTestCase {
+	return []checkOpenPRConflictsTestCase{
+		{
+			name:              "ignores queued dependabot app check-run and updates PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":".github/dependabot.yml","status":"queued","conclusion":"","app":{"slug":"dependabot"}}]}`,
+			},
+			openPRs:        []GitHubPullRequest{makeTestOpenPR(550, "feat/dependabot-check", "head550", "trusted-author")},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
+		},
+		{
+			name:              "skips PR with same-named queued check from github-actions app",
+			autoUpdateAuthors: []string{"trusted-author"},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":".github/dependabot.yml","status":"queued","conclusion":"","app":{"slug":"github-actions"}}]}`,
+			},
+			openPRs:               []GitHubPullRequest{makeTestOpenPR(550, "feat/actions-check", "head550", "trusted-author")},
+			wantUpdatedPRs:        nil,
+			wantUncachedFailedPRs: []int{550},
+		},
+		{
+			name:              "skips PR with queued Dependabot job from github-actions alongside dependabot app check",
+			autoUpdateAuthors: []string{"trusted-author"},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":".github/dependabot.yml","status":"queued","conclusion":"","app":{"slug":"dependabot"}},{"name":"Dependabot","status":"queued","conclusion":"","app":{"slug":"github-actions"}}]}`,
+			},
+			openPRs:               []GitHubPullRequest{makeTestOpenPR(550, "feat/dependabot-job", "head550", "trusted-author")},
+			wantUpdatedPRs:        nil,
+			wantUncachedFailedPRs: []int{550},
 		},
 	}
 }

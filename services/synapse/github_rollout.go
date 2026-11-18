@@ -430,7 +430,7 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 	}
 	hasPending := false
 	for _, cr := range checkRuns.CheckRuns {
-		if isBuildMetadataCheck(cr.Name) {
+		if isBuildMetadataCheck(cr.Name) || isDependabotAppCheck(cr.App.Slug) {
 			continue
 		}
 		state := classifyCheckState(cr.Status, cr.Conclusion)
