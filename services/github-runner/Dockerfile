@@ -30,8 +30,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    GIT_TERMINAL_PROMPT=0 \
-    RUNNER_ALLOW_RUNASROOT="1"
+    GIT_TERMINAL_PROMPT=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -122,7 +121,7 @@ RUN python3 -m venv /opt/venv && \
 
 ENV RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
-    PATH="/usr/local/cargo/bin:/opt/venv/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
+    PATH="/usr/local/cargo/bin:/opt/venv/bin:/usr/local/go/bin:/data/cache/go/bin:/home/ubuntu/go/bin:/root/go/bin:${PATH}"
 
 # Install GitHub Actions Runner v2.338.2 with SHA256 verification
 ARG RUNNER_VERSION=2.338.2
@@ -131,7 +130,8 @@ WORKDIR /actions-runner
 RUN curl -fsSL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" -o /tmp/runner.tar.gz && \
     echo "${RUNNER_SHA256}  /tmp/runner.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/runner.tar.gz -C /actions-runner && \
-    rm -f /tmp/runner.tar.gz
+    rm -f /tmp/runner.tar.gz && \
+    chown -R 1000:1000 /usr/local/cargo /actions-runner
 
 COPY services/github-runner/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh

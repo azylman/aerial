@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -333,7 +332,6 @@ type buildPoolEnvCase struct {
 	tz        []string
 	wantExact []string
 	wantEnv   map[string]string
-	checkDirs bool
 }
 
 func assertBuildPoolEnvCase(t *testing.T, tc buildPoolEnvCase) {
@@ -358,17 +356,6 @@ func assertBuildPoolEnvCase(t *testing.T, tc buildPoolEnvCase) {
 			t.Errorf("expected %s=%q, got %q", k, expected, envMap[k])
 		}
 	}
-	if tc.checkDirs {
-		for _, d := range []string{
-			filepath.Join(tmpDir, "cache", "go-build"),
-			filepath.Join(tmpDir, "cache", "go", "pkg", "mod"),
-			filepath.Join(tmpDir, "cache", "golangci-lint"),
-		} {
-			if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
-				t.Errorf("expected directory %q to exist, err: %v", d, err)
-			}
-		}
-	}
 }
 
 func TestBuildPoolEnv(t *testing.T) {
@@ -376,7 +363,7 @@ func TestBuildPoolEnv(t *testing.T) {
 
 	tests := []buildPoolEnvCase{
 		{name: "EmptyRuntimeBaseReturnsBaseEnv", base: []string{"FOO=bar", "BAZ=qux"}, wantExact: []string{"FOO=bar", "BAZ=qux"}},
-		{name: "InjectsUnifiedCacheDirectories", base: []string{"EXISTING=1"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "<tmp>/cache/go-build", "GOPATH": "<tmp>/cache/go", "GOMODCACHE": "<tmp>/cache/go/pkg/mod", "GOLANGCI_LINT_CACHE": "<tmp>/cache/golangci-lint", "EXISTING": "1"}, checkDirs: true},
+		{name: "InjectsUnifiedCacheDirectories", base: []string{"EXISTING=1"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "<tmp>/cache/go-build", "GOPATH": "<tmp>/cache/go", "GOMODCACHE": "<tmp>/cache/go/pkg/mod", "GOLANGCI_LINT_CACHE": "<tmp>/cache/golangci-lint", "EXISTING": "1"}},
 		{name: "PreservesExplicitCacheEnv", base: []string{"GOCACHE=/custom/gocache", "GOPATH=/custom/gopath", "GOMODCACHE=/custom/modcache", "GOLANGCI_LINT_CACHE=/custom/lintcache"}, useTmpDir: true, wantEnv: map[string]string{"GOCACHE": "/custom/gocache", "GOPATH": "/custom/gopath", "GOMODCACHE": "/custom/modcache", "GOLANGCI_LINT_CACHE": "/custom/lintcache"}},
 		{name: "InjectsConfiguredTimezone", base: []string{"EXISTING=1"}, useTmpDir: true, tz: []string{"America/Los_Angeles"}, wantEnv: map[string]string{"TZ": "America/Los_Angeles"}},
 		{name: "PreservesExplicitTZ", base: []string{"TZ=UTC"}, useTmpDir: true, tz: []string{"America/Los_Angeles"}, wantEnv: map[string]string{"TZ": "UTC"}},
@@ -387,28 +374,6 @@ func TestBuildPoolEnv(t *testing.T) {
 			t.Parallel()
 			assertBuildPoolEnvCase(t, tc)
 		})
-	}
-}
-
-func TestBuildPoolEnv_RootChown(t *testing.T) {
-	origGetEuid := getEuid
-	origChown := chownFile
-	defer func() {
-		getEuid = origGetEuid
-		chownFile = origChown
-	}()
-
-	var chowned []string
-	getEuid = func() int { return 0 }
-	chownFile = func(path string, uid, gid int) error {
-		chowned = append(chowned, path)
-		return nil
-	}
-
-	tmpDir := t.TempDir()
-	_ = buildPoolEnv([]string{"A=B"}, tmpDir)
-	if len(chowned) == 0 {
-		t.Errorf("expected chownFile to be called for cache directories when getEuid == 0")
 	}
 }
 

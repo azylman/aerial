@@ -2,10 +2,14 @@
 set -euo pipefail
 
 unset OPENAI_API_KEY || true
-export RUNNER_ALLOW_RUNASROOT=1
 
-# Create isolated directories with 0700 permissions
-mkdir -p /root/.gemini/antigravity-cli /root/.roborev /root/.claude/projects /root/.codex
+# Root bootstrap at container start
+chmod 0755 /root
+mkdir -p /root/.gemini/antigravity-cli /root/.roborev /root/.claude/projects /root/.codex /root/.docker/buildx/instances /home/ubuntu
+for item in roborev claude claude.json codex gemini docker; do
+  ln -sfn "/root/.${item}" "/home/ubuntu/.${item}"
+done
+
 find /root/.claude/projects -type f -mtime +14 -delete 2>/dev/null || true
 find /root/.claude/projects -mindepth 1 -type d -empty -delete 2>/dev/null || true
 find /root/.codex/sessions -type f -mtime +14 -delete 2>/dev/null || true
@@ -39,7 +43,15 @@ cat > /root/.claude/settings.json <<'EOF'
       "Read(/root/.gemini/**)",
       "Read(//root/.gemini/**)",
       "Read(/root/.codex/**)",
-      "Read(//root/.codex/**)"
+      "Read(//root/.codex/**)",
+      "Read(/home/ubuntu/.roborev/**)",
+      "Read(//home/ubuntu/.roborev/**)",
+      "Read(/home/ubuntu/.claude/**)",
+      "Read(//home/ubuntu/.claude/**)",
+      "Read(/home/ubuntu/.gemini/**)",
+      "Read(//home/ubuntu/.gemini/**)",
+      "Read(/home/ubuntu/.codex/**)",
+      "Read(//home/ubuntu/.codex/**)"
     ]
   }
 }
@@ -440,7 +452,13 @@ cat > /root/.gemini/antigravity-cli/permissions.json <<'EOF'
       "read_file(/local/*)",
       "read_file(/secrets/*)",
       "read_file(/root/.roborev/*)",
+      "read_file(/root/.claude/*)",
+      "read_file(/root/.gemini/*)",
       "read_file(/root/.codex/*)",
+      "read_file(/home/ubuntu/.roborev/*)",
+      "read_file(/home/ubuntu/.claude/*)",
+      "read_file(/home/ubuntu/.gemini/*)",
+      "read_file(/home/ubuntu/.codex/*)",
       "command(git push)",
       "command(git commit)",
       "command(git reset)",
@@ -534,11 +552,26 @@ else
 fi
 
 if [ -d "/cache" ]; then
-  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm
-  export GOCACHE="/cache/go-build"
-  export GOMODCACHE="/cache/go-mod"
+  mkdir -p /data
+  ln -sfn /cache /data/cache
+  (
+    flock 200
+    mkdir -p /cache/go-build /cache/go/pkg /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
+    if [ -d "/cache/go-mod" ] && [ ! -L "/cache/go-mod" ]; then
+      mkdir -p /cache/go/pkg/mod
+      cp -a /cache/go-mod/. /cache/go/pkg/mod/ 2>/dev/null || true
+      rm -rf /cache/go-mod
+      ln -sfn go/pkg/mod /cache/go-mod
+    elif [ ! -e "/cache/go-mod" ] && [ ! -L "/cache/go-mod" ]; then
+      ln -sfn go/pkg/mod /cache/go-mod
+    fi
+    find /cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
+  ) 200>"/cache/.init.lock"
+  export GOCACHE="/data/cache/go-build"
+  export GOPATH="/data/cache/go"
+  export GOMODCACHE="/data/cache/go/pkg/mod"
+  export GOLANGCI_LINT_CACHE="/data/cache/golangci-lint"
   export PIP_CACHE_DIR="/cache/pip"
-  export GOLANGCI_LINT_CACHE="/cache/golangci-lint"
   export CARGO_TARGET_DIR="/cache/cargo-target"
   export NPM_CONFIG_CACHE="/cache/npm"
 fi
@@ -938,27 +971,62 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm
-  export GOCACHE="/cache/go-build"
-  export GOMODCACHE="/cache/go-mod"
+  mkdir -p /data
+  ln -sfn /cache /data/cache
+  (
+    flock 200
+    mkdir -p /cache/go-build /cache/go/pkg /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
+    if [ -d "/cache/go-mod" ] && [ ! -L "/cache/go-mod" ]; then
+      mkdir -p /cache/go/pkg/mod
+      cp -a /cache/go-mod/. /cache/go/pkg/mod/ 2>/dev/null || true
+      rm -rf /cache/go-mod
+      ln -sfn go/pkg/mod /cache/go-mod
+    elif [ ! -e "/cache/go-mod" ] && [ ! -L "/cache/go-mod" ]; then
+      ln -sfn go/pkg/mod /cache/go-mod
+    fi
+    find /cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
+  ) 200>"/cache/.init.lock"
+  export GOCACHE="/data/cache/go-build"
+  export GOPATH="/data/cache/go"
+  export GOMODCACHE="/data/cache/go/pkg/mod"
+  export GOLANGCI_LINT_CACHE="/data/cache/golangci-lint"
   export PIP_CACHE_DIR="/cache/pip"
-  export GOLANGCI_LINT_CACHE="/cache/golangci-lint"
   export RUSTUP_HOME="/usr/local/rustup"
   export CARGO_HOME="/usr/local/cargo"
   export CARGO_TARGET_DIR="/cache/cargo-target"
   export NPM_CONFIG_CACHE="/cache/npm"
 
   cat >> /actions-runner/.env <<EOF
-GOCACHE=/cache/go-build
-GOMODCACHE=/cache/go-mod
+GOCACHE=/data/cache/go-build
+GOPATH=/data/cache/go
+GOMODCACHE=/data/cache/go/pkg/mod
+GOLANGCI_LINT_CACHE=/data/cache/golangci-lint
 PIP_CACHE_DIR=/cache/pip
-GOLANGCI_LINT_CACHE=/cache/golangci-lint
 RUSTUP_HOME=/usr/local/rustup
 CARGO_HOME=/usr/local/cargo
 CARGO_TARGET_DIR=/cache/cargo-target
 NPM_CONFIG_CACHE=/cache/npm
 EOF
 fi
+
+if [ -S "/var/run/docker.sock" ]; then
+  DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+  if [ -n "${DOCKER_GID}" ] && [ "${DOCKER_GID}" != "0" ]; then
+    groupadd -for -g "${DOCKER_GID}" hostdocker 2>/dev/null || true
+    usermod -aG hostdocker ubuntu 2>/dev/null || true
+  fi
+fi
+
+for f in /actions-runner/.path /actions-runner/.env /root/.claude.json; do
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    chown -h 1000:1000 "$f" 2>/dev/null || true
+  fi
+done
+find /root/.roborev /root/.claude /root/.codex /root/.gemini /root/.docker /home/ubuntu /actions-runner \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
+
+run_as_ubuntu() {
+  setpriv --reuid=ubuntu --regid=ubuntu --init-groups env -u RUNNER_ALLOW_RUNASROOT HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu "$@"
+}
 
 cd /actions-runner
 
@@ -969,7 +1037,7 @@ else
   REG_TOKEN=$(mint_runner_token "registration-token")
 
   echo "Configuring GitHub Actions Runner..."
-  ./config.sh --unattended \
+  run_as_ubuntu ./config.sh --unattended \
     --url "https://github.com/${TARGET_REPO}" \
     --token "${REG_TOKEN}" \
     --name "${RUNNER_NAME}" \
@@ -985,14 +1053,14 @@ cleanup() {
   fi
 
   if [[ ",${RUNNER_LABELS}," == *",roborev,"* ]] && [ -x /usr/local/bin/roborev.real ]; then
-    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon stop 2>/dev/null || true
+    run_as_ubuntu env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon stop 2>/dev/null || true
   fi
 
   if [ -z "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" ]; then
     local rem_token
     rem_token=$(mint_runner_token "remove-token" 2>/dev/null || true)
     if [ -n "${rem_token}" ]; then
-      ./config.sh remove --token "${rem_token}" || true
+      run_as_ubuntu ./config.sh remove --token "${rem_token}" || true
     fi
   fi
   exit 0
@@ -1002,9 +1070,9 @@ trap cleanup SIGTERM SIGINT
 
 echo "Starting runner..."
 if [[ ",${RUNNER_LABELS}," == *",ci,"* ]]; then
-  env -u GITHUB_PAT ./run.sh &
+  run_as_ubuntu env -u GITHUB_PAT ./run.sh &
 else
-  ./run.sh &
+  run_as_ubuntu ./run.sh &
 fi
 RUNNER_PID=$!
 wait "${RUNNER_PID}"
