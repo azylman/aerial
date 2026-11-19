@@ -46,9 +46,11 @@ const InsertChunkSQL = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, m
 const SelectChunksForUpdateSQL = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
 
 var (
-	ErrBuildNotFound     = errors.New("vanadis build not found")
-	ErrBuildConflict     = errors.New("vanadis build state conflict")
-	ErrInvalidBuildInput = errors.New("invalid vanadis build input")
+	ErrBuildNotFound = errors.New("vanadis build not found")
+	ErrBuildConflict = errors.New("vanadis build state conflict")
+	// ErrInvalidBuildInput aliases the canonical model sentinel so errors.Is
+	// identity holds wherever build input validation executes.
+	ErrInvalidBuildInput = model.ErrInvalidBuildInput
 )
 
 // CreateBuild inserts a build and its chunks atomically. A replay of an

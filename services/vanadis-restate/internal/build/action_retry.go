@@ -69,15 +69,5 @@ func (r retryReconcileRuntime) RunReconcileStep(name string, fn func(context.Con
 }
 
 func retryActionRequestMatches(req store.RetryActionChunkRequest, key string) bool {
-	return validRetryInstructionPair(req) && strings.TrimSpace(req.BuildID) != "" && req.BuildID == key && strings.TrimSpace(req.ChunkID) != "" && strings.TrimSpace(req.ExpectedDispatchID) != "" && strings.TrimSpace(req.Reason) != ""
-}
-
-// validRetryInstructionPair mirrors the internal/store copy byte-for-byte for
-// the remaining root caller (retry request matching here); the store copy is
-// authoritative until later chunks move that caller.
-func validRetryInstructionPair(req store.RetryActionChunkRequest) bool {
-	if req.ExpectedInstructions == nil && req.ReplacementInstructions == nil {
-		return true
-	}
-	return req.ExpectedInstructions != nil && req.ReplacementInstructions != nil && strings.TrimSpace(*req.ExpectedInstructions) != "" && strings.TrimSpace(*req.ReplacementInstructions) != ""
+	return store.ValidRetryInstructionPair(req) && strings.TrimSpace(req.BuildID) != "" && req.BuildID == key && strings.TrimSpace(req.ChunkID) != "" && strings.TrimSpace(req.ExpectedDispatchID) != "" && strings.TrimSpace(req.Reason) != ""
 }

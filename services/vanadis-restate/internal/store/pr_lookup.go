@@ -9,11 +9,10 @@ package store
 // repo normalization, rollout JSON encoding and error behavior are
 // byte-identical to the root copies they replace.
 //
-// Helper copies below (normalizeDiscordThreadID) mirror the frozen root
-// router.go copy byte-for-byte; router.go stays frozen. ErrPRTransitionSkipped
-// is defined here as the single sentinel for skipped lifecycle transitions;
-// the root package aliases it so errors.Is identity holds wherever the lookup
-// executes.
+// Thread normalization delegates to the canonical internal/model helper.
+// ErrPRTransitionSkipped is defined here as the single sentinel for skipped
+// lifecycle transitions; the root package aliases it so errors.Is identity
+// holds wherever the lookup executes.
 
 import (
 	"context"
@@ -25,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // ErrPRTransitionSkipped means the persisted row rejected a stale lifecycle transition.
@@ -92,7 +92,7 @@ func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, thread
 	if s == nil || s.db == nil {
 		return "", "", errors.New("database connection is nil")
 	}
-	threadID = normalizeDiscordThreadID(threadID)
+	threadID = model.NormalizeDiscordThreadID(threadID)
 	candidates := RepoMatchCandidates(repo)
 	if threadID == "" || len(candidates) == 0 {
 		return "", "", ErrChunkNotFound
@@ -186,12 +186,4 @@ func (s *Store) UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status,
 	default:
 		return nil
 	}
-}
-
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
 }

@@ -2,13 +2,9 @@ package build
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	restate "github.com/restatedev/sdk-go"
 
@@ -32,33 +28,18 @@ func CanFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
 	return prflow.CanFallbackThreadRepoLookup(ev)
 }
 
+// ExtractChunkIDFromBranch delegates to the canonical internal/model helper.
 func ExtractChunkIDFromBranch(repo, branch string) string {
-	return prflow.ExtractChunkIDFromBranch(repo, branch)
+	return model.ExtractChunkIDFromBranch(repo, branch)
 }
 
+// GenerateBuildID delegates to the canonical internal/model helper.
 func GenerateBuildID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
-}
-
-func cleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
+	return model.GenerateBuildID()
 }
 
 func actionDispatchID(chunk model.VanadisChunk) string {
-	return prflow.ActionDispatchID(chunk)
-}
-
-// actionCompletionAllowed mirrors the frozen internal/store copy byte-for-byte;
-// router.go stays frozen until the facade-removal chunk unifies both copies.
-func actionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	identityMatches := dispatchID == actionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
-	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
+	return model.ActionDispatchID(chunk)
 }
 
 // actionLaunchKey preserves legacy acknowledgement keys outside action retries.
@@ -143,19 +124,7 @@ func actionFailureAccepted(c model.VanadisChunk, buildStatus, dispatchID string)
 		c.Status = statusRunning
 		buildStatus = statusRunning
 	}
-	return actionFailureAllowed(c, buildStatus, dispatchID)
-}
-
-func actionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) bool {
-	if c.PRNumber == 0 {
-		return actionCompletionAllowed(c, buildStatus, dispatchID)
-	}
-	// PR attachment retains action mode. PR closure and remediation retain their
-	// identities, while old action-turn identities must still match the generation.
-	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
-		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
-	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
-		(prIdentity || dispatchID == actionDispatchID(c))
+	return store.ActionFailureAllowed(c, buildStatus, dispatchID)
 }
 
 const dispatchStatusSuccess = "success"
