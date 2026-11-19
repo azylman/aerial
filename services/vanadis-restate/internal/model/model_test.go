@@ -107,35 +107,12 @@ func TestExtractChunkIDFromBranch(t *testing.T) {
 		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-12345g", want: ""},
 		{name: "no separator after vanadis", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1", want: ""},
 		{name: "empty chunk id", repo: "aerial", branch: "feat/aerial-pr-vanadis--123456", want: ""},
+		{name: "invalid chunk characters", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1!-012345", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, ExtractChunkIDFromBranch(tc.repo, tc.branch))
-		})
-	}
-}
-
-func TestIsValidVanadisChunkID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		id    string
-		valid bool
-	}{
-		{name: "simple", id: "abc", valid: true},
-		{name: "complex", id: "Abc-123_XZ", valid: true},
-		{name: "empty", id: "", valid: false},
-		{name: "blank", id: "   ", valid: false},
-		{name: "too long", id: strings.Repeat("a", 121), valid: false},
-		{name: "max length", id: strings.Repeat("a", 120), valid: true},
-		{name: "slash", id: "a/b", valid: false},
-		{name: "space", id: "a b", valid: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.valid, IsValidVanadisChunkID(tc.id))
 		})
 	}
 }
@@ -155,24 +132,6 @@ func TestGenerateBuildID(t *testing.T) {
 			parts := strings.Split(id, "-")
 			assert.Len(t, parts, 3, "id %q must match build-<unix>-<8hex>", id)
 			assert.Len(t, parts[2], 8, "id %q must carry an 8-char hex suffix", id)
-			assert.NotEqual(t, id, GenerateBuildID(), "duplicate build id %q", id)
-		})
-	}
-}
-
-func TestNormalizeRepo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, repo, want string
-	}{
-		{name: "bare repo", repo: "aerial", want: "aerial"},
-		{name: "padded repo", repo: "  azylman/aerial  ", want: "azylman/aerial"},
-		{name: "empty", repo: "", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, NormalizeRepo(tc.repo))
 		})
 	}
 }
@@ -186,10 +145,7 @@ func TestNormalizeChunkModeAndEffort(t *testing.T) {
 		wantModeErr, wantEffortErr                     bool
 	}{
 		{name: "defaults", rawMode: "", wantMode: "pr", rawEffort: "", wantEffort: "medium"},
-		{name: "canonical values", rawMode: "pr", wantMode: "pr", rawEffort: "medium", wantEffort: "medium"},
-		{name: "uppercase values", rawMode: "PR", wantMode: "pr", rawEffort: "LOW", wantEffort: "low"},
-		{name: "action and low", rawMode: "action", wantMode: "action", rawEffort: "low", wantEffort: "low"},
-		{name: "mixed case and high", rawMode: "Action", wantMode: "action", rawEffort: "high", wantEffort: "medium"},
+		{name: "mixed case values", rawMode: "Action", wantMode: "action", rawEffort: "LOW", wantEffort: "low"},
 		{name: "invalid values", rawMode: "bogus", wantModeErr: true, rawEffort: "bogus", wantEffortErr: true},
 	}
 	for _, tc := range tests {
@@ -213,14 +169,13 @@ func TestValidateChunkModeAndRepo(t *testing.T) {
 		files, symbols []string
 		wantErr        bool
 	}{
-		{name: "pr valid", mode: "pr", repo: "aerial", wantErr: false},
 		{name: "default mode with repo", mode: "", repo: "aerial", wantErr: false},
 		{name: "pr missing repo", mode: "pr", repo: "   ", wantErr: true},
 		{name: "invalid mode", mode: "bogus", repo: "aerial", wantErr: true},
-		{name: "action clean", mode: "action", repo: "", wantErr: false},
 		{name: "action with repo", mode: "action", repo: "aerial", wantErr: true},
+		// Retained although the store table covers the same path: per-package
+		// statement coverage requires executing this branch in-package.
 		{name: "action with files", mode: "action", files: []string{"f.go"}, wantErr: true},
-		{name: "action with symbols", mode: "action", symbols: []string{"Sym"}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

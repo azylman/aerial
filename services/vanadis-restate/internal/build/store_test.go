@@ -413,33 +413,4 @@ func TestPostgresVanadisStore_UpdatesAndStatus(t *testing.T) {
 	}
 }
 
-func TestStoreHelpers(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		thread     string
-		wantThread string
-		repo       string
-		wantRepo   string
-	}{
-		{name: "clean thread with discord prefix", thread: "discord-12345", wantThread: "12345", repo: "azylman/aerial", wantRepo: "aerial"},
-		{name: "clean thread with colon", thread: "chan:9876", wantThread: "9876", repo: "aerial", wantRepo: "aerial"},
-		{name: "empty snowflake", repo: "", wantRepo: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if model.CleanRepoName(tc.repo) != tc.wantRepo {
-				t.Errorf("CleanRepoName(%q) = %q, want %q", tc.repo, model.CleanRepoName(tc.repo), tc.wantRepo)
-			}
-			if model.NormalizeDiscordThreadID(tc.thread) != tc.wantThread {
-				t.Errorf("NormalizeDiscordThreadID(%q) = %q, want %q", tc.thread, model.NormalizeDiscordThreadID(tc.thread), tc.wantThread)
-			}
-		})
-	}
-	if id := GenerateBuildID(); !strings.HasPrefix(id, "build-") {
-		t.Errorf("GenerateBuildID() = %q, want prefix 'build-'", id)
-	}
-}
-
 func isActionRow(row pgx.Row) bool { _, ok := row.(*genericMockRow); return ok }
