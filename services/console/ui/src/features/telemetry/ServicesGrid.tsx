@@ -33,18 +33,12 @@ export const ServiceCard = memo(function ServiceCard({ name }: { readonly name: 
       onClick={open}
       onKeyDown={(e) => onActivateKey(e, open)}
     >
-      <div className="header">
-        <span className="title">{svc.name}</span>
-        <div className="status-badge-container">
-          <span className={`pulse-dot ${svc.status}`} />
-          <span className={`badge ${svc.status}`}>{svc.status.toUpperCase()}</span>
-        </div>
+      <span className="title">{svc.name}</span>
+      <div className="status-badge-container">
+        <span className="service-uptime">{formatUptime(svc.uptime_seconds)}</span>
+        <span className={`pulse-dot ${svc.status}`} />
+        <span className={`badge ${svc.status}`}>{svc.status.toUpperCase()}</span>
       </div>
-      <div className="service-metrics">
-        <span>UPTIME: {formatUptime(svc.uptime_seconds)}</span>
-        <span>PORT: READY</span>
-      </div>
-      <div className="card-action-hint">CLICK FOR DIAGNOSTICS &rarr;</div>
     </div>
   );
 });
