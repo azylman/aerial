@@ -67,6 +67,11 @@ func decideBatch(cur sessionCursor, batch transcriptwire.TranscriptStepBatch) Ba
 		// at-least-once replay after newer appends landed must not wipe them.
 		// A strictly newer epoch, or a same-epoch rewrite that extends past
 		// the cursor, still performs the delete-then-insert.
+		// Documented limitation: a genuine rewrite landing in the same mtime
+		// tick with no new steps is indistinguishable from a redelivery (the
+		// wire carries no content hash) and resolves as a duplicate. The
+		// build prefers this idempotent overlap over a gap that deletes
+		// already-indexed steps.
 		if batch.FileMtime.After(cur.lastMtime) || batch.LastStep > cur.lastStep {
 			return DecisionReset
 		}
