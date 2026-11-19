@@ -18,8 +18,8 @@ import (
 )
 
 // Session is the live audio bridge managed by CallSessionManager.
-// The concrete bridge implementation lives in the parent package until the
-// session-bridge chunk moves it here; the manager only drives this contract.
+// The concrete bridge implementation lives in this package
+// (session.go/tools.go); the manager only drives this contract.
 type Session interface {
 	ProviderCallSID() string
 	RecordingWAV() []byte

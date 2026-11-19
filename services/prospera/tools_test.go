@@ -247,10 +247,8 @@ func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
 		_ = wsConn.Close()
 	})
 
-	sess := &MediaStreamSession{
-		callID:     callID,
-		geminiConn: wsConn,
-	}
+	sess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: callID})
+	sess.SetGeminiConnForTest(wsConn)
 	handler.sessionMgr.RegisterSession(callID, sess)
 }
 
