@@ -21,28 +21,8 @@ const DefaultConfigPath = config.DefaultConfigPath
 // DefaultTimezone is the fallback timezone for tool invocations when unspecified in tool payload.
 const DefaultTimezone = config.DefaultTimezone
 
-var (
-	defaultConfigPath = config.DefaultConfigPath
-	localConfigPath   = "/local/config.yaml"
-)
+var localConfigPath = "/local/config.yaml"
 
 // Keep the local override path declared for compatibility with
 // pre-extraction callers; resolution itself lives in internal/config.
 var _ = localConfigPath
-
-// ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
-// then /local/config.yaml (if size > 0), falling back to fallbackPath.
-func ResolveConfigPath(fallbackPath string) string {
-	return config.ResolveConfigPath(fallbackPath)
-}
-
-// LoadConfig loads configuration from path using DATABASE_URL from the environment.
-func LoadConfig(path string) (*Config, error) {
-	return config.LoadConfig(path)
-}
-
-// RegisterConfigTokens registers sensitive tokens from Haro's configuration,
-// database credentials, environment variables, and shared secrets into the global redaction pool.
-func RegisterConfigTokens(cfg *Config) {
-	config.RegisterConfigTokens(cfg)
-}

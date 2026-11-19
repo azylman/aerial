@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
+	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/ticker"
@@ -155,7 +156,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, RedactDSN(cfg.DatabaseURL))
+		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, model.RedactDSN(cfg.DatabaseURL))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
@@ -181,7 +182,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 }
 
 var (
-	configPath = defaultConfigPath
+	configPath = config.DefaultConfigPath
 	runAppFn   = RunApp
 	exitFn     = log.Fatalf
 )

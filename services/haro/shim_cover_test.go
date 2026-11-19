@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
 // Regression cover for the root-owned nil-context tolerance on
@@ -20,9 +21,9 @@ func TestShim_NilCtxDefaults(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+			db, err := testutil.OpenSQLiteTestDB(":memory:")
 			if err != nil {
-				t.Fatalf("OpenDB failed: %v", err)
+				t.Fatalf("OpenSQLiteTestDB failed: %v", err)
 			}
 			defer db.Close()
 			switch tc.call {

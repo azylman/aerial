@@ -26,8 +26,3 @@ type (
 	SchedulesResponse         = model.SchedulesResponse
 	ScheduleRunsResponse      = model.ScheduleRunsResponse
 )
-
-// RedactDSN returns a log-safe form of a database DSN.
-func RedactDSN(dsn string) string {
-	return model.RedactDSN(dsn)
-}

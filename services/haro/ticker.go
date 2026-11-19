@@ -11,11 +11,6 @@ package main
 // the server in haro-07a.
 
 import (
-	"context"
-	"database/sql"
-	"time"
-
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/ticker"
 )
@@ -32,19 +27,5 @@ type (
 	HTTPPromptDispatcher   = dispatch.HTTPPromptDispatcher
 )
 
-func NewHTTPPromptDispatcher(brainURL string) *HTTPPromptDispatcher {
-	return dispatch.NewHTTPPromptDispatcher(brainURL)
-}
-
 // Ticker periodically evaluates due schedules and dispatches them.
 type Ticker = ticker.Ticker
-
-// NewTicker returns a Ticker that evaluates schedules on interval.
-func NewTicker(db *sql.DB, dispatcher PromptDispatcher, interval time.Duration) *Ticker {
-	return ticker.NewTicker(db, dispatcher, interval)
-}
-
-// HandleDispatchOutcome updates schedule_runs and monotonically advances heartbeat last_completed_at.
-func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Message) error {
-	return ticker.HandleDispatchOutcome(ctx, database, msg)
-}

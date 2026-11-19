@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/haro/internal/config"
+	"github.com/azylman/aerial/services/haro/internal/server"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
+	"github.com/azylman/aerial/services/haro/internal/ticker"
 )
 
-// TestShim_RootDelegates keeps the zero-logic root shims (kept until the
-// haro-07c purge) coverage-bearing while main.go wires internal packages
-// directly: every delegate below must keep forwarding to its internal owner.
-func TestShim_RootDelegates(t *testing.T) {
+// TestRoot_InternalDelegates exercises the internal packages main.go wires
+// directly (config, ticker, server) from the root test package.
+func TestRoot_InternalDelegates(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
 	_ = os.WriteFile(cfgPath, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\neri_url: \"http://127.0.0.1:59484\"\nvanadis_url: \"http://127.0.0.1:59485\"\n"), 0o644)
@@ -39,27 +41,27 @@ func TestShim_RootDelegates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			switch tc.call {
 			case "resolve":
-				if got := ResolveConfigPath("fallback"); got != tc.wantOut {
-					t.Errorf("ResolveConfigPath() = %q, want %q", got, tc.wantOut)
+				if got := config.ResolveConfigPath("fallback"); got != tc.wantOut {
+					t.Errorf("config.ResolveConfigPath() = %q, want %q", got, tc.wantOut)
 				}
 			case "load":
-				cfg, err := LoadConfig(cfgPath)
+				cfg, err := config.LoadConfig(cfgPath)
 				if err != nil {
-					t.Fatalf("LoadConfig() err = %v", err)
+					t.Fatalf("config.LoadConfig() err = %v", err)
 				}
 				if cfg.Port != tc.wantOut {
-					t.Errorf("LoadConfig().Port = %q, want %q", cfg.Port, tc.wantOut)
+					t.Errorf("config.LoadConfig().Port = %q, want %q", cfg.Port, tc.wantOut)
 				}
 			case "register":
-				RegisterConfigTokens(&Config{Port: "4005", DatabaseURL: "postgres://user:pass@localhost:5432/db"})
+				config.RegisterConfigTokens(&Config{Port: "4005", DatabaseURL: "postgres://user:pass@localhost:5432/db"})
 			case "ticker":
-				if got := NewTicker(nil, nil, time.Second); got == nil {
-					t.Error("NewTicker() = nil, want non-nil ticker")
+				if got := ticker.NewTicker(nil, nil, time.Second); got == nil {
+					t.Error("ticker.NewTicker() = nil, want non-nil ticker")
 				}
 			default:
-				err := HandleOneShotJob(t.Context(), nil, nil, nil)
+				err := server.HandleOneShotJob(t.Context(), nil, nil, nil)
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("HandleOneShotJob() err = %v, want containing %q", err, tc.wantErr)
+					t.Errorf("server.HandleOneShotJob() err = %v, want containing %q", err, tc.wantErr)
 				}
 			}
 		})
@@ -119,7 +121,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		if cfg == nil {
 			return nil, context.DeadlineExceeded
 		}
-		return initTestSQLite(cfg.DatabaseURL) //nolint:contextcheck // test sqlite opener takes no ctx (frozen testutil seam); wrapper must match the openDBFn signature.
+		return testutil.OpenSQLiteTestDB(cfg.DatabaseURL) //nolint:contextcheck // test sqlite opener takes no ctx (frozen testutil seam); wrapper must match the openDBFn signature.
 	}
 	defer func() { openDBFn = origOpenDBFn }()
 
