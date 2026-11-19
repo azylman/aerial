@@ -106,7 +106,7 @@ func executeProxyTest(t *testing.T, tc proxyTestCase) {
 	}
 
 	store := dbtest.NewFakeStore()
-	mux := SetupBrainMux(store, store, pool)
+	mux := SetupBrainMuxWithEmbedder(store, store, pool, nil)
 
 	reqURL := tc.reqPath
 	if tc.reqQuery != "" {

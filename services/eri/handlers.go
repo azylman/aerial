@@ -1391,10 +1391,6 @@ func handleInternalGuardScan() http.HandlerFunc {
 	}
 }
 
-func SetupBrainMux(store db.Store, txStore db.TranscriptStore, pool *queue.WorkerPool, searchPaths ...string) *http.ServeMux {
-	return SetupBrainMuxWithEmbedder(store, txStore, pool, nil, searchPaths...)
-}
-
 func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	_ = searchPaths
 	mux := http.NewServeMux()
