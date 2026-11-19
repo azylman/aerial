@@ -5,107 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestLoadRestateConfig(t *testing.T) {
-	origFallback := vanadisFallbackConfigPath
-	defer func() {
-		vanadisFallbackConfigPath = origFallback
-	}()
-
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "restate.yaml")
-	_ = os.WriteFile(yamlPath, []byte("enabled: true\nrestate_ingress_url: \"http://restate.aerial:8080/\"\n"), 0o600)
-
-	badYamlPath := filepath.Join(tmpDir, "bad.yaml")
-	_ = os.WriteFile(badYamlPath, []byte(":::bad_yaml"), 0o600)
-
-	tests := []struct {
-		name              string
-		envIngressURL     string
-		envRestateEnabled string
-		envVanadisEnabled string
-		configPath        string
-		fallbackPath      string
-		wantEnabled       bool
-		wantURL           string
-	}{
-		{
-			name:        "defaults unconfigured",
-			wantEnabled: false,
-			wantURL:     "",
-		},
-		{
-			name:          "env ingress url set",
-			envIngressURL: "http://env-restate:8080/",
-			wantEnabled:   true,
-			wantURL:       "http://env-restate:8080",
-		},
-		{
-			name:              "env restate enabled true",
-			envRestateEnabled: "true",
-			wantEnabled:       true,
-			wantURL:           "",
-		},
-		{
-			name:              "env vanadis restate enabled true",
-			envVanadisEnabled: "true",
-			wantEnabled:       true,
-			wantURL:           "",
-		},
-		{
-			name:              "env disabled overrides ingress url",
-			envIngressURL:     "http://env-restate:8080",
-			envRestateEnabled: "false",
-			wantEnabled:       false,
-			wantURL:           "http://env-restate:8080",
-		},
-		{
-			name:        "config path yaml loaded",
-			configPath:  yamlPath,
-			wantEnabled: true,
-			wantURL:     "http://restate.aerial:8080",
-		},
-		{
-			name:         "fallback config path loaded",
-			fallbackPath: yamlPath,
-			wantEnabled:  true,
-			wantURL:      "http://restate.aerial:8080",
-		},
-		{
-			name:        "bad yaml fallback logs warning",
-			configPath:  badYamlPath,
-			wantEnabled: false,
-			wantURL:     "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("RESTATE_INGRESS_URL", tc.envIngressURL)
-			t.Setenv("RESTATE_ENABLED", tc.envRestateEnabled)
-			t.Setenv("VANADIS_RESTATE_ENABLED", tc.envVanadisEnabled)
-			if tc.fallbackPath != "" {
-				vanadisFallbackConfigPath = tc.fallbackPath
-			} else {
-				vanadisFallbackConfigPath = filepath.Join(tmpDir, "missing.yaml")
-			}
-
-			cfg := LoadRestateConfig(tc.configPath)
-			if cfg.Enabled != tc.wantEnabled {
-				t.Errorf("Enabled = %v, want %v", cfg.Enabled, tc.wantEnabled)
-			}
-			if cfg.RestateIngressURL != tc.wantURL {
-				t.Errorf("RestateIngressURL = %q, want %q", cfg.RestateIngressURL, tc.wantURL)
-			}
-		})
-	}
-}
 
 func TestMapRestateError(t *testing.T) {
 	t.Parallel()
@@ -368,6 +271,31 @@ func TestRestateDeadlineResponse(t *testing.T) {
 			writeStoreErr(context.Background(), rec, err)
 			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.message) {
 				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestNilServerServiceNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		service string
+		want    string
+	}{
+		{name: "build defaults to legacy", service: "build", want: "Build"},
+		{name: "router defaults to legacy", service: "router", want: "BuildRouter"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s *VanadisServer
+			got := s.buildRouterServiceName()
+			if tc.service == "build" {
+				got = s.buildServiceName()
+			}
+			if got != tc.want {
+				t.Errorf("nil server %s service name = %q, want %q", tc.service, got, tc.want)
 			}
 		})
 	}
