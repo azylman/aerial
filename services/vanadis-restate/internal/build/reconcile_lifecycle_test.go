@@ -1199,3 +1199,100 @@ func TestReconcileErrorsMetric(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, mode, key, body       string
+		nudges                      int
+		code                        int
+		wantError, wantAcknowledged bool
+	}{
+		{"pr accepted", "pr", "c", `{"status":"accepted","dispatch_id":"vanadis-c-turn-0"}`, 0, 202, false, true},
+		{"pr duplicate", "pr", "c", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-0"}`, 0, 200, false, true},
+		{"pr active", "pr", "c", `{"status":"skipped_active"}`, 0, 200, false, false},
+		{"pr wrong accepted", "pr", "c", `{"status":"accepted","dispatch_id":"wrong"}`, 0, 202, true, false},
+		{"pr wrong duplicate", "pr", "c", `{"status":"already_exists","dispatch_id":"wrong"}`, 0, 200, true, false},
+		{"pr malformed", "pr", "c", `invalid`, 0, 200, true, false},
+		{"pr missing status", "pr", "c", `{}`, 0, 200, true, false},
+		{"pr server failure", "pr", "c", `{}`, 0, 500, true, false},
+		{"initial accepted", "action", "c", `{"status":"accepted","dispatch_id":"vanadis-c-turn-0"}`, 0, 202, false, true},
+		{"initial duplicate", "action", "c", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-0"}`, 0, 200, false, true},
+		{"initial active", "action", "c", `{"status":"skipped_active"}`, 0, 200, false, false},
+		{"initial wrong accepted", "action", "c", `{"status":"accepted","dispatch_id":"wrong"}`, 0, 202, true, false},
+		{"initial wrong duplicate", "action", "c", `{"status":"already_exists","dispatch_id":"wrong"}`, 0, 200, true, false},
+		{"initial malformed", "action", "c", `invalid`, 0, 200, true, false},
+		{"initial missing status", "action", "c", `{}`, 0, 200, true, false},
+		{"initial server failure", "action", "c", `{}`, 0, 500, true, false},
+		{"retry accepted", "action", "dispatch:vanadis-c-turn-1", `{"status":"accepted","dispatch_id":"vanadis-c-turn-1"}`, 1, 202, false, true},
+		{"retry duplicate", "action", "dispatch:vanadis-c-turn-1", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-1"}`, 1, 200, false, true},
+		{"retry active", "action", "dispatch:vanadis-c-turn-1", `{"status":"skipped_active"}`, 0, 200, false, false},
+		{"retry wrong accepted", "action", "dispatch:vanadis-c-turn-1", `{"status":"accepted","dispatch_id":"wrong"}`, 1, 202, true, false},
+		{"retry wrong duplicate", "action", "dispatch:vanadis-c-turn-1", `{"status":"already_exists","dispatch_id":"wrong"}`, 1, 200, true, false},
+		{"retry malformed", "action", "dispatch:vanadis-c-turn-1", `invalid`, 1, 200, true, false},
+		{"retry missing status", "action", "dispatch:vanadis-c-turn-1", `{}`, 1, 200, true, false},
+		{"retry server failure", "action", "dispatch:vanadis-c-turn-1", `{}`, 1, 500, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			build := model.VanadisBuild{ID: "b", Status: "running"}
+			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []model.VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, false)
+			assert.Equal(t, tc.wantError, err != nil)
+			assert.Equal(t, tc.wantAcknowledged, out.LaunchedMap[tc.key])
+		})
+	}
+}
+
+func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
+	t.Parallel()
+	accepted := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dispatch" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		var req executor.BrainDispatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		// Eri's active-session gate runs before its duplicate-ID check. Either
+		// persisted generation therefore produces the same ambiguous response.
+		if req.SessionID == "vanadis-retry" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "skipped_active", "dispatch_id": req.ID})
+			return
+		}
+		accepted <- req.ID
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "dispatch_id": req.ID})
+	}))
+	defer srv.Close()
+	build := model.VanadisBuild{ID: "b", Status: "running"}
+	chunks := []model.VanadisChunk{
+		{ID: "retry", Mode: "action", Status: "running", StallNudges: 1},
+		{ID: "sibling", Mode: "action", Status: "pending"},
+		{ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}},
+	}
+	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
+	launched := map[string]bool{}
+	_, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
+	assert.ErrorIs(t, err, executor.ErrDispatchActive)
+	assert.False(t, launched["dispatch:vanadis-retry-turn-1"])
+	assert.True(t, launched["sibling"])
+	select {
+	case id := <-accepted:
+		assert.Equal(t, "vanadis-sibling-turn-0", id)
+	default:
+		t.Error("independent sibling was not accepted")
+	}
+	assert.False(t, launched["dependent"])
+}

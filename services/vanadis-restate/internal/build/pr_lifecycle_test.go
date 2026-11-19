@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -803,6 +804,308 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 			require.Equal(t, statusDeployFailed, st.chunks[0].Status)
 			require.NotNil(t, eri.lastDispatch)
 			require.True(t, rt.attempts["c1"].Delivered)
+		})
+	}
+}
+
+func TestBuildObject_PRRecoveryAfterRejectedCheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, event string }{{"check update", "check_updated"}, {"check failure", "check_failed"}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			parent := "failed"
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}}
+			st := recoveryReadFailureStore{recoveryFixtureStore(&mu, &parent, &chunks, false)}
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"h2"}}`))
+			}))
+			t.Cleanup(api.Close)
+			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec.GitHubAPIURL = api.URL
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+			ctx := mockRunContext{Context: context.Background()}
+			ev := pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2", CheckName: "lint", CheckState: "passed"}
+			if err := bo.handlePREventType(ctx, "b1", "c1", tc.event, ev); !errors.Is(err, errPRTransitionSkipped) {
+				t.Fatalf("check error=%v", err)
+			}
+			if err := bo.handlePREventType(ctx, "b1", "c1", "synchronize", ev); err != nil {
+				t.Fatalf("recovery error=%v", err)
+			}
+			if parent != "running" || chunks[0].Status != "pr_opened" || chunks[0].HeadSHA != "h2" {
+				t.Fatalf("recovered parent=%s chunk=%+v", parent, chunks[0])
+			}
+		})
+	}
+}
+
+func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body, wantParent, wantChunk, wantHead string
+		wantError, wantSkipped                      bool
+	}{
+		{"still closed", `{"state":"closed","merged":false,"head":{"sha":"h2"}}`, "failed", "failed", "h1", true, true},
+		{"inconsistent merged open", `{"state":"open","merged":true,"head":{"sha":"h2"}}`, "failed", "failed", "h1", true, true},
+		{"missing state", `{"merged":false,"head":{"sha":"h2"}}`, "failed", "failed", "h1", true, false},
+		{"missing merged flag", `{"state":"open","head":{"sha":"h2"}}`, "failed", "failed", "h1", true, false},
+		{"reopened on newer head", `{"state":"open","merged":false,"head":{"sha":"h2"}}`, "running", "pr_opened", "h2", false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			parent := "running"
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "pr_opened", HeadSHA: "h1"}}
+			st := recoveryLifecycleStore{recoveryFixtureStore(&mu, &parent, &chunks, false), &parent, &chunks}
+			bo := NewBuildObject("", nil).WithAuthority(st, nil)
+			ctx := mockRunContext{Context: context.Background()}
+			if err := bo.handlePREventType(ctx, "b1", "c1", "closed_unmerged", pubsub.PRLifecycleEvent{HeadSHA: "h2"}); err != nil {
+				t.Fatal(err)
+			}
+			if parent != "failed" || chunks[0].Status != "failed" || chunks[0].HeadSHA != "h1" {
+				t.Fatalf("closure parent=%s chunk=%+v", parent, chunks[0])
+			}
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
+			t.Cleanup(api.Close)
+			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec.GitHubAPIURL = api.URL
+			bo.WithAuthority(st, exec)
+			err := bo.handlePREventType(ctx, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2"})
+			if (err != nil) != tc.wantError || errors.Is(err, errPRTransitionSkipped) != tc.wantSkipped {
+				t.Fatalf("sync error=%v", err)
+			}
+			if parent != tc.wantParent || chunks[0].Status != tc.wantChunk || chunks[0].HeadSHA != tc.wantHead {
+				t.Fatalf("sync parent=%s chunk=%+v", parent, chunks[0])
+			}
+		})
+	}
+}
+
+func TestBuildObject_PRRecoveryWidget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, event, parent string
+		wantWidget          bool
+	}{
+		{"failed synchronize", "synchronize", "failed", true},
+		{"failed opened", "opened", "failed", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, _ := dbScript{buildRow: buildRow("b1", tc.parent), routes: []sqlRoute{{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", Status: "failed"}}}.open()
+			var observed *executor.StatusWidgetRequest
+			eri := &mockEriClient{widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
+				observed = &req
+				return "widget", nil
+			}}
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"new"}}`))
+			}))
+			t.Cleanup(api.Close)
+			exec := executor.NewExecutor("", eri, nil, "", nil)
+			exec.GitHubAPIURL = api.URL
+			exec.HTTPClient = api.Client()
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+			err := bo.OnPREvent(makeObjectMockContext(t, "b1"), pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, Event: tc.event, HeadSHA: "new"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed == nil || observed.Status != "failed" || len(observed.Chunks) != 2 || observed.Chunks[0].Status != "open" {
+				t.Fatalf("widget=%+v", observed)
+			}
+		})
+	}
+}
+
+func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Unix(1700000000, 0).UTC()
+	validGitHubPR := `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"Summary\n\n<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`
+	prEv := func(ev, branch, sha, target string, pr int) pubsub.PRLifecycleEvent {
+		return pubsub.PRLifecycleEvent{Event: ev, Repo: "external/aerial", PRNumber: pr, Branch: branch, HeadSHA: sha, TargetID: target}
+	}
+	ch := func(id, status string, pr int, started time.Time) []model.VanadisChunk {
+		return []model.VanadisChunk{{ID: id, BuildID: "b1", Mode: "pr", Status: status, Repo: "external/aerial", PRNumber: pr, StartedAt: started}}
+	}
+
+	tests := []struct {
+		name           string
+		event          pubsub.PRLifecycleEvent
+		chunks         []model.VanadisChunk
+		ghResponse     string
+		withoutExec    bool
+		wantAttached   string
+		wantAttachedPR int
+		wantWidgetSync bool
+		wantFailed     string
+		widgetErr      error
+	}{
+		{"early opened attached via verified PR", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "chunk-1", 101, true, "", nil},
+		{"fork contributor PR rejected on close", prEv("closed_unmerged", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"closed","merged":false,"author_association":"FIRST_TIME_CONTRIBUTOR","user":{"login":"attacker"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-bad","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":true,"full_name":"attacker/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"untrusted author association rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 103), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"NONE","user":{"login":"stranger"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"missing dispatch trailer rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 104), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"manual PR","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"unstarted chunk rejected before dispatch", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 105), ch("chunk-1", statusRunning, 0, time.Time{}), validGitHubPR, false, "", 0, false, "", nil},
+		{"superseded pr rejected when chunk has different pr", prEv("closed_unmerged", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 101), ch("chunk-1", statusRunning, 200, startedAt), validGitHubPR, false, "", 0, false, "", nil},
+		{"ineligible chunk status rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 101), ch("chunk-1", statusCompleted, 0, startedAt), validGitHubPR, false, "", 0, false, "", nil},
+		{"unmatched pr event without branch encoding", prEv("opened", "main", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, "", nil},
+		{"target chunk absent in chunks list", prEv("opened", "feat/aerial-pr-vanadis-chunk-99-abcdef", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, "", nil},
+		{"collaborator author accepted with matching sha", prEv("check_updated", "feat/aerial-pr-vanadis-chunk-1-abcdef", "sha-1", "th-1", 101), ch("chunk-1", statusCoding, 0, startedAt), `{"state":"open","merged":false,"author_association":"COLLABORATOR","user":{"login":"aerial-bot"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, "", nil},
+		{"nonencoded branch resolved via unambiguous thread and verified trailer", prEv("ci_failed", "feat/custom-branch", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, "", nil},
+		{"absent event branch resolved via unambiguous thread and verified trailer", prEv("conflict", "", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, "", nil},
+		{"nonencoded branch rejected without trailer", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"manual PR","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"nonencoded branch rejected when parallel chunks ambiguous", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), []model.VanadisChunk{{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "external/aerial", StartedAt: startedAt}, {ID: "chunk-2", BuildID: "b1", Mode: "pr", Status: statusCoding, Repo: "external/aerial", StartedAt: startedAt}}, `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"mismatched head repository rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"other/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"mismatched head branch ref rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-2-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"mismatched head sha rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "sha-other", "", 102), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, "", nil},
+		{"mismatched event target thread rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "th-wrong", 102), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, "", nil},
+		{"mismatched trailer chunk id rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-other\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, "", nil},
+		{"nil executor refuses unverified attachment", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, true, "", 0, false, "", nil},
+		{"widget sync failure still attaches", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "chunk-1", 101, false, "", errors.New("widget down")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &unattachedPREventSpyStore{chunks: tc.chunks}
+			var exec *executor.Executor
+			if !tc.withoutExec {
+				api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					fmt.Fprint(w, tc.ghResponse)
+				}))
+				t.Cleanup(api.Close)
+				eri := &mockEriClient{
+					widgetFn: func(context.Context, executor.StatusWidgetRequest) (string, error) {
+						return "msg-1", tc.widgetErr
+					},
+				}
+				exec = executor.NewExecutor(t.TempDir(), eri, nil, "token", api.Client())
+				exec.GitHubAPIURL = api.URL
+			}
+			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
+			ctx := makeObjectMockContext(t, "b1")
+
+			assert.NoError(t, bo.OnPREvent(ctx, tc.event))
+			assert.Equal(t, tc.wantAttached, spy.attachedChunkID)
+			assert.Equal(t, tc.wantFailed, spy.failedChunkID)
+			if tc.wantAttached != "" {
+				assert.Equal(t, tc.wantAttachedPR, spy.attachedPR)
+				assert.Equal(t, tc.event.Repo, spy.attachedRepo)
+			}
+			if tc.wantWidgetSync {
+				assert.Positive(t, spy.syncWidgetCalls)
+			}
+		})
+	}
+}
+
+func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
+	t.Parallel()
+
+	errBuild := errors.New("build db error")
+	errAttach := errors.New("attach generic error")
+	startedAt := time.Unix(1700000000, 0).UTC()
+	validGitHubPR := `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"azylman"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"azylman/aerial"}},"base":{"repo":{"full_name":"azylman/aerial"}}}`
+
+	tests := []struct {
+		name        string
+		event       pubsub.PRLifecycleEvent
+		getBuildErr error
+		attachErr   error
+		ghStatus    int
+		wantErr     bool
+	}{
+		{
+			name: "get build error propagates",
+			event: pubsub.PRLifecycleEvent{
+				Event:    "opened",
+				Repo:     "aerial",
+				PRNumber: 101,
+				Branch:   "feat/aerial-pr-vanadis-chunk-1-abcdef",
+			},
+			getBuildErr: errBuild,
+			ghStatus:    http.StatusOK,
+			wantErr:     true,
+		},
+		{
+			name: "get build not found returns nil",
+			event: pubsub.PRLifecycleEvent{
+				Event:    "opened",
+				Repo:     "aerial",
+				PRNumber: 101,
+				Branch:   "feat/aerial-pr-vanadis-chunk-1-abcdef",
+			},
+			getBuildErr: store.ErrBuildNotFound,
+			ghStatus:    http.StatusOK,
+			wantErr:     false,
+		},
+		{
+			name: "github verification failure propagates retryable error",
+			event: pubsub.PRLifecycleEvent{
+				Event:    "opened",
+				Repo:     "aerial",
+				PRNumber: 101,
+				Branch:   "feat/aerial-pr-vanadis-chunk-1-abcdef",
+			},
+			ghStatus: http.StatusServiceUnavailable,
+			wantErr:  true,
+		},
+		{
+			name: "attach chunk conflict swallowed",
+			event: pubsub.PRLifecycleEvent{
+				Event:    "opened",
+				Repo:     "aerial",
+				PRNumber: 101,
+				Branch:   "feat/aerial-pr-vanadis-chunk-1-abcdef",
+			},
+			attachErr: store.ErrBuildConflict,
+			ghStatus:  http.StatusOK,
+			wantErr:   false,
+		},
+		{
+			name: "attach chunk generic error propagates",
+			event: pubsub.PRLifecycleEvent{
+				Event:    "opened",
+				Repo:     "aerial",
+				PRNumber: 101,
+				Branch:   "feat/aerial-pr-vanadis-chunk-1-abcdef",
+			},
+			attachErr: errAttach,
+			ghStatus:  http.StatusOK,
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.ghStatus)
+				fmt.Fprint(w, validGitHubPR)
+			}))
+			t.Cleanup(api.Close)
+			exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", api.Client())
+			exec.GitHubAPIURL = api.URL
+			spy := &unattachedPREventSpyStore{
+				chunks: []model.VanadisChunk{
+					{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "aerial", PRNumber: 0, StartedAt: startedAt},
+				},
+				getBuildErr: tc.getBuildErr,
+				attachErr:   tc.attachErr,
+			}
+			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
+			ctx := makeObjectMockContext(t, "b1")
+
+			err := bo.OnPREvent(ctx, tc.event)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
