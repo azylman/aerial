@@ -54,12 +54,11 @@ describe('Header', () => {
 
   it('matches the static header before any data arrives', () => {
     render(<Header />);
-    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('AERIAL v3.0');
-    expect(screen.getByText('PERMET COMMAND HUD // TACTICAL GATEWAY')).toBeTruthy();
-    expect(screen.getByText('LVL 5 // ACTIVE')).toBeTruthy();
-    expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '0', SCHEDULES: '0', 'MEMORY ARCHIVE': '0', 'BUILD QUEUE': '0', DOCKET: null });
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Aerial Console');
+    expect(screen.getByText('Ready')).toBeTruthy();
+    expect(badges()).toEqual({ Overview: null, Tasks: '0', Schedules: '0', Memory: '0', Builds: '0', Docket: null });
     expect(screen.queryByRole('navigation', { name: 'Tactical Gateway Launcher' })).toBeNull();
-    const telemetry = screen.getByRole('tab', { name: /TELEMETRY/ });
+    const telemetry = screen.getByRole('tab', { name: /Overview/ });
     expect(telemetry.getAttribute('aria-selected')).toBe('true');
     expect(telemetry.getAttribute('aria-controls')).toBe('telemetry-view');
   });
@@ -73,8 +72,8 @@ describe('Header', () => {
       s.setFacts(FACTS);
       s.setBuilds(BUILDS);
     });
-    expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '2', SCHEDULES: '40', 'MEMORY ARCHIVE': '150', 'BUILD QUEUE': '5', DOCKET: null });
-    const score = screen.getByText('LVL 3 // STABLE');
+    expect(badges()).toEqual({ Overview: null, Tasks: '2', Schedules: '40', Memory: '150', Builds: '5', Docket: null });
+    const score = screen.getByText('3 / 4 Healthy');
     expect(score.getAttribute('style')).toContain('var(--accent-amber)');
 
     const dock = screen.getByRole('navigation', { name: 'Tactical Gateway Launcher' });
@@ -90,14 +89,14 @@ describe('Header', () => {
   it('clicking a tab navigates through the store', () => {
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
     render(<Header />);
-    act(() => screen.getByRole('tab', { name: /BUILD QUEUE/ }).click());
+    act(() => screen.getByRole('tab', { name: /Builds/ }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('builds');
-    expect(screen.getByRole('tab', { name: /BUILD QUEUE/ }).className).toBe('view-tab-btn active');
-    expect(screen.getByRole('tab', { name: /TELEMETRY/ }).getAttribute('aria-selected')).toBe('false');
+    expect(screen.getByRole('tab', { name: /Builds/ }).className).toBe('view-tab-btn active');
+    expect(screen.getByRole('tab', { name: /Overview/ }).getAttribute('aria-selected')).toBe('false');
     expect(scrollTo).not.toHaveBeenCalled();
 
     Object.defineProperty(window, 'scrollY', { value: 240, configurable: true });
-    act(() => screen.getByRole('tab', { name: /BUILD QUEUE/ }).click());
+    act(() => screen.getByRole('tab', { name: /Builds/ }).click());
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: 'instant' });
     Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
   });
