@@ -645,6 +645,10 @@ func findTranscriptFile(brainDir, sessionID string, extraDirs ...string) string 
 	return findMuseTranscriptFile(brainDir, sessionID, extraDirs...)
 }
 
+func FindTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	return findTranscriptFile(brainDir, sessionID, extraDirs...)
+}
+
 type transcriptScanState struct {
 	parsedSteps      []rawTranscriptStep
 	firstParsedStep  int
