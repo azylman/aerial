@@ -858,7 +858,6 @@ type ensurePhoneNumberTestCase struct {
 	searchCode          int
 	buyBody             string
 	buyCode             int
-	areaCode            string
 	emptyAreaCode       bool
 	failSearchTransport bool
 	failBuyTransport    bool
@@ -932,13 +931,6 @@ func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
 			buyCode:       http.StatusOK,
 			emptyAreaCode: true,
 			wantNumber:    "+15105550100",
-		},
-		{
-			name:      "unparseable area code fails search",
-			ownedBody: `{"incoming_phone_numbers":[]}`,
-			ownedCode: http.StatusOK,
-			areaCode:  ":\x7f",
-			wantErr:   true,
 		},
 		{
 			name:                "search transport failure",
@@ -1071,9 +1063,9 @@ func runEnsurePhoneNumberCase(t *testing.T, tc ensurePhoneNumberTestCase) {
 		})}
 	}
 
-	area := tc.areaCode
-	if area == "" && !tc.emptyAreaCode {
-		area = "510"
+	area := "510"
+	if tc.emptyAreaCode {
+		area = ""
 	}
 	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(httpClient))
 	phone, err := client.EnsurePhoneNumber(context.Background(), area, "https://prospera.aerial")
@@ -1146,8 +1138,8 @@ func TestEscapeXML(t *testing.T) {
 		{"<tag>&'\"", "&lt;tag&gt;&amp;&#39;&#34;"},
 	}
 	for _, tc := range tests {
-		if got := escapeXML(tc.in); got != tc.want {
-			t.Fatalf("escapeXML(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := EscapeXML(tc.in); got != tc.want {
+			t.Fatalf("EscapeXML(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

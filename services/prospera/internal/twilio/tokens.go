@@ -143,9 +143,6 @@ func EscapeXML(s string) string {
 	return xmlEscaper.Replace(s)
 }
 
-// escapeXML is the package-internal alias used by moved tests.
-var escapeXML = EscapeXML
-
 // GenerateConnectStreamTwiML generates XML-escaped TwiML connecting the call to a Media Stream WebSocket.
 func GenerateConnectStreamTwiML(wsURL string) string {
 	return fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n  <Connect>\n    <Stream url=\"%s\" />\n  </Connect>\n</Response>", EscapeXML(wsURL))

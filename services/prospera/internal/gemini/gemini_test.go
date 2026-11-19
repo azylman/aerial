@@ -169,17 +169,18 @@ func TestBuildGeminiMessages(t *testing.T) {
 }
 
 type consultTestCase struct {
-	name         string
-	overrideURL  string
-	sessionID    string
-	startISO     string
-	endISO       string
-	statusCode   int
-	respBody     string
-	failFollowup bool
-	truncateBody bool
-	wantSubstr   string
-	wantErr      bool
+	name                  string
+	overrideURL           string
+	sessionID             string
+	startISO              string
+	endISO                string
+	statusCode            int
+	respBody              string
+	failFollowup          bool
+	failNotificationsOnly bool
+	truncateBody          bool
+	wantSubstr            string
+	wantErr               bool
 }
 
 func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
@@ -250,12 +251,12 @@ func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
 				wantErr:      true,
 			},
 			{
-				name:         "calendar notifications init 500 with session",
-				sessionID:    "mcp-sess-9",
-				statusCode:   http.StatusOK,
-				respBody:     `{"jsonrpc":"2.0","id":1,"result":{}}`,
-				failFollowup: true,
-				wantErr:      true,
+				name:                  "calendar notifications init 500 with session",
+				sessionID:             "mcp-sess-9",
+				statusCode:            http.StatusOK,
+				respBody:              `{"jsonrpc":"2.0","id":1,"result":{}}`,
+				failNotificationsOnly: true,
+				wantErr:               true,
 			},
 			{
 				name:         "calendar truncated body read error",
@@ -336,6 +337,17 @@ func handleConsultCalendarMock(t *testing.T, w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	if tc.truncateBody {
 		w.Header().Set("Content-Length", "100")
+	}
+	if tc.failNotificationsOnly {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("notifications/initialized")) {
+			http.Error(w, "notifications failed", http.StatusInternalServerError)
+			return
+		}
+		if bytes.Contains(body, []byte(`"id":2`)) {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Sunday is free"}]}}`))
+			return
+		}
 	}
 	if tc.failFollowup {
 		body, _ := io.ReadAll(r.Body)
