@@ -518,15 +518,6 @@ func testDBStandaloneFunctions(ctx context.Context, t *testing.T, db, closedDB *
 	if claimed, err := ClaimEventTriggers(ctx, db, "", nil, ""); err != nil || len(claimed) != 0 {
 		t.Errorf("expected empty, nil for empty ClaimEventTriggers, got %v, %v", claimed, err)
 	}
-	if isSQLiteDB(nil) {
-		t.Error("expected false for nil db")
-	}
-	if pgdb, err := sql.Open("pgx", "postgres://mock:mock@127.0.0.1:5432/mock"); err == nil {
-		if isSQLiteDB(pgdb) {
-			t.Error("expected false for pgx driver")
-		}
-		_ = pgdb.Close()
-	}
 	if _, err := DeleteOneShotSchedule(ctx, db, ""); err == nil {
 		t.Error("expected error for empty id in DeleteOneShotSchedule")
 	}
@@ -539,14 +530,9 @@ func testDBStandaloneFunctions(ctx context.Context, t *testing.T, db, closedDB *
 	if _, err := HasRunningHeartbeatRun(ctx, closedDB, "sched-1", time.Now()); err == nil {
 		t.Error("expected error for closed db in HasRunningHeartbeatRun")
 	}
-	func() {
-		oldFn := isSQLiteDBFn
-		isSQLiteDBFn = func(*sql.DB) bool { return false }
-		defer func() { isSQLiteDBFn = oldFn }()
-		if _, err := ClaimEventTriggers(ctx, closedDB, "camera", []string{"garage"}, "person_arrived"); err == nil {
-			t.Error("expected error from closed db on Postgres query path")
-		}
-	}()
+	if _, err := ClaimEventTriggers(ctx, closedDB, "camera", []string{"garage"}, "person_arrived"); err == nil {
+		t.Error("expected error from closed db on claim path")
+	}
 	_ = NewToolHandler(&Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
 }
 

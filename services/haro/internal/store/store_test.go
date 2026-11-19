@@ -561,6 +561,57 @@ func TestDeleteOneShotSchedule(t *testing.T) {
 	}
 }
 
+func TestDeleteByID(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name        string
+		query       string
+		emptyErrMsg string
+		errPrefix   string
+		id          string
+		seed        bool
+		nilDB       bool
+		closedDB    bool
+		wantDeleted bool
+		wantErr     string
+	}{
+		{"nil db errors", "DELETE FROM one_shot_schedules WHERE id = $1", "", "", "s-1", false, true, false, false, "database is nil"},
+		{"empty id custom message", "DELETE FROM one_shot_schedules WHERE id = $1", "custom id required", "", "   ", false, false, false, false, "custom id required"},
+		{"closed db prefixed error", "DELETE FROM one_shot_schedules WHERE id = $1", "", "failed to delete test item", "s-1", false, false, true, false, "failed to delete test item"},
+		{"deletes existing", "DELETE FROM one_shot_schedules WHERE id = $1", "", "", "s-1", true, false, false, true, ""},
+		{"missing returns false", "DELETE FROM one_shot_schedules WHERE id = $1", "", "", "missing", false, false, false, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			if tc.seed {
+				mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-1", ThreadID: "th", Prompt: "p", RunAt: now})
+			}
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			if tc.closedDB {
+				_ = db.Close()
+			}
+			deleted, err := deleteByID(ctx, database, tc.query, tc.emptyErrMsg, tc.errPrefix, tc.id)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("deleteByID err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("deleteByID err = %v", err)
+			}
+			if deleted != tc.wantDeleted {
+				t.Errorf("deleted = %v, want %v", deleted, tc.wantDeleted)
+			}
+		})
+	}
+}
+
 func TestHeartbeatScheduleRoundTrip(t *testing.T) {
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
@@ -722,6 +773,36 @@ func TestGetDueSchedules(t *testing.T) {
 			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), now.Add(time.Hour))
 			if gotID := fetchDueID(ctx, t, db, tc.kind, now); gotID != tc.wantID {
 				t.Errorf("due ID = %q, want %q", gotID, tc.wantID)
+			}
+		})
+	}
+}
+
+func TestGetDueSchedulesScanErrors(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	tests := []struct {
+		name   string
+		kind   string
+		badSQL string
+	}{
+		{"cron bad row fails scan", "cron", `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 0, TRUE, CURRENT_TIMESTAMP, 'medium')`},
+		{"heartbeat bad row fails scan", "heartbeat", `INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ('h-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'low', 0, TRUE, CURRENT_TIMESTAMP)`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			if _, err := db.ExecContext(ctx, tc.badSQL); err != nil {
+				t.Fatalf("insert bad row err = %v", err)
+			}
+			var err error
+			if tc.kind == "cron" {
+				_, err = GetDueCronSchedules(ctx, db, now)
+			} else {
+				_, err = GetDueHeartbeatSchedules(ctx, db, now)
+			}
+			if err == nil || !strings.Contains(err.Error(), "Scan error") {
+				t.Errorf("due scan err = %v, want Scan error", err)
 			}
 		})
 	}
