@@ -227,7 +227,11 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 
 	// 2. Near-duplicate deduplication via cosine similarity threshold (0.85)
 	dup, sim, err := h.store.FindDuplicateFact(ctx, emb, 0.85)
-	if err == nil && dup != nil {
+	if err != nil {
+		RecordOperation("store", "error", time.Since(start).Seconds())
+		return MemoryStoreOutput{}, fmt.Errorf("failed to check duplicate facts: %w", err)
+	}
+	if dup != nil {
 		log.Printf("[Memory] Reinforcing duplicate fact %d (sim=%.2f, text=%q)", dup.ID, sim, dup.FactText)
 		if err = h.store.ReinforceFact(ctx, dup.ID); err != nil {
 			RecordOperation("store", "error", time.Since(start).Seconds())

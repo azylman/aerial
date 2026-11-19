@@ -106,8 +106,8 @@ func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID st
 
 	var lastRowID int64
 	var factExtractedAt FactTime
-	query := `SELECT COALESCE(last_extracted_rowid, 0), fact_extracted_at FROM extraction_watermarks WHERE thread_id = $1`
-	err := s.db.QueryRowContext(queryCtx, query, threadID).Scan(&lastRowID, &factExtractedAt)
+	query := `SELECT COALESCE(last_extracted_rowid, 0), fact_extracted_at FROM extraction_watermarks WHERE stack = $1 AND thread_id = $2`
+	err := s.db.QueryRowContext(queryCtx, query, s.effectiveStack(), threadID).Scan(&lastRowID, &factExtractedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil, nil
@@ -128,8 +128,8 @@ func (s *SQLStore) getWatermarkMap(ctx context.Context) (map[string]int64, error
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks`
-	rows, err := s.db.QueryContext(queryCtx, query)
+	query := `SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks WHERE stack = $1`
+	rows, err := s.db.QueryContext(queryCtx, query, s.effectiveStack())
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +194,7 @@ func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, acti
 }
 
 // GetUnextractedAdminTurns retrieves completed admin turns for threadID that haven't been extracted.
-func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
+func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
@@ -206,8 +206,13 @@ func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string
 		return nil, err
 	}
 
-	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&is_admin=true&after_row_id=%d&limit=50",
-		s.getBrainURL(), url.QueryEscape(threadID), lastRowID)
+	batchLimit := 50
+	if len(limit) > 0 && limit[0] > 0 {
+		batchLimit = limit[0]
+	}
+
+	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&is_admin=true&after_row_id=%d&order=asc&limit=%d",
+		s.getBrainURL(), url.QueryEscape(threadID), lastRowID, batchLimit)
 
 	tasks, err := s.fetchTasks(ctx, endpoint)
 	if err != nil {
@@ -263,13 +268,13 @@ func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO extraction_watermarks (thread_id, last_extracted_rowid, fact_extracted_at, updated_at)
-	VALUES ($1, $2, $3, $4)
-	ON CONFLICT(thread_id) DO UPDATE SET
-	  last_extracted_rowid = CASE WHEN EXCLUDED.last_extracted_rowid > extraction_watermarks.last_extracted_rowid THEN EXCLUDED.last_extracted_rowid ELSE extraction_watermarks.last_extracted_rowid END,
+	query := `INSERT INTO extraction_watermarks (stack, thread_id, last_extracted_rowid, fact_extracted_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5)
+	ON CONFLICT (stack, thread_id) DO UPDATE SET
+	  last_extracted_rowid = GREATEST(extraction_watermarks.last_extracted_rowid, EXCLUDED.last_extracted_rowid),
 	  fact_extracted_at = EXCLUDED.fact_extracted_at,
 	  updated_at = EXCLUDED.updated_at`
-	_, err := s.db.ExecContext(queryCtx, query, threadID, maxRowID, now, now)
+	_, err := s.db.ExecContext(queryCtx, query, s.effectiveStack(), threadID, maxRowID, now, now)
 	return err
 }
 
@@ -505,6 +510,14 @@ func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID stri
 	}
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil, nil
+	}
+
+	if s.indexerClient != nil {
+		tc, tcErr := s.indexerClient.GetTrajectoryContext(ctx, threadID)
+		if tcErr != nil {
+			return nil, nil, tcErr
+		}
+		return tc.RetrievedFacts, tc.ToolCalls, nil
 	}
 
 	_, factExtractedAt, err := s.GetConversationFactWatermark(ctx, threadID)
