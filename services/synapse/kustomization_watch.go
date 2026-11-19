@@ -7,109 +7,48 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"maps"
-	"net/http"
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/flux"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
-
-const (
-	watchEventDeleted = "DELETED"
-)
-
-// errWatchExpired signals that the watch resourceVersion is gone (410) and the watcher must re-list.
-var errWatchExpired = errors.New("kube watch resourceVersion expired")
 
 // kustomizationObservation is the live state of one Flux Kustomization as seen by a LIST or WATCH.
-type kustomizationObservation struct {
-	Ref                    fluxKustomizationRef
-	Suspended              bool
-	RequestedAt            string
-	LastHandledReconcileAt string
-	LastAppliedRevision    string
-	SourceRef              fluxSourceRef
-	Conditions             []fluxCondition
-}
+type kustomizationObservation = model.KustomizationObservation
 
 // kustomizationRequestHandled reports whether Flux has handled a reconcile request recorded as
 // requestedAt: lastHandledReconcileAt at or after it means handled, because a later request (from
 // another PR) supersedes an earlier one. Unparseable values fall back to string equality.
 func kustomizationRequestHandled(requestedAt, lastHandledReconcileAt string) bool {
-	requested, rErr := time.Parse(time.RFC3339Nano, requestedAt)
-	handled, hErr := time.Parse(time.RFC3339Nano, lastHandledReconcileAt)
-	if rErr != nil || hErr != nil {
-		return requestedAt == lastHandledReconcileAt
-	}
-	return !handled.Before(requested)
+	return flux.KustomizationRequestHandled(requestedAt, lastHandledReconcileAt)
 }
 
 // kustomizationReady classifies the Ready condition: ready on True; failed on False with a terminal
 // reason. Unknown, Progressing and DependencyNotReady are neither, since Flux requeues and writes status
 // again, producing the next watch event.
 func kustomizationReady(conditions []fluxCondition) (ready, failed bool, reason string) {
-	i := slices.IndexFunc(conditions, func(c fluxCondition) bool { return c.Type == "Ready" })
-	if i == -1 {
-		return false, false, ""
-	}
-	c := conditions[i]
-	reason = c.Reason
-	if c.Message != "" {
-		reason = cmp.Or(c.Reason, "Ready=False") + ": " + c.Message
-	}
-	switch {
-	case c.Status == "True":
-		return true, false, reason
-	case c.Status != "False", c.Reason == reasonProgressing, c.Reason == "DependencyNotReady":
-		return false, false, reason
-	default:
-		return false, true, reason
-	}
+	return flux.KustomizationReady(conditions)
 }
 
-type kustomizationActionKind int
-
 const (
-	kustomizationWait kustomizationActionKind = iota
-	kustomizationMarkDeployed
-	kustomizationFail
-	kustomizationRepatch
+	kustomizationWait         = flux.KustomizationWait
+	kustomizationMarkDeployed = flux.KustomizationMarkDeployed
+	kustomizationFail         = flux.KustomizationFail
+	kustomizationRepatch      = flux.KustomizationRepatch
 )
 
 // kustomizationAction is what a PR rollout must do about one observed Kustomization.
-type kustomizationAction struct {
-	Kind   kustomizationActionKind
-	Reason string
-}
+type kustomizationAction = flux.KustomizationAction
 
 // kustomizationRequestAction decides how an observation affects a recorded reconcile request.
 func kustomizationRequestAction(recorded kustomizationRequest, obs kustomizationObservation) kustomizationAction {
-	if kustomizationRequestHandled(recorded.RequestedAt, obs.LastHandledReconcileAt) {
-		ready, failed, reason := kustomizationReady(obs.Conditions)
-		switch {
-		case ready:
-			return kustomizationAction{Kind: kustomizationMarkDeployed}
-		case failed:
-			return kustomizationAction{Kind: kustomizationFail, Reason: reason}
-		default:
-			return kustomizationAction{Kind: kustomizationWait}
-		}
-	}
-	if obs.Suspended {
-		return kustomizationAction{Kind: kustomizationFail, Reason: "Kustomization suspended"}
-	}
-	// The annotation at or after the recorded value means this (or a newer) request is pending in Flux;
-	// anything older means the patch was lost and the recorded value must be re-applied.
-	if kustomizationRequestHandled(recorded.RequestedAt, obs.RequestedAt) {
-		return kustomizationAction{Kind: kustomizationWait}
-	}
-	return kustomizationAction{Kind: kustomizationRepatch}
+	return flux.KustomizationRequestAction(recorded, obs)
 }
 
 // rolloutSink receives the level-triggered state of every watched Kustomization, and reports whether
@@ -121,14 +60,28 @@ type rolloutSink interface {
 	hasPendingRollouts(ctx context.Context) (bool, error)
 }
 
-// kubeWatchSource is one kube collection driven by the informer loop: list applies the full state and
-// returns its resourceVersion, watch streams changes from it, and apply handles one change event.
-type kubeWatchSource interface {
-	String() string
-	list(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) (string, error)
-	watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error)
-	apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, object json.RawMessage) error
+type rolloutSinkAdapter struct {
+	inner rolloutSink
 }
+
+func (a rolloutSinkAdapter) ApplyKustomizationList(ctx context.Context, namespace string, observations []model.KustomizationObservation) error {
+	return a.inner.applyKustomizationList(ctx, namespace, observations)
+}
+
+func (a rolloutSinkAdapter) ApplyKustomizationStatus(ctx context.Context, obs model.KustomizationObservation) error {
+	return a.inner.applyKustomizationStatus(ctx, obs)
+}
+
+func (a rolloutSinkAdapter) ApplyKustomizationDeleted(ctx context.Context, ref model.FluxKustomizationRef) error {
+	return a.inner.applyKustomizationDeleted(ctx, ref)
+}
+
+func (a rolloutSinkAdapter) HasPendingRollouts(ctx context.Context) (bool, error) {
+	return a.inner.hasPendingRollouts(ctx)
+}
+
+// kubeWatchSource is one kube collection driven by the informer loop.
+type kubeWatchSource = flux.KubeWatchSource
 
 // kustomizationSource watches one namespace's Kustomizations and applies each observation.
 type kustomizationSource struct {
@@ -137,284 +90,66 @@ type kustomizationSource struct {
 
 func (k kustomizationSource) String() string { return k.namespace + " kustomizations" }
 
-func (k kustomizationSource) list(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) (string, error) {
-	observations, resourceVersion, err := kube.ListKustomizations(ctx, k.namespace)
-	if err != nil {
-		return "", err
-	}
-	if err := sink.applyKustomizationList(ctx, k.namespace, observations); err != nil {
-		return "", fmt.Errorf("apply kustomization list: %w", err)
-	}
-	return resourceVersion, nil
+func (k kustomizationSource) List(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink) (string, error) {
+	return flux.KustomizationSource{Namespace: k.namespace}.List(ctx, client, sink)
 }
 
-func (k kustomizationSource) watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error) {
-	return kube.WatchKustomizations(ctx, k.namespace, resourceVersion)
+func (k kustomizationSource) Watch(ctx context.Context, client flux.KubeClient, resourceVersion string) (io.ReadCloser, error) {
+	return flux.KustomizationSource{Namespace: k.namespace}.Watch(ctx, client, resourceVersion)
 }
 
-func (k kustomizationSource) apply(ctx context.Context, _ *DefaultOutboundDispatcher, sink rolloutSink, eventType string, object json.RawMessage) error {
-	var obj fluxKustomizationObject
-	if err := json.Unmarshal(object, &obj); err != nil {
-		return fmt.Errorf("decode %s kustomization: %w", eventType, err)
-	}
-	obs := obj.observation(k.namespace)
-	if eventType == watchEventDeleted {
-		return sink.applyKustomizationDeleted(ctx, obs.Ref)
-	}
-	return sink.applyKustomizationStatus(ctx, obs)
+func (k kustomizationSource) Apply(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink, eventType string, object json.RawMessage) error {
+	return flux.KustomizationSource{Namespace: k.namespace}.Apply(ctx, client, sink, eventType, object)
 }
 
-// workloadSource watches the Flux-managed workloads at path. A Kustomization that is already Ready emits
-// no further event, so every workload change re-lists flux-system Kustomizations while a rollout is
-// pending, letting a request gated on workload rollout complete once its workloads become available.
+// workloadSource watches the Flux-managed workloads at path.
 type workloadSource struct {
 	path string
 }
 
 func (w workloadSource) String() string { return w.path }
 
-func (w workloadSource) list(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) (string, error) {
-	resourceVersion, err := kube.ListFluxWorkloadsVersion(ctx, w.path)
-	if err != nil {
-		return "", err
-	}
-	return resourceVersion, recheckPendingRollouts(ctx, kube, sink)
+func (w workloadSource) List(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink) (string, error) {
+	return flux.WorkloadSource{Path: w.path}.List(ctx, client, sink)
 }
 
-func (w workloadSource) watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error) {
-	return kube.WatchFluxWorkloads(ctx, w.path, resourceVersion)
+func (w workloadSource) Watch(ctx context.Context, client flux.KubeClient, resourceVersion string) (io.ReadCloser, error) {
+	return flux.WorkloadSource{Path: w.path}.Watch(ctx, client, resourceVersion)
 }
 
-func (workloadSource) apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, _ json.RawMessage) error {
-	if eventType == watchEventDeleted {
-		return nil
-	}
-	return recheckPendingRollouts(ctx, kube, sink)
+func (w workloadSource) Apply(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink, eventType string, object json.RawMessage) error {
+	return flux.WorkloadSource{Path: w.path}.Apply(ctx, client, sink, eventType, object)
 }
 
-// recheckPendingRollouts re-lists flux-system Kustomizations while any PR rollout is pending, so requests
-// gated on workload rollout re-evaluate against current state.
-func recheckPendingRollouts(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) error {
-	pending, err := sink.hasPendingRollouts(ctx)
-	if err != nil || !pending {
-		return err
-	}
-	if _, err := (kustomizationSource{namespace: fluxSystemNamespace}).list(ctx, kube, sink); err != nil {
-		return fmt.Errorf("re-evaluate rollouts: %w", err)
-	}
-	return nil
-}
-
-// runRolloutRechecks re-evaluates pending rollouts on every tick until ctx ends or ticks closes, so
-// time-based outcomes such as a Reloader restart timeout fire even when no watched object changes.
+// runRolloutRechecks re-evaluates pending rollouts on every tick until ctx ends or ticks closes.
 func runRolloutRechecks(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, ticks <-chan time.Time) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case _, ok := <-ticks:
-			if !ok {
-				return
-			}
-			if err := recheckPendingRollouts(ctx, kube, sink); err != nil && ctx.Err() == nil {
-				log.Printf("[synapse] [flux-watch] error re-checking pending rollouts: %v", err)
-			}
-		}
-	}
+	flux.RunRolloutRechecks(ctx, kube, rolloutSinkAdapter{inner: sink}, ticks)
 }
 
-// kubeWatcher runs the informer loop over one source: LIST and apply the full state, WATCH from the
-// list resourceVersion, and re-LIST whenever the stream ends or expires.
-type kubeWatcher struct {
-	kube       *DefaultOutboundDispatcher
-	sink       rolloutSink
-	source     kubeWatchSource
-	retryDelay time.Duration
-}
+// kubeWatcher runs the informer loop over one source.
+type kubeWatcher = flux.KubeWatcher
 
 // newKubeWatcher constructs a watcher; retryDelay is the initial backoff after a failure.
 func newKubeWatcher(kube *DefaultOutboundDispatcher, sink rolloutSink, source kubeWatchSource, retryDelay time.Duration) *kubeWatcher {
-	return &kubeWatcher{kube: kube, sink: sink, source: source, retryDelay: retryDelay}
-}
-
-// Run loops until ctx is cancelled. A finished or expired watch re-lists immediately; failures back off.
-func (w *kubeWatcher) Run(ctx context.Context) {
-	delay := w.retryDelay
-	for ctx.Err() == nil {
-		err := w.listAndWatch(ctx)
-		if err == nil || errors.Is(err, errWatchExpired) {
-			delay = w.retryDelay
-			continue
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, delay, err)
-		select {
-		case <-time.After(delay):
-			delay = advanceBackoffDelay(delay, true)
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (w *kubeWatcher) listAndWatch(ctx context.Context) error {
-	resourceVersion, err := w.source.list(ctx, w.kube, w.sink)
-	if err != nil {
-		return err
-	}
-	stream, err := w.source.watch(ctx, w.kube, resourceVersion)
-	if err != nil {
-		return err
-	}
-	defer stream.Close()
-	return w.consume(ctx, stream)
-}
-
-type kubeWatchEvent struct {
-	Type   string          `json:"type"`
-	Object json.RawMessage `json:"object"`
-}
-
-// consume applies watch events until the stream ends (nil), expires (errWatchExpired) or fails.
-func (w *kubeWatcher) consume(ctx context.Context, stream io.Reader) error {
-	dec := json.NewDecoder(stream)
-	for {
-		var evt kubeWatchEvent
-		if err := dec.Decode(&evt); err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			return fmt.Errorf("decode watch event: %w", err)
-		}
-		if err := w.applyEvent(ctx, evt); err != nil {
-			return err
-		}
-	}
-}
-
-func (w *kubeWatcher) applyEvent(ctx context.Context, evt kubeWatchEvent) error {
-	switch evt.Type {
-	case "ADDED", "MODIFIED", watchEventDeleted:
-		return w.source.apply(ctx, w.kube, w.sink, evt.Type, evt.Object)
-	case "ERROR":
-		var status struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal(evt.Object, &status); err == nil && status.Code == http.StatusGone {
-			return errWatchExpired
-		}
-		return fmt.Errorf("watch error event: %s", string(evt.Object))
-	default:
-		return nil
-	}
-}
-
-// rolloutKustomizationNamespaces are the namespaces whose Kustomizations the rollout watcher follows.
-var rolloutKustomizationNamespaces = []string{fluxSystemNamespace}
-
-// rolloutWatchSources are the collections the rollout watcher follows: the Kustomizations of
-// rolloutKustomizationNamespaces and every Flux-managed workload kind whose rollout gates a deploy.
-func rolloutWatchSources() []kubeWatchSource {
-	sources := make([]kubeWatchSource, 0, len(rolloutKustomizationNamespaces)+len(rolloutWorkloadKinds))
-	for _, namespace := range rolloutKustomizationNamespaces {
-		sources = append(sources, kustomizationSource{namespace: namespace})
-	}
-	for _, k := range rolloutWorkloadKinds {
-		sources = append(sources, workloadSource{path: k.Path})
-	}
-	return sources
+	return flux.NewKubeWatcher(kube, rolloutSinkAdapter{inner: sink}, source, retryDelay)
 }
 
 // startKustomizationWatcher runs the Kustomization rollout watchers when PR state is durable and the kube
 // API is configured. The returned stop function cancels them and waits for them to exit; it is idempotent.
 func (s *RouterServer) startKustomizationWatcher(ctx context.Context, kube *DefaultOutboundDispatcher) func() {
-	if s.registry == nil || kube == nil || kube.kubeAPIServer == "" {
-		return func() {}
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	for _, source := range rolloutWatchSources() {
-		wg.Go(func() { newKubeWatcher(kube, s, source, kube.retryDelay).Run(ctx) })
-	}
-	ticker := time.NewTicker(rolloutRecheckInterval)
-	wg.Go(func() {
-		defer ticker.Stop()
-		runRolloutRechecks(ctx, kube, s, ticker.C)
-	})
-	return func() {
-		cancel()
-		wg.Wait()
-	}
+	return flux.StartWatcher(ctx, kube, s)
 }
 
 // trackedRollout is a deploying PR whose completion is gated on recorded Kustomization requests.
-type trackedRollout struct {
-	PR       DeployingPR
-	Requests map[string]kustomizationRequest
-	Deployed []string
-}
+type trackedRollout = flux.TrackedRollout
 
 // recordedKustomizationRequests decodes the PR's kustomization_requests metadata, if any.
 func recordedKustomizationRequests(meta map[string]any) map[string]kustomizationRequest {
-	raw, ok := meta[kustomizationRequestsKey].(map[string]any)
-	if !ok {
-		return nil
-	}
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var requests map[string]kustomizationRequest
-	if err := json.Unmarshal(encoded, &requests); err != nil {
-		return nil
-	}
-	return requests
+	return flux.RecordedKustomizationRequests(meta)
 }
 
 func isDeploySuccessPending(meta map[string]any) bool {
-	if meta == nil {
-		return false
-	}
-	v, ok := meta["deploy_success_pending"]
-	if !ok {
-		return false
-	}
-	switch b := v.(type) {
-	case bool:
-		return b
-	case string:
-		return strings.EqualFold(b, "true")
-	default:
-		return false
-	}
-}
-
-// pendingRequest returns the PR's recorded request for ref while it has not been deployed.
-func (t trackedRollout) pendingRequest(ref fluxKustomizationRef) (kustomizationRequest, bool) {
-	req, ok := t.Requests[ref.Name]
-	if !ok || req.RequestedAt == "" || cmp.Or(req.Namespace, fluxSystemNamespace) != ref.Namespace {
-		return kustomizationRequest{}, false
-	}
-	if slices.Contains(t.Deployed, ref.Name) && !isDeploySuccessPending(t.PR.Metadata) {
-		return kustomizationRequest{}, false
-	}
-	return req, true
-}
-
-// hasPending reports whether any recorded request is still waiting to be deployed.
-func (t trackedRollout) hasPending() bool {
-	for name, req := range t.Requests {
-		if _, pending := t.pendingRequest(fluxKustomizationRef{Namespace: cmp.Or(req.Namespace, fluxSystemNamespace), Name: name}); pending {
-			return true
-		}
-	}
-	return false
+	return flux.IsDeploySuccessPending(meta)
 }
 
 // hasPendingRollouts reports whether any deploying PR still waits on a recorded Kustomization request.
@@ -423,7 +158,7 @@ func (s *RouterServer) hasPendingRollouts(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return slices.ContainsFunc(rollouts, trackedRollout.hasPending), nil
+	return slices.ContainsFunc(rollouts, trackedRollout.HasPending), nil
 }
 
 func (s *RouterServer) trackedRollouts(ctx context.Context) ([]trackedRollout, error) {
@@ -443,6 +178,26 @@ func (s *RouterServer) trackedRollouts(ctx context.Context) ([]trackedRollout, e
 	return rollouts, nil
 }
 
+// ApplyKustomizationList satisfies flux.RolloutSink.
+func (s *RouterServer) ApplyKustomizationList(ctx context.Context, namespace string, observations []model.KustomizationObservation) error {
+	return s.applyKustomizationList(ctx, namespace, observations)
+}
+
+// ApplyKustomizationStatus satisfies flux.RolloutSink.
+func (s *RouterServer) ApplyKustomizationStatus(ctx context.Context, obs model.KustomizationObservation) error {
+	return s.applyKustomizationStatus(ctx, obs)
+}
+
+// ApplyKustomizationDeleted satisfies flux.RolloutSink.
+func (s *RouterServer) ApplyKustomizationDeleted(ctx context.Context, ref model.FluxKustomizationRef) error {
+	return s.applyKustomizationDeleted(ctx, ref)
+}
+
+// HasPendingRollouts satisfies flux.RolloutSink.
+func (s *RouterServer) HasPendingRollouts(ctx context.Context) (bool, error) {
+	return s.hasPendingRollouts(ctx)
+}
+
 // applyKustomizationList reconciles a full LIST: every observation is applied, and any pending request
 // for a Kustomization of namespace that no longer exists fails its PR.
 func (s *RouterServer) applyKustomizationList(ctx context.Context, namespace string, observations []kustomizationObservation) error {
@@ -459,7 +214,7 @@ func (s *RouterServer) applyKustomizationList(ctx context.Context, namespace str
 	for _, t := range rollouts {
 		for _, name := range slices.Sorted(maps.Keys(t.Requests)) {
 			ref := fluxKustomizationRef{Namespace: cmp.Or(t.Requests[name].Namespace, fluxSystemNamespace), Name: name}
-			if _, pending := t.pendingRequest(ref); pending && ref.Namespace == namespace && !present[ref] {
+			if _, pending := t.PendingRequest(ref); pending && ref.Namespace == namespace && !present[ref] {
 				errs = append(errs, s.failKustomizationRollout(ctx, t.PR, name, "Kustomization deleted"))
 			}
 		}
@@ -484,7 +239,7 @@ func (s *RouterServer) applyKustomizationDeleted(ctx context.Context, ref fluxKu
 	}
 	var errs []error
 	for _, t := range rollouts {
-		if _, pending := t.pendingRequest(ref); pending {
+		if _, pending := t.PendingRequest(ref); pending {
 			errs = append(errs, s.failKustomizationRollout(ctx, t.PR, ref.Name, "Kustomization deleted"))
 		}
 	}
@@ -504,7 +259,7 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 	var loadErr error
 	loaded := false
 	for _, t := range rollouts {
-		req, pending := t.pendingRequest(obs.Ref)
+		req, pending := t.PendingRequest(obs.Ref)
 		if !pending {
 			continue
 		}
@@ -603,49 +358,13 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 
 // gitHistoryCache memoizes the GitHub facts the rollout gate needs. Both are immutable: a commit's
 // time never changes, and neither does whether one SHA descends from another.
-type gitHistoryCache struct {
-	mu          sync.Mutex
-	commitTimes map[string]time.Time
-	includes    map[string]bool
-}
-
-func (c *gitHistoryCache) commitTime(key string) (time.Time, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	at, ok := c.commitTimes[key]
-	return at, ok
-}
-
-func (c *gitHistoryCache) storeCommitTime(key string, at time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.commitTimes == nil {
-		c.commitTimes = make(map[string]time.Time)
-	}
-	c.commitTimes[key] = at
-}
-
-func (c *gitHistoryCache) includesVerdict(key string) (verdict, ok bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	verdict, ok = c.includes[key]
-	return verdict, ok
-}
-
-func (c *gitHistoryCache) storeIncludesVerdict(key string, verdict bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.includes == nil {
-		c.includes = make(map[string]bool)
-	}
-	c.includes[key] = verdict
-}
+type gitHistoryCache = flux.GitHistoryCache
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.
 func (s *RouterServer) commitTime(ctx context.Context, repo, sha string) (time.Time, error) {
 	repo = normalizeRepo(repo)
 	key := repo + "@" + sha
-	if at, ok := s.gitHistory.commitTime(key); ok {
+	if at, ok := s.gitHistory.CommitTime(key); ok {
 		return at, nil
 	}
 	var commit struct {
@@ -659,7 +378,7 @@ func (s *RouterServer) commitTime(ctx context.Context, repo, sha string) (time.T
 	if commit.Committer.Date.IsZero() {
 		return time.Time{}, fmt.Errorf("commit %s has no committer date", sha)
 	}
-	s.gitHistory.storeCommitTime(key, commit.Committer.Date)
+	s.gitHistory.StoreCommitTime(key, commit.Committer.Date)
 	return commit.Committer.Date, nil
 }
 
@@ -674,7 +393,7 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 	}
 	repo = normalizeRepo(repo)
 	key := repo + "@" + commit + "..." + revision
-	if verdict, ok := s.gitHistory.includesVerdict(key); ok {
+	if verdict, ok := s.gitHistory.IncludesVerdict(key); ok {
 		return verdict, nil
 	}
 	var comparison struct {
@@ -685,7 +404,7 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 		return false, fmt.Errorf("compare %s...%s: %w", commit, revision, err)
 	}
 	verdict := comparison.Status == "identical" || comparison.Status == "ahead"
-	s.gitHistory.storeIncludesVerdict(key, verdict)
+	s.gitHistory.StoreIncludesVerdict(key, verdict)
 	return verdict, nil
 }
 
@@ -839,12 +558,7 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 
 // newKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.
 func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]kustomizationRequest {
-	requestedAt := now.Format(time.RFC3339Nano)
-	requests := make(map[string]kustomizationRequest, len(refs))
-	for _, ref := range refs {
-		requests[ref.Name] = kustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
-	}
-	return requests
+	return flux.NewKustomizationRequests(refs, now)
 }
 
 // reconcileImageKustomizations patches each ref with its recorded request; one failure never skips the rest.

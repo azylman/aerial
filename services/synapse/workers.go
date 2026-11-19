@@ -229,6 +229,16 @@ func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {
 	}
 }
 
+// APIServer returns the configured Kubernetes API server URL.
+func (d *DefaultOutboundDispatcher) APIServer() string {
+	return d.kubeAPIServer
+}
+
+// RetryDelay returns the base delay between informer retries.
+func (d *DefaultOutboundDispatcher) RetryDelay() time.Duration {
+	return d.retryDelay
+}
+
 func resolveImageTag(repo, imageRef string) (tagKey, imageName, workloadName string) {
 	return kube.ResolveImageTag(repo, imageRef)
 }
@@ -243,29 +253,18 @@ func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req Ima
 	return d.kubeClient.PromoteImageTag(ctx, req)
 }
 
-// rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy.
-var rolloutWorkloadKinds = []struct{ Kind, Path string }{
-	{Kind: "Deployment", Path: "/apis/apps/v1/deployments"},
-	{Kind: kindStatefulSet, Path: "/apis/apps/v1/statefulsets"},
-	{Kind: "DaemonSet", Path: "/apis/apps/v1/daemonsets"},
-	{Kind: kindRestateDeployment, Path: "/apis/restate.dev/v1beta1/restatedeployments"},
-	{Kind: kindRestateCluster, Path: "/apis/restate.dev/v1/restateclusters"},
-}
-
 func toFluxKustomizationRefs(refs []model.FluxKustomizationRef) []fluxKustomizationRef {
 	if refs == nil {
 		return nil
 	}
 	res := make([]fluxKustomizationRef, len(refs))
-	for i, r := range refs {
-		res[i] = fluxKustomizationRef{Namespace: r.Namespace, Name: r.Name}
-	}
+	copy(res, refs)
 	return res
 }
 
 func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error) {
 	d.ensureClients()
-	changes, err := d.kubeClient.ListKustomizationConfigMaps(ctx, model.FluxKustomizationRef{Namespace: ref.Namespace, Name: ref.Name})
+	changes, err := d.kubeClient.ListKustomizationConfigMaps(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +277,7 @@ func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Cont
 
 func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
 	d.ensureClients()
-	workloads, err := d.kubeClient.ListKustomizationWorkloads(ctx, model.FluxKustomizationRef{Namespace: ref.Namespace, Name: ref.Name})
+	workloads, err := d.kubeClient.ListKustomizationWorkloads(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -306,12 +305,12 @@ func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Cont
 
 func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
 	d.ensureClients()
-	return d.kubeClient.ReconcileKustomization(ctx, model.FluxKustomizationRef{Namespace: ref.Namespace, Name: ref.Name}, requestedAt)
+	return d.kubeClient.ReconcileKustomization(ctx, ref, requestedAt)
 }
 
 func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
 	d.ensureClients()
-	return d.kubeClient.ResolveFluxSourceRepo(ctx, model.FluxInvolvedObject{Kind: obj.Kind, Name: obj.Name, Namespace: obj.Namespace})
+	return d.kubeClient.ResolveFluxSourceRepo(ctx, obj)
 }
 
 func (d *DefaultOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]fluxKustomizationRef, error) {
@@ -332,16 +331,14 @@ func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, name
 	res := make([]kustomizationObservation, len(obs))
 	for i, o := range obs {
 		conds := make([]fluxCondition, len(o.Conditions))
-		for j, c := range o.Conditions {
-			conds[j] = fluxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
-		}
+		copy(conds, o.Conditions)
 		res[i] = kustomizationObservation{
-			Ref:                    fluxKustomizationRef{Namespace: o.Ref.Namespace, Name: o.Ref.Name},
+			Ref:                    o.Ref,
 			Suspended:              o.Suspended,
 			RequestedAt:            o.RequestedAt,
 			LastHandledReconcileAt: o.LastHandledReconcileAt,
 			LastAppliedRevision:    o.LastAppliedRevision,
-			SourceRef:              fluxSourceRef{Kind: o.SourceRef.Kind, Name: o.SourceRef.Name, Namespace: o.SourceRef.Namespace},
+			SourceRef:              o.SourceRef,
 			Conditions:             conds,
 		}
 	}
@@ -351,10 +348,6 @@ func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, name
 func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, namespace, resourceVersion string) (io.ReadCloser, error) {
 	d.ensureClients()
 	return d.kubeClient.WatchKustomizations(ctx, namespace, resourceVersion)
-}
-
-func advanceBackoffDelay(delay time.Duration, expBackoff bool) time.Duration {
-	return ericlient.AdvanceBackoffDelay(delay, expBackoff)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {

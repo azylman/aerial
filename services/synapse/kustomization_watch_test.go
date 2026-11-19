@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 const sha42Image = "ghcr.io/azylman/aerial-synapse:sha-42"
@@ -1219,6 +1221,38 @@ func TestDeferPRToWatcher_LifecycleErrors(t *testing.T) {
 				}
 			} else if err != nil || !deferred {
 				t.Fatalf("deferPRToWatcher() = (%v, %v)", deferred, err)
+			}
+		})
+	}
+}
+
+func TestRouterServer_RolloutSinkMethods(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+	}{
+		{name: "satisfies and exercises flux.RolloutSink interface"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newTestRouter(Config{}, nil, nil, nil, nil)
+			var sink flux.RolloutSink = srv
+
+			if err := sink.ApplyKustomizationList(context.Background(), "flux-system", nil); err != nil {
+				t.Fatalf("ApplyKustomizationList unexpected error: %v", err)
+			}
+			if err := sink.ApplyKustomizationStatus(context.Background(), model.KustomizationObservation{Ref: model.FluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}}); err != nil {
+				t.Fatalf("ApplyKustomizationStatus unexpected error: %v", err)
+			}
+			if err := sink.ApplyKustomizationDeleted(context.Background(), model.FluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}); err != nil {
+				t.Fatalf("ApplyKustomizationDeleted unexpected error: %v", err)
+			}
+			pending, err := sink.HasPendingRollouts(context.Background())
+			if err != nil || pending {
+				t.Fatalf("HasPendingRollouts() = (%v, %v), want (false, nil)", pending, err)
 			}
 		})
 	}
