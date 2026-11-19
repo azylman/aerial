@@ -296,11 +296,13 @@ type ConflictOutcome struct {
 
 // HandleConflictCheck runs the journaled GitHub conflict-check effect for one
 // PR. Stale head SHAs drop, terminal states absorb within their reopen epoch,
-// and already-dispatched effect keys never re-fire. A conflicted head marks
-// the collaborator-conflict slot and schedules a delayed recheck; a clean
-// head clears the slot. A failed check schedules a delayed recheck and
-// returns the error without marking the effect dispatched, so the retry
-// re-fires exactly once per attempt.
+// and already-dispatched effect keys never re-fire. A conflicted head
+// schedules the delayed recheck BEFORE persisting any state, so a scheduling
+// failure leaves nothing behind and the retry re-fires the check instead of
+// hitting AlreadyDispatched with the recheck permanently lost. A clean head
+// clears the slot. A failed check schedules a delayed recheck and returns
+// the error without marking the effect dispatched, so the retry re-fires
+// exactly once per attempt.
 func (h *RepoHandlers) HandleConflictCheck(ctx context.Context, prKey string, ev PREvent) (ConflictOutcome, error) {
 	if h == nil || h.store == nil {
 		return ConflictOutcome{}, fmt.Errorf("repo handlers not configured")
@@ -332,23 +334,26 @@ func (h *RepoHandlers) HandleConflictCheck(ctx context.Context, prKey string, ev
 		}
 		return ConflictOutcome{Disposition: DispositionApply, RecheckScheduled: true}, err
 	}
-	pr.MarkEffectDispatched(key)
 	if !conflicted {
+		pr.MarkEffectDispatched(key)
 		pr.ClearCollaboratorConflict(headSHA)
 		h.store.SavePR(pr)
 		return ConflictOutcome{Disposition: DispositionApply}, nil
 	}
-	pr.MarkCollaboratorConflict(headSHA)
-	h.store.SavePR(pr)
 	if err := h.reschedule.ScheduleConflictRecheck(ctx, ConflictRecheckDelay, ev); err != nil {
 		return ConflictOutcome{Disposition: DispositionApply, Conflicted: true}, err
 	}
+	pr.MarkCollaboratorConflict(headSHA)
+	pr.MarkEffectDispatched(key)
+	h.store.SavePR(pr)
 	return ConflictOutcome{Disposition: DispositionApply, Conflicted: true, RecheckScheduled: true}, nil
 }
 
 // HandleFanout delivers one async main-push send per touched PR key from the
 // journaled rebuild index. It records no per-PR state; receiving PRObjects
-// drop stale payloads against their own head SHA.
+// drop stale payloads against their own head SHA. Every key is attempted:
+// one failing key never starves the later keys, and failures join into the
+// returned error so retries still signal failure.
 func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 	if h == nil || h.store == nil {
 		return fmt.Errorf("repo handlers not configured")
@@ -361,12 +366,13 @@ func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 	if !ok || st == nil || strings.TrimSpace(st.LatestMainSHA) == "" {
 		return nil
 	}
+	var errs []error
 	for _, key := range st.PRKeys() {
 		if err := h.fanout.SendMainPush(ctx, key, st.LatestMainSHA); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("fanout %q: %w", key, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // HandleKustomizationStatus records a dispatched-SHA tombstone scoped to its

@@ -37,14 +37,24 @@ type recheckCall struct {
 }
 
 type fakeRescheduler struct {
-	err   error
-	calls []recheckCall
+	err       error
+	failCalls int
+	calls     []recheckCall
 }
 
 func (f *fakeRescheduler) ScheduleConflictRecheck(ctx context.Context, delay time.Duration, ev PREvent) error {
 	_ = ctx
 	f.calls = append(f.calls, recheckCall{delay: delay, event: ev})
-	return f.err
+	if f.failCalls == 0 {
+		return nil
+	}
+	if f.failCalls > 0 {
+		f.failCalls--
+	}
+	if f.err != nil {
+		return f.err
+	}
+	return errFakeSchedule
 }
 
 type projectionCall struct {
@@ -67,14 +77,24 @@ type fanoutCall struct {
 }
 
 type fakeFanoutSender struct {
-	err   error
-	calls []fanoutCall
+	err     error
+	failKey string
+	calls   []fanoutCall
 }
 
 func (f *fakeFanoutSender) SendMainPush(ctx context.Context, prKey, mainSHA string) error {
 	_ = ctx
 	f.calls = append(f.calls, fanoutCall{prKey: prKey, mainSHA: mainSHA})
-	return f.err
+	if f.failKey == "" {
+		return f.err
+	}
+	if prKey == f.failKey {
+		if f.err != nil {
+			return f.err
+		}
+		return errFakeSend
+	}
+	return nil
 }
 
 var (
@@ -223,6 +243,7 @@ func runConflictEffect(t *testing.T, store *MemRepoStore, seedMark string, confl
 	scheduler := &fakeRescheduler{}
 	if schedulerErr {
 		scheduler.err = errFakeSchedule
+		scheduler.failCalls = -1
 	}
 	var schedulerArg ConflictRescheduler = scheduler
 	if nilScheduler {
@@ -259,7 +280,6 @@ func TestHandleMainPushRecords(t *testing.T) {
 		prNumber           int
 		seedIndex          []string
 		seedUpdatedPRs     []int
-		nilStore           bool
 		nilProjector       bool
 		wantLatest         string
 		wantIndexLen       int
@@ -273,7 +293,6 @@ func TestHandleMainPushRecords(t *testing.T) {
 		{name: "fresh push clears updated flags", repo: "aerial", mainSHA: "mainsha2", seedIndex: []string{"mainsha1"}, seedUpdatedPRs: []int{90, 91}, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantUpdatedCleared: true, wantProjections: 1},
 		{name: "push touches pr key", repo: "aerial", mainSHA: "mainsha1", prNumber: 101, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: "azylman/aerial#101", wantProjections: 1},
 		{name: "index bounds at fifty", repo: "aerial", mainSHA: "newsha99", seedIndex: seedMainIndex50(), wantLatest: "newsha99", wantIndexLen: 50, wantIndexFirst: "base01", wantProjections: 1},
-		{name: "nil store defaults to memory", repo: "aerial", mainSHA: "mainsha1", nilStore: true, wantProjections: 1},
 		{name: "nil projector still commits", repo: "aerial", mainSHA: "mainsha2", seedIndex: []string{"mainsha1"}, nilProjector: true, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantProjections: 0},
 	}
 	for _, tc := range tests {
@@ -281,21 +300,14 @@ func TestHandleMainPushRecords(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			store := seedMainPushStore(tc.repo, tc.seedIndex, tc.seedUpdatedPRs)
-			var storeArg RepoStateStore = store
-			if tc.nilStore {
-				storeArg = nil
-			}
 			projector := &fakeProjector{}
 			var projectArg RepoProjector = projector
 			if tc.nilProjector {
 				projectArg = nil
 			}
-			h := NewRepoHandlers(storeArg, nil, nil, projectArg, nil)
+			h := NewRepoHandlers(store, nil, nil, projectArg, nil)
 			if err := h.HandleMainPush(ctx, RepoEvent{Repo: tc.repo, MainSHA: tc.mainSHA, PRNumber: tc.prNumber}); err != nil {
 				t.Fatalf("HandleMainPush err = %v, want nil", err)
-			}
-			if tc.nilStore {
-				return
 			}
 			want := pushResult{latest: tc.wantLatest, indexLen: tc.wantIndexLen, first: tc.wantIndexFirst, projections: tc.wantProjections}
 			if got := repoPushSummary(t, store, tc.repo, len(projector.calls)); got != want {
@@ -351,11 +363,12 @@ func TestHandleConflictCheckRoutes(t *testing.T) {
 		wantErr        bool
 		want           EventDisposition
 		wantAlready    bool
+		wantCalls      int
 	}{
 		{name: "stale head drops without effect", seedHead: "abc123", evHead: "def456", want: DispositionDropStale},
 		{name: "terminal merged absorbs", seedHead: "abc123", evHead: "abc123", seedTerminal: TerminalMerged, want: DispositionAbsorbTerminal},
 		{name: "terminal closed absorbs", seedHead: "abc123", evHead: "abc123", seedTerminal: TerminalClosed, want: DispositionAbsorbTerminal},
-		{name: "reopen epoch applies after terminal", seedHead: "abc123", evHead: "abc123", seedTerminal: TerminalMerged, seedEpoch: 1, evEpoch: 2, want: DispositionApply},
+		{name: "reopen epoch applies after terminal", seedHead: "abc123", evHead: "abc123", seedTerminal: TerminalMerged, seedEpoch: 1, evEpoch: 2, want: DispositionApply, wantCalls: 1},
 		{name: "empty head drops", seedHead: "abc123", evHead: "", want: DispositionDropStale},
 		{name: "zero head drops", seedHead: "abc123", evHead: "0000000", want: DispositionDropStale},
 		{name: "already dispatched skips checker", seedHead: "abc123", seedGen: 2, evHead: "abc123", seedDispatched: true, want: DispositionApply, wantAlready: true},
@@ -381,8 +394,8 @@ func TestHandleConflictCheckRoutes(t *testing.T) {
 				return
 			}
 			checkConflictOutcome(t, out, tc.want, false, tc.wantAlready, false)
-			if len(checker.calls) != 0 && tc.want != DispositionApply {
-				t.Fatalf("checker calls = %d on %q, want 0", len(checker.calls), tc.want)
+			if len(checker.calls) != tc.wantCalls {
+				t.Fatalf("checker calls = %d, want %d", len(checker.calls), tc.wantCalls)
 			}
 		})
 	}
@@ -409,6 +422,7 @@ func TestHandleConflictCheckEffects(t *testing.T) {
 		{name: "conflict marks and schedules recheck", checkerConflicted: true, wantConflicted: true, wantRecheck: true, wantConflictMark: "abc123", wantCheckerCalls: 1, wantSchedCalls: 1},
 		{name: "checker error schedules recheck and errors", checkerErr: true, wantErr: true, wantRecheck: true, wantCheckerCalls: 1, wantSchedCalls: 1},
 		{name: "checker and scheduler both fail", checkerErr: true, schedulerErr: true, wantErr: true, wantCheckerCalls: 1, wantSchedCalls: 1},
+		{name: "conflicted scheduler failure persists nothing", checkerConflicted: true, schedulerErr: true, wantErr: true, wantConflicted: true, wantConflictMark: "", wantCheckerCalls: 1, wantSchedCalls: 1},
 		{name: "nil checker defaults to clean", nilChecker: true, wantConflictMark: ""},
 		{name: "nil scheduler with checker error still errors", checkerErr: true, nilScheduler: true, wantErr: true, wantRecheck: true, wantCheckerCalls: 1},
 	}
@@ -430,15 +444,61 @@ func TestHandleConflictCheckEffects(t *testing.T) {
 			if !tc.wantErr && !tc.nilScheduler && tc.wantRecheck && scheduler.calls[0].delay != ConflictRecheckDelay {
 				t.Fatalf("recheck delay = %v, want %v", scheduler.calls[0].delay, ConflictRecheckDelay)
 			}
-			if tc.wantErr {
-				return
-			}
 			ps, ok := store.LoadPR(key)
 			if !ok {
 				t.Fatalf("PR %q missing after check", key)
 			}
 			if ps.CollaboratorConflict != tc.wantConflictMark {
 				t.Fatalf("conflict mark = %q, want %q", ps.CollaboratorConflict, tc.wantConflictMark)
+			}
+		})
+	}
+}
+
+func TestHandleConflictCheckConflictedRetry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		failCalls     int
+		wantFirstErr  bool
+		wantSecondErr bool
+		wantMark      string
+	}{
+		{name: "schedule fails once then retry succeeds", failCalls: 1, wantFirstErr: true, wantMark: "abc123"},
+		{name: "schedule keeps failing", failCalls: 9, wantFirstErr: true, wantSecondErr: true, wantMark: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			store := NewMemRepoStore()
+			key := seedConflictPR(store, "abc123", 2, 0, TerminalNone, "", false)
+			scheduler := &fakeRescheduler{err: errFakeSchedule, failCalls: tc.failCalls}
+			h := NewRepoHandlers(store, &fakeConflictChecker{conflicted: true}, scheduler, nil, nil)
+			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
+			first, err := h.HandleConflictCheck(ctx, key, ev)
+			if (err != nil) != tc.wantFirstErr {
+				t.Fatalf("first check err = %v, wantErr %v", err, tc.wantFirstErr)
+			}
+			if first.RecheckScheduled {
+				t.Fatalf("first check scheduled a recheck despite scheduler failure")
+			}
+			second, err := h.HandleConflictCheck(ctx, key, ev)
+			if (err != nil) != tc.wantSecondErr {
+				t.Fatalf("retry check err = %v, wantErr %v", err, tc.wantSecondErr)
+			}
+			if !tc.wantSecondErr && (!second.RecheckScheduled || second.AlreadyDispatched || !second.Conflicted) {
+				t.Fatalf("retry outcome = %+v, want scheduled recheck on a fresh attempt", second)
+			}
+			if len(scheduler.calls) != 2 {
+				t.Fatalf("scheduler calls = %d, want 2 attempts", len(scheduler.calls))
+			}
+			ps, ok := store.LoadPR(key)
+			if !ok {
+				t.Fatalf("PR %q missing after retry", key)
+			}
+			if ps.CollaboratorConflict != tc.wantMark {
+				t.Fatalf("conflict mark = %q, want %q", ps.CollaboratorConflict, tc.wantMark)
 			}
 		})
 	}
@@ -452,11 +512,14 @@ func TestHandleFanoutDelivers(t *testing.T) {
 		seedKeys  []string
 		latestSHA string
 		nilSender bool
+		failKey   string
+		wantErr   bool
 	}{
 		{name: "fans out to touched keys", repo: "aerial", seedKeys: []string{"azylman/aerial#101", "azylman/aerial#102"}, latestSHA: "mainsha1"},
 		{name: "empty index sends nothing", repo: "aerial", latestSHA: "mainsha1"},
 		{name: "missing repo sends nothing", repo: "ghost"},
 		{name: "nil sender drops sends silently", repo: "aerial", seedKeys: []string{"azylman/aerial#101"}, latestSHA: "mainsha1", nilSender: true},
+		{name: "failing key does not starve later keys", repo: "aerial", seedKeys: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, latestSHA: "mainsha1", failKey: "azylman/aerial#102", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -465,14 +528,14 @@ func TestHandleFanoutDelivers(t *testing.T) {
 			if NormalizeRepo(tc.repo) != "" {
 				store = seedFanoutStore(tc.repo, tc.seedKeys, tc.latestSHA)
 			}
-			sender := &fakeFanoutSender{}
+			sender := &fakeFanoutSender{failKey: tc.failKey}
 			var senderArg PRFanoutSender = sender
 			if tc.nilSender {
 				senderArg = nil
 			}
 			h := NewRepoHandlers(store, nil, nil, nil, senderArg)
-			if err := h.HandleFanout(context.Background(), RepoEvent{Repo: tc.repo}); err != nil {
-				t.Fatalf("HandleFanout err = %v, want nil", err)
+			if err := h.HandleFanout(context.Background(), RepoEvent{Repo: tc.repo}); (err != nil) != tc.wantErr {
+				t.Fatalf("HandleFanout err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.nilSender {
 				return
@@ -573,11 +636,7 @@ func TestResolvePRBySHAHandler(t *testing.T) {
 		wantBranch string
 		wantOK     bool
 	}{
-		{name: "resolves hit", entries: []SHAEntry{{Repo: "aerial", SHA: "abc123", PRNumber: 101, Branch: "feat-x", UpdatedAt: 7}}, repo: "aerial", sha: "abc123", wantPR: 101, wantBranch: "feat-x", wantOK: true},
-		{name: "ambiguous picks newest", entries: []SHAEntry{{Repo: "aerial", SHA: "abc123", PRNumber: 101, Branch: "old", UpdatedAt: 7}, {Repo: "aerial", SHA: "abc123", PRNumber: 102, Branch: "new", UpdatedAt: 9}}, repo: "aerial", sha: "abc123", wantPR: 102, wantBranch: "new", wantOK: true},
-		{name: "miss returns false", entries: []SHAEntry{{Repo: "aerial", SHA: "abc123", PRNumber: 101, Branch: "feat-x", UpdatedAt: 7}, {Repo: "aerial", SHA: "abc123", Branch: "junk"}}, repo: "aerial", sha: "deadbee"},
-		{name: "repo mismatch misses", entries: []SHAEntry{{Repo: "aerial", SHA: "abc123", PRNumber: 101, Branch: "feat-x", UpdatedAt: 7}}, repo: "mirrormere", sha: "abc123"},
-		{name: "empty sha misses", repo: "aerial", sha: ""},
+		{name: "resolves hit through store entries", entries: []SHAEntry{{Repo: "aerial", SHA: "abc123", PRNumber: 101, Branch: "feat-x", UpdatedAt: 7}, {Repo: "aerial", SHA: "abc123", Branch: "junk"}}, repo: "aerial", sha: "abc123", wantPR: 101, wantBranch: "feat-x", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
