@@ -26,6 +26,7 @@ type BatchPublishFunc func(ctx context.Context, batch transcriptwire.TranscriptS
 // snapshot were never attempted and stay queued, so a fresh Drain re-seeds
 // from the indexer watermark instead of replaying stale steps.
 type Publisher struct {
+	drainMu sync.Mutex
 	mu      sync.Mutex
 	stack   string
 	publish BatchPublishFunc
@@ -341,6 +342,8 @@ func (p *Publisher) Drain(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
 	p.mu.Lock()
 	if p.publish == nil && len(p.order) > 0 {
 		p.mu.Unlock()

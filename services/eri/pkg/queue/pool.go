@@ -32,6 +32,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
+	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 const (
@@ -123,6 +124,9 @@ type WorkerPoolConfig struct {
 	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
 	TraceContent                     bool                       // record prompt/response on invoke_agent spans (tracing capture_content)
 	ActiveTurns                      *runner.ActiveTurnRegistry // daemons' active turn spans for the MCP trace proxy; nil gets a private registry
+	TranscriptStore                  db.TranscriptStore
+	TranscriptsIndexerURL            string
+	TranscriptRecheckDelay           time.Duration
 }
 
 type queueItem struct {
@@ -168,6 +172,15 @@ type WorkerPool struct {
 	activeChunkSteps    map[string]string
 	activeChunkTurns    map[string]string
 	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
+
+	TranscriptStore         db.TranscriptStore
+	TranscriptsIndexerURL   string
+	TranscriptRecheckDelay  time.Duration
+	TranscriptPublisher     *transcript.Publisher
+	TranscriptIndexerClient *transcript.IndexerClient
+	transcriptPublishCh     chan TranscriptPublishJob
+	transcriptPublishSem    chan struct{}
+	transcriptPending       map[string]bool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -510,6 +523,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		chunkToBuildID:   make(map[string]string),
 		activeChunkSteps: make(map[string]string),
 		activeChunkTurns: make(map[string]string),
+
+		TranscriptStore: cfg.TranscriptStore, TranscriptsIndexerURL: cfg.TranscriptsIndexerURL, TranscriptRecheckDelay: cfg.TranscriptRecheckDelay,
+		transcriptPublishCh: make(chan TranscriptPublishJob, 256), transcriptPublishSem: make(chan struct{}, 1), transcriptPending: make(map[string]bool),
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -669,6 +685,7 @@ func (p *WorkerPool) GetRuntimeConfig() string {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
+	p.wg.Go(p.runTranscriptPublishWorker)
 	if p.AgentPool() != nil || p.cfg.Store != nil {
 		p.wg.Go(func() {
 			interval := p.cfg.MaintenanceInterval
@@ -818,6 +835,7 @@ func (p *WorkerPool) collectUniquePoolsLocked() []runner.AgentPool {
 	return out
 }
 
+//nolint:contextcheck,nolintlint // Stop executes on process teardown after callers contexts are cancelled.
 func (p *WorkerPool) Stop() {
 	p.mu.Lock()
 	if p.stopped {
@@ -839,6 +857,11 @@ func (p *WorkerPool) Stop() {
 		log.Printf("[WorkerPool] Workers exited cleanly")
 	case <-time.After(2 * time.Second):
 		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := p.drainTranscriptPublisher(ctx); err != nil {
+		log.Printf("[WorkerPool] Warning: failed to drain transcript publisher: %v", err)
 	}
 
 	p.mu.Lock()
