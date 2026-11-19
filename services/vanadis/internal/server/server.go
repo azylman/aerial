@@ -1,5 +1,6 @@
 // Package server holds the L3 Vanadis HTTP service: VanadisServer, routes and
-// handlers, PostgreSQL initialization, and the RunServer/RunApp lifecycle.
+// handlers, PostgreSQL initialization, and the RunApp lifecycle (over the
+// unexported runServer).
 // It is the only package that wires L0 config/model, L1 dag/store/restate/
 // metrics, and the L2 MCP handler into HTTP endpoints.
 package server

@@ -42,8 +42,9 @@ func TestMainEntrypoint(t *testing.T) {
 	}
 }
 
-// TestMainForwardsRunExit covers the one-line main-to-run delegation so the
-// root package keeps its coverage floor without re-testing run's exit mapping.
+// TestMainForwardsRunExit pins the one behavior TestMainEntrypoint cannot:
+// that a run error propagates through main to a nonzero process exit. The
+// success-path mapping is owned by TestMainEntrypoint and not repeated here.
 func TestMainForwardsRunExit(t *testing.T) {
 	realLoad, realRun, realInit, realExit := loadConfigFn, runAppFn, initTracingFn, exitFn
 	t.Cleanup(func() { loadConfigFn, runAppFn, initTracingFn, exitFn = realLoad, realRun, realInit, realExit })
@@ -52,11 +53,11 @@ func TestMainForwardsRunExit(t *testing.T) {
 	initTracingFn = func(context.Context, string, string) (tracing.Config, func()) {
 		return tracing.Config{}, func() {}
 	}
-	runAppFn = func(context.Context, config.Config) error { return nil }
+	runAppFn = func(context.Context, config.Config) error { return errors.New("listen failed") }
 	got := -1
 	exitFn = func(code int) { got = code }
 	main()
-	if got != 0 {
-		t.Fatalf("exit code = %d, want 0", got)
+	if got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
 	}
 }
