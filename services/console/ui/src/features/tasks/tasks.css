@@ -13,9 +13,9 @@
 }
 
 .task-card {
-    background: #f6f5f1;
-    border: 1px solid #e2dfd7;
-    border-left: 3px solid #c2410c;
+    background: var(--card-elevated);
+    border: 1px solid var(--card-border);
+    border-left: 3px solid var(--accent-primary);
     border-radius: 6px;
     padding: 10px 12px;
     box-shadow: var(--accent-glow);
