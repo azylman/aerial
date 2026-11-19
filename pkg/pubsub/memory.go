@@ -246,13 +246,14 @@ func (b *MemoryBus) ConsumeQueue(ctx context.Context, subject string, queue stri
 	return sub, nil
 }
 
-// EnsureCoreStreams records the 3 primary streams as registered.
+// EnsureCoreStreams records the 4 primary streams as registered.
 func (b *MemoryBus) EnsureCoreStreams(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.streams[StreamAerialEvents] = true
 	b.streams[StreamAerialJobs] = true
 	b.streams[StreamAerialCoalesced] = true
+	b.streams[StreamAerialTranscripts] = true
 	return nil
 }
 
