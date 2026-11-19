@@ -20,8 +20,8 @@
     --card-radius: 12px;
 
     /* Typography */
-    --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-heading: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-heading: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
     --text-primary: #141413;
     --text-secondary: #575652;
@@ -52,7 +52,7 @@ body {
     color: var(--text-primary);
     font-family: var(--font-main);
     min-height: 100vh;
-    padding: 24px 16px;
+    padding: 0;
     overflow-x: hidden;
     position: relative;
 }
@@ -72,192 +72,185 @@ body::after {
 .hud-container {
     position: relative;
     z-index: 1;
-    max-width: 1440px;
-    margin: 0 auto;
+    max-width: none;
+    margin: 0;
     width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 0;
 }
 
 /* --- HUD HEADER --- */
 .hud-header {
-    background: var(--bg-surface);
-    border: 1px solid var(--card-border);
-    border-radius: var(--card-radius);
-    padding: 16px 20px;
+    width: 100%;
+    min-height: 54px;
+    background: #ffffff;
+    border-radius: 0;
+    border: none;
+    border-bottom: 1px solid #e2dfd7;
+    padding: 8px 20px;
     display: flex;
-    flex-direction: column;
-    gap: 16px;
-    box-shadow: var(--accent-glow);
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
     position: relative;
-    overflow: hidden;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0;
 }
 
 .hud-header::before {
     display: none;
 }
 
-.header-top {
+.cmd-left {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 16px;
     flex-wrap: wrap;
+}
+
+.cmd-right {
+    display: flex;
+    align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
 }
 
 .brand-block {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
 }
 
 .brand-badge {
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--card-border);
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    background: #141413;
+    color: #ffffff;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.2rem;
-    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.brand-badge svg {
+    display: none;
+}
+
+.brand-monogram {
+    line-height: 1;
 }
 
 .brand-text h1 {
     font-family: var(--font-heading);
-    font-size: 1.25rem;
+    font-size: 14px;
     font-weight: 700;
     letter-spacing: -0.01em;
-    display: flex;
-    align-items: center;
-    gap: 8px;
     color: var(--text-primary);
-}
-
-.brand-text h1 .version {
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    background: var(--bg-elevated);
-    color: var(--accent-primary);
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid var(--card-border);
-}
-
-.brand-text .sub {
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    letter-spacing: 0.04em;
+    white-space: nowrap;
+    margin: 0;
 }
 
 /* Permet Gauge */
-.permet-gauge {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 180px;
-}
-
-.permet-gauge-header {
-    display: flex;
-    justify-content: space-between;
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
+.permet-gauge.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
     font-weight: 600;
-}
-
-.permet-label {
-    color: var(--text-secondary);
-}
-
-.permet-value {
+    font-family: var(--font-mono);
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
     color: var(--text-primary);
+    white-space: nowrap;
+    line-height: 1;
+}
+
+.permet-val {
     font-variant-numeric: tabular-nums;
 }
 
-.permet-bar-bg {
-    height: 6px;
-    background: var(--bg-elevated);
-    border-radius: 3px;
-    overflow: hidden;
-    border: 1px solid var(--card-border);
+.permet-val.optimal {
+    color: var(--accent-emerald);
 }
 
-.permet-bar-fill {
-    position: relative;
-    height: 100%;
-    width: 88%;
-    background: var(--accent-primary);
-    border-radius: 3px;
+.permet-val.stable {
+    color: var(--accent-amber);
 }
 
-.permet-bar-fill::after {
-    display: none;
+.permet-val.warning {
+    color: var(--accent-crimson);
 }
 
-/* Primary View Tabs */
+.permet-val.idle {
+    color: var(--text-secondary);
+}
+
+/* Primary View Tabs - Inline Segmented Control */
 .hud-view-tabs,
 .hud-nav {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    border-bottom: 1px solid var(--card-border);
-    padding-bottom: 14px;
-    flex-wrap: wrap;
+    background: #efede7;
+    border-radius: 7px;
+    padding: 3px;
+    gap: 2px;
+    border: none;
+    border-bottom: none;
 }
 
 .view-tab-btn,
 .nav-btn {
-    background: var(--bg-surface);
-    border: 1px solid var(--card-border);
-    border-radius: 8px;
-    padding: 8px 16px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 4px 10px;
     color: var(--text-secondary);
     font-family: var(--font-main);
     font-size: 0.8rem;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     transition: all 0.15s ease;
-    min-height: 40px;
+    min-height: 28px;
     text-decoration: none;
+    position: relative;
 }
 
 .view-tab-btn:hover,
 .nav-btn:hover {
-    background: var(--bg-elevated);
-    border-color: var(--card-border-hover);
     color: var(--text-primary);
-    transform: translateY(-1px);
+    background: rgba(255, 255, 255, 0.5);
 }
 
 .view-tab-btn.active,
 .nav-btn.active {
-    background: #141413;
-    color: #ffffff;
-    border-color: #141413;
-    box-shadow: none;
-}
-
-.view-tab-btn.active .tab-badge {
-    background: rgba(255, 255, 255, 0.18);
-    color: #ffffff;
+    background: #ffffff;
+    color: #141413;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
     border-color: transparent;
 }
 
+.view-tab-btn.active .tab-badge {
+    background: #efede7;
+    color: #141413;
+}
+
 .tab-badge {
-    background: var(--bg-elevated);
-    padding: 2px 7px;
-    border-radius: 6px;
+    background: rgba(20, 20, 19, 0.06);
+    padding: 1px 5px;
+    border-radius: 4px;
     font-size: 0.7rem;
+    font-weight: 600;
     color: var(--text-secondary);
-    border: 1px solid var(--card-border);
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
 }
@@ -266,9 +259,8 @@ body::after {
 .quick-launch-dock {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
-    width: 100%;
 }
 
 .dock-chip {
@@ -276,16 +268,16 @@ body::after {
     border: 1px solid var(--card-border);
     color: var(--text-primary);
     text-decoration: none;
-    padding: 7px 12px;
-    border-radius: 8px;
+    padding: 4px 10px;
+    border-radius: 6px;
     font-family: var(--font-main);
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     font-weight: 500;
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     white-space: nowrap;
-    min-height: 38px;
+    min-height: 28px;
     transition: all 0.15s ease;
     position: relative;
 }
@@ -304,8 +296,8 @@ body::after {
 }
 
 .dock-chip .ping-dot {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: var(--accent-emerald);
 }
@@ -331,6 +323,10 @@ body::after {
 
 /* View Panels with strict active visibility */
 .view-panel {
+    max-width: 1440px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 16px 20px;
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -354,26 +350,37 @@ body::after {
 
 @media (max-width: 768px) {
     body {
-        padding: 1rem 0.75rem calc(120px + env(safe-area-inset-bottom, 0px));
+        padding: 0 0 calc(80px + env(safe-area-inset-bottom, 0px));
     }
     .hud-header {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 1rem;
-        padding: 14px 14px;
+        padding: 8px 12px;
+        min-height: auto;
+        gap: 8px;
+    }
+    .cmd-left {
+        order: 1;
+        width: auto;
+    }
+    .cmd-right {
+        display: contents;
+    }
+    .permet-gauge.status-pill {
+        order: 2;
     }
     .quick-launch-dock {
+        order: 3;
+        width: 100%;
         gap: 6px;
         flex-wrap: nowrap;
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
-        padding-bottom: 4px;
+        padding-bottom: 2px;
     }
     .dock-chip {
-        padding: 6px 10px;
+        padding: 5px 8px;
         font-size: 0.72rem;
-        min-height: 34px;
-        gap: 6px;
+        min-height: 30px;
+        gap: 5px;
         flex-shrink: 0;
     }
     .hud-view-tabs,
@@ -387,27 +394,43 @@ body::after {
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border-top: 1px solid var(--card-border);
-        border-bottom: none;
-        padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+        border-radius: 0;
+        padding: 4px 6px calc(4px + env(safe-area-inset-bottom, 0px));
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 4px;
-        width: auto;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 2px;
+        width: 100%;
+        min-height: 64px;
     }
     .view-tab-btn,
     .nav-btn {
-        padding: 6px 4px;
-        font-size: 0.7rem;
-        min-height: 36px;
+        flex-direction: column;
+        padding: 4px 2px;
+        font-size: 0.65rem;
+        min-height: 48px;
         justify-content: center;
-        gap: 4px;
+        gap: 3px;
+        border-radius: 6px;
+        border: none;
+    }
+    .view-tab-btn.active,
+    .nav-btn.active {
+        background: #efede7;
+        color: #141413;
+        box-shadow: none;
     }
     .view-tab-btn .tab-badge {
-        padding: 1px 4px;
-        font-size: 0.65rem;
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        padding: 1px 3px;
+        font-size: 0.6rem;
     }
     .summary-bar {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .view-panel {
+        padding: 12px 14px;
     }
 }
 
