@@ -40,20 +40,33 @@ cat > /root/.claude/settings.json <<'EOF'
       "Read(/home/ubuntu/.claude/**)",
       "Read(//home/ubuntu/.claude/**)",
       "Read(/home/ubuntu/.config/muse/**)",
-      "Read(//home/ubuntu/.config/muse/**)"
+      "Read(//home/ubuntu/.config/muse/**)",
+      "Read(/actions-runner/.env)",
+      "Read(//actions-runner/.env)"
     ]
   }
 }
 EOF
 chmod 0600 /root/.claude/settings.json
 
-# Seed claude-oauth-token as a writable 0600 file from /local/claude-oauth-token (or fallback /secrets/claude-oauth-token)
+# Seed claude-oauth-token into /actions-runner/.env and /root/.roborev/claude-oauth-token from /local/claude-oauth-token (or fallback /secrets/claude-oauth-token)
+: > /actions-runner/.env
+chmod 0600 /actions-runner/.env
+CLAUDE_TOKEN_SRC=""
 if [ -s "/local/claude-oauth-token" ]; then
-  cp -f "/local/claude-oauth-token" "/root/.roborev/claude-oauth-token"
-  chmod 0600 "/root/.roborev/claude-oauth-token"
+  CLAUDE_TOKEN_SRC="/local/claude-oauth-token"
 elif [ -s "/secrets/claude-oauth-token" ]; then
-  cp -f "/secrets/claude-oauth-token" "/root/.roborev/claude-oauth-token"
-  chmod 0600 "/root/.roborev/claude-oauth-token"
+  CLAUDE_TOKEN_SRC="/secrets/claude-oauth-token"
+fi
+if [ -n "${CLAUDE_TOKEN_SRC}" ]; then
+  CLAUDE_TOKEN_VAL=$(tr -d '\r\n' < "${CLAUDE_TOKEN_SRC}")
+  if [ -n "${CLAUDE_TOKEN_VAL}" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_TOKEN_VAL}"
+    echo "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_TOKEN_VAL}" >> /actions-runner/.env
+    mkdir -p /root/.roborev 2>/dev/null || true
+    cp -f "${CLAUDE_TOKEN_SRC}" "/root/.roborev/claude-oauth-token" 2>/dev/null || true
+    chmod 0600 "/root/.roborev/claude-oauth-token" 2>/dev/null || true
+  fi
 fi
 
 # Digest-tracked atomic seeding of /root/.config/muse/auth.json
@@ -89,6 +102,7 @@ elif [ -s "/etc/roborev/config.toml" ]; then
 elif [ -s "$(dirname "$0")/roborev-config.toml" ]; then
   cp -f "$(dirname "$0")/roborev-config.toml" "/root/.roborev/config.toml"
 fi
+chmod 0600 /root/.roborev/config.toml
 
 if [ -s "/local/postgres-password" ]; then
   cp -f "/local/postgres-password" "/root/.roborev/postgres-password"
@@ -98,14 +112,8 @@ elif [ -s "/secrets/postgres-password" ]; then
   chmod 0600 "/root/.roborev/postgres-password"
 fi
 
-if [ -s "/root/.roborev/postgres-password" ]; then
-  cat >> /root/.roborev/config.toml <<'EOF'
-
-[sync]
-enabled = true
-postgres_url = "postgres://aerial:${file:/root/.roborev/postgres-password}@postgres:5432/aerial?sslmode=disable"
-interval = "1h"
-EOF
+if [ ! -s "/root/.roborev/postgres-password" ]; then
+  sed -i -e '/^\[sync\]/,/^interval = .*/d' /root/.roborev/config.toml
 fi
 chmod 0600 /root/.roborev/config.toml
 
