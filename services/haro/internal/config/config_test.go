@@ -107,19 +107,25 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 	pathWithBoth := filepath.Join(tmpDir, "with_both.yaml")
 	pathWithoutEri := filepath.Join(tmpDir, "without_eri.yaml")
 	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
+	pathWithRestate := filepath.Join(tmpDir, "with_restate.yaml")
 	_ = os.WriteFile(pathWithBoth, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
 	_ = os.WriteFile(pathWithoutEri, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
 	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"), 0o644)
+	_ = os.WriteFile(pathWithRestate, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'miorine'\n"), 0o644)
 
 	tests := []struct {
 		name           string
 		path           string
 		envEri         string
 		envVanadis     string
+		envRestate     string
+		envAgent       string
 		envDB          string
 		wantErr        bool
 		wantEriURL     string
 		wantVanadisURL string
+		wantRestateURL string
+		wantAgentName  string
 	}{
 		{
 			name:           "env eri url takes precedence over yaml",
@@ -129,6 +135,8 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			envDB:          "postgres://localhost/db",
 			wantEriURL:     "http://eri.aerial:9001",
 			wantVanadisURL: "http://yaml.vanadis:4025",
+			wantRestateURL: "",
+			wantAgentName:  "aerial",
 		},
 		{
 			name:           "env vanadis url takes precedence over yaml",
@@ -138,6 +146,8 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			envDB:          "postgres://localhost/db",
 			wantEriURL:     "http://yaml.eri:8088",
 			wantVanadisURL: "http://env.vanadis:4025",
+			wantRestateURL: "",
+			wantAgentName:  "aerial",
 		},
 		{
 			name:           "yaml urls used when env empty",
@@ -147,6 +157,32 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			envDB:          "postgres://localhost/db",
 			wantEriURL:     "http://yaml.eri:8088",
 			wantVanadisURL: "http://yaml.vanadis:4025",
+			wantRestateURL: "",
+			wantAgentName:  "aerial",
+		},
+		{
+			name:           "restate url and agent name loaded from yaml",
+			path:           pathWithRestate,
+			envEri:         "",
+			envVanadis:     "",
+			envDB:          "postgres://localhost/db",
+			wantEriURL:     "http://yaml.eri:8088",
+			wantVanadisURL: "http://yaml.vanadis:4025",
+			wantRestateURL: "http://yaml.restate:8080",
+			wantAgentName:  "miorine",
+		},
+		{
+			name:           "env restate url and agent name take precedence over yaml",
+			path:           pathWithRestate,
+			envEri:         "",
+			envVanadis:     "",
+			envRestate:     "http://env.restate:8080/",
+			envAgent:       "suletta",
+			envDB:          "postgres://localhost/db",
+			wantEriURL:     "http://yaml.eri:8088",
+			wantVanadisURL: "http://yaml.vanadis:4025",
+			wantRestateURL: "http://env.restate:8080",
+			wantAgentName:  "suletta",
 		},
 		{
 			name:       "missing eri url returns error",
@@ -170,6 +206,8 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ERI_URL", tc.envEri)
 			t.Setenv("VANADIS_URL", tc.envVanadis)
+			t.Setenv("RESTATE_INGRESS_URL", tc.envRestate)
+			t.Setenv("AGENT_NAME", tc.envAgent)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", "")
 			t.Setenv("POSTGRES_HOST", "")
@@ -182,8 +220,9 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL) {
-				t.Errorf("cfg.EriURL = %q, want %q; cfg.VanadisURL = %q, want %q", cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL)
+			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL || cfg.RestateURL != tc.wantRestateURL || cfg.AgentName != tc.wantAgentName) {
+				t.Errorf("cfg.EriURL = %q (want %q), cfg.VanadisURL = %q (want %q), cfg.RestateURL = %q (want %q), cfg.AgentName = %q (want %q)",
+					cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL, cfg.RestateURL, tc.wantRestateURL, cfg.AgentName, tc.wantAgentName)
 			}
 		})
 	}
