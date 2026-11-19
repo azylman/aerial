@@ -10,6 +10,60 @@ else
   unset CLAUDE_CODE_OAUTH_TOKEN
 fi
 
+# Canonical workflow-style roborev-override matcher, shared by the pre-review
+# check, the quota branch, and the stateless fallback below. Matches only when
+# the comment author is the repo owner and the body contains ## roborev-override
+# plus a hex token exactly equal to the full head SHA or exactly its 7-char
+# prefix (tokens are bounded by non-hex characters, so a short prefix embedded
+# in a longer hex string written for another commit never matches).
+roborev_workflow_override_match() {
+  local comments_json="$1" repo="$2" head="$3"
+  local owner short body
+  owner="${repo%%/*}"
+  short="${head:0:7}"
+  [[ -n "${owner}" && -n "${head}" ]] || return 1
+  body=$(printf '%s' "${comments_json}" | jq -r --arg owner "${owner}" --arg full "${head}" --arg short "${short}" '
+    [ .[]?
+      | select(((.body // "") | contains("## roborev-override"))
+        and (.user.login == $owner)
+        and (((.body | [scan("[0-9a-fA-F]+")] | any(. == $full)) or ((($short != "") and ((.body | [scan("[0-9a-fA-F]+")] | any(. == $short))))))))]
+    | last | .body // empty' 2>/dev/null || true)
+  [[ -n "${body}" ]] || return 1
+  printf '%s' "${body}"
+}
+
+roborev_fetch_workflow_override_body() {
+  local repo="$1" pr="$2" head="$3"
+  local token comments page page_json count all
+  token="${GH_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}"
+  [[ -n "${token}" && -n "${repo}" && -n "${pr}" && -n "${head}" ]] || return 1
+  # GitHub lists issue comments in ascending order at most 100 per page, so a
+  # late override past comment 100 would otherwise be missed. Walk pages until
+  # a short page arrives (capped to bound pathological threads). Any fetch
+  # failure fails closed.
+  all="[]"
+  page=1
+  while [[ "${page}" -le 10 ]]; do
+    page_json=$(curl -fsSL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${token}" \
+      -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${repo}/issues/${pr}/comments?per_page=100&page=${page}" 2>/dev/null || true)
+    [[ -n "${page_json}" ]] || return 1
+    count=$(printf '%s' "${page_json}" | jq 'length' 2>/dev/null || echo 0)
+    all=$(jq -c -n --argjson a "${all}" --argjson b "${page_json}" '$a + $b' 2>/dev/null || echo "[]")
+    [[ "${count}" -lt 100 ]] && break
+    page=$((page + 1))
+  done
+  comments="${all}"
+  roborev_workflow_override_match "${comments}" "${repo}" "${head}"
+}
+
+roborev_emit_override_pass() {
+  local body="$1" head="$2"
+  local short
+  short="${head:0:7}"
+  [[ -z "${short}" ]] && short=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+  printf '## roborev: Review Passed (`%s`)\n\n%s\n' "${short}" "${body}"
+}
+
 if [ -d "/cache" ]; then
   export GOCACHE="/data/cache/go-build"
   export GOPATH="/data/cache/go"
@@ -247,6 +301,18 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
           exit 0
         fi
       fi
+      # Workflow-style override (canonical aerial-config treatment): an owner
+      # comment containing ## roborev-override plus the full or 7-char head
+      # SHA. Freshly fetched, so overrides posted while the review was running
+      # still apply even when the strict Commit:/override-header extraction
+      # above found nothing.
+      if [[ -z "${head_override_body:-}" ]]; then
+        head_override_body=$(roborev_fetch_workflow_override_body "${gh_repo}" "${pr_num}" "${head_sha}" 2>/dev/null || true)
+      fi
+      if [[ -n "${head_override_body:-}" ]]; then
+        roborev_emit_override_pass "${head_override_body}" "${head_sha}"
+        exit 0
+      fi
     fi
 
     env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${cmd_args[@]}" > "${raw_out}" 2>&1
@@ -322,6 +388,13 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
       cat "${raw_out}"
       exit 0
     elif grep -qi "quota" "${raw_out}"; then
+      # An override posted while the review was running still honours the
+      # canonical treatment: re-fetch and exit 0 without burning another agent
+      # call. Fail-closed behaviour for non-overridden PRs is unchanged.
+      if override_body=$(roborev_fetch_workflow_override_body "${gh_repo}" "${pr_num}" "${head_sha}" 2>/dev/null); [[ -n "${override_body}" ]]; then
+        roborev_emit_override_pass "${override_body}" "${head_sha}"
+        exit 0
+      fi
       # The stateless ci review below has no agent failover, so after a quota
       # failure it can only post a misleading "Review Skipped (quota)" comment
       # that hides member reviews the backup agent already completed.
@@ -334,6 +407,12 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     fi
   fi
 
+  # No daemon ref was derivable: honour a workflow-style override before the
+  # stateless fallback so it never runs an agent for an overridden head.
+  if override_body=$(roborev_fetch_workflow_override_body "${gh_repo}" "${pr_num}" "${head_sha}" 2>/dev/null); [[ -n "${override_body}" ]]; then
+    roborev_emit_override_pass "${override_body}" "${head_sha}"
+    exit 0
+  fi
   if [[ "${has_review_types}" -eq 0 ]]; then
     exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${ci_args[@]}" --review-types "${review_types_arg:-default,test-value}"
   fi
