@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BuildDetailAPIResponse, BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useConsoleStore } from '../../store/store';
-import { BuildDetailPanel } from './BuildDetail';
+import { BuildDagGraph, BuildDetailPanel } from './BuildDetail';
 import BuildsView from './BuildsView';
 
 /** An instant at local wall-clock time on 2026-11-08, so card times read the same in any TZ. */
@@ -361,5 +361,34 @@ describe('BuildDetailPanel', () => {
     rerender(<BuildDetailPanel target={{ id: 'b-q' }} />);
     expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(['/api/builds/b-run', '/api/builds/b-q']);
     expect(screen.getByText('Synapse hooks')).toBeTruthy();
+  });
+
+  it('gives the graph floor width matching dag.width in narrow viewports so badges do not overflow cards', () => {
+    const wideChunks: readonly VanadisChunkDTO[] = [
+      chunk('w1', 0, 'in_progress', { title: 'First chunk', depends_on: [] }),
+      chunk('w2', 1, 'ci_failed', { title: 'Second chunk', depends_on: [] }),
+      chunk('w3', 2, 'completed', { title: 'Third chunk', depends_on: [] }),
+      chunk('w4', 3, 'pending', { title: 'Fourth chunk', depends_on: [] }),
+    ];
+    const { container } = render(
+      <div style={{ width: '360px' }}>
+        <BuildDagGraph buildId="b-wide" chunks={wideChunks} />
+      </div>,
+    );
+    const graph = container.querySelector('.build-dag-graph') as HTMLElement;
+    expect(graph).toBeTruthy();
+    expect(graph.style.width).toBe('942px');
+    expect(graph.style.minWidth).toBe('942px');
+
+    const nodes = container.querySelectorAll('.build-dag-node');
+    expect(nodes).toHaveLength(4);
+    for (const node of nodes) {
+      const el = node as HTMLElement;
+      const widthPct = Number.parseFloat(el.style.width);
+      const computedWidth = (widthPct / 100) * Number.parseFloat(graph.style.minWidth);
+      expect(Math.round(computedWidth)).toBe(220);
+      expect(node.querySelector('.chunk-status-badge')).toBeTruthy();
+      expect(node.querySelector('.chunk-index-badge')).toBeTruthy();
+    }
   });
 });

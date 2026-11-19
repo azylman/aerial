@@ -31,7 +31,9 @@ function TagSection({ label, tags, className }: { readonly label: string; readon
   );
 }
 
-/** Interactive DAG graph of build chunks rendered across rank rows with SVG bezier connectors. */
+const EDGE_TONES = ['completed', 'active', 'failed', 'pending'] as const;
+
+/** Interactive Sugiyama DAG graph of build chunks laid out with @dagrejs/dagre. */
 export function BuildDagGraph({
   buildId,
   chunks,
@@ -45,44 +47,91 @@ export function BuildDagGraph({
   if (dag.ranks.length === 0) return null;
 
   return (
-    <div className="build-dag-graph">
-      {dag.edges.length > 0 ? (
-        <svg className="build-dag-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-          {dag.edges.map((edge) => {
-            const fromX = ((edge.fromIndex + 0.5) / edge.fromCount) * 100;
-            const fromY = ((edge.fromRank + 0.5) / dag.ranks.length) * 100;
-            const toX = ((edge.toIndex + 0.5) / edge.toCount) * 100;
-            const toY = ((edge.toRank + 0.5) / dag.ranks.length) * 100;
-            const midY = (fromY + toY) / 2;
-            const d = `M ${fromX} ${fromY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${toY}`;
-            return <path key={`${edge.fromId}->${edge.toId}`} className="build-dag-edge" d={d} />;
-          })}
-        </svg>
-      ) : null}
-      {dag.ranks.map((rankNodes, rankIdx) => (
-        <div key={rankIdx} className="build-dag-rank" data-rank={rankIdx}>
-          {rankNodes.map((node) => {
-            const isActive =
-              activeChunkId !== undefined && (activeChunkId === node.chunk.id || activeChunkId === String(node.number));
-            return (
-              <button
-                key={node.chunk.id}
-                type="button"
-                className={`build-dag-node${isActive ? ' active' : ''}`}
-                data-chunk-id={node.chunk.id}
-                data-chunk-index={node.number}
-                onClick={() =>
-                  useConsoleStore.getState().openDrawer({ kind: 'build', id: buildId, chunkId: node.chunk.id })
-                }
-              >
-                <span className="chunk-index-badge">#{node.number}</span>
-                <span className="chunk-title">{node.chunk.title || `Chunk ${node.number}`}</span>
-                <span className={node.status.className}>{node.status.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      ))}
+    <div className="build-dag-viewport">
+      <div
+        className="build-dag-graph"
+        style={{
+          width: `${dag.width}px`,
+          minWidth: `${dag.width}px`,
+          height: `${dag.height}px`,
+        }}
+      >
+        {dag.edges.length > 0 ? (
+          <svg
+            className="build-dag-edges"
+            viewBox={`0 0 ${dag.width} ${dag.height}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <defs>
+              {EDGE_TONES.map((tone) => (
+                <marker
+                  key={tone}
+                  id={`dag-arrow-${tone}`}
+                  viewBox="0 0 10 10"
+                  refX="7"
+                  refY="5"
+                  markerUnits="userSpaceOnUse"
+                  markerWidth="8"
+                  markerHeight="8"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 1.5 L 8 5 L 0 8.5 z" className={`build-dag-arrow arrow-${tone}`} />
+                </marker>
+              ))}
+            </defs>
+            {dag.edges.map((edge) => (
+              <path
+                key={`${edge.fromId}->${edge.toId}`}
+                className={`build-dag-edge edge-${edge.tone}`}
+                d={edge.path}
+                vectorEffect="non-scaling-stroke"
+                markerEnd={`url(#dag-arrow-${edge.tone})`}
+              />
+            ))}
+          </svg>
+        ) : null}
+        {dag.ranks.map((rankNodes, rankIdx) => (
+          <div key={rankIdx} className="build-dag-rank" data-rank={rankIdx}>
+            {rankNodes.map((node) => {
+              const isActive =
+                activeChunkId !== undefined &&
+                (activeChunkId === node.chunk.id || activeChunkId === String(node.number));
+              const statusRaw = (node.chunk.status || 'pending').toLowerCase();
+              const titleText = node.chunk.title || `Chunk ${node.number}`;
+              const leftPct = ((node.x - node.width / 2) / dag.width) * 100;
+              const widthPct = (node.width / dag.width) * 100;
+              return (
+                <button
+                  key={node.chunk.id}
+                  type="button"
+                  className={`build-dag-node node-status-${statusRaw}${isActive ? ' active' : ''}`}
+                  data-chunk-id={node.chunk.id}
+                  data-chunk-index={node.number}
+                  title={titleText}
+                  style={{
+                    left: `${leftPct}%`,
+                    top: `${node.y - Math.round(node.height / 2)}px`,
+                    width: `${widthPct}%`,
+                    height: `${node.height}px`,
+                  }}
+                  onClick={() =>
+                    useConsoleStore.getState().openDrawer({ kind: 'build', id: buildId, chunkId: node.chunk.id })
+                  }
+                >
+                  {node.dependsOn.length > 0 ? <span className="dag-node-port port-in" aria-hidden="true" /> : null}
+                  <span className="dag-node-meta">
+                    <span className="chunk-index-badge">#{node.number}</span>
+                    <span className={node.status.className}>{node.status.label}</span>
+                  </span>
+                  <span className="chunk-title">{titleText}</span>
+                  {node.hasOutEdge ? <span className="dag-node-port port-out" aria-hidden="true" /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -2,6 +2,7 @@
 // detail. A build is indexed once per object (polls are reconciled, so an unchanged
 // build keeps its reference and its index entry) and a filter is one linear pass.
 
+import { Graph, layout as dagreLayout } from '@dagrejs/dagre';
 import type { BuildDetailAPIResponse, BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
 import { type BuildChunkStats, type BuildQueueState, classifyBuildQueueState, computeBuildChunkStats } from '../../lib/builds';
 import { buildFromDetail } from '../../store/selectors';
@@ -141,7 +142,20 @@ export function chunkPrUrl(chunk: Partial<Pick<VanadisChunkDTO, 'pr_number' | 'r
   return `https://github.com/${chunk.repo || DEFAULT_CHUNK_REPO}/pull/${chunk.pr_number}`;
 }
 
-// ---- topological DAG layout ----
+// ---- topological DAG layout (@dagrejs/dagre Sugiyama layout) ----
+
+export const DAG_NODE_WIDTH = 220;
+export const DAG_NODE_HEIGHT = 76;
+export const DAG_NODE_SEP = 14;
+export const DAG_RANK_SEP = 36;
+export const DAG_MARGIN = 10;
+
+export type DagEdgeTone = 'completed' | 'active' | 'failed' | 'pending';
+
+export interface DagPoint {
+  readonly x: number;
+  readonly y: number;
+}
 
 export interface ChunkDagNode {
   readonly chunk: VanadisChunkDTO;
@@ -149,6 +163,11 @@ export interface ChunkDagNode {
   readonly status: ChunkStatusBadge;
   readonly rank: number;
   readonly dependsOn: readonly string[];
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly hasOutEdge: boolean;
 }
 
 export interface ChunkDagEdge {
@@ -160,37 +179,81 @@ export interface ChunkDagEdge {
   readonly toRank: number;
   readonly toIndex: number;
   readonly toCount: number;
+  readonly points: readonly DagPoint[];
+  readonly path: string;
+  readonly tone: DagEdgeTone;
 }
 
 export interface ChunkDagLayout {
+  readonly width: number;
+  readonly height: number;
+  readonly nodes: readonly ChunkDagNode[];
   readonly ranks: readonly (readonly ChunkDagNode[])[];
   readonly edges: readonly ChunkDagEdge[];
 }
 
+function classifyEdgeTone(fromStatus: string | undefined, toStatus: string | undefined): DagEdgeTone {
+  const from = (fromStatus || 'pending').toLowerCase();
+  const to = (toStatus || 'pending').toLowerCase();
+  if (from === 'failed' || from === 'ci_failed' || to === 'failed' || to === 'ci_failed') return 'failed';
+  if (
+    to === 'running' ||
+    to === 'in_progress' ||
+    to === 'coding' ||
+    to === 'pr_opened' ||
+    to === 'deploying'
+  ) {
+    return 'active';
+  }
+  if ((from === 'completed' || from === 'merged') && (to === 'completed' || to === 'merged')) {
+    return 'completed';
+  }
+  return 'pending';
+}
+
+function buildCubicEdgePath(points: readonly DagPoint[]): string {
+  const start = points[0]!;
+  const end = points[points.length - 1]!;
+  if (points.length <= 2) {
+    const midY = Math.round(((start.y + end.y) / 2) * 10) / 10;
+    return `M ${start.x} ${start.y} C ${start.x} ${midY}, ${end.x} ${midY}, ${end.x} ${end.y}`;
+  }
+  let d = `M ${start.x} ${start.y}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i]!;
+    const p1 = points[i + 1]!;
+    const midY = Math.round(((p0.y + p1.y) / 2) * 10) / 10;
+    d += ` C ${p0.x} ${midY}, ${p1.x} ${midY}, ${p1.x} ${p1.y}`;
+  }
+  return d;
+}
+
 /**
- * Builds a topological DAG layout for Vanadis build chunks.
- * Ranks are 0-based depth levels (0 for roots, 1 + max(parentRank) for dependents).
+ * Builds a Sugiyama topological DAG layout for Vanadis build chunks using @dagrejs/dagre.
+ * Ranks are 0-based depth levels (0 for roots, 1 + max(parentRank) for dependents), and
+ * every node and edge receives pixel-accurate coordinates and SVG cubic-bezier routing paths.
  */
 export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayout {
   if (chunks.length === 0) {
-    return { ranks: [], edges: [] };
+    return { width: 0, height: 0, nodes: [], ranks: [], edges: [] };
   }
 
   const hasExplicitDependsOn = chunks.some((c) => Array.isArray(c.depends_on));
   const chunkIds = new Set(chunks.map((c) => c.id));
 
   const parentMap = new Map<string, readonly string[]>();
+  const outDegree = new Set<string>();
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i]!;
-    if (hasExplicitDependsOn) {
-      const deps = Array.isArray(c.depends_on)
+    const deps = hasExplicitDependsOn
+      ? Array.isArray(c.depends_on)
         ? c.depends_on.filter((depId) => depId !== c.id && chunkIds.has(depId))
+        : []
+      : i > 0 && chunks[i - 1]
+        ? [chunks[i - 1]!.id]
         : [];
-      parentMap.set(c.id, deps);
-    } else {
-      const deps = i > 0 && chunks[i - 1] ? [chunks[i - 1]!.id] : [];
-      parentMap.set(c.id, deps);
-    }
+    parentMap.set(c.id, deps);
+    for (const pid of deps) outDegree.add(pid);
   }
 
   const memo = new Map<string, number>();
@@ -203,9 +266,7 @@ export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayou
     const parents = parentMap.get(id) ?? [];
     let maxParent = -1;
     for (const pid of parents) {
-      if (visiting.has(pid)) {
-        continue;
-      }
+      if (visiting.has(pid)) continue;
       const pr = computeRank(pid);
       if (pr > maxParent) maxParent = pr;
     }
@@ -219,13 +280,49 @@ export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayou
     computeRank(c.id);
   }
 
-  const nodes: ChunkDagNode[] = chunks.map((chunk, position) => ({
-    chunk,
-    number: chunkNumber(chunk, position),
-    status: chunkStatusBadge(chunk.status),
-    rank: memo.get(chunk.id) ?? 0,
-    dependsOn: parentMap.get(chunk.id) ?? [],
-  }));
+  const g = new Graph({ multigraph: false, compound: false });
+  g.setGraph({
+    rankdir: 'TB',
+    nodesep: DAG_NODE_SEP,
+    ranksep: DAG_RANK_SEP,
+    marginx: DAG_MARGIN,
+    marginy: DAG_MARGIN,
+  });
+  g.setDefaultEdgeLabel(() => ({}));
+
+  // Insert nodes and edges so dagre's DFS initial ordering places earlier chunks on the left.
+  for (const c of chunks) {
+    g.setNode(c.id, { width: DAG_NODE_WIDTH, height: DAG_NODE_HEIGHT });
+  }
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const c = chunks[i]!;
+    const toRank = memo.get(c.id) ?? 0;
+    const deps = parentMap.get(c.id) ?? [];
+    for (let j = deps.length - 1; j >= 0; j--) {
+      const pid = deps[j]!;
+      const fromRank = memo.get(pid) ?? 0;
+      if (fromRank < toRank) {
+        g.setEdge(pid, c.id);
+      }
+    }
+  }
+  dagreLayout(g);
+
+  const nodes: ChunkDagNode[] = chunks.map((chunk, position) => {
+    const layoutNode = g.node(chunk.id);
+    return {
+      chunk,
+      number: chunkNumber(chunk, position),
+      status: chunkStatusBadge(chunk.status),
+      rank: memo.get(chunk.id) ?? 0,
+      dependsOn: parentMap.get(chunk.id) ?? [],
+      x: Math.round(layoutNode.x),
+      y: Math.round(layoutNode.y),
+      width: DAG_NODE_WIDTH,
+      height: DAG_NODE_HEIGHT,
+      hasOutEdge: outDegree.has(chunk.id),
+    };
+  });
 
   let maxRank = 0;
   for (const node of nodes) {
@@ -235,6 +332,9 @@ export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayou
   const rankBuckets: ChunkDagNode[][] = Array.from({ length: maxRank + 1 }, () => []);
   for (const node of nodes) {
     rankBuckets[node.rank]!.push(node);
+  }
+  for (const bucket of rankBuckets) {
+    bucket.sort((a, b) => a.x - b.x);
   }
 
   const nodeMap = new Map<string, ChunkDagNode>();
@@ -253,6 +353,18 @@ export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayou
       const toRank = node.rank;
       const toRankNodes = rankBuckets[toRank] ?? [];
       const toIndex = toRankNodes.findIndex((n) => n.chunk.id === node.chunk.id);
+
+      const startPort: DagPoint = { x: parentNode.x, y: parentNode.y + Math.round(parentNode.height / 2) };
+      const endPort: DagPoint = { x: node.x, y: node.y - Math.round(node.height / 2) };
+      const dagreEdge = g.edge(parentId, node.chunk.id);
+      const interior =
+        dagreEdge && Array.isArray(dagreEdge.points) && dagreEdge.points.length > 2 && Math.abs(toRank - fromRank) > 1
+          ? (dagreEdge.points as readonly DagPoint[])
+              .slice(1, -1)
+              .map((p: DagPoint) => ({ x: Math.round(p.x), y: Math.round(p.y) }))
+          : [];
+      const points: readonly DagPoint[] = [startPort, ...interior, endPort];
+
       edges.push({
         fromId: parentId,
         toId: node.chunk.id,
@@ -262,9 +374,16 @@ export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayou
         toRank,
         toIndex,
         toCount: toRankNodes.length,
+        points,
+        path: buildCubicEdgePath(points),
+        tone: classifyEdgeTone(parentNode.chunk.status, node.chunk.status),
       });
     }
   }
 
-  return { ranks: rankBuckets, edges };
+  const graphMeta = g.graph();
+  const width = Math.max(Math.round(graphMeta.width ?? 0), DAG_NODE_WIDTH + DAG_MARGIN * 2);
+  const height = Math.max(Math.round(graphMeta.height ?? 0), DAG_NODE_HEIGHT + DAG_MARGIN * 2);
+
+  return { width, height, nodes, ranks: rankBuckets, edges };
 }
