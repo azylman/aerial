@@ -61,19 +61,8 @@ func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNu
 	if s == nil || s.registry == nil || prNum <= 0 || strings.TrimSpace(repo) == "" {
 		return nil
 	}
-	pgReg, ok := s.registry.(*PostgresPRRegistry)
-	if !ok || pgReg == nil || pgReg.pool == nil {
-		return nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	var metaBytes []byte
-	err := pgReg.pool.QueryRow(qCtx, `SELECT COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normalizeRepo(repo), prNum).Scan(&metaBytes)
-	if err != nil || len(metaBytes) == 0 {
-		return nil
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(metaBytes, &meta); err != nil || meta == nil {
+	meta, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
+	if err != nil || len(meta) == 0 {
 		return nil
 	}
 	// Only the identity-validated snapshot for the PR's current revision renders.
