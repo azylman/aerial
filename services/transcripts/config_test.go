@@ -173,3 +173,57 @@ func TestLoadConfigFileDefaultStack(t *testing.T) {
 		t.Fatalf("Stack = %q, want default %q", cfg.Stack, DefaultStack)
 	}
 }
+
+func TestLoadConfigFileSummarizer(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeCfg := func(name, body string) string {
+		p := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		return p
+	}
+	absentPath := writeCfg("absent.yaml", "port: '4017'\nstack: 'aerial'\ndatabase_url: 'postgres://x'\n")
+	enabledPath := writeCfg("enabled.yaml", "port: '4017'\nstack: 'aerial'\ndatabase_url: 'postgres://x'\nsummarizer:\n  enabled: true\n  batch_limit: 3\n  max_steps: 7\n  eri_llm_url: 'http://eri:8080/internal/llm'\n  senses_url: 'http://senses:8880'\n")
+	zeroLimitsPath := writeCfg("zerolimits.yaml", "port: '4017'\nstack: 'aerial'\ndatabase_url: 'postgres://x'\nsummarizer:\n  enabled: true\n")
+	tests := []struct {
+		name        string
+		path        string
+		wantEnabled bool
+		wantBatch   int
+		wantMax     int
+		wantLLMURL  string
+	}{
+		{"absent section stays dark with sweep defaults", absentPath, false, DefaultSummarizerBatchLimit, DefaultSummarizerMaxSteps, ""},
+		{"enabled keeps explicit bounds and urls", enabledPath, true, 3, 7, "http://eri:8080/internal/llm"},
+		{"zero limits fill defaults", zeroLimitsPath, true, DefaultSummarizerBatchLimit, DefaultSummarizerMaxSteps, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "")
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", "")
+			t.Setenv("POSTGRES_DB", "")
+			t.Setenv("NATS_URL", "")
+			cfg, err := LoadConfigFile(tc.path, "")
+			if err != nil {
+				t.Fatalf("LoadConfigFile() err = %v", err)
+			}
+			if cfg.Summarizer.Enabled != tc.wantEnabled {
+				t.Errorf("Enabled = %v, want %v", cfg.Summarizer.Enabled, tc.wantEnabled)
+			}
+			if cfg.Summarizer.BatchLimit != tc.wantBatch {
+				t.Errorf("BatchLimit = %d, want %d", cfg.Summarizer.BatchLimit, tc.wantBatch)
+			}
+			if cfg.Summarizer.MaxSteps != tc.wantMax {
+				t.Errorf("MaxSteps = %d, want %d", cfg.Summarizer.MaxSteps, tc.wantMax)
+			}
+			if cfg.Summarizer.EriLLMURL != tc.wantLLMURL {
+				t.Errorf("EriLLMURL = %q, want %q", cfg.Summarizer.EriLLMURL, tc.wantLLMURL)
+			}
+		})
+	}
+}
