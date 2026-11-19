@@ -1,212 +1,23 @@
 package main
 
-import (
-	"fmt"
-	"strings"
-)
+import "github.com/azylman/aerial/services/prospera/internal/model"
 
-// CallMode represents the operating mode of a voice call session.
-type CallMode string
+type CallMode = model.CallMode
 
 const (
-	ModeConversation CallMode = "conversation"
-	ModeNotify       CallMode = "notify"
-	ModeCallback     CallMode = "callback"
+	ModeConversation = model.ModeConversation
+	ModeNotify       = model.ModeNotify
+	ModeCallback     = model.ModeCallback
 )
 
-// CallIdentity specifies assistant self-identification rules for a call.
-type CallIdentity struct {
-	Introduction string `json:"introduction,omitempty" jsonschema:"Spoken opening self-introduction or identity greeting when connecting"`
-	Disclose     string `json:"disclose,omitempty"     jsonschema:"AI disclosure policy: 'when-asked', 'always', or 'never' (default 'when-asked')"`
-}
+type CallIdentity = model.CallIdentity
 
-// CallBrief contains the intent, context, boundaries, and approval rules for a phone call.
-type CallBrief struct {
-	Mode               string       `json:"mode,omitempty"                 jsonschema:"Operating mode: 'conversation' for interactive dialog or 'notify' for one-way announcement"`
-	Task               string       `json:"task,omitempty"                 jsonschema:"Primary objective, task instruction, or opening message for the call"`
-	Context            string       `json:"context,omitempty"              jsonschema:"Background context, entity details, or reference notes for the conversation"`
-	Language           string       `json:"language,omitempty"             jsonschema:"Spoken language code (e.g. 'en-US', default 'en-US')"`
-	Identity           CallIdentity `json:"identity,omitempty"             jsonschema:"Assistant identity and AI disclosure configuration"`
-	Disclosures        []string     `json:"disclosures,omitempty"          jsonschema:"Required disclosure statements or disclaimers to state during the call"`
-	Approvals          string       `json:"approvals,omitempty"            jsonschema:"Financial and commitment boundary rules (default: ZERO SPEND AUTHORIZED)"`
-	VoicemailMessage   string       `json:"voicemail_message,omitempty"    jsonschema:"Message to leave if answered by voicemail or answering machine"`
-	SuccessCriteria    string       `json:"success_criteria,omitempty"     jsonschema:"Criteria defining whether the call successfully accomplished its objective"`
-	MaxDurationSeconds int          `json:"max_duration_seconds,omitempty" jsonschema:"Maximum duration in seconds before terminating the call (default 300, max 900)"`
-}
+type CallBrief = model.CallBrief
 
-const defaultApprovalFirewall = "ZERO SPEND AUTHORIZED. You are not authorized to agree to any financial charges, fees, deposits, or non-refundable commitments. If the other party requires payment or financial authorization, politely inform them you will have the person you are calling for follow up directly."
+const defaultApprovalFirewall = model.DefaultApprovalFirewall
 
-// ValidateInitiateCallArgs validates and normalizes arguments for initiating a call.
-func ValidateInitiateCallArgs(toRaw, fromNumber, message string, brief CallBrief) (string, CallBrief, error) {
-	normTo, err := NormalizeE164(toRaw)
-	if err != nil {
-		return "", brief, fmt.Errorf("invalid destination phone number: %w", err)
-	}
-
-	if fromNumber != "" {
-		normFrom, err := NormalizeE164(fromNumber)
-		if err == nil && normTo == normFrom {
-			return "", brief, fmt.Errorf("destination number cannot match source from_number")
-		}
-	}
-
-	if trimmedMode := strings.TrimSpace(brief.Mode); trimmedMode != "" {
-		switch CallMode(trimmedMode) {
-		case ModeConversation, ModeNotify:
-			brief.Mode = trimmedMode
-		default:
-			return "", brief, fmt.Errorf("invalid mode %q: must be conversation or notify", brief.Mode)
-		}
-	} else {
-		brief.Mode = string(ModeConversation)
-	}
-
-	trimmedMessage := strings.TrimSpace(message)
-	if strings.TrimSpace(brief.Task) == "" && trimmedMessage != "" {
-		brief.Task = trimmedMessage
-	}
-
-	if strings.TrimSpace(brief.Task) == "" {
-		return "", brief, fmt.Errorf("opening message or task is required")
-	}
-
-	if err := validateBriefLimits(brief); err != nil {
-		return "", brief, err
-	}
-
-	normalizeBriefDefaults(&brief)
-	return normTo, brief, nil
-}
-
-func validateBriefLimits(b CallBrief) error {
-	limits := []struct {
-		name string
-		val  int
-		max  int
-	}{
-		{"task", len(b.Task), 2000},
-		{"context", len(b.Context), 4000},
-		{"approvals", len(b.Approvals), 2000},
-		{"voicemail_message", len(b.VoicemailMessage), 1000},
-		{"success_criteria", len(b.SuccessCriteria), 1000},
-		{"disclosures", len(b.Disclosures), 20},
-	}
-	for _, l := range limits {
-		if l.val > l.max {
-			unit := "characters"
-			metric := "length"
-			if l.name == "disclosures" {
-				unit = "items"
-				metric = "count"
-			}
-			return fmt.Errorf("%s exceeds %d %s (%s: %d)", l.name, l.max, unit, metric, l.val)
-		}
-	}
-	return nil
-}
-
-func normalizeBriefDefaults(b *CallBrief) {
-	if b.Language == "" {
-		b.Language = "en-US"
-	}
-	if b.Identity.Disclose == "" {
-		b.Identity.Disclose = "when-asked"
-	}
-	if b.MaxDurationSeconds <= 0 {
-		b.MaxDurationSeconds = 300
-	} else if b.MaxDurationSeconds > 900 {
-		b.MaxDurationSeconds = 900
-	}
-	if strings.TrimSpace(b.Approvals) == "" {
-		b.Approvals = defaultApprovalFirewall
-	}
-}
-
-// BuildSystemPrompt constructs the system prompt for the Gemini Live session.
-func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []string) string {
-	var sb strings.Builder
-
-	sb.WriteString("You are Aerial, an assistant making or handling a phone call.\n")
-	sb.WriteString("Speak like a warm, natural human on a live phone call—use a relaxed conversational cadence, natural contractions (like \"I'm\", \"we're\", \"I'd\"), expressive intonation, and everyday phrasing rather than stiff or scripted readback. Keep spoken turns brief (1-2 short sentences) suited for real-time telephone conversation, and never recite the task brief verbatim; open with a friendly, casual hook and let the other person respond before sharing extra details.\n\n")
-
-	if brief.Language != "" {
-		fmt.Fprintf(&sb, "SPOKEN LANGUAGE: %s\n\n", brief.Language)
-	}
-
-	if brief.Identity.Introduction != "" {
-		fmt.Fprintf(&sb, "IDENTITY INTRODUCTION: %s\n", brief.Identity.Introduction)
-	}
-	switch brief.Identity.Disclose {
-	case "", "when-asked":
-		if brief.Identity.Introduction == "" {
-			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: focus directly on the task without introducing yourself upfront. If asked who is calling or for your name, state that your name is Aerial and phrase your role naturally for the situation—for example, '<Name>'s assistant' when the person's name has been given or is in the permitted disclosures/context, 'the homeowner's assistant' for a contractor, or simply that you are an assistant helping schedule or check on this—never literally say 'the owner's assistant' where it sounds unnatural like at a restaurant or dentist. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
-		} else {
-			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: if asked who is calling or for your name, state that your name is Aerial and phrase your role naturally for the situation—for example, '<Name>'s assistant' when the person's name has been given or is in the permitted disclosures/context, 'the homeowner's assistant' for a contractor, or simply that you are an assistant helping schedule or check on this—never literally say 'the owner's assistant' where it sounds unnatural like at a restaurant or dentist. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
-		}
-	default:
-		fmt.Fprintf(&sb, "AI IDENTITY DISCLOSURE POLICY: %s\n\n", brief.Identity.Disclose)
-	}
-
-	sb.WriteString("CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION): Never impersonate the person you are calling for or claim their personal, medical, or family relationships as your own (never say 'my wife', 'my husband', 'my partner', 'my kids', or 'my house'). Even when using progressive disclosure without introducing yourself upfront, always frame household, guest, or personal details using natural neutral or third-person attribution (for example, 'the appointment is under <Name>', 'the property has a side gate', or 'one of the people in the group...').\n\n")
-
-	fmt.Fprintf(&sb, "TASK OBJECTIVE:\n%s\n\n", brief.Task)
-
-	if brief.Context != "" {
-		fmt.Fprintf(&sb, "BACKGROUND CONTEXT:\n%s\n\n", brief.Context)
-	}
-
-	if len(brief.Disclosures) > 0 {
-		sb.WriteString("PERMITTED DISCLOSURES:\n")
-		for _, d := range brief.Disclosures {
-			fmt.Fprintf(&sb, "- %s\n", d)
-		}
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("APPROVAL FIREWALL:\n")
-	sb.WriteString(brief.Approvals)
-	sb.WriteString("\n\n")
-
-	sb.WriteString("HOLD MUSIC & SILENCE RULE: When placed on hold or listening to hold music or automated silence, DO NOT speak or interrupt. Wait silently until a live human speaks.\n\n")
-
-	sb.WriteString("DTMF & PHONE TREES: When navigating interactive voice response (IVR) phone menus, call the 'send_dtmf' tool with the exact key sequence needed.\n\n")
-
-	sb.WriteString("MANDATORY TOOL LOOKUP (NO GUESSING): Never guess, assume, or default to 'no' or 'none' when asked about any detail not explicitly stated in TASK OBJECTIVE, BACKGROUND CONTEXT, or PERMITTED DISCLOSURES. If the task is strictly for a specific date or time and does not authorize alternative dates, politely decline other dates directly without calling 'consult_calendar'; only call 'consult_calendar' when the brief allows date/time flexibility or requires checking schedule availability before confirming a proposed slot. Before answering any question about household details, addresses, preferences, restrictions, or background facts not listed above, you MUST call 'consult_memory' first and answer strictly from the returned facts using the neutral or third-person framing rule above.\n\n")
-
-	if brief.SuccessCriteria != "" {
-		fmt.Fprintf(&sb, "SUCCESS CRITERIA (CONFIRM BEFORE ENDING):\n%s\n\n", brief.SuccessCriteria)
-	}
-
-	switch mode {
-	case ModeCallback:
-		sb.WriteString("CALLBACK RECEPTIONIST MODE: You are answering an inbound call. Pick up with a brief, natural greeting (for example, 'Hi, this is Aerial, how can I help you?' or 'Hello, this is Aerial speaking') and let the caller explain why they are calling. Do not dump prior call details upfront on pickup; use any prior call context as background once the caller brings it up, take their message or update (along with their name and callback number if needed), and do not promise specific commitments.\n\n")
-	case ModeNotify:
-		sb.WriteString("NOTIFY MODE: Deliver the intended notification message clearly, confirm receipt if possible, and conclude the call.\n\n")
-	case ModeConversation:
-		// Default conversational mode uses the base system prompt instructions
-	}
-
-	if len(ownerInstructions) > 0 {
-		sb.WriteString("LIVE OWNER GUIDANCE:\n")
-		for _, instr := range ownerInstructions {
-			fmt.Fprintf(&sb, "- %s\n", instr)
-		}
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
-}
-
-// ResolveVoicemailMessage determines the message to play or leave when voicemail is reached.
-func ResolveVoicemailMessage(brief CallBrief, openingMessage string) string {
-	if trimmed := strings.TrimSpace(brief.VoicemailMessage); trimmed != "" {
-		return trimmed
-	}
-	if trimmed := strings.TrimSpace(openingMessage); trimmed != "" {
-		return trimmed
-	}
-	if trimmed := strings.TrimSpace(brief.Task); trimmed != "" {
-		return fmt.Sprintf("Hello, this is an automated message regarding: %s. Please return this call at your earliest convenience.", trimmed)
-	}
-	return "Hello, please return this call at your convenience. Thank you."
-}
+var (
+	ValidateInitiateCallArgs = model.ValidateInitiateCallArgs
+	BuildSystemPrompt        = model.BuildSystemPrompt
+	ResolveVoicemailMessage  = model.ResolveVoicemailMessage
+)
