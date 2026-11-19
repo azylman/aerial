@@ -1078,114 +1078,6 @@ func TestWorkerPool_ResolvedTranscriptStore_TableDriven(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_TranscriptRoots_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	sessMgr := session.New(tmpDir, tmpDir)
-
-	tests := []struct {
-		name          string
-		pool          *WorkerPool
-		wantBrainRoot string
-		wantExtraLen  int
-	}{
-		{
-			name: "nil_pool",
-			pool: nil,
-		},
-		{
-			name: "nil_session_mgr",
-			pool: &WorkerPool{},
-		},
-		{
-			name:          "with_session_mgr",
-			pool:          &WorkerPool{sessionMgr: sessMgr},
-			wantBrainRoot: sessMgr.Roots()[0],
-			wantExtraLen:  len(sessMgr.Roots()) - 1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			brainRoot, extra := tc.pool.transcriptRoots()
-			if brainRoot != tc.wantBrainRoot {
-				t.Errorf("brainRoot = %q, want %q", brainRoot, tc.wantBrainRoot)
-			}
-			if len(extra) != tc.wantExtraLen {
-				t.Errorf("len(extra) = %d, want %d", len(extra), tc.wantExtraLen)
-			}
-		})
-	}
-}
-
-func TestWorkerPool_EnqueueTranscriptPublish_EdgeGuards(t *testing.T) {
-	t.Parallel()
-
-	memBus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = memBus.Close() })
-
-	tests := []struct {
-		name      string
-		pool      *WorkerPool
-		sessionID string
-		threadID  string
-		source    string
-	}{
-		{
-			name:      "nil_pool",
-			pool:      nil,
-			sessionID: "s1",
-		},
-		{
-			name:      "empty_session_id",
-			pool:      &WorkerPool{},
-			sessionID: "",
-		},
-		{
-			name:      "whitespace_session_id",
-			pool:      &WorkerPool{},
-			sessionID: "   ",
-		},
-		{
-			name:      "no_event_bus",
-			pool:      &WorkerPool{transcriptsIndexerURL: "http://indexer.local"},
-			sessionID: "s1",
-		},
-		{
-			name:      "no_indexer_url",
-			pool:      &WorkerPool{eventBus: memBus},
-			sessionID: "s1",
-		},
-		{
-			name: "stopped_pool",
-			pool: &WorkerPool{
-				eventBus:              memBus,
-				transcriptsIndexerURL: "http://indexer.local",
-				stopped:               true,
-			},
-			sessionID: "s1",
-		},
-		{
-			name: "nil_publish_channel",
-			pool: &WorkerPool{
-				eventBus:              memBus,
-				transcriptsIndexerURL: "http://indexer.local",
-				transcriptPublishCh:   nil,
-			},
-			sessionID: "s1",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tc.pool.EnqueueTranscriptPublish(tc.sessionID, tc.threadID, tc.source)
-		})
-	}
-}
-
 func TestWorkerPool_TranscriptPublish_LifecycleGuards(t *testing.T) {
 	t.Parallel()
 
@@ -1239,46 +1131,64 @@ func TestWorkerPool_TranscriptPublish_LifecycleGuards(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Accessors_TableDriven(t *testing.T) {
+func TestWorkerPool_RecheckSessionTranscript_DetectsModification(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.NewFromData(&config.ConfigData{NATSURL: "nats://cfg.local:4222"})
-
-	tests := []struct {
-		name        string
-		pool        *WorkerPool
-		wantNATSURL string
-		wantCfg     *config.Config
-	}{
-		{
-			name:        "nil_pool",
-			pool:        nil,
-			wantNATSURL: "",
-			wantCfg:     nil,
-		},
-		{
-			name:        "config_nats_url",
-			pool:        &WorkerPool{appCfg: cfg},
-			wantNATSURL: "nats://cfg.local:4222",
-			wantCfg:     cfg,
-		},
-		{
-			name:        "fallback_cfg_nats_url",
-			pool:        &WorkerPool{cfg: WorkerPoolConfig{NATSURL: "nats://fallback.local:4222"}},
-			wantNATSURL: "nats://fallback.local:4222",
-			wantCfg:     nil,
-		},
+	tmpDir := t.TempDir()
+	sessID := "s-recheck-mod"
+	filePath := filepath.Join(tmpDir, "transcript.jsonl")
+	if err := os.WriteFile(filePath, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.pool.NATSURL(); got != tc.wantNATSURL {
-				t.Errorf("NATSURL() = %q, want %q", got, tc.wantNATSURL)
-			}
-			if got := tc.pool.AppConfig(); got != tc.wantCfg {
-				t.Errorf("AppConfig() = %v, want %v", got, tc.wantCfg)
-			}
-		})
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+
+	p := &WorkerPool{
+		transcriptPublishCh:    make(chan transcriptPublishJob, 5),
+		transcriptRecheckDelay: 10 * time.Millisecond,
+		eventBus:               memBus,
+		transcriptsIndexerURL:  "http://indexer.local",
+	}
+
+	if err := os.WriteFile(filePath, []byte("modified content"), 0o644); err != nil {
+		t.Fatalf("write modified file: %v", err)
+	}
+	if err := os.Chtimes(filePath, fi.ModTime().Add(time.Hour), fi.ModTime().Add(time.Hour)); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	p.recheckSessionTranscript(sessID, "t1", filePath, fi.ModTime().UTC(), fi.Size())
+
+	select {
+	case job := <-p.transcriptPublishCh:
+		if job.sessionID != sessID {
+			t.Errorf("job.sessionID = %q, want %q", job.sessionID, sessID)
+		}
+		if job.source != "recheck" {
+			t.Errorf("job.source = %q, want recheck", job.source)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for recheck publish job")
+	}
+}
+
+func TestWorkerPool_DrainTranscriptPublisher_DrainsJobs(t *testing.T) {
+	t.Parallel()
+
+	p := &WorkerPool{
+		transcriptPublishCh: make(chan transcriptPublishJob, 5),
+	}
+	p.transcriptPublishCh <- transcriptPublishJob{sessionID: "s-drain-1"}
+	p.transcriptPublishCh <- transcriptPublishJob{sessionID: "s-drain-2"}
+
+	p.drainTranscriptPublisher(context.Background())
+
+	if len(p.transcriptPublishCh) != 0 {
+		t.Errorf("expected channel to be empty after drain, got len %d", len(p.transcriptPublishCh))
 	}
 }

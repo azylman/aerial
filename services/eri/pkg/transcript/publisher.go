@@ -27,6 +27,7 @@ type BatchPublishFunc func(ctx context.Context, batch transcriptwire.TranscriptS
 // from the indexer watermark instead of replaying stale steps.
 type Publisher struct {
 	mu      sync.Mutex
+	drainMu sync.Mutex
 	stack   string
 	publish BatchPublishFunc
 	queues  map[string][]transcriptwire.TranscriptStepBatch
@@ -341,6 +342,8 @@ func (p *Publisher) Drain(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
 	p.mu.Lock()
 	if p.publish == nil && len(p.order) > 0 {
 		p.mu.Unlock()

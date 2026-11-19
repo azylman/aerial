@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -217,6 +218,70 @@ func TestPublisher_DrainFailureKeepsBatchesEnqueuedDuringFlight(t *testing.T) {
 		t.Fatalf("second Drain failed: %v", err)
 	}
 	assertEnvelopesEqual(t, published, []publishedEnvelope{{first: 1, last: 1, final: true}})
+}
+
+// TestPublisher_DrainConcurrentSerialization verifies that concurrent calls to Drain
+// are serialized on drainMu so that no batch is published twice and no queued batch is dropped.
+func TestPublisher_DrainConcurrentSerialization(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var publishedMu sync.Mutex
+	var published []transcriptwire.TranscriptStepBatch
+
+	var firstCall sync.Once
+	publish := func(_ context.Context, b transcriptwire.TranscriptStepBatch) error {
+		publishedMu.Lock()
+		published = append(published, b)
+		publishedMu.Unlock()
+
+		firstCall.Do(func() {
+			close(started)
+			<-release
+		})
+		return nil
+	}
+
+	p := NewPublisher("aerial", publish)
+	p.Enqueue(testBatch("s1", 0, 0, false), testBatch("s1", 1, 1, true))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errs := make(chan error, 2)
+
+	go func() {
+		defer wg.Done()
+		errs <- p.Drain(context.Background())
+	}()
+
+	<-started
+
+	entered2 := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		close(entered2)
+		errs <- p.Drain(context.Background())
+	}()
+
+	<-entered2
+	close(release)
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("unexpected drain error: %v", err)
+		}
+	}
+
+	publishedMu.Lock()
+	defer publishedMu.Unlock()
+	assertFirstStepsEqual(t, published, []int{0, 1})
+	if pending := countPending(p); pending != 0 {
+		t.Fatalf("pending = %d, want 0", pending)
+	}
 }
 
 type publishedEnvelope struct {
