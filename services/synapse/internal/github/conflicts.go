@@ -81,7 +81,7 @@ func dedupeLatestCheckRuns(runs []model.GitHubMetadataCheck) []model.GitHubMetad
 	latestIdx := make(map[string]int, len(runs))
 	out := make([]model.GitHubMetadataCheck, 0, len(runs))
 	for _, cr := range runs {
-		if strings.EqualFold(strings.TrimSpace(cr.Name), "build-metadata") || strings.EqualFold(strings.TrimSpace(cr.App.Slug), "dependabot") {
+		if model.IsBuildMetadataCheck(cr.Name) || model.IsDependabotAppCheck(cr.App.Slug) {
 			continue
 		}
 		key := CanonicalFailedCheckKey(cr.Name)

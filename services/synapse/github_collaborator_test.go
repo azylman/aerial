@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/azylman/aerial/services/synapse/internal/github"
 )
 
 func TestFormatCollaboratorPRTarget(t *testing.T) {
@@ -56,7 +58,7 @@ func TestFormatCollaboratorPRTarget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatCollaboratorPRTarget(tc.repo, tc.prNumber, tc.prTitle, tc.branch, tc.headSHA)
+			got := github.FormatCollaboratorPRTarget(tc.repo, tc.prNumber, tc.prTitle, tc.branch, tc.headSHA)
 			if got != tc.want {
 				t.Errorf("formatCollaboratorPRTarget() = %q, want %q", got, tc.want)
 			}

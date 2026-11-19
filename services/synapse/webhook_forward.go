@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/azylman/aerial/services/synapse/internal/github"
 )
 
 type GitHubPRRef struct {
@@ -42,13 +44,8 @@ func (pr GitHubPullRequest) GetNumber() int {
 }
 
 func isPRMergeConflict(pr GitHubPullRequest) bool {
-	if strings.EqualFold(strings.TrimSpace(pr.MergeableState), "dirty") {
-		return true
-	}
-	if pr.Mergeable != nil && !*pr.Mergeable {
-		return true
-	}
-	return false
+	reason := github.ExtractAutoMergeBlockReason(pr.MergeableState, pr.Mergeable)
+	return github.IsActionableAutoMergeBlock(reason)
 }
 
 func isPRMergeabilityUnknown(pr GitHubPullRequest) bool {

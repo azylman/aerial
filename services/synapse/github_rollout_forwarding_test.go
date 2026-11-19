@@ -129,7 +129,7 @@ func TestUpdatedForCurrentMainHelpers(t *testing.T) {
 	if nilSrv.wasUpdatedForCurrentMain("azylman/aerial", 123) {
 		t.Errorf("expected false for nil server")
 	}
-	nilSrv.clearUpdatedPRsForRepo("azylman/aerial")
+	nilSrv.GHState().ClearUpdatedPRsForRepo("azylman/aerial")
 
 	srv := &RouterServer{}
 	srv.markUpdatedForCurrentMain("azylman/aerial", 0)
@@ -151,7 +151,7 @@ func TestUpdatedForCurrentMainHelpers(t *testing.T) {
 		t.Errorf("expected true for PR 99")
 	}
 
-	srv.clearUpdatedPRsForRepo("azylman/aerial")
+	srv.GHState().ClearUpdatedPRsForRepo("azylman/aerial")
 
 	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
 		t.Errorf("expected false for cleared PR 42")
