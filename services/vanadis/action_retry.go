@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,10 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -67,36 +64,9 @@ func (s *VanadisServer) retryActionChunk(ctx context.Context, req RetryActionChu
 	if err != nil {
 		return nil, err
 	}
-	target := strings.TrimRight(s.restateCfg.RestateIngressURL, "/") + "/" + s.buildServiceName() + "/" + url.PathEscape(req.BuildID) + "/RetryActionChunk"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", retryActionIdempotencyKey(req))
-	client := s.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("durable retry request: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		switch response.StatusCode {
-		case http.StatusBadRequest:
-			return nil, fmt.Errorf("%w: retry rejected", ErrInvalidBuildInput)
-		case http.StatusNotFound:
-			return nil, ErrBuildNotFound
-		case http.StatusConflict:
-			return nil, ErrBuildConflict
-		}
-		return nil, fmt.Errorf("durable retry returned HTTP %d", response.StatusCode)
-	}
 	var result RetryActionChunkResult
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode durable retry: %w", err)
+	if err := s.callRetryAction(ctx, req.BuildID, body, retryActionIdempotencyKey(req), &result); err != nil {
+		return nil, err
 	}
 	if !result.Accepted || result.BuildID != req.BuildID || result.ChunkID != req.ChunkID || result.DispatchID == "" {
 		return nil, errors.New("invalid durable retry acknowledgement")

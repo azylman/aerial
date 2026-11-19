@@ -63,6 +63,7 @@ func TestRetryActionIntake(t *testing.T) {
 		{name: "invalid json", body: `{`, wantStatus: 400},
 		{name: "stale", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 409, wantStatus: 409},
 		{name: "transient", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 503, wantStatus: 500},
+		{name: "invalid acknowledgement", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"","accepted":false}`, wantStatus: 500},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,6 +237,60 @@ func TestRetryEligibility(t *testing.T) {
 			err := s.validateRetryEligibility(context.Background(), RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: tc.identity})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+type eligibilityEdgeCase struct {
+	name      string
+	nilStore  bool
+	storeErr  error
+	build     *VanadisBuild
+	chunks    []VanadisChunk
+	wantErr   bool
+	wantErrIs error
+	wantSub   string
+}
+
+func TestValidateRetryEligibilityEdges(t *testing.T) {
+	t.Parallel()
+	tests := []eligibilityEdgeCase{
+		{name: "nil store errors", nilStore: true, wantErr: true, wantSub: "vanadis store not configured"},
+		{name: "store error propagates", storeErr: errors.New("db down"), wantErr: true, wantSub: "db down"},
+		{name: "nil build maps to not found", build: nil, wantErrIs: ErrBuildNotFound},
+		{name: "missing chunk maps to not found", build: &VanadisBuild{ID: "b1", Status: "failed"}, chunks: []VanadisChunk{{ID: "c9", BuildID: "b1", Mode: "action", Status: "failed"}}, wantErrIs: ErrChunkNotFound},
+		{name: "non-action mode conflicts", build: &VanadisBuild{ID: "b1", Status: "failed"}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "failed"}}, wantErrIs: ErrBuildConflict},
+		{name: "unready dependency conflicts", build: &VanadisBuild{ID: "b1", Status: "failed"}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}}, {ID: "c0", BuildID: "b1", Mode: "action", Status: "pending"}}, wantErrIs: ErrBuildConflict},
+		{name: "ready dependency passes", build: &VanadisBuild{ID: "b1", Status: "failed"}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}}, {ID: "c0", BuildID: "b1", Mode: "action", Status: "completed"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s *VanadisServer
+			if !tc.nilStore {
+				s = &VanadisServer{store: retryEligibilityFixture{build: tc.build, chunks: tc.chunks, err: tc.storeErr}}
+			} else {
+				s = &VanadisServer{}
+			}
+			err := s.validateRetryEligibility(context.Background(), RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"})
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErrIs)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
+					t.Errorf("err %q does not contain %q", err.Error(), tc.wantSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}
