@@ -661,6 +661,8 @@ func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) 
 	return true
 }
 
+var defaultIndexerProxyClient = &http.Client{Timeout: 15 * time.Second}
+
 func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL string) {
 	targetURL, err := url.Parse(indexerURL)
 	if err != nil {
@@ -681,7 +683,7 @@ func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL s
 			req.Header.Add(k, v)
 		}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := defaultIndexerProxyClient.Do(req)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("indexer proxy error: %v", err))
 		return

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,9 +17,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
-	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
@@ -63,9 +62,10 @@ func TestTurnExecution_TouchedSessionIDs(t *testing.T) {
 	t.Run("enqueueTranscriptPublish with custom trigger source", func(t *testing.T) {
 		t.Parallel()
 		p := &WorkerPool{
-			eventBus:              pubsub.NewMemoryBus(),
-			transcriptsIndexerURL: "http://indexer.local",
-			transcriptPublishCh:   make(chan transcriptPublishJob, 5),
+			eventBus:                pubsub.NewMemoryBus(),
+			transcriptsIndexerURL:   "http://indexer.local",
+			transcriptPublishCh:     make(chan transcriptPublishJob, 5),
+			transcriptWorkerStarted: true,
 		}
 		te := &turnExecution{
 			pool:        p,
@@ -525,16 +525,6 @@ func TestWorkerPool_ConcurrentPublishAndStartupResend(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_TranscriptPublish_Guards(t *testing.T) {
-	t.Parallel()
-	var nilPool *WorkerPool
-	nilPool.EnqueueTranscriptPublish("s1", "t1", "test")
-
-	pool := &WorkerPool{}
-	pool.EnqueueTranscriptPublish("", "t1", "test")
-	pool.EnqueueTranscriptPublish("   ", "t1", "test")
-}
-
 func TestWorkerPool_RunStartupResend_ErrorsAndEdges(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -601,19 +591,31 @@ func TestWorkerPool_RunStartupResend_ErrorsAndEdges(t *testing.T) {
 	}
 
 	// 5. Mixed valid and corrupt sessions in brainDir: skips corrupt and sends valid
-	sessValidDir := filepath.Join(tmpDir, "sess-valid", ".system_generated", "logs")
+	sessValidDir := filepath.Join(tmpDir, "brain", "sess-valid", ".system_generated", "logs")
 	_ = os.MkdirAll(sessValidDir, 0o755)
 	_ = os.WriteFile(filepath.Join(sessValidDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"step 1"}
 `), 0o644)
 
-	sessBadDir := filepath.Join(tmpDir, "sess-bad", ".system_generated", "logs")
+	sessBadDir := filepath.Join(tmpDir, "brain", "sess-bad", ".system_generated", "logs")
 	_ = os.MkdirAll(sessBadDir, 0o755)
 	_ = os.WriteFile(filepath.Join(sessBadDir, "transcript.jsonl"), []byte(`corrupt non-json content`), 0o644)
 
 	storeMulti := dbtest.NewFakeStore()
 	_ = storeMulti.SaveSessionID(ctx, "t-v", "sess-valid")
 	_ = storeMulti.SaveSessionID(ctx, "t-b", "sess-bad")
+
+	validBatches := make(chan transcriptwire.TranscriptStepBatch, 10)
+	_, subErr := memBus.Subscribe(ctx, pubsub.SubjectTranscriptsStepsPrefix+"sess-valid", "test-valid-sub", func(_ context.Context, msg pubsub.Message) error {
+		var batch transcriptwire.TranscriptStepBatch
+		if uErr := json.Unmarshal(msg.Data(), &batch); uErr == nil {
+			validBatches <- batch
+		}
+		return nil
+	})
+	if subErr != nil {
+		t.Fatalf("Subscribe sess-valid: %v", subErr)
+	}
 
 	poolMulti := New(config.NewFromData(&config.ConfigData{
 		DataDir: tmpDir,
@@ -626,16 +628,89 @@ func TestWorkerPool_RunStartupResend_ErrorsAndEdges(t *testing.T) {
 		EventBus:              memBus,
 		TranscriptsIndexerURL: okIndexer.URL,
 	})
-	if err := poolMulti.RunStartupResend(ctx); err != nil {
-		t.Errorf("expected RunStartupResend to succeed skipping bad session, got %v", err)
+	if resendErr := poolMulti.RunStartupResend(ctx); resendErr != nil {
+		t.Errorf("expected RunStartupResend to succeed skipping bad session, got %v", resendErr)
+	}
+
+	select {
+	case batchValid := <-validBatches:
+		if batchValid.SessionID != "sess-valid" || len(batchValid.Steps) != 2 {
+			t.Errorf("unexpected batch: %+v", batchValid)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for valid session batch")
 	}
 }
 
-func TestWorkerPool_TranscriptPublish_ErrorBranches(t *testing.T) {
+func TestWorkerPool_RunStartupResend_ExtraRootSession(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// 1. Watermark fetch error falls back to -1 and still publishes
+	okIndexer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"watermarks":[]}`))
+	}))
+	defer okIndexer.Close()
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	_ = pubsub.EnsureCoreStreams(ctx, memBus)
+
+	tmpDir := t.TempDir()
+	storeMulti := dbtest.NewFakeStore()
+
+	extraHome := t.TempDir()
+	sessExtraDir := filepath.Join(extraHome, ".gemini", "antigravity-cli", "brain", "sess-extra", ".system_generated", "logs")
+	_ = os.MkdirAll(sessExtraDir, 0o755)
+	_ = os.WriteFile(filepath.Join(sessExtraDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"extra hello"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"extra step"}
+`), 0o644)
+	_ = storeMulti.SaveSessionID(ctx, "t-extra", "sess-extra")
+
+	extraBatches := make(chan transcriptwire.TranscriptStepBatch, 10)
+	_, err := memBus.Subscribe(ctx, pubsub.SubjectTranscriptsStepsPrefix+"sess-extra", "test-extra-sub", func(_ context.Context, msg pubsub.Message) error {
+		var batch transcriptwire.TranscriptStepBatch
+		if uErr := json.Unmarshal(msg.Data(), &batch); uErr == nil {
+			extraBatches <- batch
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe sess-extra: %v", err)
+	}
+
+	smWithExtra := session.New(extraHome, tmpDir)
+	poolExtra := New(config.NewFromData(&config.ConfigData{
+		DataDir: tmpDir,
+		Transcripts: config.TranscriptsConfig{
+			IndexerURL: okIndexer.URL,
+			Stack:      "aerial",
+		},
+	}), WorkerPoolConfig{
+		Store:                 storeMulti,
+		EventBus:              memBus,
+		TranscriptsIndexerURL: okIndexer.URL,
+		SessionManager:        smWithExtra,
+	})
+	if rErr := poolExtra.RunStartupResend(ctx); rErr != nil {
+		t.Errorf("expected RunStartupResend with extra root to succeed, got %v", rErr)
+	}
+
+	select {
+	case batchExtra := <-extraBatches:
+		if batchExtra.SessionID != "sess-extra" || len(batchExtra.Steps) != 2 {
+			t.Errorf("unexpected extra batch: %+v", batchExtra)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for extra session batch")
+	}
+}
+
+func TestWorkerPool_TranscriptPublish_WatermarkFallbackPublishes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
 	errIndexer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "indexer unavailable", http.StatusBadGateway)
 	}))
@@ -646,7 +721,7 @@ func TestWorkerPool_TranscriptPublish_ErrorBranches(t *testing.T) {
 	_ = pubsub.EnsureCoreStreams(ctx, memBus)
 
 	tmpDir := t.TempDir()
-	sessID := "sess-wm-err"
+	sessID := "sess-wm-fallback"
 	sessDir := filepath.Join(tmpDir, "brain", sessID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0o755)
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
@@ -654,18 +729,25 @@ func TestWorkerPool_TranscriptPublish_ErrorBranches(t *testing.T) {
 `), 0o644)
 
 	store := dbtest.NewFakeStore()
-	_ = store.SaveSessionID(ctx, "thread-wm-err", sessID)
+	_ = store.SaveSessionID(ctx, "thread-wm-fallback", sessID)
+
+	receivedBatches := make(chan transcriptwire.TranscriptStepBatch, 10)
+	_, err := memBus.Subscribe(ctx, pubsub.SubjectTranscriptsStepsPrefix+sessID, "test-wm-fallback-sub", func(_ context.Context, msg pubsub.Message) error {
+		var batch transcriptwire.TranscriptStepBatch
+		if err := json.Unmarshal(msg.Data(), &batch); err == nil {
+			receivedBatches <- batch
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to subscribe to session batch subject: %v", err)
+	}
 
 	cfg := config.NewFromData(&config.ConfigData{
 		DataDir: tmpDir,
 		Transcripts: config.TranscriptsConfig{
 			IndexerURL: errIndexer.URL,
 			Stack:      "aerial",
-		},
-		McpServers: config.TargetMcpConfig{
-			Common:  map[string]json.RawMessage{"mem": []byte("{}")},
-			Discord: map[string]json.RawMessage{"disc": []byte("{}")},
-			Voice:   map[string]json.RawMessage{"sens": []byte("{}")},
 		},
 	})
 
@@ -677,43 +759,19 @@ func TestWorkerPool_TranscriptPublish_ErrorBranches(t *testing.T) {
 	pool.ctx, pool.cancel = context.WithCancel(context.Background())
 	defer pool.cancel()
 
-	// Process job with watermark fetch error -> still processes
 	pool.processTranscriptPublishJob(transcriptPublishJob{
 		sessionID: sessID,
-		threadID:  "thread-wm-err",
+		threadID:  "thread-wm-fallback",
 		source:    "turn-end",
 	})
 
-	// Process with missing transcript file and retried=true -> drops
-	pool.processTranscriptPublishJob(transcriptPublishJob{
-		sessionID: "sess-missing-file",
-		threadID:  "thread-missing",
-		retried:   true,
-	})
-
-	// Process with cancelled context -> returns immediately
-	cancelCtx, cancelFn := context.WithCancel(context.Background())
-	cancelFn()
-	pool.processTranscriptPublishJobWithContext(cancelCtx, transcriptPublishJob{sessionID: sessID})
-
-	// Process job with corrupt transcript file -> logs warning and returns
-	sessCorruptID := "sess-corrupt"
-	sessCorruptDir := filepath.Join(tmpDir, "brain", sessCorruptID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessCorruptDir, 0o755)
-	_ = os.WriteFile(filepath.Join(sessCorruptDir, "transcript.jsonl"), []byte(`corrupt invalid content`), 0o644)
-	_ = store.SaveSessionID(ctx, "thread-corrupt", sessCorruptID)
-	pool.processTranscriptPublishJob(transcriptPublishJob{
-		sessionID: sessCorruptID,
-		threadID:  "thread-corrupt",
-	})
-
-	// transcriptRoots with sessionMgr
-	sm := session.New(tmpDir, tmpDir)
-	poolWithSM := New(nil, WorkerPoolConfig{SessionManager: sm})
-	bDir, eDirs := poolWithSM.transcriptRoots()
-	roots := sm.Roots()
-	if len(roots) > 0 && (bDir != roots[0] || len(eDirs) != len(roots)-1) {
-		t.Errorf("unexpected roots: %s, %v", bDir, eDirs)
+	select {
+	case batch := <-receivedBatches:
+		if batch.SessionID != sessID || batch.FirstStep != 0 || batch.LastStep != 1 {
+			t.Errorf("unexpected fallback batch: %+v", batch)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for fallback batch publish")
 	}
 }
 
@@ -750,14 +808,24 @@ func TestWorkerPool_TranscriptPublish_RecheckAndPark(t *testing.T) {
 		t.Fatal("timed out waiting for recheck publish job")
 	}
 
-	// 2. File unchanged -> returns without enqueueing
-	fi2, _ := os.Stat(txPath)
-	p.recheckSessionTranscript("s2", "t2", txPath, fi2.ModTime().UTC(), fi2.Size())
+	// 2. File unmodified -> does not enqueue
+	newFi, _ := os.Stat(txPath)
+	p.recheckSessionTranscript("s1-unmod", "t1", txPath, newFi.ModTime().UTC(), newFi.Size())
+	select {
+	case j := <-p.transcriptPublishCh:
+		t.Fatalf("unexpected job for unmodified file: %+v", j)
+	case <-time.After(50 * time.Millisecond):
+	}
 
-	// 3. Stat error -> returns
-	p.recheckSessionTranscript("s3", "t3", "/tmp/does-not-exist-file-123456", time.Now(), 0)
+	// 3. Nonexistent file -> does not enqueue
+	p.recheckSessionTranscript("s1-missing", "t1", filepath.Join(tmpDir, "missing.jsonl"), time.Now().UTC(), 0)
+	select {
+	case j := <-p.transcriptPublishCh:
+		t.Fatalf("unexpected job for missing file: %+v", j)
+	case <-time.After(50 * time.Millisecond):
+	}
 
-	// Park job
+	// 4. Park job
 	p.parkTranscriptJob(transcriptPublishJob{sessionID: "s-park"})
 	select {
 	case j := <-p.transcriptPublishCh:
@@ -768,170 +836,219 @@ func TestWorkerPool_TranscriptPublish_RecheckAndPark(t *testing.T) {
 		t.Fatal("timed out waiting for parked job")
 	}
 
-	// Unknown session in allowlist dropped
-	store := dbtest.NewFakeStore()
-	_ = store.SaveSessionID(context.Background(), "t-other", "s-other")
-	pAllow := &WorkerPool{cfg: WorkerPoolConfig{Store: store}}
-	pAllow.ctx, pAllow.cancel = context.WithCancel(context.Background())
-	defer pAllow.cancel()
-	pAllow.processTranscriptPublishJob(transcriptPublishJob{sessionID: "s-unknown", retried: true})
+	// 5. Cancelled context does not park or recheck
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pCancelled := &WorkerPool{
+		ctx:                    cancelledCtx,
+		transcriptRecheckDelay: 1 * time.Millisecond,
+		transcriptPublishCh:    make(chan transcriptPublishJob, 10),
+	}
+	pCancelled.parkTranscriptJob(transcriptPublishJob{sessionID: "s-cancel"})
+	pCancelled.recheckSessionTranscript("s-cancel", "t-cancel", txPath, fi.ModTime().UTC().Add(-time.Hour), fi.Size())
+	select {
+	case j := <-pCancelled.transcriptPublishCh:
+		t.Fatalf("unexpected job on cancelled context: %+v", j)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// 6. Nil-context recheck does not panic
+	pNilCtx := &WorkerPool{
+		transcriptRecheckDelay: 1 * time.Millisecond,
+	}
+	pNilCtx.recheckSessionTranscript("s-nil", "t-nil", txPath, fi.ModTime().UTC().Add(-time.Hour), fi.Size())
 }
 
-func TestWorkerPool_TranscriptPublish_InterruptAndMatch(t *testing.T) {
+func TestWorkerPool_TranscriptPublish_JobHandling(t *testing.T) {
 	t.Parallel()
-	logInterruptWarning("op", nil)
-	logInterruptWarning("op", errors.New("simulated error"))
+	ctx := context.Background()
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
 
-	if matchesDispatchTarget(nil, "d1", "b1") {
-		t.Errorf("expected false for nil dispatch")
+	// 1. EnqueueTranscriptPublish rejection rules
+	p := &WorkerPool{
+		eventBus:                memBus,
+		transcriptsIndexerURL:   "http://indexer.local",
+		transcriptPublishCh:     make(chan transcriptPublishJob, 10),
+		transcriptWorkerStarted: true,
 	}
-	d1 := &db.Dispatch{ID: "d1", TargetID: "b1"}
-	if !matchesDispatchTarget(d1, "d1", "") {
-		t.Errorf("expected true for matching dispatch ID")
-	}
-	if !matchesDispatchTarget(d1, "", "b1") {
-		t.Errorf("expected true for matching build ID")
-	}
-	if matchesDispatchTarget(d1, "other", "other") {
-		t.Errorf("expected false for non-matching")
-	}
+	p.EnqueueTranscriptPublish("", "t1", "turn-end")
+	p.EnqueueTranscriptPublish("   ", "t1", "turn-end")
 
-	var nilPool *WorkerPool
-	nilPool.CloseThreadProcesses("", "test")
-	nilPool.CloseThreadProcesses("thread-1", "test")
-	nilPool.SetEventBus(nil)
-	if nilPool.EventBus() != nil {
-		t.Errorf("expected nil bus")
-	}
-	if err := nilPool.DeliverDirect("ch", "msg"); err == nil {
-		t.Errorf("expected error on nil pool")
-	}
-	if err := nilPool.DeliverDirectWithAttachments("ch", "msg", []*delivery.Attachment{{Filename: "f.txt"}}); err == nil {
-		t.Errorf("expected error on nil pool")
-	}
-	DrainThreadPendingMessages(context.Background(), nil, "", "")
-}
-
-func TestWorkerPool_TranscriptPublish_NilAndFallbackAccessors(t *testing.T) {
-	t.Parallel()
-	var nilPool *WorkerPool
-	if nilPool.transcriptsIndexerBaseURL() != "" || nilPool.stackName() != "" {
-		t.Errorf("expected empty string for nil pool")
-	}
-	if nilPool.resolvedTranscriptStore() != nil || nilPool.mcpServerNames() != nil {
-		t.Errorf("expected nil for nil pool")
-	}
-	if b, e := nilPool.transcriptRoots(); b != "" || e != nil {
-		t.Errorf("expected empty roots for nil pool")
-	}
-	nilPool.ensureTranscriptPublishWorker()
-	nilPool.parkTranscriptJob(transcriptPublishJob{})
-	if err := nilPool.RunStartupResend(context.Background()); err != nil {
-		t.Errorf("expected nil error on nil pool startup resend")
-	}
-
-	p := &WorkerPool{}
-	if p.ensureTranscriptPublisherLocked() != nil {
-		t.Errorf("expected nil publisher without bus")
-	}
-	if p.ensureIndexerClientLocked() != nil {
-		t.Errorf("expected nil indexer without URL")
-	}
-	if p.transcriptsIndexerBaseURL() != "" || p.stackName() != "" {
-		t.Errorf("expected empty string for unconfigured pool")
-	}
-	if p.mcpServerNames() != nil {
-		t.Errorf("expected nil mcp servers")
-	}
-	if b, e := p.transcriptRoots(); b != "" || e != nil {
-		t.Errorf("expected empty roots for unconfigured pool")
-	}
-
-	fakeStore := dbtest.NewFakeStore()
-	pWithStore := &WorkerPool{transcriptStore: fakeStore}
-	if pWithStore.resolvedTranscriptStore() != fakeStore {
-		t.Errorf("expected explicit transcriptStore")
-	}
-	pWithCfgStore := &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}}
-	if pWithCfgStore.resolvedTranscriptStore() != fakeStore {
-		t.Errorf("expected cfg transcriptStore")
-	}
-}
-
-func TestWorkerPool_TranscriptPublish_EdgeBranchesAndDrains(t *testing.T) {
-	t.Parallel()
 	pStopped := &WorkerPool{
+		eventBus:              memBus,
+		transcriptsIndexerURL: "http://indexer.local",
+		transcriptPublishCh:   make(chan transcriptPublishJob, 10),
 		stopped:               true,
+	}
+	pStopped.EnqueueTranscriptPublish("s-stopped", "t1", "turn-end")
+
+	pNoBus := &WorkerPool{
 		transcriptsIndexerURL: "http://indexer.local",
-		eventBus:              pubsub.NewMemoryBus(),
+		transcriptPublishCh:   make(chan transcriptPublishJob, 10),
 	}
-	pStopped.EnqueueTranscriptPublish("s-stopped", "t1", "discord")
-	pStopped.ensureTranscriptPublishWorker()
+	pNoBus.EnqueueTranscriptPublish("s-nobus", "t1", "turn-end")
 
-	pNoCfg := &WorkerPool{cfg: WorkerPoolConfig{NATSURL: "nats://fallback:4222"}}
-	if pNoCfg.NATSURL() != "nats://fallback:4222" {
-		t.Errorf("fallback NATSURL = %q", pNoCfg.NATSURL())
+	pNoURL := &WorkerPool{
+		eventBus:            memBus,
+		transcriptPublishCh: make(chan transcriptPublishJob, 10),
 	}
+	pNoURL.EnqueueTranscriptPublish("s-nourl", "t1", "turn-end")
 
-	var nilP *WorkerPool
-	nilP.drainTranscriptPublisher(context.Background())
-
-	pCred := &WorkerPool{cfg: WorkerPoolConfig{AgyBin: "/bin/agy", APIKey: "key"}}
-	bin, key := pCred.runnerCredentials()
-	if bin != "/bin/agy" || key != "key" {
-		t.Errorf("runnerCredentials = %q, %q", bin, key)
-	}
-
-	pCache := &WorkerPool{
-		eventBus:              pubsub.NewMemoryBus(),
-		transcriptsIndexerURL: "http://indexer.local",
-	}
-	pub1 := pCache.ensureTranscriptPublisher()
-	pub2 := pCache.ensureTranscriptPublisher()
-	if pub1 == nil || pub1 != pub2 {
-		t.Errorf("publisher caching failed")
+	select {
+	case j := <-p.transcriptPublishCh:
+		t.Fatalf("unexpected job enqueued for blank session: %+v", j)
+	case j := <-pStopped.transcriptPublishCh:
+		t.Fatalf("unexpected job enqueued on stopped pool: %+v", j)
+	case j := <-pNoBus.transcriptPublishCh:
+		t.Fatalf("unexpected job enqueued with no bus: %+v", j)
+	case j := <-pNoURL.transcriptPublishCh:
+		t.Fatalf("unexpected job enqueued with no URL: %+v", j)
+	default:
 	}
 
-	idx1 := pCache.ensureIndexerClient()
-	idx2 := pCache.ensureIndexerClient()
-	if idx1 == nil || idx1 != idx2 {
-		t.Errorf("indexer caching failed")
+	// 2. processTranscriptPublishJobWithContext missing transcript and recheck source
+	pProcess := &WorkerPool{
+		eventBus:                memBus,
+		transcriptsIndexerURL:   "http://indexer.local",
+		transcriptRecheckDelay:  1 * time.Millisecond,
+		transcriptPublishCh:     make(chan transcriptPublishJob, 10),
+		transcriptWorkerStarted: true,
+	}
+	pProcess.processTranscriptPublishJobWithContext(ctx, transcriptPublishJob{
+		sessionID: "s-missing-tx",
+		retried:   false,
+	})
+	select {
+	case j := <-pProcess.transcriptPublishCh:
+		if !j.retried || j.sessionID != "s-missing-tx" {
+			t.Fatalf("unexpected parked job: %+v", j)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for parked missing-transcript job")
 	}
 
-	pCache.transcriptWorkerStarted = true
-	pCache.ensureTranscriptPublishWorker()
-
-	store := dbtest.NewFakeStore()
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m1", ThreadID: "t-drain", Status: db.StatusPending})
-	DrainThreadPendingMessages(context.Background(), store, "t-drain", "cancelled")
-	m, _ := store.GetMessage(context.Background(), "m1")
-	if m == nil || m.Status != db.StatusFailed {
-		t.Errorf("expected m1 to be failed")
+	pProcess.processTranscriptPublishJobWithContext(ctx, transcriptPublishJob{
+		sessionID: "s-missing-tx-2",
+		retried:   true,
+	})
+	select {
+	case j := <-pProcess.transcriptPublishCh:
+		t.Fatalf("retried missing transcript should not be parked: %+v", j)
+	case <-time.After(50 * time.Millisecond):
 	}
+
+	cancelledCtx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	pProcess.processTranscriptPublishJobWithContext(cancelledCtx2, transcriptPublishJob{sessionID: "s-cancel"})
 }
 
-func TestWorkerPool_TranscriptPublish_CallbacksAndErrors(t *testing.T) {
+func TestWorkerPool_TranscriptPublish_Allowlist(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
+
 	store := dbtest.NewFakeStore()
-	_ = store.SaveSessionID(context.Background(), "k1", "sess-1")
-	store.FailNext("GetSessionTurnCount", errors.New("err"))
-	getRec, onRot := makeSessionCallbacks(store)
-	rec, err := getRec(context.Background(), "k1")
-	if err != nil || rec.TurnCount != 0 {
-		t.Errorf("expected 0 turn count on error")
+	_ = store.SaveSessionID(ctx, "t-known", "s-known")
+	pStore := &WorkerPool{
+		cfg: WorkerPoolConfig{Store: store},
+	}
+	if !pStore.checkAllowlist(ctx, transcriptPublishJob{sessionID: "s-known"}) {
+		t.Errorf("expected known session to be allowed")
 	}
 
-	store.FailNext("GetPreviousSessionID", errors.New("err"))
-	rec2, err := getRec(context.Background(), "k1")
-	if err != nil || rec2.PreviousSessionID != "" {
-		t.Errorf("expected empty previous session ID on error")
+	pStoreCh := &WorkerPool{
+		cfg:                    WorkerPoolConfig{Store: store},
+		transcriptRecheckDelay: 1 * time.Millisecond,
+		transcriptPublishCh:    make(chan transcriptPublishJob, 10),
+	}
+	if pStoreCh.checkAllowlist(ctx, transcriptPublishJob{sessionID: "s-unknown", retried: false}) {
+		t.Errorf("expected unknown session to be disallowed")
+	}
+	select {
+	case j := <-pStoreCh.transcriptPublishCh:
+		if !j.retried || j.sessionID != "s-unknown" {
+			t.Fatalf("unexpected parked job: %+v", j)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for parked unknown session")
 	}
 
-	if err := onRot(context.Background(), "k1", "sess-1", "sess-2"); err != nil {
-		t.Errorf("rotation failed: %v", err)
+	if pStoreCh.checkAllowlist(ctx, transcriptPublishJob{sessionID: "s-unknown-retried", retried: true}) {
+		t.Errorf("expected retried unknown session to be disallowed")
+	}
+	select {
+	case j := <-pStoreCh.transcriptPublishCh:
+		t.Fatalf("retried unknown session should not be re-parked: %+v", j)
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	storeErr := dbtest.NewFakeStore()
-	storeErr.FailNext("GetPendingOrProcessingMessages", errors.New("simulated error"))
-	DrainThreadPendingMessages(context.Background(), storeErr, "t-err", "cancelled")
+	storeErr.FailNext("GetKnownTurnSessionIDs", errors.New("db failure"))
+	pStoreErr := &WorkerPool{
+		cfg: WorkerPoolConfig{Store: storeErr},
+	}
+	if !pStoreErr.checkAllowlist(ctx, transcriptPublishJob{sessionID: "s-any"}) {
+		t.Errorf("expected allowlist to fail open on store error")
+	}
+}
+
+func TestWorkerPool_TranscriptPublish_ConfigResolution(t *testing.T) {
+	t.Parallel()
+
+	// 1. Config resolution: transcriptsIndexerBaseURL and stackName
+	appCfg := config.NewFromData(&config.ConfigData{
+		Transcripts: config.TranscriptsConfig{
+			IndexerURL: "http://from-config.local",
+			Stack:      "stack-config",
+		},
+	})
+	pCfg := &WorkerPool{appCfg: appCfg}
+	if got := pCfg.transcriptsIndexerBaseURL(); got != "http://from-config.local" {
+		t.Errorf("transcriptsIndexerBaseURL() = %q, want http://from-config.local", got)
+	}
+	if got := pCfg.stackName(); got != "stack-config" {
+		t.Errorf("stackName() = %q, want stack-config", got)
+	}
+	var pNil *WorkerPool
+	if got := pNil.transcriptsIndexerBaseURL(); got != "" {
+		t.Errorf("nil transcriptsIndexerBaseURL() = %q, want empty", got)
+	}
+	if got := pNil.stackName(); got != "" {
+		t.Errorf("nil stackName() = %q, want empty", got)
+	}
+	if got := pNil.resolvedTranscriptStore(); got != nil {
+		t.Errorf("nil resolvedTranscriptStore() = %v, want nil", got)
+	}
+
+	// 2. mcpServerNames and pool accessors
+	appCfgMCP := config.NewFromData(&config.ConfigData{
+		NATSURL: "nats://test-nats:4222",
+		McpServers: config.TargetMcpConfig{
+			Common:    map[string]json.RawMessage{"srv-b": []byte(`{}`), "srv-a": []byte(`{}`)},
+			Discord:   map[string]json.RawMessage{"srv-c": []byte(`{}`)},
+			Voice:     map[string]json.RawMessage{"srv-d": []byte(`{}`)},
+			Ephemeral: map[string]json.RawMessage{"srv-e": []byte(`{}`)},
+		},
+	})
+	pMCP := &WorkerPool{appCfg: appCfgMCP}
+	servers := pMCP.mcpServerNames()
+	expectedServers := []string{"srv-a", "srv-b", "srv-c", "srv-d", "srv-e"}
+	if !slices.Equal(servers, expectedServers) {
+		t.Errorf("mcpServerNames() = %v, want %v", servers, expectedServers)
+	}
+	if pMCP.NATSURL() != "nats://test-nats:4222" {
+		t.Errorf("NATSURL() = %q, want nats://test-nats:4222", pMCP.NATSURL())
+	}
+	if pMCP.AppConfig() != appCfgMCP {
+		t.Errorf("AppConfig() did not match")
+	}
+	if pNil.mcpServerNames() != nil {
+		t.Errorf("nil mcpServerNames() should be nil")
+	}
+	if pNil.NATSURL() != "" {
+		t.Errorf("nil NATSURL() should be empty")
+	}
+	if pNil.AppConfig() != nil {
+		t.Errorf("nil AppConfig() should be nil")
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -58,31 +57,10 @@ func (p *WorkerPool) resolvedTranscriptStore() db.TranscriptStore {
 }
 
 func (p *WorkerPool) transcriptRoots() (string, []string) {
-	if p == nil {
+	if p == nil || p.sessionMgr == nil {
 		return "", nil
 	}
-	if p.sessionMgr != nil {
-		if roots := p.sessionMgr.Roots(); len(roots) > 0 {
-			return roots[0], roots[1:]
-		}
-	}
-	if p.appCfg == nil {
-		return "", nil
-	}
-	cur := p.appCfg.Current()
-	if cur == nil {
-		return "", nil
-	}
-	var roots []string
-	if cur.DataDir != "" {
-		roots = append(roots, filepath.Join(cur.DataDir, "brain"))
-	}
-	if cur.GeminiHomeDir != "" {
-		roots = append(roots,
-			filepath.Join(cur.GeminiHomeDir, ".gemini", "antigravity-cli", "brain"),
-			filepath.Join(cur.GeminiHomeDir, ".gemini", "antigravity", "brain"),
-		)
-	}
+	roots := p.sessionMgr.Roots()
 	if len(roots) == 0 {
 		return "", nil
 	}
@@ -368,7 +346,7 @@ func (p *WorkerPool) recheckSessionTranscript(sessionID, threadID, path string, 
 		delay = 30 * time.Second
 	}
 	time.AfterFunc(delay, func() {
-		if p.ctx.Err() != nil {
+		if p.ctx != nil && p.ctx.Err() != nil {
 			return
 		}
 		fi, err := os.Stat(path)
@@ -411,6 +389,32 @@ drained:
 	}
 }
 
+func collectStartupSessionIDs(brainDir string, extraDirs []string, known map[string]bool) []string {
+	seenSessions := make(map[string]bool)
+	var sessionIDs []string
+	for _, dir := range append([]string{brainDir}, extraDirs...) {
+		if dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			sid := entry.Name()
+			if seenSessions[sid] || (known != nil && !known[sid]) {
+				continue
+			}
+			seenSessions[sid] = true
+			sessionIDs = append(sessionIDs, sid)
+		}
+	}
+	return sessionIDs
+}
+
 // RunStartupResend runs the startup transcript resend pass against IndexerClient.Watermarks.
 func (p *WorkerPool) RunStartupResend(ctx context.Context) error {
 	if p == nil {
@@ -437,19 +441,7 @@ func (p *WorkerPool) RunStartupResend(ctx context.Context) error {
 			log.Printf("[WorkerPool] Warning: failed to query known turn session IDs on startup resend: %v", kErr)
 		}
 	}
-	var sessionIDs []string
-	if entries, err := os.ReadDir(brainDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-				continue
-			}
-			sid := entry.Name()
-			if known != nil && !known[sid] {
-				continue
-			}
-			sessionIDs = append(sessionIDs, sid)
-		}
-	}
+	sessionIDs := collectStartupSessionIDs(brainDir, extraDirs, known)
 	var allBatches []transcriptwire.TranscriptStepBatch
 	for _, sid := range sessionIDs {
 		wm := -1

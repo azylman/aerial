@@ -625,15 +625,19 @@ func findCodexTranscriptFile(brainDir, sessionID string) string {
 }
 
 func findTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
-	candidates := []string{
-		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID+".jsonl"),
-	}
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-			return c
+	for _, dir := range append([]string{brainDir}, extraDirs...) {
+		if dir == "" {
+			continue
+		}
+		for _, c := range []string{
+			filepath.Join(dir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
+			filepath.Join(dir, sessionID, "system_generated", "logs", "transcript.jsonl"),
+			filepath.Join(dir, sessionID, "transcript.jsonl"),
+			filepath.Join(dir, sessionID+".jsonl"),
+		} {
+			if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+				return c
+			}
 		}
 	}
 	if cand := findClaudeTranscriptFile(brainDir, sessionID); cand != "" {
