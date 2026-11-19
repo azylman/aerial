@@ -5,10 +5,11 @@ unset OPENAI_API_KEY || true
 
 # Root bootstrap at container start
 chmod 0755 /root
-mkdir -p /root/.gemini/antigravity-cli /root/.roborev /root/.claude/projects /root/.codex /root/.docker/buildx/instances /home/ubuntu
+mkdir -p /root/.gemini/antigravity-cli /root/.roborev /root/.claude/projects /root/.codex /root/.config/muse /root/.docker/buildx/instances /home/ubuntu /home/ubuntu/.config
 for item in roborev claude claude.json codex gemini docker; do
   ln -sfn "/root/.${item}" "/home/ubuntu/.${item}"
 done
+ln -sfn /root/.config/muse /home/ubuntu/.config/muse
 
 find /root/.claude/projects -type f -mtime +14 -delete 2>/dev/null || true
 find /root/.claude/projects -mindepth 1 -type d -empty -delete 2>/dev/null || true
@@ -20,7 +21,7 @@ fi
 if [ -d "/root/.gemini/antigravity-cli/conversations" ]; then
   find /root/.gemini/antigravity-cli/conversations -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 fi
-chmod 0700 /root/.gemini/antigravity-cli /root/.roborev /root/.claude /root/.codex
+chmod 0700 /root/.gemini/antigravity-cli /root/.roborev /root/.claude /root/.codex /root/.config/muse
 
 # Pre-populate Claude configuration and deny rules
 cat > /root/.claude.json <<'EOF'
@@ -44,6 +45,8 @@ cat > /root/.claude/settings.json <<'EOF'
       "Read(//root/.gemini/**)",
       "Read(/root/.codex/**)",
       "Read(//root/.codex/**)",
+      "Read(/root/.config/muse/**)",
+      "Read(//root/.config/muse/**)",
       "Read(/home/ubuntu/.roborev/**)",
       "Read(//home/ubuntu/.roborev/**)",
       "Read(/home/ubuntu/.claude/**)",
@@ -51,7 +54,9 @@ cat > /root/.claude/settings.json <<'EOF'
       "Read(/home/ubuntu/.gemini/**)",
       "Read(//home/ubuntu/.gemini/**)",
       "Read(/home/ubuntu/.codex/**)",
-      "Read(//home/ubuntu/.codex/**)"
+      "Read(//home/ubuntu/.codex/**)",
+      "Read(/home/ubuntu/.config/muse/**)",
+      "Read(//home/ubuntu/.config/muse/**)"
     ]
   }
 }
@@ -88,238 +93,38 @@ if [ -n "${SEED_CODEX_AUTH}" ] && [ -s "${SEED_CODEX_AUTH}" ]; then
   fi
 fi
 
-# Pre-populate global /root/.roborev/config.toml with cluster-wide review guidelines,
-# global exclude_patterns (honored even by security specialist reviews), engine defaults,
-# and a 2-member default+test-value review panel for daemon-backed CI reviews.
-# review_guidelines must stay above the first [table] header: once a header opens,
-# TOML scopes later keys to that table and roborev silently drops them.
-if [ -s "/root/.codex/auth.json" ] && command -v codex >/dev/null 2>&1; then
-  if [ -s "/root/.roborev/claude-oauth-token" ] && command -v claude >/dev/null 2>&1; then
-    BACKUP_AGENT_SETTINGS=$(cat <<'EOF'
-default_backup_agent = "claude-code"
-review_backup_agent = "claude-code"
-default_backup_model = "sonnet"
-review_backup_model = "sonnet"
-EOF
-)
-    # roborev reads synthesis backups only inside [ci] and [review.panels.*];
-    # a top-level synthesis_backup_* key is silently ignored.
-    CI_SYNTHESIS_BACKUP='synthesis_backup_agent = "claude-code"'
-    PANEL_SYNTHESIS_BACKUP=$(cat <<'EOF'
-synthesis_backup_agent = "claude-code"
-synthesis_backup_model = "sonnet"
-EOF
-)
-  else
-    BACKUP_AGENT_SETTINGS=$(cat <<'EOF'
-default_backup_agent = "gemini"
-review_backup_agent = "gemini"
-EOF
-)
-    CI_SYNTHESIS_BACKUP='synthesis_backup_agent = "gemini"'
-    PANEL_SYNTHESIS_BACKUP='synthesis_backup_agent = "gemini"'
+# Digest-tracked atomic seeding of /root/.config/muse/auth.json
+SEED_MUSE_AUTH=""
+if [ -s "/local/muse-auth.json" ]; then
+  SEED_MUSE_AUTH="/local/muse-auth.json"
+elif [ -s "/secrets/muse-auth.json" ]; then
+  SEED_MUSE_AUTH="/secrets/muse-auth.json"
+fi
+
+if [ -n "${SEED_MUSE_AUTH}" ] && [ -s "${SEED_MUSE_AUTH}" ]; then
+  SEED_SHA=$(sha256sum "${SEED_MUSE_AUTH}" | awk '{print $1}')
+  CUR_SEED_SHA=$(cat /root/.config/muse/.seed-sha256 2>/dev/null || true)
+  if [ ! -s "/root/.config/muse/auth.json" ] || [ "${SEED_SHA}" != "${CUR_SEED_SHA}" ]; then
+    TMP_AUTH="/root/.config/muse/.auth.json.tmp.$$"
+    cp -f "${SEED_MUSE_AUTH}" "${TMP_AUTH}"
+    chmod 0600 "${TMP_AUTH}"
+    mv -f "${TMP_AUTH}" "/root/.config/muse/auth.json"
+    echo "${SEED_SHA}" > /root/.config/muse/.seed-sha256
+    chmod 0600 /root/.config/muse/.seed-sha256
   fi
+fi
 
-  cat > /root/.roborev/config.toml <<EOF
-default_agent = "codex"
-review_agent = "codex"
-default_model = "gpt-6.1-sol"
-review_model = "gpt-6.1-sol"
-disable_codex_sandbox = true
-${BACKUP_AGENT_SETTINGS}
-review_reasoning = "low"
-review_min_severity = "medium"
-agent_quota_cooldown = "2m"
-review_context_count = 5
-reuse_review_session = true
+if [ ! -s "/root/.config/muse/settings.json" ]; then
+  echo '{"schema_version": 1}' > /root/.config/muse/settings.json
+  chmod 0600 /root/.config/muse/settings.json
+fi
 
-review_guidelines = """
-Global Aerial Stack & Cluster Invariants (applies across all repositories):
-1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
-2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
-3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /local/claude-oauth-token, /local/codex-auth.json, /var/lib/aerial/roborev-cache/brain, /var/lib/aerial/roborev-cache/conversations, /var/lib/aerial/roborev-cache/claude-projects, and /var/lib/aerial/roborev-cache/codex at /cache, /local/claude-oauth-token, /local/codex-auth.json, /root/.gemini/antigravity-cli/brain, /root/.gemini/antigravity-cli/conversations, /root/.claude/projects, and /root/.codex on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
-5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
-6. Multi-Chunk Vanadis Builds & Dark-Launch Phases: When a commit message or PR description includes a 'Vanadis Build Context' section (indicating Chunk X of Y in a multi-chunk build), evaluate the diff strictly against the active chunk's stated scope and Target Files. Do NOT flag newly introduced dark-launch components (e.g. Phase 1 VirtualObjects, handlers, or schema additions) as 'uncalled' or 'incomplete' when caller cutover, downstream lifecycle event wiring, or legacy code removal is explicitly assigned to a later chunk in the build roadmap.
-"""
-
-exclude_patterns = [
-  "*.sum",
-  "*.lock",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "web/static/ui/**",
-  "migrations/*.sql",
-  "db/migrations/*.sql",
-  "scratch-service/migrations/*.sql",
-  "services/eri/pkg/db/migrations/*.sql",
-  "**/migrations/*.sql",
-  "vision/web/src/__fixtures__/*.json",
-  "**/__fixtures__/*.json"
-]
-
-[ci]
-agents = ["codex"]
-review_types = ["default", "test-value"]
-min_severity = "medium"
-upsert_comments = true
-${CI_SYNTHESIS_BACKUP}
-
-[review]
-default_panel = "ci"
-
-[review.subagents.default]
-agent = "codex"
-model = "gpt-6.1-sol"
-reasoning = "low"
-review_type = "default"
-
-[review.subagents.test-value]
-agent = "codex"
-model = "gpt-6.1-sol"
-reasoning = "low"
-review_type = "test-value"
-instructions = """
-Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
-"""
-
-[review.panels.ci]
-members = ["default", "test-value"]
-synthesis_agent = "codex"
-synthesis_model = "gpt-6.1-sol"
-synthesis_reasoning = "low"
-${PANEL_SYNTHESIS_BACKUP}
-EOF
-elif [ -s "/root/.roborev/claude-oauth-token" ] && command -v claude >/dev/null 2>&1; then
-  cat > /root/.roborev/config.toml <<'EOF'
-default_agent = "claude-code"
-review_agent = "claude-code"
-default_model = "sonnet"
-default_backup_agent = "gemini"
-review_reasoning = "low"
-review_min_severity = "medium"
-agent_quota_cooldown = "2m"
-review_context_count = 5
-reuse_review_session = true
-
-review_guidelines = """
-Global Aerial Stack & Cluster Invariants (applies across all repositories):
-1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
-2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
-3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /local/claude-oauth-token, /local/codex-auth.json, /var/lib/aerial/roborev-cache/brain, /var/lib/aerial/roborev-cache/conversations, /var/lib/aerial/roborev-cache/claude-projects, and /var/lib/aerial/roborev-cache/codex at /cache, /local/claude-oauth-token, /local/codex-auth.json, /root/.gemini/antigravity-cli/brain, /root/.gemini/antigravity-cli/conversations, /root/.claude/projects, and /root/.codex on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
-5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
-6. Multi-Chunk Vanadis Builds & Dark-Launch Phases: When a commit message or PR description includes a 'Vanadis Build Context' section (indicating Chunk X of Y in a multi-chunk build), evaluate the diff strictly against the active chunk's stated scope and Target Files. Do NOT flag newly introduced dark-launch components (e.g. Phase 1 VirtualObjects, handlers, or schema additions) as 'uncalled' or 'incomplete' when caller cutover, downstream lifecycle event wiring, or legacy code removal is explicitly assigned to a later chunk in the build roadmap.
-"""
-
-exclude_patterns = [
-  "*.sum",
-  "*.lock",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "web/static/ui/**",
-  "migrations/*.sql",
-  "db/migrations/*.sql",
-  "scratch-service/migrations/*.sql",
-  "services/eri/pkg/db/migrations/*.sql",
-  "**/migrations/*.sql",
-  "vision/web/src/__fixtures__/*.json",
-  "**/__fixtures__/*.json"
-]
-
-[ci]
-agents = ["claude-code"]
-review_types = ["default", "test-value"]
-min_severity = "medium"
-upsert_comments = true
-
-[review]
-default_panel = "ci"
-
-[review.subagents.default]
-agent = "claude-code"
-model = "sonnet"
-reasoning = "low"
-review_type = "default"
-
-[review.subagents.test-value]
-agent = "claude-code"
-model = "sonnet"
-reasoning = "low"
-review_type = "test-value"
-instructions = """
-Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
-"""
-
-[review.panels.ci]
-members = ["default", "test-value"]
-synthesis_agent = "claude-code"
-synthesis_model = "sonnet"
-synthesis_reasoning = "low"
-synthesis_backup_agent = "gemini"
-EOF
-else
-  cat > /root/.roborev/config.toml <<'EOF'
-default_agent = "gemini"
-review_agent = "gemini"
-review_reasoning = "low"
-review_min_severity = "medium"
-agent_quota_cooldown = "2m"
-review_context_count = 5
-reuse_review_session = true
-
-review_guidelines = """
-Global Aerial Stack & Cluster Invariants (applies across all repositories):
-1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
-2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
-3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /local/claude-oauth-token, /local/codex-auth.json, /var/lib/aerial/roborev-cache/brain, /var/lib/aerial/roborev-cache/conversations, /var/lib/aerial/roborev-cache/claude-projects, and /var/lib/aerial/roborev-cache/codex at /cache, /local/claude-oauth-token, /local/codex-auth.json, /root/.gemini/antigravity-cli/brain, /root/.gemini/antigravity-cli/conversations, /root/.claude/projects, and /root/.codex on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
-5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
-6. Multi-Chunk Vanadis Builds & Dark-Launch Phases: When a commit message or PR description includes a 'Vanadis Build Context' section (indicating Chunk X of Y in a multi-chunk build), evaluate the diff strictly against the active chunk's stated scope and Target Files. Do NOT flag newly introduced dark-launch components (e.g. Phase 1 VirtualObjects, handlers, or schema additions) as 'uncalled' or 'incomplete' when caller cutover, downstream lifecycle event wiring, or legacy code removal is explicitly assigned to a later chunk in the build roadmap.
-"""
-
-exclude_patterns = [
-  "*.sum",
-  "*.lock",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "web/static/ui/**",
-  "migrations/*.sql",
-  "db/migrations/*.sql",
-  "scratch-service/migrations/*.sql",
-  "services/eri/pkg/db/migrations/*.sql",
-  "**/migrations/*.sql",
-  "vision/web/src/__fixtures__/*.json",
-  "**/__fixtures__/*.json"
-]
-
-[ci]
-agents = ["gemini"]
-review_types = ["default", "test-value"]
-min_severity = "medium"
-upsert_comments = true
-
-[review]
-default_panel = "ci"
-
-[review.subagents.default]
-agent = "gemini"
-reasoning = "low"
-review_type = "default"
-
-[review.subagents.test-value]
-agent = "gemini"
-reasoning = "low"
-review_type = "test-value"
-instructions = """
-Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
-"""
-
-[review.panels.ci]
-members = ["default", "test-value"]
-synthesis_agent = "gemini"
-synthesis_reasoning = "low"
-EOF
+if [ -s "/local/roborev-config.toml" ]; then
+  cp -f "/local/roborev-config.toml" "/root/.roborev/config.toml"
+elif [ -s "/etc/roborev/config.toml" ]; then
+  cp -f "/etc/roborev/config.toml" "/root/.roborev/config.toml"
+elif [ -s "$(dirname "$0")/roborev-config.toml" ]; then
+  cp -f "$(dirname "$0")/roborev-config.toml" "/root/.roborev/config.toml"
 fi
 
 if [ -s "/local/postgres-password" ]; then
@@ -455,10 +260,12 @@ cat > /root/.gemini/antigravity-cli/permissions.json <<'EOF'
       "read_file(/root/.claude/*)",
       "read_file(/root/.gemini/*)",
       "read_file(/root/.codex/*)",
+      "read_file(/root/.config/muse/*)",
       "read_file(/home/ubuntu/.roborev/*)",
       "read_file(/home/ubuntu/.claude/*)",
       "read_file(/home/ubuntu/.gemini/*)",
       "read_file(/home/ubuntu/.codex/*)",
+      "read_file(/home/ubuntu/.config/muse/*)",
       "command(git push)",
       "command(git commit)",
       "command(git reset)",
@@ -594,7 +401,7 @@ for f in /actions-runner/.path /actions-runner/.env /root/.claude.json; do
     chown -h 1000:1000 "$f" 2>/dev/null || true
   fi
 done
-find /root/.roborev /root/.claude /root/.codex /root/.gemini /root/.docker /home/ubuntu /actions-runner \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
+find /root/.roborev /root/.claude /root/.codex /root/.config /root/.gemini /root/.docker /home/ubuntu /actions-runner \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
 
 run_as_ubuntu() {
   setpriv --reuid=ubuntu --regid=ubuntu --init-groups env -u RUNNER_ALLOW_RUNASROOT HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu "$@"

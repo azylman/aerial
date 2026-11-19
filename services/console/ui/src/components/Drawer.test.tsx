@@ -212,6 +212,7 @@ describe('Drawer', () => {
     for (const step of steps) act(() => runStep(step, container));
 
     const panel = container.querySelector('.diagnostic-drawer') as HTMLElement;
+    expect(panel.querySelector('.sheet-handle')).toBeTruthy();
     expect(container.querySelectorAll('.active').length).toBe(wantActive ? 2 : 0);
     expect(screen.queryByRole('dialog')?.getAttribute('aria-modal') ?? null).toBe(wantTitle === null ? null : 'true');
     expect(wantTitle === null ? screen.queryByRole('dialog') : screen.getByRole('dialog', { name: wantTitle })).toBe(wantTitle === null ? null : panel);

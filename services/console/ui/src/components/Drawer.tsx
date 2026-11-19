@@ -137,6 +137,7 @@ function DrawerPanel({
       onTransitionEnd={onTransitionDone}
       onTransitionCancel={onTransitionDone}
     >
+      <div className="sheet-handle" aria-hidden="true" />
       <div className="drawer-header">
         <div className="drawer-title">
           <span className="drawer-icon">

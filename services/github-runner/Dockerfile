@@ -91,11 +91,19 @@ RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s 
     rm -f /usr/local/bin/agy && \
     /usr/local/bin/agy.real --version
 
+ARG MUSE_VERSION=1.4.23-R8977.1
+ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
+RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /usr/local/bin/muse && \
+    echo "${MUSE_SHA256}  /usr/local/bin/muse" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/muse && \
+    /usr/local/bin/muse --version
+
 # Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /out/bin/* /usr/local/bin/
 COPY --chmod=0755 services/github-runner/agy-wrapper.sh /usr/local/bin/agy
 COPY --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev
+COPY --chmod=0644 services/github-runner/roborev-config.toml /etc/roborev/config.toml
 COPY --from=rust-builder /usr/local/rustup /usr/local/rustup
 COPY --from=rust-builder /usr/local/cargo /usr/local/cargo
 COPY --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint

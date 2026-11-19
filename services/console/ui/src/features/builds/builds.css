@@ -324,16 +324,16 @@
 
 .chunk-status-badge.chunk-status-completed,
 .chunk-status-badge.chunk-status-merged {
-    background: rgba(194, 65, 12, 0.12);
-    color: var(--accent-primary, #c2410c);
-    border: 1px solid rgba(194, 65, 12, 0.35);
+    background: #f0fdf4;
+    color: #15803d;
+    border: 1px solid #86efac;
 }
 
 .chunk-status-badge.chunk-status-running,
 .chunk-status-badge.chunk-status-in_progress {
-    background: rgba(21, 128, 61, 0.12);
-    color: var(--accent-emerald, #15803d);
-    border: 1px solid rgba(21, 128, 61, 0.35);
+    background: #dbeafe;
+    color: #1d4ed8;
+    border: 1px solid #93c5fd;
 }
 
 .chunk-status-badge.chunk-status-failed {
@@ -343,9 +343,13 @@
 }
 
 .chunk-status-badge.chunk-status-pending {
-    background: rgba(180, 83, 9, 0.12);
-    color: var(--accent-amber, #b45309);
-    border: 1px solid rgba(180, 83, 9, 0.35);
+    background: #f6f5f1;
+    color: var(--text-secondary);
+    border: 1px solid #e2dfd7;
+}
+
+.filter-pill {
+    border-radius: 999px;
 }
 
 .chunk-effort-badge {

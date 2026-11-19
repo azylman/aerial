@@ -91,12 +91,14 @@
     margin-bottom: 1rem;
 }
 
-.cat-pill {
+.cat-pill,
+.filter-pill,
+.schedules-subtab {
     background: var(--bg-surface);
     border: 1px solid var(--card-border);
     color: var(--text-secondary);
     padding: 0.4rem 0.85rem;
-    border-radius: 20px;
+    border-radius: 999px;
     font-family: var(--font-mono);
     font-size: 0.75rem;
     font-weight: 700;
@@ -107,12 +109,16 @@
     gap: 0.4rem;
 }
 
-.cat-pill:hover {
+.cat-pill:hover,
+.filter-pill:hover,
+.schedules-subtab:hover {
     border-color: var(--card-border-hover);
     color: var(--text-primary);
 }
 
-.cat-pill.active {
+.cat-pill.active,
+.filter-pill.active,
+.schedules-subtab.active {
     background: #141413;
     color: #ffffff;
     border-color: #141413;
