@@ -429,9 +429,6 @@ func TestStoreHelpers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.thread != "" && normalizeDiscordThreadID(tc.thread) != tc.wantThread {
-				t.Errorf("normalizeDiscordThreadID(%q) = %q, want %q", tc.thread, normalizeDiscordThreadID(tc.thread), tc.wantThread)
-			}
 			if cleanRepoName(tc.repo) != tc.wantRepo {
 				t.Errorf("cleanRepoName(%q) = %q, want %q", tc.repo, cleanRepoName(tc.repo), tc.wantRepo)
 			}

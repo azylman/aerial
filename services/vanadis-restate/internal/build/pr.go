@@ -13,8 +13,8 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/prflow"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -23,50 +23,17 @@ const (
 	prEventDeployStarted = "deploy_started"
 )
 
+// flow binds PR lifecycle orchestration to this object's durable authority.
+func (b *BuildObject) flow() *prflow.Flow {
+	return prflow.NewFlow(b.store, b.executor)
+}
+
 func CanFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
-	if strings.TrimSpace(ev.TargetID) == "" || ev.Quiet {
-		return false
-	}
-	branch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
-	return !strings.HasPrefix(branch, "dependabot/")
-}
-
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
-}
-
-func isHexDigit(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+	return prflow.CanFallbackThreadRepoLookup(ev)
 }
 
 func ExtractChunkIDFromBranch(repo, branch string) string {
-	repoName := strings.TrimSuffix(cleanRepoName(repo), ".git")
-	if repoName == "" {
-		return ""
-	}
-	branch = strings.TrimSpace(branch)
-	branch = strings.TrimPrefix(branch, "refs/heads/")
-	after, ok := strings.CutPrefix(branch, "feat/"+repoName+"-pr-vanadis-")
-	if !ok {
-		return ""
-	}
-	chunkID, suffix, hasSuffix := strings.CutLast(after, "-")
-	if !hasSuffix || len(suffix) != 6 {
-		return ""
-	}
-	for i := range suffix {
-		if !isHexDigit(suffix[i]) {
-			return ""
-		}
-	}
-	if !store.IsValidVanadisChunkID(chunkID) {
-		return ""
-	}
-	return chunkID
+	return prflow.ExtractChunkIDFromBranch(repo, branch)
 }
 
 func GenerateBuildID() string {
@@ -84,7 +51,7 @@ func cleanRepoName(repo string) string {
 }
 
 func actionDispatchID(chunk model.VanadisChunk) string {
-	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
+	return prflow.ActionDispatchID(chunk)
 }
 
 // actionCompletionAllowed mirrors the frozen internal/store copy byte-for-byte;
@@ -290,271 +257,12 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 	return nil
 }
 
-type prHeadVerifiedContextKey = store.PrHeadVerifiedContextKey
-
-func (b *BuildObject) recordPRHeadRevision(ctx context.Context, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	headSHA := strings.TrimSpace(ev.HeadSHA)
-	if headSHA != "" && b.executor != nil {
-		if err := b.executor.ValidatePRHead(ctx, ev.Repo, ev.PRNumber, headSHA); err != nil {
-			return err
-		}
-		ctx = context.WithValue(ctx, prHeadVerifiedContextKey{}, true)
-	}
-	if b.store == nil {
-		return nil
-	}
-	return b.store.ResetPRCheckState(ctx, chunkID, headSHA, "")
+func (b *BuildObject) handlePREventType(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+	return b.flow().HandlePREventType(ctx, buildID, chunkID, event, ev)
 }
 
-// recordPRMergeRevision follows an accepted merged lifecycle transition.
-func (b *BuildObject) recordPRMergeRevision(ctx context.Context, chunkID, rawHeadSHA, rawMergeSHA string) error {
-	mergeSHA := strings.TrimSpace(rawMergeSHA)
-	if mergeSHA == "" {
-		return nil
-	}
-	if b.store == nil {
-		return nil
-	}
-	return b.store.ResetPRCheckState(ctx, chunkID, strings.TrimSpace(rawHeadSHA), mergeSHA)
-}
-
-func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	checkName := strings.TrimSpace(ev.CheckName)
-	if checkName == "" {
-		return nil
-	}
-	checkState := strings.TrimSpace(ev.CheckState)
-	if event == "check_failed" || event == "ci_failed" {
-		checkState = "failed"
-	}
-	if checkState == "" {
-		return nil
-	}
-	if b.store == nil {
-		return nil
-	}
-	return b.store.RecordPRCheckStatus(ctx, chunkID, strings.TrimSpace(ev.HeadSHA), checkName, checkState)
-}
-
-func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID string) (*model.VanadisBuild, model.VanadisChunk, error) {
-	bld, chunks, err := b.store.GetBuild(rc, buildID)
-	if err != nil {
-		return nil, model.VanadisChunk{}, err
-	}
-	chunk := model.VanadisChunk{ID: chunkID, BuildID: buildID, Effort: effortMedium}
-	for _, c := range chunks {
-		if c.ID == chunkID {
-			chunk = c
-			chunk.Effort = store.CapChunkEffort(c.Effort)
-			break
-		}
-	}
-	return bld, chunk, nil
-}
-
-func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *model.VanadisBuild, chunk model.VanadisChunk, dispatchID, prompt string, skipIfActive ...bool) error {
-	skip := true
-	if len(skipIfActive) > 0 {
-		skip = skipIfActive[0]
-	}
-	return b.executor.DispatchChunkRemediation(rc, executor.BrainDispatchRequest{
-		ID:             dispatchID,
-		Source:         "vanadis-restate",
-		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
-		TargetID:       strings.TrimSpace(bld.ThreadID),
-		VanadisChunkID: strings.TrimSpace(chunk.ID),
-		Prompt:         prompt,
-		Effort:         store.CapChunkEffort(chunk.Effort),
-		SkipIfActive:   skip,
-	})
-}
-
-func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
-	bld, chk, failed, err := b.store.FailChunk(rc, chunkID, "ci_remediation_cap_reached", "")
-	if err != nil {
-		return err
-	}
-	if !failed || bld == nil || b.executor == nil {
-		return nil
-	}
-	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
-	}
-	if !bld.Quiet {
-		targetID := strings.TrimSpace(bld.ThreadID)
-		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
-		if mErr := b.executor.DispatchDirectMessage(rc, targetID, content); mErr != nil {
-			slog.WarnContext(rc, "[vanadis-restate] direct alert message warning", "error", mErr)
-		}
-	}
-	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
-	chunks := []model.VanadisChunk{}
-	if chk != nil {
-		chunks = append(chunks, *chk)
-	}
-	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, capBanner); sErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] sync build widget warning", "error", sErr)
-	}
-	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, "ci_remediation_cap_reached"); pErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{bld.ID}, "ci_remediation_cap_reached"); pErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	return nil
-}
-
-func (b *BuildObject) handleConflictEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	if b.store == nil {
-		return nil
-	}
-	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
-	if err != nil {
-		return err
-	}
-	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
-		return errPRTransitionSkipped
-	}
-	if err = b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusConflict, "Merge conflict detected"); err != nil {
-		return err
-	}
-	if b.executor == nil {
-		return nil
-	}
-	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA)
-	err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, executor.FormatConflictPrompt(ev))
-	if errors.Is(err, executor.ErrDispatchActive) {
-		return nil
-	}
-	return err
-}
-
-func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	if executor.IsGateAggregatorCheck(ev.CheckName) {
-		return nil
-	}
-	if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
-		return err
-	}
-	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
-	if b.store != nil {
-		if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusCIFailed, banner); err != nil {
-			return err
-		}
-	}
-	if b.executor == nil {
-		return nil
-	}
-	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
-	if err != nil {
-		return err
-	}
-	cleanHead := strings.TrimSpace(ev.HeadSHA)
-	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
-		var failCount int
-		if b.store != nil {
-			failCount, err = b.store.IncrementChunkCIFailCount(rc, chunkID, banner, cleanHead)
-			if err != nil {
-				return err
-			}
-		}
-		return b.handleCIRemediationCapReached(rc, chunkID, failCount, ev)
-	}
-	details, err := b.executor.ResolveCIFailureDetailsChecked(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
-	if err != nil {
-		return err
-	}
-	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
-	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
-	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
-		if errors.Is(err, executor.ErrDispatchActive) {
-			return nil
-		}
-		return err
-	}
-	if b.store != nil {
-		if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner, cleanHead); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (b *BuildObject) handleClosedPREvent(rc restate.RunContext, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	if ev.Status == "merged" || b.store == nil {
-		return nil
-	}
-	bld, _, failed, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged", "")
-	if fErr != nil {
-		return fErr
-	}
-	if failed && bld != nil && bld.Status == statusFailed && b.executor != nil {
-		if err := b.notifyChunkFailure(rc, *bld, chunkID, "pr_closed_unmerged"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (b *BuildObject) handleDeployFailureEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	banner := executor.FormatDeployFailureBanner(ev)
-	if b.store != nil {
-		if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, "deploy_failed", banner); err != nil {
-			return err
-		}
-	}
-	if b.executor != nil {
-		if err := b.dispatchThreadWakePrompt(rc, buildID, executor.FormatDeployFailurePrompt(ev)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	switch event {
-	case prEventOpened, "synchronize":
-		return b.recordPRHeadRevision(rc, chunkID, ev)
-	case "check_updated":
-		return b.handlePRCheckEvent(rc, chunkID, event, ev)
-	case "check_failed", "ci_failed":
-		return b.handleCIFailureEvent(rc, buildID, chunkID, event, ev)
-	case "conflict":
-		return b.handleConflictEvent(rc, buildID, chunkID, ev)
-	case "merged":
-		if b.store != nil {
-			if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "merged"); err != nil {
-				return err
-			}
-		}
-		if err := b.recordPRMergeRevision(rc, chunkID, ev.HeadSHA, ev.MergeSHA); err != nil {
-			return err
-		}
-		if b.executor != nil {
-			if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
-				slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
-			}
-			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
-				slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
-			}
-		}
-	case "closed", "closed_unmerged":
-		return b.handleClosedPREvent(rc, chunkID, ev)
-	case "deploy_failed", "sync_failed":
-		return b.handleDeployFailureEvent(rc, buildID, chunkID, ev)
-	}
-	return nil
-}
-
-func (b *BuildObject) locateOrAttachPRChunk(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
-	lookup, err := b.store.GetChunkByPR(rc, ev.Repo, ev.PRNumber)
-	if err != nil {
-		return "", err
-	}
-	if lookup != nil && lookup.Matched {
-		return lookup.ChunkID, nil
-	}
-	return b.resolveOrAttachPRChunk(rc, buildID, ev)
+func (b *BuildObject) locateOrAttachPRChunk(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
+	return b.flow().LocateOrAttachPRChunk(ctx, buildID, ev)
 }
 
 func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
@@ -623,110 +331,6 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	return nil
 }
 
-func isEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
-	if build == nil || c == nil {
-		return false
-	}
-	if (c.Mode != "" && c.Mode != "pr") || c.PRNumber != 0 || c.StartedAt.IsZero() {
-		return false
-	}
-	if c.Status != statusRunning && c.Status != statusCoding {
-		return false
-	}
-	if buildThread := normalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && normalizeDiscordThreadID(ev.TargetID) != buildThread {
-		return false
-	}
-	return store.AttachmentMatches(*c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
-}
-
-func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string) {
-	if b.executor == nil {
-		return
-	}
-	refreshedBuild, refreshedChunks, rErr := b.store.GetBuild(rc, buildID)
-	if rErr == nil && refreshedBuild != nil {
-		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *refreshedBuild, refreshedChunks, ""); sErr != nil {
-			slog.WarnContext(rc, "[vanadis-restate] sync build widget warning", "error", sErr)
-		}
-	}
-}
-
-func selectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.VanadisChunk, ev pubsub.PRLifecycleEvent) *model.VanadisChunk {
-	if build == nil {
-		return nil
-	}
-	if chunkID := ExtractChunkIDFromBranch(ev.Repo, ev.Branch); chunkID != "" {
-		for i := range chunks {
-			if chunks[i].ID == chunkID && chunks[i].BuildID == build.ID {
-				if isEligibleUnattachedChunk(build, &chunks[i], ev) {
-					return &chunks[i]
-				}
-				return nil
-			}
-		}
-		return nil
-	}
-	evThread := normalizeDiscordThreadID(ev.TargetID)
-	buildThread := normalizeDiscordThreadID(build.ThreadID)
-	if !CanFallbackThreadRepoLookup(ev) || evThread == "" || buildThread == "" || evThread != buildThread {
-		return nil
-	}
-	var matched *model.VanadisChunk
-	for i := range chunks {
-		if chunks[i].BuildID == build.ID && isEligibleUnattachedChunk(build, &chunks[i], ev) {
-			if matched != nil {
-				return nil
-			}
-			matched = &chunks[i]
-		}
-	}
-	return matched
-}
-
-func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
-	if b.executor == nil || (ExtractChunkIDFromBranch(ev.Repo, ev.Branch) == "" && !CanFallbackThreadRepoLookup(ev)) {
-		return "", nil
-	}
-
-	build, chunks, gErr := b.store.GetBuild(rc, buildID)
-	if gErr != nil {
-		if errors.Is(gErr, store.ErrBuildNotFound) {
-			return "", nil
-		}
-		return "", gErr
-	}
-
-	targetChunk := selectUnattachedTargetChunk(build, chunks, ev)
-	if targetChunk == nil {
-		return "", nil
-	}
-	if vErr := b.executor.ValidateChunkPRAttachment(rc, *build, *targetChunk, ev); vErr != nil {
-		if errors.Is(vErr, errPRTransitionSkipped) {
-			return "", nil
-		}
-		return "", vErr
-	}
-
-	_, attachedChunkID, _, aErr := b.store.AttachChunkPR(rc, store.AttachChunkPRRequest{
-		ChunkID:  targetChunk.ID,
-		PRNumber: ev.PRNumber,
-		Repo:     strings.TrimSpace(ev.Repo),
-		Branch:   ev.Branch,
-		Title:    ev.Title,
-		TargetID: ev.TargetID,
-		Quiet:    ev.Quiet,
-	})
-	if aErr != nil {
-		if errors.Is(aErr, store.ErrBuildConflict) || errors.Is(aErr, ErrChunkNotFound) {
-			return "", nil
-		}
-		return "", aErr
-	}
-
-	b.syncAttachedPRWidget(rc, buildID)
-	return attachedChunkID, nil
-}
-
 // OnDispatchOutcome receives task execution outcomes.
 func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
 	if b.store == nil {
@@ -775,20 +379,17 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	return nil
 }
 
-type noPRAction string
+// noPRAction aliases the prflow recovery decision so existing callers keep
+// compiling against the thin build surface.
+type noPRAction = prflow.NoPRAction
 
 const (
-	noPRActionNone   noPRAction = "none"
-	noPRActionResume noPRAction = "resume"
-	noPRActionFail   noPRAction = "fail"
+	noPRActionNone   = prflow.NoPRActionNone
+	noPRActionResume = prflow.NoPRActionResume
+	noPRActionFail   = prflow.NoPRActionFail
 )
 
-const noPRFailureReason = "chunk turn ended without opening a PR (after one automatic resume)"
-
-// noPRResumeDispatchID identifies the single automatic resume turn for a PR chunk.
-func noPRResumeDispatchID(chunkID string) string {
-	return fmt.Sprintf("vanadis-%s-nopr-resume-1", strings.TrimSpace(chunkID))
-}
+const noPRFailureReason = prflow.NoPRFailureReason
 
 func isCompletedDispatchStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
@@ -799,49 +400,18 @@ func isCompletedDispatchStatus(status string) bool {
 }
 
 // noPRTurnAction decides how to react when a PR chunk's turn completes. The
-// submit script attaches PRs synchronously, so a completed launch or resume turn
-// on a still-running chunk without a PR means the turn ended without one.
-func noPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) noPRAction {
-	if chunk.Mode == chunkModeAction || chunk.PRNumber != 0 || buildStatus != statusRunning {
-		return noPRActionNone
-	}
-	if chunk.Status != statusRunning && chunk.Status != statusCoding {
-		return noPRActionNone
-	}
-	switch dispatchID {
-	case actionDispatchID(chunk):
-		return noPRActionResume
-	case noPRResumeDispatchID(chunk.ID):
-		return noPRActionFail
-	}
-	return noPRActionNone
+// submit script attaches PRs synchronously, so a completed launch or resume
+// turn on a still-running chunk without a PR means the turn ended without one.
+func noPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) prflow.NoPRAction {
+	return prflow.NoPRTurnAction(chunk, buildStatus, dispatchID)
 }
 
 func findChunkIndex(chunks []model.VanadisChunk, chunkID string) int {
-	for i := range chunks {
-		if chunks[i].ID == chunkID {
-			return i
-		}
-	}
-	return -1
+	return prflow.FindChunkIndex(chunks, chunkID)
 }
 
-func (b *BuildObject) resumeNoPRChunk(rc restate.RunContext, bld *model.VanadisBuild, chunks []model.VanadisChunk, idx int) error {
-	chunk := chunks[idx]
-	chunkPrompt, err := b.executor.FormatChunkPrompt(*bld, chunks, idx)
-	if err != nil {
-		return fmt.Errorf("format chunk prompt: %w", err)
-	}
-	chunk.Effort = store.CapChunkEffort(chunk.Effort)
-	// eri dedupes by dispatch ID, so never skip: a dropped resume would stall the chunk.
-	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, noPRResumeDispatchID(chunk.ID), executor.FormatNoPRResumePrompt(chunk, chunkPrompt), false); err != nil {
-		return err
-	}
-	banner := fmt.Sprintf("Chunk %d turn ended without a PR — automatic resume dispatched", chunk.ChunkIndex+1)
-	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, banner); sErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] sync build widget warning", "error", sErr)
-	}
-	return nil
+func (b *BuildObject) resumeNoPRChunk(ctx context.Context, bld *model.VanadisBuild, chunks []model.VanadisChunk, idx int) error {
+	return b.flow().ResumeNoPRChunk(ctx, bld, chunks, idx)
 }
 
 // handleNoPRTurnOutcome resumes a PR chunk whose launch turn ended without a PR
