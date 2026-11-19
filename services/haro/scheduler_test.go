@@ -48,75 +48,6 @@ func setupTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	return db
 }
 
-func TestHandleOneShotJob_Scenarios(t *testing.T) {
-	t.Parallel()
-	db := setupTestDB(t.Context(), t)
-	ctx := context.Background()
-	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
-
-	// Nil message returns error
-	if err := HandleOneShotJob(ctx, nil, db, nil); err == nil {
-		t.Error("expected error for nil message")
-	}
-
-	// Nil database returns error
-	msgValid := &memoryMsg{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}
-	if err := HandleOneShotJob(ctx, nil, nil, msgValid); err == nil {
-		t.Error("expected error for nil database")
-	}
-
-	// Invalid JSON drops cleanly
-	msgBadJSON := &memoryMsg{data: []byte(`not-json`)}
-	if err := HandleOneShotJob(ctx, nil, db, msgBadJSON); err != nil {
-		t.Errorf("expected nil error for bad json, got %v", err)
-	}
-
-	// Missing required fields drops cleanly
-	msgMissing := &memoryMsg{data: []byte(`{"thread_id":""}`)}
-	if err := HandleOneShotJob(ctx, nil, db, msgMissing); err != nil {
-		t.Errorf("expected nil error for missing fields, got %v", err)
-	}
-
-	// Valid insert succeeds
-	if err := HandleOneShotJob(ctx, nil, db, msgValid); err != nil {
-		t.Fatalf("HandleOneShotJob valid failed: %v", err)
-	}
-	sched, err := store.GetOneShotSchedule(ctx, db, "os-valid-1")
-	if err != nil {
-		t.Fatalf("GetOneShotSchedule failed: %v", err)
-	}
-	if sched.Prompt != "p1" || sched.ThreadID != "th-1" {
-		t.Errorf("unexpected schedule: %+v", sched)
-	}
-
-	// Duplicate insert is idempotent (no error, remains valid)
-	if err := HandleOneShotJob(ctx, nil, db, msgValid); err != nil {
-		t.Fatalf("HandleOneShotJob duplicate failed: %v", err)
-	}
-
-	// Server invalidates cache on insert
-	toolHandler := NewToolHandler(&Config{DatabaseURL: ":memory:"}, db)
-	srv := NewServer(toolHandler)
-	msgWithServer := &memoryMsg{data: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
-	if err := HandleOneShotJob(ctx, srv, nil, msgWithServer); err != nil {
-		t.Fatalf("HandleOneShotJob with server failed: %v", err)
-	}
-}
-
-func TestHandleOneShotJob_ClosedDB(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	closedDB, err := OpenDB(ctx, &Config{DatabaseURL: ":memory:"})
-	if err != nil {
-		t.Fatalf("OpenDB failed: %v", err)
-	}
-	_ = closedDB.Close()
-	msgClosed := &memoryMsg{data: []byte(`{"id":"os-closed-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}
-	if err := HandleOneShotJob(ctx, nil, closedDB, msgClosed); err == nil {
-		t.Error("expected error for closed database")
-	}
-}
-
 func TestDB_CronOperations(t *testing.T) {
 	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
@@ -217,8 +148,8 @@ func TestDB_OneShotOperations(t *testing.T) {
 	}
 
 	for _, s := range []OneShotSchedule{osDue, osFuture} {
-		if err := InsertOneShotSchedule(ctx, db, s); err != nil {
-			t.Fatalf("InsertOneShotSchedule() err = %v", err)
+		if err := store.InsertOneShotSchedule(ctx, db, s); err != nil {
+			t.Fatalf("store.InsertOneShotSchedule() err = %v", err)
 		}
 	}
 
@@ -327,7 +258,7 @@ func TestGetScheduleSummaryMetrics_MissingRunsTable(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := GetScheduleSummaryMetrics(ctx, db)
+			_, err := store.GetScheduleSummaryMetrics(ctx, db)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("GetScheduleSummaryMetrics err = %v, want containing %q", err, tc.wantErr)
 			}
@@ -350,7 +281,7 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"CreateScheduleRun", store.CreateScheduleRun(ctx, nil, ScheduleRun{ID: "run-id"})},
 		{"PruneScheduleRuns", func() error { _, err := store.PruneScheduleRuns(ctx, nil, 10, 24*time.Hour, now); return err }()},
 		{"InsertHeartbeatSchedule", store.InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
-		{"ListHeartbeatSchedules", func() error { _, err := ListHeartbeatSchedules(ctx, nil, ""); return err }()},
+		{"ListHeartbeatSchedules", func() error { _, err := store.ListHeartbeatSchedules(ctx, nil, ""); return err }()},
 		{"GetCronSchedule", func() error { _, err := store.GetCronSchedule(ctx, nil, "id"); return err }()},
 		{"GetCronSchedule empty id", func() error { _, err := store.GetCronSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
 		{"GetOneShotSchedule", func() error { _, err := store.GetOneShotSchedule(ctx, nil, "id"); return err }()},

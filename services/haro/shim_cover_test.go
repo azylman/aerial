@@ -27,8 +27,8 @@ func TestShim_NilCtxDefaults(t *testing.T) {
 			defer db.Close()
 			switch tc.call {
 			case "list":
-				if _, err := ListEventTriggers(nil, db, ""); err != nil {
-					t.Errorf("ListEventTriggers(nil ctx) err = %v", err)
+				if _, err := store.ListEventTriggers(nil, db, ""); err != nil {
+					t.Errorf("store.ListEventTriggers(nil ctx) err = %v", err)
 				}
 			default:
 				if _, err := store.DeleteEventTrigger(nil, db, "missing"); err != nil {

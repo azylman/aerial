@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
 func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) HeartbeatSchedule {
@@ -62,14 +63,14 @@ func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, no
 
 func testHeartbeatListAndUpdate(ctx context.Context, t *testing.T, db *sql.DB, hb1 HeartbeatSchedule) {
 	t.Helper()
-	allHBs, err := ListHeartbeatSchedules(ctx, db, "")
+	allHBs, err := store.ListHeartbeatSchedules(ctx, db, "")
 	if err != nil || len(allHBs) != 2 {
 		t.Fatalf("ListHeartbeatSchedules all failed: err=%v, count=%d", err, len(allHBs))
 	}
 
-	filteredHBs, err := ListHeartbeatSchedules(ctx, db, "chan-1")
+	filteredHBs, err := store.ListHeartbeatSchedules(ctx, db, "chan-1")
 	if err != nil || len(filteredHBs) != 1 || filteredHBs[0].ID != "hb-op-1" {
-		t.Fatalf("ListHeartbeatSchedules(chan-1) failed: err=%v, items=%+v", err, filteredHBs)
+		t.Fatalf("store.ListHeartbeatSchedules(chan-1) failed: err=%v, items=%+v", err, filteredHBs)
 	}
 
 	hb1.TitlePrefix = "Updated Title"
@@ -227,9 +228,9 @@ func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := HandleScheduleHeartbeat(ctx, db, tc.defaultTZ, tc.args)
+			res, err := tools.HandleScheduleHeartbeat(ctx, db, tc.defaultTZ, tc.args)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleScheduleHeartbeat() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("tools.HandleScheduleHeartbeat() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if !tc.wantErr {
 				if res == nil || len(res.Content) == 0 {
@@ -249,7 +250,7 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed an existing heartbeat
-	seedRes, err := HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
+	seedRes, err := tools.HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
 		"channel_id": "1562847268833337377",
 		"cron_expr":  "0 0 * * *",
 		"prompt":     "Original Prompt",
@@ -344,9 +345,9 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := HandleUpdateHeartbeat(ctx, db, tc.args)
+			res, err := tools.HandleUpdateHeartbeat(ctx, db, tc.args)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleUpdateHeartbeat() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("tools.HandleUpdateHeartbeat() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if !tc.wantErr {
 				if res == nil || len(res.Content) == 0 {
@@ -390,7 +391,7 @@ func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 		t.Fatalf("ScheduleOnce failed: %v", err)
 	}
 
-	_, err = HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
+	_, err = tools.HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
 		"channel_id": "1562847268833337377",
 		"cron_expr":  "*/5 * * * *",
 		"prompt":     "Monitor ingress",

@@ -33,17 +33,15 @@ func initHaroJetStream(ctx context.Context, server *Server, database *sql.DB, na
 	return initHaroJetStreamWithFactory(ctx, server, database, natsURL, newBusFn)
 }
 
-type eventBusSetter interface {
-	SetEventBus(bus pubsub.Bus)
-}
-
+// configureServerEventBus wires the JetStream event bus into the server's
+// dispatcher via the exported internal/server seam; a type alias grants
+// package main no access to Server internals, so the assertion lives inside
+// Server.ConfigureEventBus.
 func configureServerEventBus(server *Server, b pubsub.Bus) {
-	if server == nil || server.dispatcher == nil {
+	if server == nil {
 		return
 	}
-	if eb, ok := server.dispatcher.(eventBusSetter); ok {
-		eb.SetEventBus(b)
-	}
+	server.ConfigureEventBus(b)
 }
 
 func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {

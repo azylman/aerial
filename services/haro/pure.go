@@ -27,57 +27,6 @@ type (
 	ScheduleRunsResponse      = model.ScheduleRunsResponse
 )
 
-// Schedule type aliases.
-const (
-	scheduleTypeCron       = model.ScheduleTypeCron
-	scheduleTypeOneShot    = model.ScheduleTypeOneShot
-	scheduleTypeHeartbeat  = model.ScheduleTypeHeartbeat
-	scheduleTypeEventWatch = model.ScheduleTypeEventWatch
-)
-
-// Run, tool-response and build event status aliases.
-const (
-	statusCompleted     = model.StatusCompleted
-	statusFailed        = model.StatusFailed
-	statusStale         = model.StatusStale
-	statusSkippedActive = model.StatusSkippedActive
-	statusMerged        = model.StatusMerged
-	statusSuccess       = model.StatusSuccess
-)
-
-// Shared field key aliases.
-const (
-	fieldStatus  = model.FieldStatus
-	fieldEffort  = model.FieldEffort
-	fieldMessage = model.FieldMessage
-	fieldError   = model.FieldError
-)
-
-// FormatEventTriggerPrompt combines an optional context header with an event trigger prompt.
-func FormatEventTriggerPrompt(contextHeader, prompt string) string {
-	return model.FormatEventTriggerPrompt(contextHeader, prompt)
-}
-
-// SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.
-func SanitizeScheduleText(s string) string {
-	return model.SanitizeScheduleText(s)
-}
-
-// FormatCronSchedulesWithDesc converts raw CronSchedule records into serialized CronScheduleWithDesc items.
-func FormatCronSchedulesWithDesc(raw []CronSchedule) []CronScheduleWithDesc {
-	return model.FormatCronSchedulesWithDesc(raw)
-}
-
-// FormatHeartbeatSchedulesWithDesc converts raw HeartbeatSchedule records into serialized HeartbeatScheduleWithDesc items.
-func FormatHeartbeatSchedulesWithDesc(raw []HeartbeatSchedule) []HeartbeatScheduleWithDesc {
-	return model.FormatHeartbeatSchedulesWithDesc(raw)
-}
-
-// FormatOneShotSchedulesJSON converts raw OneShotSchedule records into serialized OneShotScheduleJSON items.
-func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
-	return model.FormatOneShotSchedulesJSON(raw)
-}
-
 // RedactDSN returns a log-safe form of a database DSN.
 func RedactDSN(dsn string) string {
 	return model.RedactDSN(dsn)
