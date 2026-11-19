@@ -4,7 +4,7 @@
 
 import { Graph, layout as dagreLayout } from '@dagrejs/dagre';
 import type { BuildDetailAPIResponse, BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
-import { type BuildChunkStats, type BuildQueueState, classifyBuildQueueState, computeBuildChunkStats } from '../../lib/builds';
+import { type BuildChunkStats, type BuildQueueState, classifyBuildQueueState, compareBuilds, computeBuildChunkStats } from '../../lib/builds';
 import { buildFromDetail } from '../../store/selectors';
 
 export type BuildFilter = 'ALL' | 'RUNNING' | 'QUEUED' | 'COMPLETED';
@@ -39,9 +39,9 @@ function indexBuild(build: VanadisBuildDTO): IndexedBuild {
   return entry;
 }
 
-/** Index entries in payload order; unchanged builds reuse their entry. */
+/** Index entries ordered by running first, then queued, then completed descending by completion time. */
 export function indexBuilds(builds: readonly VanadisBuildDTO[]): readonly IndexedBuild[] {
-  return builds.map(indexBuild);
+  return [...builds].sort(compareBuilds).map(indexBuild);
 }
 
 /** Queue search query normalization. */

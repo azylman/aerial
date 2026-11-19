@@ -316,9 +316,9 @@ func (b *BuildObject) ServiceName() string {
 	return model.BuildServiceName(b.agentName)
 }
 
-func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) {
+func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) error {
 	if b.executor == nil {
-		return
+		return nil
 	}
 	var build *model.VanadisBuild
 	var chunks []model.VanadisChunk
@@ -333,11 +333,13 @@ func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepNa
 		chunks = priorState.Chunks
 	}
 	if build == nil || strings.TrimSpace(build.ID) == "" || build.Quiet {
-		return
+		return nil
 	}
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, fmt.Sprintf("⚠️ Reconcile backing off (%s): %v", stepName, transErr)); err != nil {
 		slog.ErrorContext(ctx, "[vanadis-restate] sync widget error on transition failure", "error", err)
+		return err
 	}
+	return nil
 }
 
 func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
@@ -367,9 +369,8 @@ func ToTerminalErr(err error) error {
 	}
 }
 
-func planInputsToChunks(buildID string, inputs []store.CreateChunkInput) []model.VanadisChunk {
+func planInputsToChunks(buildID string, inputs []store.CreateChunkInput, now time.Time) []model.VanadisChunk {
 	chunks := make([]model.VanadisChunk, len(inputs))
-	now := time.Now().UTC()
 	for i, in := range inputs {
 		cid := strings.TrimSpace(in.ID)
 		if cid == "" {
@@ -431,10 +432,16 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	chunks := planInputsToChunks(buildID, req.Chunks)
-	if err := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
-		RecordReconcileError(labelCreate, err)
+	now, err := RunJournaled(ctx, labelCreate, "create-build-clock", func(rc restate.RunContext) (time.Time, error) {
+		return time.Now().UTC(), nil
+	})
+	if err != nil {
 		return model.VanadisBuild{}, ToTerminalErr(err)
+	}
+	chunks := planInputsToChunks(buildID, req.Chunks, now)
+	if verr := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); verr != nil {
+		RecordReconcileError(labelCreate, verr)
+		return model.VanadisBuild{}, ToTerminalErr(verr)
 	}
 	validatedChunks, err := dag.NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
@@ -446,7 +453,6 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	if title == "" {
 		title = objective
 	}
-	now := time.Now().UTC()
 	build := model.VanadisBuild{
 		ID:            buildID,
 		ThreadID:      threadID,

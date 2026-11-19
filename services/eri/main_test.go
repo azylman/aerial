@@ -25,6 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -1055,21 +1056,34 @@ func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
 	}
 	defer func() { newBusFn = oldNewBus }()
 
-	syncedCh := make(chan pubsub.TranscriptSyncedEvent, 1)
-	_, _ = memBus.Subscribe(context.Background(), pubsub.SubjectAerialTurnTranscriptSynced, "test-verify-runbrainapp", func(_ context.Context, msg pubsub.Message) error {
-		var ev pubsub.TranscriptSyncedEvent
-		if err := json.Unmarshal(msg.Data(), &ev); err == nil {
+	batchCh := make(chan transcriptwire.TranscriptStepBatch, 1)
+	_, _ = memBus.Subscribe(context.Background(), pubsub.SubjectTranscriptsSteps("run-brain-app-sess"), "test-verify-runbrainapp", func(_ context.Context, msg pubsub.Message) error {
+		var b transcriptwire.TranscriptStepBatch
+		if err := json.Unmarshal(msg.Data(), &b); err == nil {
 			select {
-			case syncedCh <- ev:
+			case batchCh <- b:
 			default:
 			}
 		}
 		return nil
 	})
 
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"sessions":          map[string]int{"run-brain-app-sess": 0},
+			"last_indexed_step": 0,
+		})
+	}))
+	defer srv.Close()
+
 	_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
 		d.NATSURL = "nats://127.0.0.1:4222"
+		d.Transcripts.IndexerURL = srv.URL
 	})
+
+	p := filepath.Join(cfg.DataDir(), "brain", "run-brain-app-sess", "transcript.jsonl")
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.WriteFile(p, []byte("{\"step_index\":0,\"type\":\"PLANNER_RESPONSE\",\"content\":\"step 0 indexed\"}\n{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"content\":\"step 1 unindexed\"}\n"), 0o644)
 
 	_, cancel, wait := runBrainAppUntilReady(t, cfg)
 	defer func() {
@@ -1079,37 +1093,16 @@ func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
 		}
 	}()
 
-	turnEv := pubsub.TurnCompletedEvent{
-		SessionID:      "run-brain-app-sess",
-		ConversationID: "conv-1",
-		Source:         "discord",
-		CompletedAt:    time.Now().UTC(),
-	}
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(5 * time.Second)
-
-	var msgSeq atomic.Int64
-	publishNext := func() {
-		seq := msgSeq.Add(1)
-		_ = memBus.Publish(context.Background(), pubsub.SubjectAerialTurnCompleted, fmt.Sprintf("turn-%d", seq), turnEv)
-	}
-
-	// Publish immediately, then repeat on ticks until leader handoff activates the subscriber.
-	publishNext()
-
-	for {
-		select {
-		case ev := <-syncedCh:
-			if ev.SessionID != "run-brain-app-sess" {
-				t.Errorf("ev.SessionID = %q, want %q", ev.SessionID, "run-brain-app-sess")
-			}
-			return
-		case <-ticker.C:
-			publishNext()
-		case <-timeout:
-			t.Fatal("timed out waiting for TranscriptSyncedEvent from RunBrainApp subscriber")
+	select {
+	case b := <-batchCh:
+		if b.SessionID != "run-brain-app-sess" {
+			t.Errorf("b.SessionID = %q, want %q", b.SessionID, "run-brain-app-sess")
 		}
+		if len(b.Steps) != 1 || b.Steps[0].StepIndex != 1 {
+			t.Errorf("published steps = %+v, want only delta step 1 (step 0 covered by watermark)", b.Steps)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for TranscriptStepBatch from RunBrainApp startup resend")
 	}
 }
 
