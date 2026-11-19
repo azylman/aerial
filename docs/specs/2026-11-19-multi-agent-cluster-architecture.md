@@ -320,23 +320,67 @@ Before retiring sibling logical PostgreSQL databases in Phase 2, an idempotent d
      - **Serial-PK Tables (`facts`, `procedural_candidates`, and `pr_registry` — Target ID Allocation without Cross-DB ID Collisions):** Because each sibling database independently allocated `BIGSERIAL id` values starting at `1` (and no foreign keys reference `facts.id`, `procedural_candidates.id`, or `pr_registry.id`), the backfill **omits the source `id` column** on insert so the target `aerial` database allocates fresh `BIGSERIAL id` values rather than colliding with `aerial`'s `id = 1..N`:
        - `facts`: `INSERT INTO facts (source_agent, fact_text, embedding, created_at, last_reinforced_at, reinforce_count) SELECT '<source_agent>', s.fact_text, s.embedding, s.created_at, s.last_reinforced_at, s.reinforce_count FROM source_facts s WHERE NOT EXISTS (SELECT 1 FROM facts t WHERE t.source_agent = '<source_agent>' AND t.fact_text = s.fact_text AND t.created_at = s.created_at);`
        - `procedural_candidates`: `INSERT INTO procedural_candidates (agent, thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, pr_number, created_at, updated_at) SELECT '<source_agent>', s.thread_id, s.domain, s.loaded_skill, s.trigger_pattern, s.steps_json, s.avoid_json, s.embedding, s.status, s.pr_number, s.created_at, s.updated_at FROM source_procedural_candidates s WHERE NOT EXISTS (SELECT 1 FROM procedural_candidates t WHERE t.agent = '<source_agent>' AND t.thread_id = s.thread_id AND t.trigger_pattern = s.trigger_pattern AND t.created_at = s.created_at);`
-       - `pr_registry`: `INSERT INTO pr_registry (agent, repo, pr_number, branch, head_sha, merge_sha, target_id, status, title, metadata, created_at, updated_at) SELECT ... ON CONFLICT (repo, pr_number) DO UPDATE SET agent = EXCLUDED.agent, ... WHERE <Section 8.4.2 disambiguation predicate>;` (omitting source `id` and deduplicating deterministically on the natural unique constraint `UNIQUE (repo, pr_number)`).
+       - `pr_registry`: Populated via a staged deterministic deduplication query (Section 8.4.2) that copies rows from all source sibling databases into a temporary staging table, selects the winning row per `(repo, pr_number)` ordered by disambiguation priority, and inserts into `pr_registry` omitting source `id` so target `id` `BIGSERIAL` values are generated without collisions.
    - A full re-run of each statement is exercised in testing to verify multi-index idempotency.
 2. **Deterministic `pr_registry` Deduplication:**
    - Because legacy webhook fan-out forwarded GitHub/Flux webhooks to multiple sibling synapse instances prior to consolidation, duplicate `(repo, pr_number)` rows can exist across sibling databases with different owning agents.
-   - Merging `pr_registry` applies a deterministic disambiguation rule:
-     1. Prefer the row whose `agent` matches the explicit agent trailer in the PR body (`<!-- aerial-pr: {"agent": "<agent>"} -->` or legacy `bot_id`).
-     2. Else prefer the row whose `agent` matches the PR head branch prefix or registration provenance.
-     3. Else assign ownership to the agent configured with `default_owner: true` in `synapse.yaml` (e.g. `'aerial'`).
-   - Duplicate rows resolved by this rule are logged in a migration audit log (`pr_registry_backfill_dropped`).
+   - Merging `pr_registry` executes an explicit two-step staging and deduplication workflow:
+     1. Source rows from each sibling database are inserted into a temporary staging table:
+        ```sql
+        CREATE TEMP TABLE _staging_pr_registry (
+            source_db TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            pr_number INTEGER NOT NULL,
+            branch TEXT NOT NULL,
+            head_sha TEXT NOT NULL,
+            merge_sha TEXT,
+            target_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            title TEXT NOT NULL,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            priority INT GENERATED ALWAYS AS (
+                CASE
+                    -- Priority 1: explicit agent trailer in metadata matching agent
+                    WHEN metadata->>'trailer_agent' = agent THEN 1
+                    -- Priority 2: branch name includes agent prefix or identifier
+                    WHEN branch LIKE '%' || agent || '%' THEN 2
+                    -- Priority 3: primary default owner agent ('aerial')
+                    WHEN agent = 'aerial' THEN 3
+                    -- Priority 4: remaining fallback
+                    ELSE 4
+                END
+            ) STORED
+        );
+        ```
+     2. Winning rows are inserted into `pr_registry` using `DISTINCT ON`:
+        ```sql
+        INSERT INTO pr_registry (agent, repo, pr_number, branch, head_sha, merge_sha, target_id, status, title, metadata, created_at, updated_at)
+        SELECT DISTINCT ON (repo, pr_number)
+            agent, repo, pr_number, branch, head_sha, merge_sha, target_id, status, title, metadata, created_at, updated_at
+        FROM _staging_pr_registry
+        ORDER BY repo, pr_number, priority ASC, updated_at DESC;
+        ```
+     3. Dropped duplicate rows are recorded in an audit table:
+        ```sql
+        INSERT INTO pr_registry_backfill_dropped (source_db, agent, repo, pr_number, branch, head_sha, dropped_at)
+        SELECT s.source_db, s.agent, s.repo, s.pr_number, s.branch, s.head_sha, CURRENT_TIMESTAMP
+        FROM _staging_pr_registry s
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pr_registry t
+            WHERE t.repo = s.repo AND t.pr_number = s.pr_number AND t.agent = s.agent AND t.head_sha = s.head_sha
+        );
+        ```
 3. **Post-Backfill Sequence Resynchronization:**
-   - After copying rows (preserving explicit `row_id` on `messages`/`dispatches` and allocating target `id`s on `facts`, `procedural_candidates`, and `pr_registry`), all serial sequences are synchronized:
+   - After copying rows (preserving explicit `row_id` on `messages`/`dispatches` and allocating target `id`s on `facts`, `procedural_candidates`, and `pr_registry`), all serial sequences are synchronized using the 3-argument `setval(seq, val, is_called)` form so both empty tables (`is_called = false`, next value 1) and populated tables (`is_called = true`, next value max+1) behave correctly:
      ```sql
-     SELECT setval(pg_get_serial_sequence('messages', 'row_id'), coalesce(max(row_id), 1)) FROM messages;
-     SELECT setval(pg_get_serial_sequence('dispatches', 'row_id'), coalesce(max(row_id), 1)) FROM dispatches;
-     SELECT setval(pg_get_serial_sequence('facts', 'id'), coalesce(max(id), 1)) FROM facts;
-     SELECT setval(pg_get_serial_sequence('procedural_candidates', 'id'), coalesce(max(id), 1)) FROM procedural_candidates;
-     SELECT setval(pg_get_serial_sequence('pr_registry', 'id'), coalesce(max(id), 1)) FROM pr_registry;
+     SELECT setval(pg_get_serial_sequence('messages', 'row_id'), coalesce(max(row_id), 1), max(row_id) IS NOT NULL) FROM messages;
+     SELECT setval(pg_get_serial_sequence('dispatches', 'row_id'), coalesce(max(row_id), 1), max(row_id) IS NOT NULL) FROM dispatches;
+     SELECT setval(pg_get_serial_sequence('facts', 'id'), coalesce(max(id), 1), max(id) IS NOT NULL) FROM facts;
+     SELECT setval(pg_get_serial_sequence('procedural_candidates', 'id'), coalesce(max(id), 1), max(id) IS NOT NULL) FROM procedural_candidates;
+     SELECT setval(pg_get_serial_sequence('pr_registry', 'id'), coalesce(max(id), 1), max(id) IS NOT NULL) FROM pr_registry;
      ```
 4. **Pre-Cutover Reconciliation & Watermark Verification:**
    - Before any sibling database is retired or decommissioned, an automated reconciliation check verifies:
