@@ -564,7 +564,7 @@
             "lineWidth": 2,
             "showPoints": "never"
           },
-          "unit": "short"
+          "unit": "percent"
         }
       },
       "gridPos": {
@@ -592,12 +592,63 @@
       },
       "targets": [
         {
-          "expr": "sum by (node, exported_job, task) (nomad_client_allocs_cpu_throttled_periods{node=~\"$node\", task=~\"$container\"})",
-          "legendFormat": "{{node}}: {{exported_job}}/{{task}}",
+          "expr": "(sum by (name) (label_replace(rate(container_cpu_cfs_throttled_periods_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")) / clamp_min(sum by (name) (label_replace(rate(container_cpu_cfs_periods_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")), 0.001)) * 100",
+          "legendFormat": "{{name}}",
           "refId": "A"
         }
       ],
-      "title": "Nomad Allocation CPU Throttled Periods",
+      "title": "Container CPU Throttling (% Throttled Periods)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (label_replace(rate(container_cpu_cfs_throttled_seconds_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Container CPU Throttled Time (Seconds / Sec)",
       "type": "timeseries"
     }
   ],
