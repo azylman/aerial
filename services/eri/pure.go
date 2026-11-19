@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,7 +13,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 const discordErrCodeThreadAlreadyCreated = 160004
@@ -81,20 +79,6 @@ func ResolveGuildID(msgGuildID, cachedGuildID, channelGuildID string) string {
 		return cachedGuildID
 	}
 	return channelGuildID
-}
-
-// buildSyncLLM adapts a runner.LLMFunc into a transcript.LLMClientFunc using the preferred low-effort model.
-func buildSyncLLM(rawLLM runner.LLMFunc, lowEffortModel, defaultModel string) transcript.LLMClientFunc {
-	if rawLLM == nil {
-		return nil
-	}
-	model := strings.TrimSpace(lowEffortModel)
-	if model == "" {
-		model = strings.TrimSpace(defaultModel)
-	}
-	return func(ctx context.Context, prompt string) (string, error) {
-		return rawLLM(ctx, model, prompt)
-	}
 }
 
 // DefaultGeminiHomeDir returns the production default base directory for .gemini files.

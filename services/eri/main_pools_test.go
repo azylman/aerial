@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -592,14 +595,65 @@ func TestServeBrainHTTP(t *testing.T) {
 	}
 }
 
+type retryTestBus struct {
+	pubsub.Bus
+
+	fn func(ctx context.Context, subject, msgID string, data any) error
+}
+
+func (b *retryTestBus) Publish(ctx context.Context, s, id string, d any) error {
+	return b.fn(ctx, s, id, d)
+}
+
 type leaderHandoffCase struct {
 	name             string
 	lockErr          error
 	cancelWait       bool
 	cancelViaRelease bool
 	holdThenUnblk    bool
+	retryResend      bool
 	wantErr          bool
 	wantReleased     bool
+}
+
+func setupRetryResendBus(t *testing.T, tmpDir string) (*retryTestBus, <-chan transcriptwire.TranscriptStepBatch) {
+	t.Helper()
+	sessDir := filepath.Join(tmpDir, "brain", "sess-retry-test")
+	_ = os.MkdirAll(sessDir, 0o755)
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte("{\"step_index\":0,\"type\":\"PLANNER_RESPONSE\",\"content\":\"retry content\"}\n"), 0o644)
+
+	var publishCount atomic.Int32
+	batchCh := make(chan transcriptwire.TranscriptStepBatch, 1)
+	bus := &retryTestBus{
+		fn: func(_ context.Context, _, _ string, data any) error {
+			if publishCount.Add(1) == 1 {
+				return errors.New("transient bus disconnect")
+			}
+			if b, ok := data.(transcriptwire.TranscriptStepBatch); ok {
+				select {
+				case batchCh <- b:
+				default:
+				}
+			}
+			return nil
+		},
+	}
+	return bus, batchCh
+}
+
+func awaitRetryResendBatch(t *testing.T, batchCh <-chan transcriptwire.TranscriptStepBatch) {
+	t.Helper()
+	if batchCh == nil {
+		return
+	}
+	select {
+	case b := <-batchCh:
+		if b.SessionID != "sess-retry-test" {
+			t.Errorf("b.SessionID = %q, want %q", b.SessionID, "sess-retry-test")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for retried startup resend to publish batch")
+	}
 }
 
 func assertLeaderHandoffCase(t *testing.T, tc leaderHandoffCase) {
@@ -637,9 +691,17 @@ func assertLeaderHandoffCase(t *testing.T, tc leaderHandoffCase) {
 	ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, newMockMainDaemonSpawner())
 	defer func() { _ = ephemPool.Close() }()
 
+	var fakeBus pubsub.Bus
+	var batchCh <-chan transcriptwire.TranscriptStepBatch
+	if tc.retryResend {
+		fakeBus, batchCh = setupRetryResendBus(t, tmpDir)
+	}
+
 	doneCh := make(chan struct{}, 1)
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		Store: ephemStore(store),
+		Store:           ephemStore(store),
+		TranscriptStore: store,
+		EventBus:        fakeBus,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"ok"}`, "", 0, nil
 		},
@@ -669,6 +731,7 @@ func assertLeaderHandoffCase(t *testing.T, tc leaderHandoffCase) {
 			t.Fatal("timed out waiting for held canary message after leader promotion")
 		}
 	}
+	awaitRetryResendBatch(t, batchCh)
 	if tc.cancelWait && !tc.cancelViaRelease {
 		cancel()
 	}
@@ -698,6 +761,7 @@ func TestStartLeaderHandoff_Scenarios(t *testing.T) {
 
 	tests := []leaderHandoffCase{
 		{name: "CanaryHoldAndPromotion", holdThenUnblk: true, wantReleased: true},
+		{name: "StartupResendRetriesUntilSuccess", retryResend: true, wantReleased: true},
 		{name: "LeaderLockErrorPropagates", lockErr: errors.New("advisory lock failed"), wantErr: true},
 		{name: "CancelledContextWhileWaiting", cancelWait: true},
 		{name: "ReleaseWhileWaitingWithoutParentCancel", cancelWait: true, cancelViaRelease: true},
