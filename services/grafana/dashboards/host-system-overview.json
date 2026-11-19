@@ -592,6 +592,76 @@
       "title": "Host Memory Breakdown",
       "type": "timeseries",
       "description": "Host RAM utilization and memory breakdown. Anomaly target: host_ram_saturation (max((1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100))."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "max by (instance) (increase(node_vmstat_oom_kill{instance=~\"$node\"}[1h]))",
+          "legendFormat": "{{instance}} (1h OOM Kills)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "max by (instance) (increase(node_vmstat_oom_kill{instance=~\"$node\"}[24h]))",
+          "legendFormat": "{{instance}} (24h OOM Kills)",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Host Kernel OOM Kills (node_vmstat_oom_kill)",
+      "type": "timeseries"
     }
   ],
   "refresh": "15s",
