@@ -108,16 +108,6 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 	return model.ValidateEventWatchSpec(source, target, eventType, extraSources...)
 }
 
-// Ordinal formats an integer into its English ordinal string (e.g., 1st, 2nd, 3rd, 4th, 11th, 111th).
-func Ordinal(n int) string {
-	return model.Ordinal(n)
-}
-
-// FormatCronDescription converts a standard 5-field cron expression or descriptor into human-readable English.
-func FormatCronDescription(cronExpr string) string {
-	return model.FormatCronDescription(cronExpr)
-}
-
 // SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.
 func SanitizeScheduleText(s string) string {
 	return model.SanitizeScheduleText(s)
@@ -141,9 +131,4 @@ func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
 // RedactDSN returns a log-safe form of a database DSN.
 func RedactDSN(dsn string) string {
 	return model.RedactDSN(dsn)
-}
-
-// FirstNonEmpty returns the first non-blank string after trimming spaces.
-func FirstNonEmpty(vals ...string) string {
-	return model.FirstNonEmpty(vals...)
 }
