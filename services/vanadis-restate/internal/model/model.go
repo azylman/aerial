@@ -3,6 +3,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -61,4 +62,63 @@ type BuildObjectState struct {
 	Build            VanadisBuild    `json:"build"`
 	Chunks           []VanadisChunk  `json:"chunks"`
 	Launched         map[string]bool `json:"launched,omitempty"`
+}
+
+// FailChunkRequest carries the chunk and reason for failing a chunk.
+type FailChunkRequest struct {
+	DispatchID string `json:"dispatch_id,omitempty"`
+	BuildID    string `json:"build_id,omitempty"`
+	ChunkID    string `json:"chunk_id"`
+	Reason     string `json:"reason"`
+}
+
+// FailChunkResponse represents the result of failing a chunk.
+type FailChunkResponse struct {
+	Failed      bool   `json:"failed"`
+	BuildID     string `json:"build_id"`
+	ChunkID     string `json:"chunk_id"`
+	BuildStatus string `json:"build_status"`
+	ChunkStatus string `json:"chunk_status"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	Objective   string `json:"objective,omitempty"`
+	Quiet       bool   `json:"quiet,omitempty"`
+}
+
+// AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
+type AttachChunkPRResponse struct {
+	Status   string `json:"status"`
+	BuildID  string `json:"build_id"`
+	ChunkID  string `json:"chunk_id"`
+	ThreadID string `json:"thread_id"`
+}
+
+// Legacy Restate service names preserved for the dark-launch default agent.
+const (
+	legacyBuildServiceName       = "Build"
+	legacyBuildRouterServiceName = "BuildRouter"
+)
+
+// NormalizeAgentName trims and lowercases a per-agent name for scoped Restate names.
+func NormalizeAgentName(agent string) string {
+	return strings.ToLower(strings.TrimSpace(agent))
+}
+
+// BuildServiceName derives the Restate Build Virtual Object name for an agent.
+// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
+func BuildServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return legacyBuildServiceName
+	}
+	return legacyBuildServiceName + "-" + name
+}
+
+// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
+// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
+func BuildRouterServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return legacyBuildRouterServiceName
+	}
+	return legacyBuildRouterServiceName + "-" + name
 }
