@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/services/haro/internal/dispatch"
+	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
@@ -54,7 +56,7 @@ func TestDB_CronOperations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
-	cron1 := CronSchedule{
+	cron1 := model.CronSchedule{
 		ID:          "cron-due-1",
 		TargetID:    "chan-1",
 		TitlePrefix: "Title 1",
@@ -65,7 +67,7 @@ func TestDB_CronOperations(t *testing.T) {
 		Enabled:     true,
 		Effort:      "low",
 	}
-	cronFuture := CronSchedule{
+	cronFuture := model.CronSchedule{
 		ID:          "cron-future-2",
 		TargetID:    "chan-1",
 		TitlePrefix: "Title 2",
@@ -76,7 +78,7 @@ func TestDB_CronOperations(t *testing.T) {
 		Enabled:     true,
 		Effort:      "medium",
 	}
-	cronDisabled := CronSchedule{
+	cronDisabled := model.CronSchedule{
 		ID:          "cron-disabled-3",
 		TargetID:    "chan-1",
 		TitlePrefix: "Title 3",
@@ -88,7 +90,7 @@ func TestDB_CronOperations(t *testing.T) {
 		Effort:      "high",
 	}
 
-	for _, c := range []CronSchedule{cron1, cronFuture, cronDisabled} {
+	for _, c := range []model.CronSchedule{cron1, cronFuture, cronDisabled} {
 		if err := store.InsertCronSchedule(ctx, db, c); err != nil {
 			t.Fatalf("store.InsertCronSchedule() err = %v", err)
 		}
@@ -133,14 +135,14 @@ func TestDB_OneShotOperations(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
-	osDue := OneShotSchedule{
+	osDue := model.OneShotSchedule{
 		ID:       "oneshot-due-1",
 		ThreadID: "th-1",
 		Prompt:   "one shot prompt 1",
 		RunAt:    now.Add(-5 * time.Minute),
 		Effort:   "medium",
 	}
-	osFuture := OneShotSchedule{
+	osFuture := model.OneShotSchedule{
 		ID:       "oneshot-future-2",
 		ThreadID: "th-2",
 		Prompt:   "one shot prompt 2",
@@ -148,7 +150,7 @@ func TestDB_OneShotOperations(t *testing.T) {
 		Effort:   "low",
 	}
 
-	for _, s := range []OneShotSchedule{osDue, osFuture} {
+	for _, s := range []model.OneShotSchedule{osDue, osFuture} {
 		if err := store.InsertOneShotSchedule(ctx, db, s); err != nil {
 			t.Fatalf("store.InsertOneShotSchedule() err = %v", err)
 		}
@@ -185,9 +187,9 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
-	// Create ScheduleRun
+	// Create model.ScheduleRun
 	completedAt := now.Add(2 * time.Second)
-	run1 := ScheduleRun{
+	run1 := model.ScheduleRun{
 		ID:           "run-1",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -207,7 +209,7 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 	}
 
 	// Create run with zero StartedAt (defaults to current time)
-	runZero := ScheduleRun{
+	runZero := model.ScheduleRun{
 		ID:           "run-zero-started",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -217,13 +219,13 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 	}
 
 	// Create invalid run (empty ID)
-	if err := store.CreateScheduleRun(ctx, db, ScheduleRun{}); err == nil {
+	if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{}); err == nil {
 		t.Errorf("store.CreateScheduleRun() empty ID expected error, got nil")
 	}
 
 	// Insert older runs to test pruning
 	for i := 2; i <= 6; i++ {
-		r := ScheduleRun{
+		r := model.ScheduleRun{
 			ID:           fmt.Sprintf("run-%d", i),
 			ScheduleID:   "cron-old",
 			ScheduleType: "cron",
@@ -279,16 +281,16 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"AdvanceCronNextRun", store.AdvanceCronNextRun(ctx, nil, "id", now)},
 		{"GetDueOneShotSchedules", func() error { _, err := store.GetDueOneShotSchedules(ctx, nil, now); return err }()},
 		{"DeleteOneShotSchedule", func() error { _, err := store.DeleteOneShotSchedule(ctx, nil, "id"); return err }()},
-		{"CreateScheduleRun", store.CreateScheduleRun(ctx, nil, ScheduleRun{ID: "run-id"})},
+		{"CreateScheduleRun", store.CreateScheduleRun(ctx, nil, model.ScheduleRun{ID: "run-id"})},
 		{"PruneScheduleRuns", func() error { _, err := store.PruneScheduleRuns(ctx, nil, 10, 24*time.Hour, now); return err }()},
-		{"InsertHeartbeatSchedule", store.InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
+		{"InsertHeartbeatSchedule", store.InsertHeartbeatSchedule(ctx, nil, model.HeartbeatSchedule{})},
 		{"ListHeartbeatSchedules", func() error { _, err := store.ListHeartbeatSchedules(ctx, nil, ""); return err }()},
 		{"GetCronSchedule", func() error { _, err := store.GetCronSchedule(ctx, nil, "id"); return err }()},
 		{"GetCronSchedule empty id", func() error { _, err := store.GetCronSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
 		{"GetOneShotSchedule", func() error { _, err := store.GetOneShotSchedule(ctx, nil, "id"); return err }()},
 		{"GetOneShotSchedule empty id", func() error { _, err := store.GetOneShotSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
 		{"GetHeartbeatSchedule", func() error { _, err := store.GetHeartbeatSchedule(ctx, nil, "id"); return err }()},
-		{"UpdateHeartbeatSchedule", store.UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
+		{"UpdateHeartbeatSchedule", store.UpdateHeartbeatSchedule(ctx, nil, model.HeartbeatSchedule{ID: "id"})},
 		{"GetDueHeartbeatSchedules", func() error { _, err := store.GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
 		{"AdvanceHeartbeatNextRun", store.AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
 		{"HasRunningHeartbeatRun", func() error { _, err := store.HasRunningHeartbeatRun(ctx, nil, "id", now); return err }()},
@@ -304,21 +306,21 @@ func TestDB_NilDBGuards(t *testing.T) {
 }
 
 type mockDispatcher struct {
-	dispatched []PromptDispatchRequest
-	response   PromptDispatchResponse
+	dispatched []dispatch.PromptDispatchRequest
+	response   dispatch.PromptDispatchResponse
 	err        error
 
-	dispatchedRequests []DispatchRequest
-	dispatchResponse   DispatchResponse
+	dispatchedRequests []dispatch.DispatchRequest
+	dispatchResponse   dispatch.DispatchResponse
 	dispatchErr        error
 }
 
-func (m *mockDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
+func (m *mockDispatcher) DispatchPrompt(ctx context.Context, req dispatch.PromptDispatchRequest) (dispatch.PromptDispatchResponse, error) {
 	m.dispatched = append(m.dispatched, req)
 	return m.response, m.err
 }
 
-func (m *mockDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+func (m *mockDispatcher) Dispatch(ctx context.Context, req dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
 	m.dispatchedRequests = append(m.dispatchedRequests, req)
 	return m.dispatchResponse, m.dispatchErr
 }
