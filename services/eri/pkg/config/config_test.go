@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData().
@@ -265,7 +267,6 @@ haro_url: "  http://haro.internal:4026  "
 coven_url: "http://coven.internal:4027/"
 nats_url: "  nats://nats-cluster:4222/  "
 transcripts:
-  database: "  shared_db  "
   stack: " stack-b "
 channels:
   default:
@@ -278,7 +279,7 @@ channels:
 			wantHaroURL:    "http://haro.internal:4026",
 			wantCovenURL:   "http://coven.internal:4027",
 			wantNATSURL:    "nats://nats-cluster:4222",
-			wantTx:         TranscriptsConfig{Database: "shared_db", Stack: "stack-b"},
+			wantTx:         TranscriptsConfig{Stack: "stack-b"},
 		},
 		{
 			name: "nats url env override",
@@ -309,7 +310,6 @@ channels:
 			name: "transcripts indexer url and batch budget",
 			content: `
 transcripts:
-  database: "shared_db"
   stack: "stack-b"
   indexer_url: "  http://indexer.internal:4060/  "
   max_batch_bytes: 65536
@@ -317,7 +317,20 @@ channels:
   default:
     mode: "threads"
 `,
-			wantTx: TranscriptsConfig{Database: "shared_db", Stack: "stack-b", IndexerURL: "http://indexer.internal:4060", MaxBatchBytes: 65536},
+			wantTx: TranscriptsConfig{Stack: "stack-b", IndexerURL: "http://indexer.internal:4060", MaxBatchBytes: 65536},
+		},
+		{
+			name: "stale transcripts database key is rejected",
+			content: `
+transcripts:
+  database: "postgres://user:pass@shared-db:5432/transcripts"
+  stack: "stack-b"
+channels:
+  default:
+    mode: "threads"
+`,
+			wantErr:     true,
+			errContains: "transcripts: 'database' is deprecated and unsupported",
 		},
 	}
 }
@@ -339,6 +352,78 @@ func TestTranscriptsConfig_EffectiveMaxBatchBytes(t *testing.T) {
 			cfg := TranscriptsConfig{MaxBatchBytes: tc.budget}
 			if got := cfg.EffectiveMaxBatchBytes(); got != tc.want {
 				t.Errorf("EffectiveMaxBatchBytes() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranscriptsConfig_UnmarshalStaleDatabase(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		yaml        string
+		json        string
+		wantErr     bool
+		errContains string
+		wantStack   string
+	}{
+		{
+			name:        "yaml stale database rejected",
+			yaml:        "database: postgres://shared/transcripts\nstack: alpha\n",
+			wantErr:     true,
+			errContains: "transcripts: 'database' is deprecated and unsupported",
+		},
+		{
+			name:        "json stale database rejected",
+			json:        `{"database": "postgres://shared/transcripts", "stack": "alpha"}`,
+			wantErr:     true,
+			errContains: "transcripts: 'database' is deprecated and unsupported",
+		},
+		{
+			name:      "yaml valid config without database",
+			yaml:      "stack: alpha\nindexer_url: http://indexer:4030/\nmax_batch_bytes: 12345\n",
+			wantStack: "alpha",
+		},
+		{
+			name:      "json valid config without database",
+			json:      `{"stack": "alpha", "indexer_url": "http://indexer:4030/", "max_batch_bytes": 12345}`,
+			wantStack: "alpha",
+		},
+		{
+			name:        "yaml invalid syntax",
+			yaml:        "[invalid yaml",
+			wantErr:     true,
+			errContains: "did not find expected",
+		},
+		{
+			name:        "json invalid syntax",
+			json:        `{"database": invalid}`,
+			wantErr:     true,
+			errContains: "invalid character",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg TranscriptsConfig
+			var err error
+			if tc.yaml != "" {
+				err = yaml.Unmarshal([]byte(tc.yaml), &cfg)
+			} else {
+				err = json.Unmarshal([]byte(tc.json), &cfg)
+			}
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Stack != tc.wantStack {
+				t.Fatalf("cfg.Stack = %q, want %q", cfg.Stack, tc.wantStack)
 			}
 		})
 	}
