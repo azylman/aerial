@@ -47,7 +47,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		return err
 	}
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
-	s.shadowDeployDispatched(ctx, repo, "git-merge", headSHA, prNum)
+	s.shadowDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum)
 	return nil
 }
 

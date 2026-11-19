@@ -287,12 +287,15 @@ func (s *RouterServer) shadowConflictResolved(ctx context.Context, res *Resolved
 // shadowDeployDispatched mirrors one deploy_success dispatch in shadow mode.
 // The dual legacy dedup keys (PR-keyed and job-plus-SHA) are untouched; the
 // shadow send carries the job name so the Restate effect key stays scoped.
-func (s *RouterServer) shadowDeployDispatched(ctx context.Context, repo, jobName, commitSHA string, prNumber int) {
-	if prNumber <= 0 || strings.TrimSpace(commitSHA) == "" {
+// Head and merge SHAs ride in their own fields: the deployed commit is the
+// merge SHA, and comparing it against the projected head SHA would record a
+// false divergence on every normal deploy where head != merge.
+func (s *RouterServer) shadowDeployDispatched(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int) {
+	if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
 		return
 	}
 	s.shadowPREvent(ctx, "HandleDeployDispatched", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: commitSHA, JobName: jobName,
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
 	})
 }
 

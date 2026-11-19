@@ -493,12 +493,16 @@ func TestShadowDeployDispatchedGuards(t *testing.T) {
 	tests := []struct {
 		name      string
 		prNumber  int
-		commitSHA string
+		headSHA   string
+		mergeSHA  string
 		wantCalls int
+		wantDiv   uint64
 	}{
-		{name: "valid dispatch mirrors HandleDeployDispatched", prNumber: 7, commitSHA: shadowTestHeadSHA(), wantCalls: 1},
-		{name: "zero pr sends nothing", prNumber: 0, commitSHA: shadowTestHeadSHA(), wantCalls: 0},
-		{name: "blank sha sends nothing", prNumber: 7, commitSHA: "  ", wantCalls: 0},
+		{name: "valid dispatch mirrors HandleDeployDispatched", prNumber: 7, headSHA: shadowTestHeadSHA(), mergeSHA: shadowTestMergeSHA(), wantCalls: 1, wantDiv: 0},
+		{name: "head-only dispatch sends without divergence", prNumber: 7, headSHA: shadowTestHeadSHA(), wantCalls: 1, wantDiv: 0},
+		{name: "merge-only dispatch sends without divergence", prNumber: 7, mergeSHA: shadowTestMergeSHA(), wantCalls: 1, wantDiv: 0},
+		{name: "zero pr sends nothing", prNumber: 0, headSHA: shadowTestHeadSHA(), wantCalls: 0, wantDiv: 0},
+		{name: "blank shas send nothing", prNumber: 7, headSHA: "  ", mergeSHA: " ", wantCalls: 0, wantDiv: 0},
 	}
 
 	for _, tc := range tests {
@@ -506,11 +510,14 @@ func TestShadowDeployDispatchedGuards(t *testing.T) {
 			t.Parallel()
 			shot, srv := newShadowCapture()
 			defer srv.Close()
-			r := newTestRouter(Config{RestateURL: srv.URL}, srv.Client(), &mockPRRegistry{resolveHeadSHA: tc.commitSHA}, nil)
+			r := newTestRouter(Config{RestateURL: srv.URL}, srv.Client(), &mockPRRegistry{resolveHeadSHA: shadowTestHeadSHA(), resolveMergeSHA: shadowTestMergeSHA()}, nil)
 			r.SetRestateShadow(newShadowRestateReporter(Config{RestateURL: srv.URL}, srv.Client()))
-			r.shadowDeployDispatched(context.Background(), "aerial", "api", tc.commitSHA, tc.prNumber)
+			r.shadowDeployDispatched(context.Background(), "aerial", "api", tc.headSHA, tc.mergeSHA, tc.prNumber)
 			if got := shot.count(); got != tc.wantCalls {
 				t.Errorf("captured shadow calls = %d, want %d", got, tc.wantCalls)
+			}
+			if got := r.restateShadow().Divergences(); got != tc.wantDiv {
+				t.Errorf("Divergences() = %d, want %d", got, tc.wantDiv)
 			}
 		})
 	}

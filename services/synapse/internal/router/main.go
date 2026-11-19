@@ -834,14 +834,14 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 		}
 		if evt.PRNumber > 0 {
 			s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-			s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+			s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 			return &evt, nil
 		}
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err
 		}
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-		s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+		s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 		return &evt, nil
 	case eventDeployRollback, eventDeployFailed:
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
@@ -892,7 +892,7 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 		return err
 	}
 	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-	s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+	s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 	return nil
 }
 

@@ -374,7 +374,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			return err
 		}
 		s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
-		s.shadowDeployDispatched(ctx, pr.Repo, name, commitSHA, pr.PRNumber)
+		s.shadowDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber)
 		s.shadowRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name)
 	}
 	if s.registry != nil {
