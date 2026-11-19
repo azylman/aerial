@@ -38,9 +38,15 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	branchArg := store.FirstNonEmpty(cleanBranch, "<branch>")
 	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
 
-	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix. " + checkoutAndSubmit
+	directive := "[VANADIS CI REMEDIATION — MANDATORY]\n" +
+		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: a fix pushed to the existing PR branch. " + checkoutAndSubmit + "\n" +
+		"Ending this turn with no commit is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+		"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it. Only if genuinely blocked, say so explicitly as your final line in the form REMEDIATION BLOCKED: <reason and the decision needed>."
 	if isRoboRevCheckName(ev.CheckName) {
-		directive = fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. Fix verified issues, or record rebuttal via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>''. %s", shortRepo, ev.PRNumber, checkoutAndSubmit)
+		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, or (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>''. %s\n", shortRepo, ev.PRNumber, checkoutAndSubmit) +
+			"Ending this turn with no commit and no override is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+			"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it. Only if genuinely blocked, say so explicitly as your final line in the form REMEDIATION BLOCKED: <reason and the decision needed>."
 	}
 	return formatErrorDetailsBlock(
 		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", ev.CheckName, ev.PRNumber, ev.Repo, ev.HeadSHA),
