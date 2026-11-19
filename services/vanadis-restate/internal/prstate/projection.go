@@ -25,6 +25,15 @@ package prstate
 // the projection being rebuilt, so rebuild is non-circular; snapshot restore
 // remains the fallback.
 //
+// Live-send ordering: sends for one PR are totally ordered by the PRObject's
+// single-threaded journal — a retried unrecorded send completes before any
+// later invocation's send, and recorded sends never re-fire, so no stale
+// live send can land last. Rebuild replays current state through this same
+// send path and must run quiesced against live traffic; the cutover re-derives
+// the snapshot from current committed state at send time rather than
+// forwarding event-captured snapshots. The journal key below only ever
+// distinguishes content for dedup; it never decides a transition.
+//
 // External idempotency tolerance: the registry upsert has no external
 // idempotency-key parameter, so at-least-once delivery is accepted here and
 // absorbed by the idempotent upsert (same journal key replays to the same
@@ -36,6 +45,7 @@ package prstate
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,14 +149,35 @@ func BuildProjection(s *PRState, branch, title, targetID, mergeSHA string) Proje
 	return snap
 }
 
-// ProjectionJournalKey scopes one projection send to repo+PR+headSHA+
-// generation, mirroring the generation-scoped EffectKey contract: keys bump
-// only when a new gate generation starts, and readiness retry never mints
-// one. Replays of the same key return the recorded row write.
+// ProjectionJournalKey scopes one projection send to its exact content:
+// repo+PR+headSHA+generation+reopen epoch plus a digest of every projected
+// field. Status, checks, and titles change many times within one generation
+// on one head SHA, so a generation-scoped key alone would suppress a newer
+// projection as a replay of an older one. Retries of the identical snapshot
+// reuse the key and dedupe; any content or epoch change mints a new key.
+// The digest input is length-delimited by NUL separators (mirroring
+// EffectKey.String's Builder pattern), so no marshaling error path exists.
 func ProjectionJournalKey(snap ProjectionSnapshot) string {
-	return fmt.Sprintf("%s#%d@%s:gen%d:%s",
+	meta := snap.Metadata
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		metaBytes = []byte("{}")
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
 		NormalizeRepo(snap.Repo), snap.PRNumber,
-		strings.TrimSpace(snap.HeadSHA), snap.Generation, ProjectionKind)
+		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
+		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.Title),
+		strings.TrimSpace(snap.TargetID), strings.TrimSpace(snap.Status),
+		snap.Generation, snap.MetaEpoch, metaBytes)
+	sum := sha256.Sum256([]byte(sb.String()))
+	return fmt.Sprintf("%s#%d@%s:gen%d:epoch%d:%s:%x",
+		NormalizeRepo(snap.Repo), snap.PRNumber,
+		strings.TrimSpace(snap.HeadSHA), snap.Generation, snap.MetaEpoch,
+		ProjectionKind, sum[:8])
 }
 
 // ownedChecksMerge builds the per-key merge expression for the owned

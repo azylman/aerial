@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -238,28 +239,30 @@ func TestRebuildProjection(t *testing.T) {
 func TestBuildProjection(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		pr         int
-		headSHA    string
-		failedSHA  string
-		check      string
-		conflict   string
-		terminal   TerminalState
-		mergeSHA   string
-		gen        uint64
-		wantStatus string
-		wantRepo   string
-		wantChecks int
-		wantGenKey string
+		name        string
+		pr          int
+		headSHA     string
+		failedSHA   string
+		check       string
+		conflict    string
+		terminal    TerminalState
+		mergeSHA    string
+		gen         uint64
+		reopened    bool
+		wantStatus  string
+		wantRepo    string
+		wantChecks  int
+		wantKeyPrep string
 	}{
-		{name: "open normalizes bare repo", pr: 101, headSHA: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
-		{name: "failed ci maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantGenKey: "azylman/aerial#101@abc123:gen1:projection"},
-		{name: "roborev failure maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "roborev", gen: 2, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantGenKey: "azylman/aerial#101@abc123:gen2:projection"},
-		{name: "conflict maps conflict", pr: 101, headSHA: "abc123", conflict: "abc123", gen: 1, wantStatus: "conflict", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen1:projection"},
-		{name: "superseded failure projects open", pr: 101, headSHA: "def456", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@def456:gen1:projection"},
-		{name: "superseded conflict projects open", pr: 101, headSHA: "def456", conflict: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@def456:gen0:projection"},
-		{name: "merged maps merged", pr: 101, headSHA: "abc123", terminal: TerminalMerged, mergeSHA: "def456", gen: 3, wantStatus: "merged", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen3:projection"},
-		{name: "closed maps closed", pr: 101, headSHA: "abc123", terminal: TerminalClosed, wantStatus: "closed", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
+		{name: "open normalizes bare repo", pr: 101, headSHA: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen0:epoch0:projection:"},
+		{name: "failed ci maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantKeyPrep: "azylman/aerial#101@abc123:gen1:epoch0:projection:"},
+		{name: "roborev failure maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "roborev", gen: 2, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantKeyPrep: "azylman/aerial#101@abc123:gen2:epoch0:projection:"},
+		{name: "conflict maps conflict", pr: 101, headSHA: "abc123", conflict: "abc123", gen: 1, wantStatus: "conflict", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen1:epoch0:projection:"},
+		{name: "superseded failure projects open", pr: 101, headSHA: "def456", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@def456:gen1:epoch0:projection:"},
+		{name: "superseded conflict projects open", pr: 101, headSHA: "def456", conflict: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@def456:gen0:epoch0:projection:"},
+		{name: "reopened projects open on new epoch", pr: 101, headSHA: "abc123", terminal: TerminalMerged, reopened: true, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen0:epoch1:projection:"},
+		{name: "merged maps merged", pr: 101, headSHA: "abc123", terminal: TerminalMerged, mergeSHA: "def456", gen: 3, wantStatus: "merged", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen3:epoch0:projection:"},
+		{name: "closed maps closed", pr: 101, headSHA: "abc123", terminal: TerminalClosed, wantStatus: "closed", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen0:epoch0:projection:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,6 +273,9 @@ func TestBuildProjection(t *testing.T) {
 			s.MarkConflictPublished(tc.conflict)
 			s.HeadSHA = tc.headSHA
 			s.MarkTerminal(tc.terminal)
+			if tc.reopened {
+				s.Reopen()
+			}
 			for range tc.gen {
 				s.RecordKustomizationRequests()
 			}
@@ -289,8 +295,8 @@ func TestBuildProjection(t *testing.T) {
 					t.Fatalf("metadata key %q not in owned partition", k)
 				}
 			}
-			if got := ProjectionJournalKey(snap); got != tc.wantGenKey {
-				t.Fatalf("JournalKey = %q, want %q", got, tc.wantGenKey)
+			if got := ProjectionJournalKey(snap); !strings.HasPrefix(got, tc.wantKeyPrep) {
+				t.Fatalf("JournalKey = %q, want prefix %q", got, tc.wantKeyPrep)
 			}
 		})
 	}
@@ -304,11 +310,11 @@ func TestBuildProjection(t *testing.T) {
 func TestBuildProjectionNilState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		wantStatus string
-		wantGenKey string
+		name        string
+		wantStatus  string
+		wantKeyPrep string
 	}{
-		{name: "nil state maps open empty", wantStatus: "open", wantGenKey: "#0@:gen0:projection"},
+		{name: "nil state maps open empty", wantStatus: "open", wantKeyPrep: "#0@:gen0:epoch0:projection:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,10 +326,80 @@ func TestBuildProjectionNilState(t *testing.T) {
 			if got := ProjectionStatus(nil); got != tc.wantStatus {
 				t.Fatalf("nil ProjectionStatus = %q, want %q", got, tc.wantStatus)
 			}
-			if got := ProjectionJournalKey(snap); got != tc.wantGenKey {
-				t.Fatalf("JournalKey = %q, want %q", got, tc.wantGenKey)
+			if got := ProjectionJournalKey(snap); !strings.HasPrefix(got, tc.wantKeyPrep) {
+				t.Fatalf("JournalKey = %q, want prefix %q", got, tc.wantKeyPrep)
 			}
 		})
+	}
+}
+
+// TestProjectionJournalKey freezes content addressing: every snapshot below
+// shares repo/PR/headSHA/generation, yet each mints a distinct key, while an
+// identical snapshot reuses the same key and dedupes. A generation-scoped
+// key alone would collide all of these and suppress newer projections.
+func TestProjectionJournalKey(t *testing.T) {
+	t.Parallel()
+	base := ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "t", TargetID: "123", Status: "open", Generation: 1, Metadata: map[string]any{"ci_checks": map[string]any{}}}
+	statusDiff := base
+	statusDiff.Status = "ci_failed"
+	epochDiff := base
+	epochDiff.MetaEpoch = 1
+	mergeDiff := base
+	mergeDiff.MergeSHA = "def456"
+	mergeDiff.Status = "merged"
+	checksDiff := base
+	checksDiff.Status = "ci_failed"
+	checksDiff.Metadata = map[string]any{"ci_checks": map[string]any{"lint": "failed"}}
+	branchDiff := base
+	branchDiff.Branch = "feat/y"
+	genDiff := base
+	genDiff.Generation = 2
+	tests := []struct {
+		name string
+		snap ProjectionSnapshot
+	}{
+		{name: "base open snapshot", snap: base},
+		{name: "status differs", snap: statusDiff},
+		{name: "reopen epoch differs", snap: epochDiff},
+		{name: "merge sha differs", snap: mergeDiff},
+		{name: "checks differ", snap: checksDiff},
+		{name: "branch differs", snap: branchDiff},
+		{name: "generation differs", snap: genDiff},
+	}
+	var mu sync.Mutex
+	seen := map[string]string{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			key := ProjectionJournalKey(tc.snap)
+			mu.Lock()
+			prev, dup := seen[key]
+			if !dup {
+				seen[key] = tc.name
+			}
+			mu.Unlock()
+			if dup {
+				t.Fatalf("key collision: %q already minted for %q", key, prev)
+			}
+			if again := ProjectionJournalKey(tc.snap); again != key {
+				t.Fatalf("identical snapshot minted %q then %q, want stable key", key, again)
+			}
+		})
+	}
+	if ProjectionJournalKey(base) == "" {
+		t.Fatal("journal key must not be empty")
+	}
+	emptyMeta := base
+	emptyMeta.Metadata = map[string]any{}
+	nilMeta := base
+	nilMeta.Metadata = nil
+	if ProjectionJournalKey(nilMeta) != ProjectionJournalKey(emptyMeta) {
+		t.Fatal("nil metadata must key like an empty object, matching the SQL fallback")
+	}
+	badMeta := base
+	badMeta.Metadata = map[string]any{"ci_checks": func() {}}
+	if ProjectionJournalKey(badMeta) != ProjectionJournalKey(emptyMeta) {
+		t.Fatal("unmarshalable metadata must fall back to the empty object key")
 	}
 }
 
@@ -339,12 +415,8 @@ func TestProjectionUpsertQueryBranches(t *testing.T) {
 		part       string
 		wantSubstr string
 	}{
-		{name: "insert carries ci_checks merge", part: "insert", wantSubstr: "ci_checks"},
-		{name: "insert binds snapshot metadata", part: "insert", wantSubstr: "$9"},
 		{name: "insert defaults missing checks to empty", part: "insert", wantSubstr: "COALESCE($9::jsonb->'ci_checks', '{}'::jsonb)"},
 		{name: "conflict target", part: "all", wantSubstr: "ON CONFLICT (repo, pr_number)"},
-		{name: "update merges ci_checks", part: "update", wantSubstr: "ci_checks"},
-		{name: "update binds snapshot metadata", part: "update", wantSubstr: "$9"},
 		{name: "update removes banner", part: "update", wantSubstr: "- 'banner'"},
 		{name: "update coalesces null metadata", part: "update", wantSubstr: "COALESCE(metadata, '{}'::jsonb)"},
 		{name: "update defaults missing checks to empty", part: "update", wantSubstr: "COALESCE($9::jsonb->'ci_checks', '{}'::jsonb)"},
