@@ -672,11 +672,11 @@ func TestEnsureCoreStreams(t *testing.T) {
 		subject string
 	}{
 		{StreamAerialEvents, SubjectAerialPRPrefix + "merged"},
-		{StreamAerialEvents, SubjectAerialTurnTranscriptSynced},
+		{StreamAerialEvents, SubjectTranscriptsIndexed},
 		{StreamAerialJobs, SubjectEriPromptJob},
 		{StreamAerialCoalesced, SubjectCovenExtractCoalesced("thread-test")},
 		{StreamAerialTranscripts, SubjectTranscriptsSteps("sess-1")},
-		{StreamAerialTranscripts, SubjectTranscriptsIndexed},
+		{StreamAerialTranscripts, SubjectTranscriptsStepsPrefix + "test"},
 	}
 	for _, chk := range checks {
 		st, ok := mjs.existingStreams[chk.stream]
@@ -765,11 +765,6 @@ func TestContracts_JSONWireFormat(t *testing.T) {
 		payload  any
 		wantJSON string
 	}{
-		{
-			name:     "TranscriptSyncedEvent",
-			payload:  TranscriptSyncedEvent{SessionID: "s1", ConversationID: "c1", StepsInserted: 3, SyncedAt: fixedTime},
-			wantJSON: `{"session_id":"s1","conversation_id":"c1","steps_inserted":3,"synced_at":"2026-11-14T16:00:00Z"}`,
-		},
 		{
 			name: "TurnCompletedEvent_telemetry",
 			payload: TurnCompletedEvent{
