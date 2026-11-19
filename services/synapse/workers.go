@@ -1,227 +1,64 @@
 package main
 
 import (
-	"bytes"
-	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"net/url"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
-)
-
-const (
-	fieldMetadata      = "metadata"
-	queryLabelSelector = "labelSelector"
-	unknownLabel       = "unknown"
+	"github.com/azylman/aerial/services/synapse/internal/ericlient"
+	"github.com/azylman/aerial/services/synapse/internal/kube"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 // Metric collectors for JetStream queues and worker execution telemetry.
 var (
-	JobsEnqueuedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_jobs_enqueued_total",
-			Help: "Total number of jobs enqueued, skipped as duplicate, or failed on enqueue.",
-		},
-		[]string{labelQueue, fieldKind, fieldStatus},
-	)
-
-	JobsProcessedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_jobs_processed_total",
-			Help: "Total number of jobs processed by worker execution status.",
-		},
-		[]string{labelQueue, fieldKind, fieldStatus},
-	)
-
-	JobDurationSeconds = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "synapse_job_duration_seconds",
-			Help:    "Execution duration of jobs in seconds.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{labelQueue, fieldKind},
-	)
-
-	JobRetriesTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_job_retries_total",
-			Help: "Total number of job retry attempts by reason.",
-		},
-		[]string{labelQueue, fieldKind, "reason"},
-	)
-
-	JobsDroppedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_jobs_dropped_total",
-			Help: "Total number of jobs dropped or cancelled by reason.",
-		},
-		[]string{labelQueue, fieldKind, "reason"},
-	)
-
-	QueueDepth = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "synapse_queue_depth",
-			Help: "Current depth of queues partitioned by state.",
-		},
-		[]string{labelQueue, "state"},
-	)
-
-	DiscordGatewayLatencySeconds = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "synapse_discord_gateway_latency_seconds",
-			Help: "Heartbeat latency of the Discord Gateway connection in seconds.",
-		},
-	)
+	JobsEnqueuedTotal            = metrics.JobsEnqueuedTotal
+	JobsProcessedTotal           = metrics.JobsProcessedTotal
+	JobDurationSeconds           = metrics.JobDurationSeconds
+	JobRetriesTotal              = metrics.JobRetriesTotal
+	JobsDroppedTotal             = metrics.JobsDroppedTotal
+	QueueDepth                   = metrics.QueueDepth
+	DiscordGatewayLatencySeconds = metrics.DiscordGatewayLatencySeconds
 )
 
 const (
-	QueueDefault            = "default"
-	QueueDiscordIngress     = "discord_ingress"
-	QueueDiscordInteraction = "discord_interaction"
+	QueueDefault            = metrics.QueueDefault
+	QueueDiscordIngress     = metrics.QueueDiscordIngress
+	QueueDiscordInteraction = metrics.QueueDiscordInteraction
 )
-
-var (
-	knownQueues = []string{
-		QueueDefault,
-		QueueDiscordIngress,
-		QueueDiscordInteraction,
-	}
-	knownStates = []string{statusPending, "in_flight"}
-)
-
-func registerCollector(c prometheus.Collector) {
-	if err := prometheus.Register(c); err != nil {
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
-		}
-	}
-}
-
-func init() {
-	registerCollector(JobsEnqueuedTotal)
-	registerCollector(JobsProcessedTotal)
-	registerCollector(JobDurationSeconds)
-	registerCollector(JobRetriesTotal)
-	registerCollector(JobsDroppedTotal)
-	registerCollector(QueueDepth)
-	registerCollector(DiscordGatewayLatencySeconds)
-
-	for _, q := range knownQueues {
-		for _, s := range knownStates {
-			QueueDepth.WithLabelValues(q, s).Set(0)
-		}
-	}
-	DiscordGatewayLatencySeconds.Set(0)
-}
 
 // RecordJobEnqueued increments the JobsEnqueuedTotal counter for the specified queue, kind, and status.
 func RecordJobEnqueued(queue, kind, status string) {
-	if queue == "" {
-		queue = QueueDefault
-	}
-	if kind == "" {
-		kind = unknownLabel
-	}
-	if status == "" {
-		status = unknownLabel
-	}
-	JobsEnqueuedTotal.WithLabelValues(queue, kind, status).Inc()
+	metrics.RecordJobEnqueued(queue, kind, status)
 }
 
 // RecordJobRetry increments the JobRetriesTotal counter for the specified queue, kind, and reason.
 func RecordJobRetry(queue, kind, reason string) {
-	if queue == "" {
-		queue = QueueDefault
-	}
-	if kind == "" {
-		kind = unknownLabel
-	}
-	if reason == "" {
-		reason = unknownLabel
-	}
-	JobRetriesTotal.WithLabelValues(queue, kind, reason).Inc()
+	metrics.RecordJobRetry(queue, kind, reason)
 }
 
 // RecordJobDropped increments the JobsDroppedTotal counter for the specified queue, kind, and reason.
 func RecordJobDropped(queue, kind, reason string) {
-	if queue == "" {
-		queue = QueueDefault
-	}
-	if kind == "" {
-		kind = unknownLabel
-	}
-	if reason == "" {
-		reason = unknownLabel
-	}
-	JobsDroppedTotal.WithLabelValues(queue, kind, reason).Inc()
+	metrics.RecordJobDropped(queue, kind, reason)
 }
 
 // SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.
 func SetDiscordGatewayLatency(seconds float64) {
-	DiscordGatewayLatencySeconds.Set(seconds)
+	metrics.SetDiscordGatewayLatency(seconds)
 }
 
-type consumerStatsQuerier interface {
-	ConsumerStats(ctx context.Context, stream, consumer string) (pending int64, inFlight int64, err error)
-}
-
-type synapseConsumerTarget struct {
-	stream   string
-	consumer string
-	queue    string
-}
-
-var synapseConsumerTargets = []synapseConsumerTarget{
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-github", queue: QueueDefault},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-deploy", queue: QueueDefault},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
-}
+type consumerStatsQuerier = metrics.ConsumerStatsQuerier
 
 func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) error {
-	for _, queue := range knownQueues {
-		QueueDepth.WithLabelValues(queue, "pending").Set(0)
-		QueueDepth.WithLabelValues(queue, "in_flight").Set(0)
-	}
-	if q == nil {
-		return nil
-	}
-
-	queuePending := make(map[string]int64)
-	queueInFlight := make(map[string]int64)
-	var firstErr error
-	for _, target := range synapseConsumerTargets {
-		pending, inFlight, err := q.ConsumerStats(ctx, target.stream, target.consumer)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("consumer stats %s/%s: %w", target.stream, target.consumer, err)
-			}
-			log.Printf("[synapse] [metrics] warning querying consumer stats for %s/%s: %v", target.stream, target.consumer, err)
-			continue
-		}
-		queuePending[target.queue] += pending
-		queueInFlight[target.queue] += inFlight
-	}
-	for queue, p := range queuePending {
-		QueueDepth.WithLabelValues(queue, "pending").Set(float64(p))
-	}
-	for queue, f := range queueInFlight {
-		QueueDepth.WithLabelValues(queue, "in_flight").Set(float64(f))
-	}
-	return firstErr
+	return metrics.CollectJetStreamQueueMetrics(ctx, q)
 }
 
 func normalizeJobArgs(args any) any {
@@ -247,18 +84,15 @@ func normalizeJobArgs(args any) any {
 }
 
 func resolveJobQueueAndKind(args any) (string, string) {
-	switch normalizeJobArgs(args).(type) {
-	case GitHubWebhookArgs:
-		return QueueDefault, "github_webhook"
+	switch a := normalizeJobArgs(args).(type) {
 	case DeployWebhookArgs:
 		return QueueDefault, "deploy_webhook"
-	case DiscordIngressArgs:
-		return QueueDiscordIngress, "discord_ingress"
-	case DiscordInteractionArgs:
-		return QueueDiscordInteraction, "discord_interaction"
-	default:
-		return QueueDefault, unknownLabel
+	case *DeployWebhookArgs:
+		if a != nil {
+			return QueueDefault, "deploy_webhook"
+		}
 	}
+	return metrics.ResolveJobQueueAndKind(args)
 }
 
 func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error {
@@ -279,11 +113,7 @@ func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error 
 }
 
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
-type GitHubWebhookArgs struct {
-	Event    string `json:"event"`
-	Delivery string `json:"delivery"`
-	Body     []byte `json:"body"`
-}
+type GitHubWebhookArgs = model.GitHubWebhookArgs
 
 // DeployWebhookArgs contains payload data for durable background processing of deployment webhooks.
 type DeployWebhookArgs struct {
@@ -291,64 +121,17 @@ type DeployWebhookArgs struct {
 	Event          DeployEvent `json:"event"`
 }
 
-// DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.
-type DiscordMessageIngressRequest struct {
-	BotUserID string             `json:"bot_user_id,omitempty"`
-	RoleNames map[string]string  `json:"role_names,omitempty"`
-	Message   *discordgo.Message `json:"message"`
-}
-
-// DiscordIngressArgs contains payload data for JetStream queueing of Discord message ingress events.
-type DiscordIngressArgs struct {
-	MessageID string             `json:"message_id"`
-	BotUserID string             `json:"bot_user_id,omitempty"`
-	RoleNames map[string]string  `json:"role_names,omitempty"`
-	Message   *discordgo.Message `json:"message"`
-}
-
-// DiscordInteractionArgs contains payload data for JetStream queueing of Discord interaction events.
-type DiscordInteractionArgs struct {
-	InteractionID string                 `json:"interaction_id"`
-	Interaction   *discordgo.Interaction `json:"interaction"`
-}
-
-type GitPushEventRequest struct {
-	Repo     string `json:"repo"`
-	Ref      string `json:"ref"`
-	Commit   string `json:"commit"`
-	TargetID string `json:"target_id,omitempty"`
-	PRNumber int    `json:"pr_number,omitempty"`
-}
-
-type ImageReadyEventRequest struct {
-	Image     string `json:"image"`
-	Digest    string `json:"digest,omitempty"`
-	Repo      string `json:"repo,omitempty"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-	PRNumber  int    `json:"pr_number,omitempty"`
-	TargetID  string `json:"target_id,omitempty"`
-}
-
-type PromptRequest struct {
-	ChannelID string `json:"channel_id"`
-	Prompt    string `json:"prompt"`
-	Effort    string `json:"effort,omitempty"`
-}
-
-type DispatchRequest struct {
-	ID           string `json:"id,omitempty"`
-	Source       string `json:"source"`
-	SessionID    string `json:"session_id,omitempty"`
-	TargetID     string `json:"target_id,omitempty"`
-	Prompt       string `json:"prompt"`
-	Effort       string `json:"effort,omitempty"`
-	SkipIfActive bool   `json:"skip_if_active,omitempty"`
-}
-
-type DirectMessageRequest struct {
-	ChannelID string `json:"channel_id"`
-	Content   string `json:"content"`
-}
+// Type aliases to model domain types.
+type (
+	DiscordMessageIngressRequest = model.DiscordMessageIngressRequest
+	DiscordIngressArgs           = model.DiscordIngressArgs
+	DiscordInteractionArgs       = model.DiscordInteractionArgs
+	GitPushEventRequest          = model.GitPushEventRequest
+	ImageReadyEventRequest       = model.ImageReadyEventRequest
+	PromptRequest                = model.PromptRequest
+	DispatchRequest              = model.DispatchRequest
+	DirectMessageRequest         = model.DirectMessageRequest
+)
 
 type OutboundDispatcher interface {
 	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
@@ -376,6 +159,9 @@ type DefaultOutboundDispatcher struct {
 	discordInteractionClient *http.Client
 	retryDelay               time.Duration
 	maxAttempts              int
+
+	kubeClient *kube.Client
+	eriClient  *ericlient.Client
 }
 
 func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *DefaultOutboundDispatcher {
@@ -386,14 +172,30 @@ func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *Default
 		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
 		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
 	}
-	// Outbound eri calls carry traceparent so turn joins gateway or webhook traces.
-	return &DefaultOutboundDispatcher{
+	d := &DefaultOutboundDispatcher{
 		brainURL:                 strings.TrimRight(brainURL, "/"),
 		httpClient:               tracing.Client(client),
 		discordMsgClient:         tracing.Client(discordMsgClient),
 		discordInteractionClient: tracing.Client(discordInteractionClient),
 		retryDelay:               1500 * time.Millisecond,
 		maxAttempts:              6,
+	}
+	d.ensureClients()
+	return d
+}
+
+func (d *DefaultOutboundDispatcher) ensureClients() {
+	if d.kubeClient == nil {
+		d.kubeClient = kube.NewClient(d.httpClient)
+		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
+		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
+		d.kubeClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
+	}
+	if d.eriClient == nil {
+		d.eriClient = ericlient.NewClient(d.brainURL, d.httpClient)
+		d.eriClient.SetDiscordMsgClient(d.discordMsgClient)
+		d.eriClient.SetDiscordInteractionClient(d.discordInteractionClient)
+		d.eriClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
 	}
 }
 
@@ -411,291 +213,34 @@ func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(receiverURL string) {
 	trimmed := strings.TrimRight(strings.TrimSpace(receiverURL), "/")
 	if isFluxEventServerRootURL(trimmed) {
 		d.fluxReceiverURL = ""
-		return
+	} else {
+		d.fluxReceiverURL = trimmed
 	}
-	d.fluxReceiverURL = trimmed
+	if d.kubeClient != nil {
+		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
+	}
 }
 
 func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {
 	d.kubeAPIServer = strings.TrimRight(apiServer, "/")
 	d.kubeToken = strings.TrimSpace(token)
-}
-
-func (d *DefaultOutboundDispatcher) getKubeToken() string {
-	return getKubeServiceAccountToken(d.kubeToken)
-}
-
-func (d *DefaultOutboundDispatcher) forwardFluxReceiver(ctx context.Context, payload any) error {
-	if d.fluxReceiverURL == "" {
-		return nil
+	if d.kubeClient != nil {
+		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
 	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal flux receiver payload: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.fluxReceiverURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("create flux receiver request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("flux receiver request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr != nil {
-			return fmt.Errorf("flux receiver returned status %d", resp.StatusCode)
-		}
-		return fmt.Errorf("flux receiver returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
-}
-
-func extractImageWorkloadName(imageRef string) string {
-	ref := strings.TrimSpace(imageRef)
-	if lastSlash := strings.LastIndex(ref, "/"); lastSlash != -1 {
-		ref = ref[lastSlash+1:]
-	}
-	if colonIdx := strings.Index(ref, ":"); colonIdx != -1 {
-		ref = ref[:colonIdx]
-	}
-	return strings.TrimSpace(ref)
 }
 
 func resolveImageTag(repo, imageRef string) (tagKey, imageName, workloadName string) {
-	workloadName = extractImageWorkloadName(imageRef)
-	if workloadName == "" || strings.EqualFold(workloadName, "none") {
-		return "", "", ""
-	}
-	switch repo[strings.LastIndex(repo, "/")+1:] {
-	case "aerial":
-		imageName = "aerial-" + strings.TrimPrefix(workloadName, "aerial-")
-	case "aerial-sidecars":
-		imageName = "aerial-sidecar-" + strings.TrimPrefix(workloadName, "aerial-sidecar-")
-	case "mirrormere":
-		if strings.HasPrefix(workloadName, "mirrormere") {
-			imageName = workloadName
-		} else {
-			imageName = "mirrormere-" + workloadName
-		}
-	default:
-		imageName = workloadName
-	}
-	tagKey = "TAG_" + strings.ToUpper(strings.ReplaceAll(imageName, "-", "_"))
-	return tagKey, imageName, workloadName
-}
-
-func (d *DefaultOutboundDispatcher) createOrRetryImageTagConfigMap(ctx context.Context, client *http.Client, token, tagKey, commitSHA string, doPatch func() (int, []byte, error)) error {
-	postBody, err := json.Marshal(map[string]any{
-		"apiVersion": "v1",
-		fieldKind:    kindConfigMap,
-		fieldMetadata: map[string]string{
-			"name":      "aerial-image-tags",
-			"namespace": "flux-system",
-		},
-		"data": map[string]string{
-			tagKey: strings.TrimSpace(commitSHA),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal configmap post body: %w", err)
-	}
-	postURL := d.kubeAPIServer + "/api/v1/namespaces/flux-system/configmaps"
-	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, postURL, bytes.NewReader(postBody))
-	if err != nil {
-		return fmt.Errorf("create configmap post request: %w", err)
-	}
-	postReq.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		postReq.Header.Set("Authorization", "Bearer "+token)
-	}
-	postResp, err := client.Do(postReq)
-	if err != nil {
-		return fmt.Errorf("configmap post request failed: %w", err)
-	}
-	defer postResp.Body.Close()
-	postRespBody, readErr := io.ReadAll(io.LimitReader(postResp.Body, 64<<10))
-	if readErr != nil {
-		return fmt.Errorf("read configmap post response: %w", readErr)
-	}
-	if postResp.StatusCode >= 200 && postResp.StatusCode < 300 {
-		return nil
-	}
-	if postResp.StatusCode == http.StatusConflict {
-		retryCode, retryBody, retryErr := doPatch()
-		if retryErr != nil {
-			return retryErr
-		}
-		if retryCode >= 200 && retryCode < 300 {
-			return nil
-		}
-		return fmt.Errorf("configmap retry patch returned status %d: %s", retryCode, string(retryBody))
-	}
-	return fmt.Errorf("configmap post returned status %d: %s", postResp.StatusCode, string(postRespBody))
-}
-
-func (d *DefaultOutboundDispatcher) upsertImageTagConfigMap(ctx context.Context, tagKey, commitSHA string) error {
-	apiServer := d.kubeAPIServer
-	token := d.getKubeToken()
-	client := getK8sHTTPClient(apiServer, d.httpClient)
-
-	patchBody, err := json.Marshal(map[string]any{
-		"apiVersion": "v1",
-		fieldKind:    kindConfigMap,
-		fieldMetadata: map[string]string{
-			"name":      "aerial-image-tags",
-			"namespace": "flux-system",
-		},
-		"data": map[string]string{
-			tagKey: strings.TrimSpace(commitSHA),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal configmap patch body: %w", err)
-	}
-
-	patchURL := apiServer + "/api/v1/namespaces/flux-system/configmaps/aerial-image-tags"
-	doPatch := func() (int, []byte, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, patchURL, bytes.NewReader(patchBody))
-		if reqErr != nil {
-			return 0, nil, fmt.Errorf("create configmap patch request: %w", reqErr)
-		}
-		req.Header.Set("Content-Type", "application/strategic-merge-patch+json")
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		resp, respErr := client.Do(req)
-		if respErr != nil {
-			return 0, nil, fmt.Errorf("configmap patch request failed: %w", respErr)
-		}
-		defer resp.Body.Close()
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr != nil {
-			return resp.StatusCode, nil, fmt.Errorf("read configmap patch response: %w", readErr)
-		}
-		return resp.StatusCode, body, nil
-	}
-
-	statusCode, body, err := doPatch()
-	if err != nil {
-		return err
-	}
-	if statusCode >= 200 && statusCode < 300 {
-		return nil
-	}
-	if statusCode == http.StatusNotFound {
-		return d.createOrRetryImageTagConfigMap(ctx, client, token, tagKey, commitSHA, doPatch)
-	}
-	return fmt.Errorf("configmap patch returned status %d: %s", statusCode, string(body))
+	return kube.ResolveImageTag(repo, imageRef)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	if d.fluxReceiverURL != "" {
-		return d.forwardFluxReceiver(ctx, req)
-	}
-	return nil
+	d.ensureClients()
+	return d.kubeClient.DispatchGitPush(ctx, req)
 }
 
-// PromoteImageTag writes the image's TAG_ key into ConfigMap and forwards to Flux receiver.
 func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
-	tagKey, _, workloadName := resolveImageTag(req.Repo, req.Image)
-	if workloadName == "" {
-		return "", nil
-	}
-
-	var kubeSuccess, fluxSuccess bool
-	var kubeErr, fluxErr error
-
-	if d.kubeAPIServer != "" && req.CommitSHA != "" && !isZeroSHA(req.CommitSHA) {
-		if err := d.upsertImageTagConfigMap(ctx, tagKey, req.CommitSHA); err != nil {
-			kubeErr = fmt.Errorf("upsert image tag configmap: %w", err)
-		} else {
-			kubeSuccess = true
-		}
-	}
-
-	if d.fluxReceiverURL != "" {
-		if err := d.forwardFluxReceiver(ctx, req); err != nil {
-			fluxErr = fmt.Errorf("forward flux receiver: %w", err)
-		} else {
-			fluxSuccess = true
-		}
-	}
-
-	if kubeErr != nil && fluxErr != nil {
-		return "", errors.Join(kubeErr, fluxErr)
-	}
-	if kubeErr != nil && !fluxSuccess {
-		return "", kubeErr
-	}
-	if fluxErr != nil && !kubeSuccess {
-		return "", fluxErr
-	}
-	if kubeSuccess || fluxSuccess {
-		return workloadName, nil
-	}
-	return "", nil
-}
-
-// kubeJSON performs a raw kube API request and returns the response body, failing on non-2xx statuses.
-func (d *DefaultOutboundDispatcher) kubeJSON(ctx context.Context, method, path, contentType string, body []byte) ([]byte, error) {
-	if d.kubeAPIServer == "" {
-		return nil, errors.New("kube api server not configured")
-	}
-	var reqBody io.Reader
-	if body != nil {
-		reqBody = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, d.kubeAPIServer+path, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("create kube %s %s request: %w", method, path, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	if token := d.getKubeToken(); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := getK8sHTTPClient(d.kubeAPIServer, d.httpClient).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("kube %s %s request failed: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read kube %s %s response: %w", method, path, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("kube %s %s returned status %d: %s", method, path, resp.StatusCode, truncateKubeBody(respBody))
-	}
-	return respBody, nil
-}
-
-func truncateKubeBody(body []byte) string {
-	const maxLen = 512
-	if len(body) > maxLen {
-		return string(body[:maxLen]) + "..."
-	}
-	return string(body)
-}
-
-// isKubeNotFound reports whether err represents a 404 Not Found HTTP response from the Kubernetes API.
-func isKubeNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "returned status 404:")
-}
-
-// workloadListPaths are the cluster-wide list endpoints for every workload kind that can run an image.
-var workloadListPaths = []string{
-	"/apis/apps/v1/deployments",
-	"/apis/apps/v1/statefulsets",
-	"/apis/apps/v1/daemonsets",
-	"/apis/batch/v1/jobs",
-	"/apis/batch/v1/cronjobs",
-	"/apis/restate.dev/v1beta1/restatedeployments",
-	"/apis/restate.dev/v1/restateclusters",
+	d.ensureClients()
+	return d.kubeClient.PromoteImageTag(ctx, req)
 }
 
 // rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy.
@@ -707,402 +252,132 @@ var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 	{Kind: kindRestateCluster, Path: "/apis/restate.dev/v1/restateclusters"},
 }
 
-// fluxManagedSelector selects every object applied by any Flux Kustomization.
-const fluxManagedSelector = fluxKustomizationNameLabel
-
-// kustomizationSelector selects every object applied by ref.
-func kustomizationSelector(ref fluxKustomizationRef) url.Values {
-	return url.Values{queryLabelSelector: {fluxKustomizationNameLabel + "=" + ref.Name + "," + fluxKustomizationNamespaceLabel + "=" + ref.Namespace}}
+func toFluxKustomizationRefs(refs []model.FluxKustomizationRef) []fluxKustomizationRef {
+	if refs == nil {
+		return nil
+	}
+	res := make([]fluxKustomizationRef, len(refs))
+	for i, r := range refs {
+		res[i] = fluxKustomizationRef{Namespace: r.Namespace, Name: r.Name}
+	}
+	return res
 }
 
-// ListKustomizationConfigMaps lists when each ConfigMap applied by ref last changed.
 func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error) {
-	body, err := d.kubeJSON(ctx, http.MethodGet, "/api/v1/configmaps?"+kustomizationSelector(ref).Encode(), "", nil)
-	if err != nil {
-		return nil, fmt.Errorf("list %s configmaps: %w", ref.Name, err)
-	}
-	changes, err := decodeConfigMapChanges(body)
-	if err != nil {
-		return nil, fmt.Errorf("decode %s configmaps: %w", ref.Name, err)
-	}
-	return changes, nil
-}
-
-// ListKustomizationWorkloads lists the Deployments, StatefulSets and DaemonSets applied by ref.
-func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
-	query := kustomizationSelector(ref)
-	var workloads []workloadRollout
-	for _, k := range rolloutWorkloadKinds {
-		body, err := d.kubeJSON(ctx, http.MethodGet, k.Path+"?"+query.Encode(), "", nil)
-		if err != nil {
-			if isKubeNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("list %s workloads: %w", ref.Name, err)
-		}
-		decoded, err := decodeWorkloadRollouts(k.Kind, body)
-		if err != nil {
-			return nil, fmt.Errorf("decode %s: %w", k.Path, err)
-		}
-		for i := range decoded {
-			if decoded[i].Kind == kindRestateDeployment && decoded[i].Replicas == 0 {
-				observation, err := d.collectStoppedChildren(ctx, decoded[i])
-				if err != nil {
-					return nil, err
-				}
-				decoded[i].StoppedChildren = observation
-			}
-		}
-		workloads = append(workloads, decoded...)
-	}
-	return workloads, nil
-}
-
-// ListFluxWorkloadsVersion lists workloads at path and returns list resourceVersion for watching.
-func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
-	body, err := d.kubeJSON(ctx, http.MethodGet, path+"?"+url.Values{queryLabelSelector: {fluxManagedSelector}}.Encode(), "", nil)
-	if err != nil {
-		return "", fmt.Errorf("list flux workloads: %w", err)
-	}
-	var list struct {
-		Metadata struct {
-			ResourceVersion string `json:"resourceVersion"`
-		} `json:"metadata"`
-	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return "", fmt.Errorf("decode %s: %w", path, err)
-	}
-	return list.Metadata.ResourceVersion, nil
-}
-
-// WatchFluxWorkloads opens a kube watch stream of the Flux-managed workloads at path from resourceVersion.
-func (d *DefaultOutboundDispatcher) WatchFluxWorkloads(ctx context.Context, path, resourceVersion string) (io.ReadCloser, error) {
-	return d.watchKube(ctx, path, url.Values{queryLabelSelector: {fluxManagedSelector}}, resourceVersion)
-}
-
-func (d *DefaultOutboundDispatcher) listWorkloadImages(ctx context.Context) ([]workloadImageRef, error) {
-	var workloads []workloadImageRef
-	for _, path := range workloadListPaths {
-		body, err := d.kubeJSON(ctx, http.MethodGet, path, "", nil)
-		if err != nil {
-			if isKubeNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("list workloads: %w", err)
-		}
-		refs, err := decodeWorkloadImageRefs(body)
-		if err != nil {
-			return nil, fmt.Errorf("decode %s: %w", path, err)
-		}
-		workloads = append(workloads, refs...)
-	}
-	return workloads, nil
-}
-
-// DiscoverImageKustomizations returns every Flux Kustomization owning a workload that runs one of
-// imageNames. When no labeled workload matches, it falls back to every flux-system Kustomization that
-// substitutes from the image tag ConfigMap, so a promoted tag is never left un-reconciled.
-func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
-	if d.kubeAPIServer == "" || len(imageNames) == 0 {
-		return nil, nil
-	}
-	workloads, err := d.listWorkloadImages(ctx)
+	d.ensureClients()
+	changes, err := d.kubeClient.ListKustomizationConfigMaps(ctx, model.FluxKustomizationRef{Namespace: ref.Namespace, Name: ref.Name})
 	if err != nil {
 		return nil, err
 	}
-	if refs := kustomizationsForImages(workloads, imageNames); len(refs) > 0 {
-		return refs, nil
+	res := make([]configMapChange, len(changes))
+	for i, c := range changes {
+		res[i] = configMapChange{Namespace: c.Namespace, Name: c.Name, ChangedAt: c.ChangedAt}
 	}
-	body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: fluxSystemNamespace}), "", nil)
-	if err != nil {
-		return nil, fmt.Errorf("list kustomizations: %w", err)
-	}
-	refs, err := decodeImageTagKustomizations(body)
-	if err != nil {
-		return nil, fmt.Errorf("decode kustomizations: %w", err)
-	}
-	return refs, nil
+	return res, nil
 }
 
-// ReconcileKustomization requests a Flux reconcile by patching the requestedAt annotation to the
-// caller-recorded value; Flux echoes it back in status.lastHandledReconcileAt once handled. Re-patching
-// the same value is idempotent.
+func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
+	d.ensureClients()
+	workloads, err := d.kubeClient.ListKustomizationWorkloads(ctx, model.FluxKustomizationRef{Namespace: ref.Namespace, Name: ref.Name})
+	if err != nil {
+		return nil, err
+	}
+	return fromModelWorkloadRollouts(workloads), nil
+}
+
+func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
+	d.ensureClients()
+	return d.kubeClient.ListFluxWorkloadsVersion(ctx, path)
+}
+
+func (d *DefaultOutboundDispatcher) WatchFluxWorkloads(ctx context.Context, path, resourceVersion string) (io.ReadCloser, error) {
+	d.ensureClients()
+	return d.kubeClient.WatchFluxWorkloads(ctx, path, resourceVersion)
+}
+
+func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
+	d.ensureClients()
+	refs, err := d.kubeClient.DiscoverImageKustomizations(ctx, imageNames)
+	if err != nil {
+		return nil, err
+	}
+	return toFluxKustomizationRefs(refs), nil
+}
+
 func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
-	patchBody, err := json.Marshal(map[string]any{
-		fieldMetadata: map[string]any{
-			"annotations": map[string]string{fluxReconcileRequestedAtAnnotation: requestedAt},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal kustomization patch body: %w", err)
-	}
-	if _, err := d.kubeJSON(ctx, http.MethodPatch, kustomizationPath(ref), "application/merge-patch+json", patchBody); err != nil {
-		return fmt.Errorf("reconcile kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
-	}
-	return nil
+	d.ensureClients()
+	return d.kubeClient.ReconcileKustomization(ctx, model.FluxKustomizationRef{Namespace: ref.Namespace, Name: ref.Name}, requestedAt)
 }
 
-// ResolveFluxSourceRepo returns the owner/repo of the GitRepository behind a Flux object: the object
-// itself for a GitRepository, or its spec.sourceRef for a Kustomization. Other kinds resolve to "".
 func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
-	namespace := cmp.Or(strings.TrimSpace(obj.Namespace), fluxSystemNamespace)
-	source := fluxSourceRef{Kind: obj.Kind, Name: strings.TrimSpace(obj.Name), Namespace: namespace}
-	if obj.Kind == kindKustomization {
-		body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: namespace, Name: source.Name}), "", nil)
-		if err != nil {
-			return "", fmt.Errorf("get kustomization %s/%s: %w", namespace, source.Name, err)
-		}
-		var k fluxKustomizationObject
-		if err := json.Unmarshal(body, &k); err != nil {
-			return "", fmt.Errorf("decode kustomization %s/%s: %w", namespace, source.Name, err)
-		}
-		source = k.Spec.SourceRef
-		source.Namespace = cmp.Or(source.Namespace, namespace)
-	}
-	return d.gitRepositorySlug(ctx, source)
+	d.ensureClients()
+	return d.kubeClient.ResolveFluxSourceRepo(ctx, model.FluxInvolvedObject{Kind: obj.Kind, Name: obj.Name, Namespace: obj.Namespace})
 }
 
-// gitRepositorySlug GETs the GitRepository behind source and returns the owner/repo of its spec.url;
-// any other source kind resolves to "".
-func (d *DefaultOutboundDispatcher) gitRepositorySlug(ctx context.Context, source fluxSourceRef) (string, error) {
-	if source.Kind != "GitRepository" || source.Name == "" {
-		return "", nil
-	}
-	body, err := d.kubeJSON(ctx, http.MethodGet, gitRepositoryPath(source.Namespace, source.Name), "", nil)
-	if err != nil {
-		return "", fmt.Errorf("get gitrepository %s/%s: %w", source.Namespace, source.Name, err)
-	}
-	var repo struct {
-		Spec struct {
-			URL string `json:"url"`
-		} `json:"spec"`
-	}
-	if err := json.Unmarshal(body, &repo); err != nil {
-		return "", fmt.Errorf("decode gitrepository %s/%s: %w", source.Namespace, source.Name, err)
-	}
-	return gitRepoSlug(repo.Spec.URL), nil
-}
-
-// DiscoverRepoKustomizations returns the sorted Kustomizations, in the namespaces the rollout watcher
-// follows, whose GitRepository source is repo. Each distinct source is fetched once. Suspended
-// Kustomizations are skipped: they apply nothing, and the watcher would fail a PR waiting on one.
 func (d *DefaultOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]fluxKustomizationRef, error) {
-	repo = normalizeRepo(repo)
-	if d.kubeAPIServer == "" || repo == "" {
-		return nil, nil
+	d.ensureClients()
+	refs, err := d.kubeClient.DiscoverRepoKustomizations(ctx, repo)
+	if err != nil {
+		return nil, err
 	}
-	slugs := make(map[fluxSourceRef]string)
-	var refs []fluxKustomizationRef
-	for _, namespace := range rolloutKustomizationNamespaces {
-		observations, _, err := d.ListKustomizations(ctx, namespace)
-		if err != nil {
-			return nil, err
-		}
-		for _, obs := range observations {
-			if obs.Suspended {
-				continue
-			}
-			slug, ok := slugs[obs.SourceRef]
-			if !ok {
-				if slug, err = d.gitRepositorySlug(ctx, obs.SourceRef); err != nil {
-					return nil, err
-				}
-				slugs[obs.SourceRef] = slug
-			}
-			if slug != "" && strings.EqualFold(normalizeRepo(slug), repo) {
-				refs = append(refs, obs.Ref)
-			}
-		}
-	}
-	slices.SortFunc(refs, compareKustomizationRefs)
-	return refs, nil
+	return toFluxKustomizationRefs(refs), nil
 }
 
-// ListKustomizations lists the Kustomizations of namespace and returns them with the list resourceVersion.
 func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, namespace string) ([]kustomizationObservation, string, error) {
-	body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: namespace}), "", nil)
+	d.ensureClients()
+	obs, rv, err := d.kubeClient.ListKustomizations(ctx, namespace)
 	if err != nil {
-		return nil, "", fmt.Errorf("list kustomizations: %w", err)
+		return nil, "", err
 	}
-	return decodeKustomizationList(body, namespace)
+	res := make([]kustomizationObservation, len(obs))
+	for i, o := range obs {
+		conds := make([]fluxCondition, len(o.Conditions))
+		for j, c := range o.Conditions {
+			conds[j] = fluxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+		}
+		res[i] = kustomizationObservation{
+			Ref:                    fluxKustomizationRef{Namespace: o.Ref.Namespace, Name: o.Ref.Name},
+			Suspended:              o.Suspended,
+			RequestedAt:            o.RequestedAt,
+			LastHandledReconcileAt: o.LastHandledReconcileAt,
+			LastAppliedRevision:    o.LastAppliedRevision,
+			SourceRef:              fluxSourceRef{Kind: o.SourceRef.Kind, Name: o.SourceRef.Name, Namespace: o.SourceRef.Namespace},
+			Conditions:             conds,
+		}
+	}
+	return res, rv, nil
 }
 
-// WatchKustomizations opens a kube watch stream of namespace's Kustomizations from resourceVersion.
 func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, namespace, resourceVersion string) (io.ReadCloser, error) {
-	return d.watchKube(ctx, kustomizationPath(fluxKustomizationRef{Namespace: namespace}), url.Values{}, resourceVersion)
-}
-
-// watchKube opens a kube watch stream at path filtered by query from resourceVersion.
-func (d *DefaultOutboundDispatcher) watchKube(ctx context.Context, path string, query url.Values, resourceVersion string) (io.ReadCloser, error) {
-	if d.kubeAPIServer == "" {
-		return nil, errors.New("kube api server not configured")
-	}
-	query.Set("watch", "1")
-	query.Set("allowWatchBookmarks", "true")
-	query.Set("resourceVersion", resourceVersion)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.kubeAPIServer+path+"?"+query.Encode(), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("create kube watch %s request: %w", path, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	if token := d.getKubeToken(); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	streamClient := *getK8sHTTPClient(d.kubeAPIServer, d.httpClient)
-	streamClient.Timeout = 0
-	resp, err := streamClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("kube watch %s request failed: %w", path, err)
-	}
-	if resp.StatusCode == http.StatusGone {
-		resp.Body.Close()
-		return nil, errWatchExpired
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if readErr != nil {
-			return nil, fmt.Errorf("kube watch %s returned status %d (read error: %w)", path, resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("kube watch %s returned status %d: %s", path, resp.StatusCode, truncateKubeBody(body))
-	}
-	return resp.Body, nil
-}
-
-func validateBrainChannel(channelID, endpointPath string) error {
-	if channelID != "" || endpointPath != "/dispatch" {
-		if !IsValidDiscordChannel(channelID) {
-			return fmt.Errorf("invalid discord snowflake channel id: %q", channelID)
-		}
-	}
-	return nil
+	d.ensureClients()
+	return d.kubeClient.WatchKustomizations(ctx, namespace, resourceVersion)
 }
 
 func advanceBackoffDelay(delay time.Duration, expBackoff bool) time.Duration {
-	if expBackoff {
-		delay = min(time.Duration(float64(delay)*1.5), 5*time.Second)
-	}
-	return delay
-}
-
-func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
-	if strings.TrimSpace(d.brainURL) == "" {
-		return errors.New("brain URL is not configured")
-	}
-	if err := validateBrainChannel(channelID, endpointPath); err != nil {
-		return err
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal %s request: %w", reqLabel, err)
-	}
-	delay := d.retryDelay
-	if delay <= 0 {
-		delay = defaultDelay
-	}
-	if maxAttempts <= 0 {
-		maxAttempts = 6
-	}
-	endpoint := d.brainURL + endpointPath
-	var lastErr error
-
-	for attempt := range maxAttempts {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if attempt > 0 {
-			RecordJobRetry(QueueDefault, "brain_http_dispatch", "brain_http_retry")
-		}
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return fmt.Errorf("create %s request: %w", reqLabel, err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		resp, err := d.httpClient.Do(httpReq)
-		if err != nil {
-			lastErr = fmt.Errorf("%s request failed (attempt %d/%d): %w", reqLabel, attempt+1, maxAttempts, err)
-		} else {
-			respBody, readErr := io.ReadAll(resp.Body)
-			if readErr != nil {
-				respBody = []byte(fmt.Sprintf("error reading body: %v", readErr))
-			}
-			resp.Body.Close()
-
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return nil
-			}
-			if resp.StatusCode < 500 {
-				return fmt.Errorf("%s returned status %d: %s", statusLabel, resp.StatusCode, string(respBody))
-			}
-			lastErr = fmt.Errorf("%s returned status %d (attempt %d/%d): %s", statusLabel, resp.StatusCode, attempt+1, maxAttempts, string(respBody))
-		}
-		if attempt+1 < maxAttempts {
-			select {
-			case <-time.After(delay):
-				delay = advanceBackoffDelay(delay, expBackoff)
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
-	return lastErr
+	return ericlient.AdvanceBackoffDelay(delay, expBackoff)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	return d.postBrainWithRetry(ctx, "/prompt", "prompt", "brain prompt", req.ChannelID, d.maxAttempts, 1500*time.Millisecond, true, req)
+	d.ensureClients()
+	return d.eriClient.DispatchPrompt(ctx, req)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
-	return d.postBrainWithRetry(ctx, "/discord/message", "direct message", "brain internal message", req.ChannelID, 3, 500*time.Millisecond, false, req)
+	d.ensureClients()
+	return d.eriClient.DispatchDirectMessage(ctx, req)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
-	return d.postBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", d.maxAttempts, 1500*time.Millisecond, true, req)
-}
-
-func (d *DefaultOutboundDispatcher) postDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
-	if strings.TrimSpace(d.brainURL) == "" {
-		return errors.New("brain URL is not configured")
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal %s request: %w", reqLabel, err)
-	}
-	endpoint := d.brainURL + path
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("create %s request: %w", reqLabel, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpClient := client
-	if httpClient == nil {
-		httpClient = d.httpClient
-	}
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("%s request failed: %w", reqLabel, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return fmt.Errorf("read %s response: %w", reqLabel, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s returned status %d: %s", statusLabel, resp.StatusCode, string(respBody))
-	}
-	return nil
+	d.ensureClients()
+	return d.eriClient.DispatchBackground(ctx, req)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
-	return d.postDiscordInternalJSON(ctx, d.discordMsgClient, 20*time.Second, "/internal/discord/message", "discord message ingress", "discord ingress", req)
+	d.ensureClients()
+	return d.eriClient.DispatchDiscordMessage(ctx, req)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
-	return d.postDiscordInternalJSON(ctx, d.discordInteractionClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
+	d.ensureClients()
+	return d.eriClient.DispatchDiscordInteraction(ctx, interaction)
 }

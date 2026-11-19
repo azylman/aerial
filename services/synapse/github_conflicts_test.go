@@ -7,7 +7,6 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -581,18 +580,6 @@ func TestHealDependabotPRAndBranchHelpers(t *testing.T) {
 		srvErr.populateMissingBranch(ctx, resNotFound)
 		if resNotFound.Branch != "" {
 			t.Errorf("expected branch to remain empty, got %q", resNotFound.Branch)
-		}
-	})
-
-	t.Run("loadK8sCertPool invalid", func(t *testing.T) {
-		t.Parallel()
-		if pool := loadK8sCertPool(""); pool != nil {
-			t.Errorf("expected nil pool for empty path")
-		}
-		tmp := t.TempDir() + "/not-a-cert.pem"
-		_ = os.WriteFile(tmp, []byte("not a cert"), 0o600)
-		if pool := loadK8sCertPool(tmp); pool != nil {
-			t.Errorf("expected nil pool for non-cert file")
 		}
 	})
 }

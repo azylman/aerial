@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -670,78 +668,6 @@ func TestHandleFluxWebhook_Forwarding(t *testing.T) {
 	}
 }
 
-func TestKustomizationsForImages(t *testing.T) {
-	t.Parallel()
-	core := fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
-	marida := fluxKustomizationRef{Namespace: "flux-system", Name: "marida-core"}
-	appsMarida := fluxKustomizationRef{Namespace: "apps", Name: "marida-core"}
-	owned := func(name, namespace string, images ...string) workloadImageRef {
-		labels := map[string]string{"kustomize.toolkit.fluxcd.io/name": name}
-		if namespace != "" {
-			labels["kustomize.toolkit.fluxcd.io/namespace"] = namespace
-		}
-		return workloadImageRef{Labels: labels, Images: images}
-	}
-
-	tests := []struct {
-		name       string
-		workloads  []workloadImageRef
-		imageNames []string
-		want       []fluxKustomizationRef
-	}{
-		{
-			name: "two kustomizations sharing an image are both returned sorted",
-			workloads: []workloadImageRef{
-				owned("marida-core", "flux-system", "ghcr.io/azylman/aerial-synapse:abc"),
-				owned("aerial-core", "flux-system", "ghcr.io/azylman/aerial-synapse:abc"),
-			},
-			imageNames: []string{"aerial-synapse"},
-			want:       []fluxKustomizationRef{core, marida},
-		},
-		{
-			name: "tag and digest are stripped before matching",
-			workloads: []workloadImageRef{
-				owned("aerial-core", "flux-system", "registry.local:5000/team/aerial-eri:v1@sha256:deadbeef"),
-				owned("marida-core", "flux-system", "aerial-eri@sha256:deadbeef"),
-			},
-			imageNames: []string{"aerial-eri"},
-			want:       []fluxKustomizationRef{core, marida},
-		},
-		{
-			name: "unlabeled workload is ignored",
-			workloads: []workloadImageRef{
-				{Labels: map[string]string{"app": "eri"}, Images: []string{"ghcr.io/azylman/aerial-eri:abc"}},
-				{Images: []string{"ghcr.io/azylman/aerial-eri:abc"}},
-			},
-			imageNames: []string{"aerial-eri"},
-		},
-		{
-			name:       "no matching image returns nil",
-			workloads:  []workloadImageRef{owned("aerial-core", "flux-system", "ghcr.io/azylman/aerial-eri:abc")},
-			imageNames: []string{"aerial-haro"},
-		},
-		{
-			name: "duplicate owners de-duplicate and namespace label defaults to flux-system",
-			workloads: []workloadImageRef{
-				owned("aerial-core", "", "ghcr.io/azylman/aerial-eri:abc"),
-				owned("aerial-core", "flux-system", "ghcr.io/azylman/aerial-eri:def"),
-				owned("marida-core", "apps", "ghcr.io/azylman/aerial-eri:abc"),
-			},
-			imageNames: []string{"aerial-eri"},
-			want:       []fluxKustomizationRef{appsMarida, core},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := kustomizationsForImages(tc.workloads, tc.imageNames); !slices.Equal(got, tc.want) {
-				t.Errorf("kustomizationsForImages() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 const (
 	rolloutSHA   = "0123abcd"
 	synapseImage = "ghcr.io/azylman/aerial-synapse:" + rolloutSHA
@@ -796,92 +722,6 @@ func TestImageTag(t *testing.T) {
 			t.Parallel()
 			if got := imageTag(tc.image); got != tc.want {
 				t.Errorf("imageTag(%q) = %q, want %q", tc.image, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestDecodeWorkloadRollouts(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		kind    string
-		body    string
-		want    []workloadRollout
-		wantErr bool
-	}{
-		{name: "RestateDeployment explicit zero", kind: "RestateDeployment", body: `{"items":[{"metadata":{"generation":2},"spec":{"replicas":0},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateDeployment", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 0}}},
-		{name: "RestateDeployment omitted defaults one", kind: "RestateDeployment", body: `{"items":[{"metadata":{"generation":2},"spec":{},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateDeployment", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 1}}},
-		{name: "StatefulSet explicit zero", kind: "StatefulSet", body: `{"items":[{"metadata":{"generation":2},"spec":{"replicas":0},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "StatefulSet", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 0}}},
-		{name: "StatefulSet omitted defaults one", kind: "StatefulSet", body: `{"items":[{"metadata":{"generation":2},"spec":{},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "StatefulSet", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 1}}},
-		{name: "RestateCluster explicit zero", kind: "RestateCluster", body: `{"items":[{"metadata":{"generation":2},"spec":{"compute":{"replicas":0}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateCluster", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 0}}},
-		{name: "RestateCluster omitted defaults one", kind: "RestateCluster", body: `{"items":[{"metadata":{"generation":2},"spec":{},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateCluster", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 1}}},
-		{
-			name: "deployment defaults replicas to one and detects the progress deadline",
-			kind: "Deployment",
-			body: `{"items":[{"metadata":{"name":"synapse","namespace":"default","generation":4},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:0123abcd"}],"initContainers":[{"image":"busybox"}]}}},"status":{"observedGeneration":4,"replicas":2,"updatedReplicas":1,"availableReplicas":1,"conditions":[{"type":"Available","status":"True"},{"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded"}]}}]}`,
-			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "synapse", Images: []string{"ghcr.io/azylman/aerial-synapse:0123abcd", "busybox"}, Generation: 4, ObservedGeneration: 4, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1, StatusReplicas: 2, ProgressDeadlineExceeded: true}},
-		},
-		{
-			name: "deployment progressing normally",
-			kind: "Deployment",
-			body: `{"items":[{"metadata":{"name":"haro","namespace":"default","generation":2},"spec":{"replicas":3,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-haro:0123abcd"}]}}},"status":{"observedGeneration":2,"replicas":3,"updatedReplicas":3,"availableReplicas":3,"conditions":[{"type":"Progressing","status":"True","reason":"NewReplicaSetAvailable"}]}}]}`,
-			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "haro", Images: []string{"ghcr.io/azylman/aerial-haro:0123abcd"}, Generation: 2, ObservedGeneration: 2, Replicas: 3, UpdatedReplicas: 3, AvailableReplicas: 3, StatusReplicas: 3}},
-		},
-		{
-			name: "statefulset revisions",
-			kind: "StatefulSet",
-			body: `{"items":[{"metadata":{"name":"db","namespace":"default","generation":7},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"postgres:18"}]}}},"status":{"observedGeneration":7,"replicas":2,"availableReplicas":2,"updateRevision":"db-2","currentRevision":"db-1"}}]}`,
-			want: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "db", Images: []string{"postgres:18"}, Generation: 7, ObservedGeneration: 7, Replicas: 2, AvailableReplicas: 2, StatusReplicas: 2, UpdateRevision: "db-2", CurrentRevision: "db-1"}},
-		},
-		{
-			name: "daemonset scheduling counts",
-			kind: "DaemonSet",
-			body: `{"items":[{"metadata":{"name":"fluent-bit","namespace":"kube-system","generation":3},"spec":{"template":{"spec":{"containers":[{"image":"fluent/fluent-bit:4"}]}}},"status":{"observedGeneration":3,"desiredNumberScheduled":3,"updatedNumberScheduled":2,"numberAvailable":3}}]}`,
-			want: []workloadRollout{{Kind: "DaemonSet", Namespace: "kube-system", Name: "fluent-bit", Images: []string{"fluent/fluent-bit:4"}, Generation: 3, ObservedGeneration: 3, Replicas: 1, DesiredNumberScheduled: 3, UpdatedNumberScheduled: 2, NumberAvailable: 3}},
-		},
-		{
-			name: "change time skips subresource writes and configmap refs cover every source",
-			kind: "Deployment",
-			body: `{"items":[{"metadata":{"name":"eri","namespace":"default","generation":5,"annotations":{"reloader.stakater.com/auto":"true"},"managedFields":[{"manager":"kustomize-controller","operation":"Apply","time":"2026-11-08T10:01:00Z"},{"manager":"kube-controller-manager","operation":"Update","subresource":"status","time":"2026-11-08T10:09:00Z"},{"manager":"reloader","operation":"Update","time":"2026-11-08T10:02:00Z"},{"manager":"kubectl","operation":"Update"}]},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-eri:0123abcd","env":[{"name":"A","valueFrom":{"configMapKeyRef":{"name":"eri-flags","key":"a"}}},{"name":"B","value":"b"},{"name":"C","valueFrom":{"secretKeyRef":{"name":"eri-secret","key":"c"}}}],"envFrom":[{"configMapRef":{"name":"eri-env"}},{"secretRef":{"name":"eri-secret"}}]}],"initContainers":[{"image":"busybox","envFrom":[{"configMapRef":{"name":"eri-env"}}]}],"volumes":[{"name":"cfg","configMap":{"name":"eri-config"}},{"name":"data","emptyDir":{}},{"name":"bundle","projected":{"sources":[{"configMap":{"name":"ca-bundle"}},{"secret":{"name":"eri-secret"}}]}}]}}},"status":{"observedGeneration":5,"replicas":1,"updatedReplicas":1,"availableReplicas":1}}]}`,
-			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "eri", Images: []string{"ghcr.io/azylman/aerial-eri:0123abcd", "busybox"}, ChangedAt: rolloutClock(10, 2, 0), Annotations: map[string]string{"reloader.stakater.com/auto": "true"}, ConfigMapRefs: []string{"ca-bundle", "eri-config", "eri-env", "eri-flags"}, Generation: 5, ObservedGeneration: 5, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1, StatusReplicas: 1}},
-		},
-		{
-			name: "restatedeployment replicas and ready condition",
-			kind: "RestateDeployment",
-			body: `{"items":[{"metadata":{"name":"restate-worker","namespace":"default","generation":3},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-restate-worker:0123abcd"}]}}},"status":{"observedGeneration":3,"replicas":2,"readyReplicas":2,"availableReplicas":2,"deploymentId":"dp_12345","conditions":[{"type":"Ready","status":"True"}]}}]}`,
-			want: []workloadRollout{{Kind: "RestateDeployment", Namespace: "default", Name: "restate-worker", Images: []string{"ghcr.io/azylman/aerial-restate-worker:0123abcd"}, Generation: 3, ObservedGeneration: 3, Replicas: 2, ReadyReplicas: 2, AvailableReplicas: 2, StatusReplicas: 2, DeploymentID: "dp_12345", ReadyConditionTrue: true}},
-		},
-		{
-			name: "restatecluster compute image and ready condition",
-			kind: "RestateCluster",
-			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
-			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 1, ReadyConditionTrue: true}},
-		},
-		{
-			name: "restatecluster with compute env and resources",
-			kind: "RestateCluster",
-			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6","replicas":2,"env":[{"name":"A","value":"1"}],"resources":{"limits":{"cpu":"1"},"requests":{"memory":"512Mi"}}}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
-			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 2, ReadyConditionTrue: true, Env: map[string]string{"A": "1"}, Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}, Requests: map[string]string{"memory": "512Mi"}}}},
-		},
-		{
-			name: "statefulset with container env and resources",
-			kind: "StatefulSet",
-			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"docker.io/restatedev/restate:1.6","env":[{"name":"A","value":"1"}],"resources":{"limits":{"cpu":"1"}}}]}}},"status":{"observedGeneration":2,"replicas":2,"availableReplicas":2,"currentRevision":"r-1","updateRevision":"r-1"}}]}`,
-			want: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 2, AvailableReplicas: 2, StatusReplicas: 2, CurrentRevision: "r-1", UpdateRevision: "r-1", Env: map[string]string{"A": "1"}, Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}}},
-		},
-		{name: "empty list", kind: "Deployment", body: `{"items":[]}`, want: []workloadRollout{}},
-		{name: "malformed list", kind: "Deployment", body: `{"items":`, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := decodeWorkloadRollouts(tc.kind, []byte(tc.body))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("decodeWorkloadRollouts() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("decodeWorkloadRollouts() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

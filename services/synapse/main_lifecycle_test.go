@@ -27,7 +27,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	RecordJobRetry("", "", "")
 	RecordJobDropped("", "", "")
 	SetDiscordGatewayLatency(0.042)
-	registerCollector(JobsEnqueuedTotal)
 
 	tests := []struct {
 		name          string

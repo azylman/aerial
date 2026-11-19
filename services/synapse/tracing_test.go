@@ -121,16 +121,15 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 	d.retryDelay = time.Millisecond
 	switch target {
 	case "brain":
-		if err := d.postBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", 3, time.Millisecond, false, DispatchRequest{Source: "webhook"}); err != nil {
-			t.Fatalf("postBrainWithRetry: %v", err)
+		if err := d.DispatchBackground(ctx, DispatchRequest{Source: "webhook"}); err != nil {
+			t.Fatalf("DispatchBackground: %v", err)
 		}
 	case "discord":
-		client := d.discordMsgClient
 		if nilClient {
-			client = nil
+			d.discordMsgClient = nil
 		}
-		if err := d.postDiscordInternalJSON(ctx, client, time.Minute, "/internal/discord/message", "discord message ingress", "discord ingress", DiscordMessageIngressRequest{}); err != nil {
-			t.Fatalf("postDiscordInternalJSON: %v", err)
+		if err := d.DispatchDiscordMessage(ctx, DiscordMessageIngressRequest{}); err != nil {
+			t.Fatalf("DispatchDiscordMessage: %v", err)
 		}
 	}
 	assertTraceIDs(t, srv.traceIDs(), wantRequests, parentTraceID, withParent)

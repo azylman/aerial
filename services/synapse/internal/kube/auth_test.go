@@ -1,4 +1,4 @@
-package main
+package kube
 
 import (
 	"encoding/pem"
@@ -9,6 +9,12 @@ import (
 	"testing"
 	"time"
 )
+
+type zeroCallTransport struct{}
+
+func (*zeroCallTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, nil
+}
 
 func TestLoadK8sCertPool(t *testing.T) {
 	t.Parallel()
@@ -42,7 +48,7 @@ func TestLoadK8sCertPool(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool := loadK8sCertPool(tc.path)
+			pool := LoadK8sCertPool(tc.path)
 			if tc.wantLoaded && pool == nil {
 				t.Errorf("expected non-nil cert pool for %s", tc.path)
 			}
@@ -58,8 +64,8 @@ func TestGetKubeServiceAccountToken(t *testing.T) {
 	tokenFile := filepath.Join(tempDir, "sa-token")
 	_ = os.WriteFile(tokenFile, []byte("  projected-sa-token  \n"), 0o600)
 
-	origTokenPath := kubeTokenPath
-	t.Cleanup(func() { kubeTokenPath = origTokenPath })
+	origTokenPath := KubeTokenPath
+	t.Cleanup(func() { KubeTokenPath = origTokenPath })
 
 	tests := []struct {
 		name          string
@@ -74,10 +80,10 @@ func TestGetKubeServiceAccountToken(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			kubeTokenPath = tc.tokenPath
-			got := getKubeServiceAccountToken(tc.explicitToken)
+			KubeTokenPath = tc.tokenPath
+			got := GetKubeServiceAccountToken(tc.explicitToken)
 			if got != tc.wantToken {
-				t.Errorf("getKubeServiceAccountToken() = %q, want %q", got, tc.wantToken)
+				t.Errorf("GetKubeServiceAccountToken() = %q, want %q", got, tc.wantToken)
 			}
 		})
 	}
@@ -94,8 +100,8 @@ func TestGetK8sHTTPClient(t *testing.T) {
 	validCAFile := filepath.Join(tempDir, "ca.crt")
 	_ = os.WriteFile(validCAFile, validPEM, 0o644)
 
-	origCAPath := kubeCAPath
-	t.Cleanup(func() { kubeCAPath = origCAPath })
+	origCAPath := KubeCAPath
+	t.Cleanup(func() { KubeCAPath = origCAPath })
 
 	tests := []struct {
 		name          string
@@ -130,12 +136,12 @@ func TestGetK8sHTTPClient(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			kubeCAPath = tc.caPath
+			KubeCAPath = tc.caPath
 			var customClient *http.Client
 			if tc.hasHTTPClient {
 				customClient = &http.Client{Transport: &zeroCallTransport{}, Timeout: 42 * time.Millisecond}
 			}
-			client := getK8sHTTPClient(tc.apiServer, customClient)
+			client := GetK8sHTTPClient(tc.apiServer, customClient)
 			if tc.wantCustom {
 				if client != customClient {
 					t.Fatalf("expected custom client to be returned, got %v", client)

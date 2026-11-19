@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/services/synapse/internal/kube"
 )
 
 const sha42Image = "ghcr.io/azylman/aerial-synapse:sha-42"
@@ -152,7 +154,7 @@ func TestGitRepoSlug(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := gitRepoSlug(tc.url); got != tc.want {
+			if got := kube.GitRepoSlug(tc.url); got != tc.want {
 				t.Errorf("gitRepoSlug(%q) = %q, want %q", tc.url, got, tc.want)
 			}
 		})
@@ -871,40 +873,6 @@ func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 			}
 			if got := bus.insertedDeployJobs[0].Event.Repo; got != tc.wantRepo {
 				t.Errorf("repo = %q, want %q", got, tc.wantRepo)
-			}
-		})
-	}
-}
-
-func TestDecodeKustomizationList(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		body    string
-		want    []kustomizationObservation
-		wantRV  string
-		wantErr bool
-	}{
-		{
-			name:   "source ref defaults to the kustomization namespace and the applied revision is kept",
-			body:   `{"metadata":{"resourceVersion":"12"},"items":[{"metadata":{"name":"aerial-core","annotations":{"reconcile.fluxcd.io/requestedAt":"t1"}},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}},"status":{"lastHandledReconcileAt":"t1","lastAppliedRevision":"main@sha1:abc","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"stack","namespace":"apps"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"sources"}}}]}`,
-			wantRV: "12",
-			want: []kustomizationObservation{
-				{Ref: fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}, RequestedAt: "t1", LastHandledReconcileAt: "t1", LastAppliedRevision: "main@sha1:abc", SourceRef: fluxSourceRef{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"}, Conditions: []fluxCondition{{Type: "Ready", Status: "True"}}},
-				{Ref: fluxKustomizationRef{Namespace: "apps", Name: "stack"}, Suspended: true, SourceRef: fluxSourceRef{Kind: "GitRepository", Name: "stack", Namespace: "sources"}},
-			},
-		},
-		{name: "malformed list", body: `{"items":`, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, rv, err := decodeKustomizationList([]byte(tc.body), "flux-system")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("decodeKustomizationList() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if rv != tc.wantRV || !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("decodeKustomizationList() = (%+v, %q), want (%+v, %q)", got, rv, tc.want, tc.wantRV)
 			}
 		})
 	}

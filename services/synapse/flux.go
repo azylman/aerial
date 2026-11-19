@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/services/synapse/internal/kube"
 )
 
 const (
@@ -44,19 +44,8 @@ type FluxAlertEvent struct {
 }
 
 // cleanRevisionSHA extracts the commit SHA from a Flux revision metadata string.
-// Formats observed from Flux: "branch@sha1:1234abcd...", "sha1:1234abcd...", or bare "1234abcd...".
 func cleanRevisionSHA(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if idx := strings.Index(raw, "@sha1:"); idx != -1 {
-		return strings.TrimSpace(raw[idx+len("@sha1:"):])
-	}
-	if after, found := strings.CutPrefix(raw, "sha1:"); found {
-		return strings.TrimSpace(after)
-	}
-	if idx := strings.Index(raw, "@"); idx != -1 {
-		return strings.TrimSpace(raw[idx+1:])
-	}
-	return raw
+	return kube.CleanRevisionSHA(raw)
 }
 
 // alertPayloadRepo returns the repo an alert carries in its payload or metadata, if any.
@@ -225,26 +214,6 @@ func (s *RouterServer) resolveFluxAlertSourceRepo(ctx context.Context, alert Flu
 	return repo
 }
 
-// gitRepoSlug extracts "owner/repo" from a git remote URL (https, ssh:// or scp-like), or "" if none.
-func gitRepoSlug(rawURL string) string {
-	ref := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(rawURL), "/"), ".git")
-	if i := strings.Index(ref, "://"); i != -1 {
-		ref = ref[i+3:]
-		j := strings.Index(ref, "/")
-		if j == -1 {
-			return ""
-		}
-		ref = ref[j+1:]
-	} else if i := strings.Index(ref, ":"); i != -1 {
-		ref = ref[i+1:]
-	}
-	parts := strings.Split(strings.Trim(ref, "/"), "/")
-	if len(parts) < 2 || parts[len(parts)-2] == "" || parts[len(parts)-1] == "" {
-		return ""
-	}
-	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
-}
-
 const (
 	fluxSystemNamespace                = "flux-system"
 	imageTagsConfigMapName             = "aerial-image-tags"
@@ -258,155 +227,9 @@ type fluxKustomizationRef struct {
 	Namespace, Name string
 }
 
-func compareKustomizationRefs(a, b fluxKustomizationRef) int {
-	if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
-		return c
-	}
-	return strings.Compare(a.Name, b.Name)
-}
-
-// gitRepositoryPath returns the kube API path of a Flux GitRepository.
-func gitRepositoryPath(namespace, name string) string {
-	return "/apis/source.toolkit.fluxcd.io/v1/namespaces/" + url.PathEscape(namespace) + "/gitrepositories/" + url.PathEscape(name)
-}
-
-// kustomizationPath returns the kube API path of ref, or of its namespace's collection when Name is empty.
-func kustomizationPath(ref fluxKustomizationRef) string {
-	path := "/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/" + url.PathEscape(ref.Namespace) + "/kustomizations"
-	if ref.Name != "" {
-		path += "/" + url.PathEscape(ref.Name)
-	}
-	return path
-}
-
-// workloadImageRef is the subset of a workload needed to map images to their owning Kustomization.
-type workloadImageRef struct {
-	Labels map[string]string
-	Images []string
-}
-
-// kubeNameRef is any kube reference object identified by name (configMapKeyRef, configMapRef, configMap volume).
-type kubeNameRef struct {
-	Name string `json:"name"`
-}
-
-type kubeEnvVar struct {
-	Name      string `json:"name"`
-	Value     string `json:"value"`
-	ValueFrom *struct {
-		ConfigMapKeyRef *kubeNameRef `json:"configMapKeyRef"`
-	} `json:"valueFrom"`
-}
-
 type kubeResourceRequirements struct {
 	Limits   map[string]string `json:"limits,omitempty"`
 	Requests map[string]string `json:"requests,omitempty"`
-}
-
-type kubeContainer struct {
-	Image   string       `json:"image"`
-	Env     []kubeEnvVar `json:"env"`
-	EnvFrom []struct {
-		ConfigMapRef *kubeNameRef `json:"configMapRef"`
-	} `json:"envFrom"`
-	Resources kubeResourceRequirements `json:"resources"`
-}
-
-type kubeVolume struct {
-	ConfigMap *kubeNameRef `json:"configMap"`
-	Projected struct {
-		Sources []struct {
-			ConfigMap *kubeNameRef `json:"configMap"`
-		} `json:"sources"`
-	} `json:"projected"`
-}
-
-type kubePodSpec struct {
-	Containers     []kubeContainer `json:"containers"`
-	InitContainers []kubeContainer `json:"initContainers"`
-	Volumes        []kubeVolume    `json:"volumes"`
-}
-
-// configMapRefs returns the sorted, de-duplicated names of the ConfigMaps the pod spec consumes through
-// env valueFrom, envFrom, configMap volumes and projected volume sources.
-func (p kubePodSpec) configMapRefs() []string {
-	var refs []*kubeNameRef
-	for _, c := range slices.Concat(p.Containers, p.InitContainers) {
-		for _, e := range c.Env {
-			if e.ValueFrom != nil {
-				refs = append(refs, e.ValueFrom.ConfigMapKeyRef)
-			}
-		}
-		for _, e := range c.EnvFrom {
-			refs = append(refs, e.ConfigMapRef)
-		}
-	}
-	for _, v := range p.Volumes {
-		refs = append(refs, v.ConfigMap)
-		for _, src := range v.Projected.Sources {
-			refs = append(refs, src.ConfigMap)
-		}
-	}
-	var names []string
-	for _, ref := range refs {
-		if ref != nil && ref.Name != "" {
-			names = append(names, ref.Name)
-		}
-	}
-	slices.Sort(names)
-	return slices.Compact(names)
-}
-
-func (p kubePodSpec) images() []string {
-	images := make([]string, 0, len(p.Containers)+len(p.InitContainers))
-	for _, c := range slices.Concat(p.Containers, p.InitContainers) {
-		images = append(images, c.Image)
-	}
-	return images
-}
-
-// kubeWorkloadList decodes any apps/v1, batch/v1, or restate.dev/v1 workload list; cronjobs carry their pod spec under
-// spec.jobTemplate.spec.template.spec, restate clusters under spec.compute.image, every other kind under spec.template.spec.
-type kubeWorkloadList struct {
-	Items []struct {
-		Metadata struct {
-			Labels map[string]string `json:"labels"`
-		} `json:"metadata"`
-		Spec struct {
-			Template struct {
-				Spec kubePodSpec `json:"spec"`
-			} `json:"template"`
-			JobTemplate struct {
-				Spec struct {
-					Template struct {
-						Spec kubePodSpec `json:"spec"`
-					} `json:"template"`
-				} `json:"spec"`
-			} `json:"jobTemplate"`
-			Compute struct {
-				Image string `json:"image"`
-			} `json:"compute"`
-		} `json:"spec"`
-	} `json:"items"`
-}
-
-func decodeWorkloadImageRefs(body []byte) ([]workloadImageRef, error) {
-	var list kubeWorkloadList
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, err
-	}
-	refs := make([]workloadImageRef, 0, len(list.Items))
-	for _, item := range list.Items {
-		images := slices.Concat(item.Spec.Template.Spec.images(), item.Spec.JobTemplate.Spec.Template.Spec.images())
-		if item.Spec.Compute.Image != "" {
-			images = append(images, item.Spec.Compute.Image)
-		}
-		refs = append(refs, workloadImageRef{
-			Labels: item.Metadata.Labels,
-			Images: images,
-		})
-	}
-	return refs, nil
 }
 
 // kubeManagedField is one metadata.managedFields entry; Subresource is set for status and scale writes.
@@ -425,18 +248,6 @@ type kubeObjectMeta struct {
 	Generation      int64                `json:"generation"`
 	Annotations     map[string]string    `json:"annotations"`
 	ManagedFields   []kubeManagedField   `json:"managedFields"`
-}
-
-// changedAt is the latest time any manager wrote the object itself (not a subresource), so controller
-// status updates never count as a change; zero when no entry carries a time.
-func (m kubeObjectMeta) changedAt() time.Time {
-	var latest time.Time
-	for _, f := range m.ManagedFields {
-		if f.Subresource == "" && f.Time.After(latest) {
-			latest = f.Time
-		}
-	}
-	return latest
 }
 
 // workloadRollout is the rollout state of one Deployment, StatefulSet, DaemonSet, RestateDeployment or RestateCluster.
@@ -465,127 +276,6 @@ type workloadRollout struct {
 	ManagedWorkloads                                                []workloadRollout
 	Env                                                             map[string]string
 	Resources                                                       kubeResourceRequirements
-}
-
-// kubeRolloutList decodes an apps/v1, restate.dev/v1beta1 or restate.dev/v1 workload list with rollout status.
-type kubeRolloutList struct {
-	Items []struct {
-		Metadata kubeObjectMeta `json:"metadata"`
-		Spec     struct {
-			Replicas *int32             `json:"replicas"`
-			Selector *kubeLabelSelector `json:"selector"`
-			Template struct {
-				Spec kubePodSpec `json:"spec"`
-			} `json:"template"`
-			Compute struct {
-				Image     string                   `json:"image"`
-				Replicas  *int32                   `json:"replicas"`
-				Env       []kubeEnvVar             `json:"env"`
-				Resources kubeResourceRequirements `json:"resources"`
-			} `json:"compute"`
-		} `json:"spec"`
-		Status struct {
-			ObservedGeneration     int64           `json:"observedGeneration"`
-			Replicas               int32           `json:"replicas"`
-			UpdatedReplicas        int32           `json:"updatedReplicas"`
-			AvailableReplicas      int32           `json:"availableReplicas"`
-			ReadyReplicas          int32           `json:"readyReplicas"`
-			DeploymentID           string          `json:"deploymentId"`
-			UpdateRevision         string          `json:"updateRevision"`
-			CurrentRevision        string          `json:"currentRevision"`
-			DesiredNumberScheduled int32           `json:"desiredNumberScheduled"`
-			UpdatedNumberScheduled int32           `json:"updatedNumberScheduled"`
-			NumberAvailable        int32           `json:"numberAvailable"`
-			Conditions             []fluxCondition `json:"conditions"`
-		} `json:"status"`
-	} `json:"items"`
-}
-
-func decodeWorkloadEnvAndResources(kind string, computeEnv []kubeEnvVar, computeRes kubeResourceRequirements, containers []kubeContainer) (map[string]string, kubeResourceRequirements) {
-	if kind != kindRestateCluster && kind != kindStatefulSet {
-		return nil, kubeResourceRequirements{}
-	}
-	var env map[string]string
-	for _, e := range computeEnv {
-		if e.Name != "" {
-			if env == nil {
-				env = make(map[string]string)
-			}
-			env[e.Name] = e.Value
-		}
-	}
-	var res kubeResourceRequirements
-	if len(computeRes.Limits) > 0 || len(computeRes.Requests) > 0 {
-		res = computeRes
-	}
-	for _, c := range containers {
-		for _, e := range c.Env {
-			if e.Name != "" {
-				if env == nil {
-					env = make(map[string]string)
-				}
-				env[e.Name] = e.Value
-			}
-		}
-		if len(c.Resources.Limits) > 0 || len(c.Resources.Requests) > 0 {
-			res = c.Resources
-		}
-	}
-	return env, res
-}
-
-// decodeWorkloadRollouts decodes a workload list of kind (list items carry no kind of their own).
-func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error) {
-	var list kubeRolloutList
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, err
-	}
-	workloads := make([]workloadRollout, 0, len(list.Items))
-	for _, item := range list.Items {
-		st := item.Status
-		images := item.Spec.Template.Spec.images()
-		env, resources := decodeWorkloadEnvAndResources(kind, item.Spec.Compute.Env, item.Spec.Compute.Resources, item.Spec.Template.Spec.Containers)
-		if item.Spec.Compute.Image != "" {
-			images = append(images, item.Spec.Compute.Image)
-		}
-		replicas := item.Spec.Replicas
-		if replicas == nil && item.Spec.Compute.Replicas != nil {
-			replicas = item.Spec.Compute.Replicas
-		}
-		workloads = append(workloads, workloadRollout{
-			Kind:                   kind,
-			UID:                    item.Metadata.UID,
-			Selector:               item.Spec.Selector,
-			Namespace:              item.Metadata.Namespace,
-			Name:                   item.Metadata.Name,
-			Images:                 images,
-			ChangedAt:              item.Metadata.changedAt(),
-			Annotations:            item.Metadata.Annotations,
-			ConfigMapRefs:          item.Spec.Template.Spec.configMapRefs(),
-			Generation:             item.Metadata.Generation,
-			ObservedGeneration:     st.ObservedGeneration,
-			Replicas:               *cmp.Or(replicas, new(int32(1))),
-			UpdatedReplicas:        st.UpdatedReplicas,
-			AvailableReplicas:      st.AvailableReplicas,
-			StatusReplicas:         st.Replicas,
-			ReadyReplicas:          st.ReadyReplicas,
-			DeploymentID:           st.DeploymentID,
-			UpdateRevision:         st.UpdateRevision,
-			CurrentRevision:        st.CurrentRevision,
-			DesiredNumberScheduled: st.DesiredNumberScheduled,
-			UpdatedNumberScheduled: st.UpdatedNumberScheduled,
-			NumberAvailable:        st.NumberAvailable,
-			ProgressDeadlineExceeded: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
-				return c.Type == reasonProgressing && c.Status == "False" && c.Reason == "ProgressDeadlineExceeded"
-			}),
-			ReadyConditionTrue: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
-				return c.Type == "Ready" && c.Status == "True"
-			}),
-			Env:       env,
-			Resources: resources,
-		})
-	}
-	return workloads, nil
 }
 
 // imageTag returns the tag of an image reference, ignoring any digest and registry port; "" when untagged.
@@ -718,23 +408,6 @@ type configMapChange struct {
 	ChangedAt       time.Time
 }
 
-// decodeConfigMapChanges decodes a ConfigMap list into the last change of each ConfigMap.
-func decodeConfigMapChanges(body []byte) ([]configMapChange, error) {
-	var list struct {
-		Items []struct {
-			Metadata kubeObjectMeta `json:"metadata"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, err
-	}
-	changes := make([]configMapChange, 0, len(list.Items))
-	for _, item := range list.Items {
-		changes = append(changes, configMapChange{Namespace: item.Metadata.Namespace, Name: item.Metadata.Name, ChangedAt: item.Metadata.changedAt()})
-	}
-	return changes, nil
-}
-
 // prRolloutInput is everything one Kustomization contributes to a PR's deployed decision. Since is the
 // merge commit time: anything written at or after it (less rolloutChangeSkew) may carry the PR's change.
 type prRolloutInput struct {
@@ -821,44 +494,6 @@ func prRolloutStatus(in prRolloutInput) (done, failed bool, reason string) {
 	return true, false, ""
 }
 
-// imageRepositoryBasename strips registry, path, tag and digest from an image reference.
-func imageRepositoryBasename(image string) string {
-	ref := strings.TrimSpace(image)
-	if i := strings.Index(ref, "@"); i != -1 {
-		ref = ref[:i]
-	}
-	if i := strings.LastIndex(ref, "/"); i != -1 {
-		ref = ref[i+1:]
-	}
-	if i := strings.Index(ref, ":"); i != -1 {
-		ref = ref[:i]
-	}
-	return ref
-}
-
-// kustomizationsForImages returns the sorted, de-duplicated Flux Kustomizations owning any workload
-// that runs one of imageNames (matched on image repository basename).
-func kustomizationsForImages(workloads []workloadImageRef, imageNames []string) []fluxKustomizationRef {
-	seen := make(map[fluxKustomizationRef]struct{})
-	var refs []fluxKustomizationRef
-	for _, w := range workloads {
-		name := w.Labels[fluxKustomizationNameLabel]
-		if name == "" || !slices.ContainsFunc(w.Images, func(img string) bool {
-			return slices.Contains(imageNames, imageRepositoryBasename(img))
-		}) {
-			continue
-		}
-		ref := fluxKustomizationRef{Namespace: cmp.Or(w.Labels[fluxKustomizationNamespaceLabel], fluxSystemNamespace), Name: name}
-		if _, dup := seen[ref]; dup {
-			continue
-		}
-		seen[ref] = struct{}{}
-		refs = append(refs, ref)
-	}
-	slices.SortFunc(refs, compareKustomizationRefs)
-	return refs
-}
-
 type fluxCondition struct {
 	Type    string `json:"type"`
 	Status  string `json:"status"`
@@ -897,15 +532,6 @@ type fluxKustomizationObject struct {
 	} `json:"status"`
 }
 
-func (k fluxKustomizationObject) substitutesImageTags() bool {
-	for _, src := range k.Spec.PostBuild.SubstituteFrom {
-		if src.Kind == kindConfigMap && src.Name == imageTagsConfigMapName {
-			return true
-		}
-	}
-	return false
-}
-
 // observation projects the fields the rollout watcher acts on; namespace defaults to defaultNamespace.
 // The source ref namespace defaults to the Kustomization's own, as in Flux.
 func (k fluxKustomizationObject) observation(defaultNamespace string) kustomizationObservation {
@@ -921,23 +547,4 @@ func (k fluxKustomizationObject) observation(defaultNamespace string) kustomizat
 		SourceRef:              source,
 		Conditions:             k.Status.Conditions,
 	}
-}
-
-// decodeImageTagKustomizations returns the sorted Kustomizations of a list that substitute from the
-// image tag ConfigMap.
-func decodeImageTagKustomizations(body []byte) ([]fluxKustomizationRef, error) {
-	var list struct {
-		Items []fluxKustomizationObject `json:"items"`
-	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, fmt.Errorf("unmarshal kustomization list: %w", err)
-	}
-	var refs []fluxKustomizationRef
-	for _, k := range list.Items {
-		if k.substitutesImageTags() {
-			refs = append(refs, fluxKustomizationRef{Namespace: cmp.Or(k.Metadata.Namespace, fluxSystemNamespace), Name: k.Metadata.Name})
-		}
-	}
-	slices.SortFunc(refs, compareKustomizationRefs)
-	return refs, nil
 }

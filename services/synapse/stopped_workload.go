@@ -1,12 +1,8 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
-	"slices"
+	"github.com/azylman/aerial/services/synapse/internal/kube"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 type kubeOwnerReference struct {
@@ -24,49 +20,6 @@ type kubeLabelSelector struct {
 		Operator string   `json:"operator"`
 		Values   []string `json:"values"`
 	} `json:"matchExpressions"`
-}
-
-// matches evaluates the complete selector; invalid or empty selectors are unknown.
-func (s *kubeLabelSelector) matches(labels map[string]string) (bool, bool) {
-	if s == nil || len(s.MatchLabels)+len(s.MatchExpressions) == 0 {
-		return false, false
-	}
-	matched := true
-	for k, v := range s.MatchLabels {
-		if k == "" {
-			return false, false
-		}
-		actual, ok := labels[k]
-		matched = matched && ok && actual == v
-	}
-	for _, e := range s.MatchExpressions {
-		match, valid := selectorExpressionMatches(e.Key, e.Operator, e.Values, labels)
-		if !valid {
-			return false, false
-		}
-		matched = matched && match
-	}
-
-	return matched, true
-}
-
-func selectorExpressionMatches(key, operator string, values []string, labels map[string]string) (bool, bool) {
-	if key == "" {
-		return false, false
-	}
-	value, exists := labels[key]
-	switch operator {
-	case "In":
-		return exists && slices.Contains(values, value), len(values) > 0
-	case "NotIn":
-		return !exists || !slices.Contains(values, value), len(values) > 0
-	case "Exists":
-		return exists, len(values) == 0
-	case "DoesNotExist":
-		return !exists, len(values) == 0
-	default:
-		return false, false
-	}
 }
 
 type stoppedReplicaSet struct {
@@ -87,135 +40,215 @@ type stoppedPod struct {
 	Metadata kubeObjectMeta `json:"metadata"`
 }
 
-// A non-nil observation proves both inventories were read completely and the parent
-// was re-read afterwards. An empty successful inventory differs from unknown evidence.
 type stoppedChildObservation struct {
 	ReplicaSets []stoppedReplicaSet
 	Pods        []stoppedPod
 }
 
-func (d *DefaultOutboundDispatcher) collectStoppedChildren(ctx context.Context, w workloadRollout) (*stoppedChildObservation, error) {
-	observation := &stoppedChildObservation{}
-	if err := d.stoppedInventory(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(w.Namespace)+"/replicasets", &observation.ReplicaSets); err != nil {
-		return nil, err
+func toModelKubeObjectMeta(m kubeObjectMeta) model.KubeObjectMeta {
+	refs := make([]model.KubeOwnerReference, len(m.OwnerReferences))
+	for i, r := range m.OwnerReferences {
+		refs[i] = model.KubeOwnerReference{
+			APIVersion: r.APIVersion,
+			Kind:       r.Kind,
+			Name:       r.Name,
+			UID:        r.UID,
+			Controller: r.Controller,
+		}
 	}
-	if err := d.stoppedInventory(ctx, "/api/v1/namespaces/"+url.PathEscape(w.Namespace)+"/pods", &observation.Pods); err != nil {
-		return nil, err
+	fields := make([]model.KubeManagedField, len(m.ManagedFields))
+	for i, f := range m.ManagedFields {
+		fields[i] = model.KubeManagedField{Time: f.Time, Subresource: f.Subresource}
 	}
-	body, err := d.kubeJSON(ctx, http.MethodGet, "/apis/restate.dev/v1beta1/namespaces/"+url.PathEscape(w.Namespace)+"/restatedeployments/"+url.PathEscape(w.Name), "", nil)
-	if err != nil {
-		return nil, err
+	return model.KubeObjectMeta{
+		UID:             m.UID,
+		Labels:          m.Labels,
+		OwnerReferences: refs,
+		Name:            m.Name,
+		Namespace:       m.Namespace,
+		Generation:      m.Generation,
+		Annotations:     m.Annotations,
+		ManagedFields:   fields,
 	}
-	// Reuse the canonical desired-replica defaulting when decoding the fresh object.
-	fresh, err := decodeWorkloadRollouts(kindRestateDeployment, append(append([]byte(`{"items":[`), body...), []byte(`]}`)...))
-	if err != nil {
-		return nil, err
-	}
-	if len(fresh) != 1 || fresh[0].UID == "" || fresh[0].Namespace != w.Namespace || fresh[0].Name != w.Name || fresh[0].Generation <= 0 || fresh[0].UID != w.UID || fresh[0].Generation != w.Generation || fresh[0].Replicas != w.Replicas || fresh[0].ObservedGeneration < w.Generation {
-		return nil, fmt.Errorf("stopped parent changed or unobserved: %s", w)
-	}
-	return observation, nil
 }
 
-func (d *DefaultOutboundDispatcher) stoppedInventory(ctx context.Context, path string, items any) error {
-	body, err := d.kubeJSON(ctx, http.MethodGet, path, "", nil)
-	if err != nil {
-		return err
+func toModelStoppedObservation(o *stoppedChildObservation) *model.StoppedChildObservation {
+	if o == nil {
+		return nil
 	}
-	var list struct {
-		Metadata struct {
-			Continue string `json:"continue"`
-		} `json:"metadata"`
-		Items json.RawMessage `json:"items"`
+	rs := make([]model.StoppedReplicaSet, len(o.ReplicaSets))
+	for i, r := range o.ReplicaSets {
+		rs[i] = model.StoppedReplicaSet{
+			Metadata: toModelKubeObjectMeta(r.Metadata),
+			Spec:     r.Spec,
+			Status:   r.Status,
+		}
 	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return err
+	pods := make([]model.StoppedPod, len(o.Pods))
+	for i, p := range o.Pods {
+		pods[i] = model.StoppedPod{
+			Metadata: toModelKubeObjectMeta(p.Metadata),
+		}
 	}
-	// Never accept a truncated inventory. Retry on a later watcher reconciliation.
-	if list.Metadata.Continue != "" || len(list.Items) == 0 || string(list.Items) == "null" {
-		return fmt.Errorf("incomplete stopped inventory: %s", path)
+	return &model.StoppedChildObservation{
+		ReplicaSets: rs,
+		Pods:        pods,
 	}
-	return json.Unmarshal(list.Items, items)
 }
 
-func stoppedChildrenComplete(w workloadRollout) bool {
-	if w.StoppedChildren == nil || w.UID == "" || w.Namespace == "" || w.Name == "" || w.Generation <= 0 {
-		return false
+func fromModelStoppedObservation(o *model.StoppedChildObservation) *stoppedChildObservation {
+	if o == nil {
+		return nil
 	}
-	if _, valid := w.Selector.matches(nil); !valid {
-		return false
-	}
-	owned := map[string]string{}
-	for _, rs := range w.StoppedChildren.ReplicaSets {
-		relevant, _ := w.Selector.matches(rs.Metadata.Labels)
-		ownedByParent, ownerValid := stoppedReplicaSetOwner(w, rs.Metadata)
-		relevant = relevant || ownedByParent
-		if !ownerValid {
-			return false
-		}
-		if !relevant {
-			continue
-		}
-		if !ownedByParent || !stoppedReplicaSetComplete(w, rs) || owned[rs.Metadata.UID] != "" {
-			return false
-		}
-
-		owned[rs.Metadata.UID] = rs.Metadata.Name
-	}
-	for _, p := range w.StoppedChildren.Pods {
-		if stoppedPodRelevant(w, p.Metadata, owned) {
-			return false
+	rs := make([]stoppedReplicaSet, len(o.ReplicaSets))
+	for i, r := range o.ReplicaSets {
+		rs[i] = stoppedReplicaSet{
+			Metadata: fromModelKubeObjectMeta(r.Metadata),
+			Spec:     r.Spec,
+			Status:   r.Status,
 		}
 	}
-	return true
+	pods := make([]stoppedPod, len(o.Pods))
+	for i, p := range o.Pods {
+		pods[i] = stoppedPod{
+			Metadata: fromModelKubeObjectMeta(p.Metadata),
+		}
+	}
+	return &stoppedChildObservation{
+		ReplicaSets: rs,
+		Pods:        pods,
+	}
 }
 
-func stoppedReplicaSetOwner(w workloadRollout, m kubeObjectMeta) (bool, bool) {
-	relevant := false
-	controllerCount := 0
-	for _, o := range m.OwnerReferences {
-		if o.Controller {
-			controllerCount++
-		}
-		if o.UID == w.UID || (o.Kind == kindRestateDeployment && o.Name == w.Name) {
-			if relevant || !o.Controller || o.Kind != kindRestateDeployment || o.Name != w.Name || o.UID != w.UID || o.APIVersion != "restate.dev/v1beta1" {
-				return true, false
-			}
-			relevant = true
+func fromModelKubeObjectMeta(m model.KubeObjectMeta) kubeObjectMeta {
+	refs := make([]kubeOwnerReference, len(m.OwnerReferences))
+	for i, r := range m.OwnerReferences {
+		refs[i] = kubeOwnerReference{
+			APIVersion: r.APIVersion,
+			Kind:       r.Kind,
+			Name:       r.Name,
+			UID:        r.UID,
+			Controller: r.Controller,
 		}
 	}
-	return relevant, !relevant || controllerCount == 1
+	fields := make([]kubeManagedField, len(m.ManagedFields))
+	for i, f := range m.ManagedFields {
+		fields[i] = kubeManagedField{Time: f.Time, Subresource: f.Subresource}
+	}
+	return kubeObjectMeta{
+		UID:             m.UID,
+		Labels:          m.Labels,
+		OwnerReferences: refs,
+		Name:            m.Name,
+		Namespace:       m.Namespace,
+		Generation:      m.Generation,
+		Annotations:     m.Annotations,
+		ManagedFields:   fields,
+	}
 }
 
-func stoppedReplicaSetComplete(w workloadRollout, rs stoppedReplicaSet) bool {
-	return rs.Metadata.Name != "" && rs.Metadata.UID != "" && rs.Metadata.Namespace == w.Namespace && rs.Metadata.Generation > 0 && rs.Status.ObservedGeneration >= rs.Metadata.Generation && rs.Spec.Replicas != nil && *rs.Spec.Replicas == 0 && rs.Status.Replicas == 0 && rs.Status.ReadyReplicas == 0 && rs.Status.AvailableReplicas == 0 && rs.Status.FullyLabeledReplicas == 0
+func toModelWorkloadRollouts(ws []workloadRollout) []model.WorkloadRollout {
+	if ws == nil {
+		return nil
+	}
+	res := make([]model.WorkloadRollout, len(ws))
+	for i, w := range ws {
+		res[i] = toModelWorkloadRollout(w)
+	}
+	return res
 }
 
-func stoppedPodRelevant(w workloadRollout, m kubeObjectMeta, owned map[string]string) bool {
-	matches, _ := w.Selector.matches(m.Labels)
-	if matches {
-		return true
+func fromModelWorkloadRollouts(ws []model.WorkloadRollout) []workloadRollout {
+	if ws == nil {
+		return nil
 	}
-	for _, o := range m.OwnerReferences {
-		if _, ok := owned[o.UID]; ok {
-			return true
-		}
-		if o.UID == w.UID || (o.Kind == kindRestateDeployment && o.Name == w.Name) {
-			return true
-		}
-		// Missing or incorrect UID must not hide a pod naming an owned ReplicaSet.
-		for _, name := range owned {
-			if o.Kind == "ReplicaSet" && o.Name == name {
-				return true
-			}
+	res := make([]workloadRollout, len(ws))
+	for i, w := range ws {
+		res[i] = fromModelWorkloadRollout(w)
+	}
+	return res
+}
+
+func toModelWorkloadRollout(w workloadRollout) model.WorkloadRollout {
+	var selector *model.KubeLabelSelector
+	if w.Selector != nil {
+		selector = &model.KubeLabelSelector{
+			MatchLabels:      w.Selector.MatchLabels,
+			MatchExpressions: w.Selector.MatchExpressions,
 		}
 	}
-	return false
+	return model.WorkloadRollout{
+		UID:                      w.UID,
+		Selector:                 selector,
+		StoppedChildren:          toModelStoppedObservation(w.StoppedChildren),
+		Kind:                     w.Kind,
+		Namespace:                w.Namespace,
+		Name:                     w.Name,
+		Images:                   w.Images,
+		ChangedAt:                w.ChangedAt,
+		Annotations:              w.Annotations,
+		ConfigMapRefs:            w.ConfigMapRefs,
+		Generation:               w.Generation,
+		ObservedGeneration:       w.ObservedGeneration,
+		Replicas:                 w.Replicas,
+		UpdatedReplicas:          w.UpdatedReplicas,
+		AvailableReplicas:        w.AvailableReplicas,
+		StatusReplicas:           w.StatusReplicas,
+		UpdateRevision:           w.UpdateRevision,
+		CurrentRevision:          w.CurrentRevision,
+		DesiredNumberScheduled:   w.DesiredNumberScheduled,
+		UpdatedNumberScheduled:   w.UpdatedNumberScheduled,
+		NumberAvailable:          w.NumberAvailable,
+		ProgressDeadlineExceeded: w.ProgressDeadlineExceeded,
+		ReadyReplicas:            w.ReadyReplicas,
+		DeploymentID:             w.DeploymentID,
+		ReadyConditionTrue:       w.ReadyConditionTrue,
+		ManagedWorkloads:         toModelWorkloadRollouts(w.ManagedWorkloads),
+		Env:                      w.Env,
+		Resources:                model.KubeResourceRequirements{Limits: w.Resources.Limits, Requests: w.Resources.Requests},
+	}
+}
+
+func fromModelWorkloadRollout(m model.WorkloadRollout) workloadRollout {
+	var selector *kubeLabelSelector
+	if m.Selector != nil {
+		selector = &kubeLabelSelector{
+			MatchLabels:      m.Selector.MatchLabels,
+			MatchExpressions: m.Selector.MatchExpressions,
+		}
+	}
+	return workloadRollout{
+		UID:                      m.UID,
+		Selector:                 selector,
+		StoppedChildren:          fromModelStoppedObservation(m.StoppedChildren),
+		Kind:                     m.Kind,
+		Namespace:                m.Namespace,
+		Name:                     m.Name,
+		Images:                   m.Images,
+		ChangedAt:                m.ChangedAt,
+		Annotations:              m.Annotations,
+		ConfigMapRefs:            m.ConfigMapRefs,
+		Generation:               m.Generation,
+		ObservedGeneration:       m.ObservedGeneration,
+		Replicas:                 m.Replicas,
+		UpdatedReplicas:          m.UpdatedReplicas,
+		AvailableReplicas:        m.AvailableReplicas,
+		StatusReplicas:           m.StatusReplicas,
+		UpdateRevision:           m.UpdateRevision,
+		CurrentRevision:          m.CurrentRevision,
+		DesiredNumberScheduled:   m.DesiredNumberScheduled,
+		UpdatedNumberScheduled:   m.UpdatedNumberScheduled,
+		NumberAvailable:          m.NumberAvailable,
+		ProgressDeadlineExceeded: m.ProgressDeadlineExceeded,
+		ReadyReplicas:            m.ReadyReplicas,
+		DeploymentID:             m.DeploymentID,
+		ReadyConditionTrue:       m.ReadyConditionTrue,
+		ManagedWorkloads:         fromModelWorkloadRollouts(m.ManagedWorkloads),
+		Env:                      m.Env,
+		Resources:                kubeResourceRequirements{Limits: m.Resources.Limits, Requests: m.Resources.Requests},
+	}
 }
 
 func stoppedRestateDeploymentComplete(w workloadRollout) (bool, bool, string) {
-	if stoppedChildrenComplete(w) {
-		return true, false, ""
-	}
-	return false, false, "waiting for stopped child evidence"
+	return kube.StoppedRestateDeploymentComplete(toModelWorkloadRollout(w))
 }
