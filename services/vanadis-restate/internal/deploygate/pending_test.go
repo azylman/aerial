@@ -1,4 +1,4 @@
-package build
+package deploygate
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 func TestDeploymentStartBeforeMerge(t *testing.T) {
@@ -33,22 +32,23 @@ func TestDeploymentStartBeforeMerge(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, Status: "pr_opened", HeadSHA: "head"}}}}
-			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", OccurredAt: now, RolloutState: &pubsub.PRRolloutState{StartedJobs: []string{"web"}}}
-			b := &BuildObject{store: st}
-			require.NoError(t, b.armDeploymentStart(rt, "b", ev))
+			rt := newFakeRuntime("b")
+			rt.now = now
+			st := &fakeStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, Status: "pr_opened", HeadSHA: "head"}}}
+			ev := pubsub.PRLifecycleEvent{Event: DeployStartedEvent, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", OccurredAt: now, RolloutState: &pubsub.PRRolloutState{StartedJobs: []string{"web"}}}
+			g := NewGate(st, nil)
+			require.NoError(t, g.ArmDeploymentStart(rt, "b", ev))
 			require.Empty(t, rt.attempts)
 			rt.now = now.Add(2 * time.Minute)
 			ev.OccurredAt = rt.now
 			ev.RolloutState = &pubsub.PRRolloutState{StartedJobs: []string{"web", "worker"}}
-			require.NoError(t, b.armDeploymentStart(rt, "b", ev))
+			require.NoError(t, g.ArmDeploymentStart(rt, "b", ev))
 			rt.now = now.Add(tc.elapsed)
 			st.chunks[0].Status = tc.status
 			st.chunks[0].MergeSHA = tc.revision
 			st.chunks[0].HeadSHA = tc.head
 			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), st.chunks...)}
-			require.NoError(t, (&BuildObject{store: st}).syncDeploymentDeadlines(rt, state, nil, nil))
+			require.NoError(t, NewGate(st, nil).SyncDeadlines(rt, state, nil, nil))
 			require.Equal(t, tc.wantArmed, len(rt.attempts) > 0)
 			require.Empty(t, rt.pending)
 			if tc.wantArmed {
@@ -71,7 +71,7 @@ func TestPendingDeploymentFailures(t *testing.T) {
 	}{
 		{name: "pending read", pendingErr: unavailable},
 		{name: "attempt read", attemptErr: unavailable},
-		{name: "clock", clockErr: unavailable, ev: &pubsub.PRLifecycleEvent{Event: prEventDeployStarted}},
+		{name: "clock", clockErr: unavailable, ev: &pubsub.PRLifecycleEvent{Event: DeployStartedEvent}},
 		{name: "authority read", readErr: unavailable},
 		{name: "authority write", writeErr: unavailable},
 		{name: "journal", journalErr: unavailable},
@@ -80,13 +80,18 @@ func TestPendingDeploymentFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Deadline: now.Add(15 * time.Minute), Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}}}
-			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now, pendingErr: tc.pendingErr, getErr: tc.attemptErr, nowErr: tc.clockErr, pending: map[string]pendingDeploymentStart{"c:merge": p}}
+			p := PendingStart{ChunkID: "c", HeadSHA: "head", Deadline: now.Add(15 * time.Minute), Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}}}
+			rt := newFakeRuntime("b")
+			rt.now = now
+			rt.pendingErr = tc.pendingErr
+			rt.getErr = tc.attemptErr
+			rt.nowErr = tc.clockErr
 			rt.runStepErr = tc.journalErr
+			rt.pending = map[string]PendingStart{"c:merge": p}
 			chunks := []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged}}
-			st := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{getBuildErr: tc.readErr, chunks: chunks}}
+			st := &fakeStore{getBuildErr: tc.readErr, rolloutErr: tc.writeErr, chunks: chunks}
 			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), chunks...)}
-			require.Error(t, (&BuildObject{store: st}).syncDeploymentDeadlines(rt, state, tc.ev, nil))
+			require.Error(t, NewGate(st, nil).SyncDeadlines(rt, state, tc.ev, nil))
 			require.Empty(t, rt.scheduled)
 			require.Equal(t, statusMerged, st.chunks[0].Status)
 		})
@@ -108,8 +113,8 @@ func TestPendingDeploymentPromotionRechecksAuthority(t *testing.T) {
 			if tc.name == "missing chunk" {
 				chunkID = "other-chunk"
 			}
-			st := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: chunkID, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}}}
-			out, err := (&BuildObject{store: st}).promotePendingDeploymentStart(context.Background(), "b", pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}})
+			st := &fakeStore{chunks: []model.VanadisChunk{{ID: chunkID, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}}
+			out, err := NewGate(st, nil).PromotePendingStart(context.Background(), "b", PendingStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}})
 			require.NoError(t, err)
 			require.NotNil(t, out.State)
 			require.Equal(t, tc.status, out.State.Chunks[0].Status)
@@ -132,8 +137,8 @@ func TestPendingDeploymentPreservesAuthoritativeEvidence(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged, RolloutState: tc.current}}}}
-			out, err := (&BuildObject{store: st}).promotePendingDeploymentStart(context.Background(), "b", pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge", RolloutState: pending}})
+			st := &fakeStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusMerged, RolloutState: tc.current}}}
+			out, err := NewGate(st, nil).PromotePendingStart(context.Background(), "b", PendingStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge", RolloutState: pending}})
 			require.NoError(t, err)
 			require.NotNil(t, out.State)
 			require.Equal(t, tc.want, st.chunks[0].RolloutState)
@@ -154,12 +159,15 @@ func TestPendingDeploymentKeepsExistingAttempt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			a := deploymentAttempt{ChunkID: "c", PRNumber: 1, Revision: "merge", Generation: 7, Deadline: now.Add(time.Minute), Delivered: tc.delivered}
-			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Deadline: now.Add(15 * time.Minute), Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
-			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now, attempts: map[string]deploymentAttempt{"c": a}, pending: map[string]pendingDeploymentStart{"c:merge": p}}
-			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: tc.status}}}}
+			a := Attempt{ChunkID: "c", PRNumber: 1, Revision: "merge", Generation: 7, Deadline: now.Add(time.Minute), Delivered: tc.delivered}
+			p := PendingStart{ChunkID: "c", HeadSHA: "head", Deadline: now.Add(15 * time.Minute), Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
+			rt := newFakeRuntime("b")
+			rt.now = now
+			rt.attempts = map[string]Attempt{"c": a}
+			rt.pending = map[string]PendingStart{"c:merge": p}
+			st := &fakeStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: tc.status}}}
 			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), st.chunks...)}
-			require.NoError(t, (&BuildObject{store: st}).syncDeploymentDeadlines(rt, state, nil, nil))
+			require.NoError(t, NewGate(st, nil).SyncDeadlines(rt, state, nil, nil))
 			require.Equal(t, a, rt.attempts["c"])
 			require.Empty(t, rt.pending)
 			require.Empty(t, rt.scheduled)
@@ -170,26 +178,48 @@ func TestPendingDeploymentKeepsExistingAttempt(t *testing.T) {
 
 func TestPendingDeploymentDoesNotAdoptStaleSnapshot(t *testing.T) {
 	t.Parallel()
-	tests := []struct{ name, status, revision string }{
-		{"completed", statusSynced, "merge"},
-		{"cancelled", statusCancelled, "merge"},
-		{"superseded", statusMerged, "new"},
+	tests := []struct {
+		name, status, revision, stateID string
+		wantArmed                       bool
+	}{
+		{"completed", statusSynced, "merge", "c", false},
+		{"cancelled", statusCancelled, "merge", "c", false},
+		{"superseded", statusMerged, "new", "c", false},
+		{"missing chunk dropped", statusMerged, "merge", "other", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
-			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), pending: map[string]pendingDeploymentStart{"c:merge": p}}
+			p := PendingStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
+			rt := newFakeRuntime("b")
+			rt.pending = map[string]PendingStart{"c:merge": p}
 			chunks := []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}
-			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: chunks}}
-			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}}
-			require.NoError(t, (&BuildObject{store: st}).syncDeploymentDeadlines(rt, state, nil, nil))
-			require.Empty(t, rt.attempts)
+			st := &fakeStore{chunks: chunks}
+			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: []model.VanadisChunk{{ID: tc.stateID, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}}
+			require.NoError(t, NewGate(st, nil).SyncDeadlines(rt, state, nil, nil))
 			require.Empty(t, rt.pending)
-			require.Empty(t, rt.scheduled)
+			if tc.wantArmed {
+				require.NotEmpty(t, rt.attempts)
+				require.NotEmpty(t, rt.scheduled)
+			} else {
+				require.Empty(t, rt.attempts)
+				require.Empty(t, rt.scheduled)
+			}
 			require.Equal(t, tc.status, st.chunks[0].Status)
 		})
 	}
+}
+
+func TestPendingDeploymentIgnoresIrrelevantChunks(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rt := newFakeRuntime("b")
+	rt.now = now
+	state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: []model.VanadisChunk{{ID: "c", Status: "pending"}}}
+	starts, err := NewGate(&fakeStore{}, nil).SyncPendingStarts(rt, state, nil)
+	require.NoError(t, err)
+	require.Empty(t, starts)
+	require.Empty(t, rt.pending)
 }
 
 func TestPendingDeploymentCapture(t *testing.T) {
@@ -201,18 +231,19 @@ func TestPendingDeploymentCapture(t *testing.T) {
 		wantPending                 bool
 		wantDeadline                time.Time
 	}{
-		{"missing merge identity", prEventDeployStarted, "head", "", now, false, time.Time{}},
-		{"stale head", prEventDeployStarted, "other", "merge", now, false, time.Time{}},
-		{"past occurred timestamp", prEventDeployStarted, "head", "merge", now.Add(-5 * time.Minute), true, now.Add(10 * time.Minute)},
-		{"future timestamp", prEventDeployStarted, "head", "merge", now.Add(time.Hour), true, now.Add(15 * time.Minute)},
+		{"missing merge identity", DeployStartedEvent, "head", "", now, false, time.Time{}},
+		{"stale head", DeployStartedEvent, "other", "merge", now, false, time.Time{}},
+		{"past occurred timestamp", DeployStartedEvent, "head", "merge", now.Add(-5 * time.Minute), true, now.Add(10 * time.Minute)},
+		{"future timestamp", DeployStartedEvent, "head", "merge", now.Add(time.Hour), true, now.Add(15 * time.Minute)},
 		{"missing timestamp", " DEPLOY_STARTED ", "head", "merge", time.Time{}, true, now.Add(15 * time.Minute)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", Status: "pr_opened"}}}}
-			require.NoError(t, (&BuildObject{store: st}).armDeploymentStart(rt, "b", pubsub.PRLifecycleEvent{Event: tc.event, Repo: "owner/repo", PRNumber: 1, HeadSHA: tc.head, MergeSHA: tc.revision, OccurredAt: tc.occurred}))
+			rt := newFakeRuntime("b")
+			rt.now = now
+			st := &fakeStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", Status: "pr_opened"}}}
+			require.NoError(t, NewGate(st, nil).ArmDeploymentStart(rt, "b", pubsub.PRLifecycleEvent{Event: tc.event, Repo: "owner/repo", PRNumber: 1, HeadSHA: tc.head, MergeSHA: tc.revision, OccurredAt: tc.occurred}))
 			require.Equal(t, tc.wantPending, len(rt.pending) > 0)
 			require.Empty(t, rt.attempts)
 			if tc.wantPending {
@@ -222,33 +253,27 @@ func TestPendingDeploymentCapture(t *testing.T) {
 	}
 }
 
-type pendingAuthorityStore struct {
-	store.VanadisStore
-
-	build  model.VanadisBuild
-	chunks []model.VanadisChunk
-}
-
-func (s *pendingAuthorityStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return &s.build, s.chunks, nil
-}
-
 func TestPendingDeploymentRechecksTerminalBuild(t *testing.T) {
 	t.Parallel()
-	tests := []struct{ name, status string }{
-		{"completed build", statusCompleted},
-		{"cancelled build", statusCancelled},
-		{"failed build", statusFailed},
+	tests := []struct {
+		name, status string
+		nilBuild     bool
+	}{
+		{"completed build", statusCompleted, false},
+		{"cancelled build", statusCancelled, false},
+		{"failed build", statusFailed, false},
+		{"missing build", "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p := pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
-			rt := &deadlineTestRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), pending: map[string]pendingDeploymentStart{"c:merge": p}}
+			p := PendingStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}}
+			rt := newFakeRuntime("b")
+			rt.pending = map[string]PendingStart{"c:merge": p}
 			chunks := []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}}
-			st := &pendingAuthorityStore{build: model.VanadisBuild{Status: tc.status}, chunks: chunks}
+			st := &fakeStore{buildStatus: tc.status, nilBuild: tc.nilBuild, chunks: chunks}
 			state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: append([]model.VanadisChunk(nil), chunks...)}
-			require.NoError(t, (&BuildObject{store: st}).syncDeploymentDeadlines(rt, state, nil, nil))
+			require.NoError(t, NewGate(st, nil).SyncDeadlines(rt, state, nil, nil))
 			require.Empty(t, rt.attempts)
 			require.Empty(t, rt.scheduled)
 			require.Empty(t, rt.pending)

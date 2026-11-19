@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -836,23 +837,31 @@ type errDeploymentAttemptsRuntime struct {
 	*fakeObjectRuntime
 }
 
-func (errDeploymentAttemptsRuntime) GetDeploymentAttempts() (map[string]deploymentAttempt, error) {
+func (errDeploymentAttemptsRuntime) GetAttempts() (map[string]deploygate.Attempt, error) {
 	return nil, errors.New("attempts read fail")
 }
 
-func (errDeploymentAttemptsRuntime) SetDeploymentAttempts(map[string]deploymentAttempt) {}
+func (errDeploymentAttemptsRuntime) SetAttempts(map[string]deploygate.Attempt) {}
 
-func (errDeploymentAttemptsRuntime) DeploymentNow() (time.Time, error) {
+func (errDeploymentAttemptsRuntime) Now() (time.Time, error) {
 	return time.Now().UTC(), nil
 }
 
-func (errDeploymentAttemptsRuntime) GetPendingDeploymentStarts() (map[string]pendingDeploymentStart, error) {
-	return map[string]pendingDeploymentStart{}, nil
+func (errDeploymentAttemptsRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
+	return map[string]deploygate.PendingStart{}, nil
 }
 
-func (errDeploymentAttemptsRuntime) SetPendingDeploymentStarts(map[string]pendingDeploymentStart) {}
+func (errDeploymentAttemptsRuntime) SetPendingStarts(map[string]deploygate.PendingStart) {}
 
-func (errDeploymentAttemptsRuntime) ScheduleDeploymentDeadline(DeploymentDeadlineRequest, time.Duration) {
+func (errDeploymentAttemptsRuntime) ScheduleDeadline(deploygate.DeploymentDeadlineRequest, time.Duration) {
+}
+
+func (e errDeploymentAttemptsRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
+	out, err := e.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
+		o, runErr := fn(ctx)
+		return reconcileStepOutput(o), runErr
+	})
+	return deploygate.StepOutput(out), err
 }
 
 func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
