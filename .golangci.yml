@@ -118,6 +118,7 @@ linters:
         - (*strings.Builder).WriteRune
         - hash.Hash.Write
         - (*database/sql.Rows).Close
+        - (*database/sql.DB).Close
         - (io.Closer).Close
         - (io.ReadCloser).Close
         - (*github.com/azylman/aerial/services/synapse/internal/router.RouterServer).publishPRLifecycleEvent
