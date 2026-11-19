@@ -388,3 +388,119 @@ func TestScanChunks(t *testing.T) {
 		}
 	})
 }
+
+func sweepChunk(id string, idx int, mode, repo, status string, completedAt time.Time) model.VanadisChunk {
+	return model.VanadisChunk{ID: id, BuildID: "b1", ChunkIndex: idx, Mode: mode, Repo: repo, Status: status, CompletedAt: completedAt}
+}
+
+func TestEarlierDeploymentSweepIDs(t *testing.T) {
+	t.Parallel()
+	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	mergeLater := mergeBase.Add(time.Hour)
+	mergeLater2 := mergeBase.Add(2 * time.Hour)
+	tests := []struct {
+		name     string
+		chunks   []model.VanadisChunk
+		deployID string
+		want     []string
+	}{
+		{
+			name: "earlier merged same repo completes",
+			chunks: []model.VanadisChunk{
+				sweepChunk("earlier", 0, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 1, "pr", "aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"earlier"},
+		},
+		{
+			name: "earlier deploying and synced same repo complete",
+			chunks: []model.VanadisChunk{
+				sweepChunk("early-deploying", 0, "pr", "aerial", "deploying", mergeBase),
+				sweepChunk("early-synced", 1, "pr", "aerial", "synced", mergeBase),
+				sweepChunk("deploying", 2, "pr", "aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"early-deploying", "early-synced"},
+		},
+		{
+			name: "later merged same repo stays untouched",
+			chunks: []model.VanadisChunk{
+				sweepChunk("earlier", 0, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 1, "pr", "aerial", "deploying", mergeLater),
+				sweepChunk("later", 2, "pr", "aerial", "merged", mergeLater2),
+			},
+			deployID: "deploying",
+			want:     []string{"earlier"},
+		},
+		{
+			name: "earlier merged different repo stays untouched",
+			chunks: []model.VanadisChunk{
+				sweepChunk("other-repo", 0, "pr", "mirrormere", "merged", mergeBase),
+				sweepChunk("earlier", 1, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 2, "pr", "aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"earlier"},
+		},
+		{
+			name: "earlier terminal chunks stay untouched",
+			chunks: []model.VanadisChunk{
+				sweepChunk("failed", 0, "pr", "aerial", "failed", mergeBase),
+				sweepChunk("cancelled", 1, "pr", "aerial", "cancelled", mergeBase),
+				sweepChunk("completed", 2, "pr", "aerial", "completed", mergeBase),
+				sweepChunk("earlier", 3, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 4, "pr", "aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"earlier"},
+		},
+		{
+			name: "earlier never merged chunks stay untouched",
+			chunks: []model.VanadisChunk{
+				sweepChunk("opened", 0, "pr", "aerial", "pr_opened", time.Time{}),
+				sweepChunk("coding", 1, "pr", "aerial", "coding", time.Time{}),
+				sweepChunk("earlier", 2, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 3, "pr", "aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"earlier"},
+		},
+		{
+			name: "merge stamp tie breaks by lower chunk index",
+			chunks: []model.VanadisChunk{
+				sweepChunk("tie-early", 0, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 1, "pr", "aerial", "deploying", mergeBase),
+				sweepChunk("tie-late", 2, "pr", "aerial", "merged", mergeBase),
+			},
+			deployID: "deploying",
+			want:     []string{"tie-early"},
+		},
+		{
+			name: "owner qualified repo spelling matches",
+			chunks: []model.VanadisChunk{
+				sweepChunk("earlier", 0, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 1, "pr", "azylman/aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"earlier"},
+		},
+		{
+			name: "unknown deploying stamp skips earlier merged candidate",
+			chunks: []model.VanadisChunk{
+				sweepChunk("earlier", 0, "pr", "aerial", "merged", mergeBase),
+				sweepChunk("deploying", 1, "pr", "aerial", "deploying", time.Time{}),
+			},
+			deployID: "deploying",
+			want:     nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := EarlierDeploymentSweepIDs(tc.chunks, tc.deployID); !slices.Equal(got, tc.want) {
+				t.Errorf("EarlierDeploymentSweepIDs(%q) = %q, want %q", tc.deployID, got, tc.want)
+			}
+		})
+	}
+}

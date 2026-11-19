@@ -168,6 +168,7 @@ func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("GITHUB_TOKEN", "token-xyz")
 	t.Setenv("SHARE_ROOT", "/tmp/share")
+	t.Setenv("POSTGRES_DB", "")
 
 	cfg := LoadConfigFromEnv()
 	assert.Equal(t, "9999", cfg.RestatePort)
