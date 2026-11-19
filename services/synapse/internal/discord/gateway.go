@@ -45,26 +45,6 @@ var (
 	}
 )
 
-// SetGatewayOpenerForTest overrides the session opener function for testing and returns a cleanup func.
-func SetGatewayOpenerForTest(fn func(*discordgo.Session) error) func() {
-	gatewayOpenerMu.Lock()
-	orig := gatewayOpener
-	gatewayOpener = fn
-	gatewayOpenerMu.Unlock()
-	return func() {
-		gatewayOpenerMu.Lock()
-		gatewayOpener = orig
-		gatewayOpenerMu.Unlock()
-	}
-}
-
-// ResetWatermarksForTest clears all tracked channel watermarks.
-func ResetWatermarksForTest() {
-	channelWatermarksMu.Lock()
-	defer channelWatermarksMu.Unlock()
-	channelWatermarks = make(map[string]string)
-}
-
 // GetChannelWatermark returns the highest message snowflake processed for a channel.
 func GetChannelWatermark(channelID string) string {
 	channelWatermarksMu.RLock()
@@ -192,9 +172,7 @@ func StartGateway(ctx context.Context, server IngressServer, token string) (func
 
 	dg.AddHandler(NewDiscordGatewayMessageCreateHandler(gatewayCtx, server))
 	dg.AddHandler(NewDiscordGatewayInteractionCreateHandler(gatewayCtx, server))
-	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-		handleGatewayReadyWithWG(gatewayCtx, server, s, r, &sweepWG)
-	})
+	dg.AddHandler(NewDiscordGatewayReadyHandler(gatewayCtx, server, &sweepWG))
 
 	gatewayOpenerMu.RLock()
 	opener := gatewayOpener
@@ -239,18 +217,14 @@ func NewDiscordGatewayInteractionCreateHandler(ctx context.Context, server Ingre
 }
 
 // NewDiscordGatewayReadyHandler creates a discordgo Ready handler.
-func NewDiscordGatewayReadyHandler(ctx context.Context, server IngressServer) func(s *discordgo.Session, r *discordgo.Ready) {
+func NewDiscordGatewayReadyHandler(ctx context.Context, server IngressServer, wg *sync.WaitGroup) func(s *discordgo.Session, r *discordgo.Ready) {
 	return func(s *discordgo.Session, r *discordgo.Ready) {
-		HandleGatewayReady(ctx, server, s, r)
+		HandleGatewayReady(ctx, server, s, r, wg)
 	}
 }
 
 // HandleGatewayReady updates session state and triggers a background catch-up sweep.
-func HandleGatewayReady(ctx context.Context, server IngressServer, s *discordgo.Session, r *discordgo.Ready) {
-	handleGatewayReadyWithWG(ctx, server, s, r, nil)
-}
-
-func handleGatewayReadyWithWG(ctx context.Context, server IngressServer, s *discordgo.Session, r *discordgo.Ready, wg *sync.WaitGroup) {
+func HandleGatewayReady(ctx context.Context, server IngressServer, s *discordgo.Session, r *discordgo.Ready, wg *sync.WaitGroup) {
 	if s != nil && r != nil && r.User != nil {
 		if s.State != nil {
 			s.State.Lock()

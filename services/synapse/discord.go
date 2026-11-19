@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"time"
-
-	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/discord"
@@ -50,39 +47,4 @@ func (s *RouterServer) ProcessDiscordInteraction(ctx context.Context, args Disco
 // startDiscordGateway delegates gateway startup to the internal discord subpackage.
 func startDiscordGateway(ctx context.Context, server *RouterServer, token string) (func(), error) {
 	return discord.StartGateway(ctx, server, token)
-}
-
-// runDiscordCatchUpSweep delegates catch-up sweep to the internal discord subpackage.
-func runDiscordCatchUpSweep(ctx context.Context, dg *discordgo.Session, server *RouterServer, now time.Time) {
-	discord.RunCatchUpSweep(ctx, dg, server, now)
-}
-
-// getChannelWatermark delegates to internal/discord.
-func getChannelWatermark(channelID string) string {
-	return discord.GetChannelWatermark(channelID)
-}
-
-// advanceChannelWatermark delegates to internal/discord.
-func advanceChannelWatermark(channelID, messageID string) {
-	discord.AdvanceChannelWatermark(channelID, messageID)
-}
-
-// parseSnowflakeUint64 delegates to internal/discord.
-func parseSnowflakeUint64(s string) uint64 {
-	return discord.ParseSnowflakeUint64(s)
-}
-
-// discordSnowflakeFromTime delegates to internal/discord.
-func discordSnowflakeFromTime(t time.Time) string {
-	return discord.DiscordSnowflakeFromTime(t)
-}
-
-// compareDiscordSnowflakes delegates to internal/discord.
-func compareDiscordSnowflakes(a, b string) int {
-	return discord.CompareDiscordSnowflakes(a, b)
-}
-
-// maxDiscordSnowflake delegates to internal/discord.
-func maxDiscordSnowflake(a, b string) string {
-	return discord.MaxDiscordSnowflake(a, b)
 }

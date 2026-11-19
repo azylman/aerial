@@ -5,11 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
-
-	"github.com/azylman/aerial/services/synapse/internal/discord"
 )
 
 func TestProcessDiscordIngress_And_Interaction(t *testing.T) {
@@ -107,35 +104,7 @@ func TestDiscordDelegations(t *testing.T) {
 	}
 	stopFn()
 
-	// 2. runDiscordCatchUpSweep delegation
-	runDiscordCatchUpSweep(ctx, nil, srv, time.Now().UTC())
-
-	// 3. Watermark and snowflake delegations
-	discord.ResetWatermarksForTest()
-	defer discord.ResetWatermarksForTest()
-
-	if wm := getChannelWatermark("c1"); wm != "" {
-		t.Errorf("getChannelWatermark = %q, want empty", wm)
-	}
-	advanceChannelWatermark("c1", "100")
-	if wm := getChannelWatermark("c1"); wm != "100" {
-		t.Errorf("getChannelWatermark = %q, want 100", wm)
-	}
-
-	if v := parseSnowflakeUint64("123"); v != 123 {
-		t.Errorf("parseSnowflakeUint64 = %d, want 123", v)
-	}
-	if s := discordSnowflakeFromTime(time.Unix(0, 0)); s != "0" {
-		t.Errorf("discordSnowflakeFromTime = %q, want 0", s)
-	}
-	if cmp := compareDiscordSnowflakes("200", "100"); cmp != 1 {
-		t.Errorf("compareDiscordSnowflakes = %d, want 1", cmp)
-	}
-	if gotMax := maxDiscordSnowflake("100", "200"); gotMax != "200" {
-		t.Errorf("maxDiscordSnowflake = %q, want 200", gotMax)
-	}
-
-	// 4. Server Config and PublishJob methods
+	// 2. Server Config and PublishJob methods
 	var nilSrv *RouterServer
 	if cfg := nilSrv.Config(); cfg != nil {
 		t.Errorf("nil RouterServer Config() = %v, want nil", cfg)

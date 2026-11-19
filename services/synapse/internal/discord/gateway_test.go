@@ -508,7 +508,7 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 					t.Fatalf("discordgo.New() err = %v", err)
 				}
 				session.Client = &http.Client{Transport: &mockDiscordTransport{}}
-				h := NewDiscordGatewayReadyHandler(canceledCtx, srv)
+				h := NewDiscordGatewayReadyHandler(canceledCtx, srv, nil)
 				h(session, &discordgo.Ready{
 					User: &discordgo.User{ID: "bot-ready-1"},
 				})
@@ -743,7 +743,7 @@ func TestHandleGatewayReadyWithWG(t *testing.T) {
 	srv := &testIngressServer{}
 
 	var wg sync.WaitGroup
-	handleGatewayReadyWithWG(ctx, srv, sess, &discordgo.Ready{User: &discordgo.User{ID: "bot-wg-1"}}, &wg)
+	HandleGatewayReady(ctx, srv, sess, &discordgo.Ready{User: &discordgo.User{ID: "bot-wg-1"}}, &wg)
 	wg.Wait()
 
 	if sess.State.User == nil || sess.State.User.ID != "bot-wg-1" {

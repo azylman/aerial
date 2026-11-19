@@ -18,14 +18,6 @@ const discordCatchUpStaleTTL = 30 * time.Minute
 
 var discordSweepRunning atomic.Bool
 
-// SetSweepRunningForTest forces the sweep running state for testing concurrent sweep prevention.
-func SetSweepRunningForTest(running bool) func() {
-	prev := discordSweepRunning.Swap(running)
-	return func() {
-		discordSweepRunning.Store(prev)
-	}
-}
-
 // FetchActiveGuildThreads retrieves active threads for a guild using dg.GuildThreadsActive.
 func FetchActiveGuildThreads(dg *discordgo.Session, guildID string) ([]*discordgo.Channel, error) {
 	if dg == nil || guildID == "" {
