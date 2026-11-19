@@ -79,9 +79,9 @@ func (f *lockFakeDB) QueryRowContext(ctx context.Context, query string, args ...
 		return f.dbMem.QueryRowContext(ctx, "SELECT syntax error")
 	}
 	if acquired {
-		return f.dbMem.QueryRowContext(ctx, "SELECT 1")
+		return f.dbMem.QueryRowContext(ctx, "SELECT true")
 	}
-	return f.dbMem.QueryRowContext(ctx, "SELECT 0")
+	return f.dbMem.QueryRowContext(ctx, "SELECT false")
 }
 
 func (f *lockFakeDB) recorded() []string {
