@@ -794,21 +794,3 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req store.A
 	}
 	return attached, nil
 }
-
-func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, prompt string) error {
-	if b.executor == nil || b.store == nil {
-		return nil
-	}
-	bld, _, gErr := b.store.GetBuild(rc, buildID)
-	if gErr != nil {
-		return gErr
-	}
-	if bld == nil {
-		return store.ErrBuildNotFound
-	}
-	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] wake prompt warning", "error", dErr)
-		return dErr
-	}
-	return nil
-}
