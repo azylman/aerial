@@ -1,40 +1,132 @@
 /* App shell styles: Warm Stone & Ink tokens, page background, header, tab bar,
    quick-launch dock and view panels. Class names and DOM structure are preserved. */
-:root {
-    color-scheme: light;
+:root,
+:root[data-theme="dark"] {
+    color-scheme: dark;
 
     /* Surfaces */
-    --bg-base: #f6f5f1;
-    --bg-dark: #f6f5f1;
-    --bg-surface: #ffffff;
-    --bg-elevated: #efede7;
-    --card-bg: #ffffff;
-    --card-elevated: #f6f5f1;
+    --bg-base: #181825;
+    --bg-dark: #181825;
+    --bg-surface: #1e1e2e;
+    --bg-elevated: #27273a;
+    --card-bg: #1e1e2e;
+    --card-elevated: #232334;
 
     /* Borders & Shadows */
-    --card-border: #e5e3dc;
-    --card-border-hover: #c7c4b8;
-    --border-glow: #e5e3dc;
-    --border-glow-bright: #141413;
-    --accent-glow: 0 1px 3px rgba(20, 20, 19, 0.06);
+    --card-border: #313244;
+    --card-border-hover: #45475a;
+    --border-glow: #313244;
+    --border-glow-bright: #cba6f7;
+    --accent-glow: 0 2px 8px rgba(17, 17, 27, 0.45);
     --card-radius: 12px;
 
     /* Typography */
     --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-heading: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
-    --text-primary: #141413;
-    --text-secondary: #575652;
-    --text-muted: #575652;
-    --text-dim: #787771;
+    --text-primary: #cdd6f4;
+    --text-secondary: #a6adc8;
+    --text-muted: #a6adc8;
+    --text-dim: #9399b2;
 
     /* Canonical Semantic Accents */
-    --accent-primary: #c2410c;
-    --accent-emerald: #15803d;
+    --accent-primary: #cba6f7;
+    --accent-emerald: #a6e3a1;
+    --accent-amber: #f9e2af;
+    --accent-crimson: #f38ba8;
+    --accent-indigo: #89b4fa;
+
+    /* Semantic Surface & Component Tokens */
+    --brand-bg: #cba6f7;
+    --brand-fg: #11111b;
+    --tab-track-bg: #141420;
+    --tab-active-bg: #313244;
+    --tab-active-fg: #cdd6f4;
+    --tab-hover-bg: #27273a;
+    --pill-active-bg: #cba6f7;
+    --pill-active-fg: #11111b;
+    --nav-backdrop: rgba(30, 30, 46, 0.96);
+
+    /* DAG Tokens */
+    --dag-bg: #141420;
+    --dag-dot: #313244;
+    --dag-node-done-bg: rgba(166, 227, 161, 0.14);
+    --dag-node-done-border: rgba(166, 227, 161, 0.42);
+    --dag-node-done-ink: #e2f8e0;
+    --dag-node-run-bg: rgba(137, 180, 250, 0.16);
+    --dag-node-run-border: rgba(137, 180, 250, 0.48);
+    --dag-node-run-ink: #dce8fe;
+    --dag-node-fail-bg: rgba(243, 139, 168, 0.15);
+    --dag-node-fail-border: rgba(243, 139, 168, 0.45);
+    --dag-node-fail-ink: #fde2e9;
+    --dag-node-pend-bg: #232334;
+    --dag-node-pend-border: #313244;
+    --dag-node-pend-accent: #6c7086;
+    --dag-node-pend-ink: #a6adc8;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+
+    /* Surfaces */
+    --bg-base: #f8fafc;
+    --bg-dark: #f8fafc;
+    --bg-surface: #ffffff;
+    --bg-elevated: #f1f5f9;
+    --card-bg: #ffffff;
+    --card-elevated: #f8fafc;
+
+    /* Borders & Shadows */
+    --card-border: #e2e8f0;
+    --card-border-hover: #cbd5e1;
+    --border-glow: #e2e8f0;
+    --border-glow-bright: #0f172a;
+    --accent-glow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    --card-radius: 12px;
+
+    /* Typography */
+    --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-heading: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #475569;
+    --text-dim: #64748b;
+
+    /* Canonical Semantic Accents */
+    --accent-primary: #2563eb;
+    --accent-emerald: #047857;
     --accent-amber: #b45309;
     --accent-crimson: #b91c1c;
-    --accent-indigo: #4338ca;
+    --accent-indigo: #4f46e5;
 
+    /* Semantic Surface & Component Tokens */
+    --brand-bg: #0f172a;
+    --brand-fg: #ffffff;
+    --tab-track-bg: #f1f5f9;
+    --tab-active-bg: #ffffff;
+    --tab-active-fg: #0f172a;
+    --tab-hover-bg: rgba(255, 255, 255, 0.5);
+    --pill-active-bg: #0f172a;
+    --pill-active-fg: #ffffff;
+    --nav-backdrop: rgba(255, 255, 255, 0.96);
+
+    /* DAG Tokens */
+    --dag-bg: #f8fafc;
+    --dag-dot: #cbd5e1;
+    --dag-node-done-bg: #ecfdf5;
+    --dag-node-done-border: #6ee7b7;
+    --dag-node-done-ink: #065f46;
+    --dag-node-run-bg: #eff6ff;
+    --dag-node-run-border: #93c5fd;
+    --dag-node-run-ink: #1e3a8a;
+    --dag-node-fail-bg: #fef2f2;
+    --dag-node-fail-border: #fca5a5;
+    --dag-node-fail-ink: #7f1d1d;
+    --dag-node-pend-bg: #f8fafc;
+    --dag-node-pend-border: #cbd5e1;
+    --dag-node-pend-accent: #64748b;
+    --dag-node-pend-ink: #334155;
 }
 
 :root {
@@ -84,10 +176,10 @@ body::after {
 .hud-header {
     width: 100%;
     min-height: 54px;
-    background: #ffffff;
+    background: var(--bg-surface);
     border-radius: 0;
     border: none;
-    border-bottom: 1px solid #e2dfd7;
+    border-bottom: 1px solid var(--card-border);
     padding: 8px 20px;
     display: flex;
     align-items: center;
@@ -126,8 +218,8 @@ body::after {
     width: 22px;
     height: 22px;
     border-radius: 5px;
-    background: #141413;
-    color: #ffffff;
+    background: var(--brand-bg);
+    color: var(--brand-fg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -192,12 +284,42 @@ body::after {
     color: var(--text-secondary);
 }
 
+/* Theme Toggle */
+.theme-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    cursor: pointer;
+    line-height: 1;
+    min-height: 28px;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.theme-toggle-btn:hover {
+    border-color: var(--card-border-hover);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+}
+
+.theme-toggle-label {
+    font-variant-numeric: tabular-nums;
+}
+
 /* Primary View Tabs - Inline Segmented Control */
 .hud-view-tabs,
 .hud-nav {
     display: inline-flex;
     align-items: center;
-    background: #efede7;
+    background: var(--tab-track-bg);
     border-radius: 7px;
     padding: 3px;
     gap: 2px;
@@ -228,20 +350,20 @@ body::after {
 .view-tab-btn:hover,
 .nav-btn:hover {
     color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.5);
+    background: var(--tab-hover-bg);
 }
 
 .view-tab-btn.active,
 .nav-btn.active {
-    background: #ffffff;
-    color: #141413;
+    background: var(--tab-active-bg);
+    color: var(--tab-active-fg);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
     border-color: transparent;
 }
 
 .view-tab-btn.active .tab-badge {
-    background: #efede7;
-    color: #141413;
+    background: var(--tab-track-bg);
+    color: var(--tab-active-fg);
 }
 
 .tab-badge {
@@ -284,14 +406,14 @@ body::after {
 
 .dock-chip:hover {
     border-color: var(--card-border-hover);
-    background: #ffffff;
+    background: var(--bg-surface);
     transform: translateY(-1px);
     box-shadow: var(--accent-glow);
 }
 
 .dock-chip.active {
-    border-color: #141413;
-    background: #ffffff;
+    border-color: var(--text-primary);
+    background: var(--bg-surface);
     box-shadow: var(--accent-glow);
 }
 
@@ -367,6 +489,9 @@ body::after {
     .permet-gauge.status-pill {
         order: 2;
     }
+    .theme-toggle-btn {
+        order: 2;
+    }
     .quick-launch-dock {
         order: 3;
         width: 100%;
@@ -390,7 +515,7 @@ body::after {
         right: 0;
         bottom: 0;
         z-index: 150;
-        background: rgba(255, 255, 255, 0.96);
+        background: var(--nav-backdrop);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border-top: 1px solid var(--card-border);
@@ -415,8 +540,8 @@ body::after {
     }
     .view-tab-btn.active,
     .nav-btn.active {
-        background: #efede7;
-        color: #141413;
+        background: var(--tab-active-bg);
+        color: var(--tab-active-fg);
         box-shadow: none;
     }
     .view-tab-btn .tab-badge {

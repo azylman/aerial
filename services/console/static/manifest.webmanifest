@@ -4,8 +4,8 @@
   "start_url": "/console/",
   "scope": "/console/",
   "display": "standalone",
-  "background_color": "#f6f5f1",
-  "theme_color": "#f6f5f1",
+  "background_color": "#181825",
+  "theme_color": "#181825",
   "icons": [
     {
       "src": "/console/favicon-16x16.png",
