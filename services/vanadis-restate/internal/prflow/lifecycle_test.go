@@ -987,6 +987,35 @@ func TestFlow_LocateOrAttachPRChunkUnmatched(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestFlow_NotifyChunkFailure_Guards(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		nilFlow bool
+		nilExec bool
+	}{
+		{name: "nil flow skips failure notification", nilFlow: true},
+		{name: "nil executor skips failure notification", nilExec: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var f *Flow
+			if !tc.nilFlow {
+				var exec *executor.Executor
+				if !tc.nilExec {
+					exec = executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", nil)
+				}
+				f = NewFlow(&checkStatusSpyStore{}, exec)
+			}
+			err := f.NotifyChunkFailure(context.Background(), model.VanadisBuild{ID: "b1"}, "c1", "boom")
+			assert.NoError(t, err)
+		})
+	}
+}
+
 func TestFlow_IsEligibleUnattachedChunk(t *testing.T) {
 	t.Parallel()
 	now := time.Now()

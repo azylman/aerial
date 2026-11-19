@@ -191,12 +191,6 @@ type BuildMutationRequest struct {
 	Reason       string                 `json:"reason,omitempty"`
 }
 
-// RestateTransitionRequest represents the payload sent to the internal Vanadis transition endpoint.
-type RestateTransitionRequest struct {
-	Mutation      *BuildMutationRequest `json:"mutation,omitempty"`
-	PriorLaunched map[string]bool       `json:"prior_launched,omitempty"`
-}
-
 type reconcileStepOutput struct {
 	RetryResult    *store.RetryActionChunkResult `json:"retry_result,omitempty"`
 	BuildStatus    string                        `json:"build_status"`
@@ -281,6 +275,7 @@ type BuildObject struct {
 }
 
 // NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
+// vanadisURL is retained for signature compatibility and is no longer used for transitions.
 func NewBuildObject(vanadisURL string, httpClient *http.Client, runtimeFactory ...func(restate.ObjectContext) objectRuntime) *BuildObject {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -652,44 +647,10 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 }
 
 func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld model.VanadisBuild, chunkID, reason string) error {
-	if b.executor == nil {
+	if b == nil {
 		return nil
 	}
-	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
-	}
-	buildObj := bld
-	var chunks []model.VanadisChunk
-	if b.store != nil {
-		fetched, fetchedChunks, gErr := b.store.GetBuild(rc, bld.ID)
-		if gErr != nil {
-			return fmt.Errorf("get build %s for failure notification: %w", bld.ID, gErr)
-		}
-		if fetched != nil {
-			buildObj = *fetched
-			chunks = fetchedChunks
-		}
-	}
-	var widgetErr error
-	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, buildObj, chunks, "Build failed: "+reason); sErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
-		widgetErr = sErr
-	}
-	var wakeErr error
-	if !buildObj.Quiet {
-		prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk failed: %s", buildObj.ID, buildObj.Objective, reason)
-		if dErr := b.executor.DispatchWakePrompt(rc, buildObj.ThreadID, prompt); dErr != nil {
-			slog.WarnContext(rc, "[vanadis-restate] dispatch wake prompt warning", "error", dErr)
-			wakeErr = dErr
-		}
-	}
-	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, reason); pErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{buildObj.ID}, reason); pErr != nil {
-		slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	return errors.Join(widgetErr, wakeErr)
+	return b.flow().NotifyChunkFailure(rc, bld, chunkID, reason)
 }
 
 // FailChunk marks a chunk failed and cancels active work if the failure is terminal.
