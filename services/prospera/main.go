@@ -17,6 +17,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/prospera/internal/config"
 )
 
 var newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
@@ -158,18 +159,7 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
 	}
 }
 
-// prosperaRestartRequired reports whether next changes a setting that RunApp
-// binds once at startup (listen port, database, Twilio client credentials,
-// consult client endpoints) and therefore can only take effect after a restart.
-func prosperaRestartRequired(old, next *Config) bool {
-	return old.Port != next.Port ||
-		old.DatabaseURL != next.DatabaseURL ||
-		old.TwilioAccountSID != next.TwilioAccountSID ||
-		old.TwilioAuthToken != next.TwilioAuthToken ||
-		old.GoogleMCPURL != next.GoogleMCPURL ||
-		old.CovenURL != next.CovenURL ||
-		old.NATSURL != next.NATSURL
-}
+var prosperaRestartRequired = config.RestartRequired
 
 var (
 	configPath   = DefaultConfigPath

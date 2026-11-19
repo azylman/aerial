@@ -181,6 +181,14 @@ func TestSetupProsperaBus(t *testing.T) {
 			},
 			wantNil: false,
 		},
+		{
+			name:    "ensure streams failure logs and returns bus",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return &failEnsureStreamsBus{Bus: pubsub.NewMemoryBus()}, nil
+			},
+			wantNil: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -203,6 +211,14 @@ func TestSetupProsperaBus(t *testing.T) {
 			}
 		})
 	}
+}
+
+type failEnsureStreamsBus struct {
+	pubsub.Bus
+}
+
+func (*failEnsureStreamsBus) EnsureCoreStreams(ctx context.Context) error {
+	return errors.New("ensure streams failed")
 }
 
 func TestRunApp_TranscriptBatcher(t *testing.T) {
