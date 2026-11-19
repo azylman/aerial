@@ -153,7 +153,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	// 9f. executeAuthoritativeTransition fails when notifyBuildTerminal fails during continuation
 	storeCompCont, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b-cont", Status: statusCompleted}}, chunks: []model.VanadisChunk{cD}}.open()
 	boContErr := NewBuildObject("", nil).WithAuthority(storeCompCont, execErr)
-	_, errCont := boContErr.executeAuthoritativeTransition(context.Background(), "b-cont", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-0"}, nil, false)
+	_, errCont := boContErr.executeAuthoritativeTransition(context.Background(), "b-cont", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-0"}, nil, nil, false)
 	assert.Error(t, errCont)
 
 	// 9g. executeAuthoritativeTransition fails when evaluateBuildTerminalStatus fails
@@ -161,7 +161,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	cFailChunk := model.VanadisChunk{ID: "c1", BuildID: "b-fail-trans", Status: statusFailed}
 	storeTransErr, _ := dbScript{buildRow: &mockRow{b: &bFailRunning}, chunks: []model.VanadisChunk{cFailChunk}, execTag: "UPDATE 1"}.open()
 	boTransErr := NewBuildObject("", nil).WithAuthority(storeTransErr, execErr)
-	_, errTrans := boTransErr.executeAuthoritativeTransition(context.Background(), "b-fail-trans", nil, nil, false)
+	_, errTrans := boTransErr.executeAuthoritativeTransition(context.Background(), "b-fail-trans", nil, nil, nil, false)
 	assert.Error(t, errTrans)
 
 	// 10. UpdateBuild with widget sync error
@@ -241,7 +241,7 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 			if tc.nilEvidence {
 				evidence = nil
 			}
-			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1", RolloutState: evidence}, nil, false)
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1", RolloutState: evidence}, nil, nil, false)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -458,7 +458,7 @@ func TestDeploymentSuccessBeforeDelayedLifecycle(t *testing.T) {
 			assert.Equal(t, "completed", chunks[0].Status)
 			assert.Equal(t, evidence, chunks[0].RolloutState)
 			assert.Equal(t, events, bus.events)
-			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c2"}, nil, false)
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c2"}, nil, nil, false)
 			assert.NoError(t, err)
 			assert.Contains(t, out.LaunchedChunks, "action")
 		})
@@ -824,7 +824,7 @@ func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
 				eri.dispatchFn = func(context.Context, executor.BrainDispatchRequest) error { return errors.New("rejected") }
 			}
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", nil))
-			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, tc.prior, false)
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, tc.prior, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantDispatch, eri.lastDispatch != nil)
 			if tc.wantKey != "" {
@@ -1244,7 +1244,7 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 			build := model.VanadisBuild{ID: "b", Status: "running"}
 			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []model.VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
-			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, false)
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, nil, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantAcknowledged, out.LaunchedMap[tc.key])
 		})
