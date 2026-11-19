@@ -1,4 +1,4 @@
-package build
+package dag
 
 import (
 	"slices"
@@ -21,7 +21,7 @@ func runDAGTestCases(t *testing.T, tests []dagTestCase) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := normalizeAndValidateBuildDAG(tc.chunks)
+			got, err := NormalizeAndValidateBuildDAG(tc.chunks)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
@@ -248,9 +248,9 @@ func TestIsPRDependencyCodeReady(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := isPRDependencyCodeReady(tc.chunk)
+			got := IsPRDependencyCodeReady(tc.chunk)
 			if got != tc.want {
-				t.Errorf("isPRDependencyCodeReady(%+v) = %v, want %v", tc.chunk, got, tc.want)
+				t.Errorf("IsPRDependencyCodeReady(%+v) = %v, want %v", tc.chunk, got, tc.want)
 			}
 		})
 	}
@@ -260,7 +260,7 @@ func TestCheckDisjointFiles_ChunkBEmptyTargetFiles(t *testing.T) {
 	t.Parallel()
 	a := model.VanadisChunk{ID: "c1", TargetFiles: []string{"a.go"}}
 	b := model.VanadisChunk{ID: "c2", TargetFiles: nil}
-	err := checkDisjointFiles(a, b, "repo")
+	err := CheckDisjointFiles(a, b, "repo")
 	if err == nil || !strings.Contains(err.Error(), "concurrent PR chunk \"c2\" on repo \"repo\" must specify target_files") {
 		t.Fatalf("expected error on chunk b empty target files, got %v", err)
 	}
@@ -345,7 +345,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateCreateBuildInputs(tc.buildID, tc.threadID, tc.objective, tc.chunks)
+			err := ValidateCreateBuildInputs(tc.buildID, tc.threadID, tc.objective, tc.chunks)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
@@ -382,9 +382,9 @@ func TestCheckChunkDependenciesReady_ModeAndStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkChunkDependenciesReady(tc.chunk, chunks)
+			err := CheckChunkDependenciesReady(tc.chunk, chunks)
 			if (err != nil) != tc.wantErr {
-				t.Errorf("checkChunkDependenciesReady(%s) err = %v, wantErr = %v", tc.name, err, tc.wantErr)
+				t.Errorf("CheckChunkDependenciesReady(%s) err = %v, wantErr = %v", tc.name, err, tc.wantErr)
 			}
 		})
 	}
@@ -398,7 +398,7 @@ func TestNormalizeAndValidateBuildDAG_TerminalSkip(t *testing.T) {
 		{ID: "c1", Mode: "pr", Repo: "aerial", Status: "completed", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
 		{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
 	}
-	_, err := normalizeAndValidateBuildDAG(chunks)
+	_, err := NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		t.Errorf("expected valid DAG when concurrent chunk is terminal, got %v", err)
 	}
