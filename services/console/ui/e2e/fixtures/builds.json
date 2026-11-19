@@ -41,6 +41,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1500,
           "started_at": "2026-11-08T11:10:00.000Z",
@@ -67,6 +68,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794100000-c046de69-chunk-1"
+          ],
           "status": "merged",
           "pr_number": 1501,
           "started_at": "2026-11-08T11:20:00.000Z",
@@ -92,6 +96,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794100000-c046de69-chunk-2"
           ],
           "status": "in_progress",
           "started_at": "2026-11-08T11:30:00.000Z",
@@ -137,6 +144,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1510,
           "started_at": "2026-11-08T10:10:00.000Z",
@@ -162,6 +170,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794101111-bcf9fc02-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1511,
@@ -189,6 +200,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794101111-bcf9fc02-chunk-2"
+          ],
           "status": "in_progress",
           "started_at": "2026-11-08T10:30:00.000Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -213,6 +227,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794101111-bcf9fc02-chunk-3"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -258,6 +275,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1520,
           "started_at": "2026-11-08T09:10:00.000Z",
@@ -283,6 +301,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794102222-de71f158-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1521,
@@ -310,6 +331,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794102222-de71f158-chunk-2"
+          ],
           "status": "in_progress",
           "started_at": "2026-11-08T09:30:00.000Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -335,6 +359,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794102222-de71f158-chunk-3"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -359,6 +386,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794102222-de71f158-chunk-4"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -404,6 +434,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1530,
           "started_at": "2026-11-08T08:10:00.000Z",
@@ -429,6 +460,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794103333-e0fe4be9-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1531,
@@ -456,6 +490,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794103333-e0fe4be9-chunk-2"
+          ],
           "status": "in_progress",
           "started_at": "2026-11-08T08:30:00.000Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -480,6 +517,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794103333-e0fe4be9-chunk-3"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -506,6 +546,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794103333-e0fe4be9-chunk-4"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -530,6 +573,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794103333-e0fe4be9-chunk-5"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -575,6 +621,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -600,6 +647,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794104444-9e0ae287-chunk-1"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -624,6 +674,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794104444-9e0ae287-chunk-2"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -669,6 +722,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -693,6 +747,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794105555-6e79341f-chunk-1"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -738,6 +795,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -763,6 +821,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794106666-8082c0e0-chunk-1"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -787,6 +848,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794106666-8082c0e0-chunk-2"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -832,6 +896,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -856,6 +921,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794107777-e5eb4fc5-chunk-1"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -882,6 +950,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794107777-e5eb4fc5-chunk-2"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -906,6 +977,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794107777-e5eb4fc5-chunk-3"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -951,6 +1025,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -975,6 +1050,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794108888-ffba7c25-chunk-1"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -1001,6 +1079,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794108888-ffba7c25-chunk-2"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -1026,6 +1107,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794108888-ffba7c25-chunk-3"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -1050,6 +1134,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794108888-ffba7c25-chunk-4"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -1095,6 +1182,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -1119,6 +1207,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794109999-a3f1e343-chunk-1"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -1145,6 +1236,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794109999-a3f1e343-chunk-2"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -1169,6 +1263,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794109999-a3f1e343-chunk-3"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -1195,6 +1292,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794109999-a3f1e343-chunk-4"
+          ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
           "completed_at": "0001-01-01T00:00:00Z",
@@ -1219,6 +1319,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794109999-a3f1e343-chunk-5"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -1264,6 +1367,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1600,
           "started_at": "2026-11-08T01:10:00.000Z",
@@ -1289,6 +1393,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794111110-2f3c2784-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1601,
@@ -1335,6 +1442,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1610,
           "started_at": "2026-11-08T00:10:00.000Z",
@@ -1361,6 +1469,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794112221-c639e79d-chunk-1"
+          ],
           "status": "merged",
           "pr_number": 1611,
           "started_at": "2026-11-08T00:20:00.000Z",
@@ -1386,6 +1497,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794112221-c639e79d-chunk-2"
           ],
           "status": "merged",
           "pr_number": 1612,
@@ -1432,6 +1546,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1620,
           "started_at": "2026-11-07T23:10:00.000Z",
@@ -1457,6 +1572,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794113332-e3cd0e03-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1621,
@@ -1484,6 +1602,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794113332-e3cd0e03-chunk-2"
+          ],
           "status": "merged",
           "pr_number": 1622,
           "started_at": "2026-11-07T23:30:00.000Z",
@@ -1509,6 +1630,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794113332-e3cd0e03-chunk-3"
           ],
           "status": "merged",
           "pr_number": 1623,
@@ -1555,6 +1679,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1630,
           "started_at": "2026-11-07T22:10:00.000Z",
@@ -1580,6 +1705,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794114443-8e6a1430-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1631,
@@ -1607,6 +1735,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794114443-8e6a1430-chunk-2"
+          ],
           "status": "merged",
           "pr_number": 1632,
           "started_at": "2026-11-07T22:30:00.000Z",
@@ -1633,6 +1764,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794114443-8e6a1430-chunk-3"
+          ],
           "status": "merged",
           "pr_number": 1633,
           "started_at": "2026-11-07T22:40:00.000Z",
@@ -1658,6 +1792,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794114443-8e6a1430-chunk-4"
           ],
           "status": "merged",
           "pr_number": 1634,
@@ -1704,6 +1841,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1640,
           "started_at": "2026-11-07T21:10:00.000Z",
@@ -1729,6 +1867,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794115554-4c2cc643-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1641,
@@ -1756,6 +1897,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794115554-4c2cc643-chunk-2"
+          ],
           "status": "merged",
           "pr_number": 1642,
           "started_at": "2026-11-07T21:30:00.000Z",
@@ -1781,6 +1925,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794115554-4c2cc643-chunk-3"
           ],
           "status": "merged",
           "pr_number": 1643,
@@ -1808,6 +1955,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794115554-4c2cc643-chunk-4"
+          ],
           "status": "merged",
           "pr_number": 1644,
           "started_at": "2026-11-07T21:50:00.000Z",
@@ -1833,6 +1983,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794115554-4c2cc643-chunk-5"
           ],
           "status": "merged",
           "pr_number": 1645,
@@ -1879,6 +2032,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1650,
           "started_at": "2026-11-07T20:10:00.000Z",
@@ -1904,6 +2058,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794116665-62074582-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1651,
@@ -1950,6 +2107,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1660,
           "started_at": "2026-11-07T19:10:00.000Z",
@@ -1976,6 +2134,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794117776-f509b4cc-chunk-1"
+          ],
           "status": "merged",
           "pr_number": 1661,
           "started_at": "2026-11-07T19:20:00.000Z",
@@ -2001,6 +2162,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794117776-f509b4cc-chunk-2"
           ],
           "status": "merged",
           "pr_number": 1662,
@@ -2047,6 +2211,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1670,
           "started_at": "2026-11-07T18:10:00.000Z",
@@ -2072,6 +2237,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794118887-4ef38606-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1671,
@@ -2099,6 +2267,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794118887-4ef38606-chunk-2"
+          ],
           "status": "merged",
           "pr_number": 1672,
           "started_at": "2026-11-07T18:30:00.000Z",
@@ -2124,6 +2295,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794118887-4ef38606-chunk-3"
           ],
           "status": "merged",
           "pr_number": 1673,
@@ -2170,6 +2344,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1680,
           "started_at": "2026-11-07T17:10:00.000Z",
@@ -2195,6 +2370,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794119998-3af20239-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1681,
@@ -2222,6 +2400,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794119998-3af20239-chunk-2"
+          ],
           "status": "merged",
           "pr_number": 1682,
           "started_at": "2026-11-07T17:30:00.000Z",
@@ -2248,6 +2429,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794119998-3af20239-chunk-3"
+          ],
           "status": "merged",
           "pr_number": 1683,
           "started_at": "2026-11-07T17:40:00.000Z",
@@ -2273,6 +2457,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794119998-3af20239-chunk-4"
           ],
           "status": "merged",
           "pr_number": 1684,
@@ -2319,6 +2506,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1690,
           "started_at": "2026-11-07T16:10:00.000Z",
@@ -2344,6 +2532,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794121109-61f8b19c-chunk-1"
           ],
           "status": "merged",
           "pr_number": 1691,
@@ -2371,6 +2562,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794121109-61f8b19c-chunk-2"
+          ],
           "status": "merged",
           "pr_number": 1692,
           "started_at": "2026-11-07T16:30:00.000Z",
@@ -2396,6 +2590,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794121109-61f8b19c-chunk-3"
           ],
           "status": "merged",
           "pr_number": 1693,
@@ -2423,6 +2620,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794121109-61f8b19c-chunk-4"
+          ],
           "status": "merged",
           "pr_number": 1694,
           "started_at": "2026-11-07T16:50:00.000Z",
@@ -2448,6 +2648,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794121109-61f8b19c-chunk-5"
           ],
           "status": "merged",
           "pr_number": 1695,
@@ -2494,6 +2697,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1700,
           "started_at": "2026-11-07T15:10:00.000Z",
@@ -2520,6 +2724,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794122220-fe069df3-chunk-1"
+          ],
           "status": "failed",
           "started_at": "2026-11-07T15:20:00.000Z",
           "completed_at": "2026-11-07T15:28:00.000Z",
@@ -2544,6 +2751,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794122220-fe069df3-chunk-2"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -2589,6 +2799,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1710,
           "started_at": "2026-11-07T14:10:00.000Z",
@@ -2615,6 +2826,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794123331-3525486f-chunk-1"
+          ],
           "status": "failed",
           "started_at": "2026-11-07T14:20:00.000Z",
           "completed_at": "2026-11-07T14:28:00.000Z",
@@ -2639,6 +2853,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794123331-3525486f-chunk-2"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -2684,6 +2901,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1720,
           "started_at": "2026-11-07T13:10:00.000Z",
@@ -2710,6 +2928,9 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [
+            "build-1794124442-64060a7a-chunk-1"
+          ],
           "status": "failed",
           "started_at": "2026-11-07T13:20:00.000Z",
           "completed_at": "2026-11-07T13:28:00.000Z",
@@ -2734,6 +2955,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794124442-64060a7a-chunk-2"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -2779,6 +3003,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1730,
           "started_at": "2026-11-07T12:10:00.000Z",
@@ -2804,6 +3029,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794125553-2e2001b7-chunk-1"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",
@@ -2849,6 +3077,7 @@
             "Tests pass",
             "Coverage stays at 95%"
           ],
+          "depends_on": [],
           "status": "merged",
           "pr_number": 1740,
           "started_at": "2026-11-07T11:10:00.000Z",
@@ -2874,6 +3103,9 @@
           "acceptance_criteria": [
             "Tests pass",
             "Coverage stays at 95%"
+          ],
+          "depends_on": [
+            "build-1794126664-a1d717a0-chunk-1"
           ],
           "status": "pending",
           "started_at": "0001-01-01T00:00:00Z",

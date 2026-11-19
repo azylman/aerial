@@ -7,7 +7,7 @@ import { Drawer, type DrawerPanels, drawerTitle, type OpenDrawer } from './Drawe
 
 const PANELS: DrawerPanels = {
   service: ({ target }) => <p>service body {target.name}</p>,
-  build: ({ target }) => <p>build body {target.id}</p>,
+  build: ({ target }) => <p>build body {target.id}{target.chunkId ? ` chunk ${target.chunkId}` : ''}</p>,
   task: ({ target }) => <p>task body {target.id}</p>,
 };
 
@@ -37,6 +37,7 @@ describe('drawerTitle', () => {
     { name: 'service', drawer: { kind: 'service', name: 'aerial-eri' }, detail: null, want: 'DIAGNOSTICS // AERIAL-ERI' },
     { name: 'build before its detail', drawer: { kind: 'build', id: 'build-17-ab' }, detail: null, want: 'BUILD // BUILD-17-AB' },
     { name: 'build with its detail', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // SHIP IT #1' },
+    { name: 'build with chunkId keeps stable title', drawer: { kind: 'build', id: 'b-1', chunkId: 'c-1' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // SHIP IT #1' },
     { name: 'legacy entry key', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', 'Old', 'entry'), want: 'BUILD // OLD' },
     { name: 'untitled build', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', ''), want: 'BUILD // B-1' },
     { name: 'another build\'s detail', drawer: { kind: 'build', id: 'b-2' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // B-2' },
@@ -126,6 +127,14 @@ describe('Drawer', () => {
       wantActive: true,
       wantTitle: 'BUILD // SHIP IT #1',
       wantBody: 'build body b-42',
+      wantFocus: 'dialog',
+    },
+    {
+      name: 'retargets an open build drawer to a chunk',
+      steps: [{ open: BUILD }, { open: { kind: 'build', id: 'b-42', chunkId: 'c-1' } }],
+      wantActive: true,
+      wantTitle: 'BUILD // B-42',
+      wantBody: 'build body b-42 chunk c-1',
       wantFocus: 'dialog',
     },
     { name: 'opens the task panel', steps: [{ open: TASK }], wantActive: true, wantTitle: 'TASK // #42', wantBody: 'task body 42', wantFocus: 'dialog' },

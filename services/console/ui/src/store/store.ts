@@ -23,7 +23,7 @@ export type TabId = 'telemetry' | 'tasks' | 'schedules' | 'memory' | 'builds' | 
 export type DrawerState =
   | { readonly kind: 'closed' }
   | { readonly kind: 'service'; readonly name: string }
-  | { readonly kind: 'build'; readonly id: string }
+  | { readonly kind: 'build'; readonly id: string; readonly chunkId?: string }
   | { readonly kind: 'task'; readonly id: number };
 
 export interface ConsoleState {
@@ -88,7 +88,7 @@ export function fault<T>(prev: Resource<T>, error: string): Resource<T> {
 
 function sameDrawer(a: DrawerState, b: DrawerState): boolean {
   if (a.kind === 'service' && b.kind === 'service') return a.name === b.name;
-  if (a.kind === 'build' && b.kind === 'build') return a.id === b.id;
+  if (a.kind === 'build' && b.kind === 'build') return a.id === b.id && a.chunkId === b.chunkId;
   if (a.kind === 'task' && b.kind === 'task') return a.id === b.id;
   return a.kind === b.kind;
 }

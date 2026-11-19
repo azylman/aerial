@@ -292,6 +292,7 @@ const buildEntries: VanadisBuildDTO[] = BUILD_PLANS.map((plan, b) => {
       target_symbols: [`symbol${c + 1}`],
       effort: pick(['low', 'medium', 'high']),
       acceptance_criteria: ['Tests pass', 'Coverage stays at 95%'],
+      depends_on: c === 0 ? [] : [`${id}-chunk-${c}`],
       status: chunkStatus,
       ...(chunkStatus === 'merged' ? { pr_number: 1500 + b * 10 + c } : {}),
       started_at: started,

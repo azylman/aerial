@@ -222,6 +222,7 @@ export interface VanadisChunkDTO {
   readonly target_symbols?: readonly string[];
   readonly effort?: string;
   readonly acceptance_criteria?: readonly string[];
+  readonly depends_on?: readonly string[];
   readonly status: string;
   readonly pr_number?: number;
   readonly started_at: IsoTimestamp;

@@ -140,3 +140,131 @@ export function chunkPrUrl(chunk: Partial<Pick<VanadisChunkDTO, 'pr_number' | 'r
   if (!chunk.pr_number) return null;
   return `https://github.com/${chunk.repo || DEFAULT_CHUNK_REPO}/pull/${chunk.pr_number}`;
 }
+
+// ---- topological DAG layout ----
+
+export interface ChunkDagNode {
+  readonly chunk: VanadisChunkDTO;
+  readonly number: number;
+  readonly status: ChunkStatusBadge;
+  readonly rank: number;
+  readonly dependsOn: readonly string[];
+}
+
+export interface ChunkDagEdge {
+  readonly fromId: string;
+  readonly toId: string;
+  readonly fromRank: number;
+  readonly fromIndex: number;
+  readonly fromCount: number;
+  readonly toRank: number;
+  readonly toIndex: number;
+  readonly toCount: number;
+}
+
+export interface ChunkDagLayout {
+  readonly ranks: readonly (readonly ChunkDagNode[])[];
+  readonly edges: readonly ChunkDagEdge[];
+}
+
+/**
+ * Builds a topological DAG layout for Vanadis build chunks.
+ * Ranks are 0-based depth levels (0 for roots, 1 + max(parentRank) for dependents).
+ */
+export function buildChunkDag(chunks: readonly VanadisChunkDTO[]): ChunkDagLayout {
+  if (chunks.length === 0) {
+    return { ranks: [], edges: [] };
+  }
+
+  const hasExplicitDependsOn = chunks.some((c) => Array.isArray(c.depends_on));
+  const chunkIds = new Set(chunks.map((c) => c.id));
+
+  const parentMap = new Map<string, readonly string[]>();
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i]!;
+    if (hasExplicitDependsOn) {
+      const deps = Array.isArray(c.depends_on)
+        ? c.depends_on.filter((depId) => depId !== c.id && chunkIds.has(depId))
+        : [];
+      parentMap.set(c.id, deps);
+    } else {
+      const deps = i > 0 && chunks[i - 1] ? [chunks[i - 1]!.id] : [];
+      parentMap.set(c.id, deps);
+    }
+  }
+
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>();
+
+  function computeRank(id: string): number {
+    if (memo.has(id)) return memo.get(id)!;
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    const parents = parentMap.get(id) ?? [];
+    let maxParent = -1;
+    for (const pid of parents) {
+      if (visiting.has(pid)) {
+        continue;
+      }
+      const pr = computeRank(pid);
+      if (pr > maxParent) maxParent = pr;
+    }
+    visiting.delete(id);
+    const rank = maxParent >= 0 ? 1 + maxParent : 0;
+    memo.set(id, rank);
+    return rank;
+  }
+
+  for (const c of chunks) {
+    computeRank(c.id);
+  }
+
+  const nodes: ChunkDagNode[] = chunks.map((chunk, position) => ({
+    chunk,
+    number: chunkNumber(chunk, position),
+    status: chunkStatusBadge(chunk.status),
+    rank: memo.get(chunk.id) ?? 0,
+    dependsOn: parentMap.get(chunk.id) ?? [],
+  }));
+
+  let maxRank = 0;
+  for (const node of nodes) {
+    if (node.rank > maxRank) maxRank = node.rank;
+  }
+
+  const rankBuckets: ChunkDagNode[][] = Array.from({ length: maxRank + 1 }, () => []);
+  for (const node of nodes) {
+    rankBuckets[node.rank]!.push(node);
+  }
+
+  const nodeMap = new Map<string, ChunkDagNode>();
+  for (const node of nodes) {
+    nodeMap.set(node.chunk.id, node);
+  }
+
+  const edges: ChunkDagEdge[] = [];
+  for (const node of nodes) {
+    for (const parentId of node.dependsOn) {
+      const parentNode = nodeMap.get(parentId);
+      if (!parentNode) continue;
+      const fromRank = parentNode.rank;
+      const fromRankNodes = rankBuckets[fromRank] ?? [];
+      const fromIndex = fromRankNodes.findIndex((n) => n.chunk.id === parentId);
+      const toRank = node.rank;
+      const toRankNodes = rankBuckets[toRank] ?? [];
+      const toIndex = toRankNodes.findIndex((n) => n.chunk.id === node.chunk.id);
+      edges.push({
+        fromId: parentId,
+        toId: node.chunk.id,
+        fromRank,
+        fromIndex,
+        fromCount: fromRankNodes.length,
+        toRank,
+        toIndex,
+        toCount: toRankNodes.length,
+      });
+    }
+  }
+
+  return { ranks: rankBuckets, edges };
+}
