@@ -231,25 +231,270 @@ describe('BuildsView rendering cost', () => {
   });
 });
 
-describe('BuildCard opens the drawer', () => {
+describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
   it.each([
-    { name: 'click', key: null, want: 'b-q' },
-    { name: 'Enter', key: 'Enter', want: 'b-q' },
-    { name: 'Space', key: ' ', want: 'b-q' },
-    { name: 'other keys do nothing', key: 'a', want: null },
-  ])('$name', ({ key, want }) => {
+    { name: 'click', key: null, wantExpanded: true },
+    { name: 'Enter', key: 'Enter', wantExpanded: true },
+    { name: 'Space', key: ' ', wantExpanded: true },
+    { name: 'other keys do nothing', key: 'a', wantExpanded: false },
+  ])('$name toggles inline DAG expansion', ({ key, wantExpanded }) => {
     seed(payload());
     render(<BuildsView />);
-    if (key === null) fireEvent.click(card('b-q'));
-    else fireEvent.keyDown(card('b-q'), { key });
-    const drawer = useConsoleStore.getState().drawer;
-    expect(drawer.kind === 'build' ? drawer.id : null).toBe(want);
+    const target = card('b-q');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+    if (key === null) fireEvent.click(summary);
+    else fireEvent.keyDown(summary, { key });
+    expect(target.classList.contains('expanded')).toBe(wantExpanded);
+    expect(summary.getAttribute('aria-expanded')).toBe(String(wantExpanded));
+    expect(target.querySelector('.build-card-dag') !== null).toBe(wantExpanded);
+    expect(useConsoleStore.getState().drawer.kind).toBe('closed');
+    if (wantExpanded) {
+      fireEvent.click(target.querySelector('.build-dag-node[data-chunk-id="q1"]') as Element);
+      expect(useConsoleStore.getState().drawer).toEqual({ kind: 'build', id: 'b-q', chunkId: 'q1' });
+      if (key === null) fireEvent.click(summary);
+      else fireEvent.keyDown(summary, { key });
+      expect(target.classList.contains('expanded')).toBe(false);
+    }
   });
 
-  it('a card without an id does not open a drawer', () => {
+  it('clicking outer card container also toggles expansion', () => {
+    seed(payload());
+    render(<BuildsView />);
+    const target = card('b-q');
+    fireEvent.click(target);
+    expect(target.classList.contains('expanded')).toBe(true);
+    fireEvent.click(target);
+    expect(target.classList.contains('expanded')).toBe(false);
+  });
+
+  it('fetches detail fallback when expanding a chunk-less build card and renders loading, error, and empty states', async () => {
+    let rejectDetail: ((err: Error) => void) | null = null;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/builds/b-empty') {
+        return new Promise<Response>((_resolve, reject) => {
+          rejectDetail = reject;
+        });
+      }
+      return pending();
+    });
+    const chunkless = build('b-empty', 'queued', 'Chunkless Build', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(<BuildsView />);
+
+    const target = card('b-empty');
+    act(() => {
+      fireEvent.click(target.querySelector('.build-card-summary') as HTMLElement);
+    });
+    expect(target.querySelector('.overview-build-loading')?.textContent).toContain('LOADING BUILD CHUNKS...');
+
+    await act(async () => {
+      rejectDetail?.(new Error('detail failed'));
+    });
+    expect(target.querySelector('.overview-build-error')?.textContent).toContain('detail failed');
+
+    // Seed empty detail response to verify NO CHUNKS REGISTERED state
+    act(() =>
+      useConsoleStore.getState().setBuildDetail({
+        status: 'ok',
+        build: chunkless,
+        chunks: [],
+      }),
+    );
+    expect(target.querySelector('.overview-build-empty')?.textContent).toBe('NO CHUNKS REGISTERED');
+  });
+
+  it('updates inline DAG when detail resolves for an expanded chunk-less build', async () => {
+    let resolveDetail: ((res: Response) => void) | null = null;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/builds/b-live') {
+        return new Promise<Response>((resolve) => {
+          resolveDetail = resolve;
+        });
+      }
+      return pending();
+    });
+
+    const chunkless = build('b-live', 'running', 'Live Pipeline', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(<BuildsView />);
+
+    const target = card('b-live');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+    act(() => {
+      fireEvent.click(summary);
+    });
+
+    expect(target.querySelector('.overview-build-loading')).toBeTruthy();
+
+    await act(async () => {
+      resolveDetail?.(
+        await json({
+          status: 'ok',
+          build: chunkless,
+          chunks: [chunk('c1', 0, 'pending', { title: 'First chunk' })],
+        }),
+      );
+    });
+
+    const node = target.querySelector('.build-dag-node[data-chunk-id="c1"]') as HTMLElement;
+    expect(node).toBeTruthy();
+    expect(node.classList.contains('node-status-pending')).toBe(true);
+    expect(node.getAttribute('aria-label')).toContain('status PENDING');
+  });
+
+  it('does not duplicate detail requests when the drawer is open over an expanded chunk-less build card', async () => {
+    let detailCalls = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/builds/b-race') {
+        detailCalls++;
+        return json({
+          status: 'ok',
+          build: build('b-race', 'running', 'Race Build', []),
+          chunks: [chunk('r1', 0, 'running', { title: 'First chunk' })],
+        });
+      }
+      return pending();
+    });
+
+    const chunkless = build('b-race', 'running', 'Race Build', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(
+      <>
+        <BuildsView />
+        <BuildDetailPanel target={{ id: 'b-race' }} />
+      </>
+    );
+
+    const target = card('b-race');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+
+    await act(async () => {
+      fireEvent.click(summary);
+    });
+    // Initial fetch from BuildDetailPanel (and joined by BuildCardInlineDag)
+    expect(detailCalls).toBe(1);
+
+    // Set drawer state to open for this build so BuildCardInlineDag detects open drawer
+    act(() => {
+      useConsoleStore.getState().openDrawer({ kind: 'build', id: 'b-race', chunkId: 'r1' });
+    });
+
+    // Advance by 5s polling interval
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    // Exactly 1 poll fired for the interval (from BuildDetailPanel), not duplicated by BuildCardInlineDag
+    expect(detailCalls).toBe(2);
+  });
+
+  it('does not poll completed chunk-less builds once detail has settled', async () => {
+    let detailCalls = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/builds/b-term') {
+        detailCalls++;
+        return json({
+          status: 'ok',
+          build: build('b-term', 'completed', 'Finished Build', []),
+          chunks: [chunk('t1', 0, 'merged', { title: 'Done chunk' })],
+        });
+      }
+      return pending();
+    });
+
+    const chunkless = build('b-term', 'completed', 'Finished Build', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(<BuildsView />);
+
+    const target = card('b-term');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+
+    await act(async () => {
+      fireEvent.click(summary);
+    });
+    expect(detailCalls).toBe(1);
+
+    // Advance by 10s (2 intervals)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+
+    expect(detailCalls).toBe(1);
+  });
+
+  it('prefers fresher inline list chunks over matching stale cached detail from an earlier drawer session', () => {
+    useConsoleStore.getState().setBuildDetail({
+      status: 'ok',
+      build: build('b-stale', 'running', 'Stale Detail Build', []),
+      chunks: [chunk('s1', 0, 'pending', { title: 'Stale chunk' })],
+    });
+
+    const freshBuild = build('b-stale', 'running', 'Stale Detail Build', [
+      chunk('s1', 0, 'merged', { title: 'Stale chunk' }),
+    ]);
+    seed(payload([freshBuild]));
+    render(<BuildsView />);
+
+    const target = card('b-stale');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+    fireEvent.click(summary);
+
+    const node = target.querySelector('.build-dag-node[data-chunk-id="s1"]') as HTMLElement;
+    expect(node).toBeTruthy();
+    expect(node.classList.contains('node-status-merged')).toBe(true);
+    expect(node.getAttribute('aria-label')).toContain('status MERGED');
+  });
+
+  it('refetches detail when re-expanding a chunkless build card rather than treating cached detail as terminal', async () => {
+    const fetchCalls: string[] = [];
+    fetchMock.mockImplementation((url: string) => {
+      fetchCalls.push(url);
+      if (url === '/api/builds/b-reexpand') {
+        return json({
+          status: 'ok',
+          build: build('b-reexpand', 'queued', 'Reexpand Build', []),
+          chunks: [chunk('e1', 0, 'pending')],
+        });
+      }
+      return pending();
+    });
+
+    const chunkless = build('b-reexpand', 'queued', 'Reexpand Build', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(<BuildsView />);
+
+    const target = card('b-reexpand');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+
+    // First expansion: fetches detail
+    await act(async () => {
+      fireEvent.click(summary);
+    });
+    expect(fetchCalls.filter((u) => u === '/api/builds/b-reexpand').length).toBe(1);
+
+    // Collapse
+    act(() => {
+      fireEvent.click(summary);
+    });
+    expect(target.classList.contains('expanded')).toBe(false);
+
+    // Re-expand: must refetch detail
+    await act(async () => {
+      fireEvent.click(summary);
+    });
+    expect(fetchCalls.filter((u) => u === '/api/builds/b-reexpand').length).toBe(2);
+  });
+
+  it('a card without an id does not expand or open a drawer', () => {
     seed(payload([build('', 'queued', 'Anonymous', [])]));
     render(<BuildsView />);
     fireEvent.click(screen.getByText('Anonymous'));
+    expect(document.querySelector('.build-card.expanded')).toBeNull();
     expect(useConsoleStore.getState().drawer.kind).toBe('closed');
   });
 });

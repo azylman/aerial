@@ -47,6 +47,31 @@
     box-shadow: 0 6px 16px rgba(20, 20, 19, 0.08);
 }
 
+.build-card.expanded {
+    border-color: var(--accent-primary, #c2410c);
+    box-shadow: 0 6px 18px rgba(20, 20, 19, 0.08);
+}
+
+.build-card.expanded:hover {
+    border-color: var(--accent-primary, #c2410c);
+    transform: none;
+}
+
+.build-card-summary {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 0.9rem;
+    cursor: pointer;
+    min-width: 0;
+}
+
+.build-card-dag {
+    border-top: 1px solid var(--card-border);
+    padding-top: 0.85rem;
+    margin-top: 0.15rem;
+}
+
 .build-card-header {
     display: flex;
     justify-content: space-between;
