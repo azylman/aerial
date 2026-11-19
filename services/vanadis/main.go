@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,64 +22,40 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/vanadis/internal/config"
+	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
-const (
-	effortLow    = "low"
-	effortMedium = "medium"
-	jsonNull     = "null"
+const jsonNull = "null"
+
+type (
+	// Config holds runtime configuration for the Vanadis orchestrator service.
+	Config = config.Config
+	// VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
+	VanadisYAMLConfig = config.VanadisYAMLConfig
 )
 
 var (
 	// ErrBuildNotFound indicates a requested VanadisBuild does not exist in PostgreSQL.
-	ErrBuildNotFound = errors.New("vanadis build not found")
+	ErrBuildNotFound = model.ErrBuildNotFound
 	// ErrChunkNotFound indicates a requested VanadisChunk does not exist in PostgreSQL.
-	ErrChunkNotFound = errors.New("vanadis chunk not found")
+	ErrChunkNotFound = model.ErrChunkNotFound
 	// ErrBuildConflict indicates a VanadisBuild or chunk state conflict (e.g. not running or not pending).
-	ErrBuildConflict = errors.New("vanadis build state conflict")
+	ErrBuildConflict = model.ErrBuildConflict
 	// ErrInvalidBuildInput indicates invalid inputs for a VanadisBuild or chunk mutation.
-	ErrInvalidBuildInput = errors.New("invalid vanadis build input")
+	ErrInvalidBuildInput = model.ErrInvalidBuildInput
+
+	firstNonEmpty = model.FirstNonEmpty
+
+	// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
+	LoadConfig = config.LoadConfig
+	// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
+	LoadConfigFromEnv = config.LoadConfigFromEnv
 )
-
-// Config holds runtime configuration for the Vanadis orchestrator service.
-type Config struct {
-	Port         string
-	PostgresURL  string
-	BrainURL     string
-	EriURL       string
-	NATSURL      string
-	GitHubAPIURL string
-	GitHubToken  string
-	ConfigPath   string
-	DeployUIURL  string
-}
-
-// VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
-type VanadisYAMLConfig struct {
-	Port         string `yaml:"port"`
-	PostgresURL  string `yaml:"postgres_url"`
-	EriURL       string `yaml:"eri_url"`
-	NATSURL      string `yaml:"nats_url"`
-	GitHubAPIURL string `yaml:"github_api_url"`
-	GitHubToken  string `yaml:"github_token"`
-	DeployUIURL  string `yaml:"deploy_ui_url"`
-}
-
-var vanadisFallbackConfigPath = "/config/vanadis.yaml"
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
 
 func nonNilSlice[T any](s []T) []T {
 	if s == nil {
@@ -89,41 +63,6 @@ func nonNilSlice[T any](s []T) []T {
 	}
 	return s
 }
-
-// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
-func LoadConfig(configPath string) Config {
-	var fileCfg VanadisYAMLConfig
-	target := strings.TrimSpace(configPath)
-	if fi, err := os.Stat(target); err != nil || fi.Size() == 0 {
-		target = ""
-		if fi, err := os.Stat(vanadisFallbackConfigPath); err == nil && fi.Size() > 0 {
-			target = vanadisFallbackConfigPath
-		}
-	}
-	if target != "" {
-		if data, err := os.ReadFile(target); err == nil {
-			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
-				log.Printf("[vanadis] Warning: failed to parse yaml config at %s: %v", target, err)
-			}
-		}
-	}
-	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), strings.TrimSpace(fileCfg.PostgresURL))
-	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL)), "/")
-	return Config{
-		Port:         firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
-		PostgresURL:  pgURL,
-		BrainURL:     eriURL,
-		EriURL:       eriURL,
-		NATSURL:      firstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
-		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
-		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
-		ConfigPath:   strings.TrimSpace(configPath),
-		DeployUIURL:  strings.TrimRight(strings.TrimSpace(fileCfg.DeployUIURL), "/"),
-	}
-}
-
-// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
-func LoadConfigFromEnv() Config { return LoadConfig(os.Getenv("CONFIG_PATH")) }
 
 // ExecuteChunkArgs defines the job payload for executing a single Vanadis build chunk.
 type ExecuteChunkArgs struct {
@@ -133,122 +72,25 @@ type ExecuteChunkArgs struct {
 	ChunkID    string `json:"chunk_id,omitempty"`
 }
 
-func capChunkEffort(effort string) string {
-	if strings.EqualFold(strings.TrimSpace(effort), "low") {
-		return effortLow
-	}
-	return effortMedium
-}
+type (
+	// VanadisBuild represents a multi-chunk autonomous engineering build run.
+	VanadisBuild = model.VanadisBuild
+	// VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
+	VanadisChunk = model.VanadisChunk
+	// VanadisBuildEntry represents a summarized VanadisBuild including overall queue state and chunk aggregates.
+	VanadisBuildEntry = model.VanadisBuildEntry
+)
 
-func normalizeChunkEffort(effort string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "", effortMedium, "high":
-		return effortMedium, nil
-	case effortLow:
-		return effortLow, nil
-	default:
-		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
-	}
-}
-
-// VanadisBuild represents a multi-chunk autonomous engineering build run.
-type VanadisBuild struct {
-	ID              string    `json:"id"`
-	ThreadID        string    `json:"thread_id"`
-	Tier            int       `json:"tier"`
-	Title           string    `json:"title"`
-	Objective       string    `json:"objective"`
-	SharedContext   string    `json:"shared_context,omitempty"`
-	Status          string    `json:"status"`
-	StatusMessageID string    `json:"status_message_id,omitempty"`
-	Quiet           bool      `json:"quiet"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-// VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
-type VanadisChunk struct {
-	ID                 string                 `json:"id"`
-	BuildID            string                 `json:"build_id"`
-	ChunkIndex         int                    `json:"chunk_index"`
-	Mode               string                 `json:"mode"`
-	Repo               string                 `json:"repo,omitempty"`
-	Title              string                 `json:"title"`
-	Instructions       string                 `json:"instructions"`
-	TargetFiles        []string               `json:"target_files"`
-	TargetSymbols      []string               `json:"target_symbols"`
-	Effort             string                 `json:"effort"`
-	AcceptanceCriteria []string               `json:"acceptance_criteria"`
-	Status             string                 `json:"status"`
-	PRNumber           int                    `json:"pr_number,omitempty"`
-	StallNudges        int                    `json:"stall_nudges,omitempty"`
-	DependsOn          []string               `json:"depends_on"`
-	CIFailCount        int                    `json:"ci_fail_count"`
-	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
-	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
-	Banner             string                 `json:"banner,omitempty"`
-	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
-	DeployAwakeableID  string                 `json:"deploy_awakeable_id,omitempty"`
-	StartedAt          time.Time              `json:"started_at,omitempty"`
-	CompletedAt        time.Time              `json:"completed_at,omitempty"`
-	CreatedAt          time.Time              `json:"created_at"`
-	UpdatedAt          time.Time              `json:"updated_at"`
-}
-
-// VanadisBuildEntry represents a summarized VanadisBuild including overall queue state and chunk aggregates.
-type VanadisBuildEntry struct {
-	VanadisBuild
-
-	QueueState      string         `json:"queue_state"`
-	TotalChunks     int            `json:"total_chunks"`
-	CompletedChunks int            `json:"completed_chunks"`
-	RunningChunks   int            `json:"running_chunks"`
-	PendingChunks   int            `json:"pending_chunks"`
-	FailedChunks    int            `json:"failed_chunks"`
-	Chunks          []VanadisChunk `json:"chunks"`
-}
-
-// ClassifyBuildQueueState computes the overall queue state ("running", "queued", or "completed") based on buildStatus and child chunks.
-func ClassifyBuildQueueState(buildStatus string, chunks []VanadisChunk) string {
-	switch strings.ToLower(strings.TrimSpace(buildStatus)) {
-	case statusCompleted, statusMerged, statusFailed, statusCancelled, "canceled":
-		return statusCompleted
-	case statusRunning:
-		for _, c := range chunks {
-			if strings.ToLower(strings.TrimSpace(c.Status)) != statusPending {
-				return statusRunning
-			}
-		}
-		if len(chunks) > 0 {
-			return statusQueued
-		}
-		return statusRunning
-	default:
-		return statusQueued
-	}
-}
-
-// SummarizeBuildEntry constructs a VanadisBuildEntry with non-nil chunks, chunk status counts, and computed queue state.
-func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuildEntry {
-	chunks = nonNilSlice(chunks)
-	var completed, running, pending, failed int
-	for _, c := range chunks {
-		switch strings.ToLower(strings.TrimSpace(c.Status)) {
-		case statusCompleted, statusMerged:
-			completed++
-		case statusRunning, statusCoding, statusPROpened, statusDeploying:
-			running++
-		case statusFailed:
-			failed++
-		case statusPending:
-			pending++
-		}
-	}
-	return VanadisBuildEntry{
-		VanadisBuild: build, QueueState: ClassifyBuildQueueState(build.Status, chunks),
-		TotalChunks: len(chunks), CompletedChunks: completed, RunningChunks: running, PendingChunks: pending, FailedChunks: failed, Chunks: chunks,
-	}
-}
+var (
+	capChunkEffort = model.CapChunkEffort
+	// NormalizeChunkEffort validates and normalizes a chunk effort value.
+	NormalizeChunkEffort = model.NormalizeChunkEffort
+	normalizeChunkEffort = model.NormalizeChunkEffort
+	// ClassifyBuildQueueState computes the overall queue state ("running", "queued", or "completed") based on buildStatus and child chunks.
+	ClassifyBuildQueueState = model.ClassifyBuildQueueState
+	// SummarizeBuildEntry constructs a VanadisBuildEntry with non-nil chunks, chunk status counts, and computed queue state.
+	SummarizeBuildEntry = model.SummarizeBuildEntry
+)
 
 // VanadisStore defines the persistence contract for Vanadis builds and chunks.
 type VanadisStore interface {
@@ -275,62 +117,22 @@ func NewPostgresVanadisStore(db pgxQueryExecer) *PostgresVanadisStore {
 	return &PostgresVanadisStore{db: db}
 }
 
-func normalizeRepo(repo string) string {
-	return strings.TrimSpace(repo)
-}
+var (
+	// NormalizeRepo trims whitespace from a repository reference.
+	NormalizeRepo = model.NormalizeRepo
+	normalizeRepo = model.NormalizeRepo
+
+	normalizeChunkMode = model.NormalizeChunkMode
+
+	// ValidateChunkModeAndRepo validates the mode/repo/target combination for chunk idx.
+	ValidateChunkModeAndRepo = model.ValidateChunkModeAndRepo
+
+	isValidVanadisChunkID = model.IsValidVanadisChunkID
+)
 
 const (
 	serviceName = "vanadis"
 )
-
-func normalizeChunkMode(raw string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "pr":
-		return "pr", nil
-	case chunkModeAction:
-		return chunkModeAction, nil
-	default:
-		return "", fmt.Errorf("invalid chunk mode %q: must be 'pr' or 'action'", raw)
-	}
-}
-
-func validateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
-	mode, err := normalizeChunkMode(modeStr)
-	if err != nil {
-		return fmt.Errorf("chunk[%d] %w", idx, err)
-	}
-	switch mode {
-	case "pr":
-		if normalizeRepo(repo) == "" {
-			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
-		}
-	case chunkModeAction:
-		if strings.TrimSpace(repo) != "" {
-			return fmt.Errorf("chunk[%d] action chunk must have empty repo", idx)
-		}
-		if len(targetFiles) > 0 {
-			return fmt.Errorf("chunk[%d] action chunk must not specify target_files", idx)
-		}
-		if len(targetSymbols) > 0 {
-			return fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", idx)
-		}
-	}
-	return nil
-}
-
-func isValidVanadisChunkID(id string) bool {
-	id = strings.TrimSpace(id)
-	if len(id) < 1 || len(id) > 120 {
-		return false
-	}
-	for i := range len(id) {
-		c := id[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
-			return false
-		}
-	}
-	return true
-}
 
 // GetBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
 func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
@@ -505,37 +307,18 @@ func isNumericSnowflake(s string) bool {
 	return true
 }
 
-// CreateChunkInput defines a single chunk in a CreateBuildRequest.
-type CreateChunkInput struct {
-	ID                 string   `json:"id"`
-	Mode               string   `json:"mode,omitempty"`
-	Repo               string   `json:"repo,omitempty"`
-	Title              string   `json:"title"`
-	Instructions       string   `json:"instructions"`
-	TargetFiles        []string `json:"target_files"`
-	TargetSymbols      []string `json:"target_symbols"`
-	Effort             string   `json:"effort,omitempty"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	DependsOn          []string `json:"depends_on"`
-}
+type (
+	// CreateChunkInput defines a single chunk in a CreateBuildRequest.
+	CreateChunkInput = model.CreateChunkInput
+	// CreateBuildRequest defines the JSON request body for POST /builds.
+	CreateBuildRequest = model.CreateBuildRequest
+)
 
-// CreateBuildRequest defines the JSON request body for POST /builds.
-type CreateBuildRequest struct {
-	ID            string             `json:"id"`
-	ThreadID      string             `json:"thread_id"`
-	Tier          int                `json:"tier"`
-	Title         string             `json:"title"`
-	Objective     string             `json:"objective"`
-	SharedContext string             `json:"shared_context,omitempty"`
-	Quiet         bool               `json:"quiet"`
-	Chunks        []CreateChunkInput `json:"chunks"`
-}
-
-func generateBuildID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
-}
+var (
+	// GenerateBuildID generates a unique build identifier.
+	GenerateBuildID = model.GenerateBuildID
+	generateBuildID = model.GenerateBuildID
+)
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -607,44 +390,6 @@ func (s *VanadisServer) Routes() http.Handler { return SetupMux(s) }
 
 func (*VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
-}
-
-func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {
-	chunks := make([]VanadisChunk, len(rawChunks))
-	for i, c := range rawChunks {
-		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
-		if title == "" || instructions == "" {
-			return nil, fmt.Errorf("chunk[%d] title and instructions are required", i)
-		}
-		chunkID := firstNonEmpty(strings.TrimSpace(c.ID), fmt.Sprintf("%s-chunk-%d", buildID, i+1))
-		if !isValidVanadisChunkID(chunkID) {
-			return nil, fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
-		}
-		mode, err := normalizeChunkMode(c.Mode)
-		if err != nil {
-			return nil, fmt.Errorf("chunk[%d] %w", i, err)
-		}
-		if valErr := validateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); valErr != nil {
-			return nil, valErr
-		}
-		repo := ""
-		if mode == "pr" {
-			repo = normalizeRepo(c.Repo)
-		}
-		effort, err := normalizeChunkEffort(c.Effort)
-		if err != nil {
-			return nil, fmt.Errorf("chunk[%d] invalid effort: %w", i, err)
-		}
-		status := statusPending
-		var startedAt time.Time
-		chunks[i] = VanadisChunk{
-			ID: chunkID, BuildID: buildID, ChunkIndex: i, Mode: mode,
-			Repo: repo, Title: title, Instructions: instructions,
-			TargetFiles: nonNilSlice(c.TargetFiles), TargetSymbols: nonNilSlice(c.TargetSymbols), Effort: effort,
-			AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), Status: status, DependsOn: c.DependsOn, StartedAt: startedAt, CreatedAt: now, UpdatedAt: now,
-		}
-	}
-	return normalizeAndValidateBuildDAG(chunks)
 }
 
 func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request) {

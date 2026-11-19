@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,35 +90,42 @@ func TestRepoMatching_TableDriven(t *testing.T) {
 	}
 }
 
-func TestResolveChunkRef(t *testing.T) {
-	chunks := []VanadisChunk{
-		{ID: "chunk-a", ChunkIndex: 0},
-		{ID: "chunk-b", ChunkIndex: 1},
-		{ID: "10", ChunkIndex: 2},
+func TestValidateUpdateChunkInput_Validation(t *testing.T) {
+	t.Parallel()
+
+	strPtr := func(s string) *string { return &s }
+
+	// validateUpdateChunkInput tests
+	_, err := validateUpdateChunkInput("", "c1", UpdateChunkRequest{})
+	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
+		t.Fatalf("expected error on empty buildID, got %v", err)
 	}
-	tests := []struct {
-		name     string
-		chunks   []VanadisChunk
-		chunkRef string
-		wantIdx  int
-	}{
-		{"empty_ref", chunks, "", -1},
-		{"whitespace_ref", chunks, "   ", -1},
-		{"match_id_exact", chunks, "chunk-a", 0},
-		{"match_id_with_whitespace", chunks, "  chunk-b  ", 1},
-		{"match_index_string", chunks, "0", 0},
-		{"match_index_second", chunks, "1", 1},
-		{"match_id_takes_precedence_over_index", chunks, "10", 2},
-		{"no_match_index_out_of_bounds", chunks, "99", -1},
-		{"no_match_unknown_id", chunks, "unknown", -1},
-		{"empty_slice", nil, "chunk-a", -1},
+	_, err = validateUpdateChunkInput("b1", "", UpdateChunkRequest{})
+	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
+		t.Fatalf("expected error on empty chunkRef, got %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := resolveChunkRef(tc.chunks, tc.chunkRef)
-			if got != tc.wantIdx {
-				t.Errorf("resolveChunkRef() = %d, want %d", got, tc.wantIdx)
-			}
-		})
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{})
+	if err == nil || !strings.Contains(err.Error(), "at least one updated field are required") {
+		t.Fatalf("expected error on empty fields, got %v", err)
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("  ")})
+	if err == nil || !strings.Contains(err.Error(), "mode cannot be empty string") {
+		t.Fatalf("expected error on empty mode string, got %v", err)
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("invalid-mode")})
+	if err == nil {
+		t.Fatal("expected error on invalid mode")
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "huge"})
+	if err == nil {
+		t.Fatal("expected error on invalid effort")
+	}
+	effort, err := validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "high"})
+	if err != nil || effort != "medium" {
+		t.Fatalf("expected medium effort, got %q (err: %v)", effort, err)
+	}
+	effort, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Title: "New Title"})
+	if err != nil || effort != "" {
+		t.Fatalf("expected empty effort, got %q (err: %v)", effort, err)
 	}
 }
