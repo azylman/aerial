@@ -1,7 +1,8 @@
-import { type KeyboardEvent, type MouseEvent, memo, useEffect, useState } from 'react';
+import { type KeyboardEvent, type MouseEvent, memo, useCallback, useMemo, useState } from 'react';
 import type { VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
 import { GlyphText } from '../../components/Glyph';
 import { useLiveNow } from '../../hooks/useLiveNow';
+import { usePollingSync } from '../../hooks/usePollingSync';
 import {
   type BuildChunkStats,
   classifyBuildQueueState,
@@ -10,9 +11,8 @@ import {
   getBuildTimingInfo,
 } from '../../lib/builds';
 import { useConsoleStore } from '../../store/store';
-import { BuildDagGraph } from './BuildDetail';
+import { BUILD_DETAIL_POLL_MS, BuildDagGraph } from './BuildDetail';
 import { syncBuildDetail } from './data';
-import { resolveBuildDetail } from './model';
 
 const EMPTY_CHUNKS: readonly VanadisChunkDTO[] = Object.freeze([]);
 
@@ -22,21 +22,27 @@ function BuildCardInlineDag({ build }: { readonly build: VanadisBuildDTO }) {
   const hasInlineChunks = Boolean(build.chunks && build.chunks.length > 0);
   const isDetailMatch = (detailData?.build?.id ?? detailData?.entry?.id) === build.id;
 
-  useEffect(() => {
-    if (!build.id || hasInlineChunks || isDetailMatch) return;
-    setFailed(null);
-    const controller = new AbortController();
-    void syncBuildDetail(build.id)(controller.signal).finally(() => {
-      if (!controller.signal.aborted) {
-        const err = useConsoleStore.getState().builds.detail.error;
-        if (err) setFailed(err);
+  const poll = useMemo(() => (build.id ? syncBuildDetail(build.id) : null), [build.id]);
+  const fetchDetail = useCallback(
+    async (signal: AbortSignal) => {
+      if (!poll) return;
+      setFailed(null);
+      await poll(signal);
+      if (!signal.aborted) {
+        const latest = useConsoleStore.getState().builds.detail;
+        if (latest.error) setFailed(latest.error);
       }
-    });
-    return () => controller.abort();
-  }, [build.id, hasInlineChunks, isDetailMatch]);
+    },
+    [poll],
+  );
 
-  const model = resolveBuildDetail(build.id, detailData, build);
-  const resolvedChunks = model?.chunks ?? EMPTY_CHUNKS;
+  usePollingSync(fetchDetail, BUILD_DETAIL_POLL_MS, Boolean(build.id && !hasInlineChunks));
+
+  const resolvedChunks = hasInlineChunks
+    ? (build.chunks ?? EMPTY_CHUNKS)
+    : isDetailMatch
+      ? (detailData?.chunks ?? detailData?.build?.chunks ?? EMPTY_CHUNKS)
+      : EMPTY_CHUNKS;
   const isLoaded = hasInlineChunks || isDetailMatch;
   const hasFailed = !isLoaded && failed !== null;
   const isPending = !isLoaded && !hasFailed;
