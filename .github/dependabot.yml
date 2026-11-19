@@ -51,6 +51,7 @@ updates:
       - "/services/vanadis-nats"
       - "/services/coverage-ingest"
       - "/services/synapse"
+      - "/services/transcripts"
     schedule:
       interval: "weekly"
       day: "saturday"

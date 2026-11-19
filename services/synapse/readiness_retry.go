@@ -1,41 +1,14 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
-type readinessRetryStore interface {
-	RetryPRReadiness(ctx context.Context, repo, merge string, number int) (map[string]kustomizationRequest, error)
-}
-
-// RetryPRReadiness retries the original gate, never creates a new deployment generation.
-// Repeated requests while deploying retain partial progress and original request identities.
-func (r *PostgresPRRegistry) RetryPRReadiness(ctx context.Context, repo, merge string, number int) (map[string]kustomizationRequest, error) {
-	if r == nil || r.pool == nil || normalizeRepo(repo) == "" || strings.TrimSpace(merge) == "" || number <= 0 {
-		return map[string]kustomizationRequest{}, nil
-	}
-	const query = `UPDATE pr_registry SET status = 'deploying',
- metadata = CASE WHEN status = 'deploying' THEN metadata ELSE metadata - 'deployed_kustomizations' END,
- updated_at = CURRENT_TIMESTAMP
- WHERE repo = $1 AND pr_number = $2 AND merge_sha = $3
- AND status IN ('deployed', 'deploy_failed', 'deploying')
- AND jsonb_typeof(metadata->'kustomization_requests') = 'object'
- AND metadata->'kustomization_requests' <> '{}'::jsonb
- RETURNING metadata->'kustomization_requests';`
-	var body []byte
-	found, err := r.queryRowScan(ctx, "retry readiness", query, []any{&body}, normalizeRepo(repo), number, strings.TrimSpace(merge))
-	if err != nil || !found {
-		return nil, err
-	}
-	var requests map[string]kustomizationRequest
-	err = json.Unmarshal(body, &requests)
-	return requests, err
-}
+type readinessRetryStore = model.ReadinessRetryStore
 
 func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Request) {
 	var req struct {

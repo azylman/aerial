@@ -36,3 +36,11 @@ func TestRouterServerNilConfigGuards(t *testing.T) {
 		t.Fatalf("unexpected lookup: %q, %q, %v", ch, mention, ok)
 	}
 }
+
+func TestConfigFromEnvForwarding(t *testing.T) {
+	_ = LoadConfigFromEnv()
+	_, _ = loadConfigFromEnvStrict()
+	if !synapseRestartRequired(nil, nil) {
+		t.Fatal("expected restart required for nil configs")
+	}
+}
