@@ -361,7 +361,7 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
-	handler := NewToolHandler(&Config{Timezone: "UTC"}, db)
+	handler := tools.NewToolHandler(&Config{Timezone: "UTC"}, db)
 
 	// Initially empty
 	emptyOut, err := handler.ListSchedules(ctx, ListSchedulesArgs{})

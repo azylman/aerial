@@ -19,32 +19,37 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/haro/internal/config"
+	"github.com/azylman/aerial/services/haro/internal/dispatch"
+	"github.com/azylman/aerial/services/haro/internal/model"
+	"github.com/azylman/aerial/services/haro/internal/server"
+	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/ticker"
+	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
 var (
-	openDBFn = NewDB
+	openDBFn = store.NewDB
 	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 		return pubsub.NewJetStreamBus(ctx, url)
 	}
 )
 
-func initHaroJetStream(ctx context.Context, server *Server, database *sql.DB, natsURL string) pubsub.Bus {
-	return initHaroJetStreamWithFactory(ctx, server, database, natsURL, newBusFn)
+func initHaroJetStream(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string) pubsub.Bus {
+	return initHaroJetStreamWithFactory(ctx, srv, database, natsURL, newBusFn)
 }
 
 // configureServerEventBus wires the JetStream event bus into the server's
-// dispatcher via the exported internal/server seam; a type alias grants
-// package main no access to Server internals, so the assertion lives inside
-// Server.ConfigureEventBus.
-func configureServerEventBus(server *Server, b pubsub.Bus) {
-	if server == nil {
+// dispatcher via the exported internal/server seam.
+func configureServerEventBus(srv *server.Server, b pubsub.Bus) {
+	if srv == nil {
 		return
 	}
-	server.ConfigureEventBus(b)
+	srv.ConfigureEventBus(b)
 }
 
-func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
 		return nil
@@ -58,28 +63,28 @@ func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database 
 		log.Printf("[Haro] warning: failed to ensure core streams: %v", err)
 	}
 	if _, err := b.ConsumeQueue(ctx, "aerial.dispatch.*", "haro-dispatch", func(msgCtx context.Context, msg pubsub.Message) error {
-		return HandleDispatchOutcome(msgCtx, database, msg)
+		return ticker.HandleDispatchOutcome(msgCtx, database, msg)
 	}); err != nil {
 		log.Printf("[Haro] warning: failed to subscribe haro-dispatch: %v", err)
 	} else {
 		log.Println("[Haro] Subscribed haro-dispatch queue consumer to aerial.dispatch.*")
 	}
 	if _, err := b.ConsumeQueue(ctx, pubsub.SubjectHaroOneShotJob, "haro-oneshot", func(msgCtx context.Context, msg pubsub.Message) error {
-		return HandleOneShotJob(msgCtx, server, database, msg)
+		return server.HandleOneShotJob(msgCtx, srv, database, msg)
 	}); err != nil {
 		log.Printf("[Haro] warning: failed to subscribe haro-oneshot: %v", err)
 	} else {
 		log.Println("[Haro] Subscribed haro-oneshot queue consumer to " + pubsub.SubjectHaroOneShotJob)
 	}
-	configureServerEventBus(server, b)
-	if server != nil {
+	configureServerEventBus(srv, b)
+	if srv != nil {
 		if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
 			var ev pubsub.ExternalEvent
 			if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
 				log.Printf("[Haro] warning: failed to unmarshal external event: %v", unmarshalErr)
 				return nil
 			}
-			if err := server.HandleExternalEvent(msgCtx, ev); err != nil {
+			if err := srv.HandleExternalEvent(msgCtx, ev); err != nil {
 				if msg.NumDelivered() < 5 {
 					return err
 				}
@@ -96,11 +101,11 @@ func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database 
 	return b
 }
 
-func RunApp(ctx context.Context, cfg *Config) error {
+func RunApp(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("app: config cannot be nil")
 	}
-	RegisterConfigTokens(cfg)
+	config.RegisterConfigTokens(cfg)
 	port := strings.TrimSpace(cfg.Port)
 	if port == "" {
 		return fmt.Errorf("app: port cannot be empty")
@@ -119,22 +124,22 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
 	// and use-after-close on database shutdown.
-	dispatcher := NewHTTPPromptDispatcher(cfg.EriURL)
+	dispatcher := dispatch.NewHTTPPromptDispatcher(cfg.EriURL)
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	var tickerWg sync.WaitGroup
 	tickerWg.Go(func() {
-		ticker := NewTicker(database, dispatcher, 30*time.Second)
-		ticker.Start(tickerCtx)
+		t := ticker.NewTicker(database, dispatcher, 30*time.Second)
+		t.Start(tickerCtx)
 	})
 	defer func() {
 		tickerCancel()
 		tickerWg.Wait()
 	}()
 
-	toolHandler := NewToolHandler(cfg, database)
-	server := NewServer(toolHandler, dispatcher)
+	toolHandler := tools.NewToolHandler(cfg, database)
+	srv := server.NewServer(toolHandler, dispatcher)
 
-	bus := initHaroJetStream(ctx, server, database, cfg.NATSURL)
+	bus := initHaroJetStream(ctx, srv, database, cfg.NATSURL)
 	defer func() {
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {
@@ -145,14 +150,14 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,
-		Handler:           server.Routes(),
+		Handler:           srv.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, RedactDSN(cfg.DatabaseURL))
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, model.RedactDSN(cfg.DatabaseURL))
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
 		close(errChan)
@@ -177,7 +182,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 }
 
 var (
-	configPath = defaultConfigPath
+	configPath = config.DefaultConfigPath
 	runAppFn   = RunApp
 	exitFn     = log.Fatalf
 )
@@ -187,8 +192,8 @@ func main() {
 		Level: slog.LevelInfo,
 	}))))
 
-	resolvedPath := ResolveConfigPath(configPath)
-	cfg, err := LoadConfig(resolvedPath)
+	resolvedPath := config.ResolveConfigPath(configPath)
+	cfg, err := config.LoadConfig(resolvedPath)
 	if err != nil {
 		exitFn("Fatal configuration error: %v", err)
 		return
