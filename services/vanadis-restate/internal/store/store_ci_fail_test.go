@@ -17,35 +17,76 @@ func buildRow(id, status string) pgx.Row {
 	return valuesRow(id, "thread", 3, "title", "objective", "", status, "", false, time.Time{}, time.Time{})
 }
 
+// lifecycleStampFake simulates the completed_at CASE of the lifecycle status
+// write: merged stamps an unknown merge time, deploying preserves the stamp
+// without ever creating one, and every other status clears it.
+type lifecycleStampFake struct {
+	stamp     time.Time
+	write     time.Time
+	query     string
+	tag       string
+	failWrite bool
+}
+
+func (f *lifecycleStampFake) exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if f.failWrite {
+		return pgconn.CommandTag{}, errors.New("database unavailable")
+	}
+	f.query = query
+	if status, ok := args[0].(string); ok {
+		switch status {
+		case "merged":
+			if f.stamp.IsZero() {
+				f.stamp = f.write
+			}
+		case "deploying":
+			// Preserve, never create: an unknown merge stamp stays unknown.
+		default:
+			f.stamp = time.Time{}
+		}
+	}
+	return pgconn.NewCommandTag(f.tag), nil
+}
+
 func TestUpdatePRLifecycleStatus(t *testing.T) {
 	t.Parallel()
+	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	writeStamp := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name, id, tag      string
-		nilDB, execFailure bool
-		wantErr            bool
+		name, id, status, tag, wantSQL string
+		nilDB, execFailure             bool
+		initial, wantStamp             time.Time
+		wantErr                        bool
 	}{
-		{"nil database", "c1", "UPDATE 1", true, false, true},
-		{"empty id", "", "UPDATE 1", false, false, true},
-		{"eligible merge", "c1", "UPDATE 1", false, false, false},
-		{"terminal chunk", "c1", "UPDATE 0", false, false, true},
-		{"persistence failure", "c1", "", false, true, true},
+		{name: "nil database", id: "c1", status: "merged", tag: "UPDATE 1", nilDB: true, wantErr: true},
+		{name: "empty id", id: "", status: "merged", tag: "UPDATE 1", wantErr: true},
+		{name: "eligible merge stamps write time", id: "c1", status: "merged", tag: "UPDATE 1", wantSQL: "WHEN $1 = 'merged' THEN COALESCE(completed_at", wantStamp: writeStamp},
+		{name: "merge keeps existing stamp", id: "c1", status: "merged", tag: "UPDATE 1", wantSQL: "WHEN $1 = 'merged' THEN COALESCE(completed_at", initial: mergeBase, wantStamp: mergeBase},
+		{name: "deploying keeps merge stamp", id: "c1", status: "deploying", tag: "UPDATE 1", wantSQL: "WHEN $1 = 'deploying' THEN completed_at", initial: mergeBase, wantStamp: mergeBase},
+		{name: "deploying never fabricates stamp", id: "c1", status: "deploying", tag: "UPDATE 1", wantSQL: "WHEN $1 = 'deploying' THEN completed_at", wantStamp: time.Time{}},
+		{name: "other status clears stamp", id: "c1", status: "conflict", tag: "UPDATE 1", wantSQL: "ELSE NULL END", initial: mergeBase, wantStamp: time.Time{}},
+		{name: "terminal chunk", id: "c1", status: "merged", tag: "UPDATE 0", wantErr: true},
+		{name: "persistence failure", id: "c1", status: "merged", tag: "", execFailure: true, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := New(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-				if tc.execFailure {
-					return pgconn.CommandTag{}, errors.New("database unavailable")
-				}
-				return pgconn.NewCommandTag(tc.tag), nil
-			}})
+			fake := &lifecycleStampFake{stamp: tc.initial, write: writeStamp, tag: tc.tag, failWrite: tc.execFailure}
+			st := New(mockDB{execFn: fake.exec})
 			if tc.nilDB {
 				st = &Store{}
 			}
-			err := st.UpdatePRLifecycleStatus(context.Background(), tc.id, "merged")
+			err := st.UpdatePRLifecycleStatus(context.Background(), tc.id, tc.status)
 			assert.Equal(t, tc.wantErr, err != nil)
 			if tc.tag == "UPDATE 0" {
 				assert.ErrorIs(t, err, ErrPRTransitionSkipped)
+			}
+			if tc.wantErr {
+				return
+			}
+			assert.True(t, fake.stamp.Equal(tc.wantStamp), "completed_at = %v, want %v", fake.stamp, tc.wantStamp)
+			if tc.wantSQL != "" {
+				assert.Contains(t, fake.query, tc.wantSQL)
 			}
 		})
 	}
