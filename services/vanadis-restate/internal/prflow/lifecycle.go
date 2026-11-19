@@ -126,8 +126,11 @@ func (f *Flow) DispatchChunkRemediationForChunk(ctx context.Context, bld *model.
 	})
 }
 
-// notifyChunkFailure cancels active work and fans out failure notifications.
-func (f *Flow) notifyChunkFailure(ctx context.Context, bld model.VanadisBuild, chunkID, reason string) error {
+// NotifyChunkFailure cancels active work and fans out failure notifications.
+func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, chunkID, reason string) error {
+	if f == nil || f.Exec == nil {
+		return nil
+	}
 	if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
@@ -317,7 +320,7 @@ func (f *Flow) HandleClosedPREvent(ctx context.Context, chunkID string, ev pubsu
 		return fErr
 	}
 	if failed && bld != nil && bld.Status == statusFailed && f.Exec != nil {
-		if err := f.notifyChunkFailure(ctx, *bld, chunkID, "pr_closed_unmerged"); err != nil {
+		if err := f.NotifyChunkFailure(ctx, *bld, chunkID, "pr_closed_unmerged"); err != nil {
 			return err
 		}
 	}
