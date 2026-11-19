@@ -81,6 +81,8 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if bus != nil {
 		ingester.publish = NewBusIngester(store, bus).publish
 	}
+	stopSummarizer := startSummarizerLoop(ctx, store, cfg)
+	defer stopSummarizer()
 
 	server := NewServer(store)
 	httpServer := &http.Server{
@@ -112,6 +114,42 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		return err
 	}
 	return nil
+}
+
+// startSummarizerLoop runs the dark per-stack idle summarizer in the
+// background. Disabled configs (the default) return a no-op stop and start
+// nothing; enabled configs sweep RunOnce on an interval until ctx ends.
+func startSummarizerLoop(ctx context.Context, store *Store, cfg *Config) func() {
+	if cfg == nil || store == nil || !cfg.Summarizer.Enabled {
+		return func() {}
+	}
+	llm := NewLLMClient(cfg.Summarizer.EriLLMURL, nil)
+	embedder := NewEmbedder(cfg.Summarizer.SensesURL, cfg.Summarizer.SensesModel, nil)
+	summarizer := NewSummarizer(store, llm, embedder, cfg.Summarizer)
+	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		if _, err := summarizer.RunOnce(loopCtx); err != nil {
+			log.Printf("[Transcripts] summarizer sweep error: %v", err)
+		}
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := summarizer.RunOnce(loopCtx); err != nil {
+					log.Printf("[Transcripts] summarizer sweep error: %v", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 func initTranscriptsJetStream(ctx context.Context, ingester *Ingester, natsURL string) pubsub.Bus {

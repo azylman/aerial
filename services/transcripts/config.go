@@ -21,10 +21,11 @@ const DefaultStack = "aerial"
 
 // Config represents runtime configuration for the transcripts indexer.
 type Config struct {
-	Port        string `yaml:"port"`
-	Stack       string `yaml:"stack"`
-	DatabaseURL string `yaml:"database_url"`
-	NATSURL     string `yaml:"nats_url"`
+	Port        string           `yaml:"port"`
+	Stack       string           `yaml:"stack"`
+	DatabaseURL string           `yaml:"database_url"`
+	NATSURL     string           `yaml:"nats_url"`
+	Summarizer  SummarizerConfig `yaml:"summarizer"`
 }
 
 var localConfigPath = "/local/config.yaml"
@@ -63,10 +64,11 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 	var ycfg struct {
-		Port        string `yaml:"port"`
-		Stack       string `yaml:"stack"`
-		DatabaseURL string `yaml:"database_url"`
-		NATSURL     string `yaml:"nats_url"`
+		Port        string           `yaml:"port"`
+		Stack       string           `yaml:"stack"`
+		DatabaseURL string           `yaml:"database_url"`
+		NATSURL     string           `yaml:"nats_url"`
+		Summarizer  SummarizerConfig `yaml:"summarizer"`
 	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
@@ -89,5 +91,6 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		Stack:       stack,
 		DatabaseURL: databaseURL,
 		NATSURL:     natsURL,
+		Summarizer:  ycfg.Summarizer.withDefaults(),
 	}, nil
 }
