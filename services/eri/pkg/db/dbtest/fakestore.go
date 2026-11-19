@@ -909,6 +909,21 @@ func (f *FakeStore) GetPreviousSessionID(ctx context.Context, threadID string) (
 	return withFakeLock(f, "GetPreviousSessionID", func() (string, error) { return sessionPrevID(f.sessions[db.DiscordSessionID(threadID)]), nil })
 }
 
+func (f *FakeStore) ResolveThreadForSession(ctx context.Context, sessionID string) (string, error) {
+	return withFakeLock(f, "ResolveThreadForSession", func() (string, error) {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			return "", nil
+		}
+		for _, s := range f.sessions {
+			if s.InternalSessionID == sessionID || s.PreviousSessionID == sessionID {
+				return s.ThreadID, nil
+			}
+		}
+		return "", nil
+	})
+}
+
 func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
 	return f.withLockErr("SaveSessionID", func() error {
 		s := f.getOrCreateSession(threadID)

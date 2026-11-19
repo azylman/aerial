@@ -642,3 +642,169 @@ html.motion-ready .step-panel.step-active {
     font-size: 0.72rem;
     border-color: var(--border-glow);
 }
+
+/* --- OVERVIEW BENTO GRID --- */
+
+.overview-bento-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.25rem;
+    margin-bottom: 3.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px dashed var(--card-border);
+}
+
+@media (max-width: 1024px) {
+    .overview-bento-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.overview-bento-section {
+    display: flex;
+    flex-direction: column;
+}
+
+.overview-bento-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.overview-build-row,
+.overview-schedule-row {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    text-align: left;
+    width: 100%;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    transition: all 0.2s ease;
+    box-sizing: border-box;
+}
+
+.overview-build-row {
+    cursor: pointer;
+}
+
+.overview-build-row:hover {
+    background: var(--bg-elevated);
+    border-color: var(--card-border-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(20, 20, 19, 0.06);
+}
+
+.overview-row-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    flex: 1;
+}
+
+.overview-row-title {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.85rem;
+}
+
+.overview-row-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.overview-status-pill {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: var(--font-mono);
+}
+
+.overview-status-pill.status-running {
+    background: rgba(180, 83, 9, 0.12);
+    color: var(--accent-amber, #b45309);
+    border: 1px solid rgba(180, 83, 9, 0.3);
+}
+
+.overview-status-pill.status-queued {
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    border: 1px solid var(--card-border);
+}
+
+.overview-status-pill.status-completed {
+    background: rgba(21, 128, 61, 0.12);
+    color: var(--accent-emerald, #15803d);
+    border: 1px solid rgba(21, 128, 61, 0.3);
+}
+
+.overview-status-pill.status-failed {
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border: 1px solid rgba(185, 28, 28, 0.3);
+}
+
+.overview-status-pill.status-cancelled {
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--card-border);
+}
+
+.overview-chunk-progress {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.overview-cron-expr {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--accent-indigo, #4338ca);
+    background: rgba(67, 56, 202, 0.08);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(67, 56, 202, 0.2);
+    white-space: nowrap;
+}
+
+.overview-cron-desc {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
+}
+
+@media (max-width: 768px) {
+    .overview-cron-desc {
+        display: none;
+    }
+}
+
+.overview-idle-row {
+    background: var(--card-bg);
+    border: 1px dashed var(--card-border);
+    border-radius: 8px;
+    padding: 1rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-align: center;
+}
