@@ -13,7 +13,9 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/haro/internal/model"
+	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
@@ -83,16 +85,16 @@ type dbOpTestCase struct {
 func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 	t.Helper()
 	for _, p := range []string{filepath.Join(tmpDir, "fresh1.db"), filepath.Join(tmpDir, "fresh2.db") + "?cache=shared"} {
-		fdb, err := openDB(t.Context(), p)
+		fdb, err := testutil.OpenSQLiteTestDB(p)
 		if err != nil {
-			t.Fatalf("openDB %s failed: %v", p, err)
+			t.Fatalf("OpenSQLiteTestDB %s failed: %v", p, err)
 		}
 		_ = fdb.Close()
 	}
 
 	blockerFile := filepath.Join(tmpDir, "blocker.txt")
 	_ = os.WriteFile(blockerFile, []byte("data"), 0o644)
-	if _, err := openDB(t.Context(), filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
+	if _, err := testutil.OpenSQLiteTestDB(filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
 		t.Error("expected directory blocker error")
 	}
 
@@ -103,16 +105,13 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 	}
 	_, _ = vdb.Exec("CREATE VIEW cron_schedules AS SELECT 1 AS id;")
 	_ = vdb.Close()
-	if _, err := openDB(t.Context(), viewDBPath); err == nil {
+	if _, err := testutil.OpenSQLiteTestDB(viewDBPath); err == nil {
 		t.Error("expected error creating schema on conflicting view database")
 	}
 
-	oldHook := sqliteTestInitHook
-	sqliteTestInitHook = nil
-	if _, err := openDB(t.Context(), ":memory:"); err == nil {
-		t.Error("expected error for unhooked :memory:")
+	if _, err := store.NewDB(t.Context(), &Config{DatabaseURL: ":memory:"}); err == nil {
+		t.Error("expected error for unsupported :memory: scheme")
 	}
-	sqliteTestInitHook = oldHook
 }
 
 func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {
@@ -239,7 +238,7 @@ func testDBStandaloneFunctions(ctx context.Context, t *testing.T, db, closedDB *
 	if _, err := store.ClaimEventTriggers(ctx, closedDB, "camera", []string{"garage"}, "person_arrived"); err == nil {
 		t.Error("expected error from closed db on claim path")
 	}
-	_ = NewToolHandler(&Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
+	_ = tools.NewToolHandler(&Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
 }
 
 func TestDB_OperationsAndErrors(t *testing.T) {
@@ -250,10 +249,10 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	}
 	for _, tc := range cfgTests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
+			if _, err := store.NewDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
 				t.Fatalf("NewDB(t.Context(), ) err=%v", err)
 			}
-			if _, err := OpenDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
+			if _, err := store.OpenDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
 				t.Fatalf("OpenDB(t.Context(), ) err=%v", err)
 			}
 		})
@@ -261,9 +260,9 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 
 	testDBOpenFilesAndViews(t, t.TempDir())
 
-	db, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+	db, err := testutil.OpenSQLiteTestDB(":memory:")
 	if err != nil {
-		t.Fatalf("OpenDB failed: %v", err)
+		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
 	}
 	defer db.Close()
 	ctx := context.Background()
@@ -272,9 +271,9 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
 	if err != nil {
-		t.Fatalf("OpenDB closed failed: %v", err)
+		t.Fatalf("OpenSQLiteTestDB closed failed: %v", err)
 	}
 	_ = closedDB.Close()
 
@@ -298,8 +297,8 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
-	server := NewServer(&ToolHandler{})
-	ts := httptest.NewServer(server.Routes())
+	srv := server.NewServer(&ToolHandler{})
+	ts := httptest.NewServer(srv.Routes())
 	defer ts.Close()
 
 	doFlush := func(wantStatus int) {

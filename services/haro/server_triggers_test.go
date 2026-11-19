@@ -6,15 +6,16 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
 func TestDirectDB_SummaryAndRunsErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
 	if err != nil {
-		t.Fatalf("OpenDB failed: %v", err)
+		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
 	}
 	_ = closedDB.Close()
 

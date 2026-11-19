@@ -12,23 +12,8 @@ package main
 // the free functions are wrapped here.
 
 import (
-	"context"
-	"database/sql"
-
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/haro/internal/server"
 )
 
 // Server serves the haro MCP endpoint and schedule inspection HTTP routes.
 type Server = server.Server
-
-// NewServer builds a Server over handler, defaulting the dispatcher from
-// Cfg.EriURL when no explicit dispatcher is given.
-func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
-	return server.NewServer(handler, dispatcher...)
-}
-
-// HandleOneShotJob ingests a durable HaroOneShotJobArgs and inserts it idempotently into the database.
-func HandleOneShotJob(ctx context.Context, srv *Server, database *sql.DB, msg pubsub.Message) error {
-	return server.HandleOneShotJob(ctx, srv, database, msg)
-}

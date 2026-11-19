@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
+	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
 func buildEventTriggerFilterArgs(source string, targets []string, eventType string) (string, []any, bool) {
@@ -63,7 +66,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 
 	done := make(chan struct{})
 	mockDisp := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
-	server := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDisp)
+	srv := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDisp)
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -73,7 +76,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	}
 
 	wrapped := &ackSubscribeBus{Bus: memBus, onHandled: func() { close(done) }}
-	bus := initHaroJetStreamWithFactory(ctx, server, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+	bus := initHaroJetStreamWithFactory(ctx, srv, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return wrapped, nil
 	})
 	if bus == nil {
@@ -120,12 +123,12 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	defer memBus.Close()
 
 	// Test handler delivery retry capping
-	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
 	_ = closedDB.Close()
-	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+	serverClosed := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
 
 	captureBus := &handlerCaptureBus{Bus: memBus}
 	bus := initHaroJetStreamWithFactory(ctx, serverClosed, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
