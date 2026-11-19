@@ -138,6 +138,10 @@ func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNum
 	if s.registry == nil {
 		return
 	}
+	var fetched GitHubPullRequest
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls/%d", normalizeRepo(repo), prNumber), 2<<20, &fetched); (err != nil && !isGitHubNotFound(err)) || fetched.Merged || strings.EqualFold(strings.TrimSpace(fetched.State), "open") {
+		return
+	}
 	if targetID, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, prNumber); closeErr != nil {
 		slog.WarnContext(ctx, "[synapse] [registry] error closing stale PR with missing head ref", "pr", prNumber, "error", closeErr)
 	} else {
