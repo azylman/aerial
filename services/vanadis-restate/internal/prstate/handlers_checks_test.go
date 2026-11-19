@@ -30,6 +30,40 @@ func (f *FakeDiscordAlerter) SendDiscordAlert(ctx context.Context, key EffectKey
 	return f.Err
 }
 
+// fakeAlerterKeys returns the recorded keys, tolerating a nil fake.
+func fakeAlerterKeys(f *FakeDiscordAlerter) []EffectKey {
+	if f == nil {
+		return nil
+	}
+	return f.Keys
+}
+
+// checkLiteralKey builds the expected journaled key from literal case values
+// only, never via the production EffectKeyFor composition under test.
+func checkLiteralKey(tc checkEventRow) EffectKey {
+	return EffectKey{
+		Repo:           "azylman/aerial",
+		PRNumber:       tc.event.PRNumber,
+		HeadSHA:        strings.TrimSpace(tc.event.HeadSHA),
+		GateGeneration: 0,
+		Kind:           EffectDiscordAlert,
+		CheckName:      tc.event.CheckName,
+	}
+}
+
+// collabLiteralKey builds the expected journaled key from literal case
+// values only, never via the production EffectKeyFor composition under test.
+func collabLiteralKey(tc collaboratorAlertRow) EffectKey {
+	return EffectKey{
+		Repo:           "azylman/aerial",
+		PRNumber:       tc.event.PRNumber,
+		HeadSHA:        strings.TrimSpace(tc.event.HeadSHA),
+		GateGeneration: 0,
+		Kind:           EffectDiscordAlert,
+		CheckName:      tc.event.CheckName,
+	}
+}
+
 // checkEventRow is one declarative check-handler case: seeding fields build
 // the prestate, want fields assert the outcome. No closures.
 type checkEventRow struct {
@@ -40,17 +74,21 @@ type checkEventRow struct {
 	seedEpoch       uint64
 	seedEffectFired bool
 	seedAlertedSHA  string
+	seedGranular    bool
 	alertErr        bool
 	routeErr        bool
 	nilState        bool
 	nilAlerter      bool
 	wantDisposition EventDisposition
 	wantAlertFired  bool
+	wantRouted      bool
 	wantRouterCalls int
 	wantAlertCalls  int
 	wantErr         bool
 	wantHeadSHA     string
 	wantAlertedSHA  string
+	wantActiveCheck bool
+	wantEverFailed  bool
 }
 
 // seedCheckPRState builds the prestate for one check-handler case.
@@ -77,6 +115,13 @@ func seedCheckPRState(tc checkEventRow) *PRState {
 	}
 	if tc.seedEffectFired {
 		s.MarkEffectDispatched(s.EffectKeyFor(EffectDiscordAlert, tc.event.HeadSHA, "", tc.event.CheckName))
+	}
+	if tc.seedGranular {
+		granularSHA := tc.seedHeadSHA
+		if granularSHA == "" {
+			granularSHA = strings.TrimSpace(tc.event.HeadSHA)
+		}
+		s.RecordFailedCheckRunDetailed(granularSHA, tc.event.CheckName)
 	}
 	return s
 }
@@ -112,6 +157,9 @@ func checkCheckRow(t *testing.T, tc checkEventRow) {
 	if out.AlertFired != tc.wantAlertFired {
 		t.Fatalf("AlertFired = %v, want %v", out.AlertFired, tc.wantAlertFired)
 	}
+	if out.Routed != tc.wantRouted {
+		t.Fatalf("Routed = %v, want %v", out.Routed, tc.wantRouted)
+	}
 	assertCheckFiring(t, tc, s, router, fakeAlerter)
 }
 
@@ -134,21 +182,21 @@ func assertCheckFiring(t *testing.T, tc checkEventRow, s *PRState, router *FakeB
 	if s.CollaboratorAlerted != tc.wantAlertedSHA {
 		t.Fatalf("CollaboratorAlerted = %q, want %q", s.CollaboratorAlerted, tc.wantAlertedSHA)
 	}
-	if fakeAlerter != nil {
-		for _, k := range fakeAlerter.Keys {
-			if k.Kind != EffectDiscordAlert {
-				t.Fatalf("alert key kind = %q, want %q", k.Kind, EffectDiscordAlert)
-			}
-			if k.GateGeneration != s.GateGeneration {
-				t.Fatalf("alert key gen = %d, want %d", k.GateGeneration, s.GateGeneration)
-			}
+	for _, k := range fakeAlerterKeys(fakeAlerter) {
+		if k != checkLiteralKey(tc) {
+			t.Fatalf("alert key = %q, want %q", k.String(), checkLiteralKey(tc).String())
 		}
 	}
 	if tc.wantAlertCalls > 0 && !tc.wantErr {
-		key := s.EffectKeyFor(EffectDiscordAlert, tc.event.HeadSHA, "", tc.event.CheckName)
-		if !s.WasEffectDispatched(key) {
-			t.Fatalf("effect key %q not marked dispatched", key.String())
+		if !s.WasEffectDispatched(checkLiteralKey(tc)) {
+			t.Fatalf("effect key %q not marked dispatched", checkLiteralKey(tc).String())
 		}
+	}
+	if s.HasActiveCheckRun(strings.TrimSpace(tc.event.HeadSHA), tc.event.CheckName) != tc.wantActiveCheck {
+		t.Fatalf("HasActiveCheckRun = %v, want %v", !tc.wantActiveCheck, tc.wantActiveCheck)
+	}
+	if s.HasEverFailedCheckRun(strings.TrimSpace(tc.event.HeadSHA), tc.event.CheckName) != tc.wantEverFailed {
+		t.Fatalf("HasEverFailedCheckRun = %v, want %v", !tc.wantEverFailed, tc.wantEverFailed)
 	}
 	if router.CallCount() != tc.wantRouterCalls {
 		t.Fatalf("router calls = %d, want %d", router.CallCount(), tc.wantRouterCalls)
@@ -161,8 +209,8 @@ func assertCheckFiring(t *testing.T, tc checkEventRow, s *PRState, router *FakeB
 		if !strings.EqualFold(got.HeadSHA, tc.event.HeadSHA) {
 			t.Fatalf("routed sha = %q, want %q", got.HeadSHA, tc.event.HeadSHA)
 		}
-		if got.Repo != NormalizeRepo(tc.event.Repo) {
-			t.Fatalf("routed repo = %q, want %q", got.Repo, NormalizeRepo(tc.event.Repo))
+		if got.Repo != "azylman/aerial" {
+			t.Fatalf("routed repo = %q, want %q", got.Repo, "azylman/aerial")
 		}
 	}
 }
@@ -176,10 +224,13 @@ func checkEventCoreRows() []checkEventRow {
 			event:           PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abcdef1234567890", CheckName: "lint", Branch: "feat/x", Title: "Add x", BuildID: "build-1"},
 			wantDisposition: DispositionApply,
 			wantAlertFired:  true,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  1,
 			wantHeadSHA:     "abcdef1234567890",
 			wantAlertedSHA:  "",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
 		},
 		{
 			name:            "nil state drops stale",
@@ -198,10 +249,13 @@ func checkEventCoreRows() []checkEventRow {
 			nilAlerter:      true,
 			wantDisposition: DispositionApply,
 			wantAlertFired:  false,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  0,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
 		},
 		{
 			name:            "unmanaged check failed alerts without routing",
@@ -212,6 +266,8 @@ func checkEventCoreRows() []checkEventRow {
 			wantAlertCalls:  1,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "abc123",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
 		},
 		{
 			name:            "unmanaged with build id still never routes",
@@ -222,6 +278,8 @@ func checkEventCoreRows() []checkEventRow {
 			wantAlertCalls:  1,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "abc123",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
 		},
 		{
 			name:            "stale sha drops without effects",
@@ -254,10 +312,13 @@ func checkEventCoreRows() []checkEventRow {
 			seedEpoch:       1,
 			wantDisposition: DispositionApply,
 			wantAlertFired:  true,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  1,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
 		},
 		{
 			name:            "duplicate failure does not refire alert",
@@ -266,10 +327,13 @@ func checkEventCoreRows() []checkEventRow {
 			seedEffectFired: true,
 			wantDisposition: DispositionApply,
 			wantAlertFired:  false,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  0,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
 		},
 	}
 }
@@ -282,6 +346,7 @@ func checkEventEdgeRows() []checkEventRow {
 			event:           PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", BuildID: "build-1"},
 			wantDisposition: DispositionApply,
 			wantAlertFired:  false,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  0,
 			wantHeadSHA:     "",
@@ -292,6 +357,7 @@ func checkEventEdgeRows() []checkEventRow {
 			event:           PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci gate", BuildID: "build-1"},
 			wantDisposition: DispositionApply,
 			wantAlertFired:  false,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  0,
 			wantHeadSHA:     "",
@@ -301,12 +367,16 @@ func checkEventEdgeRows() []checkEventRow {
 			name:            "check passed clears failure and routes owned",
 			event:           PREvent{Event: "check_passed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"},
 			seedHeadSHA:     "abc123",
+			seedGranular:    true,
 			wantDisposition: DispositionApply,
 			wantAlertFired:  false,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  0,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "",
+			wantActiveCheck: false,
+			wantEverFailed:  true,
 		},
 		{
 			name:            "unmanaged check passed never routes",
@@ -325,6 +395,7 @@ func checkEventEdgeRows() []checkEventRow {
 			seedHeadSHA:     "abc123",
 			wantDisposition: DispositionApply,
 			wantAlertFired:  false,
+			wantRouted:      true,
 			wantRouterCalls: 1,
 			wantAlertCalls:  0,
 			wantHeadSHA:     "abc123",
@@ -348,11 +419,27 @@ func checkEventEdgeRows() []checkEventRow {
 			routeErr:        true,
 			wantDisposition: DispositionApply,
 			wantAlertFired:  true,
+			wantRouted:      false,
 			wantRouterCalls: 1,
 			wantAlertCalls:  1,
 			wantErr:         true,
 			wantHeadSHA:     "abc123",
 			wantAlertedSHA:  "",
+			wantActiveCheck: true,
+			wantEverFailed:  true,
+		},
+		{
+			name:            "sibling check failure preserves existing mark",
+			event:           PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 102, HeadSHA: "abc123", CheckName: "build", Unmanaged: true},
+			seedAlertedSHA:  "abc123",
+			alertErr:        true,
+			wantDisposition: DispositionApply,
+			wantAlertFired:  false,
+			wantRouterCalls: 0,
+			wantAlertCalls:  1,
+			wantErr:         true,
+			wantHeadSHA:     "abc123",
+			wantAlertedSHA:  "abc123",
 		},
 	}
 }
@@ -381,6 +468,7 @@ type collaboratorAlertRow struct {
 	seedAlertedSHA  string
 	seedEffectFired bool
 	alertErr        bool
+	nilAlerter      bool
 	wantDisposition EventDisposition
 	wantAlertFired  bool
 	wantAlertCalls  int
@@ -402,7 +490,6 @@ func seedCollaboratorPRState(tc collaboratorAlertRow) *PRState {
 	}
 	if tc.seedEffectFired {
 		s.MarkEffectDispatched(s.EffectKeyFor(EffectDiscordAlert, tc.event.HeadSHA, "", tc.event.CheckName))
-		s.MarkCollaboratorAlerted(tc.event.HeadSHA)
 	}
 	return s
 }
@@ -413,9 +500,14 @@ func checkCollaboratorRow(t *testing.T, tc collaboratorAlertRow) {
 	ctx := context.Background()
 	s := seedCollaboratorPRState(tc)
 	router := &FakeBuildRouterInvoker{}
-	alerter := &FakeDiscordAlerter{}
-	if tc.alertErr {
-		alerter.Err = errFakeAlert
+	var alerter DiscordAlerter
+	var fakeAlerter *FakeDiscordAlerter
+	if !tc.nilAlerter {
+		fakeAlerter = &FakeDiscordAlerter{}
+		if tc.alertErr {
+			fakeAlerter.Err = errFakeAlert
+		}
+		alerter = fakeAlerter
 	}
 	out, err := HandleCollaboratorAlert(ctx, s, tc.event, router, alerter)
 	if tc.wantErr && err == nil {
@@ -430,36 +522,33 @@ func checkCollaboratorRow(t *testing.T, tc collaboratorAlertRow) {
 	if out.AlertFired != tc.wantAlertFired {
 		t.Fatalf("AlertFired = %v, want %v", out.AlertFired, tc.wantAlertFired)
 	}
-	assertCollaboratorFiring(t, tc, s, router, alerter)
+	assertCollaboratorFiring(t, tc, s, router, fakeAlerter)
 }
 
 // assertCollaboratorFiring asserts zero router calls, alert counts, and marks.
-func assertCollaboratorFiring(t *testing.T, tc collaboratorAlertRow, s *PRState, router *FakeBuildRouterInvoker, alerter *FakeDiscordAlerter) {
+func assertCollaboratorFiring(t *testing.T, tc collaboratorAlertRow, s *PRState, router *FakeBuildRouterInvoker, fakeAlerter *FakeDiscordAlerter) {
 	t.Helper()
 	if router.CallCount() != 0 {
 		t.Fatalf("router calls = %d, want 0 (collaborator path never routes)", router.CallCount())
 	}
-	if len(alerter.Keys) != tc.wantAlertCalls {
-		t.Fatalf("alert calls = %d, want %d", len(alerter.Keys), tc.wantAlertCalls)
+	alertCalls := 0
+	if fakeAlerter != nil {
+		alertCalls = len(fakeAlerter.Keys)
+	}
+	if alertCalls != tc.wantAlertCalls {
+		t.Fatalf("alert calls = %d, want %d", alertCalls, tc.wantAlertCalls)
 	}
 	if !strings.EqualFold(s.CollaboratorAlerted, tc.wantAlertedSHA) {
 		t.Fatalf("CollaboratorAlerted = %q, want %q", s.CollaboratorAlerted, tc.wantAlertedSHA)
 	}
-	for _, k := range alerter.Keys {
-		if k.Kind != EffectDiscordAlert {
-			t.Fatalf("alert key kind = %q, want %q", k.Kind, EffectDiscordAlert)
-		}
-		if k.GateGeneration != s.GateGeneration {
-			t.Fatalf("alert key gen = %d, want %d", k.GateGeneration, s.GateGeneration)
-		}
-		if !strings.EqualFold(k.HeadSHA, tc.event.HeadSHA) {
-			t.Fatalf("alert key sha = %q, want %q", k.HeadSHA, tc.event.HeadSHA)
+	for _, k := range fakeAlerterKeys(fakeAlerter) {
+		if k != collabLiteralKey(tc) {
+			t.Fatalf("alert key = %q, want %q", k.String(), collabLiteralKey(tc).String())
 		}
 	}
 	if tc.wantAlertCalls > 0 && !tc.wantErr {
-		key := s.EffectKeyFor(EffectDiscordAlert, tc.event.HeadSHA, "", tc.event.CheckName)
-		if !s.WasEffectDispatched(key) {
-			t.Fatalf("effect key %q not marked dispatched", key.String())
+		if !s.WasEffectDispatched(collabLiteralKey(tc)) {
+			t.Fatalf("effect key %q not marked dispatched", collabLiteralKey(tc).String())
 		}
 	}
 }
@@ -569,6 +658,15 @@ func TestHandleCollaboratorAlert(t *testing.T) {
 			wantAlertFired:  false,
 			wantAlertCalls:  1,
 			wantErr:         true,
+			wantAlertedSHA:  "",
+		},
+		{
+			name:            "nil alerter leaves no mark",
+			event:           PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 201, HeadSHA: "abc123", CheckName: "lint", Unmanaged: true},
+			nilAlerter:      true,
+			wantDisposition: DispositionApply,
+			wantAlertFired:  false,
+			wantAlertCalls:  0,
 			wantAlertedSHA:  "",
 		},
 	}

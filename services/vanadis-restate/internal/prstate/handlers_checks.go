@@ -168,8 +168,9 @@ func HandleCheckEvent(ctx context.Context, s *PRState, ev PREvent, router BuildR
 			s.RecordNonRoboRevFailedSHA(headSHA)
 		}
 		_, wasActive, hadPrior := s.RecordFailedCheckRunDetailed(headSHA, ev.CheckName)
+		newlyMarked := false
 		if unmanaged {
-			s.MarkCollaboratorAlerted(headSHA)
+			newlyMarked = s.MarkCollaboratorAlerted(headSHA)
 		}
 		if s.WasEffectDispatched(s.EffectKeyFor(EffectDiscordAlert, headSHA, "", ev.CheckName)) {
 			break
@@ -178,7 +179,7 @@ func HandleCheckEvent(ctx context.Context, s *PRState, ev PREvent, router BuildR
 			formatCheckAlertMessage(ev.Repo, ev.PRNumber, ev.Title, ev.Branch, headSHA, ev.CheckName))
 		if err != nil {
 			s.RollbackFailedCheckRun(headSHA, ev.CheckName, wasActive, hadPrior)
-			if unmanaged {
+			if newlyMarked {
 				s.ClearCollaboratorAlerted(headSHA)
 			}
 			return out, err
@@ -205,10 +206,10 @@ func HandleCheckEvent(ctx context.Context, s *PRState, ev PREvent, router BuildR
 	if router == nil {
 		return out, nil
 	}
-	out.Routed = true
 	if err := router.RoutePREvent(ctx, strings.TrimSpace(ev.BuildID), toLifecycleEvent(ev)); err != nil {
 		return out, err
 	}
+	out.Routed = true
 	return out, nil
 }
 
@@ -228,6 +229,9 @@ func HandleCollaboratorAlert(ctx context.Context, s *PRState, ev PREvent, _ Buil
 	out := CheckOutcome{Disposition: DispositionApply}
 	headSHA := usableHeadSHA(ev.HeadSHA)
 	if headSHA == "" || !alertableCheck(ev.CheckName) {
+		return out, nil
+	}
+	if alerter == nil {
 		return out, nil
 	}
 	if !s.MarkCollaboratorAlerted(headSHA) {
