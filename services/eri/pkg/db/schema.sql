@@ -96,12 +96,12 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_session_row_id ON dispatches(session_i
 
 -- Extraction Watermarks Table
 CREATE TABLE IF NOT EXISTS extraction_watermarks (
-    thread_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
     stack TEXT NOT NULL DEFAULT 'aerial',
     last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
     fact_extracted_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_extraction_watermarks_stack_thread UNIQUE (stack, thread_id)
+    PRIMARY KEY (stack, thread_id)
 );
 
 -- One-Shot Schedules Table
