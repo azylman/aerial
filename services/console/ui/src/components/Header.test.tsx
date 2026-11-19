@@ -75,7 +75,7 @@ describe('Header', () => {
     });
     expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '2', SCHEDULES: '40', 'MEMORY ARCHIVE': '150', 'BUILD QUEUE': '5', DOCKET: null });
     const score = screen.getByText('LVL 3 // STABLE');
-    expect(score.getAttribute('style')).toContain('var(--neon-amber)');
+    expect(score.getAttribute('style')).toContain('var(--accent-amber)');
 
     const dock = screen.getByRole('navigation', { name: 'Tactical Gateway Launcher' });
     const chips = within(dock).getAllByRole('link');

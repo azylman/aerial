@@ -7,9 +7,9 @@ import { TabBar } from './TabBar';
 
 const TONE_COLOR: Readonly<Record<PermetTone, string | undefined>> = {
   idle: undefined,
-  optimal: 'var(--neon-cyan)',
-  stable: 'var(--neon-amber)',
-  warning: 'var(--neon-red)',
+  optimal: 'var(--accent-emerald)',
+  stable: 'var(--accent-amber)',
+  warning: 'var(--accent-crimson)',
 };
 
 const PermetGauge = memo(function PermetGauge() {

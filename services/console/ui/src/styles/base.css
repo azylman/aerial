@@ -35,18 +35,6 @@
     --accent-crimson: #b91c1c;
     --accent-indigo: #4338ca;
 
-    /* Temporary Compatibility Aliases (Chunks 1-3) */
-    --neon-cyan: var(--accent-primary);
-    --neon-magenta: var(--accent-primary);
-    --neon-purple: var(--accent-indigo);
-    --neon-green: var(--accent-emerald);
-    --neon-red: var(--accent-crimson);
-    --neon-amber: var(--accent-amber);
-    --permet-cyan: var(--accent-primary);
-    --permet-crimson: var(--accent-crimson);
-    --permet-emerald: var(--accent-emerald);
-    --permet-amber: var(--accent-amber);
-    --permet-purple: var(--accent-indigo);
 }
 
 :root {
