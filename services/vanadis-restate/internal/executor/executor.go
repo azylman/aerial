@@ -22,6 +22,11 @@ import (
 const (
 	DefaultShareRoot         = "/share"
 	MaxCIRemediationAttempts = 5
+
+	// Local vocabulary retained after the frozen-helper extraction; the
+	// canonical pure repo/branch helpers live in internal/model.
+	chunkModeAction  = "action"
+	defaultRepoOwner = "azylman"
 )
 
 // Type aliases preserving the executor public surface.
@@ -133,7 +138,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 	}
 
 	req := BrainDispatchRequest{
-		ID:             actionDispatchID(chunk),
+		ID:             model.ActionDispatchID(chunk),
 		Source:         "vanadis-restate",
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(build.ThreadID),

@@ -389,7 +389,7 @@ func planInputsToChunks(buildID string, inputs []store.CreateChunkInput) []model
 			BuildID:            buildID,
 			ChunkIndex:         i,
 			Mode:               mode,
-			Repo:               cleanRepoName(in.Repo),
+			Repo:               model.CleanRepoName(in.Repo),
 			Title:              strings.TrimSpace(in.Title),
 			Instructions:       strings.TrimSpace(in.Instructions),
 			TargetFiles:        in.TargetFiles,
