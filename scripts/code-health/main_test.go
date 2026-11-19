@@ -436,6 +436,15 @@ func testRunTargetCases() []testRunCase {
 			wantErr:  "ratchet violation(s) detected",
 		},
 		{
+			name: "catch-all test filename reported in check mode",
+			files: map[string]string{
+				"pkg/ok.go":             "package pkg\n",
+				"pkg/foo_extra_test.go": "package pkg\n",
+			},
+			wantCode: 1,
+			wantErr:  "test filename uses banned catch-all suffix",
+		},
+		{
 			name: "syntax error in test file fails check",
 			files: map[string]string{
 				"pkg/ok.go":       "package pkg\n",
@@ -626,6 +635,7 @@ func TestExprName(t *testing.T) {
 type analyzeTestCase struct {
 	name           string
 	content        string
+	rel            string
 	nonexistent    bool
 	wantViolations []string
 	wantErr        bool
@@ -634,16 +644,24 @@ type analyzeTestCase struct {
 func runAnalyzeTestFileCase(t *testing.T, tc analyzeTestCase) {
 	t.Helper()
 	dir := t.TempDir()
-	filePath := filepath.Join(dir, "sample_test.go")
+	rel := tc.rel
+	if rel == "" {
+		rel = "sample_test.go"
+	}
+	filePath := filepath.Join(dir, filepath.FromSlash(rel))
 	if !tc.nonexistent {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
 		if err := os.WriteFile(filePath, []byte(tc.content), 0o644); err != nil {
 			t.Fatalf("write file: %v", err)
 		}
 	} else {
 		filePath = filepath.Join(dir, "does_not_exist_test.go")
+		rel = "does_not_exist_test.go"
 	}
 
-	fm, violations, err := analyzeTestFile(filePath, "sample_test.go")
+	fm, violations, err := analyzeTestFile(filePath, rel)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("analyzeTestFile() error = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -846,6 +864,43 @@ func TestJ_CoverageGaps() {}
 			name:    "syntax error returns error",
 			content: "package pkg\nfunc (",
 			wantErr: true,
+		},
+		{
+			name:    "catch-all extra test filename detected",
+			rel:     "pkg/foo_extra_test.go",
+			content: "package pkg\n",
+			wantViolations: []string{
+				"pkg/foo_extra_test.go: test filename uses banned catch-all suffix",
+			},
+		},
+		{
+			name:    "catch-all more test filename detected",
+			rel:     "pkg/foo_more_test.go",
+			content: "package pkg\n",
+			wantViolations: []string{
+				"pkg/foo_more_test.go: test filename uses banned catch-all suffix",
+			},
+		},
+		{
+			name:    "catch-all coverage gaps test filename detected",
+			rel:     "pkg/foo_coverage_gaps_test.go",
+			content: "package pkg\n",
+			wantViolations: []string{
+				"pkg/foo_coverage_gaps_test.go: test filename uses banned catch-all suffix",
+			},
+		},
+		{
+			name:    "catch-all additional test filename detected",
+			rel:     "pkg/foo_additional_test.go",
+			content: "package pkg\n",
+			wantViolations: []string{
+				"pkg/foo_additional_test.go: test filename uses banned catch-all suffix",
+			},
+		},
+		{
+			name:    "canonical domain test filename passes",
+			rel:     "pkg/reconcile_lifecycle_test.go",
+			content: "package pkg\n",
 		},
 	}
 }

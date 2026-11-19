@@ -220,6 +220,14 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 			wantDeps: [][]string{nil, nil},
 		},
 		{
+			name: "concurrent_mixed_modes_skip_disjoint_check",
+			chunks: []model.VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
+				{ID: "c2", Mode: "action", DependsOn: []string{}},
+			},
+			wantDeps: [][]string{nil, nil},
+		},
+		{
 			name: "terminal_chunks_skipped_in_disjoint_check",
 			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
@@ -332,6 +340,15 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			chunks:     []model.VanadisChunk{{ID: "c1", Title: "Title", Instructions: "Inst", Mode: "pr", Repo: "aerial", Effort: "gigantic"}},
 			wantErr:    true,
 			wantSubstr: "invalid chunk effort",
+		},
+		{
+			name:       "action mode with repo rejected",
+			buildID:    "b1",
+			threadID:   "th1",
+			objective:  "obj",
+			chunks:     []model.VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Mode: "action", Repo: "non-empty-repo"}},
+			wantErr:    true,
+			wantSubstr: "action chunk must have empty repo",
 		},
 		{
 			name:      "valid build inputs",

@@ -197,44 +197,6 @@ func (*terminalRetrySpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _
 	return nil
 }
 
-func TestDag_ExtraValidationBranches(t *testing.T) {
-	t.Parallel()
-	// store.go isValidVanadisChunkID empty/too long
-	if store.IsValidVanadisChunkID("") {
-		t.Fatal("empty id should be invalid")
-	}
-	if store.IsValidVanadisChunkID(strings.Repeat("a", 121)) {
-		t.Fatal("too long id should be invalid")
-	}
-	// dag.go normalizeAndValidateBuildDAG duplicate ID
-	_, err := normalizeAndValidateBuildDAG([]model.VanadisChunk{
-		{ID: "c1", Status: "pending"},
-		{ID: "c1", Status: "pending"},
-	})
-	if err == nil {
-		t.Fatal("expected error on duplicate chunk ID")
-	}
-}
-
-func TestDag_ExtraDisjointAndValidation(t *testing.T) {
-	t.Parallel()
-	// dag.go L233-L234: validateCreateBuildInputs chunkMode validation error
-	err := validateCreateBuildInputs("b1", "th1", "obj", []model.VanadisChunk{
-		{ID: "c1", Title: "t", Instructions: "i", Mode: "action", Repo: "non-empty-repo"},
-	})
-	if err == nil {
-		t.Fatal("expected error on action mode with repo")
-	}
-
-	// dag.go L178-L178: validateConcurrentDisjointPRChunks where modeJ != "pr"
-	chunks := []model.VanadisChunk{
-		{ID: "c1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"a.go"}},
-		{ID: "c2", Status: "pending", Mode: "action", Repo: ""},
-	}
-	reach := buildTransitiveClosure(chunks, map[string]int{"c1": 0, "c2": 1})
-	_ = validateConcurrentDisjointPRChunks(chunks, reach)
-}
-
 func TestDeploymentMutationPersistence(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

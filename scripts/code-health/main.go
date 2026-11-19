@@ -37,6 +37,21 @@ const (
 
 var splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
 
+// bannedTestFilenameSuffixes rejects catch-all test filenames that accumulate
+// unrelated coverage-slop cases outside their domain scope. Fold such files
+// into canonical domain-scoped test tables instead of renaming around this
+// list: any new catch-all suffix is itself a violation of this ratchet.
+var bannedTestFilenameSuffixes = []string{"_extra_test.go", "_more_test.go", "_coverage_gaps_test.go", "_additional_test.go"}
+
+func isCatchAllTestFilename(rel string) bool {
+	for _, suffix := range bannedTestFilenameSuffixes {
+		if strings.HasSuffix(rel, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // FileMetrics records ratcheted file-level watermarks.
 type FileMetrics struct {
 	Lines int `json:"lines,omitempty"`
@@ -781,6 +796,9 @@ func analyzeTestFile(fullPath, rel string) (FileMetrics, []string, error) {
 	}
 
 	var violations []string
+	if isCatchAllTestFilename(rel) {
+		violations = append(violations, rel+": test filename uses banned catch-all suffix; fold cases into the canonical domain-scoped Test* table or name after specific behavior")
+	}
 	for _, nv := range findBannedNolints(f, fset) {
 		violations = append(violations, fmt.Sprintf("%s: %s", rel, nv))
 	}
