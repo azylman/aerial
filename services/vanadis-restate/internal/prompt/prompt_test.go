@@ -317,7 +317,7 @@ func TestFailurePromptDirectives(t *testing.T) {
 	if !strings.Contains(got, "PR #123") || !strings.Contains(got, "extracted failure details") {
 		t.Errorf("FormatCIFailurePrompt missing details: %s", got)
 	}
-	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: a fix pushed", "Ending this turn with no commit is a failed remediation", "counts as no outcome", "smallest boundary-crossing fix", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
+	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a fix pushed", "(2) a final line in the form REMEDIATION BLOCKED", "Ending this turn with neither a commit nor that blocked final line is a failed remediation", "counts as no outcome", "smallest boundary-crossing fix", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("FormatCIFailurePrompt missing %q: %s", want, got)
 		}
@@ -340,7 +340,7 @@ func TestFailurePromptDirectives(t *testing.T) {
 	if !strings.Contains(roborevGot, "critically evaluate each RoboRev finding") {
 		t.Errorf("expected RoboRev directive, got %q", roborevGot)
 	}
-	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a verified fix pushed", "(2) a technical rebuttal recorded via", "Ending this turn with no commit and no override is a failed remediation", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
+	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a verified fix pushed", "(2) a technical rebuttal recorded via", "(3) a final line in the form REMEDIATION BLOCKED", "Ending this turn with no commit, no override, and no blocked final line is a failed remediation", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
 		if !strings.Contains(roborevGot, want) {
 			t.Errorf("RoboRev prompt missing %q: %s", want, roborevGot)
 		}
