@@ -1,4 +1,4 @@
-package main
+package discord
 
 import (
 	"bytes"
@@ -12,17 +12,13 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
-func resetChannelWatermarks() {
-	channelWatermarksMu.Lock()
-	defer channelWatermarksMu.Unlock()
-	channelWatermarks = make(map[string]string)
-}
-
 func TestChannelWatermarks(t *testing.T) {
-	resetChannelWatermarks()
-	t.Cleanup(resetChannelWatermarks)
+	ResetWatermarksForTest()
+	t.Cleanup(ResetWatermarksForTest)
 
 	tests := []struct {
 		name       string
@@ -63,12 +59,12 @@ func TestChannelWatermarks(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			before := getChannelWatermark(tc.channelID)
+			before := GetChannelWatermark(tc.channelID)
 			if before != tc.wantBefore {
 				t.Errorf("before = %q, want %q", before, tc.wantBefore)
 			}
-			advanceChannelWatermark(tc.channelID, tc.advanceID)
-			after := getChannelWatermark(tc.channelID)
+			AdvanceChannelWatermark(tc.channelID, tc.advanceID)
+			after := GetChannelWatermark(tc.channelID)
 			if after != tc.wantAfter {
 				t.Errorf("after = %q, want %q", after, tc.wantAfter)
 			}
@@ -183,69 +179,67 @@ func assertCatchUpSweepTransport(t *testing.T, tc sweepTestCase, transport *mock
 	}
 }
 
-func assertCatchUpSweepBus(t *testing.T, tc sweepTestCase, bus *mockEventBus) {
+func assertCatchUpSweepBus(t *testing.T, tc sweepTestCase, bus *testEventBus) {
 	t.Helper()
-	if len(bus.insertedDiscordJobs) != len(tc.wantEnqueuedIDs) {
-		t.Errorf("insertedDiscordJobs = %d, want %d", len(bus.insertedDiscordJobs), len(tc.wantEnqueuedIDs))
+	if len(bus.insertedJobs) != len(tc.wantEnqueuedIDs) {
+		t.Errorf("insertedJobs = %d, want %d", len(bus.insertedJobs), len(tc.wantEnqueuedIDs))
 	}
 	for idx, wantID := range tc.wantEnqueuedIDs {
-		if idx < len(bus.insertedDiscordJobs) && bus.insertedDiscordJobs[idx].MessageID != wantID {
-			t.Errorf("job[%d] MessageID = %q, want %q", idx, bus.insertedDiscordJobs[idx].MessageID, wantID)
+		if idx < len(bus.insertedJobs) {
+			if args, ok := bus.insertedJobs[idx].(model.DiscordIngressArgs); ok && args.MessageID != wantID {
+				t.Errorf("job[%d] MessageID = %q, want %q", idx, args.MessageID, wantID)
+			}
 		}
 	}
 }
 
-func assertCatchUpSweepServer(t *testing.T, tc sweepTestCase, srv *RouterServer, disp *mockOutboundDispatcher) {
+func assertCatchUpSweepServer(t *testing.T, tc sweepTestCase, srv *testIngressServer) {
 	t.Helper()
 	if srv == nil {
 		return
 	}
-	calls := disp.DiscordMessageCalls()
+	calls := srv.processedIngress
 	if len(calls) != len(tc.wantEnqueuedIDs) {
-		t.Errorf("DiscordMessageCalls = %d, want %d", len(calls), len(tc.wantEnqueuedIDs))
+		t.Errorf("processedIngress = %d, want %d", len(calls), len(tc.wantEnqueuedIDs))
 	}
 	for idx, wantID := range tc.wantEnqueuedIDs {
-		if idx < len(calls) && calls[idx].Message.ID != wantID {
+		if idx < len(calls) && calls[idx].Message != nil && calls[idx].Message.ID != wantID {
 			t.Errorf("call[%d] MessageID = %q, want %q", idx, calls[idx].Message.ID, wantID)
 		}
 	}
 	if len(calls) > 1 && tc.guildID != "" {
-		if calls[1].Message.GuildID != tc.guildID {
+		if calls[1].Message != nil && calls[1].Message.GuildID != tc.guildID {
 			t.Errorf("call[1] GuildID = %q, want %q", calls[1].Message.GuildID, tc.guildID)
 		}
-		if calls[1].Message.ReferencedMessage != nil && calls[1].Message.ReferencedMessage.GuildID != tc.guildID {
+		if calls[1].Message != nil && calls[1].Message.ReferencedMessage != nil && calls[1].Message.ReferencedMessage.GuildID != tc.guildID {
 			t.Errorf("call[1] RefMessage GuildID = %q, want %q", calls[1].Message.ReferencedMessage.GuildID, tc.guildID)
 		}
 	}
 }
 
-func assertCatchUpSweepResults(t *testing.T, tc sweepTestCase, srv *RouterServer, disp *mockOutboundDispatcher, bus *mockEventBus, transport *mockDiscordTransport) {
+func assertCatchUpSweepResults(t *testing.T, tc sweepTestCase, srv *testIngressServer, bus *testEventBus, transport *mockDiscordTransport) {
 	t.Helper()
 	assertCatchUpSweepTransport(t, tc, transport)
 	if tc.hasBus {
 		assertCatchUpSweepBus(t, tc, bus)
 		return
 	}
-	assertCatchUpSweepServer(t, tc, srv, disp)
+	assertCatchUpSweepServer(t, tc, srv)
 }
 
 func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestCase) {
 	t.Helper()
-	resetChannelWatermarks()
-	defer resetChannelWatermarks()
+	ResetWatermarksForTest()
+	defer ResetWatermarksForTest()
 
 	if tc.initialWatermark != "" && tc.channelID != "" {
-		advanceChannelWatermark(tc.channelID, tc.initialWatermark)
+		AdvanceChannelWatermark(tc.channelID, tc.initialWatermark)
 	}
 
-	disp := &mockOutboundDispatcher{}
-	bus := &mockEventBus{}
-	var srv *RouterServer
-	if !tc.nilServer {
-		srv = newTestRouter(Config{}, nil, nil, disp)
-		if tc.hasBus {
-			srv.SetEventBus(bus)
-		}
+	srv := &testIngressServer{}
+	bus := &testEventBus{}
+	if tc.hasBus {
+		srv.bus = bus
 	}
 
 	targetCtx := ctx
@@ -258,20 +252,25 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 	session, transport := setupCatchUpSweepSession(t, tc)
 
 	if tc.sweepAlreadyRunning {
-		discordSweepRunning.Store(true)
-		defer discordSweepRunning.Store(false)
+		cleanup := SetSweepRunningForTest(true)
+		defer cleanup()
 	}
 
-	runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
+	var targetServer IngressServer
+	if !tc.nilServer {
+		targetServer = srv
+	}
+
+	RunCatchUpSweep(targetCtx, session, targetServer, tc.now)
 
 	if tc.runSecondSweep {
-		runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
+		RunCatchUpSweep(targetCtx, session, targetServer, tc.now)
 	}
 
-	assertCatchUpSweepResults(t, tc, srv, disp, bus, transport)
+	assertCatchUpSweepResults(t, tc, srv, bus, transport)
 
 	if tc.channelID != "" && tc.wantWatermark != "" {
-		wm := getChannelWatermark(tc.channelID)
+		wm := GetChannelWatermark(tc.channelID)
 		if wm != tc.wantWatermark {
 			t.Errorf("channel watermark = %q, want %q", wm, tc.wantWatermark)
 		}
@@ -432,11 +431,11 @@ func TestRunDiscordCatchUpSweep(t *testing.T) {
 	ctx := context.Background()
 
 	baseNow := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	minSnow := discordSnowflakeFromTime(baseNow.Add(-30 * time.Minute))
-	staleSnow := discordSnowflakeFromTime(baseNow.Add(-45 * time.Minute))
-	freshSnow1 := discordSnowflakeFromTime(baseNow.Add(-15 * time.Minute))
-	freshSnow2 := discordSnowflakeFromTime(baseNow.Add(-5 * time.Minute))
-	botSnow := discordSnowflakeFromTime(baseNow.Add(-10 * time.Minute))
+	minSnow := DiscordSnowflakeFromTime(baseNow.Add(-30 * time.Minute))
+	staleSnow := DiscordSnowflakeFromTime(baseNow.Add(-45 * time.Minute))
+	freshSnow1 := DiscordSnowflakeFromTime(baseNow.Add(-15 * time.Minute))
+	freshSnow2 := DiscordSnowflakeFromTime(baseNow.Add(-5 * time.Minute))
+	botSnow := DiscordSnowflakeFromTime(baseNow.Add(-10 * time.Minute))
 
 	freshMsg1 := &discordgo.Message{
 		ID:        freshSnow1,
@@ -628,10 +627,9 @@ func TestEnqueueDiscordMessageDirect(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			disp := &mockOutboundDispatcher{}
-			var srv *RouterServer
+			var srv *testIngressServer
 			if !tc.nilServer {
-				srv = newTestRouter(Config{}, nil, nil, disp)
+				srv = &testIngressServer{}
 			}
 			var m *discordgo.Message
 			if !tc.nilMsg {
@@ -651,11 +649,118 @@ func TestEnqueueDiscordMessageDirect(t *testing.T) {
 				}
 			}
 
-			enqueueDiscordMessage(ctx, srv, nil, m, tc.botUserID)
+			var targetServer IngressServer
+			if srv != nil {
+				targetServer = srv
+			}
+			EnqueueDiscordMessage(ctx, targetServer, nil, m, tc.botUserID)
 
-			if len(disp.DiscordMessageCalls()) != tc.wantProcessed {
-				t.Errorf("DiscordMessageCalls = %d, want %d", len(disp.DiscordMessageCalls()), tc.wantProcessed)
+			if srv != nil && len(srv.processedIngress) != tc.wantProcessed {
+				t.Errorf("processedIngress = %d, want %d", len(srv.processedIngress), tc.wantProcessed)
 			}
 		})
 	}
+}
+
+func TestFetchActiveGuildThreads(t *testing.T) {
+	t.Parallel()
+
+	// nil session
+	threads, err := FetchActiveGuildThreads(nil, "guild-1")
+	if err != nil || threads != nil {
+		t.Errorf("expected nil, nil; got %v, %v", threads, err)
+	}
+
+	// empty guild ID
+	sess, err := discordgo.New("Bot dummy")
+	if err != nil {
+		t.Fatalf("discordgo.New() err = %v", err)
+	}
+	threads, err = FetchActiveGuildThreads(sess, "")
+	if err != nil || threads != nil {
+		t.Errorf("expected nil, nil; got %v, %v", threads, err)
+	}
+
+	// threads error
+	transportErr := &mockDiscordTransport{threadsErr: map[string]bool{"g-err": true}}
+	sessErr, _ := discordgo.New("Bot dummy")
+	sessErr.Client = &http.Client{Transport: transportErr}
+	if _, err := FetchActiveGuildThreads(sessErr, "g-err"); err == nil {
+		t.Error("expected error for threadsErr")
+	}
+}
+
+func TestResolveCatchUpGuilds(t *testing.T) {
+	t.Parallel()
+
+	if guilds := resolveCatchUpGuilds(nil); guilds != nil {
+		t.Errorf("resolveCatchUpGuilds(nil) = %v", guilds)
+	}
+	if guilds := fetchFallbackUserGuilds(nil); guilds != nil {
+		t.Errorf("fetchFallbackUserGuilds(nil) = %v", guilds)
+	}
+	if guilds := fetchFallbackUserGuilds(&discordgo.Session{}); guilds != nil {
+		t.Errorf("fetchFallbackUserGuilds(empty token) = %v", guilds)
+	}
+}
+
+func TestCollectCandidateChannels(t *testing.T) {
+	t.Parallel()
+
+	if chs := collectCandidateChannels(nil, nil); chs != nil {
+		t.Errorf("collectCandidateChannels(nil) = %v", chs)
+	}
+	if chs := collectCandidateChannels(nil, &discordgo.Guild{}); chs != nil {
+		t.Errorf("collectCandidateChannels(empty guild) = %v", chs)
+	}
+
+	// Duplicate channels deduplication
+	gDup := &discordgo.Guild{
+		ID: "g-dup",
+		Channels: []*discordgo.Channel{
+			{ID: "c1"},
+			{ID: "c1"},
+		},
+	}
+	if chs := collectCandidateChannels(nil, gDup); len(chs) != 1 {
+		t.Errorf("expected 1 unique channel, got %d", len(chs))
+	}
+}
+
+func TestIsCatchUpMessageEligible(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	minSnow := DiscordSnowflakeFromTime(now.Add(-30 * time.Minute))
+	if isCatchUpMessageEligible(nil, "bot", minSnow, now) {
+		t.Error("nil message should not be eligible")
+	}
+	if isCatchUpMessageEligible(&discordgo.Message{}, "bot", minSnow, now) {
+		t.Error("empty ID message should not be eligible")
+	}
+	if isCatchUpMessageEligible(&discordgo.Message{ID: "1"}, "bot", minSnow, now) {
+		t.Error("nil author message should not be eligible")
+	}
+	if isCatchUpMessageEligible(&discordgo.Message{ID: minSnow, Author: &discordgo.User{ID: "u1"}}, "bot", minSnow, now) {
+		t.Error("message <= minSnowflake should not be eligible")
+	}
+}
+
+func TestCatchUpChannelMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	sess, err := discordgo.New("Bot dummy")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	sess.Client = &http.Client{Transport: &mockDiscordTransport{}}
+
+	CatchUpChannelMessages(ctx, nil, nil, nil, "", "", "", now)
+	CatchUpChannelMessages(ctx, sess, &testIngressServer{}, &discordgo.Channel{}, "", "", "", now)
+
+	cCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	CatchUpChannelMessages(cCtx, sess, &testIngressServer{}, &discordgo.Channel{ID: "c1", LastMessageID: "999"}, "", "", "1", now)
 }
