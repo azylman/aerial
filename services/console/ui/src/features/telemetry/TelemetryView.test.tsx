@@ -62,13 +62,20 @@ const cluster = (over: Partial<ClusterResponse> = {}): ClusterResponse => ({
 
 const seed = (data: ClusterResponse): void => act(() => useConsoleStore.getState().setCluster(data));
 
+const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>();
+const pending = (): Promise<Response> => new Promise(() => undefined);
+
 beforeEach(() => {
   useConsoleStore.setState(useConsoleStore.getInitialState(), true);
+  fetchMock.mockReset();
+  fetchMock.mockImplementation(pending);
+  vi.stubGlobal('fetch', fetchMock);
   vi.useFakeTimers({ now: Date.parse('2026-11-08T12:00:00Z'), toFake: ['setInterval', 'clearInterval', 'Date'] });
 });
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('ServiceCard states', () => {
@@ -307,6 +314,43 @@ const sampleBuilds = (over: Partial<BuildsAPIResponse> = {}): BuildsAPIResponse 
       running_chunks: 1,
       pending_chunks: 1,
       failed_chunks: 0,
+      chunks: [
+        {
+          id: 'chunk-1',
+          build_id: 'build-01',
+          chunk_index: 0,
+          title: 'Wire Contract',
+          status: 'completed',
+          started_at: '2026-11-08T12:00:00Z',
+          completed_at: '2026-11-08T12:05:00Z',
+          created_at: '2026-11-08T12:00:00Z',
+          updated_at: '2026-11-08T12:05:00Z',
+        },
+        {
+          id: 'chunk-2',
+          build_id: 'build-01',
+          chunk_index: 1,
+          title: 'Inline Build DAG',
+          status: 'in_progress',
+          depends_on: ['chunk-1'],
+          started_at: '2026-11-08T12:05:00Z',
+          completed_at: '',
+          created_at: '2026-11-08T12:00:00Z',
+          updated_at: '2026-11-08T12:05:00Z',
+        },
+        {
+          id: 'chunk-3',
+          build_id: 'build-01',
+          chunk_index: 2,
+          title: 'Unit Tests',
+          status: 'pending',
+          depends_on: ['chunk-2'],
+          started_at: '',
+          completed_at: '',
+          created_at: '2026-11-08T12:00:00Z',
+          updated_at: '2026-11-08T12:05:00Z',
+        },
+      ],
     },
     {
       id: 'build-02',
@@ -417,7 +461,7 @@ describe('OverviewBuildsSection', () => {
     expect(container.querySelectorAll('.overview-build-row')).toHaveLength(0);
   });
 
-  it('renders populated build rows with active builds prioritized first, opens drawer on click, and navigates to builds tab', () => {
+  it('renders populated build rows with active builds prioritized first, toggles inline DAG expansion on click, and navigates to builds tab', () => {
     const { container } = render(<OverviewBuildsSection />);
     seedBuilds(
       sampleBuilds({
@@ -450,11 +494,269 @@ describe('OverviewBuildsSection', () => {
     expect(within(rows[0] as HTMLElement).getByText('1/3 chunks')).toBeTruthy();
     expect(within(rows[2] as HTMLElement).getByText('Recent Completed Build')).toBeTruthy();
 
-    act(() => (rows[0] as HTMLElement).click());
-    expect(useConsoleStore.getState().drawer).toEqual({ kind: 'build', id: 'build-01' });
+    const header = rows[0]?.querySelector('.overview-build-header') as HTMLElement;
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.overview-build-dag')).toBeNull();
+
+    act(() => header.click());
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    const dag = container.querySelector('.overview-build-dag') as HTMLElement;
+    expect(dag).toBeTruthy();
+    expect(within(dag).getByText('Wire Contract')).toBeTruthy();
+    expect(within(dag).getByText('Inline Build DAG')).toBeTruthy();
+
+    const chunkNode = dag.querySelector('.build-dag-node[data-chunk-id="chunk-1"]') as HTMLElement;
+    act(() => chunkNode.click());
+    expect(useConsoleStore.getState().drawer).toEqual({ kind: 'build', id: 'build-01', chunkId: 'chunk-1' });
+
+    act(() => header.click());
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.overview-build-dag')).toBeNull();
 
     act(() => screen.getByRole('button', { name: 'Builds ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('builds');
+  });
+
+  it('fetches detail fallback exactly once when expanding a chunk-less build, showing loading then DAG, and aborts on collapse', async () => {
+    let abortObserved = false;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      init?.signal?.addEventListener('abort', () => {
+        abortObserved = true;
+      });
+      return pending();
+    });
+
+    const { container } = render(<OverviewBuildsSection />);
+    seedBuilds(sampleBuilds());
+    const rows = container.querySelectorAll('.overview-build-row');
+    const header2 = rows[1]?.querySelector('.overview-build-header') as HTMLElement;
+
+    // Expand chunk-less build-02
+    act(() => header2.click());
+    expect(header2.getAttribute('aria-expanded')).toBe('true');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/builds/build-02');
+
+    // Loading state is displayed while in flight
+    expect(within(rows[1] as HTMLElement).getByText('LOADING BUILD CHUNKS...')).toBeTruthy();
+
+    // Collapse while still in flight -> aborts the controller signal
+    act(() => header2.click());
+    expect(header2.getAttribute('aria-expanded')).toBe('false');
+    expect(abortObserved).toBe(true);
+  });
+
+  it('handles racing detail fetches without overwriting the currently expanded build', async () => {
+    let resolveB: ((res: Response) => void) | null = null;
+    let resolveA: ((res: Response) => void) | null = null;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('build-02')) {
+        return new Promise<Response>((resolve) => {
+          resolveA = resolve;
+        });
+      }
+      return new Promise<Response>((resolve) => {
+        resolveB = resolve;
+      });
+    });
+
+    const { container } = render(<OverviewBuildsSection />);
+    seedBuilds(sampleBuilds());
+    const rows = container.querySelectorAll('.overview-build-row');
+    const headerA = rows[1]?.querySelector('.overview-build-header') as HTMLElement; // build-02
+    const headerB = rows[2]?.querySelector('.overview-build-header') as HTMLElement; // build-03
+
+    // Expand build A (build-02)
+    act(() => headerA.click());
+    expect(fetchMock).toHaveBeenCalledWith('/api/builds/build-02', expect.any(Object));
+
+    // Switch to build B (build-03)
+    act(() => headerB.click());
+    expect(fetchMock).toHaveBeenCalledWith('/api/builds/build-03', expect.any(Object));
+
+    // B resolves first with chunk B
+    await act(async () => {
+      resolveB?.(
+        new Response(
+          JSON.stringify({
+            status: 'ok',
+            build: {
+              id: 'build-03',
+              thread_id: '3',
+              tier: 1,
+              title: 'Build 3',
+              objective: 'Build without title',
+              status: 'completed',
+              created_at: '2026-11-08T12:00:00Z',
+              updated_at: '2026-11-08T12:00:00Z',
+            },
+            chunks: [
+              {
+                id: 'chunk-b',
+                build_id: 'build-03',
+                chunk_index: 0,
+                title: 'Chunk B Result',
+                status: 'completed',
+                started_at: '2026-11-08T12:00:00Z',
+                completed_at: '2026-11-08T12:05:00Z',
+                created_at: '2026-11-08T12:00:00Z',
+                updated_at: '2026-11-08T12:05:00Z',
+              },
+            ],
+          }),
+        ),
+      );
+    });
+    expect(within(rows[2] as HTMLElement).getByText('Chunk B Result')).toBeTruthy();
+
+    // A resolves late: since A was aborted when switching to B, A does not overwrite B
+    await act(async () => {
+      resolveA?.(
+        new Response(
+          JSON.stringify({
+            status: 'ok',
+            build: {
+              id: 'build-02',
+              thread_id: '2',
+              tier: 2,
+              title: 'Build 2',
+              objective: 'Fix jitter',
+              status: 'queued',
+              created_at: '2026-11-08T12:00:00Z',
+              updated_at: '2026-11-08T12:00:00Z',
+            },
+            chunks: [
+              {
+                id: 'chunk-a',
+                build_id: 'build-02',
+                chunk_index: 0,
+                title: 'Chunk A Result',
+                status: 'completed',
+                started_at: '2026-11-08T12:00:00Z',
+                completed_at: '2026-11-08T12:05:00Z',
+                created_at: '2026-11-08T12:00:00Z',
+                updated_at: '2026-11-08T12:05:00Z',
+              },
+            ],
+          }),
+        ),
+      );
+    });
+
+    // B still shows Chunk B Result
+    expect(within(rows[2] as HTMLElement).getByText('Chunk B Result')).toBeTruthy();
+  });
+
+  it('displays error state when fallback fetch fails and empty state when build has zero chunks', async () => {
+    fetchMock.mockImplementation(() => Promise.reject(new Error('vanadis unavailable')));
+
+    const { container } = render(<OverviewBuildsSection />);
+    seedBuilds(sampleBuilds());
+    const rows = container.querySelectorAll('.overview-build-row');
+    const header2 = rows[1]?.querySelector('.overview-build-header') as HTMLElement;
+
+    // Expand build-02: fetch fails
+    await act(async () => {
+      header2.click();
+    });
+    expect(within(rows[1] as HTMLElement).getByText('FAILED TO LOAD BUILD CHUNKS // vanadis unavailable')).toBeTruthy();
+
+    // Resolve with legitimate 0 chunks
+    act(() =>
+      useConsoleStore.getState().setBuildDetail({
+        status: 'ok',
+        build: {
+          id: 'build-02',
+          thread_id: '2',
+          tier: 2,
+          title: 'Scheduler Jitter',
+          objective: 'Fix jitter',
+          status: 'queued',
+          created_at: '2026-11-08T12:00:00Z',
+          updated_at: '2026-11-08T12:00:00Z',
+        },
+        chunks: [],
+      }),
+    );
+    expect(within(rows[1] as HTMLElement).getByText('NO CHUNKS REGISTERED')).toBeTruthy();
+  });
+
+  it('handles builds with empty chunk arrays by showing loading while fetching, error on failure, and empty state on success', async () => {
+    let rejectFetch: ((err: Error) => void) | null = null;
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((_resolve, reject) => {
+          rejectFetch = reject;
+        }),
+    );
+
+    const { container } = render(<OverviewBuildsSection />);
+    const baseBuild = sampleBuilds().builds[0] as NonNullable<typeof sampleBuilds.prototype>;
+    seedBuilds(
+      sampleBuilds({
+        builds: [
+          {
+            ...baseBuild,
+            id: 'build-empty-chunks',
+            title: 'Build With Empty Chunks Array',
+            chunks: [],
+          },
+        ],
+      }),
+    );
+    const row = container.querySelector('.overview-build-row') as HTMLElement;
+    const header = row.querySelector('.overview-build-header') as HTMLElement;
+
+    // Expand build with chunks: []
+    act(() => header.click());
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    expect(within(row).getByText('LOADING BUILD CHUNKS...')).toBeTruthy();
+    expect(within(row).queryByText('NO CHUNKS REGISTERED')).toBeNull();
+
+    // Reject the fetch -> shows error state, never empty state
+    await act(async () => {
+      rejectFetch?.(new Error('chunk fetch failed'));
+    });
+    expect(within(row).getByText('FAILED TO LOAD BUILD CHUNKS // chunk fetch failed')).toBeTruthy();
+    expect(within(row).queryByText('NO CHUNKS REGISTERED')).toBeNull();
+
+    // Re-resolve with empty chunks detail response -> now shows legitimate empty state
+    act(() =>
+      useConsoleStore.getState().setBuildDetail({
+        status: 'ok',
+        build: {
+          id: 'build-empty-chunks',
+          thread_id: '1',
+          tier: 1,
+          title: 'Build With Empty Chunks Array',
+          objective: 'Test',
+          status: 'running',
+          created_at: '2026-11-08T12:00:00Z',
+          updated_at: '2026-11-08T12:00:00Z',
+        },
+        chunks: [],
+      }),
+    );
+    expect(within(row).getByText('NO CHUNKS REGISTERED')).toBeTruthy();
+  });
+
+  it('isolates detail errors from earlier failures when expanding an unrelated chunk-less build', async () => {
+    // Seed an existing detail error for unrelated build-01
+    act(() => useConsoleStore.getState().failBuildDetail('Build-01 network failure'));
+    expect(useConsoleStore.getState().builds.detail.error).toBe('Build-01 network failure');
+
+    // Fetch mock keeps the new request pending
+    fetchMock.mockImplementation(pending);
+
+    const { container } = render(<OverviewBuildsSection />);
+    seedBuilds(sampleBuilds());
+    const rows = container.querySelectorAll('.overview-build-row');
+    const header2 = rows[1]?.querySelector('.overview-build-header') as HTMLElement; // build-02 (chunk-less)
+
+    // Expand build-02: must render LOADING, never build-01's error
+    act(() => header2.click());
+    expect(within(rows[1] as HTMLElement).getByText('LOADING BUILD CHUNKS...')).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).queryByText(/Build-01 network failure/)).toBeNull();
   });
 });
 
