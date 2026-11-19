@@ -1368,6 +1368,12 @@ func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
 			wantAttempts: 1,
 		},
 		{
+			name:         "nil discord session does not retry",
+			failAttempts: 2,
+			errType:      "nil_session",
+			wantAttempts: 1,
+		},
+		{
 			name:         "transient 429 rate limit retries and succeeds",
 			failAttempts: 1,
 			errType:      "rate_limit",
@@ -1402,6 +1408,8 @@ func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
 							return errors.New("failed to send message chunk 1: network timeout")
 						case "forbidden":
 							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
+						case "nil_session":
+							return errors.New("discord session is nil")
 						case "rate_limit":
 							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusTooManyRequests}}
 						case "server_error":
