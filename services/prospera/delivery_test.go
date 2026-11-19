@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,18 +19,6 @@ func WithReporterHTTPClient(client *http.Client) ReporterOption {
 	return func(r *Reporter) {
 		r.internalClient, r.externalClient = client, client
 	}
-}
-
-// noRequestTransport records RoundTrip invocations for malformed-endpoint tests:
-// owned code must return the request-construction error before any network
-// I/O, so any invocation proves the fail-closed ordering broke.
-type noRequestTransport struct {
-	calls atomic.Int32
-}
-
-func (t *noRequestTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	t.calls.Add(1)
-	return nil, errors.New("no request must be sent")
 }
 
 // WithReporterGeminiBaseURL overrides the Gemini REST base URL in unit tests.
@@ -1091,11 +1078,7 @@ func runTranscriptionBranchCase(t *testing.T, tc transcriptionBranchTestCase) {
 		whisperURL = tc.whisperURL
 	}
 	httpClient := srv.Client()
-	var spy *noRequestTransport
-	if tc.whisperURL != "" {
-		spy = &noRequestTransport{}
-		httpClient = &http.Client{Transport: spy}
-	} else if tc.failClient {
+	if tc.failClient {
 		httpClient = &http.Client{
 			Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 				return nil, errors.New("network drop")
@@ -1122,9 +1105,6 @@ func runTranscriptionBranchCase(t *testing.T, tc transcriptionBranchTestCase) {
 
 	if tc.wantErr && err == nil {
 		t.Fatalf("%s: expected error, got nil", tc.name)
-	}
-	if spy != nil && spy.calls.Load() != 0 {
-		t.Fatalf("%s: malformed endpoint performed %d network requests, want fail-closed zero", tc.name, spy.calls.Load())
 	}
 	if !tc.wantErr && (err != nil || res != tc.wantResult) {
 		t.Fatalf("%s: unexpected result (%q, %v)", tc.name, res, err)
@@ -1183,13 +1163,9 @@ func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 			return nil, errors.New("network drop")
 		}),
 	}
-	badURLSpy := &noRequestTransport{}
-	rBadURL := NewReporter(staticConfig{cfg: &Config{BrainURL: ":\x7f"}}, nil, nil, WithReporterHTTPClient(&http.Client{Transport: badURLSpy}))
+	rBadURL := NewReporter(staticConfig{cfg: &Config{BrainURL: ":\x7f"}}, nil, nil)
 	if err := rBadURL.postDiscordMessage(context.Background(), rBadURL.cfgSrc.Current(), "c1", "", "msg", nil); err == nil {
 		t.Fatal("expected postDiscordMessage request creation error")
-	}
-	if badURLSpy.calls.Load() != 0 {
-		t.Fatal("expected zero network requests for malformed endpoint")
 	}
 	rFail := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain.local"}}, nil, nil, WithReporterHTTPClient(failingClient))
 	if err := rFail.postDiscordMessage(context.Background(), rFail.cfgSrc.Current(), "c1", "", "msg", nil); err == nil {

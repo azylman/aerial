@@ -32,12 +32,14 @@ func setupTestToolHandler() (*ToolHandler, *mockStoreForDelivery, *mockTwilioFor
 }
 
 type toolHandlerInitiateCallTestCase struct {
-	name           string
-	args           InitiateCallArgs
-	twilioErr      string
-	updateStateErr string
-	wantErr        bool
-	wantMode       string
+	name               string
+	args               InitiateCallArgs
+	twilioErr          string
+	updateStateErr     string
+	wantErr            bool
+	wantErrContains    string
+	wantErrNotContains string
+	wantMode           string
 }
 
 func TestToolHandler_InitiateCall(t *testing.T) {
@@ -96,9 +98,11 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 				To:      "+15105550199",
 				Message: "Hello, this is an automated confirmation call.",
 			},
-			twilioErr:      "twilio network error",
-			updateStateErr: "db write failed",
-			wantErr:        true,
+			twilioErr:          "twilio network error",
+			updateStateErr:     "db write failed",
+			wantErr:            true,
+			wantErrContains:    "twilio network error",
+			wantErrNotContains: "db write failed",
 		},
 	}
 
@@ -125,6 +129,12 @@ func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTest
 		t.Fatalf("InitiateCall() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 	if tc.wantErr {
+		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+			t.Fatalf("InitiateCall() err = %v, want substring %q", err, tc.wantErrContains)
+		}
+		if tc.wantErrNotContains != "" && strings.Contains(err.Error(), tc.wantErrNotContains) {
+			t.Fatalf("InitiateCall() err = %v, must not contain %q", err, tc.wantErrNotContains)
+		}
 		return
 	}
 	assertToolHandlerInitiateCallSuccess(t, tc, out, store, twilioMock)
