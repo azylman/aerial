@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ const (
 	// canonical pure repo/branch helpers live in internal/model.
 	chunkModeAction  = "action"
 	defaultRepoOwner = "azylman"
+	effortMedium     = "medium"
 )
 
 // Type aliases preserving the executor public surface.
@@ -200,6 +203,29 @@ func (e *Executor) DispatchWakePrompt(ctx context.Context, threadID, wakePrompt 
 		return nil
 	}
 	return e.EriClient.Prompt(ctx, threadID, wakePrompt)
+}
+
+// DispatchSilentWakePrompt wakes a thread via Eri /dispatch so the turn runs
+// as a background dispatch whose final text is not delivered to Discord.
+// The occurrence discriminator (e.g. the source event's OccurredAt) keeps
+// distinct failure occurrences on separate dispatch IDs while redeliveries
+// of the same occurrence reuse the ID and stay already_exists-as-success.
+func (e *Executor) DispatchSilentWakePrompt(ctx context.Context, threadID, chunkID, wakePrompt, occurrence string) error {
+	if e == nil || e.EriClient == nil {
+		return nil
+	}
+	cleanChunk := strings.TrimSpace(chunkID)
+	sum := sha256.Sum256([]byte(strings.TrimSpace(threadID) + "\x00" + cleanChunk + "\x00" + strings.TrimSpace(wakePrompt) + "\x00" + strings.TrimSpace(occurrence)))
+	return e.EriClient.Dispatch(ctx, BrainDispatchRequest{
+		ID:             "vanadis-deploy-fail-" + cleanChunk + "-" + hex.EncodeToString(sum[:8]),
+		Source:         "vanadis-restate",
+		SessionID:      "vanadis-" + cleanChunk,
+		TargetID:       strings.TrimSpace(threadID),
+		VanadisChunkID: cleanChunk,
+		Prompt:         wakePrompt,
+		Effort:         effortMedium,
+		SkipIfActive:   true,
+	})
 }
 
 // DispatchDirectMessage posts a message to a Discord channel.

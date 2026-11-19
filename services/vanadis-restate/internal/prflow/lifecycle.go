@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -168,8 +169,9 @@ func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, c
 	return errors.Join(widgetErr, wakeErr)
 }
 
-// dispatchThreadWakePrompt wakes the build thread with a prompt.
-func (f *Flow) dispatchThreadWakePrompt(ctx context.Context, buildID, prompt string) error {
+// dispatchSilentThreadWakePrompt wakes the build thread as a silent
+// background dispatch so the turn's final text is not posted to Discord.
+func (f *Flow) dispatchSilentThreadWakePrompt(ctx context.Context, buildID, chunkID, prompt, occurrence string) error {
 	if f.Store == nil {
 		return nil
 	}
@@ -180,8 +182,11 @@ func (f *Flow) dispatchThreadWakePrompt(ctx context.Context, buildID, prompt str
 	if bld == nil {
 		return store.ErrBuildNotFound
 	}
-	if dErr := f.Exec.DispatchWakePrompt(ctx, bld.ThreadID, prompt); dErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] wake prompt warning", "error", dErr)
+	if dErr := f.Exec.DispatchSilentWakePrompt(ctx, bld.ThreadID, chunkID, prompt, occurrence); dErr != nil {
+		if errors.Is(dErr, executor.ErrDispatchActive) {
+			return nil
+		}
+		slog.WarnContext(ctx, "[vanadis-restate] silent wake dispatch warning", "error", dErr)
 		return dErr
 	}
 	return nil
@@ -336,7 +341,11 @@ func (f *Flow) HandleDeployFailureEvent(ctx context.Context, buildID, chunkID st
 		}
 	}
 	if f.Exec != nil {
-		if err := f.dispatchThreadWakePrompt(ctx, buildID, executor.FormatDeployFailurePrompt(ev)); err != nil {
+		occurrence := ""
+		if !ev.OccurredAt.IsZero() {
+			occurrence = ev.OccurredAt.UTC().Format(time.RFC3339Nano)
+		}
+		if err := f.dispatchSilentThreadWakePrompt(ctx, buildID, chunkID, executor.FormatDeployFailurePrompt(ev), occurrence); err != nil {
 			return err
 		}
 	}
