@@ -286,30 +286,44 @@ Per prior engineering decisions (retiring per-stack DB role migration chunks) an
 ### 8.4 One-Time Cross-Database Backfill Migration & Reconciliation
 Before retiring sibling logical PostgreSQL databases in Phase 2, an idempotent data migration copies existing rows from sibling databases into the consolidated `aerial` database:
 
-1. **Explicit Conflict Targets & Idempotency:**
-   - Every backfill `INSERT` query specifies an explicit `ON CONFLICT` target:
-     - `messages`: `INSERT INTO messages (...) SELECT ... ON CONFLICT (agent, id) DO NOTHING;` (preserving existing `row_id` values under `UNIQUE (agent, row_id)`).
+1. **Backfill Conflict Targets & Multi-Index Idempotency:**
+   - Every backfill `INSERT` statement is designed for full re-run idempotency:
+     - `messages`: `INSERT INTO messages (...) SELECT ... ON CONFLICT DO NOTHING;` (bare `ON CONFLICT DO NOTHING` safely handles both unique indexes: `PRIMARY KEY (agent, id)` and composite `UNIQUE (agent, row_id)` without raising unique-violation errors on re-runs, preserving historical `row_id` values).
+     - `dispatches`: `INSERT INTO dispatches (...) SELECT ... ON CONFLICT DO NOTHING;` (bare `ON CONFLICT DO NOTHING` safely handles both `PRIMARY KEY (id)` and composite `UNIQUE (agent, row_id)`).
      - `sessions`: `INSERT INTO sessions (...) SELECT ... ON CONFLICT (agent, session_id) DO NOTHING;`
-     - `dispatches`: `INSERT INTO dispatches (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
      - `extraction_watermarks`: `INSERT INTO extraction_watermarks (thread_id, agent, last_extracted_rowid, fact_extracted_at, updated_at) SELECT thread_id, agent, last_extracted_rowid, fact_extracted_at, updated_at FROM ... ON CONFLICT (agent, thread_id) DO NOTHING;`
      - `session_summaries`: `INSERT INTO session_summaries (...) SELECT ... ON CONFLICT (agent, session_id) DO NOTHING;`
      - `transcript_steps`: `INSERT INTO transcript_steps (...) SELECT ... ON CONFLICT (agent, session_id, step_index) DO NOTHING;`
      - `one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`: `INSERT INTO ... SELECT ... ON CONFLICT (id) DO NOTHING;`
+     - `schedule_runs`: `INSERT INTO schedule_runs (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
+     - `event_triggers`: `INSERT INTO event_triggers (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
      - `vanadis_builds`: `INSERT INTO vanadis_builds (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
      - `vanadis_chunks`: `INSERT INTO vanadis_chunks (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
-     - `pr_registry`: `INSERT INTO pr_registry (...) SELECT ... ON CONFLICT (repo, pr_number) DO NOTHING;`
      - `facts`: `INSERT INTO facts (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
-2. **Post-Backfill Sequence Resynchronization:**
-   - After copying rows with explicit `row_id` values, the PostgreSQL sequences must be advanced to prevent subsequent inserts from generating collisions:
+     - `procedural_candidates`: `INSERT INTO procedural_candidates (...) SELECT ... ON CONFLICT (id) DO NOTHING;`
+   - A full re-run of each statement is exercised in testing to verify multi-index idempotency.
+2. **Deterministic `pr_registry` Deduplication:**
+   - Because legacy webhook fan-out forwarded GitHub/Flux webhooks to multiple sibling synapse instances prior to consolidation, duplicate `(repo, pr_number)` rows can exist across sibling databases with different owning agents.
+   - Merging `pr_registry` applies a deterministic disambiguation rule:
+     1. Prefer the row whose `agent` matches the explicit agent trailer in the PR body (`<!-- aerial-pr: {"agent": "<agent>"} -->` or legacy `bot_id`).
+     2. Else prefer the row whose `agent` matches the PR head branch prefix or registration provenance.
+     3. Else assign ownership to the agent configured with `default_owner: true` in `synapse.yaml` (e.g. `'aerial'`).
+   - Duplicate rows resolved by this rule are logged in a migration audit log (`pr_registry_backfill_dropped`).
+3. **Post-Backfill Sequence Resynchronization:**
+   - After copying rows with explicit `row_id` or `id` serial values, the PostgreSQL sequences must be advanced to prevent subsequent inserts from generating collisions:
      ```sql
      SELECT setval(pg_get_serial_sequence('messages', 'row_id'), coalesce(max(row_id), 1)) FROM messages;
      SELECT setval(pg_get_serial_sequence('dispatches', 'row_id'), coalesce(max(row_id), 1)) FROM dispatches;
+     SELECT setval(pg_get_serial_sequence('facts', 'id'), coalesce(max(id), 1)) FROM facts;
+     SELECT setval(pg_get_serial_sequence('procedural_candidates', 'id'), coalesce(max(id), 1)) FROM procedural_candidates;
      ```
-3. **Pre-Cutover Reconciliation & Watermark Verification:**
+4. **Pre-Cutover Reconciliation & Watermark Verification:**
    - Before any sibling database is retired or decommissioned, an automated reconciliation check verifies:
-     - Row counts match exactly between source sibling databases and `aerial` for each table (`SELECT count(*) FROM <table> WHERE agent = '<agent>'` vs. sibling count).
-     - Watermarks remain consistent: for each thread in `extraction_watermarks`, `last_extracted_rowid <= max(row_id)` in `messages` for that `agent` and `thread_id`.
-     - Zero unmigrated rows or broken foreign key references exist.
+     - **Exact Table Row Counts:** Every table receiving an `agent` column is enumerated and verified (`messages`, `sessions`, `dispatches`, `extraction_watermarks`, `session_summaries`, `transcript_steps`, `one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`, `schedule_runs`, `event_triggers`, `vanadis_builds`, `vanadis_chunks`, `facts`, and `procedural_candidates`):
+       `SELECT count(*) FROM <table> WHERE agent = '<agent>'` on the consolidated `aerial` database must equal `SELECT count(*) FROM <table>` on the source sibling database.
+     - **`pr_registry` Deduplication Verification:** `SELECT count(DISTINCT (repo, pr_number))` across all source sibling databases equals `SELECT count(*)` in the consolidated `pr_registry`, and the surviving row's `agent` satisfies the Section 8.4.2 disambiguation rule.
+     - **Watermark Consistency:** For each thread in `extraction_watermarks`, `last_extracted_rowid <= max(row_id)` in `messages` for that `agent` and `thread_id`.
+     - Zero unmigrated rows or broken foreign key references exist across any table.
 
 ---
 
@@ -391,10 +405,10 @@ To uphold In-Flight Control-Plane Continuity and zero-downtime migration, rollou
    - Ship Phase 1 schema migration (`001_phase1_transcripts_coven.sql`) in `services/eri/pkg/db/schema.sql` (renaming `stack` -> `agent` on `extraction_watermarks`, `session_summaries`, `transcript_steps`, and adding `source_agent` to `facts` and `agent` to `procedural_candidates`).
    - Remove `memory_forget` from `coven`, wire `pkg/k8sauth` provenance stamping (`source_agent`) on `memory_store`, unify `coven` and `transcripts` into single multi-agent deployments (retiring `eri`'s legacy in-process transcript DB worker), and retire sibling `coven-<agent>` and `transcripts-<agent>` deployments.
 2. **Phase 2 — Unified Database & Category 3 Control Plane (`haro` + `vanadis` Suite):**
-   - Ship Phase 2 declarative `schema.sql` and Atlas migration (`002_phase2_core_multiagent.sql`) adding `agent` columns, composite unique constraints on `(agent, row_id)`, and composite primary keys (`messages`, `sessions`, `dispatches`, `one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`, `schedule_runs`, `event_triggers`, `vanadis_builds`, `pr_registry`).
+   - Ship Phase 2 declarative `schema.sql` and Atlas migration (`002_phase2_core_multiagent.sql`) adding `agent` columns and lookup indexes across dispatches, schedules (`one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`, `schedule_runs`, `event_triggers`), `vanadis_builds`, and `pr_registry`, composite unique constraints on `(agent, row_id)` on `messages` and `dispatches`, and composite primary keys on `messages` and `sessions`.
    - Update `eri` store queries to scope `messages`, `sessions`, and `dispatches` by `cfg.Agent`.
    - Update `haro` and `vanadis` / `vanadis-nats` / `vanadis-restate` for NATS-native multi-agent routing (`aerial.jobs.eri.<agent>.*` and `aerial.rpc.eri.<agent>.*`, removing `eri_url`) and `pkg/k8sauth` enforcement (`builds`, `schedules`).
-   - Run the Section 8.4 cross-database data backfill with explicit conflict targets, execute sequence resynchronization (`setval`), and complete the pre-cutover reconciliation check before pointing sibling `eri-<agent>` pods at the `aerial` database and retiring sibling `haro-<agent>`, `vanadis-*-<agent>`, `db-migrate-<agent>`, and extra Restate clusters.
+   - Run the Section 8.4 cross-database data backfill and deterministic `pr_registry` deduplication, execute sequence resynchronization (`setval`), and complete the pre-cutover reconciliation check across all enumerated tables before pointing sibling `eri-<agent>` pods at the `aerial` database and retiring sibling `haro-<agent>`, `vanadis-*-<agent>`, `db-migrate-<agent>`, and extra Restate clusters.
 3. **Phase 3 — Multi-Bot `synapse` Consolidation:**
    - Refactor `synapse` to manage multiple concurrent Discord Gateway sessions (`bots` map in `synapse.yaml`), enforce `pkg/k8sauth` on `/internal/pr/register` and `/internal/pr/retry-readiness`, and delete `webhook_forward_urls` / `webhook_forward.go`.
    - Cut over `synapse` with all bot tokens mounted via ESO and retire sibling `synapse-<agent>` deployments.
