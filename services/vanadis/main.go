@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,19 +17,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
+	"github.com/azylman/aerial/services/vanadis/internal/store"
 )
-
-const jsonNull = "null"
 
 type (
 	// Config holds runtime configuration for the Vanadis orchestrator service.
@@ -92,30 +87,21 @@ var (
 	SummarizeBuildEntry = model.SummarizeBuildEntry
 )
 
-// VanadisStore defines the persistence contract for Vanadis builds and chunks.
-type VanadisStore interface {
-	GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
-	ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error)
-	GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error)
-	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
-}
+type (
+	// VanadisStore defines the persistence contract for Vanadis builds and chunks.
+	VanadisStore = store.VanadisStore
+	// PostgresVanadisStore implements VanadisStore backed by PostgreSQL (pgxpool.Pool).
+	PostgresVanadisStore = store.PostgresVanadisStore
+)
 
-type pgxQueryExecer interface {
-	Exec(ctx context.Context, query string, arguments ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
-	Begin(ctx context.Context) (pgx.Tx, error)
-}
-
-// PostgresVanadisStore implements VanadisStore backed by PostgreSQL (pgxpool.Pool).
-type PostgresVanadisStore struct {
-	db pgxQueryExecer
-}
-
-// NewPostgresVanadisStore constructs a new PostgresVanadisStore.
-func NewPostgresVanadisStore(db pgxQueryExecer) *PostgresVanadisStore {
-	return &PostgresVanadisStore{db: db}
-}
+var (
+	// NewPostgresVanadisStore constructs a new PostgresVanadisStore.
+	NewPostgresVanadisStore = store.NewPostgresVanadisStore
+	// ScanBuild scans one row selected with BuildColumns.
+	ScanBuild = store.ScanBuild
+	// ScanChunks scans ordered vanadis_chunks rows into VanadisChunk values.
+	ScanChunks = store.ScanChunks
+)
 
 var (
 	// NormalizeRepo trims whitespace from a repository reference.
@@ -134,131 +120,6 @@ const (
 	serviceName = "vanadis"
 )
 
-// GetBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
-func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	if s == nil || s.db == nil {
-		return nil, nil, errors.New("database connection is nil")
-	}
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return nil, nil, errors.New("build id cannot be empty")
-	}
-	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds WHERE id = $1;`
-	b, err := scanBuild(s.db.QueryRow(ctx, buildQuery, buildID))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, ErrBuildNotFound
-		}
-		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
-	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
-	rows, err := s.db.Query(ctx, chunksQuery, buildID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
-	}
-	defer rows.Close()
-	chunks, err := scanChunks(rows)
-	if err != nil {
-		return nil, nil, err
-	}
-	return &b, chunks, nil
-}
-
-func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
-	chunks := make([]VanadisChunk, 0)
-	for rows.Next() {
-		var c VanadisChunk
-		var startedAt, completedAt sql.NullTime
-		var rawCIChecks, rawRolloutState []byte
-		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
-			&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
-			&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
-			&rawRolloutState, &c.Banner, &c.MergeAwakeableID, &c.DeployAwakeableID,
-			&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
-		}
-		if startedAt.Valid {
-			c.StartedAt = startedAt.Time
-		}
-		if completedAt.Valid {
-			c.CompletedAt = completedAt.Time
-		}
-		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
-		c.DependsOn = nonNilSlice(c.DependsOn)
-		c.Effort = capChunkEffort(c.Effort)
-		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
-			var checks map[string]string
-			if err := json.Unmarshal(rawCIChecks, &checks); err == nil {
-				c.CIChecks = checks
-			}
-		}
-		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
-			var rs pubsub.PRRolloutState
-			if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
-				c.RolloutState = &rs
-			}
-		}
-		chunks = append(chunks, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating vanadis chunks: %w", err)
-	}
-	return chunks, nil
-}
-
-// ListBuilds queries recent Vanadis builds with their ordered chunks, summarized as VanadisBuildEntry items.
-func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error) {
-	if s == nil || s.db == nil {
-		return nil, errors.New("database connection is nil")
-	}
-	if limit <= 0 || limit > 100 {
-		limit = 50
-	}
-	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds ORDER BY created_at DESC, id DESC LIMIT $1;`
-	rows, err := s.db.Query(ctx, buildQuery, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query vanadis builds: %w", err)
-	}
-	defer rows.Close()
-	var builds []VanadisBuild
-	var buildIDs []string
-	for rows.Next() {
-		b, scanBuildErr := scanBuild(rows)
-		if scanBuildErr != nil {
-			return nil, fmt.Errorf("failed to scan vanadis build: %w", scanBuildErr)
-		}
-		builds = append(builds, b)
-		buildIDs = append(buildIDs, b.ID)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating vanadis builds: %w", err)
-	}
-	if len(builds) == 0 {
-		return []VanadisBuildEntry{}, nil
-	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
-	cRows, err := s.db.Query(ctx, chunksQuery, buildIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query vanadis chunks: %w", err)
-	}
-	defer cRows.Close()
-	allChunks, err := scanChunks(cRows)
-	if err != nil {
-		return nil, err
-	}
-	chunksByBuild := make(map[string][]VanadisChunk, len(builds))
-	for _, c := range allChunks {
-		chunksByBuild[c.BuildID] = append(chunksByBuild[c.BuildID], c)
-	}
-	entries := make([]VanadisBuildEntry, len(builds))
-	for i, b := range builds {
-		entries[i] = SummarizeBuildEntry(b, nonNilSlice(chunksByBuild[b.ID]))
-	}
-	return entries, nil
-}
-
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
 	cfg        Config
@@ -269,16 +130,16 @@ type VanadisServer struct {
 }
 
 // NewVanadisServer constructs a new VanadisServer instance.
-func NewVanadisServer(cfg Config, store VanadisStore, httpClient *http.Client) *VanadisServer {
+func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client) *VanadisServer {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
-	return &VanadisServer{cfg: cfg, restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")), httpClient: tracing.Client(httpClient), store: store}
+	return &VanadisServer{cfg: cfg, restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")), httpClient: tracing.Client(httpClient), store: st}
 }
 
 // SetStore updates the VanadisStore backing the server.
-func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
+func (s *VanadisServer) SetStore(st VanadisStore) { s.store = st }
 
 func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	if s == nil {
@@ -319,21 +180,6 @@ var (
 	GenerateBuildID = model.GenerateBuildID
 	generateBuildID = model.GenerateBuildID
 )
-
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-// buildColumns is the vanadis_builds SELECT list scanBuild consumes, in its destination order.
-// Every query whose rows go through scanBuild must select exactly these columns.
-const buildColumns = `id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
-
-// scanBuild scans one row selected with buildColumns.
-func scanBuild(s rowScanner) (VanadisBuild, error) {
-	var b VanadisBuild
-	err := s.Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
-	return b, err
-}
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
