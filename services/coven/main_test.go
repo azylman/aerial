@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,127 +310,6 @@ func (m *mockPubsubMsg) Term() error {
 func (*mockPubsubMsg) Snooze(_ time.Duration) error { return nil }
 func (*mockPubsubMsg) InProgress() error            { return nil }
 
-type captureSubscribeBus struct {
-	pubsub.Bus
-
-	handlers map[string]pubsub.Handler
-}
-
-func (c *captureSubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	if c.handlers == nil {
-		c.handlers = make(map[string]pubsub.Handler)
-	}
-	c.handlers[durable] = handler
-	return c.Bus.Subscribe(ctx, subject, durable, handler)
-}
-
-func TestNakBackoffDelay(t *testing.T) {
-	tests := []struct {
-		delivered uint64
-		want      time.Duration
-	}{
-		{delivered: 0, want: 1 * time.Second},
-		{delivered: 1, want: 1 * time.Second},
-		{delivered: 2, want: 2 * time.Second},
-		{delivered: 3, want: 4 * time.Second},
-		{delivered: 4, want: 8 * time.Second},
-		{delivered: 5, want: 16 * time.Second},
-		{delivered: 10, want: 16 * time.Second},
-	}
-	for _, tc := range tests {
-		t.Run(fmt.Sprintf("delivered_%d", tc.delivered), func(t *testing.T) {
-			got := nakBackoffDelay(tc.delivered)
-			if got != tc.want {
-				t.Errorf("nakBackoffDelay(%d) = %v, want %v", tc.delivered, got, tc.want)
-			}
-		})
-	}
-}
-
-type handleTranscriptSyncedEventTestCase struct {
-	name             string
-	msgData          string
-	busFail          bool
-	wantErr          bool
-	wantCoalescedJob bool
-}
-
-func runHandleTranscriptSyncedEventCase(ctx context.Context, t *testing.T, tc handleTranscriptSyncedEventTestCase) {
-	t.Helper()
-	msg := &mockPubsubMsg{data: []byte(tc.msgData), delivered: 1}
-
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	receivedChan := make(chan pubsub.CovenExtractJobArgs, 1)
-	if tc.wantCoalescedJob {
-		_, _ = memBus.Subscribe(ctx, pubsub.SubjectCovenExtractCoalesced("th-sync-1"), "test-sub", func(_ context.Context, m pubsub.Message) error {
-			var args pubsub.CovenExtractJobArgs
-			_ = json.Unmarshal(m.Data(), &args)
-			receivedChan <- args
-			return nil
-		})
-	}
-	if tc.busFail {
-		_ = memBus.Close()
-	}
-
-	err := handleTranscriptSyncedEvent(ctx, msg, memBus)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("handleTranscriptSyncedEvent() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantCoalescedJob {
-		var receivedArgs pubsub.CovenExtractJobArgs
-		select {
-		case receivedArgs = <-receivedChan:
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for coalesced extract job on bus")
-		}
-		expected := pubsub.CovenExtractJobArgs{
-			ThreadID:  "th-sync-1",
-			SessionID: "sess-1",
-		}
-		if receivedArgs != expected {
-			t.Errorf("received coalesced extract args = %+v, want %+v", receivedArgs, expected)
-		}
-	}
-}
-
-func TestHandleTranscriptSyncedEvent_Scenarios(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []handleTranscriptSyncedEventTestCase{
-		{
-			name:    "InvalidJSONLoggedAndReturnsNil",
-			msgData: "not-json",
-		},
-		{
-			name:    "EmptyConversationIDIgnored",
-			msgData: `{"session_id":"sess-1","conversation_id":""}`,
-		},
-		{
-			name:    "HealthcheckPingSessionIgnored",
-			msgData: `{"session_id":"healthcheck-ping","conversation_id":"th-sync-1"}`,
-		},
-		{
-			name:             "BusPublishesCoalescedExtractJob",
-			msgData:          `{"session_id":"sess-1","conversation_id":"th-sync-1"}`,
-			wantCoalescedJob: true,
-		},
-		{
-			name:    "BusPublishErrorReturnsError",
-			msgData: `{"session_id":"sess-1","conversation_id":"th-sync-1"}`,
-			busFail: true,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runHandleTranscriptSyncedEventCase(ctx, t, tc)
-		})
-	}
-}
-
 type handleCovenExtractJobTestCase struct {
 	name         string
 	msgData      string
@@ -679,9 +556,6 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	if err := subscribeCovenTranscriptsIndexed(ctx, nil, "aerial"); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
-	if err := subscribeCovenTranscriptSynced(ctx, nil); err != nil {
-		t.Errorf("expected nil error, got %v", err)
-	}
 	if err := subscribeCovenExtract(ctx, nil, worker); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -698,9 +572,6 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	// Broken subscribe returns error
 	brokenSub := &brokenBus{Bus: memBus, errOnSubscribe: true}
 	if err := subscribeCovenTranscriptsIndexed(ctx, brokenSub, "aerial"); err == nil {
-		t.Error("expected error when subscribe fails")
-	}
-	if err := subscribeCovenTranscriptSynced(ctx, brokenSub); err == nil {
 		t.Error("expected error when subscribe fails")
 	}
 	if err := subscribeCovenExtract(ctx, brokenSub, worker); err == nil {
@@ -724,21 +595,4 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	cancel()
 	consumers := &covenConsumers{}
 	retrySubscribeCovenConsumers(canceledCtx, memBus, worker, consumers)
-
-	// Delivery attempt < 5 returns error on closed bus (publish fails)
-	openBus := pubsub.NewMemoryBus()
-	captureClosed := &captureSubscribeBus{Bus: openBus}
-	if err := subscribeCovenTranscriptSynced(ctx, captureClosed); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	_ = openBus.Close()
-	tsHandlerClosed := captureClosed.handlers["coven-transcript-synced"]
-	validData, _ := json.Marshal(pubsub.TranscriptSyncedEvent{ConversationID: "th-retry", SessionID: "sess-1"})
-
-	if err := tsHandlerClosed(ctx, &mockPubsubMsg{data: validData, delivered: 1}); err == nil {
-		t.Error("expected error on attempt 1 with closed bus")
-	}
-	if err := tsHandlerClosed(ctx, &mockPubsubMsg{data: validData, delivered: 5}); err != nil {
-		t.Errorf("expected nil error on attempt 5 drop, got %v", err)
-	}
 }

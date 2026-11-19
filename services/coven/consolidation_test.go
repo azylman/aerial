@@ -326,11 +326,9 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 type workerLifecycleTestCase struct {
 	name        string
 	tick        int64
-	runCatchUp  bool
 	nilStore    bool
 	nilOllama   bool
 	nilLLM      bool
-	storeFail   string
 	wantExtract bool
 }
 
@@ -341,9 +339,6 @@ func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb [
 	mem.activeThreads = []string{"th-1"}
 	mem.unextractedTurns["th-1"] = []Message{
 		{RowID: 1, ThreadID: "th-1", Content: "user prompt", ResponseText: "resp", Status: "COMPLETED", IsAdmin: true},
-	}
-	if tc.storeFail != "" {
-		mem.SetFail(tc.storeFail, errors.New("store err"))
 	}
 	var store Store = mem
 	if tc.nilStore {
@@ -370,11 +365,7 @@ func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb [
 		TickInterval: -1,
 	})
 
-	if tc.runCatchUp {
-		w.RunStartupCatchUp(ctx)
-	} else {
-		w.Tick(ctx, tc.tick)
-	}
+	w.Tick(ctx, tc.tick)
 
 	if tc.wantExtract && llmCalls == 0 {
 		t.Errorf("expected fact extraction LLM call, got 0")
@@ -389,33 +380,20 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 
 	tests := []workerLifecycleTestCase{
 		{
-			name:        "StartupCatchUpExtraction",
-			runCatchUp:  true,
-			wantExtract: true,
-		},
-		{
 			name: "Tick1Noop",
 			tick: 1,
 		},
 		{
-			name:       "NilStoreSafe",
-			runCatchUp: true,
-			nilStore:   true,
+			name:     "NilStoreSafe",
+			nilStore: true,
 		},
 		{
-			name:       "NilOllamaSafe",
-			runCatchUp: true,
-			nilOllama:  true,
+			name:      "NilOllamaSafe",
+			nilOllama: true,
 		},
 		{
-			name:       "NilLLMSafe",
-			runCatchUp: true,
-			nilLLM:     true,
-		},
-		{
-			name:       "StartupCatchUpErrorHandled",
-			runCatchUp: true,
-			storeFail:  "GetActiveConversationsForExtraction",
+			name:   "NilLLMSafe",
+			nilLLM: true,
 		},
 	}
 

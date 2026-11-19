@@ -80,12 +80,12 @@ func withFactWriteLock(ctx context.Context, db DBTX, lockKey string, fn func(ctx
 			_ = rollbackErr
 		}
 	}
-	var acquired int64
+	var acquired bool
 	if err := db.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(hashtext($1))`, key).Scan(&acquired); err != nil {
 		rollback()
 		return fmt.Errorf("coven lock: failed to take fact-write lock: %w", err)
 	}
-	if acquired == 0 {
+	if !acquired {
 		rollback()
 		return ErrAdvisoryLockBusy
 	}
