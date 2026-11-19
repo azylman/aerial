@@ -305,6 +305,42 @@ channels:
 			wantEngine:   "codex",
 			wantCodexBin: "/opt/codex/bin/codex",
 		},
+		{
+			name: "transcripts indexer url and batch budget",
+			content: `
+transcripts:
+  database: "shared_db"
+  stack: "stack-b"
+  indexer_url: "  http://indexer.internal:4060/  "
+  max_batch_bytes: 65536
+channels:
+  default:
+    mode: "threads"
+`,
+			wantTx: TranscriptsConfig{Database: "shared_db", Stack: "stack-b", IndexerURL: "http://indexer.internal:4060", MaxBatchBytes: 65536},
+		},
+	}
+}
+
+func TestTranscriptsConfig_EffectiveMaxBatchBytes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		budget int
+		want   int
+	}{
+		{name: "zero falls back to wire budget", budget: 0, want: 512 * 1024},
+		{name: "negative falls back to wire budget", budget: -1, want: 512 * 1024},
+		{name: "positive budget honored", budget: 65536, want: 65536},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := TranscriptsConfig{MaxBatchBytes: tc.budget}
+			if got := cfg.EffectiveMaxBatchBytes(); got != tc.want {
+				t.Errorf("EffectiveMaxBatchBytes() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 

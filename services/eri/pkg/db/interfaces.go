@@ -72,6 +72,7 @@ type DispatchStore interface {
 type SessionStore interface {
 	GetSessionID(ctx context.Context, threadID string) (string, error)
 	GetPreviousSessionID(ctx context.Context, threadID string) (string, error)
+	ResolveThreadForSession(ctx context.Context, sessionID string) (string, error)
 	SaveSessionID(ctx context.Context, threadID, sessionID string) error
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)

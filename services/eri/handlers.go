@@ -891,6 +891,7 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 		var req struct {
 			Prompt      string                  `json:"prompt"`
 			Attachments []InternalLLMAttachment `json:"attachments"`
+			Effort      string                  `json:"effort,omitempty"`
 		}
 		if !readPostJSON(w, r, &req) {
 			return
@@ -898,6 +899,12 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 		prompt := strings.TrimSpace(req.Prompt)
 		if prompt == "" {
 			writeErr(w, http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty")
+			return
+		}
+		// Effort is parsed and validated now but stays dark: the extraction
+		// cutover wires it into the runner in a later chunk.
+		if effort := strings.ToLower(strings.TrimSpace(req.Effort)); effort != "" && effort != config.EffortLow && effort != config.EffortMedium && effort != config.EffortHigh {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
 			return
 		}
 
@@ -1007,6 +1014,11 @@ func parseTasksFilter(q url.Values) (db.TasksFilter, bool) {
 	if limitParam := strings.TrimSpace(q.Get("limit")); limitParam != "" {
 		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 {
 			filter.Limit, hasFilter = l, true
+		}
+	}
+	if orderParam := strings.ToLower(strings.TrimSpace(q.Get("order"))); orderParam != "" {
+		if orderParam == db.TasksOrderAsc || orderParam == db.TasksOrderDesc {
+			filter.Order, hasFilter = orderParam, true
 		}
 	}
 	return filter, hasFilter

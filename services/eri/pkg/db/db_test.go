@@ -595,6 +595,24 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			wantCount:   1,
 			wantFirstID: "msg-f1",
 		},
+		{
+			name:        "explicit order asc",
+			filter:      TasksFilter{Order: TasksOrderAsc},
+			wantCount:   3,
+			wantFirstID: "msg-f1",
+		},
+		{
+			name:        "explicit order desc",
+			filter:      TasksFilter{Order: TasksOrderDesc},
+			wantCount:   3,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "explicit order desc overrides after_row_id asc",
+			filter:      TasksFilter{AfterRowID: 1, Order: TasksOrderDesc},
+			wantCount:   2,
+			wantFirstID: "msg-f3",
+		},
 	}
 
 	for _, tc := range tests {
