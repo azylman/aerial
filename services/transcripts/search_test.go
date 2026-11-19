@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
 func TestSearchSessions(t *testing.T) {
@@ -84,6 +86,7 @@ func TestSearchSteps(t *testing.T) {
 
 func TestBuildStepsQuery(t *testing.T) {
 	t.Parallel()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name           string
 		stack          string
@@ -92,22 +95,25 @@ func TestBuildStepsQuery(t *testing.T) {
 		tool           string
 		limit          int
 		useFTS         bool
+		since          time.Time
 		wantContains   string
 		wantNotContain string
 		wantArgs       []any
 	}{
-		{"sqlite keeps like scan", "", "hello", "", "", 20, false, "t.content LIKE '%' || $1 || '%'", "fts_tokens", []any{"hello", 20}},
-		{"postgres uses fts index", "", "hello", "", "", 20, true, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
-		{"postgres keeps filter placeholders", "aerial", "hello", "sess-a", "bash", 10, true, "t.stack = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
+		{"sqlite keeps like scan", "", "hello", "", "", 20, false, time.Time{}, "t.content LIKE '%' || $1 || '%'", "fts_tokens", []any{"hello", 20}},
+		{"postgres uses fts index", "", "hello", "", "", 20, true, time.Time{}, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
+		{"postgres keeps filter placeholders", "aerial", "hello", "sess-a", "bash", 10, true, time.Time{}, "t.stack = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
+		{"comma-separated sessions in IN clause", "", "hello", "sess-a,sess-b", "", 20, false, time.Time{}, "t.session_id IN ($2, $3)", "fts_tokens", []any{"hello", "sess-a", "sess-b", 20}},
+		{"since clause added", "", "hello", "", "", 20, false, epoch, "t.created_at >= $2", "fts_tokens", []any{"hello", epoch, 20}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, args := buildStepsQuery(tc.stack, tc.query, tc.session, tc.tool, tc.limit, tc.useFTS)
+			got, args := buildStepsQuery(tc.stack, tc.query, tc.session, tc.tool, tc.limit, tc.useFTS, tc.since)
 			if !strings.Contains(got, tc.wantContains) {
 				t.Errorf("buildStepsQuery() = %q, want it to contain %q", got, tc.wantContains)
 			}
-			if strings.Contains(got, tc.wantNotContain) {
+			if tc.wantNotContain != "" && strings.Contains(got, tc.wantNotContain) {
 				t.Errorf("buildStepsQuery() = %q, want it to omit %q", got, tc.wantNotContain)
 			}
 			if !reflect.DeepEqual(args, tc.wantArgs) {
@@ -355,5 +361,157 @@ func TestCollectReadRowsScanError(t *testing.T) {
 	}
 	if _, err := collectReadRows(ctx, store, "op", `SELECT stack, session_id, last_indexed_step, last_mtime FROM session_summaries`, failingRowScan); err == nil {
 		t.Errorf("expected scan error")
+	}
+}
+
+func TestGetWatermark(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	if _, err := store.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 5, false, false)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		stack     string
+		sessionID string
+		wantStep  int
+		wantErr   bool
+	}{
+		{"existing session matching stack", "aerial", "sess-a", 5, false},
+		{"existing session empty stack", "", "sess-a", 5, false},
+		{"wrong stack returns not found", "other", "sess-a", -1, false},
+		{"missing session returns not found", "aerial", "missing", -1, false},
+		{"empty session returns not found", "aerial", "", -1, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := store.GetWatermark(ctx, tc.stack, tc.sessionID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetWatermark() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if got != tc.wantStep {
+				t.Errorf("GetWatermark() = %d, want %d", got, tc.wantStep)
+			}
+		})
+	}
+}
+
+func TestGetThreadTrajectory(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	batch := testBatch("sess-traj", epoch, 0, 2, false, false)
+	batch.ThreadID = "th-traj-1"
+	batch.Steps = []transcriptwire.TranscriptStep{
+		{
+			StepIndex: 0,
+			Type:      "USER_INPUT",
+			Content:   "<retrieved_memory>\n- [id:42] User likes matcha\n</retrieved_memory>",
+		},
+		{
+			StepIndex: 1,
+			Type:      "PLANNER_RESPONSE",
+			ToolName:  "read_file",
+			Content:   `{"path": "/test/file.go"}`,
+		},
+		{
+			StepIndex: 2,
+			Type:      "TOOL",
+			ToolName:  "read_file",
+			Content:   "file contents",
+		},
+	}
+	if _, err := store.ApplyBatch(ctx, batch); err != nil {
+		t.Fatalf("seed ApplyBatch: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		stack       string
+		threadID    string
+		limit       int
+		wantFactSub string
+		wantToolSub string
+		wantFactLen int
+		wantToolLen int
+	}{
+		{"trajectory extracted for thread", "aerial", "th-traj-1", 10, "[id:42] User likes matcha", "read_file", 1, 2},
+		{"trajectory limit zero defaults", "aerial", "th-traj-1", 0, "[id:42] User likes matcha", "read_file", 1, 2},
+		{"empty thread returns empty", "aerial", "", 10, "", "", 0, 0},
+		{"missing thread returns empty", "aerial", "missing", 10, "", "", 0, 0},
+		{"wrong stack returns empty", "other", "th-traj-1", 10, "", "", 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			facts, tools, err := store.GetThreadTrajectory(ctx, tc.stack, tc.threadID, tc.limit)
+			if err != nil {
+				t.Fatalf("GetThreadTrajectory() err = %v", err)
+			}
+			if len(facts) != tc.wantFactLen {
+				t.Errorf("facts len = %d, want %d", len(facts), tc.wantFactLen)
+			}
+			if tc.wantFactSub != "" && (len(facts) == 0 || !strings.Contains(facts[0], tc.wantFactSub)) {
+				t.Errorf("facts = %v, want substring %q", facts, tc.wantFactSub)
+			}
+			if len(tools) != tc.wantToolLen {
+				t.Errorf("tools len = %d, want %d", len(tools), tc.wantToolLen)
+			}
+			if tc.wantToolSub != "" && (len(tools) == 0 || !strings.Contains(tools[0], tc.wantToolSub)) {
+				t.Errorf("tools = %v, want substring %q", tools, tc.wantToolSub)
+			}
+		})
+	}
+}
+
+func TestTrajectoryFormatting(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		stepType string
+		toolName string
+		content  string
+		want     string
+	}{
+		{"empty all", "", "", "", ""},
+		{"tool only without content", "", "bash", "", "bash"},
+		{"step type only without content", "PLANNER_RESPONSE", "", "", "PLANNER_RESPONSE"},
+		{"tool and step type with content", "PLANNER_RESPONSE", "bash", "echo hi", "bash/PLANNER_RESPONSE: echo hi"},
+		{"tool and content", "", "bash", "echo hi", "bash: echo hi"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatTrajectoryToolCall(tc.stepType, tc.toolName, tc.content); got != tc.want {
+				t.Errorf("formatTrajectoryToolCall(%q, %q, %q) = %q, want %q", tc.stepType, tc.toolName, tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTruncateSingleLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		s      string
+		maxLen int
+		want   string
+	}{
+		{"maxLen negative", "hello world", -1, "hello world"},
+		{"longer than maxLen", "hello world", 5, "hello"},
+		{"shorter than maxLen", "hello", 10, "hello"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := truncateSingleLine(tc.s, tc.maxLen); got != tc.want {
+				t.Errorf("truncateSingleLine(%q, %d) = %q, want %q", tc.s, tc.maxLen, got, tc.want)
+			}
+		})
 	}
 }

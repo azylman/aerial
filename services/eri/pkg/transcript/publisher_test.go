@@ -3,6 +3,9 @@ package transcript
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,6 +279,273 @@ func TestPublisher_EnqueueStepsSplits(t *testing.T) {
 				if b.Stack != "aerial" || b.SessionID != "s1" {
 					t.Errorf("published batch lost envelope: stack=%q session=%q", b.Stack, b.SessionID)
 				}
+			}
+		})
+	}
+}
+
+func TestPublisher_BuildSessionBatches(t *testing.T) {
+	t.Parallel()
+	brainDir := t.TempDir()
+	sessDir := filepath.Join(brainDir, "sess-1")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessDir: %v", err)
+	}
+	transcriptContent := `{"step_index":0,"type":"USER_INPUT","content":"Hello world"}
+{"step_index":1,"type":"PLANNER_RESPONSE","tool_name":"bash","content":"echo hi"}
+{"step_index":2,"type":"TOOL","tool_name":"bash","content":"hi"}
+{"step_index":3,"type":"PLANNER_RESPONSE","tool_name":"custom","tool_calls":[{"name":"custom","args":{"q":"test"}}]}
+{"step_index":4,"type":"TOOL","tool_name":"trivial","content":"   "}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		params       SessionBatchParams
+		wantErrSub   string
+		wantBatches  int
+		wantReset    bool
+		wantBaseStep int
+		wantFirst    int
+		wantLast     int
+	}{
+		{
+			name: "watermark negative collects all steps",
+			params: SessionBatchParams{
+				SessionID: "sess-1",
+				BrainDir:  brainDir,
+				Watermark: -1,
+				Engine:    "agy",
+			},
+			wantBatches:  1,
+			wantReset:    false,
+			wantBaseStep: 0,
+			wantFirst:    0,
+			wantLast:     3,
+		},
+		{
+			name: "watermark advances slices tail",
+			params: SessionBatchParams{
+				SessionID: "sess-1",
+				BrainDir:  brainDir,
+				Watermark: 1,
+			},
+			wantBatches:  1,
+			wantReset:    false,
+			wantBaseStep: 2,
+			wantFirst:    2,
+			wantLast:     3,
+		},
+		{
+			name: "watermark higher than maxStepIndex resets",
+			params: SessionBatchParams{
+				SessionID: "sess-1",
+				BrainDir:  brainDir,
+				Watermark: 10,
+			},
+			wantBatches:  1,
+			wantReset:    true,
+			wantBaseStep: -1,
+			wantFirst:    0,
+			wantLast:     3,
+		},
+		{
+			name: "empty session ID errors",
+			params: SessionBatchParams{
+				SessionID: "",
+				BrainDir:  brainDir,
+			},
+			wantErrSub: "session ID cannot be empty",
+		},
+		{
+			name: "missing session errors",
+			params: SessionBatchParams{
+				SessionID: "missing-sess",
+				BrainDir:  brainDir,
+			},
+			wantErrSub: "transcript file not found",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := NewPublisher("aerial", nil)
+			batches, err := p.BuildSessionBatches(tc.params)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("BuildSessionBatches() err = %v, want substring %q", err, tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildSessionBatches() unexpected err = %v", err)
+			}
+			if len(batches) != tc.wantBatches {
+				t.Fatalf("batches len = %d, want %d", len(batches), tc.wantBatches)
+			}
+			if batches[0].Reset != tc.wantReset {
+				t.Errorf("batch Reset = %v, want %v", batches[0].Reset, tc.wantReset)
+			}
+			if batches[0].BaseStep != tc.wantBaseStep {
+				t.Errorf("batch BaseStep = %d, want %d", batches[0].BaseStep, tc.wantBaseStep)
+			}
+			if batches[0].FirstStep != tc.wantFirst {
+				t.Errorf("batch FirstStep = %d, want %d", batches[0].FirstStep, tc.wantFirst)
+			}
+			if batches[0].LastStep != tc.wantLast {
+				t.Errorf("batch LastStep = %d, want %d", batches[0].LastStep, tc.wantLast)
+			}
+		})
+	}
+}
+
+func TestPublisher_PublishSessions(t *testing.T) {
+	t.Parallel()
+	brainDir := t.TempDir()
+	sessDir := filepath.Join(brainDir, "sess-p1")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessDir: %v", err)
+	}
+	transcriptContent := `{"step_index":0,"type":"USER_INPUT","content":"Hello world"}
+{"step_index":1,"type":"PLANNER_RESPONSE","tool_name":"bash","content":"echo hi"}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		pubNil     bool
+		brainDir   string
+		watermarks map[string]int
+		sessions   []string
+		wantErrSub string
+		wantCount  int
+	}{
+		{
+			name:       "nil publisher errors",
+			pubNil:     true,
+			brainDir:   brainDir,
+			sessions:   []string{"sess-p1"},
+			wantErrSub: "publisher is nil",
+		},
+		{
+			name:       "valid session publishes",
+			pubNil:     false,
+			brainDir:   brainDir,
+			watermarks: map[string]int{"sess-p1": -1},
+			sessions:   []string{"sess-p1"},
+			wantCount:  1,
+		},
+		{
+			name:       "auto-discover sessions when sessions empty",
+			pubNil:     false,
+			brainDir:   brainDir,
+			watermarks: map[string]int{"sess-p1": -1},
+			sessions:   nil,
+			wantCount:  1,
+		},
+		{
+			name:       "blank session in list skipped",
+			pubNil:     false,
+			brainDir:   brainDir,
+			watermarks: map[string]int{"sess-p1": -1},
+			sessions:   []string{"  ", "sess-p1"},
+			wantCount:  1,
+		},
+		{
+			name:       "missing session in list errors",
+			pubNil:     false,
+			brainDir:   brainDir,
+			sessions:   []string{"sess-missing"},
+			wantErrSub: "transcript file not found",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingPublish{failCall: -1}
+			var p *Publisher
+			if !tc.pubNil {
+				p = NewPublisher("aerial", rec.publish)
+			}
+			err := p.PublishSessions(context.Background(), tc.brainDir, tc.watermarks, tc.sessions...)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("PublishSessions() err = %v, want substring %q", err, tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PublishSessions() unexpected err = %v", err)
+			}
+			if len(rec.published) != tc.wantCount {
+				t.Fatalf("published len = %d, want %d", len(rec.published), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestPublisher_PublishSession(t *testing.T) {
+	t.Parallel()
+	brainDir := t.TempDir()
+	sessDir := filepath.Join(brainDir, "sess-one")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessDir: %v", err)
+	}
+	transcriptContent := `{"step_index":0,"type":"USER_INPUT","content":"Hello world"}`
+	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		pubNil     bool
+		params     SessionBatchParams
+		wantErrSub string
+		wantCount  int
+	}{
+		{
+			name:       "nil publisher errors",
+			pubNil:     true,
+			params:     SessionBatchParams{SessionID: "sess-one", BrainDir: brainDir},
+			wantErrSub: "publisher is nil",
+		},
+		{
+			name:       "invalid session params errors",
+			pubNil:     false,
+			params:     SessionBatchParams{SessionID: "", BrainDir: brainDir},
+			wantErrSub: "session ID cannot be empty",
+		},
+		{
+			name:      "successful single session publish",
+			pubNil:    false,
+			params:    SessionBatchParams{SessionID: "sess-one", BrainDir: brainDir, Watermark: -1, Engine: "agy"},
+			wantCount: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingPublish{failCall: -1}
+			var p *Publisher
+			if !tc.pubNil {
+				p = NewPublisher("aerial", rec.publish)
+			}
+			err := p.PublishSession(context.Background(), tc.params)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("PublishSession() err = %v, want substring %q", err, tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PublishSession() unexpected err = %v", err)
+			}
+			if len(rec.published) != tc.wantCount {
+				t.Fatalf("published len = %d, want %d", len(rec.published), tc.wantCount)
 			}
 		})
 	}

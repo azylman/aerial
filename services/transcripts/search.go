@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -155,11 +157,12 @@ func (s *Store) SearchSessions(ctx context.Context, stack, queryText string, lim
 }
 
 // SearchSteps finds indexed steps by content text with optional session and
-// tool filters. An empty stack searches every stack in the shared index.
-func (s *Store) SearchSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int) ([]StepResult, error) {
+// tool filters and optional created_at lower bound. An empty stack searches every stack in the shared index.
+func (s *Store) SearchSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]StepResult, error) {
 	stack = strings.TrimSpace(stack)
 	queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
-	if queryText == "" && sessionFilter == "" && toolFilter == "" {
+	hasSince := len(since) > 0 && !since[0].IsZero()
+	if queryText == "" && sessionFilter == "" && toolFilter == "" && !hasSince {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -168,7 +171,7 @@ func (s *Store) SearchSteps(ctx context.Context, stack, queryText, sessionFilter
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	query, args := buildStepsQuery(stack, queryText, sessionFilter, toolFilter, limit, isPostgresDriver(s.db.Driver()))
+	query, args := buildStepsQuery(stack, queryText, sessionFilter, toolFilter, limit, isPostgresDriver(s.db.Driver()), since...)
 	return collectReadRows(ctx, s, "search steps query failed", query, scanStepResult, args...)
 }
 
@@ -180,7 +183,7 @@ const stepsSelectClause = `SELECT t.stack, t.session_id, s.engine, t.step_index,
 // matches content through the fts_tokens GIN index (the same
 // websearch_to_tsquery shape the eri store and coven use); hermetic SQLite
 // fixtures keep the LIKE scan since they carry no FTS index.
-func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int, useFTS bool) (string, []any) {
+func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int, useFTS bool, since ...time.Time) (string, []any) {
 	var clauses []string
 	var args []any
 	if queryText != "" {
@@ -196,16 +199,161 @@ func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit i
 		clauses = append(clauses, fmt.Sprintf("t.stack = $%d", len(args)))
 	}
 	if sessionFilter != "" {
-		args = append(args, sessionFilter)
-		clauses = append(clauses, fmt.Sprintf("t.session_id = $%d", len(args)))
+		var sessions []string
+		for s := range strings.SplitSeq(sessionFilter, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				sessions = append(sessions, s)
+			}
+		}
+		if len(sessions) == 1 {
+			args = append(args, sessions[0])
+			clauses = append(clauses, fmt.Sprintf("t.session_id = $%d", len(args)))
+		} else if len(sessions) > 1 {
+			placeholders := make([]string, 0, len(sessions))
+			for _, s := range sessions {
+				args = append(args, s)
+				placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+			}
+			clauses = append(clauses, fmt.Sprintf("t.session_id IN (%s)", strings.Join(placeholders, ", ")))
+		}
 	}
 	if toolFilter != "" {
 		args = append(args, toolFilter)
 		clauses = append(clauses, fmt.Sprintf("(t.tool_kind = $%d OR t.tool_name = $%d)", len(args), len(args)))
 	}
+	if len(since) > 0 && !since[0].IsZero() {
+		args = append(args, since[0].UTC())
+		clauses = append(clauses, fmt.Sprintf("t.created_at >= $%d", len(args)))
+	}
 	args = append(args, limit)
 	return stepsSelectClause + ` WHERE ` + strings.Join(clauses, " AND ") +
 		fmt.Sprintf(` ORDER BY t.created_at DESC LIMIT $%d`, len(args)), args
+}
+
+var reRetrievedMemoryBlock = regexp.MustCompile(`(?is)<\s*\\?retrieved_memory\s*>(.*?)<\s*[\\/]+retrieved_memory\s*>`)
+
+func truncateSingleLine(s string, maxLen int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if maxLen > 0 && len(s) > maxLen {
+		return s[:maxLen]
+	}
+	return s
+}
+
+// formatTrajectoryToolCall formats a step into a tool_name/step_type summary line.
+func formatTrajectoryToolCall(stepType, toolName, content string) string {
+	toolName = strings.TrimSpace(toolName)
+	stepType = strings.TrimSpace(stepType)
+	if toolName == "" && stepType == "" {
+		return ""
+	}
+	label := toolName
+	if label == "" {
+		label = stepType
+	} else if stepType != "" {
+		label = toolName + "/" + stepType
+	}
+	content = truncateSingleLine(content, 200)
+	if content != "" {
+		return fmt.Sprintf("%s: %s", label, content)
+	}
+	return label
+}
+
+func extractRetrievedFacts(content string, seenFacts map[string]struct{}) []string {
+	var facts []string
+	for _, block := range reRetrievedMemoryBlock.FindAllStringSubmatch(content, -1) {
+		if len(block) <= 1 {
+			continue
+		}
+		for line := range strings.SplitSeq(block[1], "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if _, seen := seenFacts[line]; !seen {
+				seenFacts[line] = struct{}{}
+				facts = append(facts, line)
+			}
+		}
+	}
+	return facts
+}
+
+// GetThreadTrajectory queries trajectory steps for threadID across session_summaries
+// and extracts retrieved facts (<retrieved_memory> lines) and tool_calls.
+func (s *Store) GetThreadTrajectory(ctx context.Context, stack, threadID string, limit int) ([]string, []string, error) {
+	stack, threadID = strings.TrimSpace(stack), strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil, nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if err := s.checkDB(); err != nil {
+		return nil, nil, err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(queryCtx,
+		`SELECT t.step_type, t.tool_name, t.content
+		 FROM transcript_steps t
+		 JOIN session_summaries s ON s.stack = t.stack AND s.session_id = t.session_id
+		 WHERE s.thread_id = $1 AND ($2 = '' OR t.stack = $2)
+		 ORDER BY t.created_at DESC LIMIT $3`,
+		threadID, stack, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get thread trajectory: %w", err)
+	}
+	defer rows.Close()
+
+	var retrievedFacts []string
+	var toolCalls []string
+	seenFacts := make(map[string]struct{})
+
+	for rows.Next() {
+		var stepType, toolName, content string
+		if err := rows.Scan(&stepType, &toolName, &content); err != nil {
+			return nil, nil, fmt.Errorf("scan thread trajectory row: %w", err)
+		}
+		retrievedFacts = append(retrievedFacts, extractRetrievedFacts(content, seenFacts)...)
+		if strings.ToUpper(strings.TrimSpace(stepType)) != "USER_INPUT" {
+			if call := formatTrajectoryToolCall(stepType, toolName, content); call != "" {
+				toolCalls = append(toolCalls, call)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("thread trajectory rows: %w", err)
+	}
+	return retrievedFacts, toolCalls, nil
+}
+
+// GetWatermark returns the last indexed step for one session on the given stack.
+// Returns -1 if the session is not found in session_summaries.
+func (s *Store) GetWatermark(ctx context.Context, stack, sessionID string) (int, error) {
+	stack, sessionID = strings.TrimSpace(stack), strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return -1, nil
+	}
+	if err := s.checkDB(); err != nil {
+		return -1, err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var lastStep int
+	err := s.db.QueryRowContext(queryCtx,
+		`SELECT last_indexed_step FROM session_summaries WHERE ($1 = '' OR stack = $1) AND session_id = $2`,
+		stack, sessionID).Scan(&lastStep)
+	if errors.Is(err, sql.ErrNoRows) {
+		return -1, nil
+	}
+	if err != nil {
+		return -1, fmt.Errorf("get watermark: %w", err)
+	}
+	return lastStep, nil
 }
 
 // GetSteps returns one session's indexed step range. An empty stack reads

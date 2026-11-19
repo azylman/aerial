@@ -82,7 +82,9 @@ func (g *Ingester) HandleBatchMessage(ctx context.Context, msg pubsub.Message) e
 		Final:        batch.Final,
 		IndexedAt:    time.Now().UTC(),
 	}
-	if err := g.publish(ctx, pubsub.SubjectTranscriptsIndexed, transcriptwire.MsgID(batch), event); err != nil {
+	indexedSubject := pubsub.SubjectAerialTurnPrefix + "transcripts_indexed"
+	indexedMsgID := "transcript-indexed:" + transcriptwire.MsgID(batch)
+	if err := g.publish(ctx, indexedSubject, indexedMsgID, event); err != nil {
 		return fmt.Errorf("publish transcripts indexed event: %w", err)
 	}
 	return nil

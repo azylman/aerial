@@ -64,11 +64,20 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 	var ycfg struct {
-		Port        string           `yaml:"port"`
-		Stack       string           `yaml:"stack"`
-		DatabaseURL string           `yaml:"database_url"`
-		NATSURL     string           `yaml:"nats_url"`
-		Summarizer  SummarizerConfig `yaml:"summarizer"`
+		Port        string `yaml:"port"`
+		Stack       string `yaml:"stack"`
+		DatabaseURL string `yaml:"database_url"`
+		NATSURL     string `yaml:"nats_url"`
+		EriLLMURL   string `yaml:"eri_llm_url"`
+		Ollama      struct {
+			BaseURL string `yaml:"base_url"`
+			Model   string `yaml:"model"`
+		} `yaml:"ollama"`
+		Embedder struct {
+			BaseURL string `yaml:"base_url"`
+			Model   string `yaml:"model"`
+		} `yaml:"embedder"`
+		Summarizer SummarizerConfig `yaml:"summarizer"`
 	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
@@ -86,11 +95,21 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
+	summarizer := ycfg.Summarizer.withDefaults()
+	if strings.TrimSpace(summarizer.EriLLMURL) == "" {
+		summarizer.EriLLMURL = strings.TrimSpace(ycfg.EriLLMURL)
+	}
+	if strings.TrimSpace(summarizer.SensesURL) == "" {
+		summarizer.SensesURL = resolveFirstNonEmpty(ycfg.Embedder.BaseURL, ycfg.Ollama.BaseURL)
+	}
+	if strings.TrimSpace(summarizer.SensesModel) == "" {
+		summarizer.SensesModel = resolveFirstNonEmpty(ycfg.Embedder.Model, ycfg.Ollama.Model)
+	}
 	return &Config{
 		Port:        port,
 		Stack:       stack,
 		DatabaseURL: databaseURL,
 		NATSURL:     natsURL,
-		Summarizer:  ycfg.Summarizer.withDefaults(),
+		Summarizer:  summarizer,
 	}, nil
 }

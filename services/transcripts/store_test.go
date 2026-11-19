@@ -403,6 +403,35 @@ func TestApplyBatchToolCallID(t *testing.T) {
 	}
 }
 
+func TestParseStepCreatedAt(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	tests := []struct {
+		name    string
+		raw     string
+		want    time.Time
+		useNear bool
+	}{
+		{"empty string", "", now, true},
+		{"rfc3339nano", "2026-11-18T12:00:00.123456789Z", time.Date(2026, 11, 18, 12, 0, 0, 123456789, time.UTC), false},
+		{"rfc3339", "2026-11-18T12:00:00Z", time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC), false},
+		{"garbage string", "not-a-timestamp", now, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseStepCreatedAt(tc.raw)
+			if tc.useNear {
+				if got.Before(now.Add(-time.Minute)) || got.After(time.Now().UTC().Add(time.Minute)) {
+					t.Errorf("parseStepCreatedAt(%q) = %v, want near now", tc.raw, got)
+				}
+			} else if !got.Equal(tc.want) {
+				t.Errorf("parseStepCreatedAt(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyBatchExecFailures(t *testing.T) {
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	plainSeed := testBatch("sess-x", epoch, 0, 1, false, false)
