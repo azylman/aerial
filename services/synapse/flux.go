@@ -173,19 +173,8 @@ type workloadRollout struct {
 	Resources                                                       kubeResourceRequirements
 }
 
-// imageTag returns the tag of an image reference, ignoring any digest and registry port; "" when untagged.
-func imageTag(image string) string {
-	return flux.ImageTag(image)
-}
-
 func (w workloadRollout) String() string {
 	return flux.WorkloadString(toModelWorkloadRollout(w))
-}
-
-// workloadRolloutComplete reports whether the workload controller has observed its latest spec and
-// every desired pod runs the current template and is available, with no old pods left.
-func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
-	return flux.WorkloadRolloutComplete(toModelWorkloadRollout(w))
 }
 
 // configMapChange is when a Flux-managed ConfigMap was last written (see kubeObjectMeta.changedAt).

@@ -3,10 +3,8 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"net/url"
@@ -29,13 +27,6 @@ func kustomizationRequestHandled(requestedAt, lastHandledReconcileAt string) boo
 	return flux.KustomizationRequestHandled(requestedAt, lastHandledReconcileAt)
 }
 
-// kustomizationReady classifies the Ready condition: ready on True; failed on False with a terminal
-// reason. Unknown, Progressing and DependencyNotReady are neither, since Flux requeues and writes status
-// again, producing the next watch event.
-func kustomizationReady(conditions []fluxCondition) (ready, failed bool, reason string) {
-	return flux.KustomizationReady(conditions)
-}
-
 const (
 	kustomizationWait         = flux.KustomizationWait
 	kustomizationMarkDeployed = flux.KustomizationMarkDeployed
@@ -49,89 +40,6 @@ type kustomizationAction = flux.KustomizationAction
 // kustomizationRequestAction decides how an observation affects a recorded reconcile request.
 func kustomizationRequestAction(recorded kustomizationRequest, obs kustomizationObservation) kustomizationAction {
 	return flux.KustomizationRequestAction(recorded, obs)
-}
-
-// rolloutSink receives the level-triggered state of every watched Kustomization, and reports whether
-// any PR still waits on a Kustomization so workload changes know when to re-evaluate.
-type rolloutSink interface {
-	applyKustomizationList(ctx context.Context, namespace string, observations []kustomizationObservation) error
-	applyKustomizationStatus(ctx context.Context, obs kustomizationObservation) error
-	applyKustomizationDeleted(ctx context.Context, ref fluxKustomizationRef) error
-	hasPendingRollouts(ctx context.Context) (bool, error)
-}
-
-type rolloutSinkAdapter struct {
-	inner rolloutSink
-}
-
-func (a rolloutSinkAdapter) ApplyKustomizationList(ctx context.Context, namespace string, observations []model.KustomizationObservation) error {
-	return a.inner.applyKustomizationList(ctx, namespace, observations)
-}
-
-func (a rolloutSinkAdapter) ApplyKustomizationStatus(ctx context.Context, obs model.KustomizationObservation) error {
-	return a.inner.applyKustomizationStatus(ctx, obs)
-}
-
-func (a rolloutSinkAdapter) ApplyKustomizationDeleted(ctx context.Context, ref model.FluxKustomizationRef) error {
-	return a.inner.applyKustomizationDeleted(ctx, ref)
-}
-
-func (a rolloutSinkAdapter) HasPendingRollouts(ctx context.Context) (bool, error) {
-	return a.inner.hasPendingRollouts(ctx)
-}
-
-// kubeWatchSource is one kube collection driven by the informer loop.
-type kubeWatchSource = flux.KubeWatchSource
-
-// kustomizationSource watches one namespace's Kustomizations and applies each observation.
-type kustomizationSource struct {
-	namespace string
-}
-
-func (k kustomizationSource) String() string { return k.namespace + " kustomizations" }
-
-func (k kustomizationSource) List(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink) (string, error) {
-	return flux.KustomizationSource{Namespace: k.namespace}.List(ctx, client, sink)
-}
-
-func (k kustomizationSource) Watch(ctx context.Context, client flux.KubeClient, resourceVersion string) (io.ReadCloser, error) {
-	return flux.KustomizationSource{Namespace: k.namespace}.Watch(ctx, client, resourceVersion)
-}
-
-func (k kustomizationSource) Apply(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink, eventType string, object json.RawMessage) error {
-	return flux.KustomizationSource{Namespace: k.namespace}.Apply(ctx, client, sink, eventType, object)
-}
-
-// workloadSource watches the Flux-managed workloads at path.
-type workloadSource struct {
-	path string
-}
-
-func (w workloadSource) String() string { return w.path }
-
-func (w workloadSource) List(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink) (string, error) {
-	return flux.WorkloadSource{Path: w.path}.List(ctx, client, sink)
-}
-
-func (w workloadSource) Watch(ctx context.Context, client flux.KubeClient, resourceVersion string) (io.ReadCloser, error) {
-	return flux.WorkloadSource{Path: w.path}.Watch(ctx, client, resourceVersion)
-}
-
-func (w workloadSource) Apply(ctx context.Context, client flux.KubeClient, sink flux.RolloutSink, eventType string, object json.RawMessage) error {
-	return flux.WorkloadSource{Path: w.path}.Apply(ctx, client, sink, eventType, object)
-}
-
-// runRolloutRechecks re-evaluates pending rollouts on every tick until ctx ends or ticks closes.
-func runRolloutRechecks(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, ticks <-chan time.Time) {
-	flux.RunRolloutRechecks(ctx, kube, rolloutSinkAdapter{inner: sink}, ticks)
-}
-
-// kubeWatcher runs the informer loop over one source.
-type kubeWatcher = flux.KubeWatcher
-
-// newKubeWatcher constructs a watcher; retryDelay is the initial backoff after a failure.
-func newKubeWatcher(kube *DefaultOutboundDispatcher, sink rolloutSink, source kubeWatchSource, retryDelay time.Duration) *kubeWatcher {
-	return flux.NewKubeWatcher(kube, rolloutSinkAdapter{inner: sink}, source, retryDelay)
 }
 
 // startKustomizationWatcher runs the Kustomization rollout watchers when PR state is durable and the kube

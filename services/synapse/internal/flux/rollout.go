@@ -32,11 +32,6 @@ func ImageTag(image string) string {
 	return tag
 }
 
-// ImageRepositoryBasename extracts the repository basename from an image reference.
-func ImageRepositoryBasename(image string) string {
-	return kube.ImageRepositoryBasename(image)
-}
-
 // WorkloadString formats a workload's kind and namespaced name.
 func WorkloadString(w model.WorkloadRollout) string {
 	return w.Kind + " " + w.Namespace + "/" + w.Name

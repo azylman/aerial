@@ -100,7 +100,7 @@ func TestKustomizationReady(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ready, failed, reason := kustomizationReady(tc.conditions)
+			ready, failed, reason := flux.KustomizationReady(tc.conditions)
 			if ready != tc.wantReady || failed != tc.wantFailed || reason != tc.wantReason {
 				t.Errorf("kustomizationReady() = (%v, %v, %q), want (%v, %v, %q)", ready, failed, reason, tc.wantReady, tc.wantFailed, tc.wantReason)
 			}
@@ -468,7 +468,7 @@ func (r *recordingSink) record(evt string) {
 	r.events = append(r.events, evt)
 }
 
-func (r *recordingSink) applyKustomizationList(_ context.Context, namespace string, observations []kustomizationObservation) error {
+func (r *recordingSink) ApplyKustomizationList(_ context.Context, namespace string, observations []kustomizationObservation) error {
 	names := make([]string, 0, len(observations))
 	for _, obs := range observations {
 		names = append(names, obs.Ref.Name)
@@ -477,7 +477,7 @@ func (r *recordingSink) applyKustomizationList(_ context.Context, namespace stri
 	return nil
 }
 
-func (r *recordingSink) applyKustomizationStatus(_ context.Context, obs kustomizationObservation) error {
+func (r *recordingSink) ApplyKustomizationStatus(_ context.Context, obs kustomizationObservation) error {
 	r.record(fmt.Sprintf("status %s/%s requested=%s handled=%s", obs.Ref.Namespace, obs.Ref.Name, obs.RequestedAt, obs.LastHandledReconcileAt))
 	if r.failStatus {
 		return errors.New("registry down")
@@ -485,12 +485,12 @@ func (r *recordingSink) applyKustomizationStatus(_ context.Context, obs kustomiz
 	return nil
 }
 
-func (r *recordingSink) applyKustomizationDeleted(_ context.Context, ref fluxKustomizationRef) error {
+func (r *recordingSink) ApplyKustomizationDeleted(_ context.Context, ref fluxKustomizationRef) error {
 	r.record("deleted " + ref.Namespace + "/" + ref.Name)
 	return nil
 }
 
-func (r *recordingSink) hasPendingRollouts(context.Context) (bool, error) {
+func (r *recordingSink) HasPendingRollouts(context.Context) (bool, error) {
 	r.record(fmt.Sprintf("pending? %v", r.pending))
 	return r.pending, nil
 }
@@ -499,7 +499,7 @@ type kustomizationWatcherRunTestCase struct {
 	name         string
 	lists        []kubeRoute
 	watches      []kubeRoute
-	source       kubeWatchSource
+	source       flux.KubeWatchSource
 	failStatus   bool
 	pending      bool
 	wantRequests []string
@@ -518,7 +518,7 @@ func runKustomizationWatcherCase(t *testing.T, tc kustomizationWatcherRunTestCas
 	disp.SetKubeConfig(ts.URL, "test-token")
 	sink := &recordingSink{failStatus: tc.failStatus, pending: tc.pending}
 
-	newKubeWatcher(disp, sink, tc.source, time.Millisecond).Run(ctx)
+	flux.NewKubeWatcher(disp, sink, tc.source, time.Millisecond).Run(ctx)
 
 	if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
 		t.Errorf("requests = %v, want %v", got, tc.wantRequests)
@@ -559,12 +559,12 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 		deploymentsList  = "LIST deployments sel=kustomize.toolkit.fluxcd.io/name"
 		deploymentsWatch = "WATCH deployments sel=kustomize.toolkit.fluxcd.io/name rv="
 	)
-	deployments := workloadSource{path: "/apis/apps/v1/deployments"}
+	deployments := flux.WorkloadSource{Path: "/apis/apps/v1/deployments"}
 	gone := `{"type":"ERROR","object":{"kind":"Status","code":410,"message":"too old resource version"}}` + "\n"
 
 	return []kustomizationWatcherRunTestCase{
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "list then chunked watch stream applies events and re-lists when the stream ends",
 			lists:        []kubeRoute{list("10", "aerial-core"), list("20")},
 			watches:      []kubeRoute{{body: event("ADDED", "marida-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "marida-core", reqT1, "")}},
@@ -578,7 +578,7 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "410 Gone error event re-lists",
 			lists:        []kubeRoute{list("10", "aerial-core"), list("30", "aerial-core")},
 			watches:      []kubeRoute{{body: event("MODIFIED", "aerial-core", reqT1, reqT0) + gone}},
@@ -586,7 +586,7 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			wantEvents:   []string{"list flux-system [aerial-core]", "status flux-system/aerial-core requested=" + reqT1 + " handled=" + reqT0, "list flux-system [aerial-core]"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "410 Gone watch response re-lists",
 			lists:        []kubeRoute{list("10"), list("40")},
 			watches:      []kubeRoute{{status: http.StatusGone, body: `{"kind":"Status","code":410}`}},
@@ -594,14 +594,14 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			wantEvents:   []string{"list flux-system []", "list flux-system []"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "list failure backs off and retries",
 			lists:        []kubeRoute{{status: http.StatusInternalServerError, body: `boom`}, list("50")},
 			wantRequests: []string{"LIST kustomizations", "LIST kustomizations", "WATCH kustomizations rv=50"},
 			wantEvents:   []string{"list flux-system []"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "watch rejection backs off and re-lists",
 			lists:        []kubeRoute{list("10"), list("60")},
 			watches:      []kubeRoute{{status: http.StatusForbidden, body: `forbidden`}},
@@ -609,7 +609,7 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			wantEvents:   []string{"list flux-system []", "list flux-system []"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "malformed watch event backs off and re-lists",
 			lists:        []kubeRoute{list("10"), list("70")},
 			watches:      []kubeRoute{{body: "{bad\n"}},
@@ -617,7 +617,7 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			wantEvents:   []string{"list flux-system []", "list flux-system []"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "non-410 error event backs off and re-lists",
 			lists:        []kubeRoute{list("10"), list("80")},
 			watches:      []kubeRoute{{body: `{"type":"ERROR","object":{"kind":"Status","code":500}}` + "\n"}},
@@ -625,7 +625,7 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			wantEvents:   []string{"list flux-system []", "list flux-system []"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "malformed watched object backs off and re-lists",
 			lists:        []kubeRoute{list("10"), list("85")},
 			watches:      []kubeRoute{{body: `{"type":"MODIFIED","object":[]}` + "\n"}},
@@ -633,7 +633,7 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			wantEvents:   []string{"list flux-system []", "list flux-system []"},
 		},
 		{
-			source:       kustomizationSource{namespace: "flux-system"},
+			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "sink failure on an event re-lists to re-derive state",
 			lists:        []kubeRoute{list("10"), list("90")},
 			watches:      []kubeRoute{{body: event("MODIFIED", "aerial-core", reqT1, reqT1)}},
@@ -977,7 +977,7 @@ func TestRunRolloutRechecks(t *testing.T) {
 			}
 			close(ticks)
 
-			runRolloutRechecks(t.Context(), disp, sink, ticks)
+			flux.RunRolloutRechecks(t.Context(), disp, sink, ticks)
 
 			if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
 				t.Errorf("requests = %v, want %v", got, tc.wantRequests)

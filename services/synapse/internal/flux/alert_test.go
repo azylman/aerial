@@ -393,27 +393,6 @@ func TestIsFluxFailureReason(t *testing.T) {
 	}
 }
 
-func TestDeployDedupTracker(t *testing.T) {
-	t.Parallel()
-	tracker := &DeployDedupTracker{}
-
-	if tracker.WasDispatched("azylman/aerial", "synapse", "sha123", 42) {
-		t.Errorf("expected WasDispatched = false initially")
-	}
-
-	tracker.RecordDispatched("azylman/aerial", "synapse", "sha123", 42)
-
-	if !tracker.WasDispatched("azylman/aerial", "other-job", "other-sha", 42) {
-		t.Errorf("expected WasDispatched = true by PR number")
-	}
-	if !tracker.WasDispatched("azylman/aerial", "synapse", "sha123", 0) {
-		t.Errorf("expected WasDispatched = true by SHA and job")
-	}
-	if tracker.WasDispatched("azylman/aerial", "other-job", "other-sha", 0) {
-		t.Errorf("expected WasDispatched = false for unrelated job and SHA")
-	}
-}
-
 func TestImageTag(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -436,13 +415,6 @@ func TestImageTag(t *testing.T) {
 				t.Errorf("ImageTag(%q) = %q, want %q", tc.image, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestImageRepositoryBasename(t *testing.T) {
-	t.Parallel()
-	if got := ImageRepositoryBasename("ghcr.io/azylman/aerial-synapse:abc123"); got != "aerial-synapse" {
-		t.Errorf("ImageRepositoryBasename() = %q, want aerial-synapse", got)
 	}
 }
 

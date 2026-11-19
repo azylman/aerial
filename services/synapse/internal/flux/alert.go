@@ -1,9 +1,7 @@
 package flux
 
 import (
-	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/services/synapse/internal/kube"
@@ -145,41 +143,4 @@ func IsFluxFailureReason(reason string) bool {
 	default:
 		return false
 	}
-}
-
-// DeployDedupTracker deduplicates deploy success dispatches across PR numbers and SHA/job combinations.
-type DeployDedupTracker struct {
-	dispatched sync.Map
-}
-
-// RecordDispatched marks a PR or SHA/job combination as dispatched.
-func (t *DeployDedupTracker) RecordDispatched(repo, jobName, commitSHA string, prNum int) {
-	normRepo := model.NormalizeRepo(repo)
-	if prNum > 0 {
-		t.dispatched.Store(fmt.Sprintf("pr:%s:%d", normRepo, prNum), true)
-	}
-	cleanJob := strings.TrimSpace(jobName)
-	cleanSHA := strings.TrimSpace(commitSHA)
-	if cleanSHA != "" && cleanJob != "" {
-		t.dispatched.Store(fmt.Sprintf("sha:%s:%s:%s", normRepo, cleanJob, cleanSHA), true)
-	}
-}
-
-// WasDispatched reports whether a PR or SHA/job combination has already been dispatched.
-func (t *DeployDedupTracker) WasDispatched(repo, jobName, commitSHA string, prNum int) bool {
-	normRepo := model.NormalizeRepo(repo)
-	cleanJob := strings.TrimSpace(jobName)
-	cleanSHA := strings.TrimSpace(commitSHA)
-
-	if prNum > 0 {
-		if _, ok := t.dispatched.Load(fmt.Sprintf("pr:%s:%d", normRepo, prNum)); ok {
-			return true
-		}
-	}
-	if cleanSHA != "" && cleanJob != "" {
-		if _, ok := t.dispatched.Load(fmt.Sprintf("sha:%s:%s:%s", normRepo, cleanJob, cleanSHA)); ok {
-			return true
-		}
-	}
-	return false
 }
