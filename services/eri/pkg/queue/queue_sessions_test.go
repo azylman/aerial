@@ -507,7 +507,7 @@ func TestTurnExecution_FailureResetsActiveSessionID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := dbtest.NewFakeStore()
-			pool := New(nil, WorkerPoolConfig{Store: store})
+			pool := New(nil, WorkerPoolConfig{Store: store, BackoffBase: time.Nanosecond})
 			te := &turnExecution{
 				pool:              pool,
 				threadID:          "th-1",
