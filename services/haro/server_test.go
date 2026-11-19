@@ -17,6 +17,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/services/haro/internal/model"
+	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
 type JSONRPCResponse struct {
@@ -512,22 +514,22 @@ func runDBOpCase(t *testing.T, tc dbOpTestCase, c CronSchedule, s OneShotSchedul
 
 func testDBStandaloneFunctions(ctx context.Context, t *testing.T, db, closedDB *sql.DB) {
 	t.Helper()
-	if firstNonEmpty("", "   ") != "" {
+	if model.FirstNonEmpty("", "   ") != "" {
 		t.Error("expected empty string from firstNonEmpty")
 	}
 	if claimed, err := ClaimEventTriggers(ctx, db, "", nil, ""); err != nil || len(claimed) != 0 {
 		t.Errorf("expected empty, nil for empty ClaimEventTriggers, got %v, %v", claimed, err)
 	}
-	if _, err := DeleteOneShotSchedule(ctx, db, ""); err == nil {
+	if _, err := store.DeleteOneShotSchedule(ctx, db, ""); err == nil {
 		t.Error("expected error for empty id in DeleteOneShotSchedule")
 	}
-	if err := AdvanceCronNextRun(ctx, db, "", time.Now()); err == nil {
+	if err := store.AdvanceCronNextRun(ctx, db, "", time.Now()); err == nil {
 		t.Error("expected error for empty id in AdvanceCronNextRun")
 	}
-	if err := AdvanceHeartbeatNextRun(ctx, db, "", time.Now()); err == nil {
+	if err := store.AdvanceHeartbeatNextRun(ctx, db, "", time.Now()); err == nil {
 		t.Error("expected error for empty id in AdvanceHeartbeatNextRun")
 	}
-	if _, err := HasRunningHeartbeatRun(ctx, closedDB, "sched-1", time.Now()); err == nil {
+	if _, err := store.HasRunningHeartbeatRun(ctx, closedDB, "sched-1", time.Now()); err == nil {
 		t.Error("expected error for closed db in HasRunningHeartbeatRun")
 	}
 	if _, err := ClaimEventTriggers(ctx, closedDB, "camera", []string{"garage"}, "person_arrived"); err == nil {
@@ -745,7 +747,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		t.Fatalf("failed to insert oneshot: %v", err)
 	}
 
-	_ = CreateScheduleRun(ctx, db, ScheduleRun{
+	_ = store.CreateScheduleRun(ctx, db, ScheduleRun{
 		ID:           "run-1",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -757,7 +759,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		StartedAt:    time.Now().UTC().Add(-1 * time.Hour),
 		DurationMs:   100,
 	})
-	_ = CreateScheduleRun(ctx, db, ScheduleRun{
+	_ = store.CreateScheduleRun(ctx, db, ScheduleRun{
 		ID:           "run-2",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -910,7 +912,7 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 			status = "failed"
 		}
 		completedAt := completedAtForStatus(status, i)
-		_ = CreateScheduleRun(ctx, db, ScheduleRun{
+		_ = store.CreateScheduleRun(ctx, db, ScheduleRun{
 			ID:           fmt.Sprintf("run-%d", i),
 			ScheduleID:   fmt.Sprintf("sched-%d", i%2+1),
 			ScheduleType: "cron",
