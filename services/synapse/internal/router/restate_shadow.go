@@ -53,16 +53,6 @@ type shadowRestateReporter struct {
 	divergences atomic.Uint64
 }
 
-// hydratedLen reports the number of cached hydration keys.
-func (r *shadowRestateReporter) hydratedLen() int {
-	if r == nil {
-		return 0
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.hydrated)
-}
-
 // newShadowRestateReporter builds a reporter from YAML config. An empty
 // restate_url leaves the reporter disabled: every send is skipped without
 // emitting a request. No environment variables are consulted.

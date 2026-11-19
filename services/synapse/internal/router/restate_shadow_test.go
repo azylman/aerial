@@ -23,6 +23,18 @@ type countingResolveRegistry struct {
 	calls atomic.Int64
 }
 
+// hydratedLen reports the number of cached hydration keys. It lives in the
+// test file because production code never reads the cache size; the deadcode
+// gate flags test-only helpers on production types.
+func hydratedLen(r *shadowRestateReporter) int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.hydrated)
+}
+
 func (c *countingResolveRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
 	c.calls.Add(1)
 	return c.PRRegistryUpdater.ResolvePRByNumber(ctx, repo, prNumber)
@@ -562,7 +574,7 @@ func TestShadowHydrationBounded(t *testing.T) {
 			Repo: "aerial", PRNumber: pr, HeadSHA: shadowTestHeadSHA(),
 		})
 	}
-	if got := r.restateShadow().hydratedLen(); got > maxShadowHydratedKeys {
+	if got := hydratedLen(r.restateShadow()); got > maxShadowHydratedKeys {
 		t.Errorf("hydrated keys = %d, want at most %d", got, maxShadowHydratedKeys)
 	}
 }
@@ -633,7 +645,7 @@ func TestHydratedLen(t *testing.T) {
 					})
 				}
 			}
-			if got := rep.hydratedLen(); got != tc.want {
+			if got := hydratedLen(rep); got != tc.want {
 				t.Errorf("hydratedLen() = %d, want %d", got, tc.want)
 			}
 		})
