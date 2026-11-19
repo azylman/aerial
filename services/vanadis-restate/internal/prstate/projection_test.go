@@ -3,6 +3,7 @@ package prstate
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -104,6 +105,9 @@ func TestProjectRegistry(t *testing.T) {
 			if got := store.RecordedCount(); got != tc.wantRecorded {
 				t.Fatalf("recorded = %d, want %d", got, tc.wantRecorded)
 			}
+			if tc.wantRecorded > 0 && !reflect.DeepEqual(store.Recorded[0], tc.snap) {
+				t.Fatalf("recorded snapshot mangled: got %+v, want %+v", store.Recorded[0], tc.snap)
+			}
 		})
 	}
 }
@@ -121,6 +125,7 @@ func TestRebuildProjection(t *testing.T) {
 		snaps        map[string]ProjectionSnapshot
 		storeErr     error
 		broken       string
+		bypassTouch  bool
 		wantErr      bool
 		wantRecorded int
 	}{
@@ -156,6 +161,7 @@ func TestRebuildProjection(t *testing.T) {
 			name:         "duplicate index key projects once",
 			keys:         []string{"azylman/aerial#101", "azylman/aerial#101"},
 			snaps:        map[string]ProjectionSnapshot{"azylman/aerial#101": openSnap},
+			bypassTouch:  true,
 			wantErr:      false,
 			wantRecorded: 1,
 		},
@@ -196,8 +202,12 @@ func TestRebuildProjection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			repo := NewRepoState("aerial")
-			for _, k := range tc.keys {
-				repo.TouchPRKey(k)
+			if tc.bypassTouch {
+				repo.TouchedPRKeys = append(repo.TouchedPRKeys, tc.keys...)
+			} else {
+				for _, k := range tc.keys {
+					repo.TouchPRKey(k)
+				}
 			}
 			store := &FakeProjectionStore{Err: tc.storeErr}
 			var err error
@@ -221,9 +231,10 @@ func TestRebuildProjection(t *testing.T) {
 	}
 }
 
-// TestBuildProjection freezes the pure state-to-row mapping: status derives
-// only from committed Restate state, repo normalizes, metadata carries only
-// owned keys, and the journal key is generation-scoped.
+// TestBuildProjection freezes the pure state-to-row mapping: status and
+// ci_checks derive only from committed Restate state scoped to the current
+// head SHA, repo normalizes, metadata carries only owned keys, and the
+// journal key is generation-scoped.
 func TestBuildProjection(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -235,27 +246,33 @@ func TestBuildProjection(t *testing.T) {
 		conflict   string
 		terminal   TerminalState
 		mergeSHA   string
+		gen        uint64
 		wantStatus string
 		wantRepo   string
 		wantChecks int
 		wantGenKey string
 	}{
 		{name: "open normalizes bare repo", pr: 101, headSHA: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
-		{name: "failed ci maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "lint", wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
-		{name: "roborev failure maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "roborev", wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
-		{name: "conflict maps conflict", pr: 101, headSHA: "abc123", conflict: "abc123", wantStatus: "conflict", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
-		{name: "merged maps merged", pr: 101, headSHA: "abc123", terminal: TerminalMerged, mergeSHA: "def456", wantStatus: "merged", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
+		{name: "failed ci maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantGenKey: "azylman/aerial#101@abc123:gen1:projection"},
+		{name: "roborev failure maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "roborev", gen: 2, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantGenKey: "azylman/aerial#101@abc123:gen2:projection"},
+		{name: "conflict maps conflict", pr: 101, headSHA: "abc123", conflict: "abc123", gen: 1, wantStatus: "conflict", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen1:projection"},
+		{name: "superseded failure projects open", pr: 101, headSHA: "def456", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@def456:gen1:projection"},
+		{name: "superseded conflict projects open", pr: 101, headSHA: "def456", conflict: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@def456:gen0:projection"},
+		{name: "merged maps merged", pr: 101, headSHA: "abc123", terminal: TerminalMerged, mergeSHA: "def456", gen: 3, wantStatus: "merged", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen3:projection"},
 		{name: "closed maps closed", pr: 101, headSHA: "abc123", terminal: TerminalClosed, wantStatus: "closed", wantRepo: "azylman/aerial", wantChecks: 0, wantGenKey: "azylman/aerial#101@abc123:gen0:projection"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := NewPRState("aerial", tc.pr)
-			s.HeadSHA = tc.headSHA
 			s.RecordFailedCISHA(tc.failedSHA)
 			s.RecordFailedCheckRunDetailed(tc.failedSHA, tc.check)
 			s.MarkConflictPublished(tc.conflict)
+			s.HeadSHA = tc.headSHA
 			s.MarkTerminal(tc.terminal)
+			for range tc.gen {
+				s.RecordKustomizationRequests()
+			}
 			snap := BuildProjection(s, "feat/x", "title", "123", tc.mergeSHA)
 			if snap.Status != tc.wantStatus {
 				t.Fatalf("Status = %q, want %q", snap.Status, tc.wantStatus)
@@ -272,13 +289,13 @@ func TestBuildProjection(t *testing.T) {
 					t.Fatalf("metadata key %q not in owned partition", k)
 				}
 			}
-			if IsOwnedMetadataKey("jobs") {
-				t.Fatalf("jobs must stay outside the owned partition")
-			}
 			if got := ProjectionJournalKey(snap); got != tc.wantGenKey {
 				t.Fatalf("JournalKey = %q, want %q", got, tc.wantGenKey)
 			}
 		})
+	}
+	if IsOwnedMetadataKey("jobs") {
+		t.Fatal("jobs must stay outside the owned partition")
 	}
 }
 
@@ -310,34 +327,102 @@ func TestBuildProjectionNilState(t *testing.T) {
 	}
 }
 
-// TestProjectionUpsertQuery freezes the real pr_registry layout: the upsert
-// targets repo/pr_number, merges only owned metadata keys, always clears the
-// banner, and never invents columns.
-func TestProjectionUpsertQuery(t *testing.T) {
+// TestProjectionUpsertQueryBranches freezes the real pr_registry layout per
+// branch: the insert half carries the owned ci_checks merge from the
+// snapshot so a first-time projection lands it, and the conflict half merges
+// the same key over existing metadata with the banner removed.
+func TestProjectionUpsertQueryBranches(t *testing.T) {
 	t.Parallel()
-	snap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", MergeSHA: "def456", Title: "t", TargetID: "123", Status: "merged", Generation: 1, Metadata: map[string]any{"ci_checks": map[string]any{"lint": "failed"}}}
+	snap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", MergeSHA: "def456", Title: "t", TargetID: "123", Status: "merged", Generation: 1}
 	tests := []struct {
 		name       string
+		part       string
 		wantSubstr string
 	}{
-		{name: "targets pr_registry", wantSubstr: "pr_registry"},
-		{name: "upserts on repo pr_number", wantSubstr: "ON CONFLICT (repo, pr_number)"},
-		{name: "writes head_sha column", wantSubstr: "head_sha"},
-		{name: "writes merge_sha column", wantSubstr: "merge_sha"},
-		{name: "writes status column", wantSubstr: "status"},
-		{name: "merges owned ci_checks key", wantSubstr: "ci_checks"},
-		{name: "clears banner like registry writes", wantSubstr: "- 'banner'"},
-		{name: "never whole blob overwrite", wantSubstr: "COALESCE(metadata, '{}'::jsonb)"},
+		{name: "insert carries ci_checks merge", part: "insert", wantSubstr: "ci_checks"},
+		{name: "insert binds snapshot metadata", part: "insert", wantSubstr: "$9"},
+		{name: "insert defaults missing checks to empty", part: "insert", wantSubstr: "COALESCE($9::jsonb->'ci_checks', '{}'::jsonb)"},
+		{name: "conflict target", part: "all", wantSubstr: "ON CONFLICT (repo, pr_number)"},
+		{name: "update merges ci_checks", part: "update", wantSubstr: "ci_checks"},
+		{name: "update binds snapshot metadata", part: "update", wantSubstr: "$9"},
+		{name: "update removes banner", part: "update", wantSubstr: "- 'banner'"},
+		{name: "update coalesces null metadata", part: "update", wantSubstr: "COALESCE(metadata, '{}'::jsonb)"},
+		{name: "update defaults missing checks to empty", part: "update", wantSubstr: "COALESCE($9::jsonb->'ci_checks', '{}'::jsonb)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			query, args := ProjectionUpsertQuery(snap)
-			if !strings.Contains(query, tc.wantSubstr) {
-				t.Fatalf("query missing %q:\n%s", tc.wantSubstr, query)
+			query, _ := ProjectionUpsertQuery(snap)
+			halves := strings.SplitN(query, "ON CONFLICT", 2)
+			if len(halves) != 2 {
+				t.Fatalf("query missing ON CONFLICT branch:\n%s", query)
 			}
-			if len(args) == 0 {
-				t.Fatalf("expected bound args, got none")
+			scope := query
+			if tc.part == "insert" {
+				scope = halves[0]
+			}
+			if tc.part == "update" {
+				scope = halves[1]
+			}
+			if !strings.Contains(scope, tc.wantSubstr) {
+				t.Fatalf("%s half missing %q:\n%s", tc.part, tc.wantSubstr, scope)
+			}
+		})
+	}
+}
+
+// TestProjectionUpsertQueryArgs freezes the exact ordered argument binding:
+// a swapped argument or mis-bound $9 fails the whole-slice comparison.
+func TestProjectionUpsertQueryArgs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		snap ProjectionSnapshot
+		want []any
+	}{
+		{
+			name: "full snapshot binds in order",
+			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", MergeSHA: "def456", Title: "t", TargetID: "123", Status: "merged", Generation: 1, Metadata: map[string]any{"ci_checks": map[string]any{"lint": "failed"}}},
+			want: []any{"azylman/aerial", 101, "feat/x", "abc123", "def456", "123", "t", "merged", `{"ci_checks":{"lint":"failed"}}`},
+		},
+		{
+			name: "nil metadata binds empty object",
+			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "t", TargetID: "123", Status: "open", Generation: 1},
+			want: []any{"azylman/aerial", 101, "feat/x", "abc123", "", "123", "t", "open", "{}"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, args := ProjectionUpsertQuery(tc.snap)
+			if !reflect.DeepEqual(args, tc.want) {
+				t.Fatalf("args = %#v, want %#v", args, tc.want)
+			}
+		})
+	}
+}
+
+// TestProjectionUpsertQueryGuardsBadMetadata freezes the marshal-failure
+// fallback: an unmarshalable metadata value still binds '{}' instead of
+// propagating garbage to $9.
+func TestProjectionUpsertQueryGuardsBadMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		want any
+	}{
+		{name: "unmarshalable metadata binds empty object", want: "{}"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			snap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "t", TargetID: "123", Status: "open", Metadata: map[string]any{"ci_checks": func() {}}}
+			_, args := ProjectionUpsertQuery(snap)
+			if len(args) != 9 {
+				t.Fatalf("args = %d, want 9", len(args))
+			}
+			if !reflect.DeepEqual(args[8], tc.want) {
+				t.Fatalf("args[8] = %#v, want %#v", args[8], tc.want)
 			}
 		})
 	}

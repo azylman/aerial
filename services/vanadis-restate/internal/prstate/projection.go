@@ -78,8 +78,11 @@ func IsOwnedMetadataKey(key string) bool {
 }
 
 // ProjectionStatus derives the registry status column purely from committed
-// Restate state. Terminal states win; conflict beats ci_failed; deploy and
-// sync lifecycle states belong to later chunks and are never invented here.
+// Restate state. Every failure signal is scoped to the current head SHA:
+// stale markers recorded for a superseded SHA never project failure onto a
+// head that never failed. Terminal states win; conflict beats ci_failed;
+// deploy and sync lifecycle states belong to later chunks and are never
+// invented here.
 func ProjectionStatus(s *PRState) string {
 	if s == nil {
 		return ProjectionStatusOpen
@@ -92,10 +95,10 @@ func ProjectionStatus(s *PRState) string {
 	case TerminalNone:
 	default:
 	}
-	if s.ConflictPublished != "" {
+	if s.WasConflictPublished(s.HeadSHA) {
 		return "conflict"
 	}
-	if s.FailedCISHA != "" || s.HasActiveFailedCheckRuns(s.HeadSHA) {
+	if s.HasFailedCISHA(s.HeadSHA) || s.HasActiveFailedCheckRuns(s.HeadSHA) {
 		return "ci_failed"
 	}
 	return ProjectionStatusOpen
@@ -123,11 +126,14 @@ func BuildProjection(s *PRState, branch, title, targetID, mergeSHA string) Proje
 	snap.MetaEpoch = s.ReopenEpoch
 	snap.Status = ProjectionStatus(s)
 	checks := map[string]any{}
-	for name := range s.Checks.ActiveFailed {
-		checks[name] = "failed"
-	}
-	if s.Checks.RoboRevActiveFailed {
-		checks["roborev"] = "failed"
+	if head := strings.TrimSpace(s.HeadSHA); head != "" && !IsZeroSHA(head) &&
+		strings.EqualFold(strings.TrimSpace(s.Checks.HeadSHA), head) {
+		for name := range s.Checks.ActiveFailed {
+			checks[name] = "failed"
+		}
+		if s.Checks.RoboRevActiveFailed {
+			checks["roborev"] = "failed"
+		}
 	}
 	snap.Metadata["ci_checks"] = checks
 	return snap
@@ -143,19 +149,30 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 		strings.TrimSpace(snap.HeadSHA), snap.Generation, ProjectionKind)
 }
 
+// ownedChecksMerge builds the per-key merge expression for the owned
+// ci_checks key over base: banner removed, a missing key defaulting to an
+// empty object so the merge can never null the blob.
+func ownedChecksMerge(base string) string {
+	return `jsonb_set(` + base + ` - 'banner', '{ci_checks}', COALESCE($9::jsonb->'ci_checks', '{}'::jsonb), true)`
+}
+
 // ProjectionUpsertQuery builds the real pr_registry upsert: column writes for
 // branch/head_sha/merge_sha/target_id/title/status plus a per-key
-// jsonb_set merge for owned metadata keys over
-// COALESCE(metadata, '{}'::jsonb) with the banner removed, keyed ON
-// CONFLICT (repo, pr_number). Unowned keys are never mentioned, so they
-// survive the merge untouched.
+// jsonb_set merge for owned metadata keys in BOTH the insert and the
+// conflict branch, so a first-time projection lands ci_checks instead of an
+// empty blob. Unowned keys are never mentioned, so they survive the merge
+// untouched.
 func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
-	metaBytes, err := json.Marshal(snap.Metadata)
+	meta := snap.Metadata
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	metaBytes, err := json.Marshal(meta)
 	if err != nil {
 		metaBytes = []byte("{}")
 	}
 	query := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, merge_sha, target_id, title, status, metadata, created_at, updated_at) ` +
-		`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
+		`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ` + ownedChecksMerge(`'{}'::jsonb`) + `, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
 		`ON CONFLICT (repo, pr_number) DO UPDATE SET ` +
 		`branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, ` +
 		`head_sha = CASE WHEN EXCLUDED.head_sha != '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, ` +
@@ -163,7 +180,7 @@ func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 		`target_id = CASE WHEN EXCLUDED.target_id != '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, ` +
 		`title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, ` +
 		`status = EXCLUDED.status, ` +
-		`metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{ci_checks}', ($9::jsonb->'ci_checks'), true), ` +
+		`metadata = ` + ownedChecksMerge(`COALESCE(metadata, '{}'::jsonb)`) + `, ` +
 		`updated_at = CURRENT_TIMESTAMP;`
 	args := []any{
 		NormalizeRepo(snap.Repo), snap.PRNumber,
