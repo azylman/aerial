@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -247,8 +246,4 @@ func fromModelWorkloadRollout(m model.WorkloadRollout) workloadRollout {
 		Env:                      m.Env,
 		Resources:                kubeResourceRequirements{Limits: m.Resources.Limits, Requests: m.Resources.Requests},
 	}
-}
-
-func stoppedRestateDeploymentComplete(w workloadRollout) (bool, bool, string) {
-	return kube.StoppedRestateDeploymentComplete(toModelWorkloadRollout(w))
 }
