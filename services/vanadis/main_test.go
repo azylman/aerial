@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,121 +17,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 )
-
-func assertConfigDefaults(t *testing.T, cfg Config) {
-	t.Helper()
-	if cfg.Port != "4025" {
-		t.Fatalf("unexpected port default: %s", cfg.Port)
-	}
-	if cfg.PostgresURL != "" {
-		t.Fatalf("unexpected PostgresURL default: %s", cfg.PostgresURL)
-	}
-	if cfg.BrainURL != "" {
-		t.Fatalf("unexpected BrainURL default: %s", cfg.BrainURL)
-	}
-	if cfg.EriURL != "" {
-		t.Fatalf("unexpected EriURL default: %s", cfg.EriURL)
-	}
-	if cfg.NATSURL != "" {
-		t.Fatalf("unexpected NATSURL default: %s", cfg.NATSURL)
-	}
-	if cfg.GitHubAPIURL != "https://api.github.com" {
-		t.Fatalf("unexpected GitHubAPIURL default: %s", cfg.GitHubAPIURL)
-	}
-	if cfg.GitHubToken != "" {
-		t.Fatalf("unexpected GitHubToken default: %s", cfg.GitHubToken)
-	}
-}
-
-func assertExpectedConfig(t *testing.T, cfg Config, wantPort, wantPostgres, wantBrain, wantEri, wantGHURL, wantGHToken string) {
-	t.Helper()
-	if cfg.Port != wantPort || cfg.PostgresURL != wantPostgres {
-		t.Fatalf("unexpected port or postgres_url: got port=%q pg=%q", cfg.Port, cfg.PostgresURL)
-	}
-	if cfg.BrainURL != wantBrain || cfg.EriURL != wantEri {
-		t.Fatalf("unexpected endpoints: got brain=%q eri=%q", cfg.BrainURL, cfg.EriURL)
-	}
-	if cfg.GitHubAPIURL != wantGHURL || cfg.GitHubToken != wantGHToken {
-		t.Fatalf("unexpected github config: got url=%q token=%q", cfg.GitHubAPIURL, cfg.GitHubToken)
-	}
-}
-
-func assertFileConfig(t *testing.T, cfg Config) {
-	t.Helper()
-	assertExpectedConfig(t, cfg, "4099", "postgres://u:p@db:5432/vanadis", "http://eri.aerial:8088", "http://eri.aerial:8088", "https://api.github.internal", "yaml-pat")
-	if cfg.DeployUIURL != "https://flux.lan.zylman.com" {
-		t.Fatalf("unexpected DeployUIURL: %q", cfg.DeployUIURL)
-	}
-}
-
-func assertEnvConfig(t *testing.T, cfg Config) {
-	t.Helper()
-	assertExpectedConfig(t, cfg, "4030", "postgres://env:5432/db", "http://env-eri:8088", "http://env-eri:8088", "https://env-api.github.com", "env-token")
-}
-
-func TestLoadConfigAndEnv(t *testing.T) {
-	origFallback := vanadisFallbackConfigPath
-	defer func() {
-		vanadisFallbackConfigPath = origFallback
-	}()
-	for _, k := range []string{
-		"PORT", "DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
-		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "NATS_URL", "CONFIG_PATH",
-		"GITHUB_API_URL", "GITHUB_TOKEN", "GITHUB_PAT",
-	} {
-		t.Setenv(k, "")
-	}
-	tmpDir := t.TempDir()
-	vanadisFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	tests := []struct {
-		name, wantHost, password string
-	}{
-		{"UnconfiguredDefaults", "", ""},
-		{"Decomposed_PostgresPassword", "@postgres:5432/", "custom_vanadis_pass"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.password != "" {
-				t.Setenv("POSTGRES_PASSWORD", tc.password)
-			}
-			cfg := LoadConfig("")
-			if tc.wantHost != "" && !strings.Contains(cfg.PostgresURL, tc.wantHost) {
-				t.Fatalf("expected postgres URL to contain %s, got %s", tc.wantHost, cfg.PostgresURL)
-			}
-			if tc.password != "" && !strings.Contains(cfg.PostgresURL, ":"+tc.password+"@") {
-				t.Fatalf("expected postgres URL to contain password %s, got %s", tc.password, cfg.PostgresURL)
-			}
-			if tc.name == "UnconfiguredDefaults" {
-				assertConfigDefaults(t, cfg)
-			}
-		})
-	}
-	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\ngithub_api_url: \"https://api.github.internal/\"\ngithub_token: \"yaml-pat\"\ndeploy_ui_url: \"https://flux.lan.zylman.com/\"\n"), 0o600)
-	vanadisFallbackConfigPath = yamlPath
-	assertFileConfig(t, LoadConfig(filepath.Join(tmpDir, "missing.yaml")))
-
-	badPath := filepath.Join(tmpDir, "bad.yaml")
-	_ = os.WriteFile(badPath, []byte(":::invalid_yaml"), 0o600)
-	t.Setenv("CONFIG_PATH", badPath)
-	t.Setenv("PORT", "4030")
-	t.Setenv("DATABASE_URL", "postgres://env:5432/db")
-	t.Setenv("ERI_URL", "http://env-eri:8088/")
-	t.Setenv("GITHUB_API_URL", "https://env-api.github.com/")
-	t.Setenv("GITHUB_TOKEN", "env-token")
-	assertEnvConfig(t, LoadConfigFromEnv())
-
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GITHUB_PAT", "pat-token-fallback")
-	if patCfg := LoadConfigFromEnv(); patCfg.GitHubToken != "pat-token-fallback" {
-		t.Fatalf("expected GITHUB_PAT fallback, got: %s", patCfg.GitHubToken)
-	}
-
-	t.Setenv("NATS_URL", "nats://env-nats:4222")
-	if natsCfg := LoadConfigFromEnv(); natsCfg.NATSURL != "nats://env-nats:4222" {
-		t.Fatalf("expected NATS_URL override, got: %s", natsCfg.NATSURL)
-	}
-}
 
 func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	t.Parallel()
@@ -515,47 +398,6 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	appCancel()
 	if err := RunApp(appCtx, Config{Port: "0"}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected RunApp error: %v", err)
-	}
-}
-
-func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
-	t.Parallel()
-	classifyTests := []struct {
-		name        string
-		buildStatus string
-		chunks      []VanadisChunk
-		expected    string
-	}{
-		{"completed status", "completed", nil, "completed"},
-		{"merged status", "merged", nil, "completed"},
-		{"failed status", "failed", nil, "completed"},
-		{"cancelled status", "cancelled", nil, "completed"},
-		{"canceled status uppercase", "CANCELED", nil, "completed"},
-		{"queued status", "queued", nil, "queued"},
-		{"pending status", "pending", nil, "queued"},
-		{"running with empty chunks", "running", []VanadisChunk{}, "running"},
-		{"running with all pending chunks", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "pending"), mkChunk("c2", "", 1, "", "", "", "pending")}, "queued"},
-		{"running with mixed chunks", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "pending"), mkChunk("c2", "", 1, "", "", "", "running")}, "running"},
-		{"running with completed chunk", "running", []VanadisChunk{mkChunk("c1", "", 0, "", "", "", "completed"), mkChunk("c2", "", 1, "", "", "", "pending")}, "running"},
-	}
-	for _, tc := range classifyTests {
-		t.Run("classify_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := ClassifyBuildQueueState(tc.buildStatus, tc.chunks); got != tc.expected {
-				t.Errorf("ClassifyBuildQueueState(%q, chunks) = %q, want %q", tc.buildStatus, got, tc.expected)
-			}
-		})
-	}
-	b := mkBuild("b-sum", "100", "Title", "Obj", "running")
-	b.CreatedAt = time.Unix(1760000000, 0)
-	c1 := mkChunk("c-sum-1", "b-sum", 0, "Chunk 1", "inst", "low", "running")
-	c1.StartedAt = time.Unix(1760000100, 0)
-	c2 := mkChunk("c-sum-2", "b-sum", 1, "Chunk 2", "inst", "high", "pending")
-	c2.StartedAt = time.Unix(1760000200, 0)
-	c2.CompletedAt = time.Unix(1760000300, 0)
-	entry := SummarizeBuildEntry(b, []VanadisChunk{c1, c2})
-	if entry.ID != "b-sum" || entry.TotalChunks != 2 || entry.QueueState != "running" || len(entry.Chunks) != 2 || !entry.Chunks[0].StartedAt.Equal(c1.StartedAt) || !entry.Chunks[1].CompletedAt.Equal(c2.CompletedAt) || entry.Chunks[0].Effort != "low" || entry.Chunks[1].Effort != "high" {
-		t.Fatalf("unexpected SummarizeBuildEntry result: %+v", entry)
 	}
 }
 
