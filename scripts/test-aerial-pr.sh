@@ -1245,7 +1245,6 @@ TEST_ROOT=$(mktemp -d /tmp/roborev-wrapper-test.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 ENTRYPOINT_FILE="${SCRIPT_DIR}/../services/github-runner/entrypoint.sh"
 ROBOREV_WRAPPER_FILE="${SCRIPT_DIR}/../services/github-runner/roborev-wrapper.sh"
-AGY_WRAPPER_FILE="${SCRIPT_DIR}/../services/github-runner/agy-wrapper.sh"
 WRAPPER_SCRIPT="$TEST_ROOT/roborev-wrapper.sh"
 MOCK_REAL="$TEST_ROOT/roborev.real"
 CALL_LOG="$TEST_ROOT/calls.log"
@@ -1254,13 +1253,12 @@ REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
 cat "$ROBOREV_WRAPPER_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" > "$WRAPPER_SCRIPT"
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" > "$WRAPPER_SCRIPT"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
 
 cat << 'MOCK_EOF' > "$MOCK_REAL"
 #!/usr/bin/env bash
 echo "[branch=${ROBOREV_SYNC_BRANCH:-}] $*" >> "${CALL_LOG}"
-echo "[token=${CLAUDE_CODE_OAUTH_TOKEN:-}]" >> "${CALL_LOG}"
 case "${1:-}" in
   list) cat "${STATE_DIR}/jobs.json" ;;
   show) cat "${STATE_DIR}/show.json" ;;
@@ -1317,25 +1315,13 @@ if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG"
   echo 'head_shortcircuit:ok'
 fi
 
-# Subtests for Claude Code OAuth token export/unset and legacy flag stripping
-mkdir -p "$TEST_ROOT/bin"
-cat << 'CLAUDE_BIN_EOF' > "$TEST_ROOT/bin/claude"
-#!/usr/bin/env bash
-exit 0
-CLAUDE_BIN_EOF
-chmod +x "$TEST_ROOT/bin/claude"
-PATH="$TEST_ROOT/bin:$PATH"
-
+# Subtests for legacy flag stripping
 printf '[]\n' > "$STATE_DIR/comments.json"
 printf '[]\n' > "$STATE_DIR/jobs.json"
 
-# Subtest 3a: Token exists -> exports token and strips legacy --agent and --reasoning flags
-printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
+# Subtest 3a: Strips legacy --agent and --reasoning flags
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG"; then
-  echo 'claude_token_export:ok'
-fi
 if ! grep -q -- "--agent" "$CALL_LOG" && ! grep -q -- "--reasoning" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
   echo 'wrapper_strips_agent_reasoning:ok'
 fi
@@ -1347,15 +1333,7 @@ if ! grep -q -- "--agent" "$CALL_LOG" && ! grep -q -- "--reasoning" "$CALL_LOG" 
   echo 'wrapper_strips_agent_reasoning_eq:ok'
 fi
 
-# Subtest 3c: Token removed -> unsets token
-rm -f "$STATE_DIR/claude-oauth-token"
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent claude-code --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q "\[token=\]" "$CALL_LOG"; then
-  echo 'claude_token_unset:ok'
-fi
-
-# Subtest 3d: Stateless fallback strips --agent and --reasoning flags so roborev.real uses config.toml
+# Subtest 3c: Stateless fallback strips --agent and --reasoning flags so roborev.real uses config.toml
 : > "$CALL_LOG"
 cat << 'MOCK_REVIEW_BODY_FAIL_STATELESS' > "$STATE_DIR/mock_review_output"
 unexpected daemon error
@@ -1368,26 +1346,8 @@ if grep -q "ci review" "$CALL_LOG" && ! grep -q "ci review.*--agent" "$CALL_LOG"
   echo 'wrapper_stateless_strips_agent_reasoning:ok'
 fi
 
-AGY_WRAPPER="$TEST_ROOT/agy-wrapper.sh"
-MOCK_AGY_REAL="$TEST_ROOT/agy.real"
-AGY_LOG="$TEST_ROOT/agy.log"
-cat "$AGY_WRAPPER_FILE" \
-  | sed "s|/usr/local/bin/agy.real|$MOCK_AGY_REAL|g" > "$AGY_WRAPPER"
-printf '#!/usr/bin/env bash\necho "$*" >> "%s"\n' "$AGY_LOG" > "$MOCK_AGY_REAL"
-chmod +x "$AGY_WRAPPER" "$MOCK_AGY_REAL"
-
-"$AGY_WRAPPER" --output-format stream-json --print-timeout 30m --add-dir /repo --prompt "--version in prompt"
-"$AGY_WRAPPER" --version
-"$AGY_WRAPPER" models
-"$AGY_WRAPPER" --model gemini-4-argon-medium --print "explicit"
-if grep -q "^--model gemini-4-hydrogen-low --output-format stream-json --print-timeout 30m --add-dir /repo --prompt --version in prompt$" "$AGY_LOG" &&
-   grep -q "^--version$" "$AGY_LOG" &&
-   grep -q "^models$" "$AGY_LOG" &&
-   grep -q "^--model gemini-4-argon-medium --print explicit$" "$AGY_LOG"; then
-  echo 'agy_model_pin:ok'
-fi
-
 # Subtest for run_as_ubuntu privilege drop
+mkdir -p "$TEST_ROOT/bin"
 MOCK_SETPRIV="$TEST_ROOT/bin/setpriv"
 cat << 'SETPRIV_EOF' > "$MOCK_SETPRIV"
 #!/usr/bin/env bash
@@ -1432,6 +1392,24 @@ if echo "$cache_out" | grep -q "GOCACHE=$TEST_ROOT/mock_data/cache/go-build" &&
   echo 'cache_exports:ok'
 fi
 
+# Subtest: entrypoint seeds CLAUDE_CODE_OAUTH_TOKEN into /actions-runner/.env with mode 0600
+CLAUDE_ENV_TEST="$TEST_ROOT/claude-env-test.sh"
+cat << 'CLAUDE_ENV_EOF' > "$CLAUDE_ENV_TEST"
+#!/usr/bin/env bash
+set -euo pipefail
+CLAUDE_ENV_EOF
+awk '/^: > \/actions-runner\/.env$/ {flag=1} flag {print} flag && /^fi$/ {seen++} flag && seen==2 {flag=0; exit}' "$ENTRYPOINT_FILE" \
+  | sed -e "s|/actions-runner/.env|$TEST_ROOT/actions-runner/.env|g" \
+        -e "s|/local/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" \
+        -e "s|/secrets/claude-oauth-token|$TEST_ROOT/nonexistent-claude-token|g" >> "$CLAUDE_ENV_TEST"
+chmod +x "$CLAUDE_ENV_TEST"
+printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
+bash "$CLAUDE_ENV_TEST"
+if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=test-claude-token-123$' "$TEST_ROOT/actions-runner/.env" &&
+   [ "$(stat -c '%a' "$TEST_ROOT/actions-runner/.env")" = "600" ]; then
+  echo 'claude_env_seed:ok'
+fi
+
 # Subtest: roborev.real review exits 0 with findings header and low severity emits Review Passed
 cat << 'MOCK_REVIEW_BODY_PASS' > "$STATE_DIR/mock_review_output"
 Review (by codex)
@@ -1464,7 +1442,7 @@ fi
 rm -f "$STATE_DIR/mock_review_output"
 unset MOCK_REVIEW_RC
 
-# Subtest: services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ["default", "test-value"], default_panel = "ci", and members = ["default", "test-value"]
+# Subtest: services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ["default", "test-value"], default_panel = "ci", members = ["default", "test-value"], and declarative [sync]
 CONFIG_GEN_TEST="$TEST_ROOT/config-gen-test.sh"
 cat << 'CONFIG_GEN_EOF' > "$CONFIG_GEN_TEST"
 #!/usr/bin/env bash
@@ -1474,10 +1452,7 @@ awk '/if \[ -s "\/local\/roborev-config.toml" \]; then/ {flag=1} flag {print} fl
   | sed -e "s|/root/.roborev/config.toml|$TEST_ROOT/gen-config.toml|g" \
         -e "s|/local/roborev-config.toml|$TEST_ROOT/nonexistent-local.toml|g" \
         -e "s|/etc/roborev/config.toml|$TEST_ROOT/nonexistent-etc.toml|g" \
-        -e "s|\$(dirname \"\$0\")/roborev-config.toml|${SCRIPT_DIR}/../services/github-runner/roborev-config.toml|g" \
-        -e "s|/local/postgres-password|$TEST_ROOT/nonexistent-pw|g" \
-        -e "s|/secrets/postgres-password|$TEST_ROOT/nonexistent-pw2|g" \
-        -e "s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" >> "$CONFIG_GEN_TEST"
+        -e "s|\$(dirname \"\$0\")/roborev-config.toml|${SCRIPT_DIR}/../services/github-runner/roborev-config.toml|g" >> "$CONFIG_GEN_TEST"
 chmod +x "$CONFIG_GEN_TEST"
 
 bash "$CONFIG_GEN_TEST"
@@ -1495,7 +1470,9 @@ if echo "$static_cfg" | grep -q 'default_agent = "claude-code"' && \
    echo "$static_cfg" | grep -q 'synthesis_backup_model = "muse-spark-1.3-contributor"' && \
    echo "$static_cfg" | grep -q 'review_types = \["default", "test-value"\]' && \
    echo "$static_cfg" | grep -q 'default_panel = "ci"' && \
-   echo "$static_cfg" | grep -q 'members = \["default", "test-value"\]'; then
+   echo "$static_cfg" | grep -q 'members = \["default", "test-value"\]' && \
+   echo "$static_cfg" | grep -q '^\[sync\]$' && \
+   echo "$static_cfg" | grep -q 'postgres_url = "postgres://aerial:\${file:/root/.roborev/postgres-password}@postgres:5432/aerial?sslmode=disable"'; then
   echo 'entrypoint_static_config:ok'
 fi
 
@@ -1611,14 +1588,12 @@ CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_token_export:ok' && echo true || echo false)" "github-runner roborev wrapper exports CLAUDE_CODE_OAUTH_TOKEN when token exists"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_token_unset:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN when token is absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_strips_agent_reasoning:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent and --reasoning flags so roborev.real uses config.toml"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_strips_agent_reasoning_eq:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent=* and --reasoning=* flags"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_stateless_strips_agent_reasoning:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent and --reasoning flags from stateless ci review fallback"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-hydrogen-low on headless invocations while preserving --version, subcommands, and explicit --model"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'run_as_ubuntu:ok' && echo true || echo false)" "github-runner entrypoint defines run_as_ubuntu and drops privileges for config, run, and cleanup"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' && echo true || echo false)" "github-runner entrypoint and roborev wrapper export unified /data/cache paths"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' && echo true || echo false)" "github-runner entrypoint exports unified /data/cache paths"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_env_seed:ok' && echo true || echo false)" "github-runner entrypoint seeds CLAUDE_CODE_OAUTH_TOKEN into /actions-runner/.env with mode 0600"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_pass_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Passed when roborev.real exits 0 with low findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_fail_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Complete when roborev.real exits 1 with findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_static_config:ok' && echo true || echo false)" "services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ['default', 'test-value'], default_panel = 'ci', and members = ['default', 'test-value']"

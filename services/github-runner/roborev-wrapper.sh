@@ -3,12 +3,6 @@ set -euo pipefail
 
 unset OPENAI_API_KEY || true
 
-if [ -s "/root/.roborev/claude-oauth-token" ]; then
-  export CLAUDE_CODE_OAUTH_TOKEN="$(tr -d '\r\n' < /root/.roborev/claude-oauth-token)"
-else
-  unset CLAUDE_CODE_OAUTH_TOKEN
-fi
-
 # Canonical workflow-style roborev-override matcher, shared by the pre-review
 # check, the quota branch, and the stateless fallback below. Matches only when
 # the comment author is the repo owner and the body contains ## roborev-override
@@ -62,17 +56,6 @@ roborev_emit_override_pass() {
   [[ -z "${short}" ]] && short=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
   printf '## roborev: Review Passed (`%s`)\n\n%s\n' "${short}" "${body}"
 }
-
-if [ -d "/cache" ]; then
-  export GOCACHE="/data/cache/go-build"
-  export GOPATH="/data/cache/go"
-  export GOMODCACHE="/data/cache/go/pkg/mod"
-  export GOLANGCI_LINT_CACHE="/data/cache/golangci-lint"
-  export GOFLAGS="-trimpath"
-  export PIP_CACHE_DIR="/cache/pip"
-  export CARGO_TARGET_DIR="/cache/cargo-target"
-  export NPM_CONFIG_CACHE="/cache/npm"
-fi
 
 if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   shift 2

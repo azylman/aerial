@@ -31,8 +31,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    GIT_TERMINAL_PROMPT=0 \
-    AGY_CLI_DISABLE_AUTO_UPDATE=true
+    GIT_TERMINAL_PROMPT=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -81,16 +80,6 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
     rm -rf /var/lib/apt/lists/* && \
     google-chrome --version
 
-# Install official Antigravity CLI (agy)
-# The real binary is renamed to agy.real in this same layer (renaming at pod start
-# copied ~340 MB into every runner pod's overlayfs upper layer); the wrapper is
-# COPYed over /usr/local/bin/agy below.
-RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin && \
-    agy_bin=$(readlink -f /usr/local/bin/agy) && \
-    mv "${agy_bin}" /usr/local/bin/agy.real && \
-    rm -f /usr/local/bin/agy && \
-    /usr/local/bin/agy.real --version
-
 ARG MUSE_VERSION=1.4.23-R8977.1
 ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
 RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /usr/local/bin/muse && \
@@ -101,7 +90,6 @@ RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.f
 # Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /out/bin/* /usr/local/bin/
-COPY --chmod=0755 services/github-runner/agy-wrapper.sh /usr/local/bin/agy
 COPY --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev
 COPY --chmod=0644 services/github-runner/roborev-config.toml /etc/roborev/config.toml
 COPY --from=rust-builder /usr/local/rustup /usr/local/rustup
@@ -114,9 +102,8 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
     node --version && \
     npm --version && \
-    npm install -g @anthropic-ai/claude-code @openai/codex && \
-    claude --version && \
-    codex --version
+    npm install -g @anthropic-ai/claude-code && \
+    claude --version
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
