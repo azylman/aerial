@@ -1,4 +1,4 @@
-package main
+package twilio
 
 import (
 	"bytes"
@@ -11,11 +11,33 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
+
+func TestMain(m *testing.M) {
+	otel.SetTracerProvider(sdktrace.NewTracerProvider())
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	os.Exit(m.Run())
+}
+
+// traceCaller returns a context carrying a sampled caller span (or a bare context) and the
+// caller's trace id ("" without a span).
+func traceCaller(withParent bool) (context.Context, string) {
+	if !withParent {
+		return context.Background(), ""
+	}
+	ctx, span := otel.Tracer("test").Start(context.Background(), "caller")
+	span.End()
+	return ctx, span.SpanContext().TraceID().String()
+}
 
 func computeExpectedTwilioSignature(authToken, fullURL string, form url.Values) string {
 	keys := make([]string, 0, len(form))
@@ -287,8 +309,6 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-type roundTripperFunc = roundTripFunc
-
 type downloadRecordingTestCase struct {
 	name         string
 	rawURL       string
@@ -297,6 +317,8 @@ type downloadRecordingTestCase struct {
 	mockBody     []byte
 	mockType     string
 	transportErr error
+	redirectLoop bool
+	failBodyRead bool
 	wantErrSub   string
 }
 
@@ -353,6 +375,26 @@ func TestDownloadRecording(t *testing.T) {
 			mockStatus: http.StatusNotFound,
 			wantErrSub: "download recording returned status 404",
 		},
+		{
+			name:         "rejects redirect loop after 10 redirects",
+			rawURL:       "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/loop.wav",
+			redirectLoop: true,
+			wantErrSub:   "stopped after 10 redirects",
+		},
+		{
+			name:        "rejects redirect to insecure scheme",
+			rawURL:      "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/plain.wav",
+			redirectURL: "http://insecure.example.com/rec.wav",
+			wantErrSub:  "redirect to insecure scheme",
+		},
+		{
+			name:         "rejects recording body read failure",
+			rawURL:       "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/unreadable.wav",
+			mockStatus:   http.StatusOK,
+			mockType:     "audio/wav",
+			failBodyRead: true,
+			wantErrSub:   "read recording body",
+		},
 	}
 
 	for _, tc := range tests {
@@ -368,6 +410,15 @@ func runDownloadRecordingCase(t *testing.T, tc downloadRecordingTestCase) {
 	tripper := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if tc.transportErr != nil {
 			return nil, tc.transportErr
+		}
+		if tc.redirectLoop {
+			header := make(http.Header)
+			header.Set("Location", req.URL.String())
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
 		}
 		if req.URL.Hostname() == "api.twilio.com" && tc.redirectURL != "" {
 			if !strings.HasPrefix(req.Header.Get("Authorization"), "Basic ") {
@@ -388,10 +439,14 @@ func runDownloadRecordingCase(t *testing.T, tc downloadRecordingTestCase) {
 		if tc.mockType != "" {
 			header.Set("Content-Type", tc.mockType)
 		}
+		rc := io.NopCloser(bytes.NewReader(tc.mockBody))
+		if tc.failBodyRead {
+			rc = io.NopCloser(&errSnippetReader{})
+		}
 		return &http.Response{
 			StatusCode: tc.mockStatus,
 			Header:     header,
-			Body:       io.NopCloser(bytes.NewReader(tc.mockBody)),
+			Body:       rc,
 		}, nil
 	})
 
@@ -424,6 +479,7 @@ type createCallTestCase struct {
 	respBody   string
 	wantSID    string
 	wantErr    bool
+	wantErrSub string
 }
 
 func TestHTTPTwilioClient_CreateCall(t *testing.T) {
@@ -473,6 +529,30 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 			respBody:   `{"status":"queued"}`,
 			wantErr:    true,
 		},
+		{
+			name: "successful call creation with status callback",
+			req: CreateCallRequest{
+				To:             "+15105550199",
+				From:           "+15105550100",
+				TwiMLURL:       "https://prospera.aerial/twilio/voice",
+				StatusCallback: "https://prospera.aerial/twilio/status",
+			},
+			statusCode: http.StatusOK,
+			respBody:   `{"sid":"CA1122334455"}`,
+			wantSID:    "CA1122334455",
+		},
+		{
+			name: "malformed JSON response body",
+			req: CreateCallRequest{
+				To:       "+15105550199",
+				From:     "+15105550100",
+				TwiMLURL: "https://prospera.aerial/twilio/voice",
+			},
+			statusCode: http.StatusOK,
+			respBody:   `{"sid":`,
+			wantErr:    true,
+			wantErrSub: "decode call response",
+		},
 	}
 
 	for _, tc := range tests {
@@ -491,6 +571,10 @@ func runCreateCallCase(t *testing.T, tc createCallTestCase) {
 			return
 		}
 		_ = r.ParseForm()
+		if tc.req.StatusCallback != "" && r.FormValue("StatusCallback") != tc.req.StatusCallback {
+			http.Error(w, "missing StatusCallback", http.StatusBadRequest)
+			return
+		}
 		if tc.req.SendDigits != "" && r.FormValue("SendDigits") != tc.req.SendDigits {
 			http.Error(w, "missing SendDigits", http.StatusBadRequest)
 			return
@@ -515,6 +599,9 @@ func runCreateCallCase(t *testing.T, tc createCallTestCase) {
 	if tc.wantErr {
 		if err == nil {
 			t.Fatal("expected error, got nil")
+		}
+		if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("CreateCall() err = %v, want substring %q", err, tc.wantErrSub)
 		}
 		return
 	}
@@ -589,12 +676,13 @@ func TestHTTPTwilioClient_IsCallActive(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		callSID    string
-		statusCode int
-		respBody   string
-		wantActive bool
-		wantErr    bool
+		name          string
+		callSID       string
+		statusCode    int
+		respBody      string
+		forceNotFound bool
+		wantActive    bool
+		wantErr       bool
 	}{
 		{
 			name:       "active in-progress call",
@@ -622,12 +710,29 @@ func TestHTTPTwilioClient_IsCallActive(t *testing.T) {
 			respBody:   "error",
 			wantErr:    true,
 		},
+		{
+			name:          "missing remote call reports inactive",
+			callSID:       "CA_missing",
+			forceNotFound: true,
+			wantActive:    false,
+		},
+		{
+			name:       "malformed JSON status body",
+			callSID:    "CA123",
+			statusCode: http.StatusOK,
+			respBody:   `{"status":`,
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.forceNotFound {
+					http.NotFound(w, r)
+					return
+				}
 				if r.Method != http.MethodGet || r.URL.Path != "/2010-04-01/Accounts/AC123/Calls/"+tc.callSID+".json" {
 					http.Error(w, "not found", http.StatusNotFound)
 					return
@@ -695,6 +800,15 @@ func TestHTTPTwilioClient_SendSMS(t *testing.T) {
 			respBody:   "internal error",
 			wantErr:    true,
 		},
+		{
+			name:       "malformed JSON response body",
+			to:         "+15105550199",
+			from:       "+15105550100",
+			body:       "Hello test message",
+			statusCode: http.StatusOK,
+			respBody:   `{"sid":`,
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -736,16 +850,20 @@ func TestHTTPTwilioClient_SendSMS(t *testing.T) {
 }
 
 type ensurePhoneNumberTestCase struct {
-	name       string
-	ownedBody  string
-	ownedCode  int
-	updateCode int
-	searchBody string
-	searchCode int
-	buyBody    string
-	buyCode    int
-	wantNumber string
-	wantErr    bool
+	name                string
+	ownedBody           string
+	ownedCode           int
+	updateCode          int
+	searchBody          string
+	searchCode          int
+	buyBody             string
+	buyCode             int
+	emptyAreaCode       bool
+	failSearchTransport bool
+	failBuyTransport    bool
+	wantNumber          string
+	wantErr             bool
+	wantErrSub          string
 }
 
 func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
@@ -789,6 +907,76 @@ func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
 			searchCode: http.StatusOK,
 			wantErr:    true,
 		},
+		{
+			name:       "owned number webhook update failure",
+			ownedBody:  `{"incoming_phone_numbers":[{"sid":"PN111","phone_number":"+15105550100","voice_url":"http://old"}]}`,
+			ownedCode:  http.StatusOK,
+			updateCode: http.StatusInternalServerError,
+			wantErr:    true,
+		},
+		{
+			name:       "malformed owned numbers body",
+			ownedBody:  `{"incoming_phone_numbers":`,
+			ownedCode:  http.StatusOK,
+			wantErr:    true,
+			wantErrSub: "decode incoming numbers",
+		},
+		{
+			name:          "default area code purchase when empty",
+			ownedBody:     `{"incoming_phone_numbers":[]}`,
+			ownedCode:     http.StatusOK,
+			searchBody:    `{"available_phone_numbers":[{"phone_number":"+15105550100"}]}`,
+			searchCode:    http.StatusOK,
+			buyBody:       `{"phone_number":"+15105550100"}`,
+			buyCode:       http.StatusOK,
+			emptyAreaCode: true,
+			wantNumber:    "+15105550100",
+		},
+		{
+			name:                "search transport failure",
+			ownedBody:           `{"incoming_phone_numbers":[]}`,
+			ownedCode:           http.StatusOK,
+			failSearchTransport: true,
+			wantErr:             true,
+		},
+		{
+			name:       "malformed search body",
+			ownedBody:  `{"incoming_phone_numbers":[]}`,
+			ownedCode:  http.StatusOK,
+			searchBody: `{"available_phone_numbers":`,
+			searchCode: http.StatusOK,
+			wantErr:    true,
+			wantErrSub: "decode available numbers",
+		},
+		{
+			name:             "buy transport failure",
+			ownedBody:        `{"incoming_phone_numbers":[]}`,
+			ownedCode:        http.StatusOK,
+			searchBody:       `{"available_phone_numbers":[{"phone_number":"+15105550999"}]}`,
+			searchCode:       http.StatusOK,
+			failBuyTransport: true,
+			wantErr:          true,
+		},
+		{
+			name:       "buy status failure",
+			ownedBody:  `{"incoming_phone_numbers":[]}`,
+			ownedCode:  http.StatusOK,
+			searchBody: `{"available_phone_numbers":[{"phone_number":"+15105550999"}]}`,
+			searchCode: http.StatusOK,
+			buyBody:    "purchase failed",
+			buyCode:    http.StatusInternalServerError,
+			wantErr:    true,
+		},
+		{
+			name:       "malformed buy body",
+			ownedBody:  `{"incoming_phone_numbers":[]}`,
+			ownedCode:  http.StatusOK,
+			searchBody: `{"available_phone_numbers":[{"phone_number":"+15105550999"}]}`,
+			searchCode: http.StatusOK,
+			buyBody:    `{"phone_number":`,
+			buyCode:    http.StatusOK,
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -811,6 +999,9 @@ func handleEnsurePhoneMock(t *testing.T, w http.ResponseWriter, r *http.Request,
 	case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers/PN111.json":
 		handleUpdatePhoneNumberMock(t, w, r, tc.updateCode)
 	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "AvailablePhoneNumbers"):
+		if tc.emptyAreaCode && r.URL.Query().Get("AreaCode") != "510" {
+			t.Errorf("AreaCode = %q, want 510 default", r.URL.Query().Get("AreaCode"))
+		}
 		if tc.searchCode != 0 {
 			w.WriteHeader(tc.searchCode)
 		}
@@ -858,11 +1049,32 @@ func runEnsurePhoneNumberCase(t *testing.T, tc ensurePhoneNumberTestCase) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
-	phone, err := client.EnsurePhoneNumber(context.Background(), "510", "https://prospera.aerial")
+	httpClient := server.Client()
+	if tc.failSearchTransport || tc.failBuyTransport {
+		baseTransport := httpClient.Transport
+		httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if tc.failSearchTransport && req.Method == http.MethodGet && strings.Contains(req.URL.Path, "AvailablePhoneNumbers") {
+				return nil, errors.New("search transport drop")
+			}
+			if tc.failBuyTransport && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/IncomingPhoneNumbers.json") {
+				return nil, errors.New("buy transport drop")
+			}
+			return baseTransport.RoundTrip(req)
+		})}
+	}
+
+	area := "510"
+	if tc.emptyAreaCode {
+		area = ""
+	}
+	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(httpClient))
+	phone, err := client.EnsurePhoneNumber(context.Background(), area, "https://prospera.aerial")
 	if tc.wantErr {
 		if err == nil {
 			t.Fatal("expected error, got nil")
+		}
+		if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("EnsurePhoneNumber() err = %v, want substring %q", err, tc.wantErrSub)
 		}
 		return
 	}
@@ -916,18 +1128,6 @@ func (*errSnippetReader) Read(p []byte) (int, error) {
 	return 0, errors.New("read error")
 }
 
-func WithTwilioBaseURL(baseURL string) TwilioOption {
-	return func(c *HTTPTwilioClient) {
-		c.baseURL = strings.TrimRight(baseURL, "/")
-	}
-}
-
-func WithTwilioHTTPClient(client *http.Client) TwilioOption {
-	return func(c *HTTPTwilioClient) {
-		c.httpClient = client
-	}
-}
-
 func TestEscapeXML(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -938,18 +1138,17 @@ func TestEscapeXML(t *testing.T) {
 		{"<tag>&'\"", "&lt;tag&gt;&amp;&#39;&#34;"},
 	}
 	for _, tc := range tests {
-		if got := escapeXML(tc.in); got != tc.want {
-			t.Fatalf("escapeXML(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := EscapeXML(tc.in); got != tc.want {
+			t.Fatalf("EscapeXML(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
 
 func TestStreamTokenManager_EntropyError(t *testing.T) {
 	t.Parallel()
-	mgr := NewStreamTokenManager(nil)
-	mgr.randFn = func([]byte) (int, error) {
+	mgr := NewStreamTokenManager(nil, WithEntropyReader(func([]byte) (int, error) {
 		return 0, errors.New("entropy error")
-	}
+	}))
 	if _, err := mgr.Issue("c1", time.Minute); err == nil {
 		t.Fatal("expected error on entropy failure")
 	}
