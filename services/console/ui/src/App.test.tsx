@@ -111,8 +111,8 @@ describe('App', () => {
     expect(window.location.hash).toBe(wantHash);
     expect(count('/console/api/status')).toBe(wantStatus);
     expect([count('/console/api/schedules'), count('/console/api/facts'), count('/console/api/builds')]).toEqual([1, 1, 1]);
-    expect(screen.getByRole('tab', { name: /MEMORY ARCHIVE/ }).textContent).toContain('9');
-    expect(screen.getByRole('tab', { name: /BUILD QUEUE/ }).textContent).toContain('2');
+    expect(screen.getByRole('tab', { name: /Memory/ }).textContent).toContain('9');
+    expect(screen.getByRole('tab', { name: /Builds/ }).textContent).toContain('2');
   });
 
   it('records upstream failures per resource and keeps the shell up', async () => {
@@ -127,7 +127,7 @@ describe('App', () => {
       'upstream down',
       'upstream down',
     ]);
-    expect(screen.getByText('LVL 5 // ACTIVE')).toBeTruthy();
+    expect(screen.getByText('Ready')).toBeTruthy();
   });
 
   it('reuses a boot status request that settled before App mounted', async () => {
@@ -147,9 +147,9 @@ describe('App', () => {
     await flush();
     await act(async () => vi.advanceTimersByTime(5000));
     expect(count('/console/api/status')).toBe(2);
-    expect(screen.getByRole('tab', { name: /ACTIVE TASKS/ }).textContent).toContain('1');
+    expect(screen.getByRole('tab', { name: /Tasks/ }).textContent).toContain('1');
 
-    await act(async () => screen.getByRole('tab', { name: /SCHEDULES/ }).click());
+    await act(async () => screen.getByRole('tab', { name: /Schedules/ }).click());
     await flush();
     expect(window.location.hash).toBe('#schedules');
     expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual(['schedules-view']);
@@ -177,7 +177,7 @@ describe('App', () => {
     }
     await flush();
     // Every view is now evaluated: switching tabs renders synchronously with no fallback.
-    await act(async () => screen.getByRole('tab', { name: /MEMORY ARCHIVE/ }).click());
+    await act(async () => screen.getByRole('tab', { name: /Memory/ }).click());
     expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual(['memory-view']);
     unmount();
   });

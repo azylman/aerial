@@ -48,19 +48,19 @@ const svc = (status: string): ServiceStatus => ({ name: status, status, uptime_s
 describe('permetScore', () => {
   it.each([
     { name: 'before first poll keeps the static value', services: null, want: PERMET_IDLE },
-    { name: 'no services is a warning at 0%', services: [], want: { percent: 0, label: 'LVL 1 // WARNING', tone: 'warning' } },
-    { name: 'all healthy is optimal', services: [svc('healthy'), svc('healthy')], want: { percent: 100, label: 'LVL 5 // OPTIMAL', tone: 'optimal' } },
+    { name: 'no services is a warning at 0%', services: [], want: { percent: 0, label: '0 / 0 Healthy', tone: 'warning' } },
+    { name: 'all healthy is optimal', services: [svc('healthy'), svc('healthy')], want: { percent: 100, label: '2 / 2 Healthy', tone: 'optimal' } },
     {
       name: 'above 70% is stable',
       services: [svc('healthy'), svc('healthy'), svc('healthy'), svc('degraded')],
-      want: { percent: 75, label: 'LVL 3 // STABLE', tone: 'stable' },
+      want: { percent: 75, label: '3 / 4 Healthy', tone: 'stable' },
     },
     {
       name: 'exactly 70% is a warning',
       services: [...Array.from({ length: 7 }, () => svc('healthy')), svc('down'), svc('down'), svc('degraded')],
-      want: { percent: 70, label: 'LVL 1 // WARNING', tone: 'warning' },
+      want: { percent: 70, label: '7 / 10 Healthy', tone: 'warning' },
     },
-    { name: 'rounds the bar width', services: [svc('healthy'), svc('down'), svc('down')], want: { percent: 33, label: 'LVL 1 // WARNING', tone: 'warning' } },
+    { name: 'rounds the bar width', services: [svc('healthy'), svc('down'), svc('down')], want: { percent: 33, label: '1 / 3 Healthy', tone: 'warning' } },
   ])('$name', ({ services, want }) => {
     expect(permetScore(services)).toEqual(want);
   });
