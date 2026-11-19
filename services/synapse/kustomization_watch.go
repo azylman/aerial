@@ -112,24 +112,6 @@ func kustomizationRequestAction(recorded kustomizationRequest, obs kustomization
 	return kustomizationAction{Kind: kustomizationRepatch}
 }
 
-// decodeKustomizationList decodes a Kustomization LIST into observations and its resourceVersion.
-func decodeKustomizationList(body []byte, namespace string) ([]kustomizationObservation, string, error) {
-	var list struct {
-		Metadata struct {
-			ResourceVersion string `json:"resourceVersion"`
-		} `json:"metadata"`
-		Items []fluxKustomizationObject `json:"items"`
-	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, "", fmt.Errorf("decode kustomization list: %w", err)
-	}
-	observations := make([]kustomizationObservation, 0, len(list.Items))
-	for _, item := range list.Items {
-		observations = append(observations, item.observation(namespace))
-	}
-	return observations, list.Metadata.ResourceVersion, nil
-}
-
 // rolloutSink receives the level-triggered state of every watched Kustomization, and reports whether
 // any PR still waits on a Kustomization so workload changes know when to re-evaluate.
 type rolloutSink interface {
