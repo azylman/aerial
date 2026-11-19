@@ -41,15 +41,6 @@ func traceparentTraceID(tp string) string {
 	return sc.TraceID().String()
 }
 
-// assertRootTraceparent checks a persisted job traceparent names a valid, sampled trace.
-func assertRootTraceparent(ctx context.Context, t *testing.T, tp string) {
-	t.Helper()
-	sc := trace.SpanContextFromContext(tracing.ContextWithTraceparent(ctx, tp))
-	if !sc.IsValid() || !sc.IsSampled() {
-		t.Errorf("job traceparent = %q, want a valid sampled trace context", tp)
-	}
-}
-
 // traceparentServer records the traceparent of every request and answers with status/body.
 type traceparentServer struct {
 	*httptest.Server
