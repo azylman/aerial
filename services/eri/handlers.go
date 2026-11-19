@@ -661,6 +661,101 @@ func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) 
 	return true
 }
 
+var transcriptsProxyHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+}
+
+func resolveTranscriptsIndexerURL(cfg *config.Config, pool *queue.WorkerPool) string {
+	if pool != nil && strings.TrimSpace(pool.TranscriptsIndexerURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(pool.TranscriptsIndexerURL), "/")
+	}
+	if cfg != nil {
+		if cur := cfg.Current(); cur != nil && strings.TrimSpace(cur.Transcripts.IndexerURL) != "" {
+			return strings.TrimRight(strings.TrimSpace(cur.Transcripts.IndexerURL), "/")
+		}
+	}
+	return ""
+}
+
+func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL, upstreamPath string) {
+	targetURL := strings.TrimRight(indexerURL, "/") + upstreamPath
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Failed to create proxy request: "+err.Error())
+		return
+	}
+
+	for k, vv := range r.Header {
+		if strings.EqualFold(k, "Connection") ||
+			strings.EqualFold(k, "Transfer-Encoding") ||
+			strings.EqualFold(k, "Authorization") ||
+			strings.EqualFold(k, "Proxy-Authorization") ||
+			strings.EqualFold(k, "Cookie") ||
+			strings.EqualFold(k, "Set-Cookie") ||
+			strings.EqualFold(k, "X-Api-Key") {
+			continue
+		}
+		for _, v := range vv {
+			proxyReq.Header.Add(k, v)
+		}
+	}
+
+	resp, err := transcriptsProxyHTTPClient.Do(proxyReq)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "Upstream proxy error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	streamProxyResponse(w, resp)
+}
+
+func handleTranscriptsSearch(indexerURL string, store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if strings.TrimSpace(indexerURL) != "" {
+			proxyTranscriptRequest(w, r, indexerURL, "/transcripts/search")
+			return
+		}
+		handleTranscriptSearch(store, embedder)(w, r)
+	}
+}
+
+func handleTranscriptsStats(indexerURL string, store db.TranscriptStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if strings.TrimSpace(indexerURL) != "" {
+			proxyTranscriptRequest(w, r, indexerURL, "/transcripts/stats")
+			return
+		}
+		handleTranscriptStats(store)(w, r)
+	}
+}
+
+func handleTranscriptsSteps(indexerURL string, store db.TranscriptStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if strings.TrimSpace(indexerURL) != "" {
+			proxyTranscriptRequest(w, r, indexerURL, "/transcripts/steps")
+			return
+		}
+		handleTranscriptSteps(store)(w, r)
+	}
+}
+
 func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireGetWithStore(w, r, store == nil) {
@@ -1320,12 +1415,17 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
-	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(txStore, embedder))
-	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(txStore, embedder))
-	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(txStore))
-	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(txStore))
-	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(txStore))
-	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(txStore))
+	indexerURL := resolveTranscriptsIndexerURL(cfg, pool)
+	searchHandler := handleTranscriptsSearch(indexerURL, txStore, embedder)
+	statsHandler := handleTranscriptsStats(indexerURL, txStore)
+	stepsHandler := handleTranscriptsSteps(indexerURL, txStore)
+
+	mux.HandleFunc("/transcripts/search", searchHandler)
+	mux.HandleFunc("/api/transcripts/search", searchHandler)
+	mux.HandleFunc("/transcripts/stats", statsHandler)
+	mux.HandleFunc("/api/transcripts/stats", statsHandler)
+	mux.HandleFunc("/transcripts/steps", stepsHandler)
+	mux.HandleFunc("/api/transcripts/steps", stepsHandler)
 	mux.HandleFunc("/tasks", handleTasks(store, pool))
 	var llmFn func(context.Context, string, string) (string, error)
 	if pool != nil {
