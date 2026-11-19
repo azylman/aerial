@@ -352,8 +352,9 @@ describe('App with a fully seeded store', () => {
     initRouteFromLocation();
     await VIEW_LOADERS.builds();
     render(<App />);
-    // One synchronous act, no flush: a suspended body would leave the null Suspense fallback here.
+    // One synchronous act, no flush: clicking a build card expands its inline DAG, and clicking a chunk opens the drawer.
     act(() => screen.getByText('Console React rewrite #1').click());
+    act(() => screen.getByText('Scaffold for Console React rewrite').click());
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('BUILD CHUNK DAG (3)')).toBeTruthy();
   });
@@ -397,9 +398,10 @@ describe('App with a fully seeded store', () => {
     await flush();
     expect(screen.getByRole('dialog', { name: 'TASK // #201 KIOSK WIDGET REFRESH STEP 1' })).toBeTruthy();
     expect(screen.getByText('COMMENTS (2)')).toBeTruthy();
-    // Back on the builds tab, the build drawer body ships in the builds chunk and opens from a card.
+    // Back on the builds tab, clicking a build card expands its inline DAG and clicking a chunk node opens the drawer.
     await goTo('#builds');
     await act(async () => within(document.getElementById('builds-view')!).getByText('Console React rewrite #1').click());
+    await act(async () => within(document.getElementById('builds-view')!).getByText('Scaffold for Console React rewrite').click());
     await flush();
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('BUILD CHUNK DAG (3)')).toBeTruthy();
