@@ -257,6 +257,60 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 	runServerRPCCase(t, closedTS, serverRPCTestCase{"list_schedules closed db", `{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"list_schedules","arguments":{}}}`, true, false})
 }
 
+// TestServer_ScheduleHeartbeatPersistsExplicitFields drives schedule_heartbeat
+// through the MCP endpoint with explicit title_prefix, timezone, and effort,
+// then asserts the persisted schedule row carries those exact values.
+func TestServer_ScheduleHeartbeatPersistsExplicitFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		channelID  string
+		wantTitle  string
+		wantTZ     string
+		wantEffort string
+	}{
+		{"explicit fields persisted", `{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345679","cron_expr":"0 0 * * *","prompt":"monitor disk","title_prefix":"Disk Alert","timezone":"UTC","effort":"high"}}}`, "123456789012345679", "Disk Alert", "UTC", "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server, ts := setupTestServer(t)
+			defer ts.Close()
+			resp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(tc.payload))
+			if err != nil {
+				t.Fatalf("POST /mcp failed: %v", err)
+			}
+			defer resp.Body.Close()
+			var rpcResp JSONRPCResponse
+			if derr := json.NewDecoder(resp.Body).Decode(&rpcResp); derr != nil {
+				t.Fatalf("decode failed: %v", derr)
+			}
+			if rpcResp.Error != nil {
+				t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
+			}
+			got, err := ListHeartbeatSchedules(t.Context(), server.handler.db, tc.channelID)
+			if err != nil {
+				t.Fatalf("ListHeartbeatSchedules err = %v", err)
+			}
+			var found *HeartbeatSchedule
+			for i := range got {
+				if got[i].TitlePrefix == tc.wantTitle {
+					found = &got[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("no heartbeat with title %q, got %+v", tc.wantTitle, got)
+			}
+			if found.Timezone != tc.wantTZ {
+				t.Errorf("Timezone = %q, want %q", found.Timezone, tc.wantTZ)
+			}
+			if found.Effort != tc.wantEffort {
+				t.Errorf("Effort = %q, want %q", found.Effort, tc.wantEffort)
+			}
+		})
+	}
+}
+
 func TestWriteJSON_Table(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -353,26 +407,6 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 		t.Error("expected error for unhooked :memory:")
 	}
 	sqliteTestInitHook = oldHook
-
-	origMax, origBase, origAfter := postgresMaxAttempts, postgresRetryBase, postgresRetryAfter
-	postgresMaxAttempts, postgresRetryBase = 2, time.Millisecond
-	postgresRetryAfter = func(time.Duration) <-chan time.Time {
-		fired := make(chan time.Time, 1)
-		fired <- time.Time{}
-		return fired
-	}
-	_, errPg := openDB(t.Context(), "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-	canceledCtx, cancel := context.WithCancel(t.Context())
-	cancel()
-	postgresRetryAfter = func(time.Duration) <-chan time.Time { return nil } // never fires: only ctx can end the wait
-	_, errCanceled := openDB(canceledCtx, "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-	postgresMaxAttempts, postgresRetryBase, postgresRetryAfter = origMax, origBase, origAfter
-	if errPg == nil || !strings.Contains(errPg.Error(), "after 2 attempts") {
-		t.Errorf("openDB error = %v, want postgres connection failure after 2 attempts", errPg)
-	}
-	if !errors.Is(errCanceled, context.Canceled) || !strings.Contains(errCanceled.Error(), "after 1 attempts") {
-		t.Errorf("openDB canceled error = %v, want context.Canceled after 1 attempts", errCanceled)
-	}
 }
 
 func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {

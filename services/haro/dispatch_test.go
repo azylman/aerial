@@ -207,6 +207,29 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 	}
 }
 
+func TestHandleDispatchOutcome_OrphanHeartbeatRun(t *testing.T) {
+	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		scheduleID string
+		runID      string
+	}{
+		{"completed run with missing schedule logs and continues", "hb-orphan", "run-hb-orphan"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTestDB(t.Context(), t)
+			ctx := context.Background()
+			seedDispatchRun(ctx, t, db, tc.runID, "heartbeat", tc.scheduleID, "running", now)
+			msg := &memoryMsg{data: dispatchPayload(t, "", &pubsub.DispatchOutcomeEvent{DispatchID: tc.runID, Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000}), subject: "aerial.dispatch.completed"}
+			if err := HandleDispatchOutcome(ctx, db, msg); err != nil {
+				t.Fatalf("HandleDispatchOutcome err = %v, want nil", err)
+			}
+			assertRunStatus(ctx, t, db, tc.runID, "completed", "", false)
+		})
+	}
+}
+
 // seedDispatchHeartbeat inserts a heartbeat schedule when the row seeds one; it is a no-op for other schedule types.
 func seedDispatchHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, scheduleType, scheduleID string, now time.Time) {
 	t.Helper()

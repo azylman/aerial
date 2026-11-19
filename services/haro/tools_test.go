@@ -98,9 +98,14 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		t.Fatal("timed out waiting for RunApp shutdown")
 	}
 
-	origMax, origBase := postgresMaxAttempts, postgresRetryBase
-	postgresMaxAttempts, postgresRetryBase = 1, 1*time.Millisecond
-	defer func() { postgresMaxAttempts, postgresRetryBase = origMax, origBase }()
+	origOpenDBFn := openDBFn
+	openDBFn = func(ctx context.Context, cfg *Config) (*sql.DB, error) {
+		if cfg != nil && strings.HasPrefix(strings.TrimSpace(cfg.DatabaseURL), "postgres://") {
+			return nil, context.DeadlineExceeded
+		}
+		return origOpenDBFn(ctx, cfg)
+	}
+	defer func() { openDBFn = origOpenDBFn }()
 
 	for _, cfg := range []*Config{
 		{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable", EriURL: "http://127.0.0.1:59484"},
