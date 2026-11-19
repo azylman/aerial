@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -157,6 +160,68 @@ func TestRunApp_ErrorCases(t *testing.T) {
 		NATSURL:     "nats://mock:4222",
 	})
 	assert.Error(t, errRestate)
+}
+
+// discoveryManifest is the minimal Restate endpoint-manifest shape the
+// assembly test decodes: service names with their handler names.
+type discoveryManifest struct {
+	Services []struct {
+		Name     string `json:"name"`
+		Ty       string `json:"ty"`
+		Handlers []struct {
+			Name string `json:"name"`
+		} `json:"handlers"`
+	} `json:"services"`
+}
+
+func TestBindRestateServices(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		agent      string
+		wantBuild  string
+		wantRouter string
+	}{
+		{name: "default agent binds dark services", agent: "", wantBuild: "Build", wantRouter: "BuildRouter"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
+			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
+			srv := bindRestateServices(restateObj, routerSvc)
+			require.NotNil(t, srv)
+			handler, err := srv.Handler()
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
+			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+			var manifest discoveryManifest
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &manifest))
+			byName := make(map[string]map[string]bool, len(manifest.Services))
+			types := make(map[string]string, len(manifest.Services))
+			for _, svc := range manifest.Services {
+				handlers := make(map[string]bool, len(svc.Handlers))
+				for _, h := range svc.Handlers {
+					handlers[h.Name] = true
+				}
+				byName[svc.Name] = handlers
+				types[svc.Name] = svc.Ty
+			}
+			require.Len(t, byName, 4)
+			for _, want := range []string{tc.wantBuild, tc.wantRouter, "PRObject", "RepoObject"} {
+				require.Contains(t, byName, want)
+			}
+			require.Len(t, byName["PRObject"], 13)
+			require.True(t, byName["PRObject"]["HandleCheckFailed"])
+			require.Equal(t, "VIRTUAL_OBJECT", types["PRObject"])
+			require.Len(t, byName["RepoObject"], 4)
+			require.True(t, byName["RepoObject"]["ResolvePRBySHA"])
+			require.Equal(t, "VIRTUAL_OBJECT", types["RepoObject"])
+		})
+	}
 }
 
 func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
