@@ -49,6 +49,32 @@ type checkOpenPRConflictsTestCase struct {
 	presetUpdatedPRs      []int
 	wantCachedFailedSHAs  map[int]string
 	wantUncachedFailedPRs []int
+	prDetails             map[int]GitHubPullRequest
+	prDetailStatus        int
+}
+
+func handleConflictCheckPRDetail(w http.ResponseWriter, r *http.Request, tc checkOpenPRConflictsTestCase) bool {
+	if r.Method != http.MethodGet || !strings.Contains(r.URL.Path, "/pulls/") {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if tc.prDetailStatus != 0 {
+		w.WriteHeader(tc.prDetailStatus)
+		_, _ = w.Write([]byte(`{"message":"error"}`))
+		return true
+	}
+	parts := strings.Split(r.URL.Path, "/pulls/")
+	var prNum int
+	if len(parts) > 1 {
+		_, _ = fmt.Sscanf(parts[1], "%d", &prNum)
+	}
+	pr, ok := tc.prDetails[prNum]
+	if !ok {
+		pr = GitHubPullRequest{Number: prNum, State: ghActionClosed, Merged: false}
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(pr)
+	return true
 }
 
 func newConflictCheckMockServer(tc checkOpenPRConflictsTestCase, putPaths *[]string, mu *sync.Mutex) *httptest.Server {
@@ -77,6 +103,9 @@ func newConflictCheckMockServer(tc checkOpenPRConflictsTestCase, putPaths *[]str
 			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(body))
+			return
+		}
+		if handleConflictCheckPRDetail(w, r, tc) {
 			return
 		}
 		if r.Method == http.MethodPut {
@@ -613,6 +642,67 @@ func checkOpenPRConflictsCasesPart4() []checkOpenPRConflictsTestCase {
 			openPRs:               []GitHubPullRequest{makeTestOpenPR(550, "feat/dependabot-job", "head550", "trusted-author")},
 			wantUpdatedPRs:        nil,
 			wantUncachedFailedPRs: []int{550},
+		},
+		{
+			name:              "422 head ref does not exist ignores merged PR without closing and updates next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
+				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
+			},
+			prResponses: []string{
+				`{"message":"head ref does not exist"}`,
+				`{"message":"Updating pull request branch."}`,
+			},
+			prStatusCodes: []int{http.StatusUnprocessableEntity, http.StatusAccepted},
+			prDetails: map[int]GitHubPullRequest{
+				512: {Number: 512, State: ghActionClosed, Merged: true},
+			},
+			wantClosedPRs: nil,
+			wantUpdatedPRs: []string{
+				"/repos/azylman/aerial/pulls/512/update-branch",
+				"/repos/azylman/aerial/pulls/550/update-branch",
+			},
+		},
+		{
+			name:              "422 head ref does not exist with 500 pr detail error does not close PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
+				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
+			},
+			prResponses: []string{
+				`{"message":"head ref does not exist"}`,
+				`{"message":"Updating pull request branch."}`,
+			},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity, http.StatusAccepted},
+			prDetailStatus: http.StatusInternalServerError,
+			wantClosedPRs:  nil,
+			wantUpdatedPRs: []string{
+				"/repos/azylman/aerial/pulls/512/update-branch",
+				"/repos/azylman/aerial/pulls/550/update-branch",
+			},
+		},
+		{
+			name:              "422 head ref does not exist closes confirmed unmerged closed PR and updates next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
+				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
+			},
+			prResponses: []string{
+				`{"message":"head ref does not exist"}`,
+				`{"message":"Updating pull request branch."}`,
+			},
+			prStatusCodes: []int{http.StatusUnprocessableEntity, http.StatusAccepted},
+			prDetails: map[int]GitHubPullRequest{
+				512: {Number: 512, State: ghActionClosed, Merged: false},
+			},
+			wantClosedPRs: []int{512},
+			wantUpdatedPRs: []string{
+				"/repos/azylman/aerial/pulls/512/update-branch",
+				"/repos/azylman/aerial/pulls/550/update-branch",
+			},
 		},
 	}
 }
