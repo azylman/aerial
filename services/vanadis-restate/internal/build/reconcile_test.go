@@ -2,18 +2,12 @@ package build
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -24,320 +18,210 @@ import (
 )
 
 func TestBuildObject_WithRestateMockContext_Completed(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(reconcileStepOutput{
-			BuildStatus:    statusCompleted,
-			LaunchedChunks: []string{"c1"},
-		})
-	}))
-	defer ts.Close()
+	b := model.VanadisBuild{ID: "b-restate-mock", Title: "Build", Status: statusCompleted, ThreadID: "th-1"}
+	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-restate-mock", Status: statusCompleted, Repo: "aerial", Mode: "pr"}
+	st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
+	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 
-	bo := NewBuildObject(ts.URL, ts.Client())
-
-	mc := mocks.NewMockContext(t)
-	mc.EXPECT().Key().Return("b-restate-mock")
-	mc.EXPECT().Get("state", mock.Anything).Return(false, nil)
-	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil)
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
-	mc.EXPECT().ClearAll().Return()
-
-	ctx := restate.WithMockContext(mc)
+	ctx := makeObjectMockContext(t, "b-restate-mock")
 	res, err := bo.Reconcile(ctx, ReconcileBuildRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, statusCompleted, res.Status)
 }
 
 func TestBuildObject_WithRestateMockContext_Running(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(reconcileStepOutput{
-			BuildStatus:    "running",
-			LaunchedChunks: []string{"c1"},
-			LaunchedMap:    map[string]bool{"c1": true},
-			State: &model.BuildObjectState{
-				Build: model.VanadisBuild{ID: "b-restate-mock", Status: "running"},
-			},
-		})
-	}))
-	defer ts.Close()
+	b := model.VanadisBuild{ID: "b-restate-mock", Title: "Build", Status: "running", ThreadID: "th-1"}
+	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-restate-mock", Status: "pending", Repo: "aerial", Mode: "pr"}
+	st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
+	eri := &mockEriClient{}
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
-	bo := NewBuildObject(ts.URL, ts.Client())
-
-	mc := mocks.NewMockContext(t)
-	mc.EXPECT().Key().Return("b-restate-mock")
-	mc.EXPECT().Get("state", mock.Anything).Return(false, nil)
-	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil)
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
-	mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return()
-	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return()
-
-	ctx := restate.WithMockContext(mc)
+	ctx := makeObjectMockContext(t, "b-restate-mock")
 	res, err := bo.Reconcile(ctx, ReconcileBuildRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, "running", res.Status)
+	assert.Contains(t, res.LaunchedChunks, "c1")
 }
 
 func TestBuildObject_ValidationFailures(t *testing.T) {
 	t.Parallel()
 
-	// 1. nil object or empty vanadisURL
-	var nilBO *BuildObject
-	_, errNil := nilBO.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errNil)
-	_, errNilMut := nilBO.Mutate(nil, BuildMutationRequest{})
-	assert.Error(t, errNilMut)
+	tests := []struct {
+		name        string
+		nilObject   bool
+		nilStore    bool
+		legacyURL   bool
+		emptyKey    bool
+		stateErr    bool
+		launchedErr bool
+		stepErr     bool
+	}{
+		{name: "nil object rejects reconcile and mutate", nilObject: true},
+		{name: "missing store rejects reconcile and mutate", nilStore: true},
+		{name: "legacy vanadis url without store rejects reconcile and mutate", nilStore: true, legacyURL: true},
+		{name: "empty build id rejects reconcile and mutate", emptyKey: true},
+		{name: "state read failure rejects reconcile and mutate", stateErr: true},
+		{name: "launched read failure rejects reconcile and mutate", launchedErr: true},
+		{name: "step execution failure rejects reconcile and mutate", stepErr: true},
+	}
 
-	boEmptyURL := NewBuildObject("", nil)
-	_, errEmptyURL := boEmptyURL.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errEmptyURL)
-	_, errEmptyURLMut := boEmptyURL.Mutate(nil, BuildMutationRequest{})
-	assert.Error(t, errEmptyURLMut)
-
-	// 2. Empty buildID / Key
-	boEmptyKey := NewBuildObject("http://localhost:4025", nil, func(ctx restate.ObjectContext) objectRuntime {
-		return newFakeObjectRuntime("")
-	})
-	_, errEmptyKey := boEmptyKey.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errEmptyKey)
-	_, errEmptyKeyMut := boEmptyKey.Mutate(nil, BuildMutationRequest{})
-	assert.Error(t, errEmptyKeyMut)
-
-	// 3. GetState error
-	boGetStateErr := NewBuildObject("http://localhost:4025", nil, func(ctx restate.ObjectContext) objectRuntime {
-		rt := newFakeObjectRuntime("b-state-err")
-		rt.getStateErr = errors.New("cannot read state")
-		return rt
-	})
-	_, errGetState := boGetStateErr.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errGetState)
-
-	// 4. GetLaunched error
-	boGetLaunchedErr := NewBuildObject("http://localhost:4025", nil, func(ctx restate.ObjectContext) objectRuntime {
-		rt := newFakeObjectRuntime("b-launch-err")
-		rt.getLaunchedErr = errors.New("cannot read launched")
-		return rt
-	})
-	_, errGetLaunched := boGetLaunchedErr.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errGetLaunched)
-
-	// 5. RunStep error
-	boRunStepErr := NewBuildObject("http://localhost:4025", nil, func(ctx restate.ObjectContext) objectRuntime {
-		rt := newFakeObjectRuntime("b-step-err")
-		rt.runStepErr = errors.New("step execution error")
-		return rt
-	})
-	_, errRunStep := boRunStepErr.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errRunStep)
-}
-
-type buildObjectTransitionTestCase struct {
-	name           string
-	mutation       *BuildMutationRequest
-	priorState     *model.BuildObjectState
-	priorLaunch    map[string]bool
-	wantReqLaunch  map[string]bool
-	serverStatus   int
-	serverResponse any
-	serverErr      bool
-	wantStatus     string
-	wantChunks     []string
-	wantErr        bool
-	wantCleared    bool
-}
-
-func runBuildObjectTransitionTestCase(t *testing.T, tc buildObjectTransitionTestCase) {
-	t.Helper()
-	var ts *httptest.Server
-	if tc.serverErr {
-		ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			hj, ok := w.(http.Hijacker)
-			if ok {
-				conn, _, _ := hj.Hijack()
-				_ = conn.Close()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilObject {
+				var nilBO *BuildObject
+				_, err := nilBO.Reconcile(nil, ReconcileBuildRequest{})
+				assert.Error(t, err)
+				_, err = nilBO.Mutate(nil, BuildMutationRequest{})
+				assert.Error(t, err)
 				return
 			}
-			http.Error(w, "server error", http.StatusInternalServerError)
-		}))
-	} else {
-		ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			assert.Equal(t, "/internal/restate/builds/b-trans/transition", r.URL.Path)
-			assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-			if tc.wantReqLaunch != nil {
-				var reqBody RestateTransitionRequest
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
-				assert.Equal(t, tc.wantReqLaunch, reqBody.PriorLaunched)
+			url := ""
+			if tc.legacyURL {
+				url = "http://localhost:4025"
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(tc.serverStatus)
-			switch v := tc.serverResponse.(type) {
-			case string:
-				_, _ = w.Write([]byte(v))
-			default:
-				_ = json.NewEncoder(w).Encode(v)
+			key := "b-validate"
+			if tc.emptyKey {
+				key = ""
 			}
-		}))
-	}
-	t.Cleanup(ts.Close)
-
-	rt := newFakeObjectRuntime("b-trans")
-	rt.state = tc.priorState
-	rt.launched = tc.priorLaunch
-	bo := NewBuildObject(ts.URL, ts.Client(), func(ctx restate.ObjectContext) objectRuntime {
-		return rt
-	})
-
-	var res ReconcileBuildResult
-	var err error
-	if tc.mutation != nil {
-		res, err = bo.Mutate(nil, *tc.mutation)
-	} else {
-		res, err = bo.Reconcile(nil, ReconcileBuildRequest{})
-	}
-
-	if tc.wantErr {
-		assert.Error(t, err)
-	} else {
-		require.NoError(t, err)
-		assert.Equal(t, tc.wantStatus, res.Status)
-		assert.Equal(t, tc.wantChunks, res.LaunchedChunks)
-		assert.Equal(t, tc.wantCleared, rt.cleared)
+			rt := newFakeObjectRuntime(key)
+			if tc.stateErr {
+				rt.getStateErr = errors.New("cannot read state")
+			}
+			if tc.launchedErr {
+				rt.getLaunchedErr = errors.New("cannot read launched")
+			}
+			if tc.stepErr {
+				rt.runStepErr = errors.New("step execution error")
+			}
+			bo := NewBuildObject(url, nil)
+			if !tc.nilStore {
+				st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b-validate", Status: "running", ThreadID: "th-1"}}}.open()
+				bo = bo.WithAuthority(st, nil)
+			}
+			bo.runtimeFactory = func(_ restate.ObjectContext) objectRuntime { return rt }
+			_, err := bo.Reconcile(nil, ReconcileBuildRequest{})
+			assert.Error(t, err)
+			_, err = bo.Mutate(nil, BuildMutationRequest{})
+			assert.Error(t, err)
+		})
 	}
 }
 
 func TestBuildObject_Transitions_Table(t *testing.T) {
 	t.Parallel()
 
-	tests := []buildObjectTransitionTestCase{
+	runningBuild := model.VanadisBuild{ID: "b-trans", Title: "Build", Status: "running", ThreadID: "th-1"}
+
+	tests := []struct {
+		name        string
+		build       model.VanadisBuild
+		chunks      []model.VanadisChunk
+		buildErr    bool
+		notFound    bool
+		nilStore    bool
+		mutation    *BuildMutationRequest
+		stateLaunch map[string]bool
+		wantStatus  string
+		wantChunks  []string
+		wantErr     bool
+		wantCleared bool
+	}{
 		{
-			name:         "successful_reconcile_running",
-			serverStatus: http.StatusOK,
-			serverResponse: reconcileStepOutput{
-				BuildStatus:    "running",
-				LaunchedChunks: []string{"c1"},
-				LaunchedMap:    map[string]bool{"c1": true},
-				State: &model.BuildObjectState{
-					Build: model.VanadisBuild{ID: "b1", Status: "running"},
-				},
+			name:  "successful_reconcile_running",
+			build: runningBuild,
+			chunks: []model.VanadisChunk{
+				{ID: "c1", BuildID: "b-trans", Status: "pending", Repo: "aerial", Mode: "pr"},
 			},
+			stateLaunch: map[string]bool{"c0": true},
 			wantStatus:  "running",
 			wantChunks:  []string{"c1"},
 			wantErr:     false,
 			wantCleared: false,
 		},
 		{
-			name: "successful_reconcile_with_nil_launched_reconstructed_from_state",
-			priorState: &model.BuildObjectState{
-				Build:    model.VanadisBuild{ID: "b1", Status: "running"},
-				Launched: map[string]bool{"c0": true},
+			name:  "successful_mutate_completed_clears_state",
+			build: runningBuild,
+			chunks: []model.VanadisChunk{
+				{ID: "c1", BuildID: "b-trans", Status: statusCompleted, Repo: "aerial", Mode: "pr"},
 			},
-			priorLaunch:   nil,
-			wantReqLaunch: map[string]bool{"c0": true},
-			serverStatus:  http.StatusOK,
-			serverResponse: reconcileStepOutput{
-				BuildStatus:    "running",
-				LaunchedChunks: []string{"c1"},
-				LaunchedMap:    map[string]bool{"c0": true, "c1": true},
-				State: &model.BuildObjectState{
-					Build: model.VanadisBuild{ID: "b1", Status: "running"},
-				},
-			},
-			wantStatus:  "running",
-			wantChunks:  []string{"c1"},
-			wantErr:     false,
-			wantCleared: false,
-		},
-		{
-			name: "successful_mutate_completed_clears_state",
 			mutation: &BuildMutationRequest{
 				Action:  "chunk_merged",
 				ChunkID: "c1",
 			},
-			priorState: &model.BuildObjectState{
-				Build:    model.VanadisBuild{ID: "b1", Status: "running"},
-				Launched: map[string]bool{"c0": true},
-			},
-			priorLaunch:  map[string]bool{"c0": true},
-			serverStatus: http.StatusOK,
-			serverResponse: reconcileStepOutput{
-				BuildStatus:    statusCompleted,
-				LaunchedChunks: nil,
-			},
+			stateLaunch: map[string]bool{"c0": true},
 			wantStatus:  statusCompleted,
 			wantErr:     false,
 			wantCleared: true,
 		},
 		{
-			name:         "server_returns_400_bad_request",
-			serverStatus: http.StatusBadRequest,
-			serverResponse: map[string]string{
-				"error": "invalid build input",
+			name:  "terminal_cancelled_clears_state",
+			build: model.VanadisBuild{ID: "b-trans", Title: "Build", Status: statusCancelled, ThreadID: "th-1"},
+			chunks: []model.VanadisChunk{
+				{ID: "c1", BuildID: "b-trans", Status: statusCancelled, Repo: "aerial", Mode: "pr"},
 			},
-			wantErr: true,
+			wantStatus:  statusCancelled,
+			wantErr:     false,
+			wantCleared: true,
 		},
 		{
-			name:         "server_returns_500_internal_error",
-			serverStatus: http.StatusInternalServerError,
-			serverResponse: map[string]string{
-				"error": "database connection lost",
-			},
-			wantErr: true,
+			name:        "build_not_found_reports_not_found",
+			notFound:    true,
+			wantStatus:  statusNotFound,
+			wantErr:     false,
+			wantCleared: true,
 		},
 		{
-			name:           "server_returns_invalid_json",
-			serverStatus:   http.StatusOK,
-			serverResponse: "invalid-json-body",
-			wantErr:        true,
+			name:     "store_read_failure_returns_error",
+			buildErr: true,
+			wantErr:  true,
 		},
 		{
-			name:      "transport_error",
-			serverErr: true,
-			wantErr:   true,
+			name:     "missing_store_fails_transition_step",
+			nilStore: true,
+			wantErr:  true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runBuildObjectTransitionTestCase(t, tc)
+			b := tc.build
+			script := dbScript{row: &mockRow{b: &b}, chunks: tc.chunks, execTag: "UPDATE 1"}
+			if tc.buildErr {
+				script = dbScript{row: errRow(errors.New("database unavailable"))}
+			}
+			if tc.notFound {
+				script = dbScript{row: errRow(store.ErrBuildNotFound)}
+			}
+			st, _ := script.open()
+			eri := &mockEriClient{}
+			bus := pubsub.NewMemoryBus()
+			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
+			bo := NewBuildObject("", nil)
+			if !tc.nilStore {
+				bo = bo.WithAuthority(st, exec)
+			}
+			rt := newFakeObjectRuntime("b-trans")
+			if tc.stateLaunch != nil {
+				rt.state = &model.BuildObjectState{Build: tc.build, Launched: tc.stateLaunch}
+			}
+			stepName := "reconcile"
+			if tc.mutation != nil {
+				stepName = "mutate"
+			}
+			res, err := bo.executeObjectTransition(rt, stepName, tc.mutation)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStatus, res.Status)
+			assert.Equal(t, tc.wantChunks, res.LaunchedChunks)
+			assert.Equal(t, tc.wantCleared, rt.cleared)
 		})
 	}
-}
-
-type errBodyReader struct{}
-
-func (errBodyReader) Read([]byte) (int, error) { return 0, errors.New("read body error") }
-func (errBodyReader) Close() error             { return nil }
-
-type roundTripFunc func(req *http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
-
-func TestCallVanadisTransition_TransportFailures(t *testing.T) {
-	t.Parallel()
-
-	// 1. Invalid URL creates request error
-	boInvalidURL := NewBuildObject("http://[::1]:namedport", nil, func(ctx restate.ObjectContext) objectRuntime {
-		return newFakeObjectRuntime("b-invalid-url")
-	})
-	_, errReq := boInvalidURL.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errReq)
-
-	// 2. Response body read error
-	clientReadErr := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       errBodyReader{},
-			}, nil
-		}),
-	}
-	boReadErr := NewBuildObject("http://vanadis.aerial:4025", clientReadErr, func(ctx restate.ObjectContext) objectRuntime {
-		return newFakeObjectRuntime("b-read-err")
-	})
-	_, errRead := boReadErr.Reconcile(nil, ReconcileBuildRequest{})
-	assert.Error(t, errRead)
 }
 
 func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
@@ -451,53 +335,34 @@ func TestBuildObject_MutationActionsAndTerminalGuards(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestBuildObject_CallVanadisTransition(t *testing.T) {
+func TestBuildObject_StoreNotConfiguredTerminal(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/transition-ok"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"build_status":"running","launched_chunks":["c1"]}`))
-		case strings.Contains(r.URL.Path, "/transition-400"):
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`bad request`))
-		case strings.Contains(r.URL.Path, "/transition-500"):
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`server error`))
-		case strings.Contains(r.URL.Path, "/transition-bad-json"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{not-json`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
 
-	ctx := context.Background()
+	tests := []struct {
+		name      string
+		mutation  *BuildMutationRequest
+		nilObject bool
+	}{
+		{name: "reconcile without store reports terminal store error"},
+		{name: "mutate without store reports terminal store error", mutation: &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}},
+		{name: "nil object skips chunk failure notification", nilObject: true},
+	}
 
-	// 200 OK
-	boOK := NewBuildObject(srv.URL, srv.Client())
-	out, err := boOK.callVanadisTransition(ctx, "transition-ok", nil, nil)
-	assert.NoError(t, err)
-	assert.Equal(t, "running", out.BuildStatus)
-
-	// 400 Bad Request
-	bo400 := NewBuildObject(srv.URL, srv.Client())
-	_, err = bo400.callVanadisTransition(ctx, "transition-400", nil, nil)
-	assert.Error(t, err)
-	var termErr restate.TerminalError
-	assert.True(t, errors.As(err, &termErr))
-	assert.Equal(t, restate.Code(400), termErr.Code())
-
-	// 500 Server Error
-	bo500 := NewBuildObject(srv.URL, srv.Client())
-	_, err = bo500.callVanadisTransition(ctx, "transition-500", nil, nil)
-	assert.Error(t, err)
-
-	// Bad JSON
-	boBadJSON := NewBuildObject(srv.URL, srv.Client())
-	_, err = boBadJSON.callVanadisTransition(ctx, "transition-bad-json", nil, nil)
-	assert.Error(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilObject {
+				var nilBO *BuildObject
+				assert.NoError(t, nilBO.notifyChunkFailure(mockRunContext{}, model.VanadisBuild{ID: "b1"}, "c1", "boom"))
+				return
+			}
+			bo := NewBuildObject("http://localhost:4025", nil)
+			rt := newFakeObjectRuntime("b-trans")
+			_, err := bo.executeObjectTransition(rt, "reconcile", tc.mutation)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "store not configured")
+		})
+	}
 }
 
 func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {

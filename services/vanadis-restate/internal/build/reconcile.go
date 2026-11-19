@@ -1,14 +1,10 @@
 package build
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
@@ -23,8 +19,8 @@ import (
 // Reconcile reconciles the build state on Restate.
 func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (ReconcileBuildResult, error) {
 	_ = req
-	if b == nil || (b.store == nil && strings.TrimSpace(b.vanadisURL) == "") {
-		err := restate.TerminalErrorf("vanadis url and store not configured")
+	if b == nil || b.store == nil {
+		err := restate.TerminalErrorf("store not configured")
 		RecordReconcileError(labelReconcileBuild, err)
 		return ReconcileBuildResult{}, err
 	}
@@ -34,8 +30,8 @@ func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildReq
 
 // Mutate applies a mutation to the build and reconciles state.
 func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest) (ReconcileBuildResult, error) {
-	if b == nil || (b.store == nil && strings.TrimSpace(b.vanadisURL) == "") {
-		err := restate.TerminalErrorf("vanadis url and store not configured")
+	if b == nil || b.store == nil {
+		err := restate.TerminalErrorf("store not configured")
 		RecordReconcileError(labelMutateBuild, err)
 		return ReconcileBuildResult{}, err
 	}
@@ -62,15 +58,14 @@ func mergePriorLaunched(priorState *model.BuildObjectState, priorLaunched map[st
 }
 
 func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID string, mutation *BuildMutationRequest, priorState *model.BuildObjectState, priorLaunched map[string]bool) (reconcileStepOutput, error) {
+	if b == nil || b.store == nil {
+		err := restate.TerminalErrorf("store not configured")
+		RecordReconcileError(stepName, err)
+		return reconcileStepOutput{}, err
+	}
 	notifiedInStep := false
 	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
-		var out reconcileStepOutput
-		var stepErr error
-		if b.store != nil {
-			out, stepErr = b.executeAuthoritativeTransition(ctx, buildID, mutation, priorLaunched, terminalNotificationRecorded(priorState))
-		} else {
-			out, stepErr = b.callVanadisTransition(ctx, buildID, mutation, priorLaunched)
-		}
+		out, stepErr := b.executeAuthoritativeTransition(ctx, buildID, mutation, priorLaunched, terminalNotificationRecorded(priorState))
 		if stepErr != nil {
 			notifiedInStep = true
 			RecordReconcileError(stepName, stepErr)
@@ -421,47 +416,4 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		LaunchedMap:    launchedMap,
 		State:          &model.BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted || finalStatus == statusFailed},
 	}, nil
-}
-
-func (b *BuildObject) callVanadisTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool) (reconcileStepOutput, error) {
-	transReq := RestateTransitionRequest{
-		Mutation:      mutation,
-		PriorLaunched: priorLaunched,
-	}
-	bodyBytes, err := json.Marshal(transReq)
-	if err != nil {
-		return reconcileStepOutput{}, restate.TerminalErrorf("marshal transition request: %v", err)
-	}
-
-	targetURL := fmt.Sprintf("%s/internal/restate/builds/%s/transition", b.vanadisURL, buildID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return reconcileStepOutput{}, restate.TerminalErrorf("create transition request: %v", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := b.httpClient.Do(httpReq)
-	if err != nil {
-		return reconcileStepOutput{}, fmt.Errorf("transition request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, rErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if rErr != nil {
-		return reconcileStepOutput{}, fmt.Errorf("read transition response: %w", rErr)
-	}
-
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		return reconcileStepOutput{}, restate.ToTerminalError(fmt.Errorf("vanadis transition rejected (status %d): %s", resp.StatusCode, string(respBody)), restate.WithErrorCode(restate.Code(resp.StatusCode)))
-	}
-	if resp.StatusCode >= 500 || resp.StatusCode < 200 {
-		return reconcileStepOutput{}, fmt.Errorf("vanadis transition server error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var stepOut reconcileStepOutput
-	if err := json.Unmarshal(respBody, &stepOut); err != nil {
-		return reconcileStepOutput{}, restate.TerminalErrorf("unmarshal transition response: %v", err)
-	}
-
-	return stepOut, nil
 }
