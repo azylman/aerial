@@ -61,7 +61,16 @@ func decideBatch(cur sessionCursor, batch transcriptwire.TranscriptStepBatch) Ba
 		return DecisionStale
 	}
 	if batch.Reset {
-		return DecisionReset
+		// A redelivered Reset batch shares the indexed epoch. When the cursor
+		// already covers its step range the steps are present, so treat it as
+		// a duplicate re-publish instead of deleting then re-inserting: an
+		// at-least-once replay after newer appends landed must not wipe them.
+		// A strictly newer epoch, or a same-epoch rewrite that extends past
+		// the cursor, still performs the delete-then-insert.
+		if batch.FileMtime.After(cur.lastMtime) || batch.LastStep > cur.lastStep {
+			return DecisionReset
+		}
+		return DecisionDuplicateFinal
 	}
 	if batch.Final && batch.LastStep <= cur.lastStep && cur.indexedFinal {
 		return DecisionDuplicateFinal
@@ -119,10 +128,6 @@ func isPostgresDriver(d driver.Driver) bool {
 	return strings.Contains(reflect.TypeOf(d).String(), "stdlib.Driver")
 }
 
-// ApplyBatch ingests one transcript step batch in a single transaction: it
-// locks the session summary row, applies decideBatch, and reports the outcome.
-// Stale batches commit nothing. Callers publish TranscriptsIndexedEvent after
-// a non-stale outcome and must return publish errors so the batch naks.
 // ApplyBatch ingests one transcript step batch in a single transaction: it
 // locks the session summary row, applies decideBatch, and reports the outcome.
 // Stale batches commit nothing. Callers publish TranscriptsIndexedEvent after

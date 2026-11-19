@@ -76,8 +76,9 @@ func TestDecideBatch(t *testing.T) {
 	}{
 		{"no row inserts", sessionCursor{}, testBatch("s", epoch, 0, 4, false, false), DecisionInsert},
 		{"older epoch is stale", sessionCursor{found: true, lastMtime: epoch, lastStep: 4}, testBatch("s", epoch.Add(-time.Hour), 5, 6, false, false), DecisionStale},
-		{"reset at epoch deletes then inserts", sessionCursor{found: true, lastMtime: epoch, lastStep: 4}, testBatch("s", epoch, 0, 2, false, true), DecisionReset},
+		{"redelivered reset at epoch re-publishes", sessionCursor{found: true, lastMtime: epoch, lastStep: 4}, testBatch("s", epoch, 0, 2, false, true), DecisionDuplicateFinal},
 		{"reset on newer epoch deletes then inserts", sessionCursor{found: true, lastMtime: epoch, lastStep: 4}, testBatch("s", epoch.Add(time.Hour), 0, 2, false, true), DecisionReset},
+		{"equal epoch reset past cursor deletes then inserts", sessionCursor{found: true, lastMtime: epoch, lastStep: 1}, testBatch("s", epoch, 0, 4, false, true), DecisionReset},
 		{"reset on older epoch is stale", sessionCursor{found: true, lastMtime: epoch, lastStep: 4}, testBatch("s", epoch.Add(-time.Hour), 0, 2, false, true), DecisionStale},
 		{"indexed final re-publishes", sessionCursor{found: true, lastMtime: epoch, lastStep: 4, indexedFinal: true}, testBatch("s", epoch, 0, 4, true, false), DecisionDuplicateFinal},
 		{"final past cursor appends", sessionCursor{found: true, lastMtime: epoch, lastStep: 4, indexedFinal: true}, testBatch("s", epoch, 5, 6, true, false), DecisionAppend},
@@ -117,9 +118,10 @@ func crossStackBatch(session string, mtime time.Time) transcriptwire.TranscriptS
 }
 
 func rewrittenResetBatch(session string, mtime time.Time) transcriptwire.TranscriptStepBatch {
-	b := testBatch(session, mtime, 0, 1, false, true)
-	b.Steps[0].Content = "rewritten"
-	b.Steps[1].Content = "rewritten"
+	b := testBatch(session, mtime, 0, 2, false, true)
+	for i := range b.Steps {
+		b.Steps[i].Content = "rewritten"
+	}
 	return b
 }
 
@@ -183,13 +185,15 @@ func TestApplyBatch(t *testing.T) {
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	plainSeed := testBatch("sess-1", epoch, 0, 4, false, false)
 	finalSeed := finalSeedBatch("sess-1", epoch)
+	resetSeed := testBatch("sess-1", epoch, 0, 1, false, false)
 	resetBatch := rewrittenResetBatch("sess-1", epoch)
 	tests := []applyBatchCase{
 		{"first batch inserts", nil, testBatch("sess-1", epoch, 0, 4, false, false), DecisionInsert, 5, 4, nil},
 		{"next batch appends", []transcriptwire.TranscriptStepBatch{plainSeed}, testBatch("sess-1", epoch.Add(time.Hour), 5, 6, true, false), DecisionAppend, 2, 6, nil},
 		{"older epoch batch is stale", []transcriptwire.TranscriptStepBatch{plainSeed}, testBatch("sess-1", epoch.Add(-time.Hour), 5, 6, false, false), DecisionStale, 0, 4, nil},
-		{"reset rewrites steps", []transcriptwire.TranscriptStepBatch{plainSeed}, resetBatch, DecisionReset, 2, 1, map[int]string{0: "rewritten", 1: "rewritten"}},
+		{"reset rewrites steps", []transcriptwire.TranscriptStepBatch{resetSeed}, resetBatch, DecisionReset, 3, 2, map[int]string{0: "rewritten", 1: "rewritten", 2: "rewritten"}},
 		{"duplicate final re-publishes without steps", []transcriptwire.TranscriptStepBatch{finalSeed}, finalSeed, DecisionDuplicateFinal, 0, 4, nil},
+		{"redelivered reset after append re-publishes", []transcriptwire.TranscriptStepBatch{resetBatch}, resetBatch, DecisionDuplicateFinal, 0, 2, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -256,6 +260,37 @@ func TestApplyBatchConcurrentDuplicateFirstBatch(t *testing.T) {
 	steps, err := store.GetSteps(ctx, "aerial", "sess-dup", 0, 10)
 	if err != nil || len(steps) != 4 {
 		t.Fatalf("steps = %d (%v), want exactly 4", len(steps), err)
+	}
+}
+
+func TestApplyBatchRedeliveredResetPreservesAppends(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	reset := testBatch("sess-replay", epoch, 0, 2, false, true)
+	appended := testBatch("sess-replay", epoch, 3, 4, false, false)
+
+	if _, err := store.ApplyBatch(ctx, reset); err != nil {
+		t.Fatalf("reset ApplyBatch() err = %v", err)
+	}
+	if _, err := store.ApplyBatch(ctx, appended); err != nil {
+		t.Fatalf("append ApplyBatch() err = %v", err)
+	}
+	replay, err := store.ApplyBatch(ctx, reset)
+	if err != nil {
+		t.Fatalf("replay ApplyBatch() err = %v", err)
+	}
+	if replay.Decision != DecisionDuplicateFinal || replay.StepsIndexed != 0 {
+		t.Fatalf("replay = %+v, want duplicate re-publish of 0 steps", replay)
+	}
+	steps, err := store.GetSteps(ctx, "aerial", "sess-replay", 0, 10)
+	if err != nil || len(steps) != 5 {
+		t.Fatalf("steps = %d (%v), want all 5 preserved", len(steps), err)
+	}
+	marks, err := store.GetWatermarks(ctx, "aerial")
+	if err != nil || len(marks) != 1 || marks[0].LastIndexedStep != 4 {
+		t.Fatalf("watermarks = %+v (%v), want cursor at step 4", marks, err)
 	}
 }
 
