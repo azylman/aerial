@@ -42,7 +42,10 @@ const TabButton = memo(function TabButton({ tab }: { readonly tab: TabMeta }) {
       role="tab"
       aria-selected={active}
       aria-controls={tabPanelId(tab.id)}
-      onClick={() => setActiveTab(tab.id)}
+      onClick={() => {
+        setActiveTab(tab.id);
+        if (window.scrollY !== 0) window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      }}
     >
       <span className="tab-icon">
         <Icon name={tab.icon} />

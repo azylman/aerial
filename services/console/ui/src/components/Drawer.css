@@ -1,14 +1,15 @@
-/* Diagnostic drawer chrome (ported from static/style.css). Like vanilla, the overlay and panel
-   stay mounted and `.active` toggles open/closed; the transitions only touch transform, opacity
-   and visibility, so they run on the compositor. */
+/* Diagnostic drawer chrome: Warm Stone & Ink surface and mobile bottom sheet.
+   Overlay and panel stay mounted; .active toggles open/closed. Transitions only touch
+   transform, opacity, and visibility for compositor acceleration. */
 .drawer-overlay {
     position: fixed;
     top: 0;
     left: 0;
     width: 100vw;
     height: 100vh;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(20, 20, 19, 0.4);
     backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
     z-index: 200;
     opacity: 0;
     pointer-events: none;
@@ -30,11 +31,10 @@
     max-width: 960px;
     height: auto;
     max-height: 90vh;
-    background: rgba(10, 14, 23, 0.96);
-    border: 1px solid var(--neon-cyan);
-    border-radius: 16px;
-    backdrop-filter: blur(20px);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75), 0 0 40px rgba(0, 242, 254, 0.25);
+    background: var(--bg-surface);
+    border: 1px solid var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: 0 20px 48px rgba(20, 20, 19, 0.12), 0 0 1px rgba(20, 20, 19, 0.2);
     z-index: 201;
     transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease, visibility 0.3s ease;
     display: flex;
@@ -58,7 +58,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 1.25rem 1.5rem;
-    border-bottom: 1px solid rgba(0, 242, 254, 0.2);
+    border-bottom: 1px solid var(--card-border);
     flex-shrink: 0;
 }
 
@@ -71,14 +71,16 @@
 
 .drawer-title h3 {
     font-family: var(--font-heading);
-    color: #fff;
+    color: var(--text-primary);
     font-size: 1.2rem;
-    letter-spacing: 1px;
+    font-weight: 700;
+    letter-spacing: normal;
     min-width: 0;
 }
 
 .drawer-icon {
     display: inline-flex;
+    color: var(--accent-primary);
 }
 
 .drawer-close {
@@ -92,7 +94,7 @@
 }
 
 .drawer-close:hover {
-    color: var(--neon-magenta);
+    color: var(--text-primary);
 }
 
 .drawer-body {
@@ -103,6 +105,25 @@
     min-height: 0;
     font-size: 0.85rem;
     line-height: 1.6;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 768px) {
+    .diagnostic-drawer {
+        top: auto;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        max-width: 100%;
+        max-height: 85vh;
+        border-radius: 16px 16px 0 0;
+        transform: translateY(24px);
+    }
+
+    .diagnostic-drawer.active {
+        transform: translateY(0);
+    }
 }
 
 @media (prefers-reduced-motion: reduce) {
