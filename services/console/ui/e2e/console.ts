@@ -111,6 +111,8 @@ const TELEMETRY_COUNTS: readonly CountExpectation[] = [
   { selector: '#telemetry-view .deploy-timer-badge', count: 4 },
   { selector: '#telemetry-view .section-badge.failed', count: 1 },
   { selector: '#telemetry-view .task-card', count: 5 },
+  { selector: '#telemetry-view .overview-build-row', count: 3 },
+  { selector: '#telemetry-view .overview-schedule-row', count: 4 },
 ];
 
 /**
@@ -460,6 +462,8 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
         'LIVE AGENT EXECUTION QUEUE',
         'DEPLOYMENT PIPELINE',
         'ACTIVE STACK COMPONENTS',
+        'VANADIS BUILD QUEUE',
+        'UPCOMING SCHEDULED ROUTINES',
         SERVICES_HEALTHY,
         'aerial-vision',
         'aerial-kernel-mcp',
