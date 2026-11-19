@@ -1500,6 +1500,52 @@ if echo "$static_cfg" | grep -q 'default_agent = "claude-code"' && \
   echo 'entrypoint_static_config:ok'
 fi
 
+# Subtest: muse-roborev wrapper rewrites --contributor-mode to on and injects default model on exec
+MOCK_MUSE_REAL="$TEST_ROOT/muse.real"
+MUSE_LOG="$TEST_ROOT/muse.log"
+printf '#!/usr/bin/env bash\necho "$*" >> "%s"\n' "$MUSE_LOG" > "$MOCK_MUSE_REAL"
+chmod +x "$MOCK_MUSE_REAL"
+
+MUSE_WRAPPER_TEST="$TEST_ROOT/muse-roborev"
+awk '/cat > \/usr\/local\/bin\/muse-roborev <<.EOF./ {flag=1; next} flag && /^EOF$/ {flag=0; exit} flag {print}' "$ENTRYPOINT_FILE" \
+  | sed "s|/usr/local/bin/muse|$MOCK_MUSE_REAL|g" > "$MUSE_WRAPPER_TEST"
+chmod +x "$MUSE_WRAPPER_TEST"
+
+: > "$MUSE_LOG"
+"$MUSE_WRAPPER_TEST" exec --no-session-log --contributor-mode off -p "test prompt"
+"$MUSE_WRAPPER_TEST" exec --contributor-mode=off --model custom-model -p "test prompt 2"
+"$MUSE_WRAPPER_TEST" exec --model=custom-model-eq --contributor-mode off
+"$MUSE_WRAPPER_TEST" version
+
+if grep -q "^exec --model muse-spark-1.3-contributor --no-session-log --contributor-mode on -p test prompt$" "$MUSE_LOG" && \
+   grep -q "^exec --contributor-mode=on --model custom-model -p test prompt 2$" "$MUSE_LOG" && \
+   grep -q "^exec --model=custom-model-eq --contributor-mode on$" "$MUSE_LOG" && \
+   grep -q "^version$" "$MUSE_LOG"; then
+  echo 'muse_roborev_wrapper:ok'
+fi
+
+# Subtest: entrypoint merges muse settings into existing settings.json preserving existing keys
+MUSE_SETTINGS_TEST="$TEST_ROOT/muse-settings-test.sh"
+cat << 'MUSE_SETTINGS_TEST_EOF' > "$MUSE_SETTINGS_TEST"
+#!/usr/bin/env bash
+set -euo pipefail
+MUSE_SETTINGS_TEST_EOF
+awk '/MUSE_SETTINGS_FILE="\/root\/.config\/muse\/settings.json"/ {flag=1} flag {print} flag && /cmp -s/ {seen_cmp=1} flag && seen_cmp && /^fi$/ {flag=0; exit}' "$ENTRYPOINT_FILE" \
+  | sed "s|/root/.config/muse|$TEST_ROOT/mock_muse_cfg|g" >> "$MUSE_SETTINGS_TEST"
+chmod +x "$MUSE_SETTINGS_TEST"
+
+mkdir -p "$TEST_ROOT/mock_muse_cfg"
+echo '{"schema_version": 1, "custom_key": "preserved_val"}' > "$TEST_ROOT/mock_muse_cfg/settings.json"
+bash "$MUSE_SETTINGS_TEST"
+merged_muse_cfg=$(cat "$TEST_ROOT/mock_muse_cfg/settings.json")
+
+if [ "$(echo "$merged_muse_cfg" | jq -r '.model')" = "muse-spark-1.3-contributor" ] && \
+   [ "$(echo "$merged_muse_cfg" | jq -r '.contributor_mode_enabled')" = "true" ] && \
+   [ "$(echo "$merged_muse_cfg" | jq -r '.contributor_mode_disclosure_acknowledged')" = "true" ] && \
+   [ "$(echo "$merged_muse_cfg" | jq -r '.custom_key')" = "preserved_val" ]; then
+  echo 'muse_settings_merge:ok'
+fi
+
 # Subtest: roborev-wrapper omits --panel none by default
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low >/dev/null 2>&1)
@@ -1623,6 +1669,8 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' &
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_pass_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Passed when roborev.real exits 0 with low findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_fail_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Complete when roborev.real exits 1 with findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_static_config:ok' && echo true || echo false)" "services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ['default', 'test-value'], default_panel = 'ci', and members = ['default', 'test-value']"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'muse_roborev_wrapper:ok' && echo true || echo false)" "github-runner entrypoint generates muse-roborev wrapper rewriting --contributor-mode to on and injecting default model"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'muse_settings_merge:ok' && echo true || echo false)" "github-runner entrypoint merges muse settings into existing settings.json preserving existing keys"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_default_omits_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper omits --panel none by default"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_flag_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when --review-types default is passed"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_toml_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when .roborev.toml sets review_types = ['default']"
