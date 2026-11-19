@@ -316,9 +316,9 @@ func (b *BuildObject) ServiceName() string {
 	return model.BuildServiceName(b.agentName)
 }
 
-func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) {
+func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) error {
 	if b.executor == nil {
-		return
+		return nil
 	}
 	var build *model.VanadisBuild
 	var chunks []model.VanadisChunk
@@ -333,11 +333,13 @@ func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepNa
 		chunks = priorState.Chunks
 	}
 	if build == nil || strings.TrimSpace(build.ID) == "" || build.Quiet {
-		return
+		return nil
 	}
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, fmt.Sprintf("⚠️ Reconcile backing off (%s): %v", stepName, transErr)); err != nil {
 		slog.ErrorContext(ctx, "[vanadis-restate] sync widget error on transition failure", "error", err)
+		return err
 	}
+	return nil
 }
 
 func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {

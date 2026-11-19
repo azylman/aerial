@@ -69,7 +69,9 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 		if stepErr != nil {
 			notifiedInStep = true
 			RecordReconcileError(stepName, stepErr)
-			b.notifyTransitionError(ctx, buildID, stepName, priorState, stepErr)
+			if nerr := b.notifyTransitionError(ctx, buildID, stepName, priorState, stepErr); nerr != nil {
+				slog.WarnContext(ctx, "[vanadis-restate] transition notify warning", "error", nerr)
+			}
 		}
 		return out, stepErr
 	})
@@ -77,8 +79,7 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 		RecordReconcileError(stepName, err)
 		notifyErr := err
 		if _, notifyStepErr := rt.RunReconcileStep("notify-transition-error", func(nctx context.Context) (reconcileStepOutput, error) {
-			b.notifyTransitionError(nctx, buildID, stepName, priorState, notifyErr)
-			return reconcileStepOutput{}, nil
+			return reconcileStepOutput{}, b.notifyTransitionError(nctx, buildID, stepName, priorState, notifyErr)
 		}); notifyStepErr != nil {
 			slog.WarnContext(context.Background(), "[vanadis-restate] journaled notify warning", "error", notifyStepErr)
 		}
