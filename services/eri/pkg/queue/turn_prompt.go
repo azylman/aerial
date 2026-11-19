@@ -281,6 +281,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 
 	targetSess := te.probeCandidateSessionID(candidateID, stdout, stderr)
 	if targetSess != "" {
+		te.touchSessionIDLocked(targetSess)
 		te.activeSessionID = targetSess
 		te.leaseSessionID = targetSess
 		if allowPersist {

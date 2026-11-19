@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +63,38 @@ type turnExecution struct {
 	interrupted                                                                                 atomic.Bool
 	finalized                                                                                   atomic.Bool // burst committed as completed; interrupts only cancel post-turn work
 	interruptReason                                                                             string
+	touchedSessions                                                                             []string
+}
+
+func (te *turnExecution) touchSessionIDLocked(id string) {
+	if te == nil {
+		return
+	}
+	s := strings.TrimSpace(id)
+	if s == "" {
+		return
+	}
+	if !slices.Contains(te.touchedSessions, s) {
+		te.touchedSessions = append(te.touchedSessions, s)
+	}
+}
+
+func (te *turnExecution) touchedSessionIDs() []string {
+	if te == nil {
+		return nil
+	}
+	te.activeSessionMu.Lock()
+	defer te.activeSessionMu.Unlock()
+	return slices.Clone(te.touchedSessions)
+}
+
+func (te *turnExecution) enqueueTranscriptPublish() {
+	if te == nil || te.pool == nil {
+		return
+	}
+	for _, sid := range te.touchedSessionIDs() {
+		te.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sid, ThreadID: te.threadID})
+	}
 }
 
 func (te *turnExecution) isDispatch() bool {
@@ -390,6 +423,7 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 	te.isCold = lease.IsCold()
 	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
 	te.turnCount = lease.TurnCount()
+	te.touchSessionIDLocked(te.leaseSessionID)
 	currSess, isCold, isEphem := te.currentSessionID, te.isCold, te.isEphemeral
 	te.activeSessionMu.Unlock()
 
@@ -921,6 +955,7 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 	if shouldSave {
 		te.currentSessionID = leaseSess
 	}
+	te.touchSessionIDLocked(leaseSess)
 	sessIDToSend := te.currentSessionID
 	if leaseSess != "" && te.currentSessionID != "" {
 		sessIDToSend = leaseSess
@@ -1121,6 +1156,7 @@ func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, 
 		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.leaseKey()); lErr == nil {
 			te.activeSessionMu.Lock()
 			te.lease, te.leaseSessionID, te.isEphemeral, te.currentSessionID = newLease, newLease.SessionID(), te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
+			te.touchSessionIDLocked(te.leaseSessionID)
 			te.activeSessionMu.Unlock()
 			te.registerActiveTurn()
 		}
@@ -1139,6 +1175,7 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	te.activeSessionMu.Lock()
 	hasCurr := te.currentSessionID != ""
 	if hasCurr {
+		te.touchSessionIDLocked(te.currentSessionID)
 		te.previousSessionID, te.currentSessionID = te.currentSessionID, ""
 	}
 	te.activeSessionID = ""
@@ -1312,6 +1349,8 @@ func (te *turnExecution) processAttemptResult(
 }
 
 func (te *turnExecution) executeWithRetries() {
+	defer te.enqueueTranscriptPublish()
+
 	maxAttempts := te.pool.cfg.MaxAttempts
 	lastErrDetail := ""
 	lastStderr := ""
