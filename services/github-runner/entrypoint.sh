@@ -114,9 +114,21 @@ if [ -n "${SEED_MUSE_AUTH}" ] && [ -s "${SEED_MUSE_AUTH}" ]; then
   fi
 fi
 
-if [ ! -s "/root/.config/muse/settings.json" ]; then
-  echo '{"schema_version": 1}' > /root/.config/muse/settings.json
-  chmod 0600 /root/.config/muse/settings.json
+MUSE_SETTINGS_FILE="/root/.config/muse/settings.json"
+MUSE_SETTINGS_DEFAULTS='{"schema_version": 1, "model": "muse-spark-1.3-contributor", "contributor_mode_enabled": true, "contributor_mode_disclosure_acknowledged": true}'
+TMP_MUSE_SETTINGS="/root/.config/muse/.settings.json.tmp.$$"
+
+if [ -f "${MUSE_SETTINGS_FILE}" ] && jq -e 'type == "object"' "${MUSE_SETTINGS_FILE}" >/dev/null 2>&1; then
+  jq -n --argjson defaults "${MUSE_SETTINGS_DEFAULTS}" --slurpfile current "${MUSE_SETTINGS_FILE}" '$current[0] * $defaults' > "${TMP_MUSE_SETTINGS}"
+else
+  echo "${MUSE_SETTINGS_DEFAULTS}" | jq '.' > "${TMP_MUSE_SETTINGS}"
+fi
+
+chmod 0600 "${TMP_MUSE_SETTINGS}"
+if [ ! -f "${MUSE_SETTINGS_FILE}" ] || ! cmp -s "${TMP_MUSE_SETTINGS}" "${MUSE_SETTINGS_FILE}"; then
+  mv -f "${TMP_MUSE_SETTINGS}" "${MUSE_SETTINGS_FILE}"
+else
+  rm -f "${TMP_MUSE_SETTINGS}"
 fi
 
 if [ -s "/local/roborev-config.toml" ]; then
@@ -308,6 +320,63 @@ fi
 EOF
 chmod 0755 /usr/local/bin/sync-gemini-settings
 /usr/local/bin/sync-gemini-settings
+
+cat > /usr/local/bin/muse-roborev <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+REAL_MUSE="/usr/local/bin/muse"
+DEFAULT_MODEL="${MUSE_DEFAULT_MODEL:-muse-spark-1.3-contributor}"
+
+# Process arguments
+cmd="${1:-}"
+has_model=0
+new_args=()
+
+if [ "$#" -gt 0 ]; then
+  new_args+=("$1")
+  shift
+fi
+
+while [ "$#" -gt 0 ]; do
+  arg="$1"
+  case "$arg" in
+    --contributor-mode)
+      # Rewrites --contributor-mode <val> to --contributor-mode on
+      shift
+      new_args+=("--contributor-mode" "on")
+      ;;
+    --contributor-mode=*)
+      # Rewrites --contributor-mode=<val> to --contributor-mode=on
+      new_args+=("--contributor-mode=on")
+      ;;
+    --model)
+      has_model=1
+      new_args+=("$arg")
+      if [ "$#" -gt 1 ]; then
+        shift
+        new_args+=("$1")
+      fi
+      ;;
+    --model=*)
+      has_model=1
+      new_args+=("$arg")
+      ;;
+    *)
+      new_args+=("$arg")
+      ;;
+  esac
+  shift
+done
+
+if [ "$cmd" = "exec" ] && [ "$has_model" -eq 0 ]; then
+  # Inject --model <model> immediately after exec
+  exec "$REAL_MUSE" exec --model "$DEFAULT_MODEL" "${new_args[@]:1}"
+else
+  exec "$REAL_MUSE" "${new_args[@]}"
+fi
+EOF
+chmod 0755 /usr/local/bin/muse-roborev
 
 # The agy and roborev wrappers are baked into the image (agy-wrapper.sh,
 # roborev-wrapper.sh) over agy.real / roborev.real; never rename them here.
