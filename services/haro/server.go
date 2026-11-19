@@ -58,15 +58,15 @@ func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	if handler == nil {
 		panic("server: handler cannot be nil")
 	}
-	if handler.cfg != nil {
-		RegisterConfigTokens(handler.cfg)
+	if handler.Cfg != nil {
+		RegisterConfigTokens(handler.Cfg)
 	}
 
 	var disp PromptDispatcher
 	if len(dispatcher) > 0 && dispatcher[0] != nil {
 		disp = dispatcher[0]
-	} else if handler.cfg != nil && strings.TrimSpace(handler.cfg.EriURL) != "" {
-		disp = NewHTTPPromptDispatcher(handler.cfg.EriURL)
+	} else if handler.Cfg != nil && strings.TrimSpace(handler.Cfg.EriURL) != "" {
+		disp = NewHTTPPromptDispatcher(handler.Cfg.EriURL)
 	}
 
 	opts := &mcp.StreamableHTTPOptions{
@@ -167,7 +167,7 @@ func (s *Server) registerTools() {
 		Name:        "schedule_heartbeat",
 		Description: "Register a persistent heartbeat monitoring schedule evaluated periodically by Haro for silent background polling and edge-triggered state tracking (such as flight status, permit updates, or external API watches) that only messages Discord when state materially changes, whereas schedule_recurring is for unconditional user-facing messages on every tick and schedule_once is for one-time delayed reminders.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScheduleHeartbeatArgs) (*mcp.CallToolResult, any, error) {
-		res, err := HandleScheduleHeartbeat(ctx, s.handler.db, s.handler.timezone, args.toMap())
+		res, err := HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -178,7 +178,7 @@ func (s *Server) registerTools() {
 		Name:        "update_heartbeat",
 		Description: "Update an existing heartbeat monitoring schedule.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args UpdateHeartbeatArgs) (*mcp.CallToolResult, any, error) {
-		res, err := HandleUpdateHeartbeat(ctx, s.handler.db, args.toMap())
+		res, err := HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -190,10 +190,10 @@ func (s *Server) registerTools() {
 		Description: "Register a deterministic one-shot event watch trigger fired when an external event occurs.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args WatchEventArgs) (*mcp.CallToolResult, any, error) {
 		var extraSources []string
-		if s.handler != nil && s.handler.cfg != nil {
-			extraSources = s.handler.cfg.ExtraEventSources
+		if s.handler != nil && s.handler.Cfg != nil {
+			extraSources = s.handler.Cfg.ExtraEventSources
 		}
-		res, err := HandleWatchEvent(ctx, s.handler.db, args.toMap(), extraSources...)
+		res, err := HandleWatchEvent(ctx, s.handler.DB, args.ToMap(), extraSources...)
 		return res, nil, err
 	})
 
@@ -201,7 +201,7 @@ func (s *Server) registerTools() {
 		Name:        "list_event_watches",
 		Description: "List active deterministic event watch triggers.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ListEventWatchesArgs) (*mcp.CallToolResult, any, error) {
-		res, err := HandleListEventWatches(ctx, s.handler.db, args.toMap())
+		res, err := HandleListEventWatches(ctx, s.handler.DB, args.ToMap())
 		return res, nil, err
 	})
 
@@ -209,7 +209,7 @@ func (s *Server) registerTools() {
 		Name:        "cancel_event_watch",
 		Description: "Cancel an active deterministic event watch trigger by watch ID.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args CancelEventWatchArgs) (*mcp.CallToolResult, any, error) {
-		res, err := HandleCancelEventWatch(ctx, s.handler.db, args.toMap())
+		res, err := HandleCancelEventWatch(ctx, s.handler.DB, args.ToMap())
 		return res, nil, err
 	})
 }
@@ -269,7 +269,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.handler == nil || s.handler.db == nil {
+	if s.handler == nil || s.handler.DB == nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "database not initialized"})
 		return
 	}
@@ -287,7 +287,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	s.schedulesCache.mu.Unlock()
 
 	ctx := r.Context()
-	db := s.handler.db
+	db := s.handler.DB
 
 	metrics, err := GetScheduleSummaryMetrics(ctx, db)
 	if err != nil {
@@ -338,7 +338,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.handler == nil || s.handler.db == nil {
+	if s.handler == nil || s.handler.DB == nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "database not initialized"})
 		return
 	}
@@ -359,7 +359,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	scheduleID := strings.TrimSpace(q.Get("schedule_id"))
 	status := strings.TrimSpace(q.Get("status"))
 
-	runs, total, err := GetScheduleRunsPaginated(r.Context(), s.handler.db, limit, offset, scheduleID, status)
+	runs, total, err := GetScheduleRunsPaginated(r.Context(), s.handler.DB, limit, offset, scheduleID, status)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
 		return
@@ -398,7 +398,7 @@ func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg
 	}
 	dbHandle := database
 	if dbHandle == nil && server != nil && server.handler != nil {
-		dbHandle = server.handler.db
+		dbHandle = server.handler.DB
 	}
 	if dbHandle == nil {
 		return errors.New("database not initialized")
@@ -446,12 +446,12 @@ func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg
 func (s *Server) recoverFailedEventTrigger(ctx context.Context, trig EventTrigger) {
 	bgCtx := context.WithoutCancel(ctx)
 	if !trig.Persistent {
-		if err := InsertEventTrigger(bgCtx, s.handler.db, trig); err != nil {
+		if err := InsertEventTrigger(bgCtx, s.handler.DB, trig); err != nil {
 			log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, err)
 		}
 		return
 	}
-	if _, err := s.handler.db.ExecContext(bgCtx, "UPDATE event_triggers SET updated_at = NULL WHERE id = $1", trig.ID); err != nil {
+	if _, err := s.handler.DB.ExecContext(bgCtx, "UPDATE event_triggers SET updated_at = NULL WHERE id = $1", trig.ID); err != nil {
 		log.Printf("[Haro] failed to reset updated_at for persistent trigger %s: %v", trig.ID, err)
 	}
 }
@@ -484,10 +484,10 @@ func (s *Server) HandleExternalEvent(ctx context.Context, ev pubsub.ExternalEven
 	if ev.Source == "healthcheck" || len(ev.Targets) == 0 {
 		return nil
 	}
-	if s.handler == nil || s.handler.db == nil {
+	if s.handler == nil || s.handler.DB == nil {
 		return errors.New("database not initialized")
 	}
-	triggers, err := ClaimEventTriggers(ctx, s.handler.db, ev.Source, ev.Targets, ev.EventType)
+	triggers, err := ClaimEventTriggers(ctx, s.handler.DB, ev.Source, ev.Targets, ev.EventType)
 	if err != nil {
 		return err
 	}

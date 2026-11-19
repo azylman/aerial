@@ -45,19 +45,6 @@ const (
 	statusSuccess       = model.StatusSuccess
 )
 
-// Reasoning effort level aliases.
-const (
-	effortLow    = model.EffortLow
-	effortMedium = model.EffortMedium
-	effortHigh   = model.EffortHigh
-)
-
-// Event-watch source aliases.
-const (
-	sourceVanadisBuild = model.SourceVanadisBuild
-	sourceVanadisChunk = model.SourceVanadisChunk
-)
-
 // Shared field key aliases.
 const (
 	fieldStatus  = model.FieldStatus
@@ -66,24 +53,9 @@ const (
 	fieldError   = model.FieldError
 )
 
-// NormalizeEffort validates effort tiers, defaulting empty to "low".
-func NormalizeEffort(effort string) (string, error) {
-	return model.NormalizeEffort(effort)
-}
-
-// IsNumericSnowflake reports whether id is a non-empty string consisting only of ASCII digits [0-9].
-func IsNumericSnowflake(id string) bool {
-	return model.IsNumericSnowflake(id)
-}
-
 // FormatEventTriggerPrompt combines an optional context header with an event trigger prompt.
 func FormatEventTriggerPrompt(contextHeader, prompt string) string {
 	return model.FormatEventTriggerPrompt(contextHeader, prompt)
-}
-
-// ValidateEventWatchSpec validates and normalizes event trigger parameters.
-func ValidateEventWatchSpec(source, target, eventType string, extraSources ...string) (normSource, normTarget, normEventType string, err error) {
-	return model.ValidateEventWatchSpec(source, target, eventType, extraSources...)
 }
 
 // SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.

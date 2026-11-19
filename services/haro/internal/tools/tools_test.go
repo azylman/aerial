@@ -1,0 +1,482 @@
+package tools
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/azylman/aerial/services/haro/internal/config"
+	"github.com/azylman/aerial/services/haro/internal/model"
+	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
+)
+
+func openToolsTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := testutil.OpenSQLiteTestDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// newMemoryToolHandler opens a hermetic in-memory haro DB and returns a
+// ToolHandler over it; the DB closes on test cleanup.
+func newMemoryToolHandler(t *testing.T) (*ToolHandler, *sql.DB) {
+	t.Helper()
+	db := openToolsTestDB(t)
+	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	return NewToolHandler(cfg, db), db
+}
+
+func TestParseRunAtWithTimezone(t *testing.T) {
+	t.Parallel()
+	baseTime := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		input   string
+		tz      string
+		want    time.Time
+		wantErr bool
+	}{
+		{"relative 30s", "30s", "UTC", baseTime.Add(30 * time.Second), false},
+		{"relative 45 seconds", "45 seconds", "UTC", baseTime.Add(45 * time.Second), false},
+		{"relative 15m", "15m", "UTC", baseTime.Add(15 * time.Minute), false},
+		{"relative 2h", "2h", "UTC", baseTime.Add(2 * time.Hour), false},
+		{"relative 1d", "1d", "UTC", baseTime.Add(24 * time.Hour), false},
+		{"relative 1w", "1w", "UTC", baseTime.Add(7 * 24 * time.Hour), false},
+		{"duration 1h30m", "1h30m", "UTC", baseTime.Add(90 * time.Minute), false},
+		{"rfc3339 utc", "2026-08-28T21:00:00Z", "UTC", time.Date(2026, 8, 28, 21, 0, 0, 0, time.UTC), false},
+		{"rfc3339nano utc", "2026-08-28T21:00:00.123456789Z", "UTC", time.Date(2026, 8, 28, 21, 0, 0, 123456789, time.UTC), false},
+		{"local datetime LA", "2026-08-28 15:00:00", "America/Los_Angeles", time.Date(2026, 8, 28, 22, 0, 0, 0, time.UTC), false},
+		{"local datetime NY", "2026-08-28 15:00:00", "America/New_York", time.Date(2026, 8, 28, 19, 0, 0, 0, time.UTC), false},
+		{"local datetime Tokyo", "2026-08-28 15:00:00", "Asia/Tokyo", time.Date(2026, 8, 28, 6, 0, 0, 0, time.UTC), false},
+		{"local iso without zone", "2026-08-28T21:00", "America/Los_Angeles", time.Date(2026, 8, 29, 4, 0, 0, 0, time.UTC), false},
+		{"local space without seconds", "2026-08-28 21:00", "America/Los_Angeles", time.Date(2026, 8, 29, 4, 0, 0, 0, time.UTC), false},
+		{"local date only", "2026-08-28", "America/Los_Angeles", time.Date(2026, 8, 28, 7, 0, 0, 0, time.UTC), false},
+		{"empty input", "", "UTC", time.Time{}, true},
+		{"invalid duration", "invalid duration", "UTC", time.Time{}, true},
+		{"overflow duration", "99999999999999999999999999999999999999999999999s", "UTC", time.Time{}, true},
+		{"empty timezone", "15m", "", time.Time{}, true},
+		{"invalid timezone", "15m", "Invalid/Timezone", time.Time{}, true},
+		{"unrecognized format", "not-a-valid-date", "UTC", time.Time{}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseRunAtWithTimezone(tc.input, tc.tz, baseTime)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ParseRunAtWithTimezone(%q, %q) err = %v, wantErr = %v", tc.input, tc.tz, err, tc.wantErr)
+			}
+			if !tc.wantErr && !got.Equal(tc.want) {
+				t.Fatalf("ParseRunAtWithTimezone(%q, %q) = %v, want %v", tc.input, tc.tz, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveTimezone_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		tz       string
+		fallback string
+		want     string
+	}{
+		{"explicit timezone", "America/New_York", "UTC", "America/New_York"},
+		{"fallback timezone", "", "America/Chicago", "America/Chicago"},
+		{"whitespace explicit timezone", "  America/Denver  ", "UTC", "America/Denver"},
+		{"whitespace fallback timezone", "", "  UTC  ", "UTC"},
+		{"default timezone", "", "", config.DefaultTimezone},
+		{"whitespace both default", "   ", "   ", config.DefaultTimezone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveTimezone(tc.tz, tc.fallback); got != tc.want {
+				t.Errorf("resolveTimezone(%q, %q) = %q, want %q", tc.tz, tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewToolHandler_Table(t *testing.T) {
+	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: "UTC", VanadisURL: "http://vanadis.tools-test"}
+	oldVanadis := store.GetVanadisURL()
+	defer store.SetVanadisURL(oldVanadis)
+	db := openToolsTestDB(t)
+	NewToolHandler(cfg, db)
+	if store.GetVanadisURL() != cfg.VanadisURL {
+		t.Errorf("VanadisURL = %q, want %q", store.GetVanadisURL(), cfg.VanadisURL)
+	}
+}
+
+func TestFormatSchedulesSummary_Table(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 28, 22, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		out      ListSchedulesOutput
+		contains []string
+	}{
+		{"empty", ListSchedulesOutput{}, []string{"No active schedules found."}},
+		{
+			"recurring only",
+			ListSchedulesOutput{Recurring: []model.CronSchedule{{ID: "c1", TargetID: "ch", TitlePrefix: "T", CronExpr: "0 0 * * *", Effort: "medium", NextRunAt: now}}},
+			[]string{"[RECURRING]", "c1"},
+		},
+		{
+			"one-shot only",
+			ListSchedulesOutput{OneShot: []model.OneShotSchedule{{ID: "o1", ThreadID: "th", Effort: "low", RunAt: now}}},
+			[]string{"[ONE_SHOT]", "o1"},
+		},
+		{
+			"heartbeat only",
+			ListSchedulesOutput{Heartbeats: []model.HeartbeatSchedule{{ID: "h1", TargetID: "ch", CronExpr: "0 * * * *", Effort: "high", NextRunAt: now}}},
+			[]string{"[HEARTBEAT]", "h1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatSchedulesSummary(tc.out)
+			for _, want := range tc.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("FormatSchedulesSummary() = %q, want substring %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+type scheduleRecurringErrTestCase struct {
+	name       string
+	args       ScheduleRecurringArgs
+	wantErrMsg string
+}
+
+type scheduleOnceErrTestCase struct {
+	name       string
+	args       ScheduleOnceArgs
+	wantErrMsg string
+}
+
+type scheduleRecurringSuccessTestCase struct {
+	name       string
+	args       ScheduleRecurringArgs
+	wantEffort string
+}
+
+type scheduleOnceSuccessTestCase struct {
+	name       string
+	args       ScheduleOnceArgs
+	wantEffort string
+}
+
+func runScheduleRecurringErrCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleRecurringErrTestCase) {
+	t.Helper()
+	_, err := h.ScheduleRecurring(ctx, tc.args)
+	if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+		t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+	}
+}
+
+func runScheduleOnceErrCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleOnceErrTestCase) {
+	t.Helper()
+	_, err := h.ScheduleOnce(ctx, tc.args)
+	if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+		t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+	}
+}
+
+func runScheduleRecurringSuccessCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleRecurringSuccessTestCase) {
+	t.Helper()
+	res, err := h.ScheduleRecurring(ctx, tc.args)
+	if err != nil || res.Status != "success" || res.Effort != tc.wantEffort {
+		t.Fatalf("unexpected ScheduleRecurring result: %+v, err: %v", res, err)
+	}
+}
+
+func runScheduleOnceSuccessCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleOnceSuccessTestCase) {
+	t.Helper()
+	res, err := h.ScheduleOnce(ctx, tc.args)
+	if err != nil || res.Status != "success" || res.Effort != tc.wantEffort {
+		t.Fatalf("unexpected ScheduleOnce result: %+v, err: %v", res, err)
+	}
+}
+
+func testToolHandlerGuardsAndNilDB(t *testing.T) {
+	t.Helper()
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected NewToolHandler(nil, nil) to panic")
+			}
+		}()
+		NewToolHandler(nil, nil)
+	}()
+}
+
+func testToolHandlerClosedDB(ctx context.Context, t *testing.T, cfg *config.Config) {
+	t.Helper()
+	closedDB, _ := sql.Open("sqlite", ":memory:")
+	_ = closedDB.Close()
+	hClosed := NewToolHandler(cfg, closedDB)
+
+	if _, err := hClosed.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "c", CronExpression: "0 9 * * *", Prompt: "p"}); err == nil {
+		t.Error("expected error with closed db in ScheduleRecurring")
+	}
+	if _, err := hClosed.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "t", RunAt: "15m", Prompt: "p"}); err == nil {
+		t.Error("expected error with closed db in ScheduleOnce")
+	}
+	if _, err := hClosed.ListSchedules(ctx, ListSchedulesArgs{TargetID: "t"}); err == nil {
+		t.Error("expected error with closed db in ListSchedules")
+	}
+	if _, err := hClosed.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "c1"}); err == nil {
+		t.Error("expected error with closed db in GetSchedule")
+	}
+	effHigh := "high"
+	if _, err := hClosed.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &effHigh}); err == nil {
+		t.Error("expected error updating cron with closed db")
+	}
+	if _, err := hClosed.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: "s1"}); err == nil {
+		t.Error("expected error canceling schedule with closed db")
+	}
+}
+
+func testToolHandlerList(ctx context.Context, t *testing.T, h *ToolHandler, db *sql.DB, now time.Time) {
+	t.Helper()
+	sZero := model.OneShotSchedule{ID: "s-zero", ThreadID: "t-zero", Prompt: "p", RunAt: now.Add(time.Hour)}
+	if err := store.InsertOneShotSchedule(nil, db, sZero); err != nil { //nolint:contextcheck // exercises nil-ctx tolerance
+		t.Fatalf("InsertOneShotSchedule nil ctx error: %v", err)
+	}
+	listZero, err := store.ListOneShotSchedules(ctx, db, "t-zero")
+	if err != nil || len(listZero) != 1 || listZero[0].CreatedAt.IsZero() {
+		t.Fatalf("expected non-zero CreatedAt, got %+v, err: %v", listZero, err)
+	}
+
+	_, _ = db.Exec("INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-empty', 'ch-raw', '', '0 0 * * *', 'p', 'UTC', ?, TRUE, ?, '')", now, now)
+	_, _ = db.Exec("INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ('o-empty', 'ch-raw', 'p', ?, ?, '')", now, now)
+
+	listAll, err := h.ListSchedules(ctx, ListSchedulesArgs{})
+	if err != nil || len(listAll.Recurring) == 0 || len(listAll.OneShot) == 0 {
+		t.Fatalf("expected non-empty lists, got %+v, err: %v", listAll, err)
+	}
+
+	listFiltered, err := h.ListSchedules(ctx, ListSchedulesArgs{TargetID: "ch-raw"})
+	if err != nil || len(listFiltered.Recurring) != 1 || listFiltered.Recurring[0].Effort != "medium" || len(listFiltered.OneShot) != 1 || listFiltered.OneShot[0].Effort != "medium" {
+		t.Fatalf("expected medium effort on empty string, got %+v, err: %v", listFiltered, err)
+	}
+	if listFiltered.Recurring[0].Prompt != "" || listFiltered.OneShot[0].Prompt != "" || strings.Contains(listFiltered.Summary, "Prompt:") {
+		t.Fatalf("expected ListSchedules to omit prompt from structs and summary, got %+v", listFiltered)
+	}
+}
+
+func testToolHandlerGet(ctx context.Context, t *testing.T, h *ToolHandler, db *sql.DB, now time.Time) {
+	t.Helper()
+	gotCron, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "c-empty"})
+	if err != nil || gotCron.Type != "recurring" || gotCron.Recurring == nil || gotCron.Recurring.Prompt != "p" {
+		t.Fatalf("expected GetSchedule recurring with prompt 'p', got %+v, err: %v", gotCron, err)
+	}
+	gotOnce, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "o-empty"})
+	if err != nil || gotOnce.Type != "one_shot" || gotOnce.OneShot == nil || gotOnce.OneShot.Prompt != "p" {
+		t.Fatalf("expected GetSchedule one_shot with prompt 'p', got %+v, err: %v", gotOnce, err)
+	}
+	_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{ID: "hb-get", TargetID: "ch-raw", CronExpr: "0 0 * * *", Prompt: "hb-p", NextRunAt: now, Enabled: true})
+	gotHB, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "hb-get"})
+	if err != nil || gotHB.Type != "heartbeat" || gotHB.Heartbeat == nil || gotHB.Heartbeat.Prompt != "hb-p" {
+		t.Fatalf("expected GetSchedule heartbeat with prompt 'hb-p', got %+v, err: %v", gotHB, err)
+	}
+	if _, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "  "}); err == nil {
+		t.Error("expected error for empty schedule_id in GetSchedule")
+	}
+	if _, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "missing-id"}); err == nil {
+		t.Error("expected error for non-existent schedule_id in GetSchedule")
+	}
+}
+
+func TestToolHandler_ScheduleAndList(t *testing.T) {
+	testToolHandlerGuardsAndNilDB(t)
+
+	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db := openToolsTestDB(t)
+	h := NewToolHandler(cfg, db)
+	ctx := context.Background()
+
+	recErrTests := []scheduleRecurringErrTestCase{
+		{"missing channel_id", ScheduleRecurringArgs{CronExpression: "0 9 * * *", Prompt: "p"}, "'channel_id' is required"},
+		{"missing cron_expression", ScheduleRecurringArgs{ChannelID: "c1", Prompt: "p"}, "'cron_expression' is required"},
+		{"missing prompt", ScheduleRecurringArgs{ChannelID: "c1", CronExpression: "0 9 * * *"}, "'prompt' is required"},
+		{"invalid cron", ScheduleRecurringArgs{ChannelID: "c1", CronExpression: "not-a-cron", Prompt: "p"}, "invalid cron expression"},
+	}
+	for _, tc := range recErrTests {
+		t.Run(tc.name, func(t *testing.T) {
+			runScheduleRecurringErrCase(ctx, t, h, tc)
+		})
+	}
+
+	onceErrTests := []scheduleOnceErrTestCase{
+		{"missing target_id", ScheduleOnceArgs{RunAt: "15m", Prompt: "p"}, "'target_id' is required"},
+		{"missing run_at", ScheduleOnceArgs{TargetID: "t1", Prompt: "p"}, "'run_at' is required"},
+		{"missing prompt", ScheduleOnceArgs{TargetID: "t1", RunAt: "15m"}, "'prompt' is required"},
+		{"invalid run_at", ScheduleOnceArgs{TargetID: "t1", RunAt: "bad-time", Prompt: "p"}, "unrecognized run_at format"},
+	}
+	for _, tc := range onceErrTests {
+		t.Run(tc.name, func(t *testing.T) {
+			runScheduleOnceErrCase(ctx, t, h, tc)
+		})
+	}
+
+	recSuccessTests := []scheduleRecurringSuccessTestCase{
+		{"default tz and effort", ScheduleRecurringArgs{ChannelID: "ch-1", CronExpression: "0 9 * * *", Prompt: "p1"}, "medium"},
+		{"explicit tz and high effort", ScheduleRecurringArgs{ChannelID: "ch-2", CronExpression: "0 20 * * 5", Prompt: "p2", Timezone: "America/New_York", Effort: "high", TitlePrefix: "Weekly"}, "high"},
+		{"untrimmed lower effort", ScheduleRecurringArgs{ChannelID: "ch-3", CronExpression: "0 9 * * *", Prompt: "p3", Effort: "  LOW  "}, "low"},
+		{"invalid effort fallback", ScheduleRecurringArgs{ChannelID: "ch-4", CronExpression: "0 9 * * *", Prompt: "p4", Effort: "unknown"}, "medium"},
+	}
+	for _, tc := range recSuccessTests {
+		t.Run(tc.name, func(t *testing.T) {
+			runScheduleRecurringSuccessCase(ctx, t, h, tc)
+		})
+	}
+
+	now := time.Now().UTC()
+	onceSuccessTests := []scheduleOnceSuccessTestCase{
+		{"target_id relative medium effort", ScheduleOnceArgs{TargetID: "t-1", RunAt: "10m", Prompt: "p1"}, "medium"},
+		{"thread_id explicit high effort", ScheduleOnceArgs{ThreadID: "t-2", RunAt: "15m", Prompt: "p2", Effort: "high"}, "high"},
+		{"untrimmed effort and absolute tz", ScheduleOnceArgs{TargetID: "t-3", RunAt: "2026-08-28 20:00:00", Timezone: "America/Los_Angeles", Prompt: "p3", Effort: "  LOW  "}, "low"},
+		{"invalid effort fallback", ScheduleOnceArgs{TargetID: "t-4", RunAt: "1h", Prompt: "p4", Effort: "invalid"}, "medium"},
+	}
+	for _, tc := range onceSuccessTests {
+		t.Run(tc.name, func(t *testing.T) {
+			runScheduleOnceSuccessCase(ctx, t, h, tc)
+		})
+	}
+
+	testToolHandlerList(ctx, t, h, db, now)
+	testToolHandlerGet(ctx, t, h, db, now)
+	testToolHandlerClosedDB(ctx, t, cfg)
+}
+
+func TestToolHandler_UpdateCronSchedule(t *testing.T) {
+	h, db := newMemoryToolHandler(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	for _, c := range []model.CronSchedule{
+		{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "America/Los_Angeles", NextRunAt: now, Enabled: true, Effort: "medium"},
+		{ID: "c-tokyo", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "Asia/Tokyo", NextRunAt: now, Enabled: true, Effort: "medium"},
+	} {
+		if err := store.InsertCronSchedule(ctx, db, c); err != nil {
+			t.Fatalf("InsertCronSchedule %s error: %v", c.ID, err)
+		}
+	}
+
+	// Rows run sequentially and share the seeded schedules: later c-tokyo rows depend on the timezone stored by earlier ones.
+	eff, expr, prompt, prefix, tzUTC := "high", "0 12 * * *", "updated", "NewPrefix", "UTC"
+	cron9, cron1730, tzNY, badExpr := "0 9 * * *", "30 17 * * *", "America/New_York", "not-a-cron"
+	tests := []struct {
+		name       string
+		args       UpdateCronScheduleArgs
+		wantErrMsg string
+		wantEffort string
+		wantTZ     string
+		wantClock  string
+	}{
+		{"full update recomputes next run", UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &eff, CronExpression: &expr, Prompt: &prompt, TitlePrefix: &prefix, Timezone: &tzUTC}, "", "high", "UTC", "12:00"},
+		{"cron-only update uses stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron9}, "", "", "Asia/Tokyo", "09:00"},
+		{"timezone-only update recomputes with stored cron", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Timezone: &tzNY}, "", "", "America/New_York", "09:00"},
+		{"cron-only update after timezone change uses new stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron1730}, "", "", "America/New_York", "17:30"},
+		{"content-only update leaves next_run_at untouched", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Prompt: &prompt}, "", "", "", ""},
+		{"missing schedule_id", UpdateCronScheduleArgs{ScheduleID: "  "}, "'schedule_id' is required", "", "", ""},
+		{"invalid cron expression", UpdateCronScheduleArgs{ScheduleID: "c1", CronExpression: &badExpr}, "invalid cron expression", "", "", ""},
+		{"non-existent schedule", UpdateCronScheduleArgs{ScheduleID: "missing-id", Effort: &eff}, "failed to update recurring schedule", "", "", ""},
+		{"non-existent schedule with cron change", UpdateCronScheduleArgs{ScheduleID: "missing-id", CronExpression: &cron9}, "failed to update recurring schedule", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := h.UpdateCronSchedule(ctx, tc.args)
+			if tc.wantErrMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+				}
+				return
+			}
+			if err != nil || out.Status != "success" {
+				t.Fatalf("UpdateCronSchedule = %+v, err: %v", out, err)
+			}
+			if tc.wantEffort != "" && out.Effort != tc.wantEffort {
+				t.Errorf("Effort = %q, want %q", out.Effort, tc.wantEffort)
+			}
+			assertNextRunClock(t, out.NextRunAt, tc.wantTZ, tc.wantClock)
+		})
+	}
+}
+
+// assertNextRunClock checks nextRunAt falls within the next day at wantClock in wantTZ; an empty wantClock means
+// next_run_at must be omitted.
+func assertNextRunClock(t *testing.T, nextRunAt, wantTZ, wantClock string) {
+	t.Helper()
+	if wantClock == "" {
+		if nextRunAt != "" {
+			t.Fatalf("expected no next_run_at, got %q", nextRunAt)
+		}
+		return
+	}
+	got, err := time.Parse(time.RFC3339, nextRunAt)
+	if err != nil {
+		t.Fatalf("parse next_run_at %q: %v", nextRunAt, err)
+	}
+	loc, err := time.LoadLocation(wantTZ)
+	if err != nil {
+		t.Fatalf("LoadLocation %q: %v", wantTZ, err)
+	}
+	if clock := got.In(loc).Format("15:04"); clock != wantClock {
+		t.Fatalf("next_run_at %s in %s = %s, want %s", nextRunAt, wantTZ, clock, wantClock)
+	}
+	if d := time.Until(got); d <= 0 || d > 25*time.Hour {
+		t.Fatalf("next_run_at %s not within the next day", nextRunAt)
+	}
+}
+
+func TestToolHandler_CancelSchedule(t *testing.T) {
+	h, db := newMemoryToolHandler(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	c := model.CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "America/Los_Angeles", NextRunAt: now, Enabled: true, Effort: "medium"}
+	if err := store.InsertCronSchedule(ctx, db, c); err != nil {
+		t.Fatalf("InsertCronSchedule error: %v", err)
+	}
+	s := model.OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "prompt", RunAt: now, Effort: "medium"}
+	if err := store.InsertOneShotSchedule(ctx, db, s); err != nil {
+		t.Fatalf("InsertOneShotSchedule error: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		id         string
+		wantErrMsg string
+	}{
+		{"cancels recurring schedule", "c1", ""},
+		{"cancels one-shot schedule", "s1", ""},
+		{"empty schedule_id", "  ", "'schedule_id' is required"},
+		{"non-existent schedule", "missing-id", "not found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: tc.id})
+			if tc.wantErrMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+				}
+				return
+			}
+			if err != nil || out.Status != "success" {
+				t.Fatalf("CancelSchedule %s = %+v, err: %v", tc.id, out, err)
+			}
+		})
+	}
+}

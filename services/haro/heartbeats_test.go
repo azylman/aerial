@@ -27,7 +27,7 @@ func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, no
 		Enabled:     true,
 		CreatedAt:   now,
 	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb1); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, hb1); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
@@ -39,22 +39,22 @@ func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, no
 		NextRunAt: now.Add(15 * time.Minute),
 		Enabled:   true,
 	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb2); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, hb2); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule defaults failed: %v", err)
 	}
 
-	got, err := GetHeartbeatSchedule(ctx, db, "hb-op-1")
+	got, err := store.GetHeartbeatSchedule(ctx, db, "hb-op-1")
 	if err != nil {
-		t.Fatalf("GetHeartbeatSchedule(hb-op-1) failed: %v", err)
+		t.Fatalf("store.GetHeartbeatSchedule(hb-op-1) failed: %v", err)
 	}
 	if got.ID != "hb-op-1" || got.TargetID != "chan-1" || got.Effort != "low" {
 		t.Errorf("GetHeartbeatSchedule got %+v", got)
 	}
 
-	if _, err := GetHeartbeatSchedule(ctx, db, "non-existent"); err == nil {
+	if _, err := store.GetHeartbeatSchedule(ctx, db, "non-existent"); err == nil {
 		t.Error("expected error for non-existent heartbeat")
 	}
-	if _, err := GetHeartbeatSchedule(ctx, db, "  "); err == nil {
+	if _, err := store.GetHeartbeatSchedule(ctx, db, "  "); err == nil {
 		t.Error("expected error for empty id")
 	}
 	return hb1
@@ -74,27 +74,27 @@ func testHeartbeatListAndUpdate(ctx context.Context, t *testing.T, db *sql.DB, h
 
 	hb1.TitlePrefix = "Updated Title"
 	hb1.Effort = "high"
-	if err = UpdateHeartbeatSchedule(ctx, db, hb1); err != nil {
+	if err = store.UpdateHeartbeatSchedule(ctx, db, hb1); err != nil {
 		t.Fatalf("UpdateHeartbeatSchedule failed: %v", err)
 	}
-	updated, err := GetHeartbeatSchedule(ctx, db, "hb-op-1")
+	updated, err := store.GetHeartbeatSchedule(ctx, db, "hb-op-1")
 	if err != nil || updated.TitlePrefix != "Updated Title" || updated.Effort != "high" {
 		t.Fatalf("updated heartbeat error=%v, got %+v", err, updated)
 	}
 
 	hbMissing := hb1
 	hbMissing.ID = "missing"
-	if err := UpdateHeartbeatSchedule(ctx, db, hbMissing); err == nil {
+	if err := store.UpdateHeartbeatSchedule(ctx, db, hbMissing); err == nil {
 		t.Error("expected error updating missing heartbeat")
 	}
 	hbEmptyID := hb1
 	hbEmptyID.ID = ""
-	if err := UpdateHeartbeatSchedule(ctx, db, hbEmptyID); err == nil {
+	if err := store.UpdateHeartbeatSchedule(ctx, db, hbEmptyID); err == nil {
 		t.Error("expected error updating empty id")
 	}
 	hbBadEffort := hb1
 	hbBadEffort.Effort = "bad-tier"
-	if err := UpdateHeartbeatSchedule(ctx, db, hbBadEffort); err == nil {
+	if err := store.UpdateHeartbeatSchedule(ctx, db, hbBadEffort); err == nil {
 		t.Error("expected error updating with invalid effort")
 	}
 }
@@ -110,7 +110,7 @@ func testHeartbeatDueAdvanceDelete(ctx context.Context, t *testing.T, db *sql.DB
 	if err = store.AdvanceHeartbeatNextRun(ctx, db, "hb-op-1", nextTime); err != nil {
 		t.Fatalf("AdvanceHeartbeatNextRun failed: %v", err)
 	}
-	advanced, _ := GetHeartbeatSchedule(ctx, db, "hb-op-1")
+	advanced, _ := store.GetHeartbeatSchedule(ctx, db, "hb-op-1")
 	if !advanced.NextRunAt.Equal(nextTime) {
 		t.Errorf("advanced NextRunAt = %v, want %v", advanced.NextRunAt, nextTime)
 	}
@@ -121,11 +121,11 @@ func testHeartbeatDueAdvanceDelete(ctx context.Context, t *testing.T, db *sql.DB
 		t.Error("expected error advancing empty id")
 	}
 
-	deleted, err := DeleteSchedule(ctx, db, "hb-op-1")
+	deleted, err := store.DeleteSchedule(ctx, db, "hb-op-1")
 	if err != nil || !deleted {
-		t.Fatalf("DeleteSchedule(hb-op-1) failed: deleted=%v, err=%v", deleted, err)
+		t.Fatalf("store.DeleteSchedule(hb-op-1) failed: deleted=%v, err=%v", deleted, err)
 	}
-	if _, err := GetHeartbeatSchedule(ctx, db, "hb-op-1"); err == nil {
+	if _, err := store.GetHeartbeatSchedule(ctx, db, "hb-op-1"); err == nil {
 		t.Error("expected hb-op-1 to be deleted")
 	}
 }
@@ -146,10 +146,10 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 
 	// Invalid effort falls back to low on heartbeat insert
 	hbInvalid := HeartbeatSchedule{ID: "hb-invalid-effort", TargetID: "chan-1", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", Effort: "bogus", NextRunAt: now, Enabled: true, CreatedAt: now}
-	if err = InsertHeartbeatSchedule(ctx, db, hbInvalid); err != nil {
+	if err = store.InsertHeartbeatSchedule(ctx, db, hbInvalid); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule invalid effort failed: %v", err)
 	}
-	gotHB, err := GetHeartbeatSchedule(ctx, db, "hb-invalid-effort")
+	gotHB, err := store.GetHeartbeatSchedule(ctx, db, "hb-invalid-effort")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 	// Seed a heartbeat with a stored cron expression that no longer parses,
 	// bypassing tool validation via direct insert.
 	badCronHB := HeartbeatSchedule{ID: "hb-bad-cron", TargetID: "1562847268833337377", CronExpr: "bad cron", Prompt: "p", Timezone: "UTC", Effort: "low", NextRunAt: time.Now().UTC(), Enabled: true, CreatedAt: time.Now().UTC()}
-	if err := InsertHeartbeatSchedule(ctx, db, badCronHB); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, badCronHB); err != nil {
 		t.Fatalf("failed to seed bad-cron heartbeat: %v", err)
 	}
 
