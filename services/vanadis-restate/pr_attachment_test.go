@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -25,9 +26,9 @@ import (
 func TestRecoveredChunkRemediationWake(t *testing.T) {
 	t.Parallel()
 	st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
-	payloads := make(chan BrainDispatchRequest, 1)
+	payloads := make(chan executor.BrainDispatchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req BrainDispatchRequest
+		var req executor.BrainDispatchRequest
 		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
@@ -38,7 +39,7 @@ func TestRecoveredChunkRemediationWake(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
-	bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), NewHTTPEriClient(server.URL, server.Client()), nil, "", nil))
+	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(server.URL, server.Client()), nil, "", nil))
 	ctx := makeObjectMockContext(t, "b1")
 	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		return true, bo.handlePREventType(rc, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "unit", Details: "unit test failed"})
