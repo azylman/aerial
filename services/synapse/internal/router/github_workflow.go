@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, headSHA, targetID string, prNum int) error {
@@ -46,6 +47,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		return err
 	}
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
+	s.shadowDeployDispatched(ctx, repo, "git-merge", headSHA, prNum)
 	return nil
 }
 
@@ -186,6 +188,11 @@ func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, rep
 			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
 		}
 		return err
+	}
+	if trackPR {
+		s.shadowPREvent(ctx, "HandleKustomizationRequested", restateclient.PREvent{
+			Repo: repo, PRNumber: prNum, HeadSHA: headSHA, Branch: headBranch,
+		})
 	}
 	return nil
 }
@@ -384,6 +391,10 @@ func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitH
 		return false
 	}
 	slog.InfoContext(ctx, "[synapse] [github] successfully triggered rerun-failed-jobs for workflow run (attempt 1)", "run_id", p.WorkflowRun.ID, "repo", res.Repo)
+	s.shadowPREvent(ctx, "HandleCheckRerunRequested", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
+		MergeSHA: res.MergeSHA, CheckName: res.CheckName, Branch: res.Branch,
+	})
 	return true
 }
 
@@ -411,6 +422,7 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
 		return nil, err
 	}
+	s.shadowCheckOutcome(ctx, res)
 	if p.Action == ghStatusCompleted && p.WorkflowRun.Status == ghStatusCompleted {
 		if err := s.dispatchWorkflowRunImages(ctx, res.Repo, workflowRunEvent{ID: p.WorkflowRun.ID, Attempt: p.WorkflowRun.RunAttempt, HeadSHA: res.HeadSHA}, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.TargetID, res.PRNumber); err != nil {
 			return nil, err
