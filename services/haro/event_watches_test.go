@@ -72,90 +72,6 @@ func TestPureHelpers_MapArgExtractors(t *testing.T) {
 	}
 }
 
-func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
-	tests := []struct {
-		name          string
-		source        string
-		target        string
-		eventType     string
-		extraSources  []string
-		wantSource    string
-		wantTarget    string
-		wantEventType string
-		wantErr       bool
-	}{
-		// empty target
-		{"empty target", "vanadis_build", "", "completed", nil, "", "", "", true},
-		// vanadis_build
-		{"vanadis_build completed", "vanadis_build", "build-123-abc", "completed", nil, "vanadis_build", "build-123-abc", "completed", false},
-		{"vanadis_build failed", "VANADIS_BUILD", "build-456", "FAILED", nil, "vanadis_build", "build-456", "failed", false},
-		{"vanadis_build invalid event_type", "vanadis_build", "build-123", "running", nil, "", "", "", true},
-		{"vanadis_build target with chunk rejected", "vanadis_build", "build-123-chunk-1", "completed", nil, "", "", "", true},
-		{"vanadis_build invalid target regex", "vanadis_build", "invalid_build", "completed", nil, "", "", "", true},
-		// vanadis_chunk
-		{"vanadis_chunk merged", "vanadis_chunk", "build-123-chunk-1", "merged", nil, "vanadis_chunk", "build-123-chunk-1", "merged", false},
-		{"vanadis_chunk completed", "vanadis_chunk", "chunk-6-vanadis-pr-events", "completed", nil, "vanadis_chunk", "chunk-6-vanadis-pr-events", "completed", false},
-		{"vanadis_chunk failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", nil, "vanadis_chunk", "anyprefix-chunk-99", "failed", false},
-		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "running", nil, "", "", "", true},
-		{"vanadis_chunk invalid target empty", "vanadis_chunk", "", "merged", nil, "", "", "", true},
-		{"vanadis_chunk invalid target characters", "vanadis_chunk", "chunk/with/slashes", "merged", nil, "", "", "", true},
-		// flux
-		{"flux bare repo sync_success", "flux", "aerial", "sync_success", nil, "flux", "azylman/aerial", "sync_success", false},
-		{"flux full repo sync_failed", "flux", "azylman/aerial-config", "sync_failed", nil, "flux", "azylman/aerial-config", "sync_failed", false},
-		{"flux invalid event_type", "flux", "aerial", "deployed", nil, "", "", "", true},
-		{"flux unmanaged repo", "flux", "other/repo", "sync_success", nil, "", "", "", true},
-		// github
-		{"github repo only pr_merged", "github", "aerial", "pr_merged", nil, "github", "azylman/aerial", "pr_merged", false},
-		{"github repo with branch ci_passed", "github", "azylman/aerial:main", "ci_passed", nil, "github", "azylman/aerial:main", "ci_passed", false},
-		{"github refs heads stripped ci_failed", "github", "aerial:refs/heads/feature/test", "ci_failed", nil, "github", "azylman/aerial:feature/test", "ci_failed", false},
-		{"github PR number with hash rejected", "github", "aerial:#123", "ci_passed", nil, "", "", "", true},
-		{"github PR number numeric rejected", "github", "aerial:123", "ci_passed", nil, "", "", "", true},
-		{"github 40-char SHA rejected", "github", "aerial:0123456789abcdef0123456789abcdef01234567", "ci_passed", nil, "", "", "", true},
-		{"github empty branch rejected", "github", "aerial:", "ci_passed", nil, "", "", "", true},
-		{"github unmanaged repo rejected", "github", "unmanaged/repo:main", "ci_passed", nil, "", "", "", true},
-		{"github invalid event_type", "github", "aerial", "completed", nil, "", "", "", true},
-		// unknown source vs configured extra_event_sources
-		{"unknown source without extraSources", "custom_iot", "device.washer", "idle", nil, "", "", "", true},
-		{"configured extra source valid", "Custom_IoT", "device.washer", "IDLE", []string{"custom_iot"}, "custom_iot", "device.washer", "idle", false},
-		{"configured extra source empty event_type", "custom_iot", "device.washer", "   ", []string{"custom_iot"}, "", "", "", true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s, target, ev, err := ValidateEventWatchSpec(tc.source, tc.target, tc.eventType, tc.extraSources...)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ValidateEventWatchSpec() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr {
-				if s != tc.wantSource || target != tc.wantTarget || ev != tc.wantEventType {
-					t.Errorf("got (%q, %q, %q), want (%q, %q, %q)", s, target, ev, tc.wantSource, tc.wantTarget, tc.wantEventType)
-				}
-			}
-		})
-	}
-}
-
-func TestPureHelpers_FormatEventTriggerPrompt(t *testing.T) {
-	tests := []struct {
-		name    string
-		header  string
-		prompt  string
-		wantStr string
-	}{
-		{"both header and prompt present", "Event trigger: test", "Proceed with task", "Event trigger: test\n\nProceed with task"},
-		{"empty header returns prompt", "   ", "Proceed with task", "Proceed with task"},
-		{"empty prompt returns header", "Event trigger: test", "   ", "Event trigger: test"},
-		{"both empty returns empty", "", "", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := FormatEventTriggerPrompt(tc.header, tc.prompt); got != tc.wantStr {
-				t.Fatalf("FormatEventTriggerPrompt() = %q, want %q", got, tc.wantStr)
-			}
-		})
-	}
-}
-
 func handleMockEntityStatus(w http.ResponseWriter, key, id string, mockMap map[string]string) {
 	if strings.HasSuffix(id, "-500") {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -207,12 +123,24 @@ func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) 
 		{"other source nomad", "nomad", "aerial-brain", false, ""},
 		{"vanadis URL not configured build", "vanadis_build", "b-running", true, "vanadis URL is not configured"},
 		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true, "vanadis URL is not configured"},
+		{"vanadis unreachable build", "vanadis_build", "b-running", true, "failed to query"},
+		{"vanadis unreachable chunk", "vanadis_chunk", "c-pending", true, "failed to query"},
+		{"vanadis malformed URL build", "vanadis_build", "b-running", true, "create vanadis build request"},
 	}
 	for _, tc := range validateTests {
 		t.Run("validate_"+tc.name, func(t *testing.T) {
-			if strings.HasPrefix(tc.name, "vanadis URL not configured") {
+			switch {
+			case strings.HasPrefix(tc.name, "vanadis URL not configured"):
 				old := GetVanadisURL()
 				SetVanadisURL("")
+				defer SetVanadisURL(old)
+			case strings.HasPrefix(tc.name, "vanadis unreachable"):
+				old := GetVanadisURL()
+				SetVanadisURL("http://127.0.0.1:1")
+				defer SetVanadisURL(old)
+			case strings.HasPrefix(tc.name, "vanadis malformed URL"):
+				old := GetVanadisURL()
+				SetVanadisURL("://bad-url")
 				defer SetVanadisURL(old)
 			}
 			err := ValidateLiveEventTarget(ctx, db, tc.source, tc.target)

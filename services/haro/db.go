@@ -18,90 +18,14 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/haro/internal/model"
 )
 
 var sqliteTestInitHook func(string) (*sql.DB, error)
 
-type ScheduleSummaryMetrics struct {
-	TotalActive    int        `json:"total_active"`
-	CronCount      int        `json:"cron_count"`
-	HeartbeatCount int        `json:"heartbeat_count"`
-	OneShotCount   int        `json:"one_shot_count"`
-	TotalRuns24h   int        `json:"total_runs_24h"`
-	NextRunAt      *time.Time `json:"next_run_at"`
-	SuccessRate24h float64    `json:"success_rate_24h"`
-}
-
-type ScheduleRunJSON struct {
-	ID           string     `json:"id"`
-	ScheduleID   string     `json:"schedule_id"`
-	ScheduleType string     `json:"schedule_type"`
-	MessageID    string     `json:"message_id,omitempty"`
-	TargetID     string     `json:"target_id"`
-	ThreadID     string     `json:"thread_id,omitempty"`
-	Title        string     `json:"title"`
-	Prompt       string     `json:"prompt"`
-	StartedAt    time.Time  `json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	DurationMs   int64      `json:"duration_ms"`
-	Status       string     `json:"status"`
-	Error        string     `json:"error,omitempty"`
-}
-
-type CronSchedule struct {
-	ID              string     `json:"id"`
-	TargetID        string     `json:"channel_id"`
-	TitlePrefix     string     `json:"title_prefix"`
-	CronExpr        string     `json:"cron_expression"`
-	Prompt          string     `json:"prompt,omitempty"`
-	Timezone        string     `json:"timezone"`
-	NextRunAt       time.Time  `json:"next_run_at"`
-	Enabled         bool       `json:"enabled"`
-	CreatedAt       time.Time  `json:"created_at"`
-	Effort          string     `json:"effort,omitempty"`
-	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
-}
-
-type OneShotSchedule struct {
-	ID        string    `json:"id"`
-	ThreadID  string    `json:"thread_id"`
-	Prompt    string    `json:"prompt,omitempty"`
-	RunAt     time.Time `json:"run_at"`
-	CreatedAt time.Time `json:"created_at"`
-	Effort    string    `json:"effort,omitempty"`
-}
-
-type HeartbeatSchedule = CronSchedule
-
-type EventTrigger struct {
-	ID         string    `json:"id"`
-	ChannelID  string    `json:"channel_id"`
-	Source     string    `json:"source"`
-	Target     string    `json:"target"`
-	EventType  string    `json:"event_type"`
-	Prompt     string    `json:"prompt"`
-	Effort     string    `json:"effort"`
-	CreatedAt  time.Time `json:"created_at"`
-	Persistent bool      `json:"persistent"`
-}
-
-type ScheduleRun struct {
-	ID           string     `json:"id"`
-	ScheduleID   string     `json:"schedule_id"`
-	ScheduleType string     `json:"schedule_type"`
-	MessageID    string     `json:"message_id"`
-	TargetID     string     `json:"target_id"`
-	ThreadID     string     `json:"thread_id"`
-	Title        string     `json:"title"`
-	Prompt       string     `json:"prompt"`
-	Status       string     `json:"status"`
-	StartedAt    time.Time  `json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	DurationMs   int64      `json:"duration_ms"`
-	Error        string     `json:"error,omitempty"`
-	Effort       string     `json:"effort,omitempty"`
-	Model        string     `json:"model,omitempty"`
-}
+// Domain row types (CronSchedule, OneShotSchedule, HeartbeatSchedule,
+// EventTrigger, ScheduleRun, ScheduleRunJSON, ScheduleSummaryMetrics) now
+// live in internal/model; pure.go keeps zero-logic aliases for this package.
 
 func OpenDB(ctx context.Context, cfg *Config) (*sql.DB, error) {
 	if cfg == nil {
@@ -677,13 +601,10 @@ func GetVanadisURL() string {
 	return vanadisURL
 }
 
+// firstNonEmpty delegates to the exported model.FirstNonEmpty seam so
+// store callers keep compiling; the logic lives in internal/model.
 func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+	return model.FirstNonEmpty(vals...)
 }
 
 // ValidateLiveEventTarget checks that the referenced target is known and not in a terminal state.
