@@ -1779,7 +1779,7 @@ spec:
       containers:
         - command:
             - /bin/sh
-            - /share/aerial/services/homepage/entrypoint.sh
+            - /local/core-homepage/entrypoint.sh
           env:
             - name: PORT
               value: "3001"
@@ -1803,8 +1803,11 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
-            - mountPath: /share
-              name: share
+            - mountPath: /local/core-homepage
+              name: homepage-core-scripts
+              readOnly: true
+            - mountPath: /local/core-homepage/config
+              name: homepage-core-config
               readOnly: true
             - mountPath: /local/user-homepage
               name: homepage-user-config
@@ -1812,55 +1815,15 @@ spec:
             - mountPath: /local/homepage-service
               name: homepage-service-config
               readOnly: true
-      initContainers:
-        - args:
-            - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
-            - --ref=main
-            - --root=/share/.sync/aerial
-            - --link=/share/aerial
-            - --period=30s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: git-sync-secret
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
       securityContext:
         fsGroup: 65533
       volumes:
-        - emptyDir: {}
-          name: share
+        - configMap:
+            name: homepage-core-scripts
+          name: homepage-core-scripts
+        - configMap:
+            name: homepage-core-config
+          name: homepage-core-config
         - configMap:
             name: homepage-user-config
             optional: true

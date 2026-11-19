@@ -7,3 +7,23 @@ resources:
   - gateways-and-networkpolicies.yaml
   - core-services.yaml
   - observability-and-mcp.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: homepage-core-scripts
+    namespace: default
+    files:
+      - ../services/homepage/entrypoint.sh
+      - ../services/homepage/prepare-config.js
+      - ../services/homepage/lib/merge.js
+  - name: homepage-core-config
+    namespace: default
+    files:
+      - ../services/homepage/config/bookmarks.yaml
+      - ../services/homepage/config/docker.yaml
+      - ../services/homepage/config/services.yaml
+      - ../services/homepage/config/settings.yaml
+      - ../services/homepage/config/widgets.yaml
+

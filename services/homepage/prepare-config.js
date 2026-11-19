@@ -8,7 +8,9 @@ const {
   mergeWidgets,
   mergeSettings,
   mergeDocker
-} = require('./lib/merge');
+} = fs.existsSync(path.join(__dirname, 'lib', 'merge.js'))
+  ? require('./lib/merge')
+  : require('./merge');
 
 function resolveDefaultCoreDir(existsFn = fs.existsSync) {
   if (existsFn('/local/core-homepage/config')) {
