@@ -342,7 +342,9 @@
 }
 
 .chunk-status-badge.chunk-status-failed,
-.chunk-status-badge.chunk-status-ci_failed {
+.chunk-status-badge.chunk-status-ci_failed,
+.chunk-status-badge.chunk-status-deploy_failed,
+.chunk-status-badge.chunk-status-conflict {
     background: rgba(185, 28, 28, 0.12);
     color: var(--accent-crimson, #b91c1c);
     border: 1px solid rgba(185, 28, 28, 0.35);
@@ -611,7 +613,9 @@
 }
 
 .build-dag-node.node-status-failed,
-.build-dag-node.node-status-ci_failed {
+.build-dag-node.node-status-ci_failed,
+.build-dag-node.node-status-deploy_failed,
+.build-dag-node.node-status-conflict {
     background: #fef2f2;
     border-color: #fca5a5;
     border-left-color: #b91c1c;
@@ -680,7 +684,9 @@
 }
 
 .build-dag-node.node-status-failed .dag-node-port,
-.build-dag-node.node-status-ci_failed .dag-node-port {
+.build-dag-node.node-status-ci_failed .dag-node-port,
+.build-dag-node.node-status-deploy_failed .dag-node-port,
+.build-dag-node.node-status-conflict .dag-node-port {
     border-color: #b91c1c;
 }
 

@@ -195,7 +195,18 @@ export interface ChunkDagLayout {
 function classifyEdgeTone(fromStatus: string | undefined, toStatus: string | undefined): DagEdgeTone {
   const from = (fromStatus || 'pending').toLowerCase();
   const to = (toStatus || 'pending').toLowerCase();
-  if (from === 'failed' || from === 'ci_failed' || to === 'failed' || to === 'ci_failed') return 'failed';
+  if (
+    from === 'failed' ||
+    from === 'ci_failed' ||
+    from === 'deploy_failed' ||
+    from === 'conflict' ||
+    to === 'failed' ||
+    to === 'ci_failed' ||
+    to === 'deploy_failed' ||
+    to === 'conflict'
+  ) {
+    return 'failed';
+  }
   if (
     to === 'running' ||
     to === 'in_progress' ||

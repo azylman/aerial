@@ -109,6 +109,7 @@ export function BuildDagGraph({
                   data-chunk-id={node.chunk.id}
                   data-chunk-index={node.number}
                   title={titleText}
+                  aria-label={`${titleText}, chunk ${node.number}, status ${node.status.label}`}
                   style={{
                     left: `${leftPct}%`,
                     top: `${node.y - Math.round(node.height / 2)}px`,

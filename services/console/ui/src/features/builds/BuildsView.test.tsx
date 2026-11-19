@@ -301,6 +301,10 @@ describe('BuildDetailPanel', () => {
       'build-dag-node node-status-merged',
       'build-dag-node node-status-in_progress',
     ]);
+    expect([...document.querySelectorAll('.build-dag-node')].map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Chunk r1, chunk 0, status MERGED',
+      'Chunk 1, chunk 1, status IN_PROGRESS',
+    ]);
     fireEvent.click(document.querySelector('.build-dag-node[data-chunk-id="r1"]') as Element);
     expect([...document.querySelectorAll('.chunk-status-badge')].map((b) => b.className)).toEqual([
       'chunk-status-badge chunk-status-merged',
@@ -372,6 +376,8 @@ describe('BuildDetailPanel', () => {
       chunk('w2', 1, 'ci_failed', { title: 'Second chunk', depends_on: [] }),
       chunk('w3', 2, 'completed', { title: 'Third chunk', depends_on: [] }),
       chunk('w4', 3, 'pending', { title: 'Fourth chunk', depends_on: [] }),
+      chunk('w5', 4, 'deploy_failed', { title: 'Fifth chunk', depends_on: [] }),
+      chunk('w6', 5, 'conflict', { title: 'Sixth chunk', depends_on: [] }),
     ];
     const { container } = render(
       <div style={{ width: '360px' }}>
@@ -380,16 +386,26 @@ describe('BuildDetailPanel', () => {
     );
     const graph = container.querySelector('.build-dag-graph') as HTMLElement;
     expect(graph).toBeTruthy();
-    expect(graph.style.width).toBe('942px');
-    expect(graph.style.minWidth).toBe('942px');
+    expect(graph.style.width).toBe('1410px');
+    expect(graph.style.minWidth).toBe('1410px');
 
     const nodes = container.querySelectorAll('.build-dag-node');
-    expect(nodes).toHaveLength(4);
+    expect(nodes).toHaveLength(6);
     expect([...nodes].map((n) => n.className)).toEqual([
       'build-dag-node node-status-in_progress',
       'build-dag-node node-status-ci_failed',
       'build-dag-node node-status-completed',
       'build-dag-node node-status-pending',
+      'build-dag-node node-status-deploy_failed',
+      'build-dag-node node-status-conflict',
+    ]);
+    expect([...nodes].map((n) => n.getAttribute('aria-label'))).toEqual([
+      'First chunk, chunk 0, status IN_PROGRESS',
+      'Second chunk, chunk 1, status CI_FAILED',
+      'Third chunk, chunk 2, status COMPLETED',
+      'Fourth chunk, chunk 3, status PENDING',
+      'Fifth chunk, chunk 4, status DEPLOY_FAILED',
+      'Sixth chunk, chunk 5, status CONFLICT',
     ]);
     for (const node of nodes) {
       const el = node as HTMLElement;
