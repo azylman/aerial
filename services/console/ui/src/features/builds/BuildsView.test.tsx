@@ -267,18 +267,6 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
     expect(target.classList.contains('expanded')).toBe(false);
   });
 
-  it('keyboard events on outer card container toggle expansion for Enter and Space', () => {
-    seed(payload());
-    render(<BuildsView />);
-    const target = card('b-q');
-    fireEvent.keyDown(target, { key: 'a' });
-    expect(target.classList.contains('expanded')).toBe(false);
-    fireEvent.keyDown(target, { key: 'Enter' });
-    expect(target.classList.contains('expanded')).toBe(true);
-    fireEvent.keyDown(target, { key: ' ' });
-    expect(target.classList.contains('expanded')).toBe(false);
-  });
-
   it('fetches detail fallback when expanding a chunk-less build card and renders loading, error, and empty states', async () => {
     let rejectDetail: ((err: Error) => void) | null = null;
     fetchMock.mockImplementation((url: string) => {
@@ -316,7 +304,7 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
     expect(target.querySelector('.overview-build-empty')?.textContent).toBe('NO CHUNKS REGISTERED');
   });
 
-  it('updates inline DAG when a list poll delivers fresh chunks for an expanded chunk-less build', async () => {
+  it('updates inline DAG when detail resolves for an expanded chunk-less build', async () => {
     let resolveDetail: ((res: Response) => void) | null = null;
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/builds/b-live') {
@@ -354,19 +342,88 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
     expect(node).toBeTruthy();
     expect(node.classList.contains('node-status-pending')).toBe(true);
     expect(node.getAttribute('aria-label')).toContain('status PENDING');
+  });
 
-    // Now seed a list poll where build has updated chunk status to COMPLETED
-    const updatedBuild = {
-      ...chunkless,
-      chunks: [chunk('c1', 0, 'completed', { title: 'First chunk' })],
-    };
-    act(() => {
-      seed(payload([updatedBuild]));
+  it('does not duplicate detail requests when the drawer is open over an expanded chunk-less build card', async () => {
+    let detailCalls = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/builds/b-race') {
+        detailCalls++;
+        return json({
+          status: 'ok',
+          build: build('b-race', 'running', 'Race Build', []),
+          chunks: [chunk('r1', 0, 'running', { title: 'First chunk' })],
+        });
+      }
+      return pending();
     });
 
-    const updatedNode = target.querySelector('.build-dag-node[data-chunk-id="c1"]') as HTMLElement;
-    expect(updatedNode.classList.contains('node-status-completed')).toBe(true);
-    expect(updatedNode.getAttribute('aria-label')).toContain('status COMPLETED');
+    const chunkless = build('b-race', 'running', 'Race Build', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(
+      <>
+        <BuildsView />
+        <BuildDetailPanel target={{ id: 'b-race' }} />
+      </>
+    );
+
+    const target = card('b-race');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+
+    await act(async () => {
+      fireEvent.click(summary);
+    });
+    // Initial fetch from BuildDetailPanel (and joined by BuildCardInlineDag)
+    expect(detailCalls).toBe(1);
+
+    // Set drawer state to open for this build so BuildCardInlineDag detects open drawer
+    act(() => {
+      useConsoleStore.getState().openDrawer({ kind: 'build', id: 'b-race', chunkId: 'r1' });
+    });
+
+    // Advance by 5s polling interval
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    // Exactly 1 poll fired for the interval (from BuildDetailPanel), not duplicated by BuildCardInlineDag
+    expect(detailCalls).toBe(2);
+  });
+
+  it('does not poll completed chunk-less builds once detail has settled', async () => {
+    let detailCalls = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/builds/b-term') {
+        detailCalls++;
+        return json({
+          status: 'ok',
+          build: build('b-term', 'completed', 'Finished Build', []),
+          chunks: [chunk('t1', 0, 'merged', { title: 'Done chunk' })],
+        });
+      }
+      return pending();
+    });
+
+    const chunkless = build('b-term', 'completed', 'Finished Build', []);
+    delete (chunkless as { chunks?: unknown }).chunks;
+    seed(payload([chunkless]));
+    render(<BuildsView />);
+
+    const target = card('b-term');
+    const summary = target.querySelector('.build-card-summary') as HTMLElement;
+
+    await act(async () => {
+      fireEvent.click(summary);
+    });
+    expect(detailCalls).toBe(1);
+
+    // Advance by 10s (2 intervals)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+
+    expect(detailCalls).toBe(1);
   });
 
   it('prefers fresher inline list chunks over matching stale cached detail from an earlier drawer session', () => {

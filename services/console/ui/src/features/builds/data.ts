@@ -11,10 +11,18 @@ export const syncBuilds = syncResource(
   (error) => useConsoleStore.getState().failBuilds(error),
 );
 
-/** Poller for one build's detail payload. */
-export const syncBuildDetail = (id: string): PollFetcher =>
-  syncResource(
-    (signal) => fetchBuildDetail(id, signal),
-    (data) => useConsoleStore.getState().setBuildDetail(data),
-    (error) => useConsoleStore.getState().failBuildDetail(error),
-  );
+const detailPollers = new Map<string, PollFetcher>();
+
+/** Poller for one build's detail payload, shared across concurrent callers for the same id. */
+export const syncBuildDetail = (id: string): PollFetcher => {
+  let poller = detailPollers.get(id);
+  if (!poller) {
+    poller = syncResource(
+      (signal) => fetchBuildDetail(id, signal),
+      (data) => useConsoleStore.getState().setBuildDetail(data),
+      (error) => useConsoleStore.getState().failBuildDetail(error),
+    );
+    detailPollers.set(id, poller);
+  }
+  return poller;
+};

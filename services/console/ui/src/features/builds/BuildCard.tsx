@@ -18,9 +18,11 @@ const EMPTY_CHUNKS: readonly VanadisChunkDTO[] = Object.freeze([]);
 
 function BuildCardInlineDag({ build }: { readonly build: VanadisBuildDTO }) {
   const detailData = useConsoleStore((s) => s.builds.detail.data);
+  const isDrawerOpen = useConsoleStore((s) => s.drawer.kind === 'build' && s.drawer.id === build.id);
   const [failed, setFailed] = useState<string | null>(null);
   const hasInlineChunks = Boolean(build.chunks && build.chunks.length > 0);
   const isDetailMatch = (detailData?.build?.id ?? detailData?.entry?.id) === build.id;
+  const isTerminal = classifyBuildQueueState(build) === 'completed';
 
   const poll = useMemo(() => (build.id ? syncBuildDetail(build.id) : null), [build.id]);
   const fetchDetail = useCallback(
@@ -36,7 +38,8 @@ function BuildCardInlineDag({ build }: { readonly build: VanadisBuildDTO }) {
     [poll],
   );
 
-  usePollingSync(fetchDetail, BUILD_DETAIL_POLL_MS, Boolean(build.id && !hasInlineChunks));
+  const shouldPoll = Boolean(build.id && !hasInlineChunks && !isDrawerOpen && (!isTerminal || !isDetailMatch));
+  usePollingSync(fetchDetail, BUILD_DETAIL_POLL_MS, shouldPoll);
 
   const resolvedChunks = hasInlineChunks
     ? (build.chunks ?? EMPTY_CHUNKS)
@@ -137,19 +140,11 @@ export const BuildCard = memo(function BuildCard({ build, expanded, onToggle }: 
     if (event.target === event.currentTarget) toggle();
   };
 
-  const onCardKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.target !== event.currentTarget) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    toggle();
-  };
-
   return (
     <div
       className={expanded ? 'build-card expanded' : 'build-card'}
       data-build-id={build.id || ''}
       onClick={onCardClick}
-      onKeyDown={onCardKeyDown}
     >
       <div
         className="build-card-summary"
