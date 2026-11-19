@@ -1,0 +1,241 @@
+package transcript
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/azylman/aerial/pkg/transcriptwire"
+)
+
+func testBatch(session string, first, last int, final bool) transcriptwire.TranscriptStepBatch {
+	return transcriptwire.TranscriptStepBatch{
+		Stack:     "aerial",
+		SessionID: session,
+		FirstStep: first,
+		LastStep:  last,
+		Final:     final,
+		FileMtime: time.Unix(1000, 0).UTC(),
+		Steps:     []transcriptwire.TranscriptStep{{StepIndex: first}},
+	}
+}
+
+// recordingPublish is a declarative publish fake: it records batches in call
+// order and fails the call at index failCall (-1 never fails).
+type recordingPublish struct {
+	failCall  int
+	published []transcriptwire.TranscriptStepBatch
+}
+
+func (r *recordingPublish) publish(_ context.Context, b transcriptwire.TranscriptStepBatch) error {
+	r.published = append(r.published, b)
+	if len(r.published)-1 == r.failCall {
+		return errors.New("publish boom")
+	}
+	return nil
+}
+
+func publishedFirstSteps(batches []transcriptwire.TranscriptStepBatch) []int {
+	if len(batches) == 0 {
+		return nil
+	}
+	got := make([]int, 0, len(batches))
+	for _, b := range batches {
+		got = append(got, b.FirstStep)
+	}
+	return got
+}
+
+func assertFirstStepsEqual(t *testing.T, got []transcriptwire.TranscriptStepBatch, want []int) {
+	t.Helper()
+	steps := publishedFirstSteps(got)
+	if len(steps) != len(want) {
+		t.Fatalf("published %v, want order %v", steps, want)
+	}
+	for i := range steps {
+		if steps[i] != want[i] {
+			t.Fatalf("published %v, want order %v", steps, want)
+		}
+	}
+}
+
+func countPending(p *Publisher) int {
+	pending := 0
+	for _, s := range p.PendingSessions() {
+		pending += p.PendingCount(s)
+	}
+	return pending
+}
+
+func TestPublisher_EnqueueCoalesces(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		enqueue  []transcriptwire.TranscriptStepBatch
+		session  string
+		want     int
+		sessions int
+	}{
+		{name: "empty publisher", session: "s1", want: 0, sessions: 0},
+		{name: "single batch", enqueue: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, true)}, session: "s1", want: 1, sessions: 1},
+		{name: "coalesce same session", enqueue: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, false), testBatch("s1", 1, 1, true)}, session: "s1", want: 2, sessions: 1},
+		{name: "other session isolated", enqueue: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, true), testBatch("s2", 0, 0, true)}, session: "s2", want: 1, sessions: 2},
+		{name: "blank session dropped", enqueue: []transcriptwire.TranscriptStepBatch{testBatch("   ", 0, 0, true)}, session: "s1", want: 0, sessions: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := NewPublisher("aerial", nil)
+			p.Enqueue(tc.enqueue...)
+			if got := p.PendingCount(tc.session); got != tc.want {
+				t.Errorf("PendingCount(%q) = %d, want %d", tc.session, got, tc.want)
+			}
+			if got := len(p.PendingSessions()); got != tc.sessions {
+				t.Errorf("PendingSessions len = %d, want %d", got, tc.sessions)
+			}
+		})
+	}
+}
+
+func TestPublisher_DrainStrictOrderAndChainAbandon(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		batches     []transcriptwire.TranscriptStepBatch
+		failCall    int
+		nilPublish  bool
+		wantOrder   []int
+		wantPending int
+		wantErr     bool
+	}{
+		{name: "empty drain no error", failCall: -1, wantOrder: nil, wantPending: 0},
+		{name: "strict order", batches: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, false), testBatch("s1", 1, 1, false), testBatch("s1", 2, 2, true)}, failCall: -1, wantOrder: []int{0, 1, 2}, wantPending: 0},
+		{name: "abandon chain on first failure", batches: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, false), testBatch("s1", 1, 1, false), testBatch("s1", 2, 2, true)}, failCall: 1, wantOrder: []int{0, 1}, wantPending: 0, wantErr: true},
+		{name: "failure isolates to session", batches: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, true), testBatch("s2", 0, 0, false), testBatch("s2", 1, 1, true)}, failCall: 0, wantOrder: []int{0, 0, 1}, wantPending: 0, wantErr: true},
+		{name: "nil publish errors and retains", batches: []transcriptwire.TranscriptStepBatch{testBatch("s1", 0, 0, true)}, nilPublish: true, wantOrder: nil, wantPending: 1, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingPublish{failCall: tc.failCall}
+			var p *Publisher
+			if tc.nilPublish {
+				p = NewPublisher("aerial", nil)
+			} else {
+				p = NewPublisher("aerial", rec.publish)
+			}
+			p.Enqueue(tc.batches...)
+			err := p.Drain(context.Background())
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertFirstStepsEqual(t, rec.published, tc.wantOrder)
+			if pending := countPending(p); pending != tc.wantPending {
+				t.Errorf("pending = %d, want %d", pending, tc.wantPending)
+			}
+		})
+	}
+}
+
+// TestPublisher_DrainEnqueueDuringDrainKeepsSingleOrderEntry reproduces the
+// window where Drain had deleted a session's queue but not its order entry:
+// an Enqueue landing in that window duplicated the order entry. s1 fails
+// fast while s2 blocks in publish; the test enqueues s1 while Drain is
+// parked in s2, so any order/queue membership split surfaces as a duplicate.
+func TestPublisher_DrainEnqueueDuringDrainKeepsSingleOrderEntry(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	publish := func(_ context.Context, b transcriptwire.TranscriptStepBatch) error {
+		if b.SessionID == "s2" {
+			close(started)
+			<-release
+			return nil
+		}
+		return errors.New("publish boom")
+	}
+	p := NewPublisher("aerial", publish)
+	p.Enqueue(testBatch("s1", 0, 0, true), testBatch("s2", 0, 0, true))
+	done := make(chan error, 1)
+	go func() { done <- p.Drain(context.Background()) }()
+	<-started
+	p.Enqueue(testBatch("s1", 1, 1, true))
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatalf("expected Drain error from s1 failure, got nil")
+	}
+	if got := p.PendingSessions(); len(got) != 1 || got[0] != "s1" {
+		t.Errorf("PendingSessions = %q, want exactly [s1]", got)
+	}
+	if n := p.PendingCount("s1"); n != 1 {
+		t.Errorf("PendingCount(s1) = %d, want 1", n)
+	}
+}
+
+type publishedEnvelope struct {
+	first int
+	last  int
+	final bool
+}
+
+func publishedEnvelopes(batches []transcriptwire.TranscriptStepBatch) []publishedEnvelope {
+	if len(batches) == 0 {
+		return nil
+	}
+	got := make([]publishedEnvelope, 0, len(batches))
+	for _, b := range batches {
+		got = append(got, publishedEnvelope{first: b.FirstStep, last: b.LastStep, final: b.Final})
+	}
+	return got
+}
+
+func assertEnvelopesEqual(t *testing.T, got []transcriptwire.TranscriptStepBatch, want []publishedEnvelope) {
+	t.Helper()
+	envelopes := publishedEnvelopes(got)
+	if len(envelopes) != len(want) {
+		t.Fatalf("published envelopes %v, want %v", envelopes, want)
+	}
+	for i := range envelopes {
+		if envelopes[i] != want[i] {
+			t.Fatalf("published envelopes %v, want %v", envelopes, want)
+		}
+	}
+}
+
+func TestPublisher_EnqueueStepsSplits(t *testing.T) {
+	t.Parallel()
+	base := transcriptwire.TranscriptStepBatch{Stack: "aerial", SessionID: "s1", FileMtime: time.Unix(1000, 0).UTC()}
+	tests := []struct {
+		name  string
+		steps []transcriptwire.TranscriptStep
+		want  []publishedEnvelope
+	}{
+		{name: "empty yields one final", steps: nil, want: []publishedEnvelope{{first: 0, last: 0, final: true}}},
+		{name: "two steps one batch", steps: []transcriptwire.TranscriptStep{{StepIndex: 0}, {StepIndex: 1}}, want: []publishedEnvelope{{first: 0, last: 1, final: true}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingPublish{failCall: -1}
+			p := NewPublisher("aerial", rec.publish)
+			if got := p.EnqueueSteps(base, tc.steps); got != len(tc.want) {
+				t.Errorf("EnqueueSteps = %d, want %d", got, len(tc.want))
+			}
+			if n := p.PendingCount("s1"); n != len(tc.want) {
+				t.Errorf("PendingCount = %d, want %d", n, len(tc.want))
+			}
+			if err := p.Drain(context.Background()); err != nil {
+				t.Fatalf("Drain failed: %v", err)
+			}
+			assertEnvelopesEqual(t, rec.published, tc.want)
+			for _, b := range rec.published {
+				if b.Stack != "aerial" || b.SessionID != "s1" {
+					t.Errorf("published batch lost envelope: stack=%q session=%q", b.Stack, b.SessionID)
+				}
+			}
+		})
+	}
+}

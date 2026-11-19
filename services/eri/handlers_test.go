@@ -920,6 +920,41 @@ func runHandleTasksFilterCases(t *testing.T, handler http.HandlerFunc, now time.
 	}
 }
 
+func TestParseTasksFilter_Order(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		wantOrder string
+		wantRange bool
+	}{
+		{name: "absent order unset", raw: "", wantOrder: "", wantRange: false},
+		{name: "asc sets order", raw: "order=asc", wantOrder: db.TasksOrderAsc, wantRange: true},
+		{name: "desc sets order", raw: "order=desc", wantOrder: db.TasksOrderDesc, wantRange: true},
+		{name: "uppercase normalized", raw: "order=ASC", wantOrder: db.TasksOrderAsc, wantRange: true},
+		{name: "padded normalized", raw: "order=%20desc%20", wantOrder: db.TasksOrderDesc, wantRange: true},
+		{name: "invalid ignored", raw: "order=sideways", wantOrder: "", wantRange: false},
+		{name: "empty ignored", raw: "order=%20%20", wantOrder: "", wantRange: false},
+		{name: "order combines with limit", raw: "order=asc&limit=10", wantOrder: db.TasksOrderAsc, wantRange: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			q, err := url.ParseQuery(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseQuery(%q) failed: %v", tc.raw, err)
+			}
+			filter, hasFilter := parseTasksFilter(q)
+			if filter.Order != tc.wantOrder {
+				t.Errorf("parseTasksFilter(%q).Order = %q, want %q", tc.raw, filter.Order, tc.wantOrder)
+			}
+			if hasFilter != tc.wantRange {
+				t.Errorf("parseTasksFilter(%q) hasFilter = %v, want %v", tc.raw, hasFilter, tc.wantRange)
+			}
+		})
+	}
+}
+
 func runHandleTasksErrorCases(t *testing.T, handler http.HandlerFunc) {
 	t.Helper()
 	if code := runHTTP(handler, http.MethodPost, "/tasks", nil).Code; code != http.StatusMethodNotAllowed {
@@ -1290,6 +1325,10 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		{"empty prompt", http.MethodPost, okLLM, `{"prompt":"   "}`, http.StatusBadRequest},
 		{"llm error", http.MethodPost, errLLM, `{"prompt":"extract"}`, http.StatusInternalServerError},
 		{"valid request", http.MethodPost, okLLM, `{"prompt":"extract"}`, http.StatusOK},
+		{"valid effort low", http.MethodPost, okLLM, `{"prompt":"extract","effort":"low"}`, http.StatusOK},
+		{"valid effort mixed case", http.MethodPost, okLLM, `{"prompt":"extract","effort":"Medium"}`, http.StatusOK},
+		{"valid effort high", http.MethodPost, okLLM, `{"prompt":"extract","effort":"high"}`, http.StatusOK},
+		{"invalid effort", http.MethodPost, okLLM, `{"prompt":"extract","effort":"turbo"}`, http.StatusBadRequest},
 		{"valid attachment staging", http.MethodPost, stagingLLM, fmt.Sprintf(`{"prompt":"inspect","attachments":[{"url":"%s/file.txt","filename":"test.txt"}]}`, attSrv.URL), http.StatusOK},
 		{"empty attachment url", http.MethodPost, okLLM, `{"prompt":"test","attachments":[{"url":"","filename":"test.txt"}]}`, http.StatusBadRequest},
 		{"empty attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":""}]}`, attSrv.URL), http.StatusBadRequest},

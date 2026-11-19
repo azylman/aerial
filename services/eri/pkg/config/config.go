@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
 // Channel effort tiers returned by ChannelPolicy.GetEffort.
@@ -240,8 +241,19 @@ type VoiceConfig struct {
 // logical DB holding the shared transcript tables (empty keeps the stack's own DatabaseURL DB);
 // Stack labels the rows this instance writes (empty defaults to its own DatabaseURL DB name).
 type TranscriptsConfig struct {
-	Database string `yaml:"database,omitempty" json:"database,omitempty"`
-	Stack    string `yaml:"stack,omitempty"    json:"stack,omitempty"`
+	Database      string `yaml:"database,omitempty"        json:"database,omitempty"`
+	Stack         string `yaml:"stack,omitempty"           json:"stack,omitempty"`
+	IndexerURL    string `yaml:"indexer_url,omitempty"     json:"indexer_url,omitempty"`
+	MaxBatchBytes int    `yaml:"max_batch_bytes,omitempty" json:"max_batch_bytes,omitempty"`
+}
+
+// EffectiveMaxBatchBytes returns the configured per-batch byte budget, falling
+// back to the shared wire budget when unset or non-positive.
+func (c TranscriptsConfig) EffectiveMaxBatchBytes() int {
+	if c.MaxBatchBytes > 0 {
+		return c.MaxBatchBytes
+	}
+	return transcriptwire.MaxBatchBytes
 }
 
 // CredentialSource selects an explicit credential file or disables provisioning.
@@ -485,8 +497,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.CovenURL = strings.TrimRight(strings.TrimSpace(raw.CovenURL), "/")
 	c.NATSURL = strings.TrimRight(strings.TrimSpace(raw.NATSURL), "/")
 	c.Transcripts = TranscriptsConfig{
-		Database: strings.TrimSpace(raw.Transcripts.Database),
-		Stack:    strings.TrimSpace(raw.Transcripts.Stack),
+		Database:      strings.TrimSpace(raw.Transcripts.Database),
+		Stack:         strings.TrimSpace(raw.Transcripts.Stack),
+		IndexerURL:    strings.TrimRight(strings.TrimSpace(raw.Transcripts.IndexerURL), "/"),
+		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
 	}
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
