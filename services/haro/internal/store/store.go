@@ -5,8 +5,9 @@
 // SQL text, scan order, and error strings are byte-identical to the root
 // implementation this package was extracted from. It imports Layer-0
 // packages internal/model (row types, constants) and internal/config
-// (Config, DefaultTimezone) only. Event-trigger persistence stays in the
-// root package until the follow-up chunk moves it here.
+// (Config, DefaultTimezone) only. Event-trigger persistence (Vanadis URL
+// accessors, live-target validation, event_triggers CRUD/claim) lives in
+// events.go; root db.go keeps zero-logic wrappers until the haro-07b purge.
 package store
 
 import (
@@ -481,24 +482,15 @@ func deleteByID(ctx context.Context, database *sql.DB, query, emptyErrMsg, errPr
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		if emptyErrMsg != "" {
-			return false, fmt.Errorf("%s", emptyErrMsg)
-		}
-		return false, fmt.Errorf("id cannot be empty")
+		return false, fmt.Errorf("%s", emptyErrMsg)
 	}
 	res, err := database.ExecContext(ctx, query, id)
 	if err != nil {
-		if errPrefix != "" {
-			return false, fmt.Errorf("%s: %w", errPrefix, err)
-		}
-		return false, err
+		return false, fmt.Errorf("%s: %w", errPrefix, err)
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		if errPrefix != "" {
-			return false, fmt.Errorf("%s: failed to determine rows affected: %w", errPrefix, err)
-		}
-		return false, fmt.Errorf("failed to determine rows affected: %w", err)
+		return false, fmt.Errorf("%s: failed to determine rows affected: %w", errPrefix, err)
 	}
 	return rowsAffected > 0, nil
 }
