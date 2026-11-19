@@ -213,10 +213,17 @@ const FIRST_PASS_BUILDS = 10;
 const BuildGrid = memo(function BuildGrid({ builds }: { readonly builds: readonly IndexedBuild[] }) {
   const loaded = useConsoleStore(selectLoaded);
   const shown = useFirstPassLimit(loaded ? builds.length : 0, FIRST_PASS_BUILDS);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const onToggle = useCallback((id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  }, []);
   let body;
   if (!loaded) body = <BuildsSkeleton />;
   else if (builds.length === 0) body = <NoBuilds />;
-  else body = builds.slice(0, shown).map((b) => <BuildCard key={b.build.id} build={b.build} />);
+  else
+    body = builds
+      .slice(0, shown)
+      .map((b) => <BuildCard key={b.build.id} build={b.build} expanded={expandedId === b.build.id} onToggle={onToggle} />);
   return (
     <div className="builds-grid" id="builds-grid" aria-live="polite">
       {body}
