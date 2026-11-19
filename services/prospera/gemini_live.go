@@ -64,10 +64,6 @@ type GeminiFunctionCall = gemini.GeminiFunctionCall
 
 const endCallToolName = gemini.EndCallToolName
 
-const argDigits = gemini.ArgDigits
-
-const argQuery = gemini.ArgQuery
-
 var NewHTTPContextConsultClient = gemini.NewHTTPContextConsultClient
 
 var BuildGeminiSetupMessage = gemini.BuildGeminiSetupMessage

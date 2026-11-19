@@ -12,5 +12,4 @@ var (
 	ComputeRMS      = audio.ComputeRMS
 	EncodePCM16WAV  = audio.EncodePCM16WAV
 	ClampInt16      = audio.ClampInt16
-	clampInt16      = audio.ClampInt16
 )

@@ -1,4 +1,4 @@
-package main
+package mediastream
 
 import (
 	"context"
@@ -13,6 +13,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/azylman/aerial/services/prospera/internal/audio"
+	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/gemini"
+	"github.com/azylman/aerial/services/prospera/internal/model"
+	"github.com/azylman/aerial/services/prospera/internal/store"
+	"github.com/azylman/aerial/services/prospera/internal/testutil"
+	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
 
 type mockConsultClient struct {
@@ -38,12 +46,12 @@ func (m *mockConsultClient) ConsultMemory(ctx context.Context, query string) (st
 type mockTwilioClient struct {
 	mu             sync.Mutex
 	hungUpCallSIDs []string
-	createdCalls   []CreateCallRequest
+	createdCalls   []twilio.CreateCallRequest
 	smsList        []string
 	hangupErr      error
 }
 
-func (m *mockTwilioClient) CreateCall(ctx context.Context, req CreateCallRequest) (string, error) {
+func (m *mockTwilioClient) CreateCall(ctx context.Context, req twilio.CreateCallRequest) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createdCalls = append(m.createdCalls, req)
@@ -76,6 +84,24 @@ func (*mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL str
 	return []byte("test"), "audio/wav", nil
 }
 
+// newBridgeTestSession adapts a manager session request to the concrete bridge implementation.
+func newBridgeTestSession(cfg SessionConfig) Session {
+	return NewMediaStreamSession(MediaStreamSessionConfig{
+		CallID:           cfg.CallID,
+		TwilioConn:       cfg.Conn,
+		Config:           cfg.Config,
+		Store:            cfg.Store,
+		TwilioClient:     cfg.TwilioClient,
+		ConsultClient:    cfg.ConsultClient,
+		OpeningGreeting:  cfg.OpeningGreeting,
+		VoicemailMessage: cfg.VoicemailMessage,
+		SystemPrompt:     cfg.SystemPrompt,
+		Language:         cfg.Language,
+		PacerInterval:    cfg.PacerInterval,
+		GeminiDialer:     cfg.GeminiDialer,
+	})
+}
+
 // requireBridgeSession resolves a managed session to the concrete bridge type.
 func requireBridgeSession(t *testing.T, mgr *CallSessionManager, callID string) *MediaStreamSession {
 	t.Helper()
@@ -103,7 +129,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 
 	geminiWSURL, _ := setupLifecycleGeminiServer(t, recordGeminiMsg)
 
-	cfg := &Config{
+	cfg := &config.Config{
 		GeminiLiveModel:     "gemini-3.8-live",
 		GeminiFallbackModel: "gemini-3.1-flash-live-preview",
 		GeminiVoiceName:     "Kore",
@@ -114,11 +140,11 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		calendarResp: "Dentist appointment at 2pm",
 		memoryResp:   "Home address: 123 Example St",
 	}
-	tokenMgr := NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now)
 
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
+		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
 			conn, resp, err := dialer.DialContext(ctx, geminiWSURL, nil)
 			if resp != nil && resp.Body != nil {
@@ -126,7 +152,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newProsperaMediaSession),
+		WithSessionFactory(newBridgeTestSession),
 	)
 
 	token, err := tokenMgr.Issue("call-test-bridge", 30*time.Second)
@@ -169,6 +195,10 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	case <-sess.Started():
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for session start event")
+	}
+
+	if got := sess.ProviderCallSID(); got != "CA_twilio_123" {
+		t.Fatalf("ProviderCallSID() = %q, want CA_twilio_123 from start event", got)
 	}
 
 	injectTwilioAudioFrames(twilioWS)
@@ -418,16 +448,16 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
 
-	cfg := &Config{
+	cfg := &config.Config{
 		GeminiLiveModel:     "gemini-3.8-live",
 		GeminiFallbackModel: "gemini-3.1-flash-live-preview",
 		GeminiVoiceName:     "Kore",
 	}
 
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, nil, nil, nil, tokenMgr,
+	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
+		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
 			conn, resp, err := dialer.DialContext(ctx, geminiWSURL, nil)
 			if resp != nil && resp.Body != nil {
@@ -435,7 +465,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newProsperaMediaSession),
+		WithSessionFactory(newBridgeTestSession),
 	)
 
 	token, _ := tokenMgr.Issue("call-reconnect", 30*time.Second)
@@ -516,17 +546,17 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	t.Cleanup(geminiServer.Close)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	tokenMgr := NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now)
 
 	consultClient := &mockConsultClient{
 		calendarErr: errors.New("calendar failed"),
 		memoryErr:   errors.New("memory failed"),
 	}
 
-	bargeStore := setUpTestStore(t)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, bargeStore, nil, consultClient, tokenMgr,
+	bargeStore := testutil.SetUpTestStore(t)
+	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, bargeStore, nil, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
+		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
 			conn, resp, err := dialer.DialContext(ctx, geminiWSURL, nil)
 			if resp != nil && resp.Body != nil {
@@ -534,7 +564,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newProsperaMediaSession),
+		WithSessionFactory(newBridgeTestSession),
 	)
 
 	token, _ := tokenMgr.Issue("call-bargein", 30*time.Second)
@@ -568,9 +598,9 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 		t.Fatal("timed out waiting for start")
 	}
 
-	sess.handleAMDAction(AMDActionReleaseGreeting)
-	sess.handleAMDAction(AMDActionSwitchToVoicemail)
-	sess.handleAMDAction(AMDActionSpeakVoicemailAndHangup)
+	sess.handleAMDAction(audio.AMDActionReleaseGreeting)
+	sess.handleAMDAction(audio.AMDActionSwitchToVoicemail)
+	sess.handleAMDAction(audio.AMDActionSpeakVoicemailAndHangup)
 	sess.HandleAMD("human")
 
 	_ = sess.Steer("guidance instruction", "guidance")
@@ -587,32 +617,32 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 }
 
 func executeBargeInToolCalls(ctx context.Context, sess *MediaStreamSession) {
-	sess.executeToolCall(ctx, GeminiFunctionCall{
+	sess.executeToolCall(ctx, gemini.GeminiFunctionCall{
 		ID:   "call_dtmf_good",
 		Name: "send_dtmf",
 		Args: map[string]any{"digits": "123"},
 	})
-	sess.executeToolCall(ctx, GeminiFunctionCall{
+	sess.executeToolCall(ctx, gemini.GeminiFunctionCall{
 		ID:   "call_cal_good",
 		Name: "consult_calendar",
 		Args: map[string]any{"query": "schedule"},
 	})
-	sess.executeToolCall(ctx, GeminiFunctionCall{
+	sess.executeToolCall(ctx, gemini.GeminiFunctionCall{
 		ID:   "call_mem_good",
 		Name: "consult_memory",
 		Args: map[string]any{"query": "preferences"},
 	})
-	sess.executeToolCall(ctx, GeminiFunctionCall{
+	sess.executeToolCall(ctx, gemini.GeminiFunctionCall{
 		ID:   "call_dtmf_bad",
 		Name: "send_dtmf",
 		Args: map[string]any{"digits": "INVALID_DIGIT"},
 	})
-	sess.executeToolCall(ctx, GeminiFunctionCall{
+	sess.executeToolCall(ctx, gemini.GeminiFunctionCall{
 		ID:   "call_cal_bad",
 		Name: "consult_calendar",
 		Args: map[string]any{"query": "bad"},
 	})
-	sess.executeToolCall(ctx, GeminiFunctionCall{
+	sess.executeToolCall(ctx, gemini.GeminiFunctionCall{
 		ID:   "call_mem_bad",
 		Name: "consult_memory",
 		Args: map[string]any{"query": "bad"},
@@ -637,7 +667,7 @@ func waitForClearEvent(ws *websocket.Conn) bool {
 func TestStreamTokenManager_NilTimeSource(t *testing.T) {
 	t.Parallel()
 
-	mgrNil := NewStreamTokenManager(nil)
+	mgrNil := twilio.NewStreamTokenManager(nil)
 	tok, err := mgrNil.Issue("c1", 10*time.Second)
 	if err != nil {
 		t.Fatalf("Issue err: %v", err)
@@ -645,63 +675,6 @@ func TestStreamTokenManager_NilTimeSource(t *testing.T) {
 	if id, ok := mgrNil.Consume(tok); !ok || id != "c1" {
 		t.Fatalf("Consume err: %q, %v", id, ok)
 	}
-}
-
-func TestMediaStreamSession_NilConnAndDialFallbacks(t *testing.T) {
-	t.Parallel()
-
-	sessNoDialer := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID: "c-nodialer",
-		Config: &Config{GeminiAPIKey: "key"},
-	})
-	_, _ = sessNoDialer.dialGemini(context.Background(), "model")
-
-	sessFailDial := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID: "c-faildial",
-		GeminiDialer: func(ctx context.Context, model string) (*websocket.Conn, error) {
-			return nil, errors.New("dial failed")
-		},
-	})
-	sessFailDial.Run(context.Background())
-
-	sessNilConsult := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID: "c-nil-consult",
-	})
-	sessNilConsult.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_cal_nil",
-		Name: "consult_calendar",
-		Args: map[string]any{"query": "q"},
-	})
-	sessNilConsult.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_mem_nil",
-		Name: "consult_memory",
-		Args: map[string]any{"query": "q"},
-	})
-	sessNilConsult.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_end_nil",
-		Name: "end_call",
-		Args: map[string]any{"reason": "done"},
-	})
-
-	sessFailReconnect := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID: "c-fail-recon",
-		GeminiDialer: func(ctx context.Context, model string) (*websocket.Conn, error) {
-			return nil, errors.New("fail reconnect")
-		},
-	})
-	if sessFailReconnect.reconnectGemini(context.Background()) {
-		t.Error("reconnectGemini should return false when dial fails")
-	}
-
-	sessHelpers := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "c-helpers"})
-	sessHelpers.sendTwilioMedia([]byte{0x01})
-	sessHelpers.sendTwilioClear()
-	sessHelpers.sendTwilioMark("mark")
-	if err := sessHelpers.sendGeminiJSON(map[string]any{}); err == nil {
-		t.Error("expected error when sending JSON with nil conn")
-	}
-	sessHelpers.handleInboundTwilioMedia(base64.StdEncoding.EncodeToString(make([]byte, 160)))
-	sessHelpers.handleInboundTwilioMedia(base64.StdEncoding.EncodeToString([]byte{}))
 }
 
 type mediaWebSocketModeTestCase struct {
@@ -785,14 +758,14 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 	}))
 	t.Cleanup(geminiServer.Close)
 
-	store := setUpTestStore(t)
-	setupMediaWebSocketStoreCall(context.Background(), store, tc)
+	st := testutil.SetUpTestStore(t)
+	setupMediaWebSocketStoreCall(context.Background(), st, tc)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
+	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
+		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
 			conn, resp, err := dialer.DialContext(ctx, geminiWSURL, nil)
 			if resp != nil && resp.Body != nil {
@@ -800,7 +773,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newProsperaMediaSession),
+		WithSessionFactory(newBridgeTestSession),
 	)
 
 	token, _ := tokenMgr.Issue(tc.callID, 30*time.Second)
@@ -878,16 +851,16 @@ func exerciseBridgeSteerAndAMD(t *testing.T, sessionMgr *CallSessionManager, cal
 	}
 }
 
-func setupMediaWebSocketStoreCall(ctx context.Context, store *PGStore, tc mediaWebSocketModeTestCase) {
+func setupMediaWebSocketStoreCall(ctx context.Context, st *store.PGStore, tc mediaWebSocketModeTestCase) {
 	switch tc.direction {
 	case "outbound":
-		_ = store.CreateOutboundCall(ctx, VoiceCall{
+		_ = st.CreateOutboundCall(ctx, model.VoiceCall{
 			CallID:     tc.callID,
 			Direction:  "outbound",
 			State:      "initiated",
 			FromNumber: "+15105550100",
 			ToNumber:   "+15105550199",
-			Brief: CallBrief{
+			Brief: model.CallBrief{
 				Mode:             tc.callMode,
 				Task:             tc.task,
 				VoicemailMessage: tc.voicemailMsg,
@@ -896,7 +869,7 @@ func setupMediaWebSocketStoreCall(ctx context.Context, store *PGStore, tc mediaW
 			UpdatedAt: time.Now().UTC(),
 		}, 5)
 	case "inbound":
-		_ = store.CreateInboundCall(ctx, VoiceCall{
+		_ = st.CreateInboundCall(ctx, model.VoiceCall{
 			CallID:     tc.callID,
 			Direction:  "inbound",
 			State:      "in-progress",
@@ -905,158 +878,5 @@ func setupMediaWebSocketStoreCall(ctx context.Context, store *PGStore, tc mediaW
 			StartedAt:  time.Now().UTC(),
 			UpdatedAt:  time.Now().UTC(),
 		})
-	}
-}
-
-func TestMediaStream_DirectHandlers(t *testing.T) {
-	t.Parallel()
-
-	store := setUpTestStore(t)
-	consultClient := &mockConsultClient{
-		calendarResp: "Confirmed 3pm meeting",
-		memoryResp:   "Primary contact: Jane Doe",
-	}
-
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID:        "call-direct-test",
-		Store:         store,
-		ConsultClient: consultClient,
-	})
-
-	sess.handleServerContent(context.Background(), &GeminiServerContent{
-		InputTranscription: &GeminiTranscription{Text: "Caller hello "},
-	})
-	sess.handleServerContent(context.Background(), &GeminiServerContent{
-		InputTranscription:  &GeminiTranscription{Text: "world"},
-		OutputTranscription: &GeminiTranscription{Text: "Hi from "},
-	})
-	sess.handleServerContent(context.Background(), &GeminiServerContent{
-		OutputTranscription: &GeminiTranscription{Text: "Prospera"},
-		GenerationComplete:  true,
-	})
-	sess.handleServerContent(context.Background(), &GeminiServerContent{
-		Interrupted: true,
-		ModelTurn: &GeminiModelTurn{
-			Parts: []GeminiPart{
-				{
-					Text: "Assistant turn response",
-				},
-				{
-					Text:    "Hidden internal thought",
-					Thought: true,
-				},
-				{
-					InlineData: &GeminiInlineData{
-						MimeType: "audio/pcm;rate=24000",
-						Data:     base64.StdEncoding.EncodeToString(make([]byte, 480)),
-					},
-				},
-				{
-					MimeType: "audio/pcm;rate=24000",
-					Data:     base64.StdEncoding.EncodeToString(make([]byte, 480)),
-				},
-			},
-		},
-	})
-
-	sess.handleServerContent(context.Background(), &GeminiServerContent{
-		OutputTranscription: &GeminiTranscription{Text: "Closing words before tool call"},
-	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_dtmf_good",
-		Name: "send_dtmf",
-		Args: map[string]any{"digits": "123#"},
-	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_dtmf_bad",
-		Name: "send_dtmf",
-		Args: map[string]any{"digits": "BAD"},
-	})
-
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_cal_good",
-		Name: "consult_calendar",
-		Args: map[string]any{"query": "schedule"},
-	})
-
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_mem_good",
-		Name: "consult_memory",
-		Args: map[string]any{"query": "preferences"},
-	})
-
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_end_good",
-		Name: "end_call",
-		Args: map[string]any{"reason": "finished"},
-	})
-
-	consultClientErr := &mockConsultClient{
-		calendarErr: errors.New("cal error"),
-		memoryErr:   errors.New("mem error"),
-	}
-	sessErr := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID:        "call-err-test",
-		ConsultClient: consultClientErr,
-	})
-	sessErr.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_cal_err",
-		Name: "consult_calendar",
-		Args: map[string]any{"query": "error"},
-	})
-	sessErr.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_mem_err",
-		Name: "consult_memory",
-		Args: map[string]any{"query": "error"},
-	})
-
-	sessNil := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID: "call-nil-client",
-	})
-	sessNil.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_cal_nil",
-		Name: "consult_calendar",
-		Args: map[string]any{"query": "nil"},
-	})
-	sessNil.executeToolCall(context.Background(), GeminiFunctionCall{
-		ID:   "call_mem_nil",
-		Name: "consult_memory",
-		Args: map[string]any{"query": "nil"},
-	})
-
-	sess.InitiateHangup("test_hangup")
-	sess.enqueueOutboundUlaw(make([]byte, 1005*160))
-}
-
-func (s *MediaStreamSession) Started() <-chan struct{} {
-	return s.started
-}
-
-func (s *MediaStreamSession) Done() <-chan struct{} {
-	return s.doneCh
-}
-
-func (s *MediaStreamSession) SetProviderCallSID(sid string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.providerCallSID = sid
-}
-
-func TestMediaStreamSession_DisconnectedAMDActions(t *testing.T) {
-	t.Parallel()
-	sessNoGemini := &MediaStreamSession{
-		openingGreeting: "Hello from opening",
-	}
-	sessNoGemini.handleAMDAction(AMDActionSwitchToVoicemail)
-	sessNoGemini.handleAMDAction(AMDActionSpeakVoicemailAndHangup)
-	sessNoGemini.handleAMDAction(AMDActionReleaseGreeting)
-
-	sessWithDialFail := &MediaStreamSession{
-		geminiDialer: func(ctx context.Context, model string) (*websocket.Conn, error) {
-			return nil, errors.New("dial fail")
-		},
-	}
-	if ok := sessWithDialFail.reconnectGemini(context.Background()); ok {
-		t.Fatal("expected reconnect failure")
 	}
 }

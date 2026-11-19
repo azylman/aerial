@@ -237,9 +237,7 @@ func TestRunApp_TranscriptBatcher(t *testing.T) {
 	flushActiveSessions(context.Background(), sessionMgr, reporter)
 
 	// Test flush with active session
-	sess := &MediaStreamSession{
-		callID: "call-batch-test",
-	}
+	sess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-batch-test"})
 	sessionMgr.RegisterSession("call-batch-test", sess)
 	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
 		CallID: "call-batch-test",
