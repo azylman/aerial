@@ -1,5 +1,6 @@
-/* Schedules view (ported verbatim from static/style.css: schedules toolbar, grid, schedule
-   cards, countdown badges and the execution run feed). */
+/* Schedules view: schedules toolbar, grid, schedule cards, countdown badges and the execution run feed
+   (Warm Stone & Ink daylight surfaces). */
+
 /* --- SCHEDULES TOOLBAR --- */
 .schedules-toolbar-card {
   background: var(--card-bg);
@@ -36,27 +37,27 @@
   gap: 0.9rem;
   position: relative;
   overflow: hidden;
+  box-shadow: var(--accent-glow);
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   min-width: 0;
 }
 
 .schedule-card:hover {
-  border-color: var(--neon-cyan);
-  transform: translateY(-3px);
-  box-shadow: 0 12px 30px -5px rgba(0, 242, 254, 0.22);
+  border-color: var(--card-border-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(20, 20, 19, 0.08);
 }
 
 .schedule-card.cron-card {
-  border-color: rgba(0, 242, 254, 0.25);
+  border-color: var(--card-border);
 }
 
 .schedule-card.oneshot-card {
-  border-color: rgba(157, 0, 255, 0.3);
+  border-color: var(--card-border);
 }
 
 .schedule-card.oneshot-card:hover {
-  border-color: var(--neon-purple);
-  box-shadow: 0 12px 30px -5px rgba(157, 0, 255, 0.25);
+  border-color: var(--card-border-hover);
 }
 
 .schedule-card-header {
@@ -81,22 +82,22 @@
 }
 
 .schedule-type-badge.cron {
-  background: rgba(0, 242, 254, 0.15);
-  color: var(--neon-cyan);
-  border: 1px solid rgba(0, 242, 254, 0.4);
+  background: rgba(194, 65, 12, 0.12);
+  color: var(--accent-primary, #c2410c);
+  border: 1px solid rgba(194, 65, 12, 0.3);
 }
 
 .schedule-type-badge.oneshot {
-  background: rgba(157, 0, 255, 0.15);
-  color: #d896ff;
-  border: 1px solid var(--neon-purple);
+  background: rgba(67, 56, 202, 0.12);
+  color: var(--accent-indigo, #4338ca);
+  border: 1px solid rgba(67, 56, 202, 0.3);
 }
 
 .schedule-tz-badge {
   font-size: 0.65rem;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
   padding: 2px 6px;
   border-radius: 4px;
 }
@@ -119,23 +120,22 @@
 }
 
 .schedule-countdown-badge.countdown-normal {
-  background: rgba(0, 242, 254, 0.1);
-  color: var(--neon-cyan);
-  border: 1px solid rgba(0, 242, 254, 0.3);
+  background: rgba(194, 65, 12, 0.1);
+  color: var(--accent-primary, #c2410c);
+  border: 1px solid rgba(194, 65, 12, 0.25);
 }
 
 .schedule-countdown-badge.countdown-urgent {
-  background: rgba(255, 183, 0, 0.18);
-  color: var(--neon-amber);
-  border: 1px solid var(--neon-amber);
+  background: rgba(180, 83, 9, 0.15);
+  color: var(--accent-amber, #b45309);
+  border: 1px solid var(--accent-amber, #b45309);
   animation: pulse-border 1.2s infinite alternate;
 }
 
 .schedule-countdown-badge.countdown-triggering {
-  background: rgba(255, 0, 127, 0.25);
-  color: var(--neon-magenta);
-  border: 1px solid var(--neon-magenta);
-  box-shadow: 0 0 12px var(--neon-magenta);
+  background: rgba(194, 65, 12, 0.18);
+  color: var(--accent-primary, #c2410c);
+  border: 1px solid var(--accent-primary, #c2410c);
 }
 
 html.motion-ready .schedule-countdown-badge.countdown-triggering {
@@ -143,9 +143,9 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
 }
 
 .schedule-countdown-badge.countdown-overdue {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--bg-elevated);
   color: var(--text-dim);
-  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border: 1px dashed var(--card-border);
 }
 
 @keyframes pulse-trigger {
@@ -156,7 +156,6 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   100% {
     opacity: 1;
     transform: scale(1.03);
-    box-shadow: 0 0 18px var(--neon-magenta);
   }
 }
 
@@ -168,13 +167,13 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   font-family: var(--font-heading);
   font-size: 1.05rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-primary);
   line-height: 1.3;
 }
 
 .schedule-cron-human {
   font-size: 0.78rem;
-  color: var(--neon-green);
+  color: var(--accent-emerald, #15803d);
   margin-top: 4px;
   font-weight: 500;
 }
@@ -188,16 +187,16 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
 }
 
 .schedule-meta-bar code {
-  background: rgba(0, 0, 0, 0.4);
-  color: var(--neon-cyan);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
   padding: 1px 5px;
   border-radius: 3px;
-  border: 1px solid rgba(0, 242, 254, 0.2);
+  border: 1px solid var(--card-border);
 }
 
 .schedule-prompt-wrap {
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
   border-radius: 8px;
   padding: 0.75rem;
 }
@@ -217,9 +216,9 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
 }
 
 .prompt-copy-btn {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--card-border);
+  color: var(--text-secondary);
   border-radius: 4px;
   padding: 2px 6px;
   font-family: var(--font-mono);
@@ -230,15 +229,15 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
 }
 
 .prompt-copy-btn:hover {
-  background: rgba(0, 242, 254, 0.15);
-  border-color: var(--neon-cyan);
-  color: #fff;
+  background: var(--bg-elevated);
+  border-color: var(--card-border-hover);
+  color: var(--text-primary);
 }
 
 .prompt-copy-btn.copied {
-  background: rgba(0, 255, 135, 0.2);
-  border-color: var(--neon-green);
-  color: var(--neon-green);
+  background: rgba(21, 128, 61, 0.15);
+  border-color: var(--accent-emerald, #15803d);
+  color: var(--accent-emerald, #15803d);
 }
 
 .schedule-prompt-body {
@@ -255,21 +254,21 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--card-border);
   padding-top: 0.6rem;
   font-size: 0.68rem;
   color: var(--text-dim);
 }
 
 .schedule-thread-link {
-  color: var(--neon-cyan);
+  color: var(--accent-primary, #c2410c);
   text-decoration: none;
   font-weight: 700;
 }
 
 .schedule-thread-link:hover {
-  color: #fff;
-  text-shadow: 0 0 8px var(--neon-cyan);
+  color: var(--text-primary);
+  text-decoration: underline;
 }
 
 /* --- EXECUTION RUN AUDIT FEED --- */
@@ -291,29 +290,30 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
+  box-shadow: var(--accent-glow);
   transition: all 0.25s ease;
 }
 
 .run-card:hover {
-  border-color: var(--neon-cyan);
-  box-shadow: 0 6px 20px -3px rgba(0, 242, 254, 0.15);
+  border-color: var(--card-border-hover);
+  box-shadow: 0 4px 12px rgba(20, 20, 19, 0.08);
 }
 
 .run-card.run-completed {
-  border-left: 3px solid var(--neon-green);
+  border-left: 3px solid var(--accent-emerald, #15803d);
 }
 
 .run-card.run-running {
-  border-left: 3px solid var(--neon-magenta);
+  border-left: 3px solid var(--accent-primary, #c2410c);
   animation: pulse-border 1.5s infinite alternate;
 }
 
 .run-card.run-enqueued {
-  border-left: 3px solid var(--neon-amber);
+  border-left: 3px solid var(--accent-amber, #b45309);
 }
 
 .run-card.run-failed {
-  border-left: 3px solid var(--neon-red);
+  border-left: 3px solid var(--accent-crimson, #b91c1c);
 }
 
 .run-card-header {
@@ -347,52 +347,52 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
 }
 
 .run-status-chip.chip-completed {
-  background: rgba(0, 255, 135, 0.15);
-  color: var(--neon-green);
-  border: 1px solid rgba(0, 255, 135, 0.4);
+  background: rgba(21, 128, 61, 0.12);
+  color: var(--accent-emerald, #15803d);
+  border: 1px solid rgba(21, 128, 61, 0.35);
 }
 
 .run-status-chip.chip-running {
-  background: rgba(255, 0, 127, 0.2);
-  color: var(--neon-magenta);
-  border: 1px solid var(--neon-magenta);
+  background: rgba(194, 65, 12, 0.12);
+  color: var(--accent-primary, #c2410c);
+  border: 1px solid var(--accent-primary, #c2410c);
   animation: pulse-border 1.2s infinite alternate;
 }
 
 .run-status-chip.chip-enqueued {
-  background: rgba(255, 183, 0, 0.15);
-  color: var(--neon-amber);
-  border: 1px solid rgba(255, 183, 0, 0.4);
+  background: rgba(180, 83, 9, 0.12);
+  color: var(--accent-amber, #b45309);
+  border: 1px solid rgba(180, 83, 9, 0.35);
 }
 
 .run-status-chip.chip-failed {
-  background: rgba(255, 42, 109, 0.25);
-  color: var(--neon-red);
-  border: 1px solid var(--neon-red);
+  background: rgba(185, 28, 28, 0.12);
+  color: var(--accent-crimson, #b91c1c);
+  border: 1px solid var(--accent-crimson, #b91c1c);
 }
 
 .run-title {
   font-weight: 700;
   font-size: 0.85rem;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .run-type-tag {
   font-size: 0.62rem;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg-elevated);
   padding: 1px 5px;
   border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--card-border);
 }
 
 .run-duration-badge {
   font-size: 0.7rem;
-  color: var(--neon-cyan);
-  background: rgba(0, 242, 254, 0.1);
+  color: var(--accent-primary, #c2410c);
+  background: rgba(194, 65, 12, 0.1);
   padding: 2px 6px;
   border-radius: 4px;
-  border: 1px solid rgba(0, 242, 254, 0.25);
+  border: 1px solid rgba(194, 65, 12, 0.25);
   font-weight: 700;
 }
 
@@ -405,10 +405,10 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   font-size: 0.78rem;
   color: var(--text-primary);
   line-height: 1.45;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--bg-elevated);
   padding: 0.6rem 0.8rem;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--card-border);
 }
 
 .run-prompt-text {
@@ -421,11 +421,11 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
 .run-error-box {
   margin-top: 0.4rem;
   padding: 0.4rem 0.6rem;
-  background: rgba(255, 42, 109, 0.1);
-  border: 1px solid var(--neon-red);
+  background: rgba(185, 28, 28, 0.08);
+  border: 1px solid var(--accent-crimson, #b91c1c);
   border-radius: 4px;
   font-size: 0.72rem;
-  color: var(--neon-red);
+  color: var(--accent-crimson, #b91c1c);
 }
 
 .run-error-label {
@@ -437,25 +437,26 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  border-top: 1px solid var(--card-border);
+  padding-top: 0.5rem;
   font-size: 0.68rem;
   color: var(--text-dim);
 }
 
-
 .run-thread-link {
-  color: var(--neon-cyan);
+  color: var(--accent-primary, #c2410c);
   text-decoration: none;
   font-weight: 700;
 }
 
 .run-thread-link:hover {
-  color: #fff;
-  text-shadow: 0 0 8px var(--neon-cyan);
+  color: var(--text-primary);
+  text-decoration: underline;
 }
 
 /* The amber success-rate state (updateScheduleMetrics set this colour inline). */
 .summary-card .value.schedules-rate-amber {
-  color: var(--neon-amber);
+  color: var(--accent-amber, #b45309);
 }
 
 /* React polish: live numbers do not jitter and flex text children may shrink. */
