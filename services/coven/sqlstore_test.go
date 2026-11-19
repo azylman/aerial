@@ -657,7 +657,7 @@ func TestSQLStore_GetActiveConversationsForExtraction(t *testing.T) {
 				{"thread_id":"th-1","row_id":12}
 			]}`,
 			wantThreads:  []string{"th-1", "th-3"},
-			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks"},
+			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks WHERE stack = $1"},
 		},
 		{
 			name:         "SuccessCustomHours",
@@ -667,7 +667,7 @@ func TestSQLStore_GetActiveConversationsForExtraction(t *testing.T) {
 				{"thread_id":"th-9","row_id":100}
 			]}`,
 			wantThreads:  []string{"th-9"},
-			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks"},
+			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks WHERE stack = $1"},
 			wantURLSub:   "limit=200",
 		},
 	}
@@ -726,8 +726,8 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			]}`,
 			wantCount:    1,
 			wantRowIDs:   []int64{12},
-			wantPatterns: []string{"FROM extraction_watermarks WHERE thread_id = $1"},
-			wantURLSub:   "after_row_id=10",
+			wantPatterns: []string{"FROM extraction_watermarks WHERE stack = $1 AND thread_id = $2"},
+			wantURLSub:   "after_row_id=10&order=asc&limit=50",
 		},
 		{
 			name:         "Success_ReverseOrderSortedAscending",
@@ -739,8 +739,8 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			]}`,
 			wantCount:    2,
 			wantRowIDs:   []int64{10, 25},
-			wantPatterns: []string{"FROM extraction_watermarks WHERE thread_id = $1"},
-			wantURLSub:   "after_row_id=0",
+			wantPatterns: []string{"FROM extraction_watermarks WHERE stack = $1 AND thread_id = $2"},
+			wantURLSub:   "after_row_id=0&order=asc&limit=50",
 		},
 	}
 
@@ -861,7 +861,7 @@ func TestSQLStore_UpdateConversationFactWatermark(t *testing.T) {
 			name:         "Success",
 			threadID:     "th-1",
 			maxRowID:     99,
-			wantPatterns: []string{"INSERT INTO extraction_watermarks (thread_id", "ON CONFLICT(thread_id) DO UPDATE"},
+			wantPatterns: []string{"INSERT INTO extraction_watermarks (stack, thread_id", "ON CONFLICT (stack, thread_id) DO UPDATE"},
 		},
 	}
 
@@ -1328,5 +1328,70 @@ func runFindNearestScoredFactsCase(t *testing.T, tc sqlStoreFindNearestScoredFac
 	}
 	if tc.wantMinScore > 0 && len(scored) > 0 && scored[0].Score < tc.wantMinScore {
 		t.Errorf("scored[0].Score = %f, want >= %f", scored[0].Score, tc.wantMinScore)
+	}
+}
+
+func TestSQLStore_GetThreadTrajectoryContext_IndexerClient(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		statusCode   int
+		body         string
+		threadID     string
+		wantErr      bool
+		wantFactsLen int
+		wantToolsLen int
+	}{
+		{
+			name:         "EmptyThreadIDReturnsNil",
+			threadID:     "   ",
+			wantErr:      false,
+			wantFactsLen: 0,
+			wantToolsLen: 0,
+		},
+		{
+			name:         "Success",
+			threadID:     "th-traj-1",
+			statusCode:   http.StatusOK,
+			body:         `{"retrieved_facts": ["- [id:1] Matcha"], "tool_calls": ["search(tea)"]}`,
+			wantErr:      false,
+			wantFactsLen: 1,
+			wantToolsLen: 1,
+		},
+		{
+			name:       "ServerError",
+			threadID:   "th-traj-2",
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}))
+			defer srv.Close()
+
+			store := NewSQLStoreWithBrainURL(dbMem, "http://eri:8080", srv.Client())
+			ic := NewIndexerClient(srv.URL, "aerial", srv.Client())
+			store.SetIndexerClient(ic)
+
+			facts, tools, err := store.GetThreadTrajectoryContext(ctx, tc.threadID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if len(facts) != tc.wantFactsLen {
+				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantFactsLen)
+			}
+			if len(tools) != tc.wantToolsLen {
+				t.Errorf("len(tools) = %d, want %d", len(tools), tc.wantToolsLen)
+			}
+		})
 	}
 }

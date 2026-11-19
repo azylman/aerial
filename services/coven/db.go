@@ -143,7 +143,7 @@ type Store interface {
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
 	GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
-	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
+	GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
 	GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
@@ -158,10 +158,12 @@ type Store interface {
 
 // SQLStore implements Store backed by PostgreSQL and Eri HTTP APIs.
 type SQLStore struct {
-	db         DBTX
-	brainURL   string
-	httpClient *http.Client
-	brainToken string
+	db            DBTX
+	brainURL      string
+	httpClient    *http.Client
+	brainToken    string
+	stack         string
+	indexerClient *IndexerClient
 }
 
 // NewSQLStore creates a new SQLStore instance using an empty Brain URL.
@@ -179,7 +181,82 @@ func NewSQLStoreWithBrainURL(db DBTX, brainURL string, client *http.Client) *SQL
 		db:         db,
 		brainURL:   cleanURL,
 		httpClient: tracing.Client(client),
+		stack:      DefaultStack,
 	}
+}
+
+// SetStack sets the stack namespace on an existing SQLStore.
+func (s *SQLStore) SetStack(stack string) {
+	if s != nil {
+		s.stack = NormalizeStack(stack)
+	}
+}
+
+// Stack returns the configured stack namespace, defaulting to DefaultStack ("aerial").
+func (s *SQLStore) Stack() string {
+	return s.effectiveStack()
+}
+
+func (s *SQLStore) effectiveStack() string {
+	if s != nil && strings.TrimSpace(s.stack) != "" {
+		return NormalizeStack(s.stack)
+	}
+	return DefaultStack
+}
+
+// SetIndexerClient sets the IndexerClient used for trajectory lookups.
+func (s *SQLStore) SetIndexerClient(client *IndexerClient) {
+	if s != nil {
+		s.indexerClient = client
+	}
+}
+
+// IndexerClient returns the configured IndexerClient, or nil if not set.
+func (s *SQLStore) IndexerClient() *IndexerClient {
+	if s != nil {
+		return s.indexerClient
+	}
+	return nil
+}
+
+// WithDB returns a shallow copy of SQLStore with db replaced by conn.
+func (s *SQLStore) WithDB(conn DBTX) *SQLStore {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.db = conn
+	return &clone
+}
+
+// DB returns the underlying DBTX.
+func (s *SQLStore) DB() DBTX {
+	if s != nil {
+		return s.db
+	}
+	return nil
+}
+
+// connProvider represents a store that can provide a pinned database connection.
+type connProvider interface {
+	Conn(ctx context.Context) (*sql.Conn, error)
+	DB() DBTX
+}
+
+var errNoPinnedConn = errors.New("underlying DBTX does not support pinned connection")
+
+// Conn returns a pinned connection to the database if s.db is *sql.DB or *sql.Conn.
+func (s *SQLStore) Conn(ctx context.Context) (*sql.Conn, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("database connection is not initialized")
+	}
+	if db, ok := s.db.(*sql.DB); ok {
+		return db.Conn(ctx)
+	}
+	if conn, ok := s.db.(*sql.Conn); ok {
+		return conn, nil
+	}
+	return nil, errNoPinnedConn
 }
 
 // SetBrainURL sets the Brain URL on an existing SQLStore.

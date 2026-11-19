@@ -627,19 +627,22 @@ func processThreadFactsProceduralCases() []processThreadFactsProceduralCase {
 			name:      "EmbeddingFailureContinues",
 			ollamaErr: errors.New("ollama down"),
 			llmResp:   proceduralResp(validTask),
+			wantErr:   true,
 		},
 		{
 			name:               "StoreGetPendingErrorContinues",
 			storeFailOp:        "GetPendingProceduralCandidates",
 			storeFailErr:       errors.New("db read failure"),
 			llmResp:            proceduralResp(validTask),
-			wantCandidateCount: 1,
+			wantCandidateCount: 0,
+			wantErr:            true,
 		},
 		{
 			name:         "StoreInsertErrorContinues",
 			storeFailOp:  "InsertProceduralCandidate",
 			storeFailErr: errors.New("db insert failure"),
 			llmResp:      proceduralResp(validTask),
+			wantErr:      true,
 		},
 		{
 			name:               "LoadedSkillsInPrompt",

@@ -313,13 +313,24 @@ func (m *TestMemStore) GetActiveConversationsForExtraction(ctx context.Context, 
 	return append([]string(nil), m.activeThreads...), nil
 }
 
-func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error) {
+func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "GetUnextractedAdminTurns" {
 		return nil, m.failErr
 	}
-	return append([]Message(nil), m.unextractedTurns[threadID]...), nil
+	turns := m.unextractedTurns[threadID]
+	wm := m.watermarks[threadID]
+	var unextracted []Message
+	for _, t := range turns {
+		if t.RowID > wm || (wm == 0 && t.RowID == 0) {
+			unextracted = append(unextracted, t)
+		}
+	}
+	if len(limit) > 0 && limit[0] > 0 && len(unextracted) > limit[0] {
+		unextracted = unextracted[:limit[0]]
+	}
+	return append([]Message(nil), unextracted...), nil
 }
 
 func (m *TestMemStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {

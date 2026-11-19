@@ -80,10 +80,10 @@ func processThreadFactsContextCases() []processThreadFactsContextCase {
 			wantErr:        false,
 		},
 		{
-			name:          "ContextQueryErrorIgnoredAndContinues",
+			name:          "ContextQueryErrorFails",
 			storeFailOp:   "GetThreadContextBeforeWatermark",
-			wantWatermark: true,
-			wantErr:       false,
+			wantWatermark: false,
+			wantErr:       true,
 		},
 		{
 			name:    "LLMErrorFails",
@@ -116,29 +116,29 @@ func processThreadFactsContextCases() []processThreadFactsContextCase {
 			wantErr:          false,
 		},
 		{
-			name:             "TrajectoryReinforceStoreErrorLoggedGracefully",
+			name:             "TrajectoryReinforceStoreErrorFails",
 			withReinforceIDs: true,
 			storeFailOp:      "ReinforceFact",
-			wantWatermark:    true,
-			wantErr:          false,
+			wantWatermark:    false,
+			wantErr:          true,
 		},
 		{
-			name:          "TrajectoryQueryErrorIgnoredAndContinues",
+			name:          "TrajectoryQueryErrorFails",
 			storeFailOp:   "GetThreadTrajectoryContext",
-			wantWatermark: true,
-			wantErr:       false,
+			wantWatermark: false,
+			wantErr:       true,
 		},
 		{
-			name:          "CandidateFactInsertStoreErrorSkipsWatermark",
+			name:          "CandidateFactInsertStoreErrorFails",
 			storeFailOp:   "InsertFact",
 			wantWatermark: false,
-			wantErr:       false,
+			wantErr:       true,
 		},
 		{
-			name:          "CandidateFactEmbeddingErrorSkipsWatermark",
+			name:          "CandidateFactEmbeddingErrorFails",
 			ollamaErr:     errors.New("embed fail"),
 			wantWatermark: false,
-			wantErr:       false,
+			wantErr:       true,
 		},
 	}
 }
