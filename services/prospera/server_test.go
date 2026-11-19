@@ -779,10 +779,9 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 func TestServer_TokenIssueFailures(t *testing.T) {
 	t.Parallel()
 	server, store, cfg := setupTestServer()
-	tokenMgrFail := NewStreamTokenManager(nil)
-	tokenMgrFail.randFn = func([]byte) (int, error) {
+	tokenMgrFail := NewStreamTokenManager(nil, WithEntropyReader(func([]byte) (int, error) {
 		return 0, errors.New("entropy failure")
-	}
+	}))
 	server.tokenMgr = tokenMgrFail
 	mux := server.Routes()
 
