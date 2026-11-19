@@ -19,26 +19,28 @@ import (
 )
 
 type parseCLIArgsCase struct {
-	name        string
-	args        []string
-	envEriURL   string
-	wantCmd     string
-	wantQuery   string
-	wantMode    string
-	wantTool    string
-	wantSession string
-	wantLimit   int
-	wantStep    int
-	wantContext int
-	wantJSON    bool
-	wantStack   string
-	wantURL     string
-	wantErrSub  string
-	wantErrIs   error
+	name             string
+	args             []string
+	envEriURL        string
+	envTranscriptURL string
+	wantCmd          string
+	wantQuery        string
+	wantMode         string
+	wantTool         string
+	wantSession      string
+	wantLimit        int
+	wantStep         int
+	wantContext      int
+	wantJSON         bool
+	wantStack        string
+	wantURL          string
+	wantErrSub       string
+	wantErrIs        error
 }
 
 func assertParseCLIArgsCase(t *testing.T, tc parseCLIArgsCase) {
 	t.Helper()
+	t.Setenv("TRANSCRIPTS_URL", tc.envTranscriptURL)
 	t.Setenv("ERI_URL", tc.envEriURL)
 	t.Setenv("AERIAL_ERI_URL", "")
 	t.Setenv("AERIAL_BRAIN_URL", "")
@@ -219,6 +221,18 @@ func parseCLIArgsExtraCases() []parseCLIArgsCase {
 			wantStep:    -1,
 			wantContext: 2,
 			wantURL:     "http://eri-host:9090",
+		},
+		{
+			name:             "TranscriptsURLPrecedenceOverEriURL",
+			args:             []string{"stats"},
+			envTranscriptURL: "http://transcripts-host:4060/",
+			envEriURL:        "http://eri-host:9090/",
+			wantCmd:          "stats",
+			wantMode:         "auto",
+			wantLimit:        10,
+			wantStep:         -1,
+			wantContext:      2,
+			wantURL:          "http://transcripts-host:4060",
 		},
 		{
 			name:       "InvalidFlag",

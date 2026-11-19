@@ -114,7 +114,9 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 		BaseURL: "http://localhost:8080",
 	}
 
-	if envURL := os.Getenv("ERI_URL"); envURL != "" {
+	if envURL := os.Getenv("TRANSCRIPTS_URL"); envURL != "" {
+		cfg.BaseURL = strings.TrimRight(envURL, "/")
+	} else if envURL := os.Getenv("ERI_URL"); envURL != "" {
 		cfg.BaseURL = strings.TrimRight(envURL, "/")
 	}
 
