@@ -111,13 +111,21 @@ func TestWorkerPool_TranscriptPublish(t *testing.T) {
 			f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sID, BrainDir: f.brainDir})
 			if !tc.knownInit {
 				<-f.store.ch
-				if !f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sID, BrainDir: f.brainDir}) {
-					t.Fatalf("expected parked session to coalesce duplicate enqueue")
+				f.pool.transcriptPublishSem <- struct{}{}
+				f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sID, BrainDir: f.brainDir})
+				n := len(f.pool.transcriptPublishCh)
+				<-f.pool.transcriptPublishSem
+				if n != 0 {
+					t.Fatalf("expected duplicate enqueue while parked to coalesce, got %d queued jobs", n)
 				}
 				f.store.setKnown(sID, true)
 			}
 			if b := <-f.pubCh; b.FirstStep != tc.first || b.LastStep != tc.last {
 				t.Fatalf("step mismatch: first=%d last=%d", b.FirstStep, b.LastStep)
+			}
+			f.pool.Stop()
+			if len(f.published) != 1 {
+				t.Fatalf("expected exactly 1 published batch, got %d", len(f.published))
 			}
 		})
 	}
@@ -146,7 +154,6 @@ func TestWorkerPool_TranscriptPublish_StopDrain(t *testing.T) {
 	f.pool.Start()
 	f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sID, BrainDir: f.brainDir})
 	<-inFlight
-	f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sID, BrainDir: f.brainDir})
 	f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: sID + "-q", BrainDir: f.brainDir})
 	f.pool.Stop()
 	if !canceled || len(f.published) != 2 || f.published[0].SessionID != sID || f.published[1].SessionID != sID+"-q" {
@@ -174,6 +181,12 @@ func TestWorkerPool_TranscriptPublishAuxiliary(t *testing.T) {
 	<-f.pool.transcriptPublishCh
 	if j := <-f.pool.transcriptPublishCh; j.SessionID != "s-retry" || len(f.pool.transcriptPublishCh) > 0 {
 		t.Fatalf("expected only s-retry, got %s", j.SessionID)
+	}
+	f.store.setKnown("s-park", false)
+	writeTestTranscript(f.brainDir, "s-park", 0)
+	_ = f.pool.processTranscriptPublishJobWithContext(context.Background(), TranscriptPublishJob{SessionID: "s-park", BrainDir: f.brainDir})
+	if !f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: "s-park", BrainDir: f.brainDir}) || len(f.pool.transcriptPublishCh) != 0 {
+		t.Fatalf("expected parked session to coalesce duplicate enqueue into 0 channel entries, got %d", len(f.pool.transcriptPublishCh))
 	}
 	f.pool.transcriptPublishSem <- struct{}{}
 	toCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)

@@ -87,6 +87,24 @@ func (p *WorkerPool) publishJobLocked(ctx context.Context, job TranscriptPublish
 	}
 }
 
+func (p *WorkerPool) setInFlight(job *TranscriptPublishJob) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if job == nil {
+		p.transcriptInFlight = nil
+	} else {
+		cp := *job
+		p.transcriptInFlight = &cp
+	}
+}
+
+func (p *WorkerPool) takeInFlight() (j *TranscriptPublishJob) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	j, p.transcriptInFlight = p.transcriptInFlight, nil
+	return j
+}
+
 func (p *WorkerPool) runTranscriptPublishWorker() {
 	for p.ctx.Err() == nil {
 		select {
@@ -96,9 +114,13 @@ func (p *WorkerPool) runTranscriptPublishWorker() {
 			if !ok {
 				return
 			}
+			p.setInFlight(&job)
 			jobCtx, cancel := context.WithTimeout(p.ctx, 60*time.Second)
 			p.publishJobLocked(jobCtx, job, "Transcript")
 			cancel()
+			if p.ctx.Err() == nil {
+				p.setInFlight(nil)
+			}
 		}
 	}
 }
@@ -109,6 +131,11 @@ func (p *WorkerPool) drainTranscriptPublisher(ctx context.Context) error {
 		defer func() { <-p.transcriptPublishSem }()
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+	if inFlight := p.takeInFlight(); inFlight != nil {
+		if err := p.processTranscriptPublishJobWithContext(ctx, *inFlight); err != nil && ctx.Err() == nil {
+			log.Printf("[WorkerPool] Drain publish error for session %s: %v", inFlight.SessionID, err)
+		}
 	}
 	for ctx.Err() == nil {
 		select {
@@ -139,8 +166,12 @@ func (p *WorkerPool) setPending(id string, pending bool) {
 }
 
 func (p *WorkerPool) retryOrDrop(j TranscriptPublishJob, reason string, err error) error {
+	if p != nil && p.ctx.Err() != nil {
+		return err
+	}
 	if j.ParkCount >= maxTranscriptParkAttempts {
 		log.Printf("[WorkerPool] Dropping transcript publish job for session %s after %d attempts (%s): %v", j.SessionID, j.ParkCount, reason, err)
+		p.setPending(j.SessionID, false)
 		return err
 	}
 	j.ParkCount++
@@ -185,6 +216,7 @@ func (p *WorkerPool) processTranscriptPublishJobWithContext(ctx context.Context,
 		return p.retryOrDrop(job, "stat transcript file", err)
 	}
 	if job.IsRecheck && fi.ModTime().UTC().Equal(job.LastMtime) && fi.Size() == job.LastSize {
+		p.setPending(sID, false)
 		return nil
 	}
 	wm := -1

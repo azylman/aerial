@@ -181,6 +181,7 @@ type WorkerPool struct {
 	transcriptPublishCh     chan TranscriptPublishJob
 	transcriptPublishSem    chan struct{}
 	transcriptPending       map[string]bool
+	transcriptInFlight      *TranscriptPublishJob
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
