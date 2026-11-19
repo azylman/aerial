@@ -517,6 +517,84 @@ describe('OverviewBuildsSection', () => {
     expect(useConsoleStore.getState().ui.activeTab).toBe('builds');
   });
 
+  it('orders out-of-order build payloads with running first, then queued, then completed by completion descending', () => {
+    const { container } = render(<OverviewBuildsSection />);
+    seedBuilds(
+      sampleBuilds({
+        builds: [
+          {
+            id: 'build-comp-older',
+            thread_id: 'th-1',
+            tier: 1,
+            title: 'Older Completed Build',
+            objective: 'Done Old',
+            status: 'completed',
+            total_chunks: 1,
+            completed_chunks: 1,
+            running_chunks: 0,
+            pending_chunks: 0,
+            failed_chunks: 0,
+            created_at: '2026-11-08T10:00:00Z',
+            updated_at: '2026-11-08T10:30:00Z',
+          },
+          {
+            id: 'build-comp-newer',
+            thread_id: 'th-2',
+            tier: 1,
+            title: 'Newer Completed Build',
+            objective: 'Done New',
+            status: 'completed',
+            total_chunks: 1,
+            completed_chunks: 1,
+            running_chunks: 0,
+            pending_chunks: 0,
+            failed_chunks: 0,
+            created_at: '2026-11-08T11:00:00Z',
+            updated_at: '2026-11-08T11:30:00Z',
+          },
+          {
+            id: 'build-queued-item',
+            thread_id: 'th-3',
+            tier: 1,
+            title: 'Queued Build Item',
+            objective: 'Queue',
+            status: 'queued',
+            total_chunks: 1,
+            completed_chunks: 0,
+            running_chunks: 0,
+            pending_chunks: 1,
+            failed_chunks: 0,
+            created_at: '2026-11-08T11:45:00Z',
+            updated_at: '2026-11-08T11:45:00Z',
+          },
+          {
+            id: 'build-running-item',
+            thread_id: 'th-4',
+            tier: 1,
+            title: 'Running Build Item',
+            objective: 'Run',
+            status: 'running',
+            total_chunks: 1,
+            completed_chunks: 0,
+            running_chunks: 1,
+            pending_chunks: 0,
+            failed_chunks: 0,
+            created_at: '2026-11-08T11:50:00Z',
+            updated_at: '2026-11-08T11:50:00Z',
+          },
+        ],
+      }),
+    );
+    const rows = container.querySelectorAll('.overview-build-row');
+    expect(rows).toHaveLength(3);
+    const renderedTitles = [...rows].map((r) => r.querySelector('.overview-row-title')?.textContent);
+    expect(renderedTitles).toEqual([
+      'Running Build Item',
+      'Queued Build Item',
+      'Newer Completed Build',
+    ]);
+  });
+
   it('fetches detail fallback exactly once when expanding a chunk-less build, showing loading then DAG, and aborts on collapse', async () => {
     let abortObserved = false;
     fetchMock.mockImplementation((_url: string, init?: RequestInit) => {

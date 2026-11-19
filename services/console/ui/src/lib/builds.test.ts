@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyBuildQueueState,
+  compareBuilds,
   computeBuildChunkStats,
   formatBuildTimestamp,
+  getBuildCompletionMs,
   getBuildStatusBadgeInfo,
   getBuildTimingInfo,
   isSameCalendarDay,
@@ -216,5 +218,109 @@ describe('getBuildTimingInfo', () => {
     },
   ])('$name', ({ build, now, want }) => {
     expect(getBuildTimingInfo(build, now ?? NOW)).toEqual(want);
+  });
+});
+
+describe('getBuildCompletionMs', () => {
+  it.each<{ name: string; build: BuildLike | null | undefined; want: number | null }>([
+    { name: 'null build', build: null, want: null },
+    { name: 'undefined build', build: undefined, want: null },
+    { name: 'running build returns null', build: { status: 'running', updated_at: localIso(10, 17, 10, 0) }, want: null },
+    { name: 'queued build returns null', build: { status: 'queued', updated_at: localIso(10, 17, 10, 0) }, want: null },
+    {
+      name: 'completed build uses max chunk completed_at',
+      build: {
+        status: 'completed',
+        updated_at: localIso(10, 17, 10, 0),
+        chunks: [
+          { status: 'merged', completed_at: localIso(10, 17, 9, 30) },
+          { status: 'completed', completed_at: localIso(10, 17, 9, 45) },
+        ],
+      },
+      want: localMs(10, 17, 9, 45),
+    },
+    {
+      name: 'completed build falls back to build and chunk updated_at',
+      build: {
+        status: 'completed',
+        updated_at: localIso(10, 17, 10, 15),
+        chunks: [{ status: 'merged', completed_at: ZERO_TIME, updated_at: localIso(10, 17, 10, 30) }],
+      },
+      want: localMs(10, 17, 10, 30),
+    },
+    {
+      name: 'completed build with no timestamps returns null',
+      build: { status: 'completed', updated_at: ZERO_TIME },
+      want: null,
+    },
+  ])('$name', ({ build, want }) => {
+    expect(getBuildCompletionMs(build)).toBe(want);
+  });
+});
+
+describe('compareBuilds', () => {
+  const bRun1 = { id: 'r1', status: 'running', created_at: localIso(10, 17, 8, 0) };
+  const bRun2 = { id: 'r2', status: 'running', created_at: localIso(10, 17, 9, 0) };
+  const bQueued1 = { id: 'q1', status: 'queued', created_at: localIso(10, 17, 8, 0) };
+  const bQueued2 = { id: 'q2', status: 'pending', created_at: localIso(10, 17, 9, 0) };
+  const bCompEarly = {
+    id: 'c-early',
+    status: 'completed',
+    created_at: localIso(10, 17, 7, 0),
+    chunks: [{ status: 'merged', completed_at: localIso(10, 17, 8, 30) }],
+  };
+  const bCompLate = {
+    id: 'c-late',
+    status: 'completed',
+    created_at: localIso(10, 17, 8, 0),
+    chunks: [{ status: 'merged', completed_at: localIso(10, 17, 9, 30) }],
+  };
+  const bCompSameCompDiffCreatedEarly = {
+    id: 'c-tie-early',
+    status: 'completed',
+    created_at: localIso(10, 17, 6, 0),
+    chunks: [{ status: 'merged', completed_at: localIso(10, 17, 9, 30) }],
+  };
+  const bCompSameCompDiffCreatedLate = {
+    id: 'c-tie-late',
+    status: 'completed',
+    created_at: localIso(10, 17, 7, 0),
+    chunks: [{ status: 'merged', completed_at: localIso(10, 17, 9, 30) }],
+  };
+
+  it.each<{ name: string; a: BuildLike; b: BuildLike; wantSign: number }>([
+    { name: 'running before queued', a: bRun1, b: bQueued1, wantSign: -1 },
+    { name: 'running before completed', a: bRun1, b: bCompLate, wantSign: -1 },
+    { name: 'queued before completed', a: bQueued1, b: bCompLate, wantSign: -1 },
+    { name: 'running builds preserve relative order', a: bRun1, b: bRun2, wantSign: 0 },
+    { name: 'queued builds preserve relative order', a: bQueued1, b: bQueued2, wantSign: 0 },
+    { name: 'later completion comes before earlier completion', a: bCompLate, b: bCompEarly, wantSign: -1 },
+    {
+      name: 'tied completion falls back to newer created_at first',
+      a: bCompSameCompDiffCreatedLate,
+      b: bCompSameCompDiffCreatedEarly,
+      wantSign: -1,
+    },
+    {
+      name: 'identical completed builds preserve relative order',
+      a: bCompEarly,
+      b: { ...bCompEarly },
+      wantSign: 0,
+    },
+  ])('$name', ({ a, b, wantSign }) => {
+    const res = compareBuilds(a, b);
+    if (wantSign === 0) {
+      expect(res).toBe(0);
+    } else if (wantSign > 0) {
+      expect(res).toBeGreaterThan(0);
+    } else {
+      expect(res).toBeLessThan(0);
+    }
+  });
+
+  it('sorts a mixed array with running first, then queued, then completed descending by completion', () => {
+    const list = [bCompEarly, bQueued1, bCompLate, bRun1, bQueued2, bRun2];
+    const sorted = [...list].sort(compareBuilds);
+    expect(sorted.map((b) => (b as { id: string }).id)).toEqual(['r1', 'r2', 'q1', 'q2', 'c-late', 'c-early']);
   });
 });
