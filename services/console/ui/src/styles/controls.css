@@ -119,9 +119,9 @@
 .cat-pill.active,
 .filter-pill.active,
 .schedules-subtab.active {
-    background: #141413;
-    color: #ffffff;
-    border-color: #141413;
+    background: var(--pill-active-bg);
+    color: var(--pill-active-fg);
+    border-color: var(--pill-active-bg);
     box-shadow: 0 1px 3px rgba(20, 20, 19, 0.12);
 }
 
@@ -135,7 +135,7 @@
 
 .cat-pill.active .pill-count {
     background: rgba(255, 255, 255, 0.2);
-    color: #ffffff;
+    color: var(--pill-active-fg);
 }
 
 /* --- RESULTS TELEMETRY BAR --- */

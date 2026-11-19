@@ -46,6 +46,9 @@ function badges(): Record<string, string | null> {
 
 describe('Header', () => {
   beforeEach(() => {
+    window.localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    document.documentElement.style.colorScheme = '';
     useConsoleStore.setState(useConsoleStore.getInitialState(), true);
     window.history.replaceState(null, '', '/console/next/');
     iconRenders.length = 0;
@@ -100,6 +103,28 @@ describe('Header', () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: 'instant' });
     Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
   });
+
+  it('initializes dark theme by default and toggles between dark and light', () => {
+    render(<Header />);
+    const toggle = screen.getByRole('button', { name: 'Switch to light theme' });
+    expect(toggle).toBeTruthy();
+    expect(toggle.getAttribute('title')).toBe('Switch to light theme (Polar Slate)');
+    expect(within(toggle).getByText('Light')).toBeTruthy();
+    expect(document.documentElement.dataset.theme).toBe('dark');
+
+    act(() => toggle.click());
+    expect(toggle.getAttribute('aria-label')).toBe('Switch to dark theme');
+    expect(toggle.getAttribute('title')).toBe('Switch to dark theme (Catppuccin Mocha)');
+    expect(within(toggle).getByText('Dark')).toBeTruthy();
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(window.localStorage.getItem('aerial-console-theme')).toBe('light');
+
+    act(() => toggle.click());
+    expect(toggle.getAttribute('aria-label')).toBe('Switch to light theme');
+    expect(within(toggle).getByText('Light')).toBeTruthy();
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(window.localStorage.getItem('aerial-console-theme')).toBe('dark');
+  });
 });
 
 interface IsolationRow {
@@ -146,6 +171,9 @@ const isolationRows: IsolationRow[] = [
 
 describe('Header render isolation', () => {
   beforeEach(() => {
+    window.localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    document.documentElement.style.colorScheme = '';
     useConsoleStore.setState(useConsoleStore.getInitialState(), true);
     useConsoleStore.getState().setCluster(CLUSTER);
     useConsoleStore.getState().setFacts(FACTS);

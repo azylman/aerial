@@ -519,8 +519,8 @@ html.motion-ready .step-panel.step-active {
 
 .service-card {
     position: relative;
-    background: #f6f5f1;
-    border: 1px solid #e2dfd7;
+    background: var(--card-elevated);
+    border: 1px solid var(--card-border);
     border-radius: 6px;
     padding: 9px 11px;
     display: flex;
@@ -535,7 +535,7 @@ html.motion-ready .step-panel.step-active {
 
 .service-card:hover {
     border-color: var(--card-border-hover);
-    background: #ffffff;
+    background: var(--bg-surface);
     box-shadow: 0 4px 12px rgba(20, 20, 19, 0.08);
 }
 
@@ -614,7 +614,6 @@ html.motion-ready .step-panel.step-active {
 }
 
 .task-inspect-btn.expand-tasks-btn {
-    color-scheme: light;
     cursor: pointer;
     padding: 4px 10px;
     font-size: 0.72rem;
