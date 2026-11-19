@@ -538,18 +538,30 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
 	slog.InfoContext(ctx, "[synapse] [github] [check_run] event", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
 
+	recovered := false
 	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return nil, err
 		}
+		recovered = true
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
-		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.failedCheckRuns.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.collaboratorAlertedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.collaboratorConflictSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.populateMissingBranch(ctx, res)
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        ghActionSynchronize,
+			Repo:         res.Repo,
+			PRNumber:     res.PRNumber,
+			Branch:       res.Branch,
+			HeadSHA:      res.HeadSHA,
+			TargetID:     res.TargetID,
+			Status:       prOpen,
+			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+			Quiet:        isDependabotBranch(res.Branch),
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			slog.WarnContext(ctx, "[synapse] [pr_lifecycle] failed publishing recovery synchronize event", "repo", res.Repo, "pr", res.PRNumber, "error", err)
+		}
 	}
 
 	s.recordCheckRunStatus(ctx, res)
@@ -559,7 +571,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
 		return nil, err
 	}
-	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && isGateAggregatorCheck(res.CheckName) && res.PRNumber > 0 {
+	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && (isGateAggregatorCheck(res.CheckName) || isRoboRevCheck(res.CheckName) || recovered) && res.PRNumber > 0 {
 		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
 			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on gate success", "repo", res.Repo, "error", err)
 		}
