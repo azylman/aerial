@@ -949,7 +949,7 @@ func isEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk,
 	if buildThread := normalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && normalizeDiscordThreadID(ev.TargetID) != buildThread {
 		return false
 	}
-	return attachmentMatches(*c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
+	return store.AttachmentMatches(*c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
 }
 
 func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string) {
