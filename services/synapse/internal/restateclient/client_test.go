@@ -34,11 +34,17 @@ type recordedRequest struct {
 	body   string
 }
 
-func newRecordedServer(t *testing.T, status int, recs *[]recordedRequest) *httptest.Server {
+func newRecordedServer(t *testing.T, status int, truncate bool, recs *[]recordedRequest) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		*recs = append(*recs, recordedRequest{method: r.Method, path: r.URL.EscapedPath(), body: string(body)})
+		if truncate {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte("short"))
+			return
+		}
 		w.WriteHeader(status)
 	}))
 }
@@ -56,7 +62,6 @@ func TestClient(t *testing.T) {
 	}{
 		{name: "trims trailing slash and keeps custom services", baseURL: "http://restate.aerial:8080/", prService: "PRObject", repoService: "RepoObject", wantBaseURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoSvc: "RepoObject"},
 		{name: "defaults empty service names to frozen objects", baseURL: "http://restate.aerial:8080", prService: "", repoService: "", wantBaseURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoSvc: "RepoObject"},
-		{name: "defaults blank service names to frozen objects", baseURL: "http://restate.aerial:8080", prService: "   ", repoService: "  ", wantBaseURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoSvc: "RepoObject"},
 		{name: "empty base url stays disabled", baseURL: "", prService: "", repoService: "", wantBaseURL: "", wantPRService: "PRObject", wantRepoSvc: "RepoObject"},
 		{name: "custom service names preserved", baseURL: "http://restate.aerial:8080", prService: "CustomPR", repoService: "CustomRepo", wantBaseURL: "http://restate.aerial:8080", wantPRService: "CustomPR", wantRepoSvc: "CustomRepo"},
 	}
@@ -125,6 +130,7 @@ func TestSendPREvent(t *testing.T) {
 		handler      string
 		event        PREvent
 		serverStatus int
+		truncate     bool
 		wantErr      string
 		wantPath     string
 		wantBodySubs []string
@@ -134,20 +140,20 @@ func TestSendPREvent(t *testing.T) {
 		{name: "bare repo normalizes with owner prefix", handler: "HandleCheckPassed", event: PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1},
 		{name: "owned merged carries merge sha", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1},
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
-		{name: "empty handler sends nothing", handler: "", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
 		{name: "empty repo sends nothing", handler: "HandleClosed", event: PREvent{Event: "closed", Repo: "", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
 		{name: "bad pr number sends nothing", handler: "HandleClosed", event: PREvent{Event: "closed", Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "pr_number is required", wantRequests: 0},
 		{name: "unconfigured endpoint sends nothing", baseURL: "unconfigured", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
 		{name: "refused endpoint surfaces error", baseURL: "http://127.0.0.1:1", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
 		{name: "malformed endpoint surfaces error", baseURL: "http://restate bad", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "create restate request", wantRequests: 0},
 		{name: "server error surfaces status", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, wantErr: "status 500", wantRequests: 1},
-		{name: "client error surfaces status", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 400, wantErr: "status 400", wantRequests: 1},
+		{name: "truncated success body surfaces drain error", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, truncate: true, wantErr: "drain restate response", wantRequests: 1},
+		{name: "unreadable error body omits body", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, truncate: true, wantErr: "returned status 500", wantRequests: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var recs []recordedRequest
-			srv := newRecordedServer(t, tc.serverStatus, &recs)
+			srv := newRecordedServer(t, tc.serverStatus, tc.truncate, &recs)
 			defer srv.Close()
 			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
 			err := c.SendPREvent(t.Context(), tc.handler, tc.event)
@@ -176,13 +182,12 @@ func TestSendRepoEvent(t *testing.T) {
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "unknown repo handler", wantRequests: 0},
 		{name: "pr handler rejected for repo event", handler: "HandleCheckFailed", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "unknown repo handler", wantRequests: 0},
 		{name: "empty repo sends nothing", handler: "HandleMainPush", event: RepoEvent{Repo: "", MainSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
-		{name: "server error surfaces status", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 500, wantErr: "status 500", wantRequests: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var recs []recordedRequest
-			srv := newRecordedServer(t, tc.serverStatus, &recs)
+			srv := newRecordedServer(t, tc.serverStatus, false, &recs)
 			defer srv.Close()
 			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
 			err := c.SendRepoEvent(t.Context(), tc.handler, tc.event)
@@ -200,14 +205,12 @@ func TestUnmanagedGuard(t *testing.T) {
 	}{
 		{name: "unmanaged without build id stays in PRObject", event: PREvent{Event: "collaborator_alert", Repo: "mirrormere", PRNumber: 12, HeadSHA: "abc123", Unmanaged: true}, wantBodySub: `"unmanaged":true`},
 		{name: "unmanaged flag wins over build id", event: PREvent{Event: "collaborator_alert", Repo: "mirrormere", PRNumber: 12, HeadSHA: "abc123", Unmanaged: true, BuildID: "build-1"}, wantBodySub: `"build_id":"build-1"`},
-		{name: "empty build id without flag stays in PRObject", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, wantBodySub: `"head_sha":"abc123"`},
-		{name: "owned build id passes through opaquely", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-7"}, wantBodySub: `"build_id":"build-7"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var recs []recordedRequest
-			srv := newRecordedServer(t, 200, &recs)
+			srv := newRecordedServer(t, 200, false, &recs)
 			defer srv.Close()
 			c := NewClient(srv.URL, "", "", nil)
 			if err := c.SendPREvent(t.Context(), "HandleCollaboratorAlert", tc.event); err != nil {

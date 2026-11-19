@@ -181,6 +181,9 @@ func (c *Client) send(ctx context.Context, service, key, handler string, payload
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if _, copyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); copyErr != nil {
+			return fmt.Errorf("drain restate response: %w", copyErr)
+		}
 		return nil
 	}
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
