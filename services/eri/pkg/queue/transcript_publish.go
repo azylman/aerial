@@ -75,16 +75,20 @@ func (p *WorkerPool) EnqueueTranscriptPublish(job TranscriptPublishJob) bool {
 	}
 }
 
-func (p *WorkerPool) publishJobLocked(ctx context.Context, job TranscriptPublishJob, tag string) {
+func (p *WorkerPool) publishJobLocked(ctx context.Context, job TranscriptPublishJob, tag string) error {
 	select {
 	case p.transcriptPublishSem <- struct{}{}:
 		defer func() { <-p.transcriptPublishSem }()
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	}
-	if err := p.processTranscriptPublishJobWithContext(ctx, job); err != nil && ctx.Err() == nil {
-		log.Printf("[WorkerPool] %s publish error for session %s: %v", tag, job.SessionID, err)
+	if err := p.processTranscriptPublishJobWithContext(ctx, job); err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[WorkerPool] %s publish error for session %s: %v", tag, job.SessionID, err)
+		}
+		return err
 	}
+	return nil
 }
 
 func (p *WorkerPool) setInFlight(job *TranscriptPublishJob) {
@@ -116,9 +120,9 @@ func (p *WorkerPool) runTranscriptPublishWorker() {
 			}
 			p.setInFlight(&job)
 			jobCtx, cancel := context.WithTimeout(p.ctx, 60*time.Second)
-			p.publishJobLocked(jobCtx, job, "Transcript")
+			err := p.publishJobLocked(jobCtx, job, "Transcript")
 			cancel()
-			if p.ctx.Err() == nil {
+			if err == nil || jobCtx.Err() == nil {
 				p.setInFlight(nil)
 			}
 		}
@@ -192,6 +196,27 @@ func (p *WorkerPool) enqueueDelayed(j TranscriptPublishJob) {
 	})
 }
 
+func (p *WorkerPool) resolvePublishBrainDir(sessionID string, extraDirs ...string) string {
+	if p == nil {
+		return ""
+	}
+	if p.sessionMgr != nil && len(p.sessionMgr.Roots()) > 0 {
+		for _, r := range p.sessionMgr.Roots() {
+			if r = strings.TrimSpace(r); r == "" {
+				continue
+			}
+			if transcript.FindTranscriptFile(r, sessionID, extraDirs...) != "" {
+				return r
+			}
+		}
+		return ""
+	}
+	if p.appCfg != nil {
+		return p.appCfg.GeminiHomeDir()
+	}
+	return ""
+}
+
 func (p *WorkerPool) processTranscriptPublishJobWithContext(ctx context.Context, job TranscriptPublishJob) error {
 	sID := strings.TrimSpace(job.SessionID)
 	if sID == "" {
@@ -204,13 +229,15 @@ func (p *WorkerPool) processTranscriptPublishJobWithContext(ctx context.Context,
 			return p.retryOrDrop(job, "allowlist", err)
 		}
 	}
-	if job.BrainDir == "" && p.appCfg != nil {
-		job.BrainDir = p.appCfg.GeminiHomeDir()
+	brainDir := job.BrainDir
+	if brainDir == "" {
+		brainDir = p.resolvePublishBrainDir(sID, job.ExtraDirs...)
 	}
-	path := transcript.FindTranscriptFile(job.BrainDir, sID, job.ExtraDirs...)
+	path := transcript.FindTranscriptFile(brainDir, sID, job.ExtraDirs...)
 	if path == "" {
 		return p.retryOrDrop(job, "transcript file not found", nil)
 	}
+	job.BrainDir = brainDir
 	fi, err := os.Stat(path)
 	if err != nil {
 		return p.retryOrDrop(job, "stat transcript file", err)

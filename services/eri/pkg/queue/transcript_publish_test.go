@@ -17,6 +17,7 @@ import (
 	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
@@ -206,5 +207,152 @@ func TestWorkerPool_TranscriptPublishAuxiliary(t *testing.T) {
 		if f.pool.processTranscriptPublishJobWithContext(context.Background(), TranscriptPublishJob{SessionID: "s-rc", BrainDir: f.brainDir}) == nil {
 			t.Fatalf("expected error")
 		}
+	}
+}
+
+func TestTurnExecution_TouchedSessionIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		touch    []string
+		expected []string
+	}{
+		{
+			name:     "empty_and_whitespace_ignored",
+			touch:    []string{"", "   ", "\t\n"},
+			expected: nil,
+		},
+		{
+			name:     "deduplicates_and_preserves_order",
+			touch:    []string{"sess-1", "sess-2", "sess-1", "  sess-2  ", "sess-3"},
+			expected: []string{"sess-1", "sess-2", "sess-3"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := New(nil, WorkerPoolConfig{})
+			pool.transcriptPublishCh = make(chan TranscriptPublishJob, 10)
+			te := &turnExecution{pool: pool, threadID: "th-123"}
+
+			for _, s := range tc.touch {
+				te.activeSessionMu.Lock()
+				te.touchSessionIDLocked(s)
+				te.activeSessionMu.Unlock()
+			}
+
+			got := te.touchedSessionIDs()
+			if !slices.Equal(got, tc.expected) {
+				t.Fatalf("touchedSessionIDs mismatch: got %v, want %v", got, tc.expected)
+			}
+
+			te.enqueueTranscriptPublish()
+			if len(tc.expected) != len(pool.transcriptPublishCh) {
+				t.Fatalf("expected %d published jobs, got %d", len(tc.expected), len(pool.transcriptPublishCh))
+			}
+			for _, expectedSid := range tc.expected {
+				job := <-pool.transcriptPublishCh
+				if job.SessionID != expectedSid || job.ThreadID != "th-123" {
+					t.Fatalf("job mismatch: got %+v, want SessionID=%s ThreadID=th-123", job, expectedSid)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessTranscriptPublishJob_MultiRootResolution(t *testing.T) {
+	t.Parallel()
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+
+	f := newTranscriptFixture(t, 20*time.Millisecond, -1)
+	defer f.pool.Stop()
+
+	f.pool.sessionMgr = session.New(root2, root1)
+	roots := f.pool.sessionMgr.Roots()
+	if len(roots) < 2 {
+		t.Fatalf("expected at least 2 roots, got %v", roots)
+	}
+
+	// First attempt: transcript does not exist under any root.
+	// Verify that retryOrDrop parks the job without locking in an incorrect sticky BrainDir.
+	sID := "sess-delayed-multi-root"
+	f.store.setKnown(sID, true)
+	job := TranscriptPublishJob{SessionID: sID, ThreadID: "th-roots"}
+	if err := f.pool.processTranscriptPublishJobWithContext(context.Background(), job); err != nil {
+		t.Fatalf("expected first attempt to return retry error, got err: %v", err)
+	}
+	if len(f.published) != 0 {
+		t.Fatalf("expected 0 published batches on first attempt, got %d", len(f.published))
+	}
+	if job.BrainDir != "" {
+		t.Fatalf("expected job.BrainDir to remain empty when no root contains the transcript, got %q", job.BrainDir)
+	}
+
+	// Second attempt: transcript appears in the second root.
+	writeTestTranscript(roots[1], sID, 0, 1)
+	if err := f.pool.processTranscriptPublishJobWithContext(context.Background(), job); err != nil {
+		t.Fatalf("expected job to succeed with second root transcript, got err: %v", err)
+	}
+
+	if len(f.published) != 1 || f.published[0].SessionID != sID {
+		t.Fatalf("expected 1 published batch for %s, got %v", sID, f.published)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_TranscriptPublish(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		deviceKey  string
+		prompt     string
+		customConv string
+		isStandard bool
+		wantJob    string
+		wantThread string
+	}{
+		{
+			name:       "custom_runner_success_publishes_conv",
+			deviceKey:  "dev-kiosk",
+			prompt:     "test prompt",
+			customConv: "custom-conv-123",
+			isStandard: false,
+			wantJob:    "custom-conv-123",
+			wantThread: "voice-dev-kiosk",
+		},
+		{
+			name:       "standard_voice_process_pool_publishes_active_session",
+			deviceKey:  "mock-dev-1",
+			prompt:     "ping",
+			isStandard: true,
+			wantJob:    "sess-mock-dev-1",
+			wantThread: "voice-mock-dev-1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := New(nil, WorkerPoolConfig{})
+			pool.transcriptPublishCh = make(chan TranscriptPublishJob, 10)
+			if tc.isStandard {
+				pool.voiceProcessPool = &queueMockVoiceProcessPool{sessions: make(map[string]*queueMockVoiceSession)}
+			} else {
+				pool.cfg.VoiceRunnerFunc = func(ctx context.Context, prompt, deviceKey string, onStatus func(string)) (string, string, error) {
+					return "ok", tc.customConv, nil
+				}
+			}
+
+			_, _, _ = pool.ExecuteVoiceTurn(context.Background(), tc.prompt, tc.deviceKey, nil)
+
+			if len(pool.transcriptPublishCh) != 1 {
+				t.Fatalf("expected 1 job, got %d", len(pool.transcriptPublishCh))
+			}
+			j := <-pool.transcriptPublishCh
+			if j.SessionID != tc.wantJob || j.ThreadID != tc.wantThread {
+				t.Fatalf("job mismatch: got %+v, want SessionID=%s ThreadID=%s", j, tc.wantJob, tc.wantThread)
+			}
+		})
 	}
 }
