@@ -13,6 +13,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/config"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 	"github.com/azylman/aerial/services/synapse/internal/router"
 )
 
@@ -27,6 +28,11 @@ var (
 func runMain() error {
 	cfg := loadConfigFn()
 	cfgSrc := httpkit.NewReloadable(&cfg, loadConfigStrictFn, config.RestartRequired)
+
+	// Dark chunk 03: the Restate invoker is constructed only. No production
+	// path sends through it yet; consumer wiring lands in a later chunk.
+	restateInvoker := restateclient.NewClient(cfg.RestateURL, cfg.RestatePRService, cfg.RestateRepoService, nil)
+	_ = restateInvoker
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
