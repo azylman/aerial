@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,6 +77,70 @@ func TestSearchSteps(t *testing.T) {
 			}
 			if len(got) != tc.wantCount {
 				t.Errorf("SearchSteps() = %d rows, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestBuildStepsQuery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		stack          string
+		query          string
+		session        string
+		tool           string
+		limit          int
+		useFTS         bool
+		wantContains   string
+		wantNotContain string
+		wantArgs       []any
+	}{
+		{"sqlite keeps like scan", "", "hello", "", "", 20, false, "t.content LIKE '%' || $1 || '%'", "fts_tokens", []any{"hello", 20}},
+		{"postgres uses fts index", "", "hello", "", "", 20, true, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
+		{"postgres keeps filter placeholders", "aerial", "hello", "sess-a", "bash", 10, true, "t.stack = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, args := buildStepsQuery(tc.stack, tc.query, tc.session, tc.tool, tc.limit, tc.useFTS)
+			if !strings.Contains(got, tc.wantContains) {
+				t.Errorf("buildStepsQuery() = %q, want it to contain %q", got, tc.wantContains)
+			}
+			if strings.Contains(got, tc.wantNotContain) {
+				t.Errorf("buildStepsQuery() = %q, want it to omit %q", got, tc.wantNotContain)
+			}
+			if !reflect.DeepEqual(args, tc.wantArgs) {
+				t.Errorf("buildStepsQuery() args = %v, want %v", args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestSearchStepsNilDB(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		query   string
+		session string
+		tool    string
+		wantErr bool
+	}{
+		{"nil db content query errors", "hello", "", "", true},
+		{"nil db session filter errors", "", "sess-a", "", true},
+		{"nil db tool filter errors", "", "", "bash", true},
+		{"nil db empty filters returns nothing", "", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := NewStore(nil, "aerial")
+			got, err := store.SearchSteps(context.Background(), "", tc.query, tc.session, tc.tool, 20)
+			if tc.wantErr && err == nil {
+				t.Errorf("SearchSteps() err = nil, want database nil error")
+			}
+			if !tc.wantErr && (err != nil || got != nil) {
+				t.Errorf("SearchSteps() = %v, %v, want nil, nil", got, err)
 			}
 		})
 	}

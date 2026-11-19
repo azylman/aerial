@@ -165,7 +165,10 @@ func (s *Store) SearchSteps(ctx context.Context, stack, queryText, sessionFilter
 	if limit <= 0 {
 		limit = 20
 	}
-	query, args := buildStepsQuery(stack, queryText, sessionFilter, toolFilter, limit)
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	query, args := buildStepsQuery(stack, queryText, sessionFilter, toolFilter, limit, isPostgresDriver(s.db.Driver()))
 	return collectReadRows(ctx, s, "search steps query failed", query, scanStepResult, args...)
 }
 
@@ -173,13 +176,20 @@ const stepsSelectClause = `SELECT t.stack, t.session_id, s.engine, t.step_index,
 	FROM transcript_steps t JOIN session_summaries s ON s.stack = t.stack AND s.session_id = t.session_id`
 
 // buildStepsQuery renders the filtered steps query; the empty stack matches
-// every stack while a set stack narrows to that stack's rows.
-func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int) (string, []any) {
+// every stack while a set stack narrows to that stack's rows. PostgreSQL
+// matches content through the fts_tokens GIN index (the same
+// websearch_to_tsquery shape the eri store and coven use); hermetic SQLite
+// fixtures keep the LIKE scan since they carry no FTS index.
+func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int, useFTS bool) (string, []any) {
 	var clauses []string
 	var args []any
 	if queryText != "" {
 		args = append(args, queryText)
-		clauses = append(clauses, fmt.Sprintf("t.content LIKE '%%' || $%d || '%%'", len(args)))
+		if useFTS {
+			clauses = append(clauses, fmt.Sprintf("t.fts_tokens @@ websearch_to_tsquery('simple', $%d)", len(args)))
+		} else {
+			clauses = append(clauses, fmt.Sprintf("t.content LIKE '%%' || $%d || '%%'", len(args)))
+		}
 	}
 	if stack != "" {
 		args = append(args, stack)
