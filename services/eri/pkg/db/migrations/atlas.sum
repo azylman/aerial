@@ -1,4 +1,4 @@
-h1:bgLmL7U3c/IlQ9P+1i6IkZb95ZCC862538VtHv6mfvs=
+h1:Kzs4BMdsCALvTrYzDVQ+rVKmaJH+D56NNftrTJO+78Y=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -36,3 +36,5 @@ h1:bgLmL7U3c/IlQ9P+1i6IkZb95ZCC862538VtHv6mfvs=
 20261114231500_relax_vanadis_chunks_mode_check.sql h1:7HuKqwMonQ+vF9HCtIpdeLGh2IC3AMk3DWp78VVo2mk=
 20261119001039_add_extraction_watermarks_stack.sql h1:csDRGMNt1NxP9TVuH8Y0QMOgUVQxs2jowCYBcVtSNWk=
 20261119001239_transcript_role_ownership.sql h1:iqdMYl/wD60cq2LwomE8MBnrwMXx3uRDbpBBSShOqwY=
+20261119083500_add_synapse_alert_firing.sql h1:T4HsDE2n6z008+nAJo1mwqvMc2nJ225t7DQ5TIDaNk4=
+20261119094337_add_synapse_main_push_seen.sql h1:9yk7TGMQtlsxRw7iAL4TWF0LyswUsJjJqtNpj50q5FA=

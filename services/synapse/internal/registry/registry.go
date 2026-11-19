@@ -88,6 +88,19 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 	return targetID, found, nil
 }
 
+// normalizeCheckRunArgs trims and lowercases check-run identifiers shared by
+// the check_runs conditional-update primitives, reporting whether the registry
+// can be touched for them.
+func (r *PostgresPRRegistry) normalizeCheckRunArgs(repo, headSHA, checkKey string, prNumber int) (string, string, string, bool) {
+	repo = model.NormalizeRepo(repo)
+	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
+	checkKey = strings.ToLower(strings.TrimSpace(checkKey))
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || headSHA == "" || model.IsZeroSHA(headSHA) || checkKey == "" {
+		return "", "", "", false
+	}
+	return repo, headSHA, checkKey, true
+}
+
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
 	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
@@ -406,6 +419,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]model.Depl
 		WHERE status = 'deploying'
 		   OR (status = 'deploy_failed' AND CASE WHEN jsonb_typeof(metadata->'kustomization_requests') = 'object' THEN metadata->'kustomization_requests' <> '{}'::jsonb ELSE false END)
 		   OR (status = 'deployed' AND COALESCE((metadata->>'deploy_success_pending')::boolean, false) = true)
+		   OR (status = 'deployed' AND COALESCE((metadata->>'deploy_success_claimed')::boolean, false) = true)
 		   OR (status IN ('merged', 'synced') AND CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0)
 		ORDER BY id ASC;`
 	rows, err := r.pool.Query(qCtx, query)
@@ -511,6 +525,443 @@ func (r *PostgresPRRegistry) AcknowledgeDeployFailedPublished(ctx context.Contex
 		WHERE repo = $1 AND pr_number = $2 AND status = 'deploy_failed';`
 	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
 		return fmt.Errorf("acknowledge deploy failed published: %w", err)
+	}
+	return nil
+}
+
+// ClaimDeploySuccess atomically claims the deploy_success publish for exactly
+// one pod. It performs the merged/synced/deploying to deployed transition
+// itself for unowned/no-deploy paths and marks the row with
+// deploy_success_pending plus deploy_success_claimed. The CTE takes the row
+// lock and reports the pre-claim flag, so serialized racers agree on a single
+// first claimer: the winner observes claimed=true while a re-claim of an
+// already-claimed row (crash recovery) returns the target with false, bounding
+// recovery to at most one republish. A deployed row that lost pending without
+// an ack still matches on its claimed flag so recovery can republish instead
+// of stranding the row.
+func (r *PostgresPRRegistry) ClaimDeploySuccess(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return "", false, nil
+	}
+	query := `
+		WITH cur AS (
+			SELECT id, target_id,
+				COALESCE((metadata->>'deploy_success_claimed')::boolean, false) AS was_claimed
+			FROM pr_registry
+			WHERE repo = $1 AND pr_number = $2
+			  AND (
+			    status IN ('merged', 'synced', 'deploying')
+			    OR (status = 'deployed' AND COALESCE((metadata->>'deploy_success_pending')::boolean, false) = true)
+			    OR (status = 'deployed' AND COALESCE((metadata->>'deploy_success_claimed')::boolean, false) = true)
+			  )
+			FOR UPDATE
+		),
+		upd AS (
+			UPDATE pr_registry p
+			SET status = 'deployed',
+			    metadata = jsonb_set(
+			        jsonb_set(COALESCE(p.metadata, '{}'::jsonb), '{deploy_success_pending}', 'true'::jsonb, true),
+			        '{deploy_success_claimed}', 'true'::jsonb, true),
+			    updated_at = CURRENT_TIMESTAMP
+			FROM cur
+			WHERE p.id = cur.id
+			RETURNING p.target_id, cur.was_claimed
+		)
+		SELECT target_id, NOT was_claimed FROM upd;`
+	var targetID string
+	var firstClaim bool
+	found, err := r.queryRowScan(ctx, "claim deploy success", query, []any{&targetID, &firstClaim}, repo, prNumber)
+	if err != nil || !found {
+		return "", false, err
+	}
+	return targetID, firstClaim, nil
+}
+
+// AcknowledgeDeploySuccessPublished clears the deploy_success claim after the
+// publish so the row stops re-entering the deploy watcher. It mirrors
+// AcknowledgeDeployFailedPublished and is idempotent.
+func (r *PostgresPRRegistry) AcknowledgeDeploySuccessPublished(ctx context.Context, repo string, prNumber int) error {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = (COALESCE(metadata, '{}'::jsonb) - 'deploy_success_pending') - 'deploy_success_claimed',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status = 'deployed';`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("acknowledge deploy success published: %w", err)
+	}
+	return nil
+}
+
+// RecordFailedCheckRun records one failed check run in durable check_runs
+// metadata, resetting the ever/active sets when headSHA starts a new
+// generation. The single conditional UPDATE returns emit/was-active/had-prior
+// semantics equivalent to the granular in-memory tracker. checkKey must
+// already be canonical (roborev variants folded); isRoboRev selects the
+// roborev flag slot instead of the active set.
+func (r *PostgresPRRegistry) RecordFailedCheckRun(ctx context.Context, repo string, prNumber int, headSHA, checkKey string, isRoboRev bool) (bool, bool, bool, error) {
+	repo, headSHA, checkKey, ok := r.normalizeCheckRunArgs(repo, headSHA, checkKey, prNumber)
+	if !ok {
+		return false, false, false, nil
+	}
+	query := `
+		WITH cur AS (
+			SELECT id,
+				(lower(COALESCE(metadata->'check_runs'->>'head_sha', '')) = lower($3)) AS same_head,
+				CASE WHEN (lower(COALESCE(metadata->'check_runs'->>'head_sha', '')) = lower($3)) AND jsonb_typeof(metadata->'check_runs'->'ever') = 'array' THEN metadata->'check_runs'->'ever' ELSE '[]'::jsonb END AS ever_base,
+				CASE WHEN (lower(COALESCE(metadata->'check_runs'->>'head_sha', '')) = lower($3)) AND jsonb_typeof(metadata->'check_runs'->'active') = 'array' THEN metadata->'check_runs'->'active' ELSE '[]'::jsonb END AS active_base,
+				CASE WHEN (lower(COALESCE(metadata->'check_runs'->>'head_sha', '')) = lower($3)) THEN COALESCE((metadata->'check_runs'->>'robo_rev_active')::boolean, false) ELSE false END AS robo_base
+			FROM pr_registry
+			WHERE repo = $1 AND pr_number = $2
+			FOR UPDATE
+		),
+		upd AS (
+			UPDATE pr_registry p
+			SET metadata = jsonb_set(
+					COALESCE(p.metadata, '{}'::jsonb),
+					'{check_runs}',
+					jsonb_build_object(
+						'head_sha', lower($3),
+						'ever', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(cur.ever_base || to_jsonb($4::text)) AS elem),
+						'active', CASE WHEN $5::boolean THEN cur.active_base ELSE (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(cur.active_base || to_jsonb($4::text)) AS elem) END,
+						'robo_rev_active', (cur.robo_base OR $5::boolean)
+					),
+					true
+				),
+			    updated_at = CURRENT_TIMESTAMP
+			FROM cur
+			WHERE p.id = cur.id
+			RETURNING
+				(((cur.ever_base <> '[]'::jsonb) OR cur.robo_base) AND NOT (CASE WHEN $5::boolean THEN cur.robo_base ELSE (cur.active_base ? $4) END)) AS emit_additional,
+				(CASE WHEN $5::boolean THEN cur.robo_base ELSE (cur.active_base ? $4) END) AS was_active,
+				((cur.ever_base ? $4)) AS had_prior
+		)
+		SELECT emit_additional, was_active, had_prior FROM upd;`
+	var emitAdditional, wasActive, hadPrior bool
+	found, err := r.queryRowScan(ctx, "record failed check run", query, []any{&emitAdditional, &wasActive, &hadPrior}, repo, prNumber, headSHA, checkKey, isRoboRev)
+	if err != nil || !found {
+		return false, false, false, err
+	}
+	return emitAdditional, wasActive, hadPrior, nil
+}
+
+// RollbackFailedCheckRun undoes a RecordFailedCheckRun whose dispatch failed,
+// restoring the prior active/ever sets for the same head SHA. It is a no-op
+// when wasActive is true (the record changed nothing) or the stored head SHA
+// moved on.
+func (r *PostgresPRRegistry) RollbackFailedCheckRun(ctx context.Context, repo string, prNumber int, headSHA, checkKey string, isRoboRev bool, wasActive, hadPriorEverFailed bool) error {
+	repo, headSHA, checkKey, ok := r.normalizeCheckRunArgs(repo, headSHA, checkKey, prNumber)
+	if !ok || wasActive {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		WITH cur AS (
+			SELECT id,
+				CASE WHEN jsonb_typeof(metadata->'check_runs'->'ever') = 'array' THEN metadata->'check_runs'->'ever' ELSE '[]'::jsonb END AS ever_base,
+				CASE WHEN jsonb_typeof(metadata->'check_runs'->'active') = 'array' THEN metadata->'check_runs'->'active' ELSE '[]'::jsonb END AS active_base,
+				COALESCE((metadata->'check_runs'->>'robo_rev_active')::boolean, false) AS robo_base
+			FROM pr_registry
+			WHERE repo = $1 AND pr_number = $2
+			  AND lower(COALESCE(metadata->'check_runs'->>'head_sha', '')) = lower($3)
+			FOR UPDATE
+		)
+		UPDATE pr_registry p
+		SET metadata = jsonb_set(
+				COALESCE(p.metadata, '{}'::jsonb),
+				'{check_runs}',
+				(COALESCE(p.metadata->'check_runs', '{}'::jsonb) || jsonb_build_object(
+					'active', CASE WHEN $5::boolean THEN cur.active_base ELSE (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements(cur.active_base) AS elem WHERE elem <> to_jsonb($4::text)) END,
+					'ever', CASE WHEN $6::boolean THEN cur.ever_base ELSE (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements(cur.ever_base) AS elem WHERE elem <> to_jsonb($4::text)) END,
+					'robo_rev_active', CASE WHEN $5::boolean THEN false ELSE cur.robo_base END
+				)),
+				true),
+		    updated_at = CURRENT_TIMESTAMP
+		FROM cur
+		WHERE p.id = cur.id;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, headSHA, checkKey, isRoboRev, hadPriorEverFailed); err != nil {
+		return fmt.Errorf("rollback failed check run: %w", err)
+	}
+	return nil
+}
+
+// RecoverNonGateCheckSuccess clears one check from the active failure set on
+// success and returns true when no non-roborev failure remains active and no
+// roborev failure is active. It mirrors the mutating-read semantics of the
+// granular in-memory tracker in a single conditional UPDATE.
+func (r *PostgresPRRegistry) RecoverNonGateCheckSuccess(ctx context.Context, repo string, prNumber int, headSHA, checkKey string) (bool, error) {
+	repo, headSHA, checkKey, ok := r.normalizeCheckRunArgs(repo, headSHA, checkKey, prNumber)
+	if !ok {
+		return false, nil
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(
+				COALESCE(metadata, '{}'::jsonb),
+				'{check_runs}',
+				(COALESCE(metadata->'check_runs', '{}'::jsonb) || jsonb_build_object(
+					'active', (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+						FROM jsonb_array_elements(
+							CASE WHEN jsonb_typeof(metadata->'check_runs'->'active') = 'array'
+							THEN metadata->'check_runs'->'active'
+							ELSE '[]'::jsonb END
+						) AS elem WHERE elem <> to_jsonb($4::text))
+				)),
+				true),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2
+		  AND lower(COALESCE(metadata->'check_runs'->>'head_sha', '')) = lower($3)
+		  AND (COALESCE(metadata->'check_runs'->'ever', '[]'::jsonb) ? $4)
+		RETURNING
+			((COALESCE(jsonb_array_length(metadata->'check_runs'->'active'), 0) = 0)
+				AND NOT COALESCE((metadata->'check_runs'->>'robo_rev_active')::boolean, false)) AS recovered;`
+	var recovered bool
+	found, err := r.queryRowScan(ctx, "recover non-gate check success", query, []any{&recovered}, repo, prNumber, headSHA, checkKey)
+	if err != nil || !found {
+		return false, err
+	}
+	return recovered, nil
+}
+
+// recordSHAPublished atomically records a per-PR head-SHA marker under key,
+// returning true only when this call newly recorded it. It backs the
+// conflict-published and collaborator-alert markers, which share the exact
+// same data contract and control-flow shape.
+func (r *PostgresPRRegistry) recordSHAPublished(ctx context.Context, opName, key, repo string, prNumber int, headSHA string) (bool, error) {
+	repo = model.NormalizeRepo(repo)
+	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || headSHA == "" || model.IsZeroSHA(headSHA) {
+		return false, nil
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{` + key + `}', to_jsonb($3::text), true),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2
+		  AND COALESCE(lower(metadata->>'` + key + `'), '') IS DISTINCT FROM lower($3)
+		RETURNING TRUE;`
+	var isNew bool
+	found, err := r.queryRowScan(ctx, opName, query, []any{&isNew}, repo, prNumber, headSHA)
+	if err != nil || !found {
+		return false, err
+	}
+	return isNew, nil
+}
+
+// RecordConflictPublished atomically records a conflict lifecycle publish for
+// the head SHA, returning true only when this call newly recorded it.
+func (r *PostgresPRRegistry) RecordConflictPublished(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error) {
+	return r.recordSHAPublished(ctx, "record conflict published", "conflict_published_sha", repo, prNumber, headSHA)
+}
+
+// WasConflictPublished reports whether a conflict publish is recorded for the head SHA.
+func (r *PostgresPRRegistry) WasConflictPublished(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error) {
+	repo = model.NormalizeRepo(repo)
+	headSHA = strings.ToLower(strings.TrimSpace(headSHA))
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || headSHA == "" {
+		return false, nil
+	}
+	query := `SELECT COALESCE(lower(metadata->>'conflict_published_sha'), '') = lower($3) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
+	var published bool
+	found, err := r.queryRowScan(ctx, "was conflict published", query, []any{&published}, repo, prNumber, headSHA)
+	if err != nil || !found {
+		return false, err
+	}
+	return published, nil
+}
+
+// ClearConflictPublished removes the conflict publication record, e.g. when a
+// new head SHA resets deduplication state.
+func (r *PostgresPRRegistry) ClearConflictPublished(ctx context.Context, repo string, prNumber int) error {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = COALESCE(metadata, '{}'::jsonb) - 'conflict_published_sha',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("clear conflict published: %w", err)
+	}
+	return nil
+}
+
+// MarkCollaboratorAlerted atomically records a collaborator CI alert for the
+// head SHA, returning true only when this call newly recorded it.
+func (r *PostgresPRRegistry) MarkCollaboratorAlerted(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error) {
+	return r.recordSHAPublished(ctx, "mark collaborator alerted", "collaborator_alerted_sha", repo, prNumber, headSHA)
+}
+
+// ClearCollaboratorAlerted removes the collaborator CI alert record.
+func (r *PostgresPRRegistry) ClearCollaboratorAlerted(ctx context.Context, repo string, prNumber int) error {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = COALESCE(metadata, '{}'::jsonb) - 'collaborator_alerted_sha',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("clear collaborator alerted: %w", err)
+	}
+	return nil
+}
+
+// MarkCollaboratorConflict atomically records a collaborator conflict alert
+// for the head SHA, returning true only when this call newly recorded it.
+func (r *PostgresPRRegistry) MarkCollaboratorConflict(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error) {
+	return r.recordSHAPublished(ctx, "mark collaborator conflict", "collaborator_conflict_sha", repo, prNumber, headSHA)
+}
+
+// ClearCollaboratorConflict removes the collaborator conflict alert record.
+func (r *PostgresPRRegistry) ClearCollaboratorConflict(ctx context.Context, repo string, prNumber int) error {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = COALESCE(metadata, '{}'::jsonb) - 'collaborator_conflict_sha',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("clear collaborator conflict: %w", err)
+	}
+	return nil
+}
+
+// NoteMainPush records a main-branch push at repo granularity and clears every
+// tracked PR's updated-for-main flag, returning true only when the push SHA is
+// newly seen for the repo. The repo-level seen row is upserted first so pushes
+// that arrive with no PR rows are still recorded, and redeliveries match the
+// stored SHA and change nothing. Flag clearing happens in the same statement,
+// so a crash cannot record a push without clearing (or vice versa).
+func (r *PostgresPRRegistry) NoteMainPush(ctx context.Context, repo string, sha string) (bool, error) {
+	repo = model.NormalizeRepo(repo)
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if r == nil || r.pool == nil || repo == "" || sha == "" || model.IsZeroSHA(sha) {
+		return false, nil
+	}
+	query := `
+		WITH up AS (
+			INSERT INTO synapse_main_push_seen AS s (repo, latest_main_sha, updated_at)
+			VALUES ($1, lower($2), CURRENT_TIMESTAMP)
+			ON CONFLICT (repo) DO UPDATE SET latest_main_sha = EXCLUDED.latest_main_sha, updated_at = CURRENT_TIMESTAMP
+			WHERE s.latest_main_sha IS DISTINCT FROM EXCLUDED.latest_main_sha
+			RETURNING TRUE AS is_new
+		),
+		clr AS (
+			UPDATE pr_registry p
+			SET metadata = COALESCE(p.metadata, '{}'::jsonb) - 'main_updated_for',
+			    updated_at = CURRENT_TIMESTAMP
+			FROM up
+			WHERE p.repo = $1 AND p.metadata ? 'main_updated_for'
+			RETURNING p.id
+		)
+		SELECT EXISTS (SELECT 1 FROM up);`
+	var isNew bool
+	found, err := r.queryRowScan(ctx, "note main push", query, []any{&isNew}, repo, sha)
+	if err != nil || !found {
+		return false, err
+	}
+	return isNew, nil
+}
+
+// LoadMainPushSHA returns the latest recorded main push SHA for a repo, or an
+// empty string when no push has been recorded.
+func (r *PostgresPRRegistry) LoadMainPushSHA(ctx context.Context, repo string) (string, error) {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" {
+		return "", nil
+	}
+	query := `SELECT COALESCE(latest_main_sha, '') FROM synapse_main_push_seen WHERE repo = $1;`
+	var sha string
+	found, err := r.queryRowScan(ctx, "load main push sha", query, []any{&sha}, repo)
+	if err != nil || !found {
+		return "", err
+	}
+	return sha, nil
+}
+
+// MarkUpdatedForMain records that a PR was updated for the given main SHA.
+func (r *PostgresPRRegistry) MarkUpdatedForMain(ctx context.Context, repo string, prNumber int, mainSHA string) error {
+	repo = model.NormalizeRepo(repo)
+	mainSHA = strings.ToLower(strings.TrimSpace(mainSHA))
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || mainSHA == "" || model.IsZeroSHA(mainSHA) {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{main_updated_for}', to_jsonb(lower($3)::text), true),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, mainSHA); err != nil {
+		return fmt.Errorf("mark updated for main: %w", err)
+	}
+	return nil
+}
+
+// WasUpdatedForMain reports whether a PR was updated for the given main SHA.
+// An empty mainSHA reports whether any updated flag is set.
+func (r *PostgresPRRegistry) WasUpdatedForMain(ctx context.Context, repo string, prNumber int, mainSHA string) (bool, error) {
+	repo = model.NormalizeRepo(repo)
+	mainSHA = strings.ToLower(strings.TrimSpace(mainSHA))
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	query := `SELECT COALESCE(lower(metadata->>'main_updated_for'), '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
+	var stored string
+	found, err := r.queryRowScan(ctx, "was updated for main", query, []any{&stored}, repo, prNumber)
+	if err != nil || !found {
+		return false, err
+	}
+	if mainSHA == "" {
+		return stored != "", nil
+	}
+	return stored == mainSHA, nil
+}
+
+// ClearUpdatedForMain removes the updated-for-main flag for a PR.
+func (r *PostgresPRRegistry) ClearUpdatedForMain(ctx context.Context, repo string, prNumber int) error {
+	repo = model.NormalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = COALESCE(metadata, '{}'::jsonb) - 'main_updated_for',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("clear updated for main: %w", err)
 	}
 	return nil
 }

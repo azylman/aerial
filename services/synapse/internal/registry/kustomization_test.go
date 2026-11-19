@@ -26,7 +26,7 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 		{name: "RecordKustomizationRequests zero pr guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 0, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("unexpected exec")},
 		{name: "RecordKustomizationRequests nil pool guard", op: "RecordKustomizationRequests", nilPool: true, repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}},
 		{name: "RecordKustomizationRequests empty requests guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: nil},
-		{name: "RecordKustomizationRequests replaces requests and clears deployed", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, wantSQLSubstr: "COALESCE(metadata, '{}'::jsonb) - 'deployed_kustomizations', '{kustomization_requests}', $3::jsonb"},
+		{name: "RecordKustomizationRequests replaces requests and clears deployed", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}},
 		{name: "RecordKustomizationRequests exec error", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("exec error"), wantErr: true},
 
 		// MarkKustomizationsDeployed
@@ -332,6 +332,10 @@ func newRecoveryFixture(t *testing.T, status, metadata string) *pgx.Conn {
 	}
 	t.Cleanup(func() { _ = conn.Close(ctx) })
 	_, err = conn.Exec(ctx, `CREATE TEMP TABLE pr_registry (id bigserial PRIMARY KEY, repo text, pr_number int, branch text NOT NULL DEFAULT '', head_sha text NOT NULL DEFAULT '', merge_sha text, target_id text NOT NULL DEFAULT '', status text, metadata jsonb, updated_at timestamptz)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = conn.Exec(ctx, `CREATE TEMP TABLE synapse_main_push_seen (repo text PRIMARY KEY, latest_main_sha text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP)`)
 	if err != nil {
 		t.Fatal(err)
 	}

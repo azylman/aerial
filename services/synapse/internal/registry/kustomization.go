@@ -17,6 +17,8 @@ const (
 
 // RecordKustomizationRequests replaces the PR's kustomization_requests wholesale and clears
 // deployed_kustomizations so completion is tracked only against the latest reconcile requests.
+// A new request set starts a new gate generation, so it also clears any
+// deploy_success_pending/claimed claim flags from the previous generation.
 func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]model.KustomizationRequest) error {
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(requests) == 0 {
@@ -31,7 +33,7 @@ func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, re
 
 	query := `
 		UPDATE pr_registry
-		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - '` + DeployedKustomizationsKey + `', '{` + KustomizationRequestsKey + `}', $3::jsonb),
+		SET metadata = jsonb_set(((COALESCE(metadata, '{}'::jsonb) - '` + DeployedKustomizationsKey + `') - 'deploy_success_pending') - 'deploy_success_claimed', '{` + KustomizationRequestsKey + `}', $3::jsonb),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1 AND pr_number = $2;`
 	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, reqBytes); err != nil {
@@ -111,8 +113,11 @@ func (r *PostgresPRRegistry) HasKustomizationRequests(ctx context.Context, repo 
 	return tracked, nil
 }
 
-// RetryPRReadiness retries the original gate, never creates a new deployment generation.
-// Repeated requests while deploying retain partial progress and original request identities.
+// RetryPRReadiness retries the original gate and starts a fresh publish
+// generation: it clears partial progress markers and any
+// deploy_success_pending/claimed claim flags so a retried gate cannot inherit
+// a previous generation's claim. Repeated requests while deploying retain the
+// original request identities.
 func (r *PostgresPRRegistry) RetryPRReadiness(ctx context.Context, repo, merge string, number int) (map[string]model.KustomizationRequest, error) {
 	repo = model.NormalizeRepo(repo)
 	merge = strings.TrimSpace(merge)
@@ -120,7 +125,7 @@ func (r *PostgresPRRegistry) RetryPRReadiness(ctx context.Context, repo, merge s
 		return map[string]model.KustomizationRequest{}, nil
 	}
 	const query = `UPDATE pr_registry SET status = 'deploying',
- metadata = CASE WHEN status = 'deploying' THEN metadata ELSE metadata - '` + DeployedKustomizationsKey + `' END,
+ metadata = ((CASE WHEN status = 'deploying' THEN metadata ELSE metadata - '` + DeployedKustomizationsKey + `' END) - 'deploy_success_pending') - 'deploy_success_claimed',
  updated_at = CURRENT_TIMESTAMP
  WHERE repo = $1 AND pr_number = $2 AND merge_sha = $3
  AND status IN ('deployed', 'deploy_failed', 'deploying')

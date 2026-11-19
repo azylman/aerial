@@ -74,6 +74,53 @@ type PRRegistryUpdater interface {
 	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
 	RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]KustomizationRequest) error
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
+	// ClaimDeploySuccess atomically claims the deploy_success publish for one
+	// pod: it flips the row to deployed with deploy_success_pending and
+	// deploy_success_claimed set, performing the merged/synced/deploying to
+	// deployed transition itself for unowned/no-deploy paths. It returns the
+	// target and true only to the pod that first claimed this generation; a
+	// re-claim of an already-claimed row returns the target with false so a
+	// crash-recovery pass can republish at most once.
+	ClaimDeploySuccess(ctx context.Context, repo string, prNumber int) (targetID string, claimed bool, err error)
+	// AcknowledgeDeploySuccessPublished clears the deploy_success claim after
+	// publish so the row stops re-entering the deploy watcher.
+	AcknowledgeDeploySuccessPublished(ctx context.Context, repo string, prNumber int) error
+	// RecordFailedCheckRun records one failed check run in durable check_runs
+	// metadata, resetting the sets when headSHA changes generation. It returns
+	// emit/was-active/had-prior semantics equivalent to the in-memory
+	// granular tracker: emitAdditional is true when this failure newly arms an
+	// alert for a generation that already failed before.
+	RecordFailedCheckRun(ctx context.Context, repo string, prNumber int, headSHA, checkKey string, isRoboRev bool) (emitAdditional, wasActive, hadPriorEverFailed bool, err error)
+	// RollbackFailedCheckRun undoes a RecordFailedCheckRun whose dispatch
+	// failed, restoring the prior active/ever sets. It is a no-op when
+	// wasActive is true.
+	RollbackFailedCheckRun(ctx context.Context, repo string, prNumber int, headSHA, checkKey string, isRoboRev bool, wasActive, hadPriorEverFailed bool) error
+	// RecoverNonGateCheckSuccess clears one check from the active failure set
+	// on success and returns true when no non-roborev failure remains active
+	// and no roborev failure is active.
+	RecoverNonGateCheckSuccess(ctx context.Context, repo string, prNumber int, headSHA, checkKey string) (recovered bool, err error)
+	// RecordConflictPublished atomically records a conflict lifecycle publish
+	// for the head SHA, returning true when this call newly recorded it.
+	RecordConflictPublished(ctx context.Context, repo string, prNumber int, headSHA string) (isNew bool, err error)
+	WasConflictPublished(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error)
+	ClearConflictPublished(ctx context.Context, repo string, prNumber int) error
+	// MarkCollaboratorAlerted atomically records a collaborator CI alert for
+	// the head SHA, returning true when this call newly recorded it.
+	MarkCollaboratorAlerted(ctx context.Context, repo string, prNumber int, headSHA string) (isNew bool, err error)
+	ClearCollaboratorAlerted(ctx context.Context, repo string, prNumber int) error
+	// MarkCollaboratorConflict atomically records a collaborator conflict
+	// alert for the head SHA, returning true when newly recorded.
+	MarkCollaboratorConflict(ctx context.Context, repo string, prNumber int, headSHA string) (isNew bool, err error)
+	ClearCollaboratorConflict(ctx context.Context, repo string, prNumber int) error
+	// NoteMainPush records a main-branch push at repo granularity and clears
+	// every tracked PR's updated-for-main flag. It returns true only when the
+	// push SHA is newly seen for the repo; pushes with no PR rows are still
+	// recorded and redeliveries are no-ops.
+	NoteMainPush(ctx context.Context, repo string, sha string) (isNew bool, err error)
+	LoadMainPushSHA(ctx context.Context, repo string) (string, error)
+	MarkUpdatedForMain(ctx context.Context, repo string, prNumber int, mainSHA string) error
+	WasUpdatedForMain(ctx context.Context, repo string, prNumber int, mainSHA string) (bool, error)
+	ClearUpdatedForMain(ctx context.Context, repo string, prNumber int) error
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
 	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error

@@ -255,6 +255,23 @@ CREATE INDEX IF NOT EXISTS idx_pr_registry_merge_sha ON pr_registry (repo, merge
 CREATE INDEX IF NOT EXISTS idx_pr_registry_status ON pr_registry (status);
 CREATE INDEX IF NOT EXISTS idx_pr_registry_target_id ON pr_registry (target_id);
 
+-- Synapse Alert Firing Table (synapse-owned; alert fingerprints have no PR row)
+CREATE TABLE IF NOT EXISTS synapse_alert_firing (
+    fingerprint TEXT PRIMARY KEY,
+    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Synapse Main Push Seen State (synapse-owned; repo-granularity dedup for
+-- main-branch pushes, independent of pr_registry rows so pushes with no PRs
+-- are still recorded and redeliveries stay idempotent)
+CREATE TABLE IF NOT EXISTS synapse_main_push_seen (
+    repo TEXT PRIMARY KEY,
+    latest_main_sha TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Production Code Coverage Table
 CREATE TABLE IF NOT EXISTS production_code_coverage (
     service TEXT NOT NULL,

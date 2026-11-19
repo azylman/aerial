@@ -233,6 +233,35 @@ type mockPRRegistry struct {
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
 
+	claimDeployTargetID string
+	claimDeployClaimed  bool
+	claimDeployErr      error
+	ackDeploySuccessErr error
+
+	recordCheckRunEmit  bool
+	recordCheckRunWas   bool
+	recordCheckRunHad   bool
+	recordCheckRunErr   error
+	recoverCheckSuccess bool
+	recoverCheckErr     error
+
+	conflictPublishIsNew bool
+	conflictPublishErr   error
+	conflictWasPublished bool
+	conflictWasErr       error
+
+	collabAlertIsNew    bool
+	collabAlertErr      error
+	collabConflictIsNew bool
+	collabConflictErr   error
+
+	mainPushIsNew     bool
+	mainPushErr       error
+	mainPushSHA       string
+	mainPushSHAErr    error
+	updatedForMain    bool
+	updatedForMainErr error
+
 	err error
 }
 
@@ -1225,4 +1254,156 @@ func (*mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[stri
 
 func (*mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error) {
 	return false, nil
+}
+
+func (m *mockPRRegistry) ClaimDeploySuccess(context.Context, string, int) (string, bool, error) {
+	if m == nil {
+		return "", false, nil
+	}
+	if err := m.checkErr(m.claimDeployErr); err != nil {
+		return "", false, err
+	}
+	if m.claimDeployTargetID == "" && !m.claimDeployClaimed {
+		return "", false, nil
+	}
+	return m.claimDeployTargetID, m.claimDeployClaimed, nil
+}
+
+func (m *mockPRRegistry) AcknowledgeDeploySuccessPublished(context.Context, string, int) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.ackDeploySuccessErr)
+}
+
+func (m *mockPRRegistry) RecordFailedCheckRun(context.Context, string, int, string, string, bool) (bool, bool, bool, error) {
+	if m == nil {
+		return false, false, false, nil
+	}
+	if err := m.checkErr(m.recordCheckRunErr); err != nil {
+		return false, false, false, err
+	}
+	return m.recordCheckRunEmit, m.recordCheckRunWas, m.recordCheckRunHad, nil
+}
+
+func (m *mockPRRegistry) RollbackFailedCheckRun(context.Context, string, int, string, string, bool, bool, bool) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.recordCheckRunErr)
+}
+
+func (m *mockPRRegistry) RecoverNonGateCheckSuccess(context.Context, string, int, string, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.recoverCheckErr); err != nil {
+		return false, err
+	}
+	return m.recoverCheckSuccess, nil
+}
+
+func (m *mockPRRegistry) RecordConflictPublished(context.Context, string, int, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.conflictPublishErr); err != nil {
+		return false, err
+	}
+	return m.conflictPublishIsNew, nil
+}
+
+func (m *mockPRRegistry) WasConflictPublished(context.Context, string, int, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.conflictWasErr); err != nil {
+		return false, err
+	}
+	return m.conflictWasPublished, nil
+}
+
+func (m *mockPRRegistry) ClearConflictPublished(context.Context, string, int) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.conflictPublishErr)
+}
+
+func (m *mockPRRegistry) MarkCollaboratorAlerted(context.Context, string, int, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.collabAlertErr); err != nil {
+		return false, err
+	}
+	return m.collabAlertIsNew, nil
+}
+
+func (m *mockPRRegistry) ClearCollaboratorAlerted(context.Context, string, int) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.collabAlertErr)
+}
+
+func (m *mockPRRegistry) MarkCollaboratorConflict(context.Context, string, int, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.collabConflictErr); err != nil {
+		return false, err
+	}
+	return m.collabConflictIsNew, nil
+}
+
+func (m *mockPRRegistry) ClearCollaboratorConflict(context.Context, string, int) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.collabConflictErr)
+}
+
+func (m *mockPRRegistry) NoteMainPush(context.Context, string, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.mainPushErr); err != nil {
+		return false, err
+	}
+	return m.mainPushIsNew, nil
+}
+
+func (m *mockPRRegistry) LoadMainPushSHA(context.Context, string) (string, error) {
+	if m == nil {
+		return "", nil
+	}
+	if err := m.checkErr(m.mainPushSHAErr); err != nil {
+		return "", err
+	}
+	return m.mainPushSHA, nil
+}
+
+func (m *mockPRRegistry) MarkUpdatedForMain(context.Context, string, int, string) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.updatedForMainErr)
+}
+
+func (m *mockPRRegistry) WasUpdatedForMain(context.Context, string, int, string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if err := m.checkErr(m.updatedForMainErr); err != nil {
+		return false, err
+	}
+	return m.updatedForMain, nil
+}
+
+func (m *mockPRRegistry) ClearUpdatedForMain(context.Context, string, int) error {
+	if m == nil {
+		return nil
+	}
+	return m.checkErr(m.updatedForMainErr)
 }
