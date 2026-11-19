@@ -1,5 +1,6 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState } from 'react';
 import type { QuickLaunchLink } from '../api/types';
+import { applyTheme, initTheme, nextTheme, type ThemeMode } from '../lib/theme';
 import { dockLinks, isDockLinkActive, type PermetTone, permetScore } from '../store/selectors';
 import { useConsoleStore } from '../store/store';
 import { Icon } from './Icon';
@@ -60,6 +61,27 @@ const QuickLaunchDock = memo(function QuickLaunchDock() {
   );
 });
 
+const ThemeToggle = memo(function ThemeToggle() {
+  const [theme, setTheme] = useState<ThemeMode>(() => initTheme());
+
+  return (
+    <button
+      type="button"
+      className="theme-toggle-btn"
+      aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      title={theme === 'dark' ? 'Switch to light theme (Polar Slate)' : 'Switch to dark theme (Catppuccin Mocha)'}
+      onClick={() => {
+        const next = nextTheme(theme);
+        applyTheme(next);
+        setTheme(next);
+      }}
+    >
+      <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
+      <span className="theme-toggle-label">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+    </button>
+  );
+});
+
 /**
  * The HUD header. It subscribes to nothing itself: the gauge, tab buttons and dock each select
  * their own slice of state, so the header shell renders exactly once.
@@ -82,6 +104,7 @@ export const Header = memo(function Header() {
       <div className="cmd-right">
         <QuickLaunchDock />
         <PermetGauge />
+        <ThemeToggle />
       </div>
     </header>
   );

@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>AERIAL // CONSOLE</title>
-    <meta name="theme-color" content="#f6f5f1">
-    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#181825">
+    <meta name="color-scheme" content="dark light">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="Aerial HUD">
     <link rel="manifest" href="/console/manifest.webmanifest">
@@ -15,7 +15,18 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
-    <style>:root { color-scheme: light; background: #f6f5f1; }</style>
+    <style>:root { color-scheme: dark; background: #181825; } :root[data-theme="light"] { color-scheme: light; background: #f8fafc; }</style>
+    <script>
+        try {
+            var theme = localStorage.getItem('aerial-console-theme');
+            if (theme === 'light') {
+                document.documentElement.dataset.theme = 'light';
+                document.documentElement.style.colorScheme = 'light';
+                var m = document.querySelector('meta[name="theme-color"]');
+                if (m) m.content = '#f8fafc';
+            }
+        } catch (_) {}
+    </script>
 </head>
 <body>
     <div id="root"></div>

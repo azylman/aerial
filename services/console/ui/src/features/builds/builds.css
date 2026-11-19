@@ -351,9 +351,9 @@
 
 .chunk-status-badge.chunk-status-completed,
 .chunk-status-badge.chunk-status-merged {
-    background: #f0fdf4;
-    color: #15803d;
-    border: 1px solid #86efac;
+    background: var(--dag-node-done-bg);
+    color: var(--dag-node-done-ink);
+    border: 1px solid var(--dag-node-done-border);
 }
 
 .chunk-status-badge.chunk-status-running,
@@ -361,26 +361,26 @@
 .chunk-status-badge.chunk-status-coding,
 .chunk-status-badge.chunk-status-pr_opened,
 .chunk-status-badge.chunk-status-deploying {
-    background: #dbeafe;
-    color: #1d4ed8;
-    border: 1px solid #93c5fd;
+    background: var(--dag-node-run-bg);
+    color: var(--dag-node-run-ink);
+    border: 1px solid var(--dag-node-run-border);
 }
 
 .chunk-status-badge.chunk-status-failed,
 .chunk-status-badge.chunk-status-ci_failed,
 .chunk-status-badge.chunk-status-deploy_failed,
 .chunk-status-badge.chunk-status-conflict {
-    background: rgba(185, 28, 28, 0.12);
-    color: var(--accent-crimson, #b91c1c);
-    border: 1px solid rgba(185, 28, 28, 0.35);
+    background: var(--dag-node-fail-bg);
+    color: var(--dag-node-fail-ink);
+    border: 1px solid var(--dag-node-fail-border);
 }
 
 .chunk-status-badge.chunk-status-pending,
 .chunk-status-badge.chunk-status-cancelled,
 .chunk-status-badge.chunk-status-canceled {
-    background: #f6f5f1;
+    background: var(--card-elevated);
     color: var(--text-secondary);
-    border: 1px solid #e2dfd7;
+    border: 1px solid var(--card-border);
 }
 
 .filter-pill {
@@ -515,8 +515,8 @@
 .build-dag-viewport {
     width: 100%;
     overflow: auto;
-    background-color: #f8f7f3;
-    background-image: radial-gradient(#d4d0c5 1px, transparent 1px);
+    background-color: var(--dag-bg);
+    background-image: radial-gradient(var(--dag-dot) 1px, transparent 1px);
     background-size: 16px 16px;
     border: 1px solid var(--card-border);
     border-radius: 10px;
@@ -547,50 +547,50 @@
 
 .build-dag-edge {
     fill: none;
-    stroke: #9ca3af;
+    stroke: var(--dag-node-pend-accent);
     stroke-width: 1.85px;
     stroke-linecap: round;
     stroke-linejoin: round;
 }
 
 .build-dag-edge.edge-completed {
-    stroke: #15803d;
+    stroke: var(--accent-emerald);
     stroke-width: 2px;
 }
 
 .build-dag-edge.edge-active {
-    stroke: #c2410c;
+    stroke: var(--accent-primary);
     stroke-width: 2px;
 }
 
 .build-dag-edge.edge-failed {
-    stroke: #b91c1c;
+    stroke: var(--accent-crimson);
     stroke-width: 2px;
 }
 
 .build-dag-edge.edge-pending {
-    stroke: #a8a29e;
+    stroke: var(--dag-node-pend-accent);
     stroke-dasharray: 4 3;
 }
 
 .build-dag-arrow {
-    fill: #9ca3af;
+    fill: var(--dag-node-pend-accent);
 }
 
 .build-dag-arrow.arrow-completed {
-    fill: #15803d;
+    fill: var(--accent-emerald);
 }
 
 .build-dag-arrow.arrow-active {
-    fill: #c2410c;
+    fill: var(--accent-primary);
 }
 
 .build-dag-arrow.arrow-failed {
-    fill: #b91c1c;
+    fill: var(--accent-crimson);
 }
 
 .build-dag-arrow.arrow-pending {
-    fill: #a8a29e;
+    fill: var(--dag-node-pend-accent);
 }
 
 .build-dag-rank {
@@ -600,9 +600,9 @@
 .build-dag-node {
     position: absolute;
     z-index: 2;
-    background: #faf9f5;
-    border: 1px solid #d6d3cb;
-    border-left: 3.5px solid #a8a29e;
+    background: var(--dag-node-pend-bg);
+    border: 1px solid var(--dag-node-pend-border);
+    border-left: 3.5px solid var(--dag-node-pend-accent);
     border-radius: 8px;
     padding: 6px 10px;
     display: flex;
@@ -613,17 +613,17 @@
     cursor: pointer;
     text-align: left;
     font-family: var(--font-main);
-    color: var(--text-primary);
+    color: var(--dag-node-pend-ink);
     transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
     box-shadow: 0 2px 5px rgba(20, 20, 19, 0.06);
 }
 
 .build-dag-node.node-status-completed,
 .build-dag-node.node-status-merged {
-    background: #ecfdf3;
-    border-color: #86efac;
-    border-left-color: #15803d;
-    color: #14532d;
+    background: var(--dag-node-done-bg);
+    border-color: var(--dag-node-done-border);
+    border-left-color: var(--accent-emerald);
+    color: var(--dag-node-done-ink);
 }
 
 .build-dag-node.node-status-running,
@@ -631,30 +631,30 @@
 .build-dag-node.node-status-coding,
 .build-dag-node.node-status-pr_opened,
 .build-dag-node.node-status-deploying {
-    background: #eff6ff;
-    border-color: #93c5fd;
-    border-left-color: #1d4ed8;
-    color: #1e3a8a;
+    background: var(--dag-node-run-bg);
+    border-color: var(--dag-node-run-border);
+    border-left-color: var(--accent-indigo);
+    color: var(--dag-node-run-ink);
 }
 
 .build-dag-node.node-status-failed,
 .build-dag-node.node-status-ci_failed,
 .build-dag-node.node-status-deploy_failed,
 .build-dag-node.node-status-conflict {
-    background: #fef2f2;
-    border-color: #fca5a5;
-    border-left-color: #b91c1c;
-    color: #7f1d1d;
+    background: var(--dag-node-fail-bg);
+    border-color: var(--dag-node-fail-border);
+    border-left-color: var(--accent-crimson);
+    color: var(--dag-node-fail-ink);
 }
 
 .build-dag-node.node-status-pending,
 .build-dag-node.node-status-queued,
 .build-dag-node.node-status-cancelled,
 .build-dag-node.node-status-canceled {
-    background: #faf9f5;
-    border-color: #d6d3cb;
-    border-left-color: #a8a29e;
-    color: #44403c;
+    background: var(--dag-node-pend-bg);
+    border-color: var(--dag-node-pend-border);
+    border-left-color: var(--dag-node-pend-accent);
+    color: var(--dag-node-pend-ink);
 }
 
 .build-dag-node:hover {
@@ -688,8 +688,8 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #ffffff;
-    border: 1.75px solid #78716c;
+    background: var(--card-bg);
+    border: 1.75px solid var(--dag-node-pend-accent);
     transform: translateX(-50%);
     pointer-events: none;
     box-sizing: border-box;
@@ -697,7 +697,7 @@
 
 .build-dag-node.node-status-completed .dag-node-port,
 .build-dag-node.node-status-merged .dag-node-port {
-    border-color: #15803d;
+    border-color: var(--accent-emerald);
 }
 
 .build-dag-node.node-status-running .dag-node-port,
@@ -705,14 +705,14 @@
 .build-dag-node.node-status-coding .dag-node-port,
 .build-dag-node.node-status-pr_opened .dag-node-port,
 .build-dag-node.node-status-deploying .dag-node-port {
-    border-color: #1d4ed8;
+    border-color: var(--accent-indigo);
 }
 
 .build-dag-node.node-status-failed .dag-node-port,
 .build-dag-node.node-status-ci_failed .dag-node-port,
 .build-dag-node.node-status-deploy_failed .dag-node-port,
 .build-dag-node.node-status-conflict .dag-node-port {
-    border-color: #b91c1c;
+    border-color: var(--accent-crimson);
 }
 
 .dag-node-port.port-in {
