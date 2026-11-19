@@ -145,9 +145,11 @@ func sameDeployRepo(a, b string) bool {
 
 // UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening
 // a terminal chunk. Notifications follow only an applied write. The deploying
-// transition preserves the merge stamp: the landed commit contains every
-// earlier merge, so deploy_success needs the deploying chunk's merge time to
-// prove which earlier chunks it includes.
+// transition preserves the merge stamp without ever creating one: the landed
+// commit contains every earlier merge, so deploy_success needs the deploying
+// chunk's real merge time to prove which earlier chunks it includes, and a
+// deploying chunk with no recorded merge keeps an unknown stamp so the sweep
+// skips it instead of completing unprovable chunks.
 func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -155,7 +157,7 @@ func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status str
 	if strings.TrimSpace(chunkID) == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 IN ('merged', 'deploying') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
 	if err != nil {
 		return fmt.Errorf("update pr lifecycle status: %w", err)
 	}
