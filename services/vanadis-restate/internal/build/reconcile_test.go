@@ -825,3 +825,66 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	_, err = boDeadline.executeObjectTransition(rtDeadline, "reconcile", nil)
 	assert.Error(t, err)
 }
+
+type replayNotifyRuntime struct {
+	*fakeObjectRuntime
+
+	primaryErr error
+	notifyRuns int
+	notifyDone bool
+}
+
+func (r *replayNotifyRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
+	if name == "notify-transition-error" {
+		r.stepsRun = append(r.stepsRun, name)
+		if r.notifyDone {
+			return reconcileStepOutput{}, nil
+		}
+		r.notifyDone = true
+		r.notifyRuns++
+		return fn(context.Background())
+	}
+	if r.primaryErr != nil {
+		r.stepsRun = append(r.stepsRun, name)
+		return reconcileStepOutput{}, r.primaryErr
+	}
+	return fn(context.Background())
+}
+
+func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		attempts   int
+		wantNotify int
+		wantWidget int
+	}{
+		{name: "single attempt notifies once", attempts: 1, wantNotify: 1, wantWidget: 1},
+		{name: "retry replays notify once", attempts: 2, wantNotify: 1, wantWidget: 1},
+		{name: "triple retry notifies once", attempts: 3, wantNotify: 1, wantWidget: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := model.VanadisBuild{ID: "b1", ThreadID: "th-1", Title: "Build", Objective: "Obj", Status: "running"}
+			st, _ := dbScript{buildRow: &mockRow{b: &b}}.open()
+			widgetCalls := 0
+			eri := &mockEriClient{}
+			eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
+				widgetCalls++
+				return "msg-1", nil
+			}
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
+			prior := &model.BuildObjectState{Build: b}
+			for range tc.attempts {
+				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil)
+				require.Error(t, err)
+			}
+			assert.Equal(t, tc.wantNotify, rt.notifyRuns)
+			assert.Equal(t, tc.wantWidget, widgetCalls)
+			assert.Contains(t, rt.stepsRun, "notify-transition-error")
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -240,6 +241,36 @@ func TestCreateBuildConflictAtomicity(t *testing.T) {
 			require.ErrorIs(t, err, store.ErrBuildConflict)
 			assert.Empty(t, tx.durable)
 			assert.Empty(t, tx.pending)
+		})
+	}
+}
+
+func TestPlanInputsToChunks_JournaledClockIdentity(t *testing.T) {
+	t.Parallel()
+	fixed := time.Date(2026, time.November, 19, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		buildID string
+		chunkID string
+		title   string
+	}{
+		{name: "first chunk timestamp identity", buildID: "b1", chunkID: "c1", title: "Chunk One"},
+		{name: "second chunk timestamp identity", buildID: "b1", chunkID: "c2", title: "Chunk Two"},
+		{name: "other build timestamp identity", buildID: "b2", chunkID: "c1", title: "Chunk One"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inputs := []store.CreateChunkInput{{ID: tc.chunkID, Title: tc.title, Repo: "aerial", Instructions: "Do work"}}
+			first := planInputsToChunks(tc.buildID, inputs, fixed)
+			second := planInputsToChunks(tc.buildID, inputs, fixed)
+			require.Len(t, first, 1)
+			require.Len(t, second, 1)
+			assert.Equal(t, tc.chunkID, first[0].ID)
+			assert.Equal(t, fixed, first[0].CreatedAt)
+			assert.Equal(t, fixed, first[0].UpdatedAt)
+			assert.Equal(t, first[0].CreatedAt, second[0].CreatedAt)
+			assert.Equal(t, first[0].UpdatedAt, second[0].UpdatedAt)
 		})
 	}
 }

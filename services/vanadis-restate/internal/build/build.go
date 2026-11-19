@@ -367,9 +367,8 @@ func ToTerminalErr(err error) error {
 	}
 }
 
-func planInputsToChunks(buildID string, inputs []store.CreateChunkInput) []model.VanadisChunk {
+func planInputsToChunks(buildID string, inputs []store.CreateChunkInput, now time.Time) []model.VanadisChunk {
 	chunks := make([]model.VanadisChunk, len(inputs))
-	now := time.Now().UTC()
 	for i, in := range inputs {
 		cid := strings.TrimSpace(in.ID)
 		if cid == "" {
@@ -431,10 +430,16 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	chunks := planInputsToChunks(buildID, req.Chunks)
-	if err := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
-		RecordReconcileError(labelCreate, err)
+	now, err := RunJournaled(ctx, labelCreate, "create-build-clock", func(rc restate.RunContext) (time.Time, error) {
+		return time.Now().UTC(), nil
+	})
+	if err != nil {
 		return model.VanadisBuild{}, ToTerminalErr(err)
+	}
+	chunks := planInputsToChunks(buildID, req.Chunks, now)
+	if verr := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); verr != nil {
+		RecordReconcileError(labelCreate, verr)
+		return model.VanadisBuild{}, ToTerminalErr(verr)
 	}
 	validatedChunks, err := dag.NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
@@ -446,7 +451,6 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	if title == "" {
 		title = objective
 	}
-	now := time.Now().UTC()
 	build := model.VanadisBuild{
 		ID:            buildID,
 		ThreadID:      threadID,
