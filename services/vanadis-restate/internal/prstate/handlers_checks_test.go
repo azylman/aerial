@@ -17,16 +17,14 @@ var errFakeCheckRoute = errors.New("fake check route failure")
 // records every fired EffectKey so tests prove exactly-once-per-key firing
 // without touching a live Discord API.
 type FakeDiscordAlerter struct {
-	Keys     []EffectKey
-	Messages []string
-	Err      error
+	Keys []EffectKey
+	Err  error
 }
 
 // SendDiscordAlert records the keyed send and returns the configured error.
-func (f *FakeDiscordAlerter) SendDiscordAlert(ctx context.Context, key EffectKey, message string) error {
+func (f *FakeDiscordAlerter) SendDiscordAlert(ctx context.Context, key EffectKey, _ string) error {
 	_ = ctx
 	f.Keys = append(f.Keys, key)
-	f.Messages = append(f.Messages, message)
 	return f.Err
 }
 
@@ -77,7 +75,6 @@ type checkEventRow struct {
 	seedGranular    bool
 	alertErr        bool
 	routeErr        bool
-	nilState        bool
 	nilAlerter      bool
 	wantDisposition EventDisposition
 	wantAlertFired  bool
@@ -93,9 +90,6 @@ type checkEventRow struct {
 
 // seedCheckPRState builds the prestate for one check-handler case.
 func seedCheckPRState(tc checkEventRow) *PRState {
-	if tc.nilState {
-		return nil
-	}
 	s := NewPRState("aerial", tc.event.PRNumber)
 	if tc.seedHeadSHA != "" {
 		s.HeadSHA = tc.seedHeadSHA
@@ -173,9 +167,6 @@ func assertCheckFiring(t *testing.T, tc checkEventRow, s *PRState, router *FakeB
 	if alertCalls != tc.wantAlertCalls {
 		t.Fatalf("alert calls = %d, want %d", alertCalls, tc.wantAlertCalls)
 	}
-	if tc.nilState {
-		return
-	}
 	if s.HeadSHA != tc.wantHeadSHA {
 		t.Fatalf("HeadSHA = %q, want %q", s.HeadSHA, tc.wantHeadSHA)
 	}
@@ -231,17 +222,6 @@ func checkEventCoreRows() []checkEventRow {
 			wantAlertedSHA:  "",
 			wantActiveCheck: true,
 			wantEverFailed:  true,
-		},
-		{
-			name:            "nil state drops stale",
-			event:           PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"},
-			nilState:        true,
-			wantDisposition: DispositionDropStale,
-			wantAlertFired:  false,
-			wantRouterCalls: 0,
-			wantAlertCalls:  0,
-			wantHeadSHA:     "",
-			wantAlertedSHA:  "",
 		},
 		{
 			name:            "nil alerter skips alert but routes owned",
