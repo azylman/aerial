@@ -18,14 +18,24 @@ func ResendOnStartup(pub *Publisher, watermarks map[string]int, batches []transc
 	if pub == nil {
 		return 0
 	}
+	resetSessions := make(map[string]bool)
+	for _, b := range batches {
+		if b.Reset {
+			if s := strings.TrimSpace(b.SessionID); s != "" {
+				resetSessions[s] = true
+			}
+		}
+	}
 	var fresh []transcriptwire.TranscriptStepBatch
 	for _, b := range batches {
 		session := strings.TrimSpace(b.SessionID)
 		if session == "" {
 			continue
 		}
-		if wm, ok := watermarks[session]; ok && b.LastStep <= wm {
-			continue
+		if !resetSessions[session] {
+			if wm, ok := watermarks[session]; ok && b.LastStep <= wm {
+				continue
+			}
 		}
 		fresh = append(fresh, b)
 	}

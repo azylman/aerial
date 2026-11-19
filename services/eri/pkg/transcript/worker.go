@@ -16,6 +16,19 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
+// legacySyncDeadcodeAnchor retains references to StartTranscriptSync and
+// StartTurnTranscriptSyncSubscriber until spl2-c20a-eri-legacy deletes those
+// legacy functions after the readiness gate without invoking goroutines at init time.
+var _ = []any{
+	StartTranscriptSync,
+	StartTurnTranscriptSyncSubscriber,
+	(*Publisher).EnqueueSteps,
+	(*Publisher).PendingSessions,
+	(*Publisher).PendingCount,
+	(*Publisher).PublishSessions,
+	(*Publisher).PublishSession,
+}
+
 // Step vocabulary for synthesized transcript steps.
 const (
 	stepTypeUserInput       = "USER_INPUT"
