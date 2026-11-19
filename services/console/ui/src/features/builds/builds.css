@@ -315,11 +315,13 @@
 }
 
 .chunk-status-badge {
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 700;
-    padding: 2px 6px;
+    padding: 1px 6px;
     border-radius: 4px;
     font-family: var(--font-mono);
+    line-height: 1.4;
+    white-space: nowrap;
 }
 
 .chunk-status-badge.chunk-status-completed,
@@ -330,19 +332,25 @@
 }
 
 .chunk-status-badge.chunk-status-running,
-.chunk-status-badge.chunk-status-in_progress {
+.chunk-status-badge.chunk-status-in_progress,
+.chunk-status-badge.chunk-status-coding,
+.chunk-status-badge.chunk-status-pr_opened,
+.chunk-status-badge.chunk-status-deploying {
     background: #dbeafe;
     color: #1d4ed8;
     border: 1px solid #93c5fd;
 }
 
-.chunk-status-badge.chunk-status-failed {
+.chunk-status-badge.chunk-status-failed,
+.chunk-status-badge.chunk-status-ci_failed {
     background: rgba(185, 28, 28, 0.12);
     color: var(--accent-crimson, #b91c1c);
     border: 1px solid rgba(185, 28, 28, 0.35);
 }
 
-.chunk-status-badge.chunk-status-pending {
+.chunk-status-badge.chunk-status-pending,
+.chunk-status-badge.chunk-status-cancelled,
+.chunk-status-badge.chunk-status-canceled {
     background: #f6f5f1;
     color: var(--text-secondary);
     border: 1px solid #e2dfd7;
@@ -476,15 +484,27 @@
     transform: rotate(90deg);
 }
 
-/* --- BUILD CHUNK DAG GRAPH & OVERLAY --- */
+/* --- BUILD CHUNK DAG GRAPH & OVERLAY (@dagrejs/dagre Sugiyama Stage) --- */
+.build-dag-viewport {
+    width: 100%;
+    overflow: auto;
+    background-color: #f8f7f3;
+    background-image: radial-gradient(#d4d0c5 1px, transparent 1px);
+    background-size: 16px 16px;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 0.35rem 0;
+    margin-top: 0.5rem;
+    margin-bottom: 0.75rem;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+}
+
 .build-dag-graph {
     position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    margin-top: 0.75rem;
-    margin-bottom: 1rem;
     width: 100%;
+    margin: 0 auto;
+    flex-shrink: 0;
 }
 
 .build-dag-edges {
@@ -500,61 +520,163 @@
 
 .build-dag-edge {
     fill: none;
-    stroke: var(--card-border);
-    stroke-width: 2px;
+    stroke: #9ca3af;
+    stroke-width: 1.85px;
     stroke-linecap: round;
-    opacity: 0.75;
+    stroke-linejoin: round;
+}
+
+.build-dag-edge.edge-completed {
+    stroke: #15803d;
+    stroke-width: 2px;
+}
+
+.build-dag-edge.edge-active {
+    stroke: #c2410c;
+    stroke-width: 2px;
+}
+
+.build-dag-edge.edge-failed {
+    stroke: #b91c1c;
+    stroke-width: 2px;
+}
+
+.build-dag-edge.edge-pending {
+    stroke: #a8a29e;
+    stroke-dasharray: 4 3;
+}
+
+.build-dag-arrow {
+    fill: #9ca3af;
+}
+
+.build-dag-arrow.arrow-completed {
+    fill: #15803d;
+}
+
+.build-dag-arrow.arrow-active {
+    fill: #c2410c;
+}
+
+.build-dag-arrow.arrow-failed {
+    fill: #b91c1c;
+}
+
+.build-dag-arrow.arrow-pending {
+    fill: #a8a29e;
 }
 
 .build-dag-rank {
-    display: flex;
-    justify-content: space-around;
-    align-items: stretch;
-    gap: 1rem;
-    position: relative;
-    z-index: 2;
-    width: 100%;
+    display: contents;
 }
 
 .build-dag-node {
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
+    position: absolute;
+    z-index: 2;
+    background: var(--card-bg, #ffffff);
+    border: 1px solid #d6d3cb;
+    border-left: 3px solid #a8a29e;
     border-radius: 8px;
-    padding: 0.75rem 1rem;
+    padding: 6px 8px;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    flex: 1 1 0;
-    min-width: 0;
-    max-width: 100%;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: stretch;
+    gap: 4px;
+    box-sizing: border-box;
     cursor: pointer;
     text-align: left;
     font-family: var(--font-main);
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    box-shadow: var(--accent-glow);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+    box-shadow: 0 2px 5px rgba(20, 20, 19, 0.06);
+}
+
+.build-dag-node.node-status-completed,
+.build-dag-node.node-status-merged {
+    border-left-color: #15803d;
+}
+
+.build-dag-node.node-status-running,
+.build-dag-node.node-status-in_progress,
+.build-dag-node.node-status-coding,
+.build-dag-node.node-status-pr_opened,
+.build-dag-node.node-status-deploying {
+    border-left-color: #1d4ed8;
+}
+
+.build-dag-node.node-status-failed,
+.build-dag-node.node-status-ci_failed {
+    border-left-color: #b91c1c;
+    border-color: rgba(185, 28, 28, 0.45);
 }
 
 .build-dag-node:hover {
-    border-color: var(--card-border-hover);
+    border-color: var(--accent-primary, #c2410c);
     transform: translateY(-1px);
+    box-shadow: 0 6px 14px rgba(20, 20, 19, 0.1);
 }
 
 .build-dag-node.active {
     border-color: var(--accent-primary, #c2410c);
-    background: var(--bg-surface);
-    box-shadow: 0 0 0 2px rgba(194, 65, 12, 0.2);
+    background: var(--bg-surface, #ffffff);
+    box-shadow: 0 0 0 2px rgba(194, 65, 12, 0.22);
+}
+
+.dag-node-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+}
+
+.build-dag-node .chunk-index-badge {
+    font-size: 0.68rem;
+    line-height: 1;
+}
+
+.build-dag-node .chunk-status-badge {
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .build-dag-node .chunk-title {
-    flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.82rem;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    overflow-wrap: break-word;
+    font-size: 0.71rem;
+    line-height: 1.22;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+.dag-node-port {
+    position: absolute;
+    left: 50%;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ffffff;
+    border: 1.75px solid #78716c;
+    transform: translateX(-50%);
+    pointer-events: none;
+    box-sizing: border-box;
+}
+
+.dag-node-port.port-in {
+    top: -4px;
+}
+
+.dag-node-port.port-out {
+    bottom: -4px;
 }
 
 .chunk-detail-panel {
