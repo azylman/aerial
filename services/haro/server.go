@@ -20,9 +20,8 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
-const (
-	fieldError = "error"
-)
+// Shared field key fieldError now lives in internal/model as FieldError;
+// pure.go keeps a zero-logic alias for this package.
 
 type Server struct {
 	handler        *ToolHandler
