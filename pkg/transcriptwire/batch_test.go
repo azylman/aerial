@@ -290,28 +290,25 @@ func TestMsgID(t *testing.T) {
 	later.FileMtime = base.FileMtime.Add(time.Second)
 
 	tests := []struct {
-		name            string
-		first           TranscriptStepBatch
-		second          TranscriptStepBatch
-		wantFirst       string
-		wantEqual       bool
-		wantNanosSubstr string
+		name      string
+		first     TranscriptStepBatch
+		second    TranscriptStepBatch
+		wantFirst string
+		wantEqual bool
 	}{
 		{
-			name:            "same batch reproduces id folding file mtime nanos",
-			first:           base,
-			second:          base,
-			wantFirst:       "transcript-batch:aerial:sess-1:0:9:1234567890000000123",
-			wantEqual:       true,
-			wantNanosSubstr: "1234567890000000123",
+			name:      "same batch reproduces id folding file mtime nanos",
+			first:     base,
+			second:    base,
+			wantFirst: "transcript-batch:aerial:sess-1:0:9:1234567890000000123",
+			wantEqual: true,
 		},
 		{
-			name:            "rewritten file mtime changes id",
-			first:           base,
-			second:          later,
-			wantFirst:       "transcript-batch:aerial:sess-1:0:9:1234567890000000123",
-			wantEqual:       false,
-			wantNanosSubstr: "1234567890000000123",
+			name:      "rewritten file mtime changes id",
+			first:     base,
+			second:    later,
+			wantFirst: "transcript-batch:aerial:sess-1:0:9:1234567890000000123",
+			wantEqual: false,
 		},
 	}
 
@@ -321,9 +318,6 @@ func TestMsgID(t *testing.T) {
 			got := MsgID(tc.first)
 			if got != tc.wantFirst {
 				t.Errorf("MsgID = %q, want %q", got, tc.wantFirst)
-			}
-			if !strings.Contains(got, tc.wantNanosSubstr) {
-				t.Errorf("MsgID %q does not fold file mtime nanos %q", got, tc.wantNanosSubstr)
 			}
 			again := MsgID(tc.second)
 			if (again == got) != tc.wantEqual {
