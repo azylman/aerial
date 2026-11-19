@@ -22,11 +22,9 @@ if [ -d "/cache" ]; then
 fi
 
 if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
-  orig_args=("$@")
   shift 2
 
-  agent=""
-  reasoning=""
+  ci_args=(ci review)
   min_severity=""
   explicit_ref=""
   do_comment=0
@@ -39,131 +37,85 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --agent)
-        agent="${2:-}"
         shift 2
         ;;
       --agent=*)
-        agent="${1#*=}"
         shift
         ;;
       --reasoning)
-        reasoning="${2:-}"
         shift 2
         ;;
       --reasoning=*)
-        reasoning="${1#*=}"
         shift
         ;;
       --min-severity)
         min_severity="${2:-}"
+        ci_args+=("$1" "${2:-}")
         shift 2
         ;;
       --min-severity=*)
         min_severity="${1#*=}"
+        ci_args+=("$1")
         shift
         ;;
       --ref)
         explicit_ref="${2:-}"
+        ci_args+=("$1" "${2:-}")
         shift 2
         ;;
       --ref=*)
         explicit_ref="${1#*=}"
+        ci_args+=("$1")
         shift
         ;;
       --comment)
         do_comment=1
+        ci_args+=("$1")
         shift
         ;;
       --upsert-comments)
         upsert=1
+        ci_args+=("$1")
         shift
         ;;
       --gh-repo)
         gh_repo="${2:-}"
+        ci_args+=("$1" "${2:-}")
         shift 2
         ;;
       --gh-repo=*)
         gh_repo="${1#*=}"
+        ci_args+=("$1")
         shift
         ;;
       --pr)
         pr_num="${2:-}"
+        ci_args+=("$1" "${2:-}")
         shift 2
         ;;
       --pr=*)
         pr_num="${1#*=}"
+        ci_args+=("$1")
         shift
         ;;
       --review-types)
         has_review_types=1
         review_types_arg="${2:-}"
+        ci_args+=("$1" "${2:-}")
         shift 2
         ;;
       --review-types=*)
         has_review_types=1
         review_types_arg="${1#*=}"
+        ci_args+=("$1")
         shift
         ;;
       *)
+        ci_args+=("$1")
         shift
         ;;
     esac
   done
-
-  if [ -s "/root/.codex/auth.json" ] && command -v codex >/dev/null 2>&1; then
-    agent="codex"
-    reasoning="low"
-    for i in "${!orig_args[@]}"; do
-      case "${orig_args[i]}" in
-        --agent=*|--agent)
-          if [[ "${orig_args[i]}" == --agent=* ]]; then
-            orig_args[i]="--agent=codex"
-          elif [[ "${orig_args[i]}" == "--agent" && $((i+1)) -lt ${#orig_args[@]} ]]; then
-            orig_args[i+1]="codex"
-          fi
-          ;;
-        --reasoning=*|--reasoning)
-          if [[ "${orig_args[i]}" == --reasoning=* ]]; then
-            orig_args[i]="--reasoning=low"
-          elif [[ "${orig_args[i]}" == "--reasoning" && $((i+1)) -lt ${#orig_args[@]} ]]; then
-            orig_args[i+1]="low"
-          fi
-          ;;
-      esac
-    done
-  elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && command -v claude >/dev/null 2>&1; then
-    if [[ -z "${agent}" || "${agent}" == "gemini" || "${agent}" == "codex" ]]; then
-      agent="claude-code"
-    fi
-    reasoning="low"
-    for i in "${!orig_args[@]}"; do
-      if [[ "${orig_args[i]}" == "--agent=gemini" || "${orig_args[i]}" == "--agent=codex" ]]; then
-        orig_args[i]="--agent=claude-code"
-      elif [[ "${orig_args[i]}" == "--agent" && ( "${orig_args[i+1]:-}" == "gemini" || "${orig_args[i+1]:-}" == "codex" ) ]]; then
-        orig_args[i+1]="claude-code"
-      elif [[ "${orig_args[i]}" == --reasoning=* ]]; then
-        orig_args[i]="--reasoning=low"
-      elif [[ "${orig_args[i]}" == "--reasoning" && $((i+1)) -lt ${#orig_args[@]} ]]; then
-        orig_args[i+1]="low"
-      fi
-    done
-  else
-    if [[ "${agent}" == "codex" || "${agent}" == "claude-code" || "${agent}" == "claude" ]]; then
-      agent="gemini"
-    fi
-    reasoning="low"
-    for i in "${!orig_args[@]}"; do
-      if [[ "${orig_args[i]}" == "--agent=codex" || "${orig_args[i]}" == "--agent=claude-code" || "${orig_args[i]}" == "--agent=claude" ]]; then
-        orig_args[i]="--agent=gemini"
-      elif [[ "${orig_args[i]}" == "--agent" && ( "${orig_args[i+1]:-}" == "codex" || "${orig_args[i+1]:-}" == "claude-code" || "${orig_args[i+1]:-}" == "claude" ) ]]; then
-        orig_args[i+1]="gemini"
-      elif [[ "${orig_args[i]}" == --reasoning=* ]]; then
-        orig_args[i]="--reasoning=low"
-      elif [[ "${orig_args[i]}" == "--reasoning" && $((i+1)) -lt ${#orig_args[@]} ]]; then
-        orig_args[i+1]="low"
-      fi
-    done
-  fi
 
   branch="${GITHUB_HEAD_REF:-}"
   base_sha=""
@@ -222,8 +174,6 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     else
       cmd_args+=("${ref}")
     fi
-    [[ -n "${agent}" ]] && cmd_args+=(--agent "${agent}")
-    [[ -n "${reasoning}" ]] && cmd_args+=(--reasoning "${reasoning}")
     [[ -n "${min_severity}" ]] && cmd_args+=(--min-severity "${min_severity}")
 
     raw_out=$(mktemp)
@@ -385,9 +335,9 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   fi
 
   if [[ "${has_review_types}" -eq 0 ]]; then
-    exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}" --review-types "${review_types_arg:-default,test-value}"
+    exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${ci_args[@]}" --review-types "${review_types_arg:-default,test-value}"
   fi
-  exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${orig_args[@]}"
+  exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${ci_args[@]}"
 fi
 
 exec env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "$@"
