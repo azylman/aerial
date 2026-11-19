@@ -732,15 +732,10 @@ func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context,
 	normRepo := normalizeRepo(repo)
 
 	if prNum > 0 && s.registry != nil {
-		if pgReg, ok := s.registry.(*PostgresPRRegistry); ok && pgReg != nil && pgReg.pool != nil {
-			qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-			var status string
-			err := pgReg.pool.QueryRow(qCtx, `SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normRepo, prNum).Scan(&status)
-			if err == nil && strings.EqualFold(strings.TrimSpace(status), "deployed") {
-				s.recordDeploySuccessDispatched(repo, jobName, commitSHA, prNum)
-				return true
-			}
+		deployed, err := s.registry.IsPRDeployed(ctx, normRepo, prNum)
+		if err == nil && deployed {
+			s.recordDeploySuccessDispatched(repo, jobName, commitSHA, prNum)
+			return true
 		}
 	}
 

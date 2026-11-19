@@ -1218,3 +1218,11 @@ func (m *mockPRRegistry) LoadPRBuildMetadata(context.Context, string, int) (Buil
 func (m *mockPRRegistry) LoadPRBuildLifecycle(context.Context, string, int) (PRBuildLifecycle, error) {
 	return m.buildLifecycle, m.buildLifecycleErr
 }
+
+func (*mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+func (*mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error) {
+	return false, nil
+}

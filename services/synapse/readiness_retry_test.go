@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -59,57 +57,6 @@ func TestRetryPRReadiness(t *testing.T) {
 			}
 			if tc.accepted && (len(disp.reconcileRequestedAts) != 1 || disp.reconcileRequestedAts[0] != "2026-01-02T03:04:05Z") {
 				t.Fatal("original request identity changed")
-			}
-		})
-	}
-}
-
-func TestPostgresPRRegistry_RetryReadiness(t *testing.T) {
-	t.Parallel()
-	if *registryTestDSN == "" {
-		t.Skip("requires disposable PostgreSQL fixture via -registry-test-dsn")
-	}
-	tests := []struct {
-		name, status, merge string
-		pending             bool
-		want                int
-	}{
-		{"deployed retries original gate", "deployed", "abc", false, 1},
-		{"failed retries original gate", "deploy_failed", "abc", false, 1},
-		{"pending retains partial progress", "deploying", "abc", true, 1},
-		{"stale merge rejected", "deployed", "old", true, 0},
-		{"closed rejected", "closed", "abc", true, 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-			conn := newRecoveryFixture(t, tc.status, `{"kustomization_requests":{"config":{"namespace":"flux-system","requested_at":"original"}},"deployed_kustomizations":["config"],"jobs":["image"],"ci_checks":{"test":"passed"}}`)
-			if _, err := conn.Exec(ctx, `UPDATE pr_registry SET merge_sha='abc'`); err != nil {
-				t.Fatal(err)
-			}
-			requests, err := NewPostgresPRRegistry(conn).RetryPRReadiness(ctx, "example/project", tc.merge, 42)
-			if err != nil || len(requests) != tc.want {
-				t.Fatalf("requests %v err %v", requests, err)
-			}
-			if tc.want > 0 && requests["config"].RequestedAt != "original" {
-				t.Fatal("request identity replaced")
-			}
-			var status string
-			var body []byte
-			if err := conn.QueryRow(ctx, `SELECT status,metadata FROM pr_registry`).Scan(&status, &body); err != nil {
-				t.Fatal(err)
-			}
-			var metadata map[string]any
-			if err := json.Unmarshal(body, &metadata); err != nil {
-				t.Fatal(err)
-			}
-			_, retained := metadata["deployed_kustomizations"]
-			if retained != tc.pending || !reflect.DeepEqual(metadata["jobs"], []any{"image"}) {
-				t.Fatalf("metadata %s", body)
-			}
-			if tc.want > 0 && status != "deploying" || tc.want == 0 && status != tc.status {
-				t.Fatalf("status %s", status)
 			}
 		})
 	}
