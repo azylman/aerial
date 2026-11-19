@@ -743,17 +743,59 @@ type notifyShortFrictionCase struct {
 	name        string
 	channelID   string
 	content     string
+	eriURL      string
 	bus         pubsub.Bus
+	client      *http.Client
 	wantErr     bool
 	errSubstr   string
 	wantSubject string
+	wantHTTP    bool
 }
 
-func runNotifyShortFrictionCase(ctx context.Context, t *testing.T, fixedTime time.Time, done <-chan struct{}, publishedSubject *string, publishedArgs *pubsub.EriDiscordMessageJobArgs, tc notifyShortFrictionCase) {
+func assertNotifyShortFrictionHTTP(t *testing.T, httpCalls *int, lastHTTPPayload *map[string]string, tc notifyShortFrictionCase) {
 	t.Helper()
+	if !tc.wantHTTP {
+		return
+	}
+	if httpCalls != nil && *httpCalls == 0 {
+		t.Errorf("expected HTTP call to eriURL")
+	}
+	if lastHTTPPayload != nil && *lastHTTPPayload != nil {
+		if (*lastHTTPPayload)["channel_id"] != tc.channelID || (*lastHTTPPayload)["content"] != tc.content {
+			t.Errorf("HTTP payload = %+v, want channel=%q, content=%q", *lastHTTPPayload, tc.channelID, tc.content)
+		}
+	}
+}
+
+func assertNotifyShortFrictionPubSub(t *testing.T, done <-chan struct{}, publishedSubject *string, publishedArgs *pubsub.EriDiscordMessageJobArgs, tc notifyShortFrictionCase) {
+	t.Helper()
+	if tc.wantErr || tc.wantSubject == "" {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pubsub message delivery")
+	}
+	if *publishedSubject != tc.wantSubject {
+		t.Errorf("subject = %q, want %q", *publishedSubject, tc.wantSubject)
+	}
+	if publishedArgs.ChannelID != tc.channelID || publishedArgs.Content != tc.content {
+		t.Errorf("publishedArgs = %+v, want channel=%q, content=%q", publishedArgs, tc.channelID, tc.content)
+	}
+}
+
+func runNotifyShortFrictionCase(ctx context.Context, t *testing.T, fixedTime time.Time, done <-chan struct{}, publishedSubject *string, publishedArgs *pubsub.EriDiscordMessageJobArgs, httpCalls *int, lastHTTPPayload *map[string]string, defaultClient *http.Client, tc notifyShortFrictionCase) {
+	t.Helper()
+	client := tc.client
+	if client == nil {
+		client = defaultClient
+	}
 	p := &GitHubSkillPublisher{
 		systemChannelID: tc.channelID,
 		now:             func() time.Time { return fixedTime },
+		eriURL:          tc.eriURL,
+		httpClient:      client,
 	}
 	p.SetEventBus(tc.bus)
 
@@ -766,23 +808,34 @@ func runNotifyShortFrictionCase(ctx context.Context, t *testing.T, fixedTime tim
 			t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
 		}
 	}
-	if !tc.wantErr && tc.wantSubject != "" {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for pubsub message delivery")
-		}
-		if *publishedSubject != tc.wantSubject {
-			t.Errorf("subject = %q, want %q", *publishedSubject, tc.wantSubject)
-		}
-		if publishedArgs.ChannelID != tc.channelID || publishedArgs.Content != tc.content {
-			t.Errorf("publishedArgs = %+v, want channel=%q, content=%q", publishedArgs, tc.channelID, tc.content)
-		}
-	}
+	assertNotifyShortFrictionHTTP(t, httpCalls, lastHTTPPayload, tc)
+	assertNotifyShortFrictionPubSub(t, done, publishedSubject, publishedArgs, tc)
 }
 
 func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 	ctx := context.Background()
+
+	var httpCalls int
+	var lastHTTPPayload map[string]string
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/discord/message" && r.Method == http.MethodPost {
+			httpCalls++
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			lastHTTPPayload = payload
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"sent"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer httpServer.Close()
+
+	failHTTPServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer failHTTPServer.Close()
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -813,14 +866,16 @@ func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 	tests := []notifyShortFrictionCase{
 		{name: "EmptyChannelIDNoop", channelID: "", content: "alert", bus: memBus, wantErr: false},
 		{name: "EmptyContentNoop", channelID: "ch-1", content: "   ", bus: memBus, wantErr: false},
-		{name: "NilBusFails", channelID: "ch-1", content: "alert", bus: nil, wantErr: true, errSubstr: "event bus is not configured"},
-		{name: "BusError", channelID: "ch-1", content: "alert", bus: errBus, wantErr: true, errSubstr: "simulated publish error"},
-		{name: "SuccessPublish", channelID: "1562837549255495693", content: "friction occurred", bus: memBus, wantErr: false, wantSubject: pubsub.SubjectEriDiscordMessageJob},
+		{name: "NilBusFailsWhenNoEriURL", channelID: "ch-1", content: "alert", bus: nil, wantErr: true, errSubstr: "event bus is not configured"},
+		{name: "BusErrorWhenNoEriURL", channelID: "ch-1", content: "alert", bus: errBus, wantErr: true, errSubstr: "simulated publish error"},
+		{name: "SuccessPublishWhenNoEriURL", channelID: "1562837549255495693", content: "friction occurred", bus: memBus, wantErr: false, wantSubject: pubsub.SubjectEriDiscordMessageJob},
+		{name: "SuccessHTTPEriURL", channelID: "1562837549255495693", content: "friction occurred via http", eriURL: httpServer.URL, client: httpServer.Client(), wantErr: false, wantHTTP: true},
+		{name: "ErrorHTTPEriURL", channelID: "1562837549255495693", content: "friction error", eriURL: failHTTPServer.URL, client: failHTTPServer.Client(), wantErr: true, errSubstr: "discord message returned status 500"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runNotifyShortFrictionCase(ctx, t, fixedTime, done, &publishedSubject, &publishedArgs, tc)
+			runNotifyShortFrictionCase(ctx, t, fixedTime, done, &publishedSubject, &publishedArgs, &httpCalls, &lastHTTPPayload, httpServer.Client(), tc)
 		})
 	}
 

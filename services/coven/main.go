@@ -200,6 +200,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		Repo:            cfg.ConfigRepoName,
 		PRRegisterURL:   cfg.PRRegisterURL,
 		SystemChannelID: cfg.SystemChannelID,
+		EriURL:          cfg.EriURL,
 	})
 	toolHandler := NewToolHandler(cfg, store, ollama, publisher)
 	server := NewServer(toolHandler)
