@@ -124,8 +124,8 @@ func hasDispatchedChunkAssociation(body string, build model.VanadisBuild, chunk 
 	if strings.TrimSpace(trailer.VanadisChunkID) != chunk.ID {
 		return false
 	}
-	buildThread := normalizeDiscordThreadID(build.ThreadID)
-	return buildThread == "" || normalizeDiscordThreadID(trailer.TargetID) == buildThread
+	buildThread := model.NormalizeDiscordThreadID(build.ThreadID)
+	return buildThread == "" || model.NormalizeDiscordThreadID(trailer.TargetID) == buildThread
 }
 
 func (e *Executor) ValidateChunkPRAttachment(ctx context.Context, build model.VanadisBuild, chunk model.VanadisChunk, ev pubsub.PRLifecycleEvent) error {
@@ -141,7 +141,7 @@ func (e *Executor) ValidateChunkPRAttachment(ctx context.Context, build model.Va
 	}
 	headRef := strings.TrimPrefix(strings.TrimSpace(pr.Head.Ref), "refs/heads/")
 	evBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
-	branchChunkID := extractChunkIDFromBranch(fullRepo, headRef)
+	branchChunkID := model.ExtractChunkIDFromBranch(fullRepo, headRef)
 	if headRef == "" || (evBranch != "" && headRef != evBranch) || (branchChunkID != "" && branchChunkID != chunk.ID) {
 		return store.ErrPRTransitionSkipped
 	}

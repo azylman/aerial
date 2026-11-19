@@ -32,11 +32,6 @@ const (
 // identity holds wherever the lifecycle transition executes.
 var ErrPRTransitionSkipped = store.ErrPRTransitionSkipped
 
-// ActionDispatchID identifies the launch turn dispatch for a chunk.
-func ActionDispatchID(chunk model.VanadisChunk) string {
-	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
-}
-
 // Flow executes PR lifecycle transitions against the durable store and the
 // executor side-effect surface.
 type Flow struct {
@@ -405,7 +400,7 @@ func IsEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk,
 	if c.Status != statusRunning && c.Status != statusCoding {
 		return false
 	}
-	if buildThread := NormalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && NormalizeDiscordThreadID(ev.TargetID) != buildThread {
+	if buildThread := model.NormalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && model.NormalizeDiscordThreadID(ev.TargetID) != buildThread {
 		return false
 	}
 	return store.AttachmentMatches(*c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
@@ -430,7 +425,7 @@ func SelectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.Vanad
 	if build == nil {
 		return nil
 	}
-	if chunkID := ExtractChunkIDFromBranch(ev.Repo, ev.Branch); chunkID != "" {
+	if chunkID := model.ExtractChunkIDFromBranch(ev.Repo, ev.Branch); chunkID != "" {
 		for i := range chunks {
 			if chunks[i].ID == chunkID && chunks[i].BuildID == build.ID {
 				if IsEligibleUnattachedChunk(build, &chunks[i], ev) {
@@ -441,8 +436,8 @@ func SelectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.Vanad
 		}
 		return nil
 	}
-	evThread := NormalizeDiscordThreadID(ev.TargetID)
-	buildThread := NormalizeDiscordThreadID(build.ThreadID)
+	evThread := model.NormalizeDiscordThreadID(ev.TargetID)
+	buildThread := model.NormalizeDiscordThreadID(build.ThreadID)
 	if !CanFallbackThreadRepoLookup(ev) || evThread == "" || buildThread == "" || evThread != buildThread {
 		return nil
 	}
@@ -460,7 +455,7 @@ func SelectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.Vanad
 
 // ResolveOrAttachPRChunk attaches an unattached chunk for the event PR.
 func (f *Flow) ResolveOrAttachPRChunk(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
-	if f.Exec == nil || (ExtractChunkIDFromBranch(ev.Repo, ev.Branch) == "" && !CanFallbackThreadRepoLookup(ev)) {
+	if f.Exec == nil || (model.ExtractChunkIDFromBranch(ev.Repo, ev.Branch) == "" && !CanFallbackThreadRepoLookup(ev)) {
 		return "", nil
 	}
 
@@ -535,7 +530,7 @@ func NoPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) No
 		return NoPRActionNone
 	}
 	switch dispatchID {
-	case ActionDispatchID(chunk):
+	case model.ActionDispatchID(chunk):
 		return NoPRActionResume
 	case NoPRResumeDispatchID(chunk.ID):
 		return NoPRActionFail

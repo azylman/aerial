@@ -198,33 +198,22 @@ func NonNilSlice[T any](s []T) []T {
 	return s
 }
 
-// NormalizeRepo trims repo whitespace.
+// NormalizeRepo trims repo whitespace. Canonical implementation lives in
+// internal/model; this alias preserves the store surface for existing callers.
 func NormalizeRepo(repo string) string {
-	return strings.TrimSpace(repo)
+	return model.NormalizeRepo(repo)
 }
 
-// NormalizeChunkMode validates and normalizes a chunk mode.
+// NormalizeChunkMode validates and normalizes a chunk mode. Canonical
+// implementation lives in internal/model.
 func NormalizeChunkMode(raw string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "pr":
-		return "pr", nil
-	case chunkModeAction:
-		return chunkModeAction, nil
-	default:
-		return "", fmt.Errorf("invalid chunk mode %q: must be 'pr' or 'action'", raw)
-	}
+	return model.NormalizeChunkMode(raw)
 }
 
-// NormalizeChunkEffort validates and normalizes a chunk effort.
+// NormalizeChunkEffort validates and normalizes a chunk effort. Canonical
+// implementation lives in internal/model.
 func NormalizeChunkEffort(effort string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "", effortMedium, "high":
-		return effortMedium, nil
-	case effortLow:
-		return effortLow, nil
-	default:
-		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
-	}
+	return model.NormalizeChunkEffort(effort)
 }
 
 // CapChunkEffort clamps an effort value to a valid effort.
@@ -237,18 +226,9 @@ func CapChunkEffort(effort string) string {
 }
 
 // IsValidVanadisChunkID reports whether id is a valid chunk identifier.
+// Canonical implementation lives in internal/model.
 func IsValidVanadisChunkID(id string) bool {
-	id = strings.TrimSpace(id)
-	if len(id) < 1 || len(id) > 120 {
-		return false
-	}
-	for i := range len(id) {
-		c := id[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
-			return false
-		}
-	}
-	return true
+	return model.IsValidVanadisChunkID(id)
 }
 
 // RepoMatchCandidates returns the repo spellings a chunk lookup should match.
@@ -267,28 +247,9 @@ func RepoMatchCandidates(repo string) []string {
 }
 
 // ValidateChunkModeAndRepo validates mode/repo coherence for a chunk input.
+// Canonical implementation lives in internal/model.
 func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
-	mode, err := NormalizeChunkMode(modeStr)
-	if err != nil {
-		return fmt.Errorf("chunk[%d] %w", idx, err)
-	}
-	switch mode {
-	case "pr":
-		if NormalizeRepo(repo) == "" {
-			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
-		}
-	case chunkModeAction:
-		if strings.TrimSpace(repo) != "" {
-			return fmt.Errorf("chunk[%d] action chunk must have empty repo", idx)
-		}
-		if len(targetFiles) > 0 {
-			return fmt.Errorf("chunk[%d] action chunk must not specify target_files", idx)
-		}
-		if len(targetSymbols) > 0 {
-			return fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", idx)
-		}
-	}
-	return nil
+	return model.ValidateChunkModeAndRepo(idx, modeStr, repo, targetFiles, targetSymbols)
 }
 
 // ScanBuild scans a single build row.

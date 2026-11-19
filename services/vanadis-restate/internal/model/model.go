@@ -3,6 +3,10 @@
 package model
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -121,4 +125,145 @@ func BuildRouterServiceName(agent string) string {
 		return legacyBuildRouterServiceName
 	}
 	return legacyBuildRouterServiceName + "-" + name
+}
+
+// Mode and effort vocabulary for the canonical normalization helpers below.
+const (
+	chunkModeAction = "action"
+	effortLow       = "low"
+	effortMedium    = "medium"
+)
+
+// ErrInvalidBuildInput reports malformed build or chunk input.
+var ErrInvalidBuildInput = errors.New("invalid vanadis build input")
+
+// ActionDispatchID identifies the launch turn dispatch for a chunk.
+func ActionDispatchID(chunk VanadisChunk) string {
+	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
+}
+
+// CleanRepoName strips any owner prefix from a repo reference.
+func CleanRepoName(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+		return repo[idx+1:]
+	}
+	return repo
+}
+
+// NormalizeDiscordThreadID canonicalizes a Discord thread or channel marker.
+func NormalizeDiscordThreadID(s string) string {
+	clean := strings.TrimSpace(s)
+	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
+		clean = strings.TrimSpace(clean[idx+1:])
+	}
+	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// ExtractChunkIDFromBranch recovers the Vanadis chunk ID encoded in a
+// feat/<repo>-pr-vanadis-<chunk>-<6hex> branch name, or "" when absent.
+func ExtractChunkIDFromBranch(repo, branch string) string {
+	repoName := strings.TrimSuffix(CleanRepoName(repo), ".git")
+	if repoName == "" {
+		return ""
+	}
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	after, ok := strings.CutPrefix(branch, "feat/"+repoName+"-pr-vanadis-")
+	if !ok {
+		return ""
+	}
+	chunkID, suffix, hasSuffix := strings.CutLast(after, "-")
+	if !hasSuffix || len(suffix) != 6 {
+		return ""
+	}
+	for i := range suffix {
+		if !isHexDigit(suffix[i]) {
+			return ""
+		}
+	}
+	if !IsValidVanadisChunkID(chunkID) {
+		return ""
+	}
+	return chunkID
+}
+
+// IsValidVanadisChunkID reports whether id is a valid chunk identifier.
+func IsValidVanadisChunkID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) < 1 || len(id) > 120 {
+		return false
+	}
+	for i := range len(id) {
+		c := id[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// GenerateBuildID mints a new build identifier.
+func GenerateBuildID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
+}
+
+// NormalizeRepo trims repo whitespace.
+func NormalizeRepo(repo string) string {
+	return strings.TrimSpace(repo)
+}
+
+// NormalizeChunkMode validates and normalizes a chunk mode.
+func NormalizeChunkMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "pr":
+		return "pr", nil
+	case chunkModeAction:
+		return chunkModeAction, nil
+	default:
+		return "", fmt.Errorf("invalid chunk mode %q: must be 'pr' or 'action'", raw)
+	}
+}
+
+// NormalizeChunkEffort validates and normalizes a chunk effort.
+func NormalizeChunkEffort(effort string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "", effortMedium, "high":
+		return effortMedium, nil
+	case effortLow:
+		return effortLow, nil
+	default:
+		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
+	}
+}
+
+// ValidateChunkModeAndRepo validates mode/repo coherence for a chunk input.
+func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
+	mode, err := NormalizeChunkMode(modeStr)
+	if err != nil {
+		return fmt.Errorf("chunk[%d] %w", idx, err)
+	}
+	switch mode {
+	case "pr":
+		if NormalizeRepo(repo) == "" {
+			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
+		}
+	case chunkModeAction:
+		if strings.TrimSpace(repo) != "" {
+			return fmt.Errorf("chunk[%d] action chunk must have empty repo", idx)
+		}
+		if len(targetFiles) > 0 {
+			return fmt.Errorf("chunk[%d] action chunk must not specify target_files", idx)
+		}
+		if len(targetSymbols) > 0 {
+			return fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", idx)
+		}
+	}
+	return nil
 }

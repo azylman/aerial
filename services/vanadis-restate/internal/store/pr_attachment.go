@@ -9,15 +9,13 @@ package store
 // standalone PR creation, transaction flow, and error behavior are
 // byte-identical to the root copies they replace.
 //
-// Helper copies below (generateBuildID, cleanRepoName) and the synced and
-// deployed status constants mirror the frozen root router.go and store.go
-// copies byte-for-byte; those root files stay frozen until the
-// facade-removal chunk unifies both copies.
+// Build ID and repo-name normalization delegate to the canonical
+// internal/model helpers. The synced and deployed status constants mirror
+// the frozen root store.go copies byte-for-byte; those root files stay
+// frozen until the facade-removal chunk unifies both copies.
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -165,10 +163,10 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 	if !errors.Is(fErr, pgx.ErrNoRows) {
 		return "", "", "", fmt.Errorf("find existing pr attach %s#%d: %w", repo, req.PRNumber, fErr)
 	}
-	buildID := generateBuildID()
+	buildID := model.GenerateBuildID()
 	chunkID := buildID + "-chunk-1"
-	title := FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, cleanRepoName(repo)))
-	threadID := normalizeDiscordThreadID(req.TargetID)
+	title := FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, model.CleanRepoName(repo)))
+	threadID := model.NormalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
 	build := model.VanadisBuild{
 		ID:        buildID,
@@ -256,18 +254,4 @@ func AttachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req AttachChu
 
 func firstWorkerFailure(c model.VanadisChunk) bool {
 	return c.Mode == "pr" && c.Status == statusFailed && c.PRNumber == 0 && c.CIFailCount == 0
-}
-
-func generateBuildID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
-}
-
-func cleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
 }

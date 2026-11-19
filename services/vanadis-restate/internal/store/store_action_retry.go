@@ -8,9 +8,8 @@ package store
 // graph rules, transaction locking and instruction matching are byte-identical
 // to the root copies they replace.
 //
-// Helper copies below (isPRDependencyCodeReady, checkChunkDependenciesReady)
-// mirror the frozen root dag.go copies byte-for-byte; dag.go stays frozen
-// until the facade-removal chunk unifies both copies.
+// Dependency-readiness checks delegate to the canonical internal/dag
+// helpers; retry-instruction pairing stays authoritative here in internal/store.
 
 import (
 	"context"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -32,7 +32,7 @@ func (s *Store) RetryActionChunk(ctx context.Context, req RetryActionChunkReques
 	if strings.TrimSpace(req.BuildID) == "" || strings.TrimSpace(req.ChunkID) == "" || strings.TrimSpace(req.ExpectedDispatchID) == "" || strings.TrimSpace(req.Reason) == "" {
 		return nil, fmt.Errorf("%w: build, chunk, expected dispatch and reason are required", ErrInvalidBuildInput)
 	}
-	if !validRetryInstructionPair(req) {
+	if !ValidRetryInstructionPair(req) {
 		return nil, fmt.Errorf("%w: expected_instructions and replacement_instructions must be paired and nonblank", ErrInvalidBuildInput)
 	}
 	tx, err := s.db.Begin(ctx)
@@ -69,11 +69,11 @@ func (s *Store) RetryActionChunk(ctx context.Context, req RetryActionChunkReques
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &RetryActionChunkResult{BuildID: req.BuildID, ChunkID: c.ID, DispatchID: actionDispatchID(c), Accepted: true}, nil
+	return &RetryActionChunkResult{BuildID: req.BuildID, ChunkID: c.ID, DispatchID: model.ActionDispatchID(c), Accepted: true}, nil
 }
 
 func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bool {
-	if err := checkChunkDependenciesReady(c, chunks); err != nil {
+	if err := dag.CheckChunkDependenciesReady(c, chunks); err != nil {
 		return false
 	}
 	descendants := map[string]bool{c.ID: true}
@@ -126,8 +126,8 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	}
 	previous := c
 	previous.StallNudges--
-	replay := c.StallNudges > 0 && req.ExpectedDispatchID == actionDispatchID(previous) && b.Status == statusRunning && (c.Status == statusPending || c.Status == statusRunning)
-	if !replay && (b.Status != statusFailed || c.Status != statusFailed || req.ExpectedDispatchID != actionDispatchID(c)) {
+	replay := c.StallNudges > 0 && req.ExpectedDispatchID == model.ActionDispatchID(previous) && b.Status == statusRunning && (c.Status == statusPending || c.Status == statusRunning)
+	if !replay && (b.Status != statusFailed || c.Status != statusFailed || req.ExpectedDispatchID != model.ActionDispatchID(c)) {
 		return conflict()
 	}
 	if !replay && !retryInstructionsMatch(req, c) {
@@ -140,7 +140,10 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	return c, replay, nil
 }
 
-func validRetryInstructionPair(req RetryActionChunkRequest) bool {
+// ValidRetryInstructionPair reports whether a retry request carries a paired
+// nonblank expected/replacement instruction update. Single authoritative copy
+// consumed by the build package.
+func ValidRetryInstructionPair(req RetryActionChunkRequest) bool {
 	if req.ExpectedInstructions == nil && req.ReplacementInstructions == nil {
 		return true
 	}
@@ -149,38 +152,4 @@ func validRetryInstructionPair(req RetryActionChunkRequest) bool {
 
 func retryInstructionsMatch(req RetryActionChunkRequest, c model.VanadisChunk) bool {
 	return req.ExpectedInstructions == nil || c.Instructions == *req.ExpectedInstructions
-}
-
-func isPRDependencyCodeReady(other model.VanadisChunk) bool {
-	status := strings.ToLower(strings.TrimSpace(other.Status))
-	if status == statusCompleted {
-		return true
-	}
-	if strings.ToLower(strings.TrimSpace(other.Mode)) == "pr" {
-		switch status {
-		case statusMerged, statusDeploying:
-			return true
-		}
-	}
-	return false
-}
-
-func checkChunkDependenciesReady(chunk model.VanadisChunk, chunks []model.VanadisChunk) error {
-	for _, depID := range chunk.DependsOn {
-		depReady := false
-		for _, other := range chunks {
-			if other.ID == depID {
-				if strings.ToLower(strings.TrimSpace(chunk.Mode)) == "pr" {
-					depReady = isPRDependencyCodeReady(other)
-				} else {
-					depReady = strings.EqualFold(strings.TrimSpace(other.Status), "completed")
-				}
-				break
-			}
-		}
-		if !depReady {
-			return fmt.Errorf("chunk %s dependency %s is not yet completed", chunk.ID, depID)
-		}
-	}
-	return nil
 }
