@@ -44,11 +44,6 @@ type Config struct {
 	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
 
-// LoadConfig loads configuration from path using DATABASE_URL from the environment.
-func LoadConfig(path string) (*Config, error) {
-	return LoadConfigFile(path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
-}
-
 // LoadConfigFile loads and validates the YAML config from path.
 // Fails fast if the file is missing, malformed, or required fields are absent.
 func LoadConfigFile(path string, dbURL string) (*Config, error) {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
@@ -102,7 +103,7 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_BrainURLResolution(t *testing.T) {
+func TestLoadConfigFile_BrainURLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
 	pathWithEri := filepath.Join(tmpDir, "with_eri.yaml")
 	pathWithoutBrain := filepath.Join(tmpDir, "without_brain.yaml")
@@ -146,7 +147,7 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 			wantDB:       "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
 		},
 		{
-			name:    "missing DB returns error via LoadConfig",
+			name:    "missing DB returns error via DSN fallback",
 			path:    pathWithEri,
 			envDB:   "",
 			wantErr: true,
@@ -165,9 +166,9 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
 			t.Setenv("POSTGRES_DB", "")
 
-			cfg, err := LoadConfig(tc.path)
+			cfg, err := LoadConfigFile(tc.path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if !tc.wantErr {
 				if cfg.EriURL != tc.wantBrainURL {
@@ -181,7 +182,7 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_VanadisURLResolution(t *testing.T) {
+func TestLoadConfigFile_VanadisURLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
 	pathWithVanadis := filepath.Join(tmpDir, "with_vanadis.yaml")
 	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
@@ -231,9 +232,9 @@ func TestLoadConfig_VanadisURLResolution(t *testing.T) {
 			t.Setenv("POSTGRES_PASSWORD", "")
 			t.Setenv("POSTGRES_DB", "")
 
-			cfg, err := LoadConfig(tc.path)
+			cfg, err := LoadConfigFile(tc.path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if !tc.wantErr && cfg.VanadisURL != tc.wantVanadisURL {
 				t.Errorf("cfg.VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)

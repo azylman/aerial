@@ -12,7 +12,6 @@ package main
 import (
 	"net/http"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/services/haro/internal/metrics"
@@ -32,10 +31,6 @@ func RecordScheduleRun(scheduleType, status string) {
 // RecordScheduleDispatchDuration observes the prompt dispatch duration in seconds for a schedule type.
 func RecordScheduleDispatchDuration(scheduleType string, durationSeconds float64) {
 	metrics.RecordScheduleDispatchDuration(scheduleType, durationSeconds)
-}
-
-func registerHaroCollector(c prometheus.Collector) {
-	metrics.RegisterHaroCollector(c)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
