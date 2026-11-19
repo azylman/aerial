@@ -721,12 +721,8 @@ func TestCIFailureTransition_RollbackAndRetry(t *testing.T) {
 				t.Fatalf("first handleCIFailureTransition err = nil, want error")
 			}
 
-			entry := srv.loadMatchingFailedCheckState(res.Repo, res.PRNumber, res.HeadSHA)
-			if entry == nil {
-				t.Fatalf("expected non-nil failedCheckState entry")
-			}
-			if entry.activeFailed["unit-tests"] {
-				t.Fatalf("expected active failure for unit-tests to be rolled back, got %v", entry.activeFailed)
+			if srv.GHState().HasActiveCheckRun(res.Repo, res.PRNumber, res.HeadSHA, "unit-tests") {
+				t.Fatalf("expected active failure for unit-tests to be rolled back")
 			}
 
 			bus.err = nil
