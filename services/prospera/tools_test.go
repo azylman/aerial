@@ -32,10 +32,12 @@ func setupTestToolHandler() (*ToolHandler, *mockStoreForDelivery, *mockTwilioFor
 }
 
 type toolHandlerInitiateCallTestCase struct {
-	name     string
-	args     InitiateCallArgs
-	wantErr  bool
-	wantMode string
+	name           string
+	args           InitiateCallArgs
+	twilioErr      string
+	updateStateErr string
+	wantErr        bool
+	wantMode       string
 }
 
 func TestToolHandler_InitiateCall(t *testing.T) {
@@ -88,6 +90,16 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "twilio error with state update failure",
+			args: InitiateCallArgs{
+				To:      "+15105550199",
+				Message: "Hello, this is an automated confirmation call.",
+			},
+			twilioErr:      "twilio network error",
+			updateStateErr: "db write failed",
+			wantErr:        true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -101,6 +113,12 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTestCase) {
 	t.Helper()
 	handler, store, twilioMock := setupTestToolHandler()
+	if tc.twilioErr != "" {
+		twilioMock.createCallErr = errors.New(tc.twilioErr)
+	}
+	if tc.updateStateErr != "" {
+		store.updateStateErr = errors.New(tc.updateStateErr)
+	}
 
 	out, err := handler.InitiateCall(context.Background(), tc.args)
 	if (err != nil) != tc.wantErr {
@@ -247,9 +265,11 @@ func TestToolHandler_EndCall(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		callID  string
-		wantErr bool
+		name             string
+		callID           string
+		reportStatus     string
+		wantReportStatus string
+		wantErr          bool
 	}{
 		{
 			name:    "empty call id",
@@ -266,6 +286,13 @@ func TestToolHandler_EndCall(t *testing.T) {
 			callID:  "call-active-1",
 			wantErr: false,
 		},
+		{
+			name:             "existing call with pending report still ends",
+			callID:           "call-active-1",
+			reportStatus:     "pending",
+			wantReportStatus: "failed",
+			wantErr:          false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -280,6 +307,7 @@ func TestToolHandler_EndCall(t *testing.T) {
 					State:           "in-progress",
 					FromNumber:      "+15105550100",
 					ToNumber:        "+15105550199",
+					ReportStatus:    tc.reportStatus,
 				}, 5)
 			}
 
@@ -289,6 +317,15 @@ func TestToolHandler_EndCall(t *testing.T) {
 			}
 			if !tc.wantErr && out.Status != "ended" {
 				t.Fatalf("EndCall() status = %s, want 'ended'", out.Status)
+			}
+			if tc.wantReportStatus != "" {
+				updated, getErr := store.GetCall(context.Background(), tc.callID)
+				if getErr != nil || updated == nil {
+					t.Fatalf("GetCall() err = %v, call = %+v", getErr, updated)
+				}
+				if updated.ReportStatus != tc.wantReportStatus {
+					t.Fatalf("ReportStatus = %q, want %q", updated.ReportStatus, tc.wantReportStatus)
+				}
 			}
 		})
 	}
@@ -355,6 +392,40 @@ func TestToolHandler_SMSAndPhone(t *testing.T) {
 		t.Parallel()
 		testToolHandlerEnsurePhone(t, handler)
 	})
+}
+
+func TestToolHandler_SendSMSStoreError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		saveErr string
+		wantErr bool
+	}{
+		{
+			name:    "save error still sends",
+			saveErr: "db write failed",
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			handler, store, _ := setupTestToolHandler()
+			if tc.saveErr != "" {
+				store.saveErr = errors.New(tc.saveErr)
+			}
+			out, err := handler.SendSMS(context.Background(), SendSMSArgs{
+				To:   "+15105550199",
+				Body: "Test SMS message",
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SendSMS() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (out.Status != "sent" || out.MessageSID == "") {
+				t.Fatalf("SendSMS() out = %+v, want sent status", out)
+			}
+		})
+	}
 }
 
 func testToolHandlerSendSMS(t *testing.T, handler *ToolHandler) {

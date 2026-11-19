@@ -427,6 +427,10 @@ func assertConsultOutcome(t *testing.T, res string, err error, wantErr bool, wan
 	}
 }
 
+func withTestCovenURL(url string) ConsultOption {
+	return func(c *HTTPContextConsultClient) { c.covenURL = url }
+}
+
 func TestNewHTTPContextConsultClient_TraceHeaders(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -446,7 +450,8 @@ func TestNewHTTPContextConsultClient_TraceHeaders(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			ctx, parentTraceID := traceCaller(tc.withParent)
-			if _, err := NewHTTPContextConsultClient("", srv.URL).ConsultMemory(ctx, "dentist"); err != nil {
+			client := NewHTTPContextConsultClient("", "", withTestCovenURL(srv.URL))
+			if _, err := client.ConsultMemory(ctx, "dentist"); err != nil {
 				t.Fatalf("ConsultMemory: %v", err)
 			}
 			id := headerTraceID(got)

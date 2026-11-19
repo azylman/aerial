@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/prospera/internal/config"
 )
 
 const (
@@ -26,12 +27,7 @@ const (
 	fieldStatus = "status"
 )
 
-// ReloadableConfigSource is a ConfigSource that also serves the loopback-only
-// git-sync reload webhook. *httpkit.Reloadable[Config] satisfies it.
-type ReloadableConfigSource interface {
-	ConfigSource
-	Handler(service string) http.Handler
-}
+type ReloadableConfigSource = config.ReloadableConfigSource
 
 // Server encapsulates the Prospera HTTP router, webhook handlers, and Streamable HTTP MCP server.
 type Server struct {
