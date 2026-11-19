@@ -8,8 +8,6 @@ package main
 // Shims contain no logic and carry no coverage-bearing statements.
 
 import (
-	"time"
-
 	"github.com/azylman/aerial/services/haro/internal/model"
 )
 
@@ -67,26 +65,6 @@ const (
 	fieldMessage = model.FieldMessage
 	fieldError   = model.FieldError
 )
-
-// IsScheduleStale reports whether scheduledAt is more overdue than maxOverdue relative to now.
-func IsScheduleStale(scheduledAt, now time.Time, maxOverdue time.Duration) bool {
-	return model.IsScheduleStale(scheduledAt, now, maxOverdue)
-}
-
-// ShouldPruneRuns reports whether runs should be pruned given the last prune time, interval, and now.
-func ShouldPruneRuns(now, lastPrune time.Time, interval time.Duration) bool {
-	return model.ShouldPruneRuns(now, lastPrune, interval)
-}
-
-// CalculateNextRun calculates the next UTC execution time for a cron expression in the specified timezone.
-func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
-	return model.CalculateNextRun(cronExpr, timezone, from)
-}
-
-// BuildHeartbeatPrompt wraps a raw heartbeat prompt with runtime instructions for the LLM.
-func BuildHeartbeatPrompt(hb HeartbeatSchedule, currentCheck ...time.Time) string {
-	return model.BuildHeartbeatPrompt(hb, currentCheck...)
-}
 
 // NormalizeEffort validates effort tiers, defaulting empty to "low".
 func NormalizeEffort(effort string) (string, error) {

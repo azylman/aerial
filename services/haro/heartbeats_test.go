@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
 func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) HeartbeatSchedule {
@@ -100,23 +101,23 @@ func testHeartbeatListAndUpdate(ctx context.Context, t *testing.T, db *sql.DB, h
 
 func testHeartbeatDueAdvanceDelete(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) {
 	t.Helper()
-	due, err := GetDueHeartbeatSchedules(ctx, db, now.Add(20*time.Minute))
+	due, err := store.GetDueHeartbeatSchedules(ctx, db, now.Add(20*time.Minute))
 	if err != nil || len(due) != 1 || due[0].ID != "hb-op-2" {
 		t.Fatalf("GetDueHeartbeatSchedules failed: err=%v, got %+v", err, due)
 	}
 
 	nextTime := now.Add(2 * time.Hour)
-	if err = AdvanceHeartbeatNextRun(ctx, db, "hb-op-1", nextTime); err != nil {
+	if err = store.AdvanceHeartbeatNextRun(ctx, db, "hb-op-1", nextTime); err != nil {
 		t.Fatalf("AdvanceHeartbeatNextRun failed: %v", err)
 	}
 	advanced, _ := GetHeartbeatSchedule(ctx, db, "hb-op-1")
 	if !advanced.NextRunAt.Equal(nextTime) {
 		t.Errorf("advanced NextRunAt = %v, want %v", advanced.NextRunAt, nextTime)
 	}
-	if err = AdvanceHeartbeatNextRun(ctx, db, "missing", nextTime); err == nil {
+	if err = store.AdvanceHeartbeatNextRun(ctx, db, "missing", nextTime); err == nil {
 		t.Error("expected error advancing missing heartbeat")
 	}
-	if err = AdvanceHeartbeatNextRun(ctx, db, "  ", nextTime); err == nil {
+	if err = store.AdvanceHeartbeatNextRun(ctx, db, "  ", nextTime); err == nil {
 		t.Error("expected error advancing empty id")
 	}
 
@@ -138,7 +139,7 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 	testHeartbeatListAndUpdate(ctx, t, db, hb1)
 	testHeartbeatDueAdvanceDelete(ctx, t, db, now)
 
-	hasRunningEmpty, err := HasRunningHeartbeatRun(ctx, db, "", now)
+	hasRunningEmpty, err := store.HasRunningHeartbeatRun(ctx, db, "", now)
 	if err != nil || hasRunningEmpty {
 		t.Errorf("HasRunningHeartbeatRun with empty scheduleID got (%v, %v), want (false, nil)", hasRunningEmpty, err)
 	}
@@ -414,216 +415,5 @@ func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 	}
 	if !strings.Contains(out.Summary, "[HEARTBEAT]") {
 		t.Errorf("summary missing [HEARTBEAT]:\n%s", out.Summary)
-	}
-}
-
-type evaluateDueHeartbeatsTestCase struct {
-	name              string
-	hbID              string
-	cronExpr          string
-	nextRunAt         time.Time
-	dispatcherStatus  string
-	dispatcherErr     error
-	seedRunningRun    bool
-	wantDispatched    bool
-	wantSkippedRun    bool
-	wantStaleRun      bool
-	wantFailedRun     bool
-	wantSessionPrefix string
-}
-
-func assertHeartbeatDispatch(t *testing.T, mock *mockDispatcher, tc evaluateDueHeartbeatsTestCase) {
-	t.Helper()
-	if !tc.wantDispatched {
-		if len(mock.dispatchedRequests) > 0 {
-			t.Errorf("dispatcher should NOT be called for %s, called %d times", tc.hbID, len(mock.dispatchedRequests))
-		}
-		return
-	}
-	if len(mock.dispatchedRequests) == 0 {
-		t.Errorf("expected dispatcher to be called for %s", tc.hbID)
-		return
-	}
-	req := mock.dispatchedRequests[len(mock.dispatchedRequests)-1]
-	if !strings.Contains(req.Prompt, "Raw monitoring prompt for "+tc.hbID) {
-		t.Errorf("dispatcher prompt missing raw prompt:\n%s", req.Prompt)
-	}
-	if !strings.Contains(req.Prompt, `<\HEARTBEAT_INSTRUCTIONS>`) {
-		t.Errorf("dispatcher prompt missing <\\HEARTBEAT_INSTRUCTIONS> wrapper:\n%s", req.Prompt)
-	}
-	if req.SessionID != "" {
-		t.Errorf("req.SessionID = %q, want empty string", req.SessionID)
-	}
-	if req.Source != "heartbeat" {
-		t.Errorf("req.Source = %q, want 'heartbeat'", req.Source)
-	}
-	if !req.SkipIfActive {
-		t.Errorf("expected req.SkipIfActive = true")
-	}
-}
-
-func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbeatsTestCase) {
-	t.Helper()
-	var runCount int
-	var runStatus, runPrompt, runType string
-	_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = ?", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
-
-	if tc.seedRunningRun {
-		if runCount != 1 || runStatus != "running" {
-			t.Errorf("expected 1 running run for seeded active heartbeat %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
-		}
-		return
-	}
-
-	if tc.wantSkippedRun && runCount != 0 {
-		t.Errorf("expected 0 runs for skipped active heartbeat %s, got count=%d", tc.hbID, runCount)
-	}
-	if tc.wantStaleRun && (runCount == 0 || runStatus != "failed") {
-		t.Errorf("expected stale failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
-	}
-	if tc.wantFailedRun && (runCount == 0 || runStatus != "failed") {
-		t.Errorf("expected failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
-	}
-	if tc.wantDispatched && tc.dispatcherErr == nil && !tc.wantSkippedRun && (runCount == 0 || runStatus != "running") {
-		t.Errorf("expected running run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
-	}
-	if runCount > 0 {
-		if runType != "heartbeat" {
-			t.Errorf("expected schedule_type='heartbeat', got %s", runType)
-		}
-		if strings.Contains(runPrompt, `HEARTBEAT_INSTRUCTIONS`) {
-			t.Errorf("schedule_runs.prompt must NOT contain HEARTBEAT_INSTRUCTIONS, got:\n%s", runPrompt)
-		}
-	}
-}
-
-func assertHeartbeatNextRunAdvanced(ctx context.Context, t *testing.T, db *sql.DB, tc evaluateDueHeartbeatsTestCase) {
-	t.Helper()
-	after, err := GetHeartbeatSchedule(ctx, db, tc.hbID)
-	if err != nil {
-		t.Fatalf("failed to reload heartbeat %s: %v", tc.hbID, err)
-	}
-	if !after.NextRunAt.After(tc.nextRunAt) {
-		t.Errorf("next_run_at was not advanced: before=%v, after=%v", tc.nextRunAt, after.NextRunAt)
-	}
-}
-
-func runEvaluateDueHeartbeatsCase(ctx context.Context, t *testing.T, tc evaluateDueHeartbeatsTestCase, now time.Time) {
-	t.Helper()
-	db := setupTestDB(ctx, t)
-
-	hb := HeartbeatSchedule{
-		ID:          tc.hbID,
-		TargetID:    "1562847268833337377",
-		TitlePrefix: "Test HB",
-		CronExpr:    tc.cronExpr,
-		Prompt:      "Raw monitoring prompt for " + tc.hbID,
-		Timezone:    "UTC",
-		Effort:      "low",
-		NextRunAt:   tc.nextRunAt,
-		Enabled:     true,
-		CreatedAt:   now.Add(-48 * time.Hour),
-	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
-		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
-	}
-
-	if tc.seedRunningRun {
-		seededRun := ScheduleRun{
-			ID:           "existing-" + tc.hbID,
-			ScheduleID:   tc.hbID,
-			ScheduleType: "heartbeat",
-			MessageID:    "existing-msg-" + tc.hbID,
-			TargetID:     hb.TargetID,
-			ThreadID:     "heartbeat-" + tc.hbID,
-			Title:        hb.TitlePrefix,
-			Prompt:       hb.Prompt,
-			Status:       "running",
-			StartedAt:    now.Add(-5 * time.Minute),
-			Effort:       hb.Effort,
-		}
-		if err := CreateScheduleRun(ctx, db, seededRun); err != nil {
-			t.Fatalf("CreateScheduleRun seeded run failed: %v", err)
-		}
-	}
-
-	dispStatus := "ok"
-	if tc.dispatcherStatus != "" {
-		dispStatus = tc.dispatcherStatus
-	}
-	mock := &mockDispatcher{
-		response:         PromptDispatchResponse{Status: dispStatus, MessageID: "msg-dispatched"},
-		err:              tc.dispatcherErr,
-		dispatchResponse: DispatchResponse{Status: dispStatus, DispatchID: "msg-dispatched", MessageID: "msg-dispatched"},
-		dispatchErr:      tc.dispatcherErr,
-	}
-	ticker := NewTicker(db, mock, 30*time.Second)
-	ticker.EvaluateDueSchedules(ctx, now)
-
-	assertHeartbeatDispatch(t, mock, tc)
-	assertHeartbeatScheduleRuns(t, db, tc)
-	assertHeartbeatNextRunAdvanced(ctx, t, db, tc)
-}
-
-func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
-	now := time.Date(2026, 10, 23, 14, 0, 0, 0, time.UTC)
-
-	tests := []evaluateDueHeartbeatsTestCase{
-		{
-			name:              "nominal due heartbeat dispatched",
-			hbID:              "hb-nominal",
-			cronExpr:          "*/5 * * * *",
-			nextRunAt:         now.Add(-1 * time.Minute),
-			wantDispatched:    true,
-			wantSessionPrefix: "heartbeat-hb-nominal",
-		},
-		{
-			name:             "active thread turn skipped without schedule run",
-			hbID:             "hb-coalesced",
-			cronExpr:         "*/5 * * * *",
-			nextRunAt:        now.Add(-1 * time.Minute),
-			dispatcherStatus: "skipped_active",
-			wantDispatched:   true,
-			wantSkippedRun:   true,
-		},
-		{
-			name:           "in-flight schedule run skipped without dispatch",
-			hbID:           "hb-in-flight",
-			cronExpr:       "*/5 * * * *",
-			nextRunAt:      now.Add(-1 * time.Minute),
-			seedRunningRun: true,
-			wantDispatched: false,
-		},
-		{
-			name:           "stale heartbeat overdue by more than 24h",
-			hbID:           "hb-stale",
-			cronExpr:       "0 * * * *",
-			nextRunAt:      now.Add(-25 * time.Hour),
-			wantDispatched: false,
-			wantStaleRun:   true,
-		},
-		{
-			name:           "dispatch failure recorded in schedule_runs",
-			hbID:           "hb-fail",
-			cronExpr:       "*/10 * * * *",
-			nextRunAt:      now.Add(-2 * time.Minute),
-			dispatcherErr:  fmt.Errorf("brain down"),
-			wantDispatched: true,
-			wantFailedRun:  true,
-		},
-		{
-			name:           "invalid cron expression uses 24h fallback",
-			hbID:           "hb-bad-cron",
-			cronExpr:       "invalid cron string",
-			nextRunAt:      now.Add(-1 * time.Minute),
-			wantDispatched: true,
-		},
-	}
-
-	ctx := context.Background()
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runEvaluateDueHeartbeatsCase(ctx, t, tc, now)
-		})
 	}
 }
