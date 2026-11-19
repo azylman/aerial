@@ -29,6 +29,15 @@ func TestInitSynapseJetStream(t *testing.T) {
 		{name: "start job consumers error returns error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
 			return &errSubscribeBus{Bus: pubsub.NewMemoryBus(), err: errors.New("sub err")}
 		}},
+		{name: "ensure core streams error with close error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
+			return &errCoreStreamsAndCloseBus{Bus: pubsub.NewMemoryBus(), streamErr: errors.New("stream err"), closeErr: errors.New("close err")}
+		}},
+		{name: "start job consumers error with close error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
+			return &errSubscribeAndCloseBus{Bus: pubsub.NewMemoryBus(), subErr: errors.New("sub err"), closeErr: errors.New("close err")}
+		}},
+		{name: "successful connection with close error on teardown", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantBusSet: true, customBus: func() pubsub.Bus {
+			return &errCloseBus{Bus: pubsub.NewMemoryBus(), closeErr: errors.New("close err")}
+		}},
 		{name: "successful connection configures bus and starts consumers", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantBusSet: true},
 	}
 
@@ -89,3 +98,37 @@ type errSubscribeBus struct {
 func (b *errSubscribeBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
 	return nil, b.err
 }
+
+type errCloseBus struct {
+	pubsub.Bus
+
+	closeErr error
+}
+
+func (b *errCloseBus) Close() error { return b.closeErr }
+
+type errCoreStreamsAndCloseBus struct {
+	pubsub.Bus
+
+	streamErr error
+	closeErr  error
+}
+
+func (b *errCoreStreamsAndCloseBus) EnsureCoreStreams(ctx context.Context) error {
+	return b.streamErr
+}
+
+func (b *errCoreStreamsAndCloseBus) Close() error { return b.closeErr }
+
+type errSubscribeAndCloseBus struct {
+	pubsub.Bus
+
+	subErr   error
+	closeErr error
+}
+
+func (b *errSubscribeAndCloseBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	return nil, b.subErr
+}
+
+func (b *errSubscribeAndCloseBus) Close() error { return b.closeErr }
