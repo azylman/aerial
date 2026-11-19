@@ -1,510 +1,93 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-	"log"
-	"net"
-	"os"
-	"regexp"
-	"strings"
-	"time"
-
-	"gopkg.in/yaml.v3"
-
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/services/synapse/internal/config"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
-// Config holds runtime configuration for synapse.
-type Config struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow
-	Port                 string
-	KubeAPIServer        string
-	KubeToken            string
-	GitHubToken          string
-	GitHubAPIURL         string
-	GitHubWebhookSecret  string
-	PostgresURL          string
-	FluxReceiverURL      string
-	BrainURL             string
-	EriURL               string
-	NATSURL              string
-	SystemChannelID      string
-	DiscordToken         string
-	AutoUpdatePRAuthors  []string
-	BotID                string
-	DefaultOwner         bool
-	WebhookForwardURLs   map[string]string
-	CollaboratorCIAlerts []CollaboratorCIAlertRule
-}
-
-// CollaboratorCIAlertRule defines a notification rule for unregistered collaborator pull requests.
-type CollaboratorCIAlertRule struct {
-	Repo      string            `yaml:"repo"`
-	ChannelID string            `yaml:"channel_id"`
-	Authors   map[string]string `yaml:"authors"`
-}
-
-// RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
-type RouterYAMLConfig struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow     `yaml:"legacy_build_workflows"`
-	Port                 string                    `yaml:"port"`
-	FluxReceiverURL      string                    `yaml:"flux_receiver_url"`
-	EriURL               string                    `yaml:"eri_url"`
-	NATSURL              string                    `yaml:"nats_url"`
-	SystemChannelID      string                    `yaml:"system_channel_id"`
-	SystemChannel        string                    `yaml:"system_channel"`
-	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
-	BotID                string                    `yaml:"bot_id"`
-	DefaultOwner         bool                      `yaml:"default_owner"`
-	WebhookForwardURLs   map[string]string         `yaml:"webhook_forward_urls"`
-	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
-}
-
-var (
-	synapseFallbackConfigPath = "/config/synapse.yaml"
-	synapseAerialConfigPath   = "/share/aerial-config/config.yaml"
+type (
+	Config                  = config.Config
+	ConfigSource            = config.ConfigSource
+	CollaboratorCIAlertRule = config.CollaboratorCIAlertRule
+	LegacyBuildWorkflow     = config.LegacyBuildWorkflow
+	RouterYAMLConfig        = config.RouterYAMLConfig
 )
 
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
+const (
+	maxPromptRunes         = model.MaxPromptRunes
+	maxRoboRevCommentRunes = model.MaxRoboRevCommentRunes
+)
 
-func normalizeWebhookForwardURLs(raw map[string]string) map[string]string {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make(map[string]string)
-	for k, v := range raw {
-		key := strings.TrimSpace(k)
-		val := strings.TrimRight(strings.TrimSpace(v), "/")
-		if key != "" && val != "" {
-			out[key] = val
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, string, []string, []CollaboratorCIAlertRule) {
-	data, err := os.ReadFile(path)
-	if err != nil && path == "/share/aerial-config/config.yaml" {
-		data, err = os.ReadFile("/config/config.yaml")
-	}
-	if err != nil {
-		return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
-	}
-	var aerialCfg RouterYAMLConfig
-	if err := yaml.Unmarshal(data, &aerialCfg); err != nil {
-		return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
-	}
-	if sysChan == "" {
-		sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
-	}
-	if botID == "" {
-		botID = strings.TrimSpace(aerialCfg.BotID)
-	}
-	if len(autoUpdateAuthors) == 0 {
-		autoUpdateAuthors = dedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
-	}
-	if len(collaboratorAlerts) == 0 {
-		collaboratorAlerts = normalizeCollaboratorCIAlerts(aerialCfg.CollaboratorCIAlerts)
-	}
-	return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
-}
-
-// ConfigSource yields the live synapse configuration snapshot. Callers read
-// Current() once per request, call, or worker tick and never mutate it.
-type ConfigSource interface {
-	Current() *Config
-}
-
-// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
-// A YAML file that fails to parse is logged and ignored so startup always proceeds.
-func LoadConfig(configPath string) Config {
-	fileCfg, err := readRouterYAML(configPath)
-	if err != nil {
-		log.Printf("[Synapse] Warning: %v", err)
-	}
-	return buildConfig(fileCfg)
-}
-
-// LoadConfigStrict resolves configuration exactly like LoadConfig but returns
-// an error when the resolved YAML file exists and cannot be read or parsed.
-// Hot reloads use it so a bad commit never replaces the last known good config.
-func LoadConfigStrict(configPath string) (Config, error) {
-	fileCfg, err := readRouterYAML(configPath)
-	if err != nil {
-		return Config{}, err
-	}
-	if _, err := normalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows); err != nil {
-		return Config{}, err
-	}
-	return buildConfig(fileCfg), nil
-}
-
-// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 func LoadConfigFromEnv() Config {
-	return LoadConfig(os.Getenv("CONFIG_PATH"))
+	return config.LoadConfigFromEnv()
 }
 
-// loadConfigFromEnvStrict is the hot-reload loader: it re-reads CONFIG_PATH
-// through LoadConfigStrict so a malformed file keeps the last known good config.
 func loadConfigFromEnvStrict() (*Config, error) {
-	cfg, err := LoadConfigStrict(os.Getenv("CONFIG_PATH"))
-	if err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return config.LoadConfigFromEnvStrict()
 }
 
-// synapseRestartRequired reports whether moving from old to next changes a
-// field that is bound once at startup (listener, database pool, Discord
-// gateway session, outbound dispatcher and registry clients) and therefore
-// can only take effect through a graceful process restart.
 func synapseRestartRequired(old, next *Config) bool {
-	return old.Port != next.Port ||
-		old.PostgresURL != next.PostgresURL ||
-		old.DiscordToken != next.DiscordToken ||
-		old.BotID != next.BotID ||
-		old.BrainURL != next.BrainURL ||
-		old.FluxReceiverURL != next.FluxReceiverURL ||
-		old.KubeAPIServer != next.KubeAPIServer ||
-		old.KubeToken != next.KubeToken ||
-		old.NATSURL != next.NATSURL
+	return config.RestartRequired(old, next)
 }
 
-// resolveRouterYAMLPath returns the YAML file to read: configPath when it is a
-// non-empty file, otherwise the fallback path when that is a non-empty file.
-func resolveRouterYAMLPath(configPath string) string {
-	if targetPath := strings.TrimSpace(configPath); targetPath != "" {
-		if fi, err := os.Stat(targetPath); err == nil && fi.Size() > 0 {
-			return targetPath
-		}
-	}
-	if fi, err := os.Stat(synapseFallbackConfigPath); err == nil && fi.Size() > 0 {
-		return synapseFallbackConfigPath
-	}
-	return ""
-}
-
-// readRouterYAML reads the resolved YAML file. It returns whatever fields
-// decoded alongside any read or parse error so LoadConfig can keep its
-// warn-and-continue semantics while LoadConfigStrict rejects the file.
-func readRouterYAML(configPath string) (RouterYAMLConfig, error) {
-	var fileCfg RouterYAMLConfig
-	targetPath := resolveRouterYAMLPath(configPath)
-	if targetPath == "" {
-		return fileCfg, nil
-	}
-	data, err := os.ReadFile(targetPath)
-	if err != nil {
-		return fileCfg, fmt.Errorf("failed to read yaml config at %s: %w", targetPath, err)
-	}
-	if err := yaml.Unmarshal(data, &fileCfg); err != nil {
-		return fileCfg, fmt.Errorf("failed to parse yaml config at %s: %w", targetPath, err)
-	}
-	return fileCfg, nil
-}
-
-// buildConfig layers environment overrides and the aerial config fallback on
-// top of the decoded YAML file.
-func buildConfig(fileCfg RouterYAMLConfig) Config {
-	legacy, err := normalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows)
-	if err != nil {
-		log.Printf("[Synapse] invalid legacy workflows: %v", err)
-	}
-	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
-	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	collaboratorAlerts := normalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
-	var aerialBotID string
-	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "" || len(collaboratorAlerts) == 0) && synapseAerialConfigPath != "" {
-		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
-	}
-
-	botID := strings.TrimSpace(firstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, "aerial"))
-	defaultOwner := fileCfg.DefaultOwner
-	if envVal := strings.TrimSpace(firstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
-		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
-	}
-
-	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
-
-	kubeServer := os.Getenv("KUBE_API_SERVER")
-	if kubeServer == "" {
-		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
-		if host != "" && port != "" {
-			kubeServer = "https://" + net.JoinHostPort(host, port)
-		}
-	}
-	kubeToken := os.Getenv("KUBE_TOKEN")
-
-	return Config{
-		LegacyBuildWorkflows: legacy,
-		Port:                 firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		KubeAPIServer:        strings.TrimRight(kubeServer, "/"),
-		KubeToken:            kubeToken,
-		GitHubToken:          os.Getenv("GITHUB_PAT"),
-		GitHubAPIURL:         strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
-		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		PostgresURL:          pgURL,
-		FluxReceiverURL:      strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
-		BrainURL:             strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		EriURL:               strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		NATSURL:              firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
-		SystemChannelID:      strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
-		DiscordToken:         os.Getenv("DISCORD_TOKEN"),
-		AutoUpdatePRAuthors:  autoUpdateAuthors,
-		BotID:                botID,
-		DefaultOwner:         defaultOwner,
-		WebhookForwardURLs:   normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
-		CollaboratorCIAlerts: collaboratorAlerts,
-	}
-}
-
-func normalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
-	if len(rules) == 0 {
-		return nil
-	}
-	var out []CollaboratorCIAlertRule
-	for _, rule := range rules {
-		repo := normalizeRepo(rule.Repo)
-		chanID := NormalizeDiscordTargetID(rule.ChannelID)
-		if repo == "" || !IsValidDiscordSnowflake(chanID) {
-			continue
-		}
-		cleanedAuthors := make(map[string]string)
-		for k, v := range rule.Authors {
-			author := strings.ToLower(strings.TrimSpace(k))
-			mention := strings.TrimSpace(v)
-			if author != "" && mention != "" {
-				cleanedAuthors[author] = mention
-			}
-		}
-		if len(cleanedAuthors) == 0 {
-			continue
-		}
-		out = append(out, CollaboratorCIAlertRule{
-			Repo:      repo,
-			ChannelID: chanID,
-			Authors:   cleanedAuthors,
-		})
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// hasCollaboratorCIAlertsForRepo reports whether any collaborator alert rules are configured for repo.
 func (s *RouterServer) hasCollaboratorCIAlertsForRepo(repo string) bool {
 	if s == nil || s.cfgSrc == nil {
 		return false
 	}
-	cfg := s.cfgSrc.Current()
-	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
-		return false
-	}
-	targetRepo := normalizeRepo(repo)
-	if targetRepo == "" {
-		return false
-	}
-	for _, rule := range cfg.CollaboratorCIAlerts {
-		if strings.EqualFold(rule.Repo, targetRepo) {
-			return true
-		}
-	}
-	return false
+	return config.HasCollaboratorCIAlertsForRepo(s.cfgSrc.Current(), repo)
 }
 
-// lookupCollaboratorCIAlert finds the matching channel ID and user mention for an author in repo.
 func (s *RouterServer) lookupCollaboratorCIAlert(repo, author string) (channelID, mention string, ok bool) {
 	if s == nil || s.cfgSrc == nil {
 		return "", "", false
 	}
-	cfg := s.cfgSrc.Current()
-	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
-		return "", "", false
-	}
-	targetRepo := normalizeRepo(repo)
-	cleanAuthor := strings.ToLower(strings.TrimSpace(author))
-	if targetRepo == "" || cleanAuthor == "" {
-		return "", "", false
-	}
-	for _, rule := range cfg.CollaboratorCIAlerts {
-		if strings.EqualFold(rule.Repo, targetRepo) {
-			if m, found := rule.Authors[cleanAuthor]; found && strings.TrimSpace(m) != "" {
-				return rule.ChannelID, strings.TrimSpace(m), true
-			}
-		}
-	}
-	return "", "", false
+	return config.LookupCollaboratorCIAlert(s.cfgSrc.Current(), repo, author)
+}
+
+func firstNonEmpty(vals ...string) string {
+	return model.FirstNonEmpty(vals...)
 }
 
 func randomNonce() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("nonce-%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
+	return model.RandomNonce()
 }
 
-// normalizeRepo ensures repository names are normalized with the owner prefix.
 func normalizeRepo(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if repo == "" {
-		return ""
-	}
-	if !strings.Contains(repo, "/") {
-		return "azylman/" + repo
-	}
-	return repo
+	return model.NormalizeRepo(repo)
 }
 
-// cleanRepoName strips the owner prefix (e.g. "azylman/") for concise Discord notifications.
-func cleanRepoName(repo string) string {
-	return strings.TrimPrefix(strings.TrimSpace(repo), "azylman/")
-}
-
-// formatDirectMessagePrefix formats the bold PR and repo prefix for direct Discord messages.
 func formatDirectMessagePrefix(prNumber int, repo string) string {
-	repoName := cleanRepoName(repo)
-	switch {
-	case prNumber > 0 && repoName != "":
-		return fmt.Sprintf("**(PR: #%d, repo: %s)** ", prNumber, repoName)
-	case repoName != "":
-		return fmt.Sprintf("**(repo: %s)** ", repoName)
-	case prNumber > 0:
-		return fmt.Sprintf("**(PR: #%d)** ", prNumber)
-	default:
-		return ""
-	}
+	return model.FormatDirectMessagePrefix(prNumber, repo)
 }
 
 func dedupeTrimmedStrings(items []string) []string {
-	seen := make(map[string]struct{}, len(items))
-	var out []string
-	for _, item := range items {
-		if clean := strings.TrimSpace(item); clean != "" {
-			if _, exists := seen[clean]; !exists {
-				seen[clean] = struct{}{}
-				out = append(out, clean)
-			}
-		}
-	}
-	return out
+	return model.DedupeTrimmedStrings(items)
 }
 
-// Discord Snowflake and Channel Name validation
-var (
-	snowflakeRegex   = regexp.MustCompile(`^\d{17,20}$`)
-	channelNameRegex = regexp.MustCompile(`^#?[a-z0-9_-]{1,100}$`)
-)
-
-// NormalizeDiscordTargetID strips Model 2 session prefixes ("discord-" and optional
-// colon-delimited pool scopes like "stateful_medium:discord-") from a target identifier.
 func NormalizeDiscordTargetID(id string) string {
-	clean := strings.TrimSpace(id)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+	return model.NormalizeDiscordTargetID(id)
 }
 
-// IsHeadlessSessionKey returns true if id is a Model 2 headless dispatch, heartbeat,
-// or pooled worker session key (e.g. "dispatch-<uuid>", "heartbeat-<id>", "discord:worker-0",
-// "discord:medium-worker-0", or "ephemeral:worker-0").
 func IsHeadlessSessionKey(id string) bool {
-	clean := strings.TrimSpace(id)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.HasPrefix(clean, "dispatch-") ||
-		strings.HasPrefix(clean, "heartbeat-") ||
-		strings.HasPrefix(clean, "worker-") ||
-		strings.Contains(clean, "-worker-")
+	return model.IsHeadlessSessionKey(id)
 }
 
 func IsValidDiscordSnowflake(id string) bool {
-	return snowflakeRegex.MatchString(strings.TrimSpace(id))
+	return model.IsValidDiscordSnowflake(id)
 }
 
 func IsValidDiscordChannel(id string) bool {
-	clean := strings.TrimSpace(id)
-	return IsValidDiscordSnowflake(clean) || channelNameRegex.MatchString(clean)
+	return model.IsValidDiscordChannel(id)
 }
 
-var re4xx = regexp.MustCompile(`\bstatus 4\d{2}\b`)
-
-// is4xxClientError returns true if the error indicates a 4xx HTTP client error or invalid Discord snowflake.
 func is4xxClientError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return re4xx.MatchString(msg) || strings.Contains(msg, "invalid discord snowflake")
+	return model.Is4xxClientError(err)
 }
 
 func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
-	lines := []string{header}
-	if clean := strings.TrimSpace(details); clean != "" {
-		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(clean)))
-	}
-	if cleanExtra := strings.TrimSpace(extraLine); cleanExtra != "" {
-		lines = append(lines, cleanExtra)
-	}
-	if footer != "" {
-		lines = append(lines, footer)
-	}
-	return strings.Join(lines, "\n")
-}
-
-const (
-	maxPromptRunes         = 1500
-	maxRoboRevCommentRunes = 4000
-)
-
-func truncatePromptDetails(s string) string {
-	return truncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
+	return model.FormatErrorDetailsBlock(header, details, extraLine, footer)
 }
 
 func truncatePromptRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "... (truncated)"
-}
-
-// LegacyBuildWorkflow pins one immutable historical producer revision.
-type LegacyBuildWorkflow struct {
-	Repository   string `yaml:"repository"`
-	WorkflowPath string `yaml:"workflow_path"`
-	BlobSHA      string `yaml:"blob_sha"`
-}
-
-func normalizeLegacyBuildWorkflows(raw []LegacyBuildWorkflow) ([]LegacyBuildWorkflow, error) {
-	out := make([]LegacyBuildWorkflow, 0, len(raw))
-	seen := map[LegacyBuildWorkflow]bool{}
-	for _, v := range raw {
-		v.Repository = strings.ToLower(strings.TrimSpace(v.Repository))
-		v.WorkflowPath = strings.TrimSpace(v.WorkflowPath)
-		v.BlobSHA = strings.ToLower(strings.TrimSpace(v.BlobSHA))
-		if !metadataRepo.MatchString(v.Repository) || !validWorkflowPath(v.WorkflowPath) || !metadataSHA.MatchString(v.BlobSHA) {
-			return nil, fmt.Errorf("invalid legacy build workflow")
-		}
-		if !seen[v] {
-			out = append(out, v)
-			seen[v] = true
-		}
-	}
-	return out, nil
+	return model.TruncatePromptRunes(s, maxRunes)
 }
