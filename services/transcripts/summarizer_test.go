@@ -107,6 +107,7 @@ func TestBuildSummaryPrompt(t *testing.T) {
 		{"typeless step falls back to step label", "sess-9", "", 0, "", "", "plain", 1, "Step 0 (step): plain", ""},
 		{"oversize content clips with marker", "sess-1", "", 1, "model_response", "", longContent, 1, "...[clipped]", longContent},
 		{"prior summary folded into prompt", "sess-1", "prior context from earlier", 1, "model_response", "", "more steps", 1, "Prior summary: prior context from earlier", ""},
+		{"oversize prior summary clips with marker", "sess-1", longContent, 1, "model_response", "", "more steps", 1, "...[clipped]", longContent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

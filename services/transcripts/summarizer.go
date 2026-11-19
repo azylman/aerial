@@ -101,9 +101,12 @@ func buildSummaryPrompt(sessionID, priorSummary string, steps []StepResult) stri
 	b.WriteString(strings.TrimSpace(sessionID))
 	b.WriteString(" into a concise durable summary of what happened and what was decided. ")
 	b.WriteString("Output plain text only, no markdown formatting.\n")
-	if strings.TrimSpace(priorSummary) != "" {
+	if prior := strings.TrimSpace(priorSummary); prior != "" {
+		if len([]rune(prior)) > maxSummaryPromptChars {
+			prior = string([]rune(prior)[:maxSummaryPromptChars]) + "...[clipped]"
+		}
 		b.WriteString("Prior summary: ")
-		b.WriteString(strings.TrimSpace(priorSummary))
+		b.WriteString(prior)
 		b.WriteString("\n")
 	}
 	for _, st := range steps {
@@ -174,19 +177,21 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	rows, err := s.store.db.QueryContext(queryCtx,
-		`SELECT session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
-		 WHERE stack = $1 AND summary_step_watermark < last_indexed_step AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $2))
-		 ORDER BY updated_at ASC`, s.store.stack, s.cfg.MinStepDelta)
-	if err != nil {
-		return nil, fmt.Errorf("select summary candidates: %w", err)
-	}
-	defer rows.Close()
 	nowFn := s.now
 	if nowFn == nil {
 		nowFn = time.Now
 	}
 	cutoff := nowFn().UTC().Add(-s.cfg.IdleThreshold)
+	scanLimit := s.cfg.BatchLimit * 4
+	rows, err := s.store.db.QueryContext(queryCtx,
+		`SELECT session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
+		 WHERE stack = $1 AND summary_step_watermark < last_indexed_step
+		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $2))
+		 ORDER BY updated_at ASC LIMIT $3`, s.store.stack, s.cfg.MinStepDelta, scanLimit)
+	if err != nil {
+		return nil, fmt.Errorf("select summary candidates: %w", err)
+	}
+	defer rows.Close()
 	var out []summaryCandidate
 	for rows.Next() {
 		var cand summaryCandidate
