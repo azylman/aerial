@@ -1,4 +1,4 @@
-package main
+package executor
 
 import (
 	"bytes"
@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	defaultShareRoot         = "/share"
+	DefaultShareRoot         = "/share"
 	maxRoboRevCommentRunes   = 4000
 	maxPromptRunes           = 6000
-	maxCIRemediationAttempts = 5
+	MaxCIRemediationAttempts = 5
 )
 
 var (
@@ -181,7 +181,7 @@ func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) 
 		return fmt.Errorf("decode eri dispatch response: %w", err)
 	}
 	if result.Status == "skipped_active" {
-		return errDispatchActive
+		return ErrDispatchActive
 	}
 	if result.Status != "" && result.Status != "ok" && result.Status != "accepted" && result.Status != "already_exists" {
 		return fmt.Errorf("eri rejected dispatch %q (status %q)", req.ID, result.Status)
@@ -204,7 +204,7 @@ func (c *HTTPEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchR
 		return fmt.Errorf("decode eri dispatch acceptance: %w", err)
 	}
 	if result.Status == "skipped_active" {
-		return errDispatchActive
+		return ErrDispatchActive
 	}
 	if req.ID == "" || result.DispatchID != req.ID || (result.Status != "accepted" && result.Status != "already_exists") {
 		return fmt.Errorf("eri did not accept dispatch %q (status %q, identity %q)", req.ID, result.Status, result.DispatchID)
@@ -271,18 +271,18 @@ func (c *HTTPEriClient) Message(ctx context.Context, channelID, content string) 
 // Executor coordinates AST symbol resolution, prompt building, CI logs, widget sync, chunk dispatch, and event publishing.
 type Executor struct {
 	shareRoot    string
-	eriClient    EriClient
+	EriClient    EriClient
 	bus          pubsub.Bus
 	gitHubToken  string
-	gitHubAPIURL string
-	httpClient   *http.Client
+	GitHubAPIURL string
+	HTTPClient   *http.Client
 	deployUIURL  string
 }
 
 // NewExecutor creates a new Executor instance.
 func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubToken string, httpClient *http.Client, deployUIURL ...string) *Executor {
 	if shareRoot == "" {
-		shareRoot = defaultShareRoot
+		shareRoot = DefaultShareRoot
 	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -293,18 +293,18 @@ func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubTo
 	}
 	return &Executor{
 		shareRoot:    shareRoot,
-		eriClient:    eriClient,
+		EriClient:    eriClient,
 		bus:          bus,
 		gitHubToken:  gitHubToken,
-		gitHubAPIURL: "https://api.github.com",
-		httpClient:   httpClient,
+		GitHubAPIURL: "https://api.github.com",
+		HTTPClient:   httpClient,
 		deployUIURL:  dURL,
 	}
 }
 
 // FormatChunkPrompt renders a structured prompt for executing a specific chunk.
 func (e *Executor) FormatChunkPrompt(build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int) (string, error) {
-	root := defaultShareRoot
+	root := DefaultShareRoot
 	if e != nil && e.shareRoot != "" {
 		root = e.shareRoot
 	}
@@ -314,7 +314,7 @@ func (e *Executor) FormatChunkPrompt(build model.VanadisBuild, chunks []model.Va
 // ExecuteLaunchChunk reserves the chunk in PostgreSQL and dispatches it directly to Eri via POST /dispatch.
 // It explicitly DOES NOT publish to aerial.jobs.vanadis.chunk.
 func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int, notice string) error {
-	if e == nil || e.eriClient == nil {
+	if e == nil || e.EriClient == nil {
 		return errors.New("executor or eri client is nil")
 	}
 	if activeIdx < 0 || activeIdx >= len(chunks) {
@@ -329,7 +329,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 	if reserveErr != nil && chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
 		return fmt.Errorf("reserve action generation: %w", reserveErr)
 	}
-	if reserveErr != nil && !errors.Is(reserveErr, ErrChunkNotFound) {
+	if reserveErr != nil && !errors.Is(reserveErr, store.ErrChunkNotFound) {
 		slog.WarnContext(ctx, "[vanadis-restate] failed reserving chunk for launch", "chunk_id", chunk.ID, "error", reserveErr)
 	}
 
@@ -349,15 +349,15 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 		SkipIfActive:   true,
 	}
 
-	return e.eriClient.DispatchAccepted(ctx, req)
+	return e.EriClient.DispatchAccepted(ctx, req)
 }
 
-func isGateAggregatorCheck(checkName string) bool {
+func IsGateAggregatorCheck(checkName string) bool {
 	lower := strings.ToLower(strings.TrimSpace(checkName))
 	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
 }
 
-func ciRemediationDispatchID(chunkID, headSHA string, failCount int) string {
+func CIRemediationDispatchID(chunkID, headSHA string, failCount int) string {
 	cleanChunk := strings.TrimSpace(chunkID)
 	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
 	if cleanSHA != "" {
@@ -366,7 +366,7 @@ func ciRemediationDispatchID(chunkID, headSHA string, failCount int) string {
 	return fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
 }
 
-func conflictRemediationDispatchID(chunkID, headSHA string) string {
+func ConflictRemediationDispatchID(chunkID, headSHA string) string {
 	cleanChunk := strings.TrimSpace(chunkID)
 	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
 	if cleanSHA != "" {
@@ -381,47 +381,47 @@ func conflictRemediationDispatchID(chunkID, headSHA string) string {
 
 // DispatchChunkRemediation delegates to Eri's POST /dispatch endpoint for PR failure remediation.
 func (e *Executor) DispatchChunkRemediation(ctx context.Context, req BrainDispatchRequest) error {
-	if e == nil || e.eriClient == nil {
+	if e == nil || e.EriClient == nil {
 		return errors.New("executor or eri client is nil")
 	}
-	return e.eriClient.Dispatch(ctx, req)
+	return e.EriClient.Dispatch(ctx, req)
 }
 
 // CancelChunkDispatch calls Eri's POST /dispatch/cancel for a chunk.
 func (e *Executor) CancelChunkDispatch(ctx context.Context, chunkID string) error {
-	if e == nil || e.eriClient == nil {
+	if e == nil || e.EriClient == nil {
 		return nil
 	}
-	return e.eriClient.CancelDispatch(ctx, chunkID)
+	return e.EriClient.CancelDispatch(ctx, chunkID)
 }
 
 // DispatchWakePrompt dispatches a prompt to a Discord thread.
 func (e *Executor) DispatchWakePrompt(ctx context.Context, threadID, prompt string) error {
-	if e == nil || e.eriClient == nil {
+	if e == nil || e.EriClient == nil {
 		return nil
 	}
-	return e.eriClient.Prompt(ctx, threadID, prompt)
+	return e.EriClient.Prompt(ctx, threadID, prompt)
 }
 
 // DispatchDirectMessage posts a message to a Discord channel.
 func (e *Executor) DispatchDirectMessage(ctx context.Context, channelID, content string) error {
-	if e == nil || e.eriClient == nil {
+	if e == nil || e.EriClient == nil {
 		return nil
 	}
-	return e.eriClient.Message(ctx, channelID, content)
+	return e.EriClient.Message(ctx, channelID, content)
 }
 
 // SyncBuildWidget formats the Discord tracker widget and dispatches it directly to Eri via POST /discord/widget.
 // It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>.
 func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, notice string) (string, error) {
-	if e == nil || e.eriClient == nil {
+	if e == nil || e.EriClient == nil {
 		return "", nil
 	}
 	widgetReq := buildSyncWidgetRequest(build, chunks, e.deployUIURL)
 	if notice != "" {
 		widgetReq.Banner = notice
 	}
-	msgID, err := e.eriClient.Widget(ctx, widgetReq)
+	msgID, err := e.EriClient.Widget(ctx, widgetReq)
 	if err != nil {
 		return "", fmt.Errorf("sync widget to eri: %w", err)
 	}
@@ -507,7 +507,7 @@ func (e *Executor) ResolveCIFailureDetails(ctx context.Context, repo string, prN
 }
 
 func (e *Executor) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	apiURL := store.FirstNonEmpty(e.gitHubAPIURL, "https://api.github.com")
+	apiURL := store.FirstNonEmpty(e.GitHubAPIURL, "https://api.github.com")
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(apiURL, "/")+path, body)
 	if err != nil {
 		return nil, err
@@ -531,7 +531,7 @@ func resolveGitHubRepoPath(repo string) string {
 }
 
 func (e *Executor) fetchCheckJobFailureLogsChecked(ctx context.Context, repo string, jobID int64) (string, error) {
-	if e == nil || e.httpClient == nil {
+	if e == nil || e.HTTPClient == nil {
 		return "", nil
 	}
 	repoPath := resolveGitHubRepoPath(repo)
@@ -545,7 +545,7 @@ func (e *Executor) fetchCheckJobFailureLogsChecked(ctx context.Context, repo str
 	if err != nil {
 		return "", err
 	}
-	resp, err := e.httpClient.Do(req)
+	resp, err := e.HTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -574,7 +574,7 @@ type gitHubIssueComment struct {
 
 func (e *Executor) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
 	repoPath := resolveGitHubRepoPath(repo)
-	if e == nil || repoPath == "" || prNumber <= 0 || e.httpClient == nil {
+	if e == nil || repoPath == "" || prNumber <= 0 || e.HTTPClient == nil {
 		return "", nil
 	}
 	var comments []gitHubIssueComment
@@ -583,7 +583,7 @@ func (e *Executor) fetchLatestRoboRevCommentChecked(ctx context.Context, repo st
 	if err != nil {
 		return "", err
 	}
-	resp, err := e.httpClient.Do(req)
+	resp, err := e.HTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -1314,4 +1314,4 @@ func formatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 	return sb.String(), nil
 }
 
-var errDispatchActive = errors.New("dispatch active; reconciliation deferred")
+var ErrDispatchActive = errors.New("dispatch active; reconciliation deferred")

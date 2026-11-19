@@ -13,6 +13,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -143,7 +144,7 @@ func (*retryAuthorityFixture) UpdateBuildStatusMessageID(context.Context, string
 
 type retryDispatchFixture struct {
 	mu       sync.Mutex
-	accepted map[string]BrainDispatchRequest
+	accepted map[string]executor.BrainDispatchRequest
 }
 
 func (f *retryDispatchFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +152,7 @@ func (f *retryDispatchFixture) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		_, _ = w.Write([]byte(`{}`))
 		return
 	}
-	var req BrainDispatchRequest
+	var req executor.BrainDispatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -184,11 +185,11 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			lost := false
 			st := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
 			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
-			f := &retryDispatchFixture{accepted: map[string]BrainDispatchRequest{}}
+			f := &retryDispatchFixture{accepted: map[string]executor.BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
-			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, NewExecutor(t.TempDir(), NewHTTPEriClient(ts.URL, ts.Client()), nil, "", nil))
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", nil))
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {
