@@ -1,8 +1,6 @@
 package main
 
 import (
-	"regexp"
-
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -28,25 +26,12 @@ const (
 	buildResultCancelled         = model.BuildResultCancelled
 )
 
-var (
-	metadataSHA  *regexp.Regexp = model.MetadataSHA
-	metadataRepo *regexp.Regexp = model.MetadataRepo
-)
-
-func isMainBuildEvent(event string) bool {
-	return model.IsMainBuildEvent(event)
-}
-
 func isBuildMetadataCheck(name string) bool {
 	return model.IsBuildMetadataCheck(name)
 }
 
 func isDependabotAppCheck(appSlug string) bool {
 	return model.IsDependabotAppCheck(appSlug)
-}
-
-func ParseBuildMetadata(raw []byte) (BuildMetadata, error) {
-	return model.ParseBuildMetadata(raw)
 }
 
 func parseStoredBuildMetadata(raw []byte) (BuildMetadata, error) {

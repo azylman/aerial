@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,15 +101,6 @@ func (b *recordingBus) publishCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.publishes)
-}
-
-func (b *recordingBus) lastEvent() (pubsub.ExternalEvent, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.events) == 0 {
-		return pubsub.ExternalEvent{}, false
-	}
-	return b.events[len(b.events)-1], true
 }
 
 type evaluateEventTriggersTestCase struct {
@@ -350,6 +343,289 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertHandleEventsWebhookScenario(t, tc)
+		})
+	}
+}
+
+func TestIntegrations_EventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		testScenario  string
+		wantSource    string
+		wantEventType string
+	}{
+		{
+			name:          "ProcessDeployEvent sync_success fires flux triggers",
+			testScenario:  "flux_sync_success",
+			wantSource:    "flux",
+			wantEventType: "sync_success",
+		},
+		{
+			name:          "ProcessGitHubEvent pr closed merged fires github triggers",
+			testScenario:  "github_pr_merged",
+			wantSource:    "github",
+			wantEventType: "pr_merged",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			recBus := &recordingBus{}
+			mockReg := &mockPRRegistry{}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
+			srv.SetEventBus(recBus)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			ctx := context.Background()
+			switch tc.testScenario {
+			case "flux_sync_success":
+				_, _ = srv.ProcessDeployEvent(ctx, DeployEvent{
+					Event: "sync_success",
+					Repo:  "azylman/aerial",
+				})
+			case "github_pr_merged":
+				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", body)
+			}
+
+			recBus.mu.Lock()
+			events := append([]pubsub.ExternalEvent(nil), recBus.events...)
+			recBus.mu.Unlock()
+
+			var found bool
+			for _, ev := range events {
+				if ev.Source == tc.wantSource && ev.EventType == tc.wantEventType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected bus event for source=%s eventType=%s, events = %+v", tc.wantSource, tc.wantEventType, events)
+			}
+		})
+	}
+}
+
+func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	recBus := &recordingBus{}
+	mockReg := &mockPRRegistry{
+		err: errors.New("database connection lost"),
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	srv.SetEventBus(recBus)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	ctx := context.Background()
+	body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+
+	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged-err", body)
+	if err == nil {
+		t.Fatalf("expected error from ProcessGitHubEvent, got res=%v", res)
+	}
+
+	if recBus.publishCount() != 0 {
+		t.Fatalf("expected no bus events on ProcessGitHubEvent error, got %d events: %+v", recBus.publishCount(), recBus.events)
+	}
+}
+
+type alertWebhookStep struct {
+	payload        string
+	updateChannel  string
+	clearDispErr   bool
+	wantStatus     int
+	wantDispatched int
+}
+
+func sendAlertsRequest(t *testing.T, handler http.Handler, path, payload string) (int, int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return rec.Code, -1
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	dispatchedVal, ok := resp["dispatched"].(float64)
+	if !ok {
+		return rec.Code, -1
+	}
+	return rec.Code, int(dispatchedVal)
+}
+
+type mutableConfigSource struct {
+	cfg Config
+}
+
+func (m *mutableConfigSource) Current() *Config { return &m.cfg }
+
+func assertAlertStep(t *testing.T, handler http.Handler, path string, step alertWebhookStep, cfgSrc *mutableConfigSource, disp *mockOutboundDispatcher) {
+	t.Helper()
+	if step.updateChannel != "" {
+		cfgSrc.cfg.SystemChannelID = step.updateChannel
+	}
+	if step.clearDispErr {
+		disp.mu.Lock()
+		disp.directMessageErr = nil
+		disp.mu.Unlock()
+	}
+	code, dispatched := sendAlertsRequest(t, handler, path, step.payload)
+	if code != step.wantStatus {
+		t.Fatalf("status = %d, want %d", code, step.wantStatus)
+	}
+	if step.wantStatus == http.StatusOK && dispatched != step.wantDispatched {
+		t.Fatalf("dispatched = %d, want %d", dispatched, step.wantDispatched)
+	}
+}
+
+func assertDirectMessages(t *testing.T, calls []DirectMessageRequest, wantCount int, wantSubstr string) {
+	t.Helper()
+	if len(calls) != wantCount {
+		t.Fatalf("DirectMessageCalls count = %d, want %d", len(calls), wantCount)
+	}
+	if wantSubstr == "" || len(calls) == 0 {
+		return
+	}
+	lastDM := calls[len(calls)-1]
+	if !strings.Contains(lastDM.Content, wantSubstr) {
+		t.Fatalf("DM content %q missing substr %q", lastDM.Content, wantSubstr)
+	}
+}
+
+func TestHandleAlertsWebhook(t *testing.T) {
+	t.Parallel()
+
+	const sysChannel = "123456789012345678"
+
+	tests := []struct {
+		name          string
+		path          string
+		cfgChannel    string
+		dispatcherErr error
+		steps         []alertWebhookStep
+		wantDMCount   int
+		wantDMSubstr  string
+	}{
+		{
+			name:       "invalid json returns 400",
+			path:       "/api/v2/alerts",
+			cfgChannel: sysChannel,
+			steps:      []alertWebhookStep{{payload: "invalid-json", wantStatus: http.StatusBadRequest}},
+		},
+		{
+			name:       "empty array returns 200 with 0 dispatched",
+			path:       "/api/webhooks/alerts",
+			cfgChannel: sysChannel,
+			steps:      []alertWebhookStep{{payload: "[]", wantStatus: http.StatusOK, wantDispatched: 0}},
+		},
+		{
+			name:         "firing alert dispatches to system channel",
+			path:         "/webhooks/alerts",
+			cfgChannel:   sysChannel,
+			wantDMCount:  1,
+			wantDMSubstr: "TestAlert",
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"},"annotations":{"summary":"disk full"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "duplicate firing alert suppressed across consecutive requests",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 1,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 0},
+			},
+		},
+		{
+			name:        "resolution clears firing alert so subsequent firing alert dispatches again",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 2,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: `[{"status":"resolved","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 0},
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "expired endsAt resolution clears firing alert so subsequent firing dispatches",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 2,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: fmt.Sprintf(`[{"labels":{"alertname":"TestAlert","severity":"critical"},"startsAt":"%s","endsAt":"%s"}]`, time.Now().Add(-10*time.Minute).Format(time.RFC3339), time.Now().Add(-5*time.Minute).Format(time.RFC3339)), wantStatus: http.StatusOK, wantDispatched: 0},
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:          "dispatcher error rolls back firing state and retries successfully",
+			path:          "/api/v2/alerts",
+			cfgChannel:    sysChannel,
+			dispatcherErr: errors.New("discord rate limited"),
+			wantDMCount:   2,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"ErrorAlert","severity":"critical"}}]`, wantStatus: http.StatusInternalServerError},
+				{payload: `[{"status":"firing","labels":{"alertname":"ErrorAlert","severity":"critical"}}]`, clearDispErr: true, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "non-firing non-resolved alert is ignored",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 0,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"pending","labels":{"alertname":"PendingAlert","severity":"warning"}}]`, wantStatus: http.StatusOK, wantDispatched: 0},
+			},
+		},
+		{
+			name:         "firing alert dispatches to configured channel name",
+			path:         "/api/v2/alerts",
+			cfgChannel:   "aerial-dev",
+			wantDMCount:  1,
+			wantDMSubstr: "ChannelNameAlert",
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"ChannelNameAlert","severity":"warning"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "invalid system channel returns retryable 503 and recovers on channel config",
+			path:        "/api/v2/alerts",
+			cfgChannel:  "invalid channel with spaces!",
+			wantDMCount: 1,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, wantStatus: http.StatusServiceUnavailable},
+				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, updateChannel: "aerial-dev", wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disp := &mockOutboundDispatcher{directMessageErr: tc.dispatcherErr}
+			cfgSrc := &mutableConfigSource{cfg: Config{SystemChannelID: tc.cfgChannel}}
+			srv := NewRouterServer(cfgSrc, nil)
+			srv.SetDispatcher(disp)
+			handler := srv.Routes()
+
+			for _, step := range tc.steps {
+				assertAlertStep(t, handler, tc.path, step, cfgSrc, disp)
+			}
+			assertDirectMessages(t, disp.DirectMessageCalls(), tc.wantDMCount, tc.wantDMSubstr)
 		})
 	}
 }

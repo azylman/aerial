@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/alerts"
 )
 
 const lifecycleTargetID = "123456789012345678"
@@ -341,16 +342,44 @@ func TestCompleteNoDeployWorkflowRun(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		headSHA string
-		prNum   int
-		want    []wantPREvent
+		name           string
+		headSHA        string
+		prNum          int
+		nilRegistry    bool
+		hasExpected    bool
+		hasExpectedErr error
+		wantErr        bool
+		want           []wantPREvent
 	}{
 		{
 			name:    "published deploy_success suppresses the deployment prompt",
 			headSHA: "head123",
 			prNum:   42,
 			want:    []wantPREvent{{Event: "deploy_success", PRNumber: 42, HeadSHA: "head123", Status: "deployed"}},
+		},
+		{
+			name:        "nil registry returns nil without action",
+			headSHA:     "head123",
+			prNum:       42,
+			nilRegistry: true,
+		},
+		{
+			name:    "zero prNum returns nil without action",
+			headSHA: "head123",
+			prNum:   0,
+		},
+		{
+			name:        "has expected deploy jobs skips deploy_success",
+			headSHA:     "head123",
+			prNum:       42,
+			hasExpected: true,
+		},
+		{
+			name:           "has expected deploy jobs error propagates",
+			headSHA:        "head123",
+			prNum:          42,
+			hasExpectedErr: errors.New("simulated has expected deploy jobs error"),
+			wantErr:        true,
 		},
 	}
 
@@ -359,10 +388,18 @@ func TestCompleteNoDeployWorkflowRun(t *testing.T) {
 			t.Parallel()
 			bus := &mockEventBus{}
 			disp := &mockOutboundDispatcher{}
-			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
+			var reg *mockPRRegistry
+			if !tc.nilRegistry {
+				reg = &mockPRRegistry{
+					resolveTargetID: lifecycleTargetID,
+					hasExpectedRes:  tc.hasExpected,
+					hasExpectedErr:  tc.hasExpectedErr,
+				}
+			}
 			srv := newLifecycleServer(lifecycleCfg(), bus, reg, disp)
-			if err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", tc.headSHA, lifecycleTargetID, tc.prNum); err != nil {
-				t.Fatalf("completeNoDeployWorkflowRun() err = %v", err)
+			err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", tc.headSHA, lifecycleTargetID, tc.prNum)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("completeNoDeployWorkflowRun() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			assertPREvents(t, bus, tc.want)
 			if n := len(disp.PromptCalls()); n != 0 {
@@ -515,7 +552,7 @@ func TestSanitizeSubjectToken(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := sanitizeSubjectToken(tc.token); got != tc.want {
+			if got := alerts.SanitizeSubjectToken(tc.token); got != tc.want {
 				t.Errorf("sanitizeSubjectToken(%q) = %q, want %q", tc.token, got, tc.want)
 			}
 		})
