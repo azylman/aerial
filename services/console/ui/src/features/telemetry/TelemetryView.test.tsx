@@ -417,16 +417,38 @@ describe('OverviewBuildsSection', () => {
     expect(container.querySelectorAll('.overview-build-row')).toHaveLength(0);
   });
 
-  it('renders populated build rows, opens drawer on click, and navigates to builds tab', () => {
+  it('renders populated build rows with active builds prioritized first, opens drawer on click, and navigates to builds tab', () => {
     const { container } = render(<OverviewBuildsSection />);
-    seedBuilds(sampleBuilds());
+    seedBuilds(
+      sampleBuilds({
+        builds: [
+          {
+            id: 'build-completed-newest',
+            thread_id: 'th-0',
+            tier: 1,
+            title: 'Recent Completed Build',
+            objective: 'Done',
+            status: 'completed',
+            queue_state: 'completed',
+            total_chunks: 2,
+            completed_chunks: 2,
+            running_chunks: 0,
+            pending_chunks: 0,
+            failed_chunks: 0,
+            created_at: '2026-11-08T12:05:00Z',
+            updated_at: '2026-11-08T12:10:00Z',
+          },
+          ...sampleBuilds().builds,
+        ],
+      }),
+    );
     expect(container.querySelector('.section-badge')?.textContent).toBe('3 ACTIVE');
     const rows = container.querySelectorAll('.overview-build-row');
     expect(rows).toHaveLength(3);
     expect(within(rows[0] as HTMLElement).getByText('Console Bento View')).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText('RUNNING')).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText('1/3 chunks')).toBeTruthy();
-    expect(within(rows[2] as HTMLElement).getByText('Build #build-03')).toBeTruthy();
+    expect(within(rows[2] as HTMLElement).getByText('Recent Completed Build')).toBeTruthy();
 
     act(() => (rows[0] as HTMLElement).click());
     expect(useConsoleStore.getState().drawer).toEqual({ kind: 'build', id: 'build-01' });
@@ -444,7 +466,7 @@ describe('OverviewSchedulesSection', () => {
     expect(container.querySelectorAll('.overview-schedule-row')).toHaveLength(0);
   });
 
-  it('renders populated routine rows and navigates to schedules tab', () => {
+  it('renders populated routine rows, toggles prompt expansion on click, and navigates to schedules tab', () => {
     const { container } = render(<OverviewSchedulesSection />);
     seedSchedules(sampleSchedules());
     expect(container.querySelector('.section-badge')?.textContent).toBe('4 ACTIVE');
@@ -454,6 +476,13 @@ describe('OverviewSchedulesSection', () => {
     expect(within(rows[0] as HTMLElement).getByText('0 9 * * * (UTC)')).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText('Every day at 9am')).toBeTruthy();
     expect(within(rows[1] as HTMLElement).getByText('Recurring Routine')).toBeTruthy();
+
+    expect(within(rows[0] as HTMLElement).queryByText('Standup')).toBeNull();
+    act(() => (rows[0] as HTMLElement).click());
+    expect(within(rows[0] as HTMLElement).getByText('PROMPT DIRECTIVE')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('Standup')).toBeTruthy();
+    act(() => (rows[0] as HTMLElement).click());
+    expect(within(rows[0] as HTMLElement).queryByText('Standup')).toBeNull();
 
     act(() => screen.getByRole('button', { name: 'Schedules ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('schedules');
