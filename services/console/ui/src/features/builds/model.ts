@@ -145,9 +145,9 @@ export function chunkPrUrl(chunk: Partial<Pick<VanadisChunkDTO, 'pr_number' | 'r
 // ---- topological DAG layout (@dagrejs/dagre Sugiyama layout) ----
 
 export const DAG_NODE_WIDTH = 220;
-export const DAG_NODE_HEIGHT = 76;
+export const DAG_NODE_HEIGHT = 58;
 export const DAG_NODE_SEP = 14;
-export const DAG_RANK_SEP = 36;
+export const DAG_RANK_SEP = 30;
 export const DAG_MARGIN = 10;
 
 export type DagEdgeTone = 'completed' | 'active' | 'failed' | 'pending';

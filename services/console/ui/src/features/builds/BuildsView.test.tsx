@@ -297,11 +297,14 @@ describe('BuildDetailPanel', () => {
     expect(text('.build-drawer-progress-bar .build-chunk-progress-label')).toBe('1 / 2 CHUNKS COMPLETED');
     expect(text('.chunks-section-title')).toBe('BUILD CHUNK DAG (2)');
     expect([...document.querySelectorAll('.chunk-title')].map((t) => t.textContent)).toEqual(['Chunk r1', 'Chunk 1']);
-    expect([...document.querySelectorAll('.chunk-status-badge')].map((b) => b.className)).toEqual([
-      'chunk-status-badge chunk-status-merged',
-      'chunk-status-badge chunk-status-in_progress',
+    expect([...document.querySelectorAll('.build-dag-node')].map((b) => b.className)).toEqual([
+      'build-dag-node node-status-merged',
+      'build-dag-node node-status-in_progress',
     ]);
     fireEvent.click(document.querySelector('.build-dag-node[data-chunk-id="r1"]') as Element);
+    expect([...document.querySelectorAll('.chunk-status-badge')].map((b) => b.className)).toEqual([
+      'chunk-status-badge chunk-status-merged',
+    ]);
     expect(screen.getByRole('button', { name: '← Back to Build DAG' })).toBeTruthy();
     expect(screen.getByRole('link', { name: /#41/ }).getAttribute('href')).toBe('https://github.com/acme/kiosk/pull/41');
     expect(screen.getByRole('heading', { name: 'Objective', level: 2 })).toBeTruthy();
@@ -363,7 +366,7 @@ describe('BuildDetailPanel', () => {
     expect(screen.getByText('Synapse hooks')).toBeTruthy();
   });
 
-  it('gives the graph floor width matching dag.width in narrow viewports so badges do not overflow cards', () => {
+  it('gives the graph floor width matching dag.width in narrow viewports and color-codes nodes by status without badges', () => {
     const wideChunks: readonly VanadisChunkDTO[] = [
       chunk('w1', 0, 'in_progress', { title: 'First chunk', depends_on: [] }),
       chunk('w2', 1, 'ci_failed', { title: 'Second chunk', depends_on: [] }),
@@ -382,13 +385,19 @@ describe('BuildDetailPanel', () => {
 
     const nodes = container.querySelectorAll('.build-dag-node');
     expect(nodes).toHaveLength(4);
+    expect([...nodes].map((n) => n.className)).toEqual([
+      'build-dag-node node-status-in_progress',
+      'build-dag-node node-status-ci_failed',
+      'build-dag-node node-status-completed',
+      'build-dag-node node-status-pending',
+    ]);
     for (const node of nodes) {
       const el = node as HTMLElement;
       const widthPct = Number.parseFloat(el.style.width);
       const computedWidth = (widthPct / 100) * Number.parseFloat(graph.style.minWidth);
       expect(Math.round(computedWidth)).toBe(220);
-      expect(node.querySelector('.chunk-status-badge')).toBeTruthy();
-      expect(node.querySelector('.chunk-index-badge')).toBeTruthy();
+      expect(node.querySelector('.chunk-status-badge')).toBeNull();
+      expect(node.querySelector('.chunk-index-badge')).toBeNull();
     }
   });
 });
