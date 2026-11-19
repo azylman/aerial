@@ -13,12 +13,12 @@ interface TabMeta {
 
 // Tab order, labels and badges for the `.hud-view-tabs` nav.
 export const TABS: readonly TabMeta[] = [
-  { id: 'telemetry', label: 'TELEMETRY', icon: 'bolt', badge: null },
-  { id: 'tasks', label: 'ACTIVE TASKS', icon: 'target', badge: (s) => tasksBadgeCount(s.status.cluster.data) },
-  { id: 'schedules', label: 'SCHEDULES', icon: 'alarm', badge: (s) => schedulesBadgeCount(s.schedules.list.data) },
-  { id: 'memory', label: 'MEMORY ARCHIVE', icon: 'brain', badge: (s) => memoryBadgeCount(s.memory.facts.data) },
-  { id: 'builds', label: 'BUILD QUEUE', icon: 'wrench', badge: (s) => buildsBadgeCount(s.builds.list.data) },
-  { id: 'docket', label: 'DOCKET', icon: 'checklist', badge: null },
+  { id: 'telemetry', label: 'Overview', icon: 'bolt', badge: null },
+  { id: 'tasks', label: 'Tasks', icon: 'target', badge: (s) => tasksBadgeCount(s.status.cluster.data) },
+  { id: 'schedules', label: 'Schedules', icon: 'alarm', badge: (s) => schedulesBadgeCount(s.schedules.list.data) },
+  { id: 'memory', label: 'Memory', icon: 'brain', badge: (s) => memoryBadgeCount(s.memory.facts.data) },
+  { id: 'builds', label: 'Builds', icon: 'wrench', badge: (s) => buildsBadgeCount(s.builds.list.data) },
+  { id: 'docket', label: 'Docket', icon: 'checklist', badge: null },
 ];
 
 export const tabButtonId = (tab: TabId): string => `tab-${tab}-btn`;

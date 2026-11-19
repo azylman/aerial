@@ -52,7 +52,7 @@ export interface PermetScore {
 }
 
 /** Static header value before the first status poll. */
-export const PERMET_IDLE: PermetScore = Object.freeze({ percent: 88, label: 'LVL 5 // ACTIVE', tone: 'idle' });
+export const PERMET_IDLE: PermetScore = Object.freeze({ percent: 100, label: 'Ready', tone: 'idle' });
 
 /** Permet gauge: share of services reporting `healthy`. */
 export function permetScore(services: readonly ServiceStatus[] | null): PermetScore {
@@ -60,9 +60,10 @@ export function permetScore(services: readonly ServiceStatus[] | null): PermetSc
   const healthy = services.filter((s) => s.status === 'healthy').length;
   const ratio = services.length > 0 ? healthy / services.length : 0;
   const percent = Math.round(ratio * 100);
-  if (ratio === 1) return { percent, label: 'LVL 5 // OPTIMAL', tone: 'optimal' };
-  if (ratio > 0.7) return { percent, label: 'LVL 3 // STABLE', tone: 'stable' };
-  return { percent, label: 'LVL 1 // WARNING', tone: 'warning' };
+  const label = `${healthy} / ${services.length} Healthy`;
+  if (ratio === 1) return { percent, label, tone: 'optimal' };
+  if (ratio > 0.7) return { percent, label, tone: 'stable' };
+  return { percent, label, tone: 'warning' };
 }
 
 export type GitSyncTone = 'synced' | 'lagging' | 'error';
