@@ -32,6 +32,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
+	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 const (
@@ -123,6 +124,11 @@ type WorkerPoolConfig struct {
 	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
 	TraceContent                     bool                       // record prompt/response on invoke_agent spans (tracing capture_content)
 	ActiveTurns                      *runner.ActiveTurnRegistry // daemons' active turn spans for the MCP trace proxy; nil gets a private registry
+	TranscriptStore                  db.TranscriptStore
+	TranscriptsIndexerURL            string
+	TranscriptRecheckDelay           time.Duration
+	TranscriptPublisher              *transcript.Publisher
+	TranscriptIndexerClient          *transcript.IndexerClient
 }
 
 type queueItem struct {
@@ -168,6 +174,14 @@ type WorkerPool struct {
 	activeChunkSteps    map[string]string
 	activeChunkTurns    map[string]string
 	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
+
+	TranscriptStore         db.TranscriptStore
+	TranscriptsIndexerURL   string
+	TranscriptRecheckDelay  time.Duration
+	TranscriptPublisher     *transcript.Publisher
+	TranscriptIndexerClient *transcript.IndexerClient
+	transcriptPublishCh     chan TranscriptPublishJob
+	transcriptPublishOnce   sync.Once
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -202,6 +216,7 @@ func (p *WorkerPool) SetEventBus(bus pubsub.Bus) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.eventBus = bus
+	p.ensureTranscriptPublishWorker()
 }
 
 // EventBus returns the event bus attached to the worker pool, if any.
@@ -510,6 +525,13 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		chunkToBuildID:   make(map[string]string),
 		activeChunkSteps: make(map[string]string),
 		activeChunkTurns: make(map[string]string),
+
+		TranscriptStore:         cfg.TranscriptStore,
+		TranscriptsIndexerURL:   cfg.TranscriptsIndexerURL,
+		TranscriptRecheckDelay:  cfg.TranscriptRecheckDelay,
+		TranscriptPublisher:     cfg.TranscriptPublisher,
+		TranscriptIndexerClient: cfg.TranscriptIndexerClient,
+		transcriptPublishCh:     make(chan TranscriptPublishJob, 256),
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -669,6 +691,7 @@ func (p *WorkerPool) GetRuntimeConfig() string {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
+	p.ensureTranscriptPublishWorker()
 	if p.AgentPool() != nil || p.cfg.Store != nil {
 		p.wg.Go(func() {
 			interval := p.cfg.MaintenanceInterval
@@ -839,6 +862,10 @@ func (p *WorkerPool) Stop() {
 		log.Printf("[WorkerPool] Workers exited cleanly")
 	case <-time.After(2 * time.Second):
 		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
+	}
+
+	if err := p.drainTranscriptPublisher(context.Background()); err != nil {
+		log.Printf("[WorkerPool] Warning: drain transcript publisher on stop: %v", err)
 	}
 
 	p.mu.Lock()

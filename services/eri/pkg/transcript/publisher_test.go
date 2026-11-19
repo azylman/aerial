@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,6 +218,37 @@ func TestPublisher_DrainFailureKeepsBatchesEnqueuedDuringFlight(t *testing.T) {
 		t.Fatalf("second Drain failed: %v", err)
 	}
 	assertEnvelopesEqual(t, published, []publishedEnvelope{{first: 1, last: 1, final: true}})
+}
+
+func TestPublisher_DrainConcurrentSerialization(t *testing.T) {
+	t.Parallel()
+	var inFlight, maxInFlight atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	p := NewPublisher("aerial", func(_ context.Context, b transcriptwire.TranscriptStepBatch) error {
+		if cur := inFlight.Add(1); cur > maxInFlight.Load() {
+			maxInFlight.Store(cur)
+		}
+		defer inFlight.Add(-1)
+		if b.SessionID == "s1" {
+			close(started)
+			<-release
+		}
+		return nil
+	})
+	p.Enqueue(testBatch("s1", 0, 0, true), testBatch("s2", 0, 0, true))
+	errCh := make(chan error, 2)
+	go func() { errCh <- p.Drain(context.Background()) }()
+	<-started
+	go func() { errCh <- p.Drain(context.Background()) }()
+	close(release)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatalf("unexpected drain error: %v", err)
+		}
+	}
+	if m := maxInFlight.Load(); m != 1 {
+		t.Errorf("max concurrent publish calls = %d, want 1", m)
+	}
 }
 
 type publishedEnvelope struct {

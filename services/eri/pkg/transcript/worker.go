@@ -624,26 +624,33 @@ func findCodexTranscriptFile(brainDir, sessionID string) string {
 	return ""
 }
 
-func findTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
-	candidates := []string{
-		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID+".jsonl"),
-	}
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-			return c
+// FindTranscriptFile locates the transcript JSONL file for a session ID.
+func FindTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	for _, dir := range append([]string{brainDir}, extraDirs...) {
+		if dir == "" {
+			continue
 		}
-	}
-	if cand := findClaudeTranscriptFile(brainDir, sessionID); cand != "" {
-		return cand
-	}
-	if cand := findCodexTranscriptFile(brainDir, sessionID); cand != "" {
-		return cand
+		for _, c := range []string{
+			filepath.Join(dir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
+			filepath.Join(dir, sessionID, "system_generated", "logs", "transcript.jsonl"),
+			filepath.Join(dir, sessionID, "transcript.jsonl"),
+			filepath.Join(dir, sessionID+".jsonl"),
+		} {
+			if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+				return c
+			}
+		}
+		if cand := findClaudeTranscriptFile(dir, sessionID); cand != "" {
+			return cand
+		}
+		if cand := findCodexTranscriptFile(dir, sessionID); cand != "" {
+			return cand
+		}
 	}
 	return findMuseTranscriptFile(brainDir, sessionID, extraDirs...)
 }
+
+var findTranscriptFile = FindTranscriptFile
 
 type transcriptScanState struct {
 	parsedSteps      []rawTranscriptStep

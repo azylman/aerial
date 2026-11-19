@@ -1,6 +1,5 @@
 // Package transcript dark publisher: per-turn transcript step batches are
-// coalesced per session and drained strictly in order. This file has no
-// callers yet; turn-end publishing wires it up in a later chunk.
+// coalesced per session and drained strictly in order.
 package transcript
 
 import (
@@ -26,6 +25,7 @@ type BatchPublishFunc func(ctx context.Context, batch transcriptwire.TranscriptS
 // snapshot were never attempted and stay queued, so a fresh Drain re-seeds
 // from the indexer watermark instead of replaying stale steps.
 type Publisher struct {
+	drainMu sync.Mutex
 	mu      sync.Mutex
 	stack   string
 	publish BatchPublishFunc
@@ -66,28 +66,19 @@ func (p *Publisher) Enqueue(batches ...transcriptwire.TranscriptStepBatch) {
 	}
 }
 
-// darkTranscriptAnchor keeps the dark transcript publisher pieces reachable
-// in the production call graph until the turn-end publishing cutover wires
-// live callers. Every call below is a validated no-op: blank sessions are
-// dropped, the indexer client is disabled without a base URL, and Drain on
-// an empty queue with no publish function reports nothing, so this performs
-// no network or database work and changes no behavior. The cutover chunk
-// removes this anchor when it wires the live publisher.
+// darkTranscriptPublisherAnchor keeps helper methods reachable in the
+// production call graph until spl2-c12a3-startup-resend.
 var _ = func() bool {
 	p := NewPublisher("", nil)
-	p.Enqueue()
 	_ = p.EnqueueSteps(transcriptwire.TranscriptStepBatch{}, nil)
 	_ = p.PendingSessions()
 	_ = p.PendingCount("")
-	errDrain := p.Drain(context.Background())
 	_ = ResendOnStartup(nil, nil, nil)
 	client := NewIndexerClient("", nil)
-	_, errGet := client.Watermark(context.Background(), "", "")
 	_, errWms := client.Watermarks(context.Background(), "")
-	_, errBatches := p.BuildSessionBatches(SessionBatchParams{})
 	errPubSess := p.PublishSessions(context.Background(), "", nil)
 	errPubOne := p.PublishSession(context.Background(), SessionBatchParams{})
-	_ = []error{errDrain, errGet, errWms, errBatches, errPubSess, errPubOne}
+	_ = []error{errWms, errPubSess, errPubOne}
 	return true
 }()
 
@@ -316,13 +307,6 @@ func (p *Publisher) PendingCount(sessionID string) int {
 	return len(p.queues[strings.TrimSpace(sessionID)])
 }
 
-// Drain publishes every queued batch strictly in order within each session.
-// On the first publish failure for a session it abandons only the chain it
-// snapshotted before the failed call (the failed head plus its already-queued
-// successors) and continues with the next session, returning the first error
-// encountered. Batches appended after the snapshot were never attempted and
-// stay queued for the next Drain. Successful sessions are fully dequeued.
-
 // dropSnapshotLocked abandons the snapshotted chain while keeping batches a
 // concurrent Enqueue appended after the snapshot. The caller must hold p.mu;
 // snapshotLen is the queue length Drain observed before the failed publish.
@@ -341,6 +325,9 @@ func (p *Publisher) Drain(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+
 	p.mu.Lock()
 	if p.publish == nil && len(p.order) > 0 {
 		p.mu.Unlock()
