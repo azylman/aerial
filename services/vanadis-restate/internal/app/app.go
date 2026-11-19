@@ -22,6 +22,7 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -81,6 +82,18 @@ func LoadConfigFromEnv() Config {
 		ShareRoot:   shareRoot,
 		AgentName:   agentName,
 	}
+}
+
+// bindRestateServices assembles the Restate worker server with Build,
+// BuildRouter, and the dark PRObject/RepoObject state services. The synapse
+// ingress invoker addresses PRObject/RepoObject, but all synapse consumers
+// stay on legacy trackers: nothing routes here until the cutover chunk.
+func bindRestateServices(restateObj *build.BuildObject, routerSvc *router.BuildRouterService) *server.Restate {
+	srv := server.NewRestate().
+		Bind(restate.Reflect(restateObj)).
+		Bind(restate.Reflect(routerSvc))
+	prstate.RegisterPRStateServices(srv, prstate.NewPRObjectService(), prstate.NewRepoObjectService())
+	return srv
 }
 
 // SetupHealthMux creates the ServeMux for health, metrics, and coverage flush.
@@ -144,9 +157,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
-	restateServer := server.NewRestate().
-		Bind(restate.Reflect(restateObj)).
-		Bind(restate.Reflect(routerSvc))
+	restateServer := bindRestateServices(restateObj, routerSvc)
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)
