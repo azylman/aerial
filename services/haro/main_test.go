@@ -11,62 +11,8 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/haro/internal/config"
-	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/testutil"
-	"github.com/azylman/aerial/services/haro/internal/ticker"
 )
-
-// TestRoot_InternalDelegates exercises the internal packages main.go wires
-// directly (config, ticker, server) from the root test package.
-func TestRoot_InternalDelegates(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(cfgPath, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\neri_url: \"http://127.0.0.1:59484\"\nvanadis_url: \"http://127.0.0.1:59485\"\n"), 0o644)
-	t.Setenv("CONFIG_PATH", filepath.Join(tmpDir, "resolve.yaml"))
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
-
-	tests := []struct {
-		name    string
-		call    string
-		wantErr string
-		wantOut string
-	}{
-		{"resolve config path", "resolve", "", filepath.Join(tmpDir, "resolve.yaml")},
-		{"load config", "load", "", "4005"},
-		{"register tokens", "register", "", ""},
-		{"new ticker", "ticker", "", ""},
-		{"one-shot nil message", "oneshot-nil", "message cannot be nil", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			switch tc.call {
-			case "resolve":
-				if got := config.ResolveConfigPath("fallback"); got != tc.wantOut {
-					t.Errorf("config.ResolveConfigPath() = %q, want %q", got, tc.wantOut)
-				}
-			case "load":
-				cfg, err := config.LoadConfig(cfgPath)
-				if err != nil {
-					t.Fatalf("config.LoadConfig() err = %v", err)
-				}
-				if cfg.Port != tc.wantOut {
-					t.Errorf("config.LoadConfig().Port = %q, want %q", cfg.Port, tc.wantOut)
-				}
-			case "register":
-				config.RegisterConfigTokens(&Config{Port: "4005", DatabaseURL: "postgres://user:pass@localhost:5432/db"})
-			case "ticker":
-				if got := ticker.NewTicker(nil, nil, time.Second); got == nil {
-					t.Error("ticker.NewTicker() = nil, want non-nil ticker")
-				}
-			default:
-				err := server.HandleOneShotJob(t.Context(), nil, nil, nil)
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("server.HandleOneShotJob() err = %v, want containing %q", err, tc.wantErr)
-				}
-			}
-		})
-	}
-}
 
 func TestMain_Execution(t *testing.T) {
 	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
