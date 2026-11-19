@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // Status literals mirrored from the build package. They stay package-private
@@ -39,10 +38,10 @@ func NormalizeAndValidateBuildDAG(chunks []model.VanadisChunk) ([]model.VanadisC
 	for i, c := range out {
 		cid := strings.TrimSpace(c.ID)
 		if cid == "" {
-			return nil, fmt.Errorf("%w: chunk[%d] id cannot be empty", store.ErrInvalidBuildInput, i)
+			return nil, fmt.Errorf("%w: chunk[%d] id cannot be empty", model.ErrInvalidBuildInput, i)
 		}
 		if _, exists := idMap[cid]; exists {
-			return nil, fmt.Errorf("%w: duplicate chunk id %q", store.ErrInvalidBuildInput, cid)
+			return nil, fmt.Errorf("%w: duplicate chunk id %q", model.ErrInvalidBuildInput, cid)
 		}
 		idMap[cid] = i
 	}
@@ -69,14 +68,14 @@ func NormalizeAndValidateBuildDAG(chunks []model.VanadisChunk) ([]model.VanadisC
 func ResolveChunkDependencies(out []model.VanadisChunk, idMap map[string]int) error {
 	for i := range out {
 		if out[i].DependsOn == nil {
-			return fmt.Errorf("%w: chunk %q must explicitly specify depends_on", store.ErrInvalidBuildInput, out[i].ID)
+			return fmt.Errorf("%w: chunk %q must explicitly specify depends_on", model.ErrInvalidBuildInput, out[i].ID)
 		}
 		normalizedDeps := make([]string, 0, len(out[i].DependsOn))
 		seenDeps := make(map[string]bool, len(out[i].DependsOn))
 		for _, rawDep := range out[i].DependsOn {
 			dep := strings.TrimSpace(rawDep)
 			if dep == "" {
-				return fmt.Errorf("%w: chunk %q has empty dependency reference", store.ErrInvalidBuildInput, out[i].ID)
+				return fmt.Errorf("%w: chunk %q has empty dependency reference", model.ErrInvalidBuildInput, out[i].ID)
 			}
 			var targetID string
 			if idx, ok := idMap[dep]; ok {
@@ -84,10 +83,10 @@ func ResolveChunkDependencies(out []model.VanadisChunk, idMap map[string]int) er
 			} else if idx, err := strconv.Atoi(dep); err == nil && idx >= 0 && idx < len(out) {
 				targetID = out[idx].ID
 			} else {
-				return fmt.Errorf("%w: chunk %q references unknown dependency %q", store.ErrInvalidBuildInput, out[i].ID, dep)
+				return fmt.Errorf("%w: chunk %q references unknown dependency %q", model.ErrInvalidBuildInput, out[i].ID, dep)
 			}
 			if targetID == out[i].ID {
-				return fmt.Errorf("%w: chunk %q cannot depend on itself", store.ErrInvalidBuildInput, out[i].ID)
+				return fmt.Errorf("%w: chunk %q cannot depend on itself", model.ErrInvalidBuildInput, out[i].ID)
 			}
 			if !seenDeps[targetID] {
 				seenDeps[targetID] = true
@@ -132,7 +131,7 @@ func CheckKahnDAGCycles(out []model.VanadisChunk, idMap map[string]int) error {
 		}
 	}
 	if visitedCount != N {
-		return fmt.Errorf("%w: cycle detected in chunk dependencies", store.ErrInvalidBuildInput)
+		return fmt.Errorf("%w: cycle detected in chunk dependencies", model.ErrInvalidBuildInput)
 	}
 	return nil
 }
@@ -171,21 +170,21 @@ func ValidateConcurrentDisjointPRChunks(out []model.VanadisChunk, reach [][]bool
 		if IsTerminalChunkStatus(chunkI.Status) {
 			continue
 		}
-		modeI, err := store.NormalizeChunkMode(chunkI.Mode)
+		modeI, err := model.NormalizeChunkMode(chunkI.Mode)
 		if err != nil || modeI != "pr" {
 			continue
 		}
-		repoI := store.NormalizeRepo(chunkI.Repo)
+		repoI := model.NormalizeRepo(chunkI.Repo)
 		for j := i + 1; j < len(out); j++ {
 			chunkJ := out[j]
 			if IsTerminalChunkStatus(chunkJ.Status) {
 				continue
 			}
-			modeJ, err := store.NormalizeChunkMode(chunkJ.Mode)
+			modeJ, err := model.NormalizeChunkMode(chunkJ.Mode)
 			if err != nil || modeJ != "pr" {
 				continue
 			}
-			repoJ := store.NormalizeRepo(chunkJ.Repo)
+			repoJ := model.NormalizeRepo(chunkJ.Repo)
 			if !strings.EqualFold(repoI, repoJ) {
 				continue
 			}
@@ -203,10 +202,10 @@ func ValidateConcurrentDisjointPRChunks(out []model.VanadisChunk, reach [][]bool
 // CheckDisjointFiles rejects two chunks that claim the same target file.
 func CheckDisjointFiles(a, b model.VanadisChunk, repo string) error {
 	if len(a.TargetFiles) == 0 {
-		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", store.ErrInvalidBuildInput, a.ID, repo)
+		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", model.ErrInvalidBuildInput, a.ID, repo)
 	}
 	if len(b.TargetFiles) == 0 {
-		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", store.ErrInvalidBuildInput, b.ID, repo)
+		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", model.ErrInvalidBuildInput, b.ID, repo)
 	}
 	filesA := make(map[string]bool, len(a.TargetFiles))
 	for _, f := range a.TargetFiles {
@@ -218,7 +217,7 @@ func CheckDisjointFiles(a, b model.VanadisChunk, repo string) error {
 	for _, f := range b.TargetFiles {
 		normF := filepath.Clean(strings.TrimSpace(f))
 		if normF != "" && normF != "." && filesA[normF] {
-			return fmt.Errorf("%w: concurrent PR chunks %q and %q on repo %q have overlapping target_files: %s", store.ErrInvalidBuildInput, a.ID, b.ID, repo, normF)
+			return fmt.Errorf("%w: concurrent PR chunks %q and %q on repo %q have overlapping target_files: %s", model.ErrInvalidBuildInput, a.ID, b.ID, repo, normF)
 		}
 	}
 	return nil
@@ -234,16 +233,16 @@ func ValidateCreateBuildInputs(buildID, threadID, objective string, chunks []mod
 		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.Instructions) == "" {
 			return fmt.Errorf("chunk[%d] id, title, and instructions cannot be empty", i)
 		}
-		if !store.IsValidVanadisChunkID(strings.TrimSpace(c.ID)) {
+		if !model.IsValidVanadisChunkID(strings.TrimSpace(c.ID)) {
 			return fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
 		}
 		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
 			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
 		}
-		if err := store.ValidateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
+		if err := model.ValidateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
 			return err
 		}
-		if _, err := store.NormalizeChunkEffort(c.Effort); err != nil {
+		if _, err := model.NormalizeChunkEffort(c.Effort); err != nil {
 			return fmt.Errorf("chunk[%d] %w", i, err)
 		}
 	}

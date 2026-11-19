@@ -429,8 +429,11 @@ func TestStoreHelpers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if cleanRepoName(tc.repo) != tc.wantRepo {
-				t.Errorf("cleanRepoName(%q) = %q, want %q", tc.repo, cleanRepoName(tc.repo), tc.wantRepo)
+			if model.CleanRepoName(tc.repo) != tc.wantRepo {
+				t.Errorf("CleanRepoName(%q) = %q, want %q", tc.repo, model.CleanRepoName(tc.repo), tc.wantRepo)
+			}
+			if model.NormalizeDiscordThreadID(tc.thread) != tc.wantThread {
+				t.Errorf("NormalizeDiscordThreadID(%q) = %q, want %q", tc.thread, model.NormalizeDiscordThreadID(tc.thread), tc.wantThread)
 			}
 		})
 	}

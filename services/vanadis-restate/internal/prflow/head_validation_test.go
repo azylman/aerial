@@ -103,7 +103,7 @@ func TestFlow_ExtractChunkIDFromBranch(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, ExtractChunkIDFromBranch(tc.repo, tc.branch))
+			assert.Equal(t, tc.want, model.ExtractChunkIDFromBranch(tc.repo, tc.branch))
 		})
 	}
 }
@@ -124,7 +124,7 @@ func TestFlow_NormalizeDiscordThreadID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, NormalizeDiscordThreadID(tc.input))
+			assert.Equal(t, tc.want, model.NormalizeDiscordThreadID(tc.input))
 		})
 	}
 }

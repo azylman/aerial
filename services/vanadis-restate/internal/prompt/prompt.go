@@ -16,20 +16,9 @@ import (
 
 const maxPromptRunes = 6000
 
-// Frozen helpers mirrored from the executor package; values stay byte-identical.
+// Action vocabulary stays local; pure repo/branch helpers delegate to the
+// canonical internal/model copies.
 const chunkModeAction = "action"
-
-func actionDispatchID(chunk model.VanadisChunk) string {
-	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
-}
-
-func cleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
-}
 
 var declKeywordPrefixes = []string{"func ", "type ", "var ", "const ", "export ", "function ", "class "}
 
@@ -45,7 +34,7 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	}
 	extraLine := strings.Join(extraParts, "\n")
 
-	shortRepo := store.FirstNonEmpty(cleanRepoName(ev.Repo), "aerial")
+	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
 	branchArg := store.FirstNonEmpty(cleanBranch, "<branch>")
 	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
 
@@ -79,7 +68,7 @@ The original chunk instructions follow.
 
 // FormatConflictPrompt formats the conflict prompt when merge conflict is detected.
 func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
-	shortRepo := store.FirstNonEmpty(cleanRepoName(ev.Repo), "aerial")
+	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
 	cleanBranch := store.FirstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
 	return fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", ev.PRNumber, ev.Repo, cleanBranch, ev.HeadSHA, shortRepo, cleanBranch)
 }
@@ -302,7 +291,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 	isActionChunk := active.Mode == chunkModeAction
 	activeRepo := ""
 	if !isActionChunk {
-		activeRepo = store.FirstNonEmpty(cleanRepoName(active.Repo), "aerial")
+		activeRepo = store.FirstNonEmpty(model.CleanRepoName(active.Repo), "aerial")
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: %s\n", build.ID)
@@ -310,7 +299,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 		fmt.Fprintf(&sb, "Build Title: %s\n", bTitle)
 	}
 	if isActionChunk {
-		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", actionDispatchID(active))
+		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", model.ActionDispatchID(active))
 	}
 	if !isActionChunk {
 		fmt.Fprintf(&sb, "Repository: %s\n", activeRepo)
@@ -333,7 +322,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 	targetFilesStr := store.FirstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
 	fmt.Fprintf(&sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\n", activeIdx+1, total, active.ID, active.Title)
 	if isActionChunk {
-		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", actionDispatchID(active))
+		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", model.ActionDispatchID(active))
 	}
 	if !isActionChunk {
 		fmt.Fprintf(&sb, "Repository: %s\nTarget Files: %s\n", activeRepo, targetFilesStr)
