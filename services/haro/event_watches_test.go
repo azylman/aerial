@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/haro/internal/config"
+	"github.com/azylman/aerial/services/haro/internal/dispatch"
+	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/testutil"
@@ -54,7 +57,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
-	_ = store.InsertEventTrigger(ctx, db, EventTrigger{
+	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-int-1",
 		ChannelID: "100000000000000001",
 		Source:    "flux",
@@ -65,8 +68,8 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	})
 
 	done := make(chan struct{})
-	mockDisp := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
-	srv := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDisp)
+	mockDisp := &mockDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
+	srv := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDisp)
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -128,7 +131,7 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
 	_ = closedDB.Close()
-	serverClosed := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+	serverClosed := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	captureBus := &handlerCaptureBus{Bus: memBus}
 	bus := initHaroJetStreamWithFactory(ctx, serverClosed, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {

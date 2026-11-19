@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -72,7 +73,7 @@ func TestWriteJSON_Table(t *testing.T) {
 
 type dbConfigTestCase struct {
 	name    string
-	cfg     *Config
+	cfg     *config.Config
 	wantErr bool
 }
 
@@ -109,7 +110,7 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 		t.Error("expected error creating schema on conflicting view database")
 	}
 
-	if _, err := store.NewDB(t.Context(), &Config{DatabaseURL: ":memory:"}); err == nil {
+	if _, err := store.NewDB(t.Context(), &config.Config{DatabaseURL: ":memory:"}); err == nil {
 		t.Error("expected error for unsupported :memory: scheme")
 	}
 }
@@ -117,8 +118,8 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {
 	t.Helper()
 	now := time.Now().UTC()
-	c := CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
-	s := OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
+	c := model.CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
+	s := model.OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
 	if err := store.InsertCronSchedule(ctx, db, c); err != nil {
 		t.Fatalf("InsertCronSchedule failed: %v", err)
 	}
@@ -163,7 +164,7 @@ func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {
 	}
 }
 
-func runDBOpCase(t *testing.T, tc dbOpTestCase, c CronSchedule, s OneShotSchedule, eff string) {
+func runDBOpCase(t *testing.T, tc dbOpTestCase, c model.CronSchedule, s model.OneShotSchedule, eff string) {
 	t.Helper()
 	if err := store.InsertCronSchedule(tc.ctx, tc.db, c); err == nil {
 		t.Errorf("%s: expected err InsertCron", tc.name)
@@ -180,13 +181,13 @@ func runDBOpCase(t *testing.T, tc dbOpTestCase, c CronSchedule, s OneShotSchedul
 	if err := store.UpdateCronSchedule(tc.ctx, tc.db, "c1", &eff, nil, nil, nil, nil, nil); err == nil {
 		t.Errorf("%s: expected err UpdateCron", tc.name)
 	}
-	if err := store.UpdateHeartbeatSchedule(tc.ctx, tc.db, HeartbeatSchedule{ID: "hb1"}); err == nil {
+	if err := store.UpdateHeartbeatSchedule(tc.ctx, tc.db, model.HeartbeatSchedule{ID: "hb1"}); err == nil {
 		t.Errorf("%s: expected err UpdateHeartbeat", tc.name)
 	}
 	if _, err := store.DeleteSchedule(tc.ctx, tc.db, "c1"); err == nil {
 		t.Errorf("%s: expected err Delete", tc.name)
 	}
-	if err := store.InsertEventTrigger(tc.ctx, tc.db, EventTrigger{}); err == nil {
+	if err := store.InsertEventTrigger(tc.ctx, tc.db, model.EventTrigger{}); err == nil {
 		t.Errorf("%s: expected err InsertEventTrigger", tc.name)
 	}
 	if _, err := store.ListEventTriggers(tc.ctx, tc.db, ""); err == nil {
@@ -238,14 +239,14 @@ func testDBStandaloneFunctions(ctx context.Context, t *testing.T, db, closedDB *
 	if _, err := store.ClaimEventTriggers(ctx, closedDB, "camera", []string{"garage"}, "person_arrived"); err == nil {
 		t.Error("expected error from closed db on claim path")
 	}
-	_ = tools.NewToolHandler(&Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
+	_ = tools.NewToolHandler(&config.Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
 }
 
 func TestDB_OperationsAndErrors(t *testing.T) {
 	cfgTests := []dbConfigTestCase{
 		{"nil config NewDB", nil, true},
-		{"empty dsn", &Config{DatabaseURL: ""}, true},
-		{"unsupported scheme", &Config{DatabaseURL: "mysql://localhost/db"}, true},
+		{"empty dsn", &config.Config{DatabaseURL: ""}, true},
+		{"unsupported scheme", &config.Config{DatabaseURL: "mysql://localhost/db"}, true},
 	}
 	for _, tc := range cfgTests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,8 +279,8 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	_ = closedDB.Close()
 
 	now := time.Now().UTC()
-	c := CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
-	s := OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
+	c := model.CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
+	s := model.OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
 	eff := "high"
 
 	dbOpTests := []dbOpTestCase{
@@ -297,7 +298,7 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
-	srv := server.NewServer(&ToolHandler{})
+	srv := server.NewServer(&tools.ToolHandler{})
 	ts := httptest.NewServer(srv.Routes())
 	defer ts.Close()
 
