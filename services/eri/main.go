@@ -876,6 +876,24 @@ func setupDiscordFunnel(
 	return dgSession, cleanup
 }
 
+var startupResendInitialBackoff = 250 * time.Millisecond
+
+func runStartupResendLoop(ctx context.Context, pool *queue.WorkerPool, backoff time.Duration) {
+	for ctx.Err() == nil {
+		err := pool.RunStartupResend(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		log.Printf("[StartupResend] Warning running startup resend: %v", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			backoff = min(backoff*2, 30*time.Second)
+		}
+	}
+}
+
 func startLeaderHandoff(
 	ctx context.Context,
 	store db.Store,
@@ -913,16 +931,12 @@ func startLeaderHandoff(
 		}
 		queue.RecoverInterrupted(leaderCtx, store, pool)
 		PrewarmProcessPoolsSequentially(leaderCtx, allPools...)
-		var rawLLM func(context.Context, string, string) (string, error)
-		if ephemeralPool != nil {
-			rawLLM = ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
-		}
-		syncLLM := buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
-		transcript.StartTranscriptSync(leaderCtx, txStore, cfg, "", syncLLM, 5*time.Minute)
-		if pool != nil && pool.EventBus() != nil {
-			if subErr := transcript.StartTurnTranscriptSyncSubscriber(leaderCtx, pool.EventBus(), txStore, cfg, "", func() transcript.LLMClientFunc { return syncLLM }); subErr != nil {
-				log.Printf("[TranscriptSync] Warning starting turn transcript sync subscriber: %v", subErr)
-			}
+		_ = txStore
+		_ = ephemeralPool
+		_ = cfg
+		_ = cur
+		if pool != nil {
+			runStartupResendLoop(leaderCtx, pool, startupResendInitialBackoff)
 		}
 	}()
 
@@ -1217,18 +1231,20 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	ambientResolver := newAmbientContextResolver(cfg)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		ParentContext:    ctx,
-		Store:            store,
-		Classifier:       cls,
-		SessionManager:   sessionMgr,
-		Pools:            pools.discord,
-		VoiceProcessPool: pools.voice,
-		LLMFunc:          pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer"),
-		AmbientResolver:  ambientResolver,
-		NATSURL:          cur.NATSURL,
-		AgentName:        appOpts.agentName,
-		TraceContent:     appOpts.traceContent,
-		ActiveTurns:      activeTurns,
+		ParentContext:         ctx,
+		Store:                 store,
+		TranscriptStore:       txStore,
+		TranscriptsIndexerURL: cur.Transcripts.IndexerURL,
+		Classifier:            cls,
+		SessionManager:        sessionMgr,
+		Pools:                 pools.discord,
+		VoiceProcessPool:      pools.voice,
+		LLMFunc:               pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer"),
+		AmbientResolver:       ambientResolver,
+		NATSURL:               cur.NATSURL,
+		AgentName:             appOpts.agentName,
+		TraceContent:          appOpts.traceContent,
+		ActiveTurns:           activeTurns,
 	})
 	detachEventBus := attachEriEventBus(ctx, pool)
 	defer detachEventBus()

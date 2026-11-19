@@ -26,7 +26,9 @@ type TranscriptPublishJob struct {
 	ParkCount                             int
 }
 
-func (p *WorkerPool) initTranscriptPublisher() {
+func (p *WorkerPool) initTranscriptPublisher() (*transcript.Publisher, *transcript.IndexerClient) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.TranscriptPublisher == nil {
 		p.TranscriptPublisher = transcript.NewPublisher(p.stackName(), func(ctx context.Context, b transcriptwire.TranscriptStepBatch) error {
 			if bus := p.EventBus(); bus != nil {
@@ -38,6 +40,7 @@ func (p *WorkerPool) initTranscriptPublisher() {
 	if p.TranscriptIndexerClient == nil && p.TranscriptsIndexerURL != "" {
 		p.TranscriptIndexerClient = transcript.NewIndexerClient(p.TranscriptsIndexerURL, nil)
 	}
+	return p.TranscriptPublisher, p.TranscriptIndexerClient
 }
 
 func (p *WorkerPool) stackName() string {
@@ -148,8 +151,11 @@ func (p *WorkerPool) drainTranscriptPublisher(ctx context.Context) error {
 				log.Printf("[WorkerPool] Drain publish error for session %s: %v", job.SessionID, err)
 			}
 		default:
-			if p.TranscriptPublisher != nil {
-				return p.TranscriptPublisher.Drain(ctx)
+			p.mu.Lock()
+			pub := p.TranscriptPublisher
+			p.mu.Unlock()
+			if pub != nil {
+				return pub.Drain(ctx)
 			}
 			return nil
 		}
@@ -246,19 +252,19 @@ func (p *WorkerPool) processTranscriptPublishJobWithContext(ctx context.Context,
 		p.setPending(sID, false)
 		return nil
 	}
+	pub, idxClient := p.initTranscriptPublisher()
 	wm := -1
-	if p.TranscriptIndexerClient != nil {
-		if w, wErr := p.TranscriptIndexerClient.Watermark(ctx, p.stackName(), sID); wErr == nil {
+	if idxClient != nil {
+		if w, wErr := idxClient.Watermark(ctx, p.stackName(), sID); wErr == nil {
 			wm = w
 		}
 	}
-	p.initTranscriptPublisher()
-	batches, err := p.TranscriptPublisher.BuildSessionBatches(transcript.SessionBatchParams{SessionID: sID, BrainDir: job.BrainDir, Watermark: wm, ThreadID: job.ThreadID, Engine: job.Engine, ExtraDirs: job.ExtraDirs, MCPServers: p.mcpServerNames()})
+	batches, err := pub.BuildSessionBatches(transcript.SessionBatchParams{SessionID: sID, BrainDir: job.BrainDir, Watermark: wm, ThreadID: job.ThreadID, Engine: job.Engine, ExtraDirs: job.ExtraDirs, MCPServers: p.mcpServerNames()})
 	if err != nil {
 		return p.retryOrDrop(job, "build batches", fmt.Errorf("build session batches: %w", err))
 	}
-	p.TranscriptPublisher.Enqueue(batches...)
-	if err := p.TranscriptPublisher.Drain(ctx); err != nil {
+	pub.Enqueue(batches...)
+	if err := pub.Drain(ctx); err != nil {
 		return p.retryOrDrop(job, "drain failure", err)
 	}
 	job.LastMtime, job.LastSize, job.IsRecheck, job.ParkCount = fi.ModTime().UTC(), fi.Size(), true, 0
