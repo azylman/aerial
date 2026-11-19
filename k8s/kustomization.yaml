@@ -10,6 +10,8 @@ resources:
 
 generatorOptions:
   disableNameSuffixHash: true
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
 
 configMapGenerator:
   - name: homepage-core-scripts
