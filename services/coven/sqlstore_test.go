@@ -86,68 +86,107 @@ func setupTestDBMem(t *testing.T) *sql.DB {
 	return db
 }
 
+type sqlStoreSetterTestCase struct {
+	name         string
+	initialURL   string
+	setURL       string
+	setToken     string
+	setStack     string
+	wantBrainURL string
+	wantToken    string
+	wantStack    string
+}
+
+func runSQLStoreSetterCase(t *testing.T, tc sqlStoreSetterTestCase, dbMem *sql.DB) {
+	t.Helper()
+	var store *SQLStore
+	if tc.name == "NilStoreFallback" {
+		if got := store.getBrainURL(); got != tc.wantBrainURL {
+			t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
+		}
+		if got := store.Stack(); got != tc.wantStack {
+			t.Errorf("Stack() = %q, want %q", got, tc.wantStack)
+		}
+		return
+	}
+
+	store = NewSQLStoreWithBrainURL(dbMem, tc.initialURL, nil)
+	if tc.setURL != "" {
+		store.SetBrainURL(tc.setURL)
+	}
+	if tc.setToken != "" {
+		store.SetBrainToken(tc.setToken)
+	}
+	if tc.setStack != "" {
+		store.SetStack(tc.setStack)
+	}
+	if store.DB() != dbMem {
+		t.Errorf("DB() = %v, want %v", store.DB(), dbMem)
+	}
+	ic := NewIndexerClient("http://transcripts", "test", nil)
+	store.SetIndexerClient(ic)
+	if store.IndexerClient() != ic {
+		t.Errorf("IndexerClient() = %v, want %v", store.IndexerClient(), ic)
+	}
+	if got := store.getBrainURL(); got != tc.wantBrainURL {
+		t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
+	}
+	if store.brainToken != tc.wantToken {
+		t.Errorf("brainToken = %q, want %q", store.brainToken, tc.wantToken)
+	}
+	if got := store.Stack(); got != tc.wantStack {
+		t.Errorf("Stack() = %q, want %q", got, tc.wantStack)
+	}
+}
+
 func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 
-	tests := []struct {
-		name         string
-		initialURL   string
-		setURL       string
-		setToken     string
-		wantBrainURL string
-		wantToken    string
-	}{
+	tests := []sqlStoreSetterTestCase{
 		{
 			name:         "DefaultURL",
 			initialURL:   "",
 			wantBrainURL: "",
+			wantStack:    DefaultStack,
 		},
 		{
 			name:         "CustomURL",
 			initialURL:   "http://my-eri:5000/",
 			setToken:     "test-token",
+			setStack:     "miorine",
 			wantBrainURL: "http://my-eri:5000",
 			wantToken:    "test-token",
+			wantStack:    "miorine",
 		},
 		{
 			name:         "SetterWithWhitespace",
 			initialURL:   "http://old-eri:5000",
 			setURL:       " http://new-eri:6000/ ",
 			setToken:     "  padded-token  ",
+			setStack:     "  suletta  ",
 			wantBrainURL: "http://new-eri:6000",
 			wantToken:    "padded-token",
+			wantStack:    "suletta",
 		},
 		{
 			name:         "SetterEmptyResetsToEmpty",
 			initialURL:   "http://custom:1234",
 			setURL:       "   ",
+			setStack:     "   ",
 			wantBrainURL: "",
+			wantStack:    DefaultStack,
 		},
 		{
 			name:         "NilStoreFallback",
 			initialURL:   "",
 			wantBrainURL: "",
+			wantStack:    DefaultStack,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store *SQLStore
-			if tc.name != "NilStoreFallback" {
-				store = NewSQLStoreWithBrainURL(dbMem, tc.initialURL, nil)
-				if tc.setURL != "" {
-					store.SetBrainURL(tc.setURL)
-				}
-				if tc.setToken != "" {
-					store.SetBrainToken(tc.setToken)
-				}
-			}
-			if got := store.getBrainURL(); got != tc.wantBrainURL {
-				t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
-			}
-			if store != nil && store.brainToken != tc.wantToken {
-				t.Errorf("brainToken = %q, want %q", store.brainToken, tc.wantToken)
-			}
+			runSQLStoreSetterCase(t, tc, dbMem)
 		})
 	}
 }
@@ -621,64 +660,6 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 	}
 }
 
-func TestSQLStore_GetActiveConversationsForExtraction(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-
-	tests := []activeConversationsTestCase{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			wantErr: true,
-		},
-		{
-			name:     "DBQueryError",
-			queryErr: errors.New("query failed"),
-			wantErr:  true,
-		},
-		{
-			name:      "EriHTTPError",
-			eriStatus: http.StatusInternalServerError,
-			eriBody:   `{"error":"failed"}`,
-			wantErr:   true,
-		},
-		{
-			name:    "EriJSONError",
-			eriBody: `not-valid-json`,
-			wantErr: true,
-		},
-		{
-			name:         "SuccessDefaultHours",
-			activeHours:  -1,
-			watermarkSQL: "SELECT 'th-1', 5 UNION ALL SELECT 'th-2', 10",
-			eriBody: `{"status":"ok","tasks":[
-				{"thread_id":"th-1","row_id":10},
-				{"thread_id":"th-2","row_id":5},
-				{"thread_id":"th-3","row_id":20},
-				{"thread_id":"th-1","row_id":12}
-			]}`,
-			wantThreads:  []string{"th-1", "th-3"},
-			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks WHERE stack = $1"},
-		},
-		{
-			name:         "SuccessCustomHours",
-			activeHours:  48,
-			watermarkSQL: "SELECT 'th-9', 0",
-			eriBody: `{"status":"ok","tasks":[
-				{"thread_id":"th-9","row_id":100}
-			]}`,
-			wantThreads:  []string{"th-9"},
-			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks WHERE stack = $1"},
-			wantURLSub:   "limit=200",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runGetActiveConversationsCase(t, tc, dbMem)
-		})
-	}
-}
-
 func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 
@@ -1118,70 +1099,6 @@ func setupBrainMockServer(status int, body string, capturedURL *string) *httptes
 			_, _ = w.Write([]byte(body))
 		}
 	}))
-}
-
-type activeConversationsTestCase struct {
-	name         string
-	nilDB        bool
-	activeHours  int
-	queryErr     error
-	watermarkSQL string
-	eriStatus    int
-	eriBody      string
-	wantErr      bool
-	wantThreads  []string
-	wantPatterns []string
-	wantURLSub   string
-}
-
-func runGetActiveConversationsCase(t *testing.T, tc activeConversationsTestCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var captured string
-	var capturedURL string
-	var store *SQLStore
-
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		server := setupBrainMockServer(tc.eriStatus, tc.eriBody, &capturedURL)
-		defer server.Close()
-
-		store = NewSQLStoreWithBrainURL(queryMockDBTX{
-			dbMem:         dbMem,
-			queryErr:      tc.queryErr,
-			rowsSQL:       tc.watermarkSQL,
-			capturedQuery: &captured,
-		}, server.URL, server.Client())
-	}
-
-	threads, err := store.GetActiveConversationsForExtraction(ctx, tc.activeHours)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GetActiveConversationsForExtraction() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if !tc.wantErr {
-		assertThreadsMatch(t, threads, tc.wantThreads)
-	}
-	for _, pat := range tc.wantPatterns {
-		if !strings.Contains(captured, pat) {
-			t.Errorf("captured query missing %q: %s", pat, captured)
-		}
-	}
-	if tc.wantURLSub != "" && !strings.Contains(capturedURL, tc.wantURLSub) {
-		t.Errorf("captured URL missing %q: %s", tc.wantURLSub, capturedURL)
-	}
-}
-
-func assertThreadsMatch(t *testing.T, got, want []string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("len(threads) = %d, want %d (%v)", len(got), len(want), got)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("threads[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
 }
 
 type unextractedAdminTurnsTestCase struct {

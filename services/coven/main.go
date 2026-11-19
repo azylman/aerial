@@ -28,31 +28,6 @@ func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pub
 	return initCovenJetStreamWithFactory(ctx, worker, natsURL, newCovenBusFn)
 }
 
-func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pubsub.Bus) error {
-	var ev pubsub.TranscriptSyncedEvent
-	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-		slog.WarnContext(ctx, "[Coven] failed to unmarshal transcript synced event", "error", err)
-		return nil
-	}
-	if strings.TrimSpace(ev.ConversationID) == "" || strings.TrimSpace(ev.SessionID) == "healthcheck-ping" {
-		return nil
-	}
-	msgID := fmt.Sprintf("coven:extract:%s:%d", ev.ConversationID, time.Now().UnixNano())
-	args := pubsub.CovenExtractJobArgs{
-		ThreadID:  ev.ConversationID,
-		SessionID: ev.SessionID,
-	}
-	return bus.Publish(ctx, pubsub.SubjectCovenExtractCoalesced(ev.ConversationID), msgID, args)
-}
-
-func nakBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
-
 func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Worker) error {
 	var args pubsub.CovenExtractJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
@@ -103,28 +78,6 @@ func subscribeCovenTranscriptsIndexed(ctx context.Context, b pubsub.Bus, stack s
 		return err
 	}
 	log.Println("[Coven] Subscribed coven-transcripts-indexed durable consumer to " + subject)
-	return nil
-}
-
-func subscribeCovenTranscriptSynced(ctx context.Context, b pubsub.Bus) error {
-	if b == nil {
-		return nil
-	}
-	_, err := b.Subscribe(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "coven-transcript-synced", func(msgCtx context.Context, msg pubsub.Message) error {
-		if err := handleTranscriptSyncedEvent(msgCtx, msg, b); err != nil {
-			if msg.NumDelivered() < 5 {
-				return err
-			}
-			slog.ErrorContext(msgCtx, "[Coven] dropping transcript synced event after max delivery attempts", "delivered", msg.NumDelivered(), "error", err)
-			return nil
-		}
-		return nil
-	})
-	if err != nil {
-		log.Printf("[Coven] warning: failed to subscribe coven-transcript-synced: %v", err)
-		return err
-	}
-	log.Println("[Coven] Subscribed coven-transcript-synced durable consumer to " + pubsub.SubjectAerialTurnTranscriptSynced)
 	return nil
 }
 

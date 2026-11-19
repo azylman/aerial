@@ -151,44 +151,6 @@ Requirements:
 7. Do NOT include markdown text formatting outside the JSON block.
 `
 
-// ExtractActiveConversationFacts queries conversations modified in the last activeHours,
-// extracts facts via the primary LLM, generates vector embeddings via Ollama, and reconciles them into persistent DB.
-func ExtractActiveConversationFacts(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, activeHours int) error {
-	start := time.Now()
-	if store == nil || client == nil || llmFunc == nil {
-		RecordOperation("extract", "error", time.Since(start).Seconds())
-		return fmt.Errorf("nil database, ollama client, or llmFunc")
-	}
-
-	threadIDs, err := store.GetActiveConversationsForExtraction(ctx, activeHours)
-	if err != nil {
-		RecordOperation("extract", "error", time.Since(start).Seconds())
-		return fmt.Errorf("failed to get active conversations: %w", err)
-	}
-
-	if len(threadIDs) > 0 {
-		log.Printf("[Memory] Starting fact extraction for %d active conversation threads...", len(threadIDs))
-
-		for _, tid := range threadIDs {
-			select {
-			case <-ctx.Done():
-				RecordOperation("extract", "error", time.Since(start).Seconds())
-				return ctx.Err()
-			default:
-			}
-
-			if err := processThreadFacts(ctx, store, client, llmFunc, tid); err != nil {
-				log.Printf("[Memory] Error extracting facts for thread %s: %v", tid, err)
-			}
-		}
-	} else {
-		log.Printf("[Memory] No active conversations requiring fact extraction.")
-	}
-
-	RecordOperation("extract", "success", time.Since(start).Seconds())
-	return nil
-}
-
 // ExtractThreadFacts extracts and reconciles facts for a single conversation thread.
 // It returns any error directly to allow JetStream retries.
 func ExtractThreadFacts(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, threadID string) error {

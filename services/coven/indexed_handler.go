@@ -56,14 +56,9 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 	return nil
 }
 
-// darkCovenAnchor keeps legacy transcript sync and deferred watermark symbols reachable
-// in the production call graph until removed in spl2-c20b-coven-legacy and wired in spl2-c16-watermark-pk.
+// darkCovenAnchor keeps deferred watermark symbols reachable
+// in the production call graph until wired in spl2-c16-watermark-pk.
 var _ = func() bool {
 	_ = ScopedThreadKey("", "")
-	_ = nakBackoffDelay(0)
-	errSub := subscribeCovenTranscriptSynced(context.Background(), nil)
-	var w Worker
-	w.RunStartupCatchUp(context.Background())
-	_ = []error{errSub}
 	return true
 }()

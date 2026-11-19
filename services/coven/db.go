@@ -142,7 +142,6 @@ type Store interface {
 	SearchCandidateFacts(ctx context.Context, embedding []float32, queryText string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
 	GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error)
-	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
 	GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error)

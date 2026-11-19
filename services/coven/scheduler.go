@@ -133,21 +133,10 @@ func (w *Worker) Start(ctx context.Context) error {
 	}
 }
 
-// RunStartupCatchUp performs a single initial sweep of fact extraction across active conversations
-// to catch up on any turns that completed while coven was offline.
-func (w *Worker) RunStartupCatchUp(ctx context.Context) {
-	if w.store == nil || w.ollama == nil || w.llmClient == nil {
-		return
-	}
-	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("[Coven Worker] Startup catch-up fact extraction failed: %v", err)
-	}
-}
-
 // Tick performs scheduled maintenance operations for the given tick count.
 // Invariant: Turn event ingestion is event-driven via JetStream durable consumers
-// (coven-transcript-synced -> coven-extract) backed by RunStartupCatchUp on boot
-// and pubsub auto-reconnect (nats.MaxReconnects(-1)); legacy 120-tick DB fallback polling is retired.
+// (coven-transcripts-indexed -> coven-extract) and pubsub auto-reconnect (nats.MaxReconnects(-1));
+// legacy 120-tick DB fallback polling is retired.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
 	// Daily: fact consolidation dreaming (tick % 2880 == 60)
 	if tick%2880 == 60 {
