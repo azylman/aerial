@@ -175,7 +175,31 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 			slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 		}
 	}
+	if err := b.completeSweptDeployments(ctx, chunks, mutation.ChunkID); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+// completeSweptDeployments completes earlier chunks superseded by the
+// deploying chunk's landed commit, publishing a completed event per chunk.
+// Skipped transitions (a concurrent completion, failure, or cancellation)
+// are harmless; other errors abort so the journaled step retries the sweep.
+func (b *BuildObject) completeSweptDeployments(ctx context.Context, chunks []model.VanadisChunk, chunkID string) error {
+	for _, sweptID := range store.EarlierDeploymentSweepIDs(chunks, chunkID) {
+		if err := b.store.CompletePRDeployment(ctx, sweptID, nil); err != nil {
+			if errors.Is(err, errPRTransitionSkipped) {
+				continue
+			}
+			return err
+		}
+		if b.executor != nil {
+			if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{sweptID}, ""); err != nil {
+				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
+			}
+		}
+	}
 	return nil
 }
 

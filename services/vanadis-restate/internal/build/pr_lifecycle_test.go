@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1105,6 +1106,160 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+type deploySweepSpyStore struct {
+	store.VanadisStore
+
+	build     *model.VanadisBuild
+	chunks    []model.VanadisChunk
+	completed []string
+	sweepErr  string
+	sweepSkip string
+}
+
+func (s *deploySweepSpyStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	return s.build, s.chunks, nil
+}
+
+func (s *deploySweepSpyStore) CompletePRDeployment(_ context.Context, chunkID string, _ *pubsub.PRRolloutState) error {
+	if chunkID == s.sweepErr {
+		return errors.New("sweep unavailable")
+	}
+	if chunkID == s.sweepSkip {
+		return store.ErrPRTransitionSkipped
+	}
+	for i := range s.chunks {
+		if s.chunks[i].ID != chunkID {
+			continue
+		}
+		if s.chunks[i].Status == statusFailed || s.chunks[i].Status == statusCancelled {
+			return store.ErrPRTransitionSkipped
+		}
+		s.chunks[i].Status = statusCompleted
+		s.completed = append(s.completed, chunkID)
+		return nil
+	}
+	return store.ErrPRTransitionSkipped
+}
+
+type recordingChunkBus struct {
+	pubsub.Bus
+
+	mu       sync.Mutex
+	subjects []string
+	events   []pubsub.ExternalEvent
+}
+
+func (b *recordingChunkBus) Publish(_ context.Context, subject, _ string, data any) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.subjects = append(b.subjects, subject)
+	if ev, ok := data.(pubsub.ExternalEvent); ok {
+		b.events = append(b.events, ev)
+	}
+	return nil
+}
+
+func (b *recordingChunkBus) sweptEvent(chunkID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, ev := range b.events {
+		if ev.Source != "vanadis_chunk" || ev.EventType != "completed" {
+			continue
+		}
+		if slices.Contains(ev.Targets, chunkID) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCompletePRDeploymentMutation_SweepsEarlierChunks(t *testing.T) {
+	t.Parallel()
+	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	mergeLater := mergeBase.Add(2 * time.Hour)
+	newChunks := func() []model.VanadisChunk {
+		return []model.VanadisChunk{
+			{ID: "earlier", BuildID: "b1", ChunkIndex: 0, Mode: "pr", Repo: "aerial", Status: statusMerged, CompletedAt: mergeBase},
+			{ID: "deploying", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: statusDeploying, CompletedAt: mergeLater},
+		}
+	}
+	tests := []struct {
+		name           string
+		buildStatus    string
+		chunks         []model.VanadisChunk
+		deployID       string
+		sweepErr       string
+		sweepSkip      string
+		withExecutor   bool
+		wantErr        bool
+		wantSweepEvent bool
+		wantCompleted  []string
+	}{
+		{
+			name:          "deploying chunk and earlier merged chunk complete",
+			buildStatus:   statusRunning,
+			chunks:        newChunks(),
+			deployID:      "deploying",
+			wantCompleted: []string{"deploying", "earlier"},
+		},
+		{
+			name:          "cancelled build completes nothing",
+			buildStatus:   statusCancelled,
+			chunks:        newChunks(),
+			deployID:      "deploying",
+			wantCompleted: nil,
+		},
+		{
+			name:          "swept write skip continues without error",
+			buildStatus:   statusRunning,
+			chunks:        newChunks(),
+			deployID:      "deploying",
+			sweepSkip:     "earlier",
+			wantCompleted: []string{"deploying"},
+		},
+		{
+			name:          "swept write error aborts",
+			buildStatus:   statusRunning,
+			chunks:        newChunks(),
+			deployID:      "deploying",
+			sweepErr:      "earlier",
+			wantErr:       true,
+			wantCompleted: []string{"deploying"},
+		},
+		{
+			name:           "swept completion publishes completed event",
+			buildStatus:    statusRunning,
+			chunks:         newChunks(),
+			deployID:       "deploying",
+			withExecutor:   true,
+			wantSweepEvent: true,
+			wantCompleted:  []string{"deploying", "earlier"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &deploySweepSpyStore{build: &model.VanadisBuild{ID: "b1", Status: tc.buildStatus}, chunks: tc.chunks, sweepErr: tc.sweepErr, sweepSkip: tc.sweepSkip}
+			var exec *executor.Executor
+			bus := &recordingChunkBus{}
+			if tc.withExecutor {
+				exec = executor.NewExecutor("", &mockEriClient{}, bus, "token", nil)
+			}
+			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
+			err := bo.completePRDeploymentMutation(context.Background(), "b1", &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: tc.deployID})
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantCompleted, spy.completed)
+			if tc.wantSweepEvent {
+				assert.True(t, bus.sweptEvent("earlier"), "expected vanadis_chunk completed event for swept chunk %q, got %+v", "earlier", bus.events)
 			}
 		})
 	}

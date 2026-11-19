@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
@@ -105,66 +104,6 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 	return store.DeleteSchedule(ctx, database, scheduleID)
 }
 
-// GetDueCronSchedules lists enabled cron schedules whose next run is due.
-func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]CronSchedule, error) {
-	return store.GetDueCronSchedules(ctx, database, now)
-}
-
-// AdvanceCronNextRun moves a cron schedule's next run timestamp.
-func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
-	return store.AdvanceCronNextRun(ctx, database, id, nextRun)
-}
-
-// GetDueHeartbeatSchedules lists enabled heartbeat schedules whose next run is due.
-func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]HeartbeatSchedule, error) {
-	return store.GetDueHeartbeatSchedules(ctx, database, now)
-}
-
-// AdvanceHeartbeatNextRun moves a heartbeat schedule's next run timestamp.
-func AdvanceHeartbeatNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
-	return store.AdvanceHeartbeatNextRun(ctx, database, id, nextRun)
-}
-
-// AdvanceHeartbeatLastCompletedAt advances a heartbeat's watermark monotonically.
-func AdvanceHeartbeatLastCompletedAt(ctx context.Context, database *sql.DB, id string, completedAt time.Time) error {
-	return store.AdvanceHeartbeatLastCompletedAt(ctx, database, id, completedAt)
-}
-
-// GetDueOneShotSchedules lists one-shot schedules whose run time is due.
-func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]OneShotSchedule, error) {
-	return store.GetDueOneShotSchedules(ctx, database, now)
-}
-
-// DeleteOneShotSchedule removes a one-shot schedule by id.
-func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bool, error) {
-	return store.DeleteOneShotSchedule(ctx, database, id)
-}
-
-// CreateScheduleRun records a new schedule execution attempt.
-func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) error {
-	return store.CreateScheduleRun(ctx, database, r)
-}
-
-// HasRunningHeartbeatRun reports whether a heartbeat has a running run since a cutoff.
-func HasRunningHeartbeatRun(ctx context.Context, database *sql.DB, scheduleID string, since time.Time) (bool, error) {
-	return store.HasRunningHeartbeatRun(ctx, database, scheduleID, since)
-}
-
-// GetScheduleRun fetches a schedule run by id.
-func GetScheduleRun(ctx context.Context, database *sql.DB, id string) (*ScheduleRun, error) {
-	return store.GetScheduleRun(ctx, database, id)
-}
-
-// UpdateScheduleRunOutcome records the terminal outcome of a schedule run.
-func UpdateScheduleRunOutcome(ctx context.Context, database *sql.DB, id, status, errStr string, completedAt time.Time, durationMs int64) error {
-	return store.UpdateScheduleRunOutcome(ctx, database, id, status, errStr, completedAt, durationMs)
-}
-
-// PruneScheduleRuns deletes runs older than maxAge or beyond maxCount newest.
-func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxAge time.Duration, now time.Time) (int64, error) {
-	return store.PruneScheduleRuns(ctx, database, maxCount, maxAge, now)
-}
-
 // GetScheduleSummaryMetrics computes summary metrics across all schedules and runs in the last 24 hours.
 func GetScheduleSummaryMetrics(ctx context.Context, database *sql.DB) (ScheduleSummaryMetrics, error) {
 	return store.GetScheduleSummaryMetrics(ctx, database)
@@ -178,13 +117,6 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 // SetVanadisURL sets the base URL for Vanadis HTTP API calls.
 func SetVanadisURL(u string) {
 	store.SetVanadisURL(u)
-}
-
-// firstNonEmpty delegates to the exported model.FirstNonEmpty seam so
-// unmoved ticker.go callers keep compiling; the logic lives in
-// internal/model.
-func firstNonEmpty(vals ...string) string {
-	return model.FirstNonEmpty(vals...)
 }
 
 // ValidateLiveEventTarget checks that the referenced target is known and not in a terminal state.

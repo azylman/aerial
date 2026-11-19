@@ -691,15 +691,80 @@ func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt D
 	return evt.SourceKind == kindKustomization && s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
 }
 
-func (s *RouterServer) isDeployEventOwnedByWatcher(ctx context.Context, evt DeployEvent) bool {
-	if s.registry == nil || evt.PRNumber <= 0 || (evt.SourceKind != kindKustomization && evt.Event != eventDeploySuccess) {
-		return false
+// deployEventWatcherOwnership reports whether evt belongs to the Kustomization watcher, which is
+// the sole terminal deploy authority for every PR whose repo sources a watched Flux Kustomization.
+// Ownership holds for started/success alerts when the PR already has recorded Kustomization
+// requests, or — so an early pre-image reconcile can never publish terminal success before the
+// watcher gate passes — when the repo is the source of at least one watched Kustomization.
+// Failure and rollback alerts keep the direct path unless the PR is tracked under a Kustomization.
+// A discovery error fails closed: the alert is owned but gated, so the caller must publish nothing
+// and record no dedup for it.
+func (s *RouterServer) deployEventWatcherOwnership(ctx context.Context, evt DeployEvent) (owned bool, err error) {
+	if s.registry == nil || evt.PRNumber <= 0 {
+		return false, nil
 	}
-	tracked, err := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber)
+	isFluxKind := evt.SourceKind == kindKustomization || evt.SourceKind == kindHelmRelease
+	if !isFluxKind && evt.Event != eventDeploySuccess {
+		return false, nil
+	}
+	tracked, trackErr := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber)
+	if trackErr != nil {
+		slog.WarnContext(ctx, "[synapse] [deploy] error checking kustomization requests", "repo", evt.Repo, "pr", evt.PRNumber, "error", trackErr)
+	} else if tracked {
+		if evt.SourceKind == kindKustomization || evt.Event == eventDeploySuccess ||
+			(isFluxKind && evt.Event == eventDeployStarted) {
+			return true, nil
+		}
+		return false, nil
+	}
+	if !isFluxKind {
+		return false, nil
+	}
+	if evt.Event != eventDeployStarted && evt.Event != eventDeploySuccess {
+		return false, nil
+	}
+	if s.dispatcher == nil {
+		return false, nil
+	}
+	refs, discErr := s.dispatcher.DiscoverRepoKustomizations(ctx, evt.Repo)
+	if discErr != nil {
+		return true, discErr
+	}
+	return len(refs) > 0, nil
+}
+
+// deferOwnedDeployEventToWatcher hands a watcher-owned alert to the Kustomization watcher instead
+// of publishing any lifecycle event from the alert, so an ungated Flux reconcile can never emit
+// terminal deploy_success or poison dedup before the watcher gate passes. Already-tracked alerts
+// defer silently; untracked deploy_started/deploy_success alerts go through deferPRToWatcher, which
+// transitions the PR to deploying (publishing the single deploy_started), records the reconcile
+// requests, and re-triggers the reconciles. It reports whether the alert was fully handled here.
+func (s *RouterServer) deferOwnedDeployEventToWatcher(ctx context.Context, evt DeployEvent) (bool, error) {
+	owned, discErr := s.deployEventWatcherOwnership(ctx, evt)
+	if !owned {
+		return false, nil
+	}
+	if discErr != nil {
+		slog.ErrorContext(ctx, "[synapse] [deploy] kustomization discovery failed; suppressing alert without publishing", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber, "error", discErr)
+		return true, nil
+	}
+	if tracked, trackErr := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber); trackErr == nil && tracked {
+		slog.InfoContext(ctx, "[synapse] [deploy] deferring event to the kustomization watcher", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
+		return true, nil
+	}
+	if evt.Event != eventDeployStarted && evt.Event != eventDeploySuccess {
+		slog.InfoContext(ctx, "[synapse] [deploy] deferring event to the kustomization watcher", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
+		return true, nil
+	}
+	if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
+		slog.InfoContext(ctx, "[synapse] [deploy] watcher-owned event waiting for image build", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
+		return false, nil
+	}
+	deferred, err := s.deferPRToWatcher(ctx, evt.Repo, evt.PRNumber)
 	if err != nil {
-		slog.WarnContext(ctx, "[synapse] [deploy] error checking kustomization requests", "repo", evt.Repo, "pr", evt.PRNumber, "error", err)
+		return true, err
 	}
-	return tracked
+	return deferred, nil
 }
 
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
@@ -709,9 +774,8 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 
 	s.evaluateFluxEventTriggers(ctx, evt)
 
-	if s.isDeployEventOwnedByWatcher(ctx, evt) {
-		slog.InfoContext(ctx, "[synapse] [deploy] deferring event to the kustomization watcher", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
-		return &evt, nil
+	if handled, err := s.deferOwnedDeployEventToWatcher(ctx, evt); handled || err != nil {
+		return &evt, err
 	}
 
 	if s.handleDeployStartedRegistry(ctx, evt) {
@@ -723,6 +787,12 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		return &evt, err
 	}
 
+	return s.publishUnownedDeployEvent(ctx, evt, syncHasExpected)
+}
+
+// publishUnownedDeployEvent publishes the lifecycle outcome for an alert the Kustomization watcher
+// does not own: PRs whose repos source no watched Flux Kustomization keep the direct alert path.
+func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt DeployEvent, syncHasExpected bool) (*DeployEvent, error) {
 	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
 		return &evt, nil
 	}

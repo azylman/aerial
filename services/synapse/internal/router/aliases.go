@@ -67,6 +67,7 @@ const (
 	eventSyncSuccess             = "sync_success"
 	eventSyncFailed              = "sync_failed"
 	kindKustomization            = "Kustomization"
+	kindHelmRelease              = "HelmRelease"
 	statusAccepted               = "accepted"
 	prConflict                   = "conflict"
 	prSynced                     = "synced"

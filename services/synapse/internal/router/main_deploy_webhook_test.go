@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -652,5 +654,275 @@ func TestProcessDeployEvent_LifecycleErrors(t *testing.T) {
 				t.Fatalf("unexpected err: %v", err)
 			}
 		})
+	}
+}
+
+// watcherAuthorityCase drives one watcher-sole-authority scenario: a sequence of
+// deploy alerts through ProcessDeployEvent optionally followed by gated watcher
+// completions, asserting the published lifecycle order and dedup state.
+type watcherAuthorityCase struct {
+	name            string
+	repo            string
+	pr              int
+	mergeSHA        string
+	headSHA         string
+	kustomization   string
+	discoverErr     bool
+	hasRequests     bool
+	trackAfterDefer bool
+	deployFailed    bool
+	events          []DeployEvent
+	gate            bool
+	gateImage       bool
+	wantEvents      []wantPREvent
+	wantDeploying   int
+	wantRequested   []string
+	wantReconciles  int
+	wantDispatched  bool
+}
+
+func watcherAuthorityCases() []watcherAuthorityCase {
+	return append(watcherAuthoritySequenceCases(), watcherAuthorityEdgeCases()...)
+}
+
+func watcherAuthoritySequenceCases() []watcherAuthorityCase {
+	const targetID = "100000000000000001"
+	return []watcherAuthorityCase{
+		{
+			name:          "pre-image success defers to watcher without terminal success",
+			repo:          "azylman/aerial",
+			pr:            1501,
+			mergeSHA:      "mergesha1501",
+			headSHA:       "headsha1501",
+			kustomization: "aerial-core",
+			events: []DeployEvent{
+				mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "oldsha1501", 1501, targetID, "success"),
+			},
+			wantEvents:     []wantPREvent{{Event: "deploy_started", PRNumber: 1501, Status: "deploying"}},
+			wantDeploying:  1,
+			wantRequested:  []string{"aerial-core"},
+			wantReconciles: 1,
+			wantDispatched: false,
+		},
+		{
+			name:            "real started after deferral stays deploying without duplicate started",
+			repo:            "azylman/aerial",
+			pr:              1501,
+			mergeSHA:        "mergesha1501",
+			headSHA:         "headsha1501",
+			kustomization:   "aerial-core",
+			trackAfterDefer: true,
+			events: []DeployEvent{
+				mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "oldsha1501", 1501, targetID, "success"),
+				mkKustomizationEvt("deploy_started", "aerial-core", "azylman/aerial", "mergesha1501", 1501, targetID, "started"),
+			},
+			wantEvents:     []wantPREvent{{Event: "deploy_started", PRNumber: 1501, Status: "deploying"}},
+			wantDeploying:  1,
+			wantRequested:  []string{"aerial-core"},
+			wantReconciles: 1,
+			wantDispatched: false,
+		},
+		{
+			name:            "gated completion publishes single success after start",
+			repo:            "azylman/aerial",
+			pr:              1501,
+			mergeSHA:        "mergesha1501",
+			headSHA:         "headsha1501",
+			kustomization:   "aerial-core",
+			trackAfterDefer: true,
+			events: []DeployEvent{
+				mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "oldsha1501", 1501, targetID, "success"),
+				mkKustomizationEvt("deploy_started", "aerial-core", "azylman/aerial", "mergesha1501", 1501, targetID, "started"),
+			},
+			gate:      true,
+			gateImage: true,
+			wantEvents: []wantPREvent{
+				{Event: "deploy_started", PRNumber: 1501, Status: "deploying"},
+				{Event: "deploy_success", PRNumber: 1501, HeadSHA: "headsha1501", MergeSHA: "mergesha1501", Status: "deployed"},
+			},
+			wantDeploying:  1,
+			wantRequested:  []string{"aerial-core"},
+			wantReconciles: 1,
+			wantDispatched: true,
+		},
+	}
+}
+
+func watcherAuthorityEdgeCases() []watcherAuthorityCase {
+	const targetID = "100000000000000001"
+	return []watcherAuthorityCase{
+		{
+			name:          "manifest-only config change completes through watcher gate",
+			repo:          "azylman/aerial-config",
+			pr:            1505,
+			mergeSHA:      "cfgmerge1505",
+			headSHA:       "cfghead1505",
+			kustomization: "aerial-config",
+			events: []DeployEvent{
+				mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "cfghead1505", 1505, targetID, "success", ""),
+			},
+			gate:      true,
+			gateImage: false,
+			wantEvents: []wantPREvent{
+				{Event: "deploy_started", PRNumber: 1505, Status: "deploying"},
+				{Event: "deploy_success", PRNumber: 1505, HeadSHA: "cfghead1505", MergeSHA: "cfgmerge1505", Status: "deployed"},
+			},
+			wantDeploying:  1,
+			wantRequested:  []string{"aerial-config"},
+			wantReconciles: 1,
+			wantDispatched: true,
+		},
+		{
+			name:          "deploy failed keeps direct failure path",
+			repo:          "azylman/aerial",
+			pr:            1508,
+			mergeSHA:      "mergesha1508",
+			headSHA:       "headsha1508",
+			kustomization: "aerial-core",
+			deployFailed:  true,
+			events: []DeployEvent{
+				mkKustomizationEvt("deploy_failed", "aerial-core", "azylman/aerial", "failsha1508", 1508, targetID, "failed"),
+			},
+			wantEvents: []wantPREvent{
+				{Event: "deploy_failed", PRNumber: 1508, MergeSHA: "failsha1508", Status: "deploy_failed"},
+			},
+			wantDeploying:  0,
+			wantReconciles: 0,
+			wantDispatched: false,
+		},
+		{
+			name:          "tracked HelmRelease failure keeps direct failure path",
+			repo:          "azylman/aerial",
+			pr:            1510,
+			mergeSHA:      "mergesha1510",
+			headSHA:       "headsha1510",
+			kustomization: "aerial-core",
+			hasRequests:   true,
+			deployFailed:  true,
+			events: []DeployEvent{
+				{Event: "deploy_failed", JobName: "rel-synapse", SourceKind: "HelmRelease", Repo: "azylman/aerial", CommitSHA: "failsha1510", PRNumber: 1510, TargetID: targetID, Status: "failed"},
+			},
+			wantEvents: []wantPREvent{
+				{Event: "deploy_failed", PRNumber: 1510, MergeSHA: "failsha1510", Status: "deploy_failed"},
+			},
+			wantDeploying:  0,
+			wantReconciles: 0,
+			wantDispatched: false,
+		},
+		{
+			name:          "discovery error fails closed without success or dedup",
+			repo:          "azylman/aerial",
+			pr:            1509,
+			mergeSHA:      "mergesha1509",
+			headSHA:       "headsha1509",
+			kustomization: "aerial-core",
+			discoverErr:   true,
+			events: []DeployEvent{
+				mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "mergesha1509", 1509, targetID, "success"),
+			},
+			wantEvents:     nil,
+			wantDeploying:  0,
+			wantReconciles: 0,
+			wantDispatched: false,
+		},
+	}
+}
+
+func TestProcessDeployEventWatcherSoleAuthority(t *testing.T) {
+	t.Parallel()
+	for _, tc := range watcherAuthorityCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runWatcherAuthorityCase(t, tc)
+		})
+	}
+}
+
+func runWatcherAuthorityCase(t *testing.T, tc watcherAuthorityCase) {
+	t.Helper()
+	ctx := context.Background()
+	const targetID = "100000000000000001"
+	reg := &mockPRRegistry{
+		hasKustomizationReqs:  tc.hasRequests,
+		deployFailedUpdated:   tc.deployFailed,
+		markKustomizationsRes: true,
+	}
+	disp := &mockOutboundDispatcher{}
+	if tc.kustomization != "" {
+		disp.repoKustomizations = map[string][]fluxKustomizationRef{
+			tc.repo: {{Namespace: "flux-system", Name: tc.kustomization}},
+		}
+	}
+	if tc.discoverErr {
+		disp.repoDiscoverErr = errors.New("kube api down")
+	}
+	bus := &mockEventBus{}
+	srv := newTestRouter(Config{SystemChannelID: targetID}, &http.Client{Transport: &zeroCallTransport{}}, reg, disp)
+	srv.SetEventBus(bus)
+	if tc.gate {
+		srv.gitHistory.StoreCommitTime(tc.repo+"@"+tc.mergeSHA, time.Now().UTC())
+	}
+	for i, evt := range tc.events {
+		if _, err := srv.ProcessDeployEvent(ctx, evt); err != nil {
+			t.Fatalf("ProcessDeployEvent() step %d err = %v", i, err)
+		}
+		if tc.trackAfterDefer && i == 0 {
+			reg.hasKustomizationReqs = true
+		}
+	}
+	if tc.gate {
+		runWatcherAuthorityGate(ctx, t, srv, tc, targetID)
+	}
+	assertWatcherAuthorityOutcome(t, srv, reg, disp, bus, tc)
+}
+
+func runWatcherAuthorityGate(ctx context.Context, t *testing.T, srv *RouterServer, tc watcherAuthorityCase, targetID string) {
+	t.Helper()
+	applied := tc.mergeSHA
+	workload := workloadRollout{
+		Kind: "Deployment", Namespace: "flux-system", Name: "synapse",
+		Generation: 2, ObservedGeneration: 2,
+		Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2, StatusReplicas: 2,
+	}
+	if tc.gateImage {
+		workload.Images = []string{"ghcr.io/azylman/synapse:" + tc.mergeSHA}
+	} else {
+		workload.ChangedAt = time.Now().UTC()
+	}
+	pr := DeployingPR{
+		Repo: tc.repo, PRNumber: tc.pr, Branch: "feat/test",
+		HeadSHA: tc.headSHA, MergeSHA: tc.mergeSHA, TargetID: targetID,
+	}
+	obs := KustomizationObservation{
+		Ref:                 fluxKustomizationRef{Namespace: "flux-system", Name: tc.kustomization},
+		LastAppliedRevision: applied,
+	}
+	state := kustomizationRolloutState{Workloads: []workloadRollout{workload}, SourceRepo: tc.repo}
+	if err := srv.gateKustomizationRequest(ctx, pr, obs, state); err != nil {
+		t.Fatalf("gateKustomizationRequest() err = %v", err)
+	}
+}
+
+func assertWatcherAuthorityOutcome(t *testing.T, srv *RouterServer, reg *mockPRRegistry, disp *mockOutboundDispatcher, bus *mockEventBus, tc watcherAuthorityCase) {
+	t.Helper()
+	assertPREvents(t, bus, tc.wantEvents)
+	if got := len(reg.deployingCalls); got != tc.wantDeploying {
+		t.Errorf("deploying calls = %d, want %d", got, tc.wantDeploying)
+	}
+	var requested []string
+	for _, call := range reg.kustomizationRequestCalls {
+		for name := range call {
+			requested = append(requested, name)
+		}
+	}
+	slices.Sort(requested)
+	if !slices.Equal(requested, tc.wantRequested) {
+		t.Errorf("recorded kustomization requests = %v, want %v", requested, tc.wantRequested)
+	}
+	if got := len(disp.ReconcileCalls()); got != tc.wantReconciles {
+		t.Errorf("reconcile calls = %d, want %d", got, tc.wantReconciles)
+	}
+	if got := srv.wasDeploySuccessDispatched(tc.repo, tc.kustomization, tc.mergeSHA, tc.pr); got != tc.wantDispatched {
+		t.Errorf("wasDeploySuccessDispatched = %v, want %v", got, tc.wantDispatched)
 	}
 }
