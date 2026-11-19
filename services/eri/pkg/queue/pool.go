@@ -438,6 +438,9 @@ func applyWorkerPoolServiceDefaults(appCfg *config.Config, cfg *WorkerPoolConfig
 	if cfg.WebhookDispatcher == nil {
 		cfg.WebhookDispatcher = NewDefaultWebhookDispatcher()
 	}
+	if cfg.TranscriptsIndexerURL == "" && appCfg != nil && appCfg.Current() != nil {
+		cfg.TranscriptsIndexerURL = strings.TrimSpace(appCfg.Current().Transcripts.IndexerURL)
+	}
 }
 
 // resolveDefaultSummarizerLLM resolves an EphemeralLLMFunc for summarization from configured agent pools.
