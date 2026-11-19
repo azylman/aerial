@@ -192,30 +192,34 @@ const (
 // PREvent is the canonical PRObject payload. It carries the head or merge SHA
 // every cross-object send needs for the stale-SHA guard, plus the gate
 // generation and reopen epoch the disposition logic compares.
+// PREvent marshals with the snake_case wire format the synapse ingress
+// invoker emits; the tags are load-bearing for cross-module interop.
 type PREvent struct {
-	Event          string
-	Repo           string
-	PRNumber       int
-	HeadSHA        string
-	MergeSHA       string
-	CheckName      string
-	JobName        string
-	Branch         string
-	Title          string
-	GateGeneration uint64
-	ReopenEpoch    uint64
-	Unmanaged      bool
-	BuildID        string
+	Event          string `json:"event"`
+	Repo           string `json:"repo"`
+	PRNumber       int    `json:"pr_number"`
+	HeadSHA        string `json:"head_sha"`
+	MergeSHA       string `json:"merge_sha"`
+	CheckName      string `json:"check_name"`
+	JobName        string `json:"job_name"`
+	Branch         string `json:"branch"`
+	Title          string `json:"title"`
+	GateGeneration uint64 `json:"gate_generation"`
+	ReopenEpoch    uint64 `json:"reopen_epoch"`
+	Unmanaged      bool   `json:"unmanaged"`
+	BuildID        string `json:"build_id"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
 // dispatched-SHA tombstones, and fan-out sends only.
+// RepoEvent marshals with the snake_case wire format the synapse ingress
+// invoker emits; the tags are load-bearing for cross-module interop.
 type RepoEvent struct {
-	Repo       string
-	MainSHA    string
-	Generation uint64
-	PRNumber   int
-	HeadSHA    string
+	Repo       string `json:"repo"`
+	MainSHA    string `json:"main_sha"`
+	Generation uint64 `json:"generation"`
+	PRNumber   int    `json:"pr_number"`
+	HeadSHA    string `json:"head_sha"`
 }
 
 // PRObject is the frozen PR handler surface. One method per lifecycle event;

@@ -22,6 +22,9 @@ type Config struct {
 	GitHubToken          string
 	GitHubAPIURL         string
 	GitHubWebhookSecret  string
+	RestateURL           string
+	RestatePRService     string
+	RestateRepoService   string
 	PostgresURL          string
 	FluxReceiverURL      string
 	BrainURL             string
@@ -50,6 +53,9 @@ type RouterYAMLConfig struct {
 	FluxReceiverURL      string                    `yaml:"flux_receiver_url"`
 	EriURL               string                    `yaml:"eri_url"`
 	NATSURL              string                    `yaml:"nats_url"`
+	RestateURL           string                    `yaml:"restate_url"`
+	RestatePRService     string                    `yaml:"restate_pr_service"`
+	RestateRepoService   string                    `yaml:"restate_repo_service"`
 	SystemChannelID      string                    `yaml:"system_channel_id"`
 	SystemChannel        string                    `yaml:"system_channel"`
 	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
@@ -132,7 +138,10 @@ func RestartRequired(old, next *Config) bool {
 		old.FluxReceiverURL != next.FluxReceiverURL ||
 		old.KubeAPIServer != next.KubeAPIServer ||
 		old.KubeToken != next.KubeToken ||
-		old.NATSURL != next.NATSURL
+		old.NATSURL != next.NATSURL ||
+		old.RestateURL != next.RestateURL ||
+		old.RestatePRService != next.RestatePRService ||
+		old.RestateRepoService != next.RestateRepoService
 }
 
 // HasCollaboratorCIAlertsForRepo reports whether any collaborator alert rules are configured for repo.
@@ -350,6 +359,9 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		BrainURL:             strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		EriURL:               strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		NATSURL:              model.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
+		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
+		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), "PRObject"),
+		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), "RepoObject"),
 		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:         os.Getenv("DISCORD_TOKEN"),
 		AutoUpdatePRAuthors:  autoUpdateAuthors,
