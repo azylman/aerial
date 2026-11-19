@@ -30,6 +30,7 @@ import (
 )
 
 func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		model        string
@@ -46,6 +47,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			store := setupTestStore(t)
 			pool := New(nil, WorkerPoolConfig{
 				Store: store,

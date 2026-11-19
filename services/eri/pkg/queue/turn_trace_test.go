@@ -490,7 +490,7 @@ func TestSessionCorruptionRetry_ReregistersActiveTurn(t *testing.T) {
 				runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", GeminiHomeDir: home}, agyToolTurnSpawner(nil)),
 				runner.InterchangeablePoolConfig{WorkerCount: tc.workers, KeyPrefix: "ephemeral:worker"})
 			defer procPool.Close()
-			pool := New(nil, WorkerPoolConfig{Store: dbtest.NewFakeStore(), RetryDelayOverride: time.Nanosecond})
+			pool := New(nil, WorkerPoolConfig{Store: dbtest.NewFakeStore(), RetryDelayOverride: time.Nanosecond, BackoffBase: time.Nanosecond})
 			lease, err := procPool.AcquireLease(context.Background(), "dispatch-1")
 			if err != nil {
 				t.Fatalf("AcquireLease: %v", err)

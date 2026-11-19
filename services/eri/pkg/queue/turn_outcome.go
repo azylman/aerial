@@ -271,6 +271,9 @@ func isRetryableDeliveryError(err error) bool {
 		return false
 	}
 	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "discord session is nil") {
+		return false
+	}
 	if strings.Contains(errStr, "failed to send message chunk ") && !strings.Contains(errStr, "chunk 0:") {
 		return false
 	}
