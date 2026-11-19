@@ -272,6 +272,7 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 		wantFailed    []string
 		wantBanners   []string
 		wantPromptIn  string
+		wantSilentIn  string
 	}{
 		{
 			name:         "closed unmerged fails chunk and dispatches failure prompt",
@@ -309,18 +310,18 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			wantFailed: []string{"c1:pr_closed_unmerged"},
 		},
 		{
-			name:         "deploy_failed sets status banner and dispatches wake prompt",
+			name:         "deploy_failed sets status banner and dispatches silent wake",
 			event:        "deploy_failed",
 			prEvent:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri", Details: "crashloop", PRNumber: 101, Repo: "aerial"},
 			wantBanners:  []string{"c1:deploy_failed:Deployment failed for eri: crashloop"},
-			wantPromptIn: "Deployment failed for job eri on aerial (PR #101",
+			wantSilentIn: "Deployment failed for job eri on aerial (PR #101",
 		},
 		{
-			name:         "sync_failed sets status banner and dispatches wake prompt",
+			name:         "sync_failed sets status banner and dispatches silent wake",
 			event:        "sync_failed",
 			prEvent:      pubsub.PRLifecycleEvent{Event: "sync_failed", Details: "git pull conflict", PRNumber: 102, Repo: "aerial"},
 			wantBanners:  []string{"c1:deploy_failed:Git sync failed: git pull conflict"},
-			wantPromptIn: "Git sync failed for PR #102 on aerial",
+			wantSilentIn: "Git sync failed for PR #102 on aerial",
 		},
 		{
 			name:        "deploy_failed banner update error propagates",
@@ -360,10 +361,20 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			}
 			assert.Equal(t, tc.wantFailed, spy.failed)
 			assert.Equal(t, tc.wantBanners, spy.banners)
-			if tc.wantPromptIn != "" {
+			switch {
+			case tc.wantSilentIn != "":
+				assert.Empty(t, eri.lastPrompt)
+				if assert.NotNil(t, eri.lastDispatch) {
+					assert.Contains(t, eri.lastDispatch.Prompt, tc.wantSilentIn)
+					assert.Equal(t, "th-1", eri.lastDispatch.TargetID)
+					assert.Equal(t, "vanadis-c1", eri.lastDispatch.SessionID)
+					assert.True(t, eri.lastDispatch.SkipIfActive)
+					assert.NotEmpty(t, eri.lastDispatch.ID)
+				}
+			case tc.wantPromptIn != "":
 				assert.Contains(t, eri.lastPrompt, tc.wantPromptIn)
 				assert.Equal(t, "th-1", eri.lastThreadID)
-			} else {
+			default:
 				assert.Empty(t, eri.lastPrompt)
 			}
 		})
@@ -872,11 +883,13 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 		wantErr      bool
 		wantNotFound bool
 	}{
-		{name: "nil executor skips wake prompt"},
-		{name: "nil store skips banner and wake prompt", storeNil: true},
+		{name: "success dispatches silent wake"},
+		{name: "nil executor skips silent wake", execNil: true},
+		{name: "nil store skips banner and silent wake", storeNil: true},
 		{name: "read error propagates", getBuildErr: dbErr, wantErr: true},
 		{name: "missing build reports not found", nilBuild: true, wantErr: true, wantNotFound: true},
-		{name: "wake prompt error propagates", promptErr: dbErr, wantErr: true},
+		{name: "silent wake error propagates", promptErr: dbErr, wantErr: true},
+		{name: "active dispatch treated as handled", promptErr: executor.ErrDispatchActive},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -884,7 +897,7 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 			spy := &checkStatusSpyStore{getBuildErr: tc.getBuildErr, nilBuild: tc.nilBuild}
 			eri := &mockEriClient{}
 			if tc.promptErr != nil {
-				eri.promptFn = func(context.Context, string, string) error { return tc.promptErr }
+				eri.dispatchFn = func(context.Context, executor.BrainDispatchRequest) error { return tc.promptErr }
 			}
 			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
 			var st store.VanadisStore = spy
@@ -903,13 +916,44 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 			}
 			if tc.execNil || tc.storeNil {
 				assert.Empty(t, eri.lastPrompt)
+				assert.Nil(t, eri.lastDispatch)
 				return
 			}
 			if tc.wantErr {
 				return
 			}
-			assert.Contains(t, eri.lastPrompt, "Deployment failed")
+			assert.Empty(t, eri.lastPrompt)
+			if assert.NotNil(t, eri.lastDispatch) {
+				assert.Contains(t, eri.lastDispatch.Prompt, "Deployment failed")
+			}
 		})
+	}
+}
+
+func TestFlow_HandleDeployFailureEvent_OccurrenceDistinguishesDispatchID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dispatch := func(occurredAt time.Time) string {
+		t.Helper()
+		spy := &checkStatusSpyStore{}
+		eri := &mockEriClient{}
+		f := NewFlow(spy, executor.NewExecutor(t.TempDir(), eri, nil, "token", nil))
+		ev := pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse", OccurredAt: occurredAt}
+		if err := f.HandleDeployFailureEvent(ctx, "b1", "c1", ev); err != nil {
+			t.Fatal(err)
+		}
+		if assert.NotNil(t, eri.lastDispatch) {
+			return eri.lastDispatch.ID
+		}
+		return ""
+	}
+	at := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	first := dispatch(at)
+	if redelivered := dispatch(at); redelivered != first {
+		t.Errorf("redelivery ID = %q, want stable %q", redelivered, first)
+	}
+	if second := dispatch(at.Add(time.Minute)); second == first {
+		t.Errorf("distinct occurrence reused dispatch ID %q", second)
 	}
 }
 

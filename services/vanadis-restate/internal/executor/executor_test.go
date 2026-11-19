@@ -210,6 +210,9 @@ func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 	if err := execNil.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
 		t.Fatal(err)
 	}
+	if err := execNil.DispatchSilentWakePrompt(ctx, "th1", "c1", "prompt", ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := execNil.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,11 +234,38 @@ func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 	if eri.lastPrompt != "prompt" {
 		t.Errorf("lastPrompt = %q, want prompt", eri.lastPrompt)
 	}
+	if err := exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "silent wake", ""); err != nil {
+		t.Fatal(err)
+	}
+	if eri.lastDispatch == nil || eri.lastDispatch.Prompt != "silent wake" || eri.lastDispatch.TargetID != "th1" || eri.lastDispatch.SessionID != "vanadis-c1" || eri.lastDispatch.VanadisChunkID != "c1" || !eri.lastDispatch.SkipIfActive || eri.lastDispatch.ID == "" {
+		t.Errorf("silent dispatch = %+v, want silent dispatch to th1 for c1", eri.lastDispatch)
+	}
 	if err := exec.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
 		t.Fatal(err)
 	}
 	if eri.lastMsgCont != "msg" {
 		t.Errorf("lastMsgCont = %q, want msg", eri.lastMsgCont)
+	}
+}
+
+func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) {
+	t.Parallel()
+	eri := &mockEriClient{}
+	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", nil)
+	ctx := context.Background()
+	dispatch := func(occurrence string) string {
+		t.Helper()
+		if err := exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "Deployment failed", occurrence); err != nil {
+			t.Fatal(err)
+		}
+		return eri.lastDispatch.ID
+	}
+	first := dispatch("2026-11-19T00:00:00Z")
+	if redelivered := dispatch("2026-11-19T00:00:00Z"); redelivered != first {
+		t.Errorf("redelivery ID = %q, want stable %q", redelivered, first)
+	}
+	if second := dispatch("2026-11-19T00:00:01Z"); second == first {
+		t.Errorf("distinct occurrence reused dispatch ID %q", second)
 	}
 }
 
