@@ -1157,6 +1157,38 @@ func startBrainEngineUsagePoller(ctx context.Context, cur *config.ConfigData, po
 	}
 }
 
+func initDefaultStores(cfg *config.Config, cur *config.ConfigData) (db.Store, db.TranscriptStore, func(), error) {
+	database, err := openDefaultDB(cfg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
+	stack, err := db.ResolveTranscriptStack(cur.DatabaseURL, cur.Transcripts.Stack)
+	if err != nil {
+		_ = database.Close()
+		return nil, nil, nil, fmt.Errorf("failed to resolve transcript stack: %w", err)
+	}
+	store := db.NewSQLStore(database)
+	txStore := db.NewSQLTranscriptStore(database, stack)
+	cleanup := func() {
+		for _, s := range []any{txStore, store} {
+			if closer, ok := s.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}
+		if closeErr := database.Close(); closeErr != nil {
+			log.Printf("Error closing database: %v", closeErr)
+		}
+	}
+	return store, txStore, cleanup, nil
+}
+
+func resolveBrainStores(cfg *config.Config, cur *config.ConfigData, opts brainAppOptions) (db.Store, db.TranscriptStore, func(), error) {
+	if opts.store != nil {
+		return opts.store, opts.txStore, nil, nil
+	}
+	return initDefaultStores(cfg, cur)
+}
+
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
 	if cfg == nil {
 		return fmt.Errorf("brain: config cannot be nil")
@@ -1187,30 +1219,12 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		return provisionErr
 	}
 
-	var store db.Store
-	var txStore db.TranscriptStore
-	if appOpts.store != nil {
-		store, txStore = appOpts.store, appOpts.txStore
-	} else {
-		database, err := openDefaultDB(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to initialize database: %w", err)
-		}
-		defer func() {
-			if err := database.Close(); err != nil {
-				log.Printf("Error closing database: %v", err)
-			}
-		}()
-		store = db.NewSQLStore(database)
-		// Built once; resolves the shared transcript index JIT from cfg so hot-reloads retarget it.
-		txStore = db.NewRoutedTranscriptStore(cfg, database, db.Open)
-		defer func() {
-			for _, s := range []any{txStore, store} {
-				if closer, ok := s.(io.Closer); ok {
-					_ = closer.Close()
-				}
-			}
-		}()
+	store, txStore, cleanupStores, storeErr := resolveBrainStores(cfg, cur, appOpts)
+	if storeErr != nil {
+		return storeErr
+	}
+	if cleanupStores != nil {
+		defer cleanupStores()
 	}
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
