@@ -825,3 +825,71 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	_, err = boDeadline.executeObjectTransition(rtDeadline, "reconcile", nil)
 	assert.Error(t, err)
 }
+
+type replayNotifyRuntime struct {
+	*fakeObjectRuntime
+
+	primaryErr error
+	notifyDone bool
+}
+
+func (r *replayNotifyRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
+	if name == "notify-transition-error" {
+		r.stepsRun = append(r.stepsRun, name)
+		if r.notifyDone {
+			return reconcileStepOutput{}, nil
+		}
+		out, err := fn(context.Background())
+		if err != nil {
+			return out, err
+		}
+		r.notifyDone = true
+		return out, nil
+	}
+	if r.primaryErr != nil {
+		r.stepsRun = append(r.stepsRun, name)
+		return reconcileStepOutput{}, r.primaryErr
+	}
+	return fn(context.Background())
+}
+
+func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		failFirst      int
+		wantCalls      int
+		wantDeliveries int
+	}{
+		{name: "delivered once across retries", failFirst: 0, wantCalls: 1, wantDeliveries: 1},
+		{name: "failed delivery retried then delivered once", failFirst: 1, wantCalls: 2, wantDeliveries: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := model.VanadisBuild{ID: "b1", ThreadID: "th-1", Title: "Build", Objective: "Obj", Status: "running"}
+			st, _ := dbScript{buildRow: &mockRow{b: &b}}.open()
+			widgetCalls, deliveries := 0, 0
+			eri := &mockEriClient{}
+			eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
+				widgetCalls++
+				if widgetCalls <= tc.failFirst {
+					return "", errors.New("widget down")
+				}
+				deliveries++
+				return "msg-1", nil
+			}
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
+			prior := &model.BuildObjectState{Build: b}
+			for range 2 {
+				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil)
+				require.Error(t, err)
+			}
+			assert.Equal(t, tc.wantCalls, widgetCalls)
+			assert.Equal(t, tc.wantDeliveries, deliveries)
+			assert.Contains(t, rt.stepsRun, "notify-transition-error")
+		})
+	}
+}

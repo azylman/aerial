@@ -988,7 +988,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	storeQuiet, _ := dbScript{buildRow: &mockRow{b: &buildQuiet}}.open()
 	eriQuiet := &mockEriClient{}
 	boQuiet := NewBuildObject("", nil).WithAuthority(storeQuiet, executor.NewExecutor(t.TempDir(), eriQuiet, nil, "", nil))
-	boQuiet.notifyTransitionError(context.Background(), "b-quiet", "step", nil, errors.New("trans err"))
+	require.NoError(t, boQuiet.notifyTransitionError(context.Background(), "b-quiet", "step", nil, errors.New("trans err")))
 	assert.Nil(t, eriQuiet.lastWidget)
 
 	// Non-quiet build resolves from store and emits banner
@@ -996,7 +996,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	storeActive, _ := dbScript{buildRow: &mockRow{b: &buildActive}, chunks: []model.VanadisChunk{{ID: "c1", Title: "Chunk 1"}}}.open()
 	eriActive := &mockEriClient{}
 	boActive := NewBuildObject("", nil).WithAuthority(storeActive, executor.NewExecutor(t.TempDir(), eriActive, nil, "", nil))
-	boActive.notifyTransitionError(context.Background(), "b-active", "step", nil, errors.New("trans err"))
+	require.NoError(t, boActive.notifyTransitionError(context.Background(), "b-active", "step", nil, errors.New("trans err")))
 	require.NotNil(t, eriActive.lastWidget)
 	assert.Equal(t, "b-active", eriActive.lastWidget.ID)
 	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriActive.lastWidget.Banner)
@@ -1007,7 +1007,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	eriPrior := &mockEriClient{}
 	boNoStore := NewBuildObject("", nil).WithAuthority(nil, executor.NewExecutor(t.TempDir(), eriPrior, nil, "", nil))
 	prior := &model.BuildObjectState{Build: model.VanadisBuild{ID: "b-prior", Title: "Prior Build"}, Chunks: []model.VanadisChunk{{ID: "c-prior", Title: "Prior Chunk"}}}
-	boNoStore.notifyTransitionError(context.Background(), "b-prior", "step", prior, errors.New("trans err"))
+	require.NoError(t, boNoStore.notifyTransitionError(context.Background(), "b-prior", "step", prior, errors.New("trans err")))
 	require.NotNil(t, eriPrior.lastWidget)
 	assert.Equal(t, "b-prior", eriPrior.lastWidget.ID)
 	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriPrior.lastWidget.Banner)
