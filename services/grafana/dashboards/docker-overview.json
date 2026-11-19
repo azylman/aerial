@@ -650,6 +650,76 @@
       ],
       "title": "Container CPU Throttled Time (Seconds / Sec)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (name, pod) (increase(container_oom_events_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[24h])) > 0",
+          "legendFormat": "Container OOM: {{pod}}/{{name}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "max by (instance) (increase(node_vmstat_oom_kill{instance=~\"$node\"}[24h]))",
+          "legendFormat": "Host Kernel OOM Kills: {{instance}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Container & Host OOM Kills (24h Increase)",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
