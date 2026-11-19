@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
 func setupTestDB(ctx context.Context, t *testing.T) *sql.DB {
@@ -160,37 +162,37 @@ func TestDB_CronOperations(t *testing.T) {
 		}
 	}
 
-	dueCrons, err := GetDueCronSchedules(ctx, db, now)
+	dueCrons, err := store.GetDueCronSchedules(ctx, db, now)
 	if err != nil {
-		t.Fatalf("GetDueCronSchedules() err = %v", err)
+		t.Fatalf("store.GetDueCronSchedules() err = %v", err)
 	}
 	if len(dueCrons) != 1 || dueCrons[0].ID != cron1.ID {
-		t.Fatalf("GetDueCronSchedules() returned %+v, want only [%s]", dueCrons, cron1.ID)
+		t.Fatalf("store.GetDueCronSchedules() returned %+v, want only [%s]", dueCrons, cron1.ID)
 	}
 
 	// Advance next run
 	newNext := now.Add(24 * time.Hour)
-	if err = AdvanceCronNextRun(ctx, db, cron1.ID, newNext); err != nil {
-		t.Fatalf("AdvanceCronNextRun() err = %v", err)
+	if err = store.AdvanceCronNextRun(ctx, db, cron1.ID, newNext); err != nil {
+		t.Fatalf("store.AdvanceCronNextRun() err = %v", err)
 	}
 
 	// Advance non-existent schedule fails
-	if err = AdvanceCronNextRun(ctx, db, "missing-cron", newNext); err == nil {
-		t.Errorf("AdvanceCronNextRun() on missing ID expected error, got nil")
+	if err = store.AdvanceCronNextRun(ctx, db, "missing-cron", newNext); err == nil {
+		t.Errorf("store.AdvanceCronNextRun() on missing ID expected error, got nil")
 	}
 
 	// Advance empty ID fails
-	if err = AdvanceCronNextRun(ctx, db, "", newNext); err == nil {
-		t.Errorf("AdvanceCronNextRun() on empty ID expected error, got nil")
+	if err = store.AdvanceCronNextRun(ctx, db, "", newNext); err == nil {
+		t.Errorf("store.AdvanceCronNextRun() on empty ID expected error, got nil")
 	}
 
 	// Verify no more due crons
-	dueCronsAfter, err := GetDueCronSchedules(ctx, db, now)
+	dueCronsAfter, err := store.GetDueCronSchedules(ctx, db, now)
 	if err != nil {
-		t.Fatalf("GetDueCronSchedules() after advance err = %v", err)
+		t.Fatalf("store.GetDueCronSchedules() after advance err = %v", err)
 	}
 	if len(dueCronsAfter) != 0 {
-		t.Fatalf("GetDueCronSchedules() expected 0 due, got %d", len(dueCronsAfter))
+		t.Fatalf("store.GetDueCronSchedules() expected 0 due, got %d", len(dueCronsAfter))
 	}
 }
 
@@ -220,29 +222,29 @@ func TestDB_OneShotOperations(t *testing.T) {
 		}
 	}
 
-	dueOneShots, err := GetDueOneShotSchedules(ctx, db, now)
+	dueOneShots, err := store.GetDueOneShotSchedules(ctx, db, now)
 	if err != nil {
-		t.Fatalf("GetDueOneShotSchedules() err = %v", err)
+		t.Fatalf("store.GetDueOneShotSchedules() err = %v", err)
 	}
 	if len(dueOneShots) != 1 || dueOneShots[0].ID != osDue.ID {
-		t.Fatalf("GetDueOneShotSchedules() returned %+v, want [%s]", dueOneShots, osDue.ID)
+		t.Fatalf("store.GetDueOneShotSchedules() returned %+v, want [%s]", dueOneShots, osDue.ID)
 	}
 
 	// Delete schedule
-	deleted, err := DeleteOneShotSchedule(ctx, db, osDue.ID)
+	deleted, err := store.DeleteOneShotSchedule(ctx, db, osDue.ID)
 	if err != nil || !deleted {
-		t.Fatalf("DeleteOneShotSchedule() deleted = %v, err = %v", deleted, err)
+		t.Fatalf("store.DeleteOneShotSchedule() deleted = %v, err = %v", deleted, err)
 	}
 
 	// Delete again returns false
-	deletedAgain, err := DeleteOneShotSchedule(ctx, db, osDue.ID)
+	deletedAgain, err := store.DeleteOneShotSchedule(ctx, db, osDue.ID)
 	if err != nil || deletedAgain {
-		t.Fatalf("DeleteOneShotSchedule() again deleted = %v, err = %v", deletedAgain, err)
+		t.Fatalf("store.DeleteOneShotSchedule() again deleted = %v, err = %v", deletedAgain, err)
 	}
 
 	// Empty ID returns error
-	if _, err := DeleteOneShotSchedule(ctx, db, ""); err == nil {
-		t.Errorf("DeleteOneShotSchedule() empty ID expected error, got nil")
+	if _, err := store.DeleteOneShotSchedule(ctx, db, ""); err == nil {
+		t.Errorf("store.DeleteOneShotSchedule() empty ID expected error, got nil")
 	}
 }
 
@@ -268,8 +270,8 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 		DurationMs:   2000,
 		Effort:       "medium",
 	}
-	if err := CreateScheduleRun(ctx, db, run1); err != nil {
-		t.Fatalf("CreateScheduleRun() err = %v", err)
+	if err := store.CreateScheduleRun(ctx, db, run1); err != nil {
+		t.Fatalf("store.CreateScheduleRun() err = %v", err)
 	}
 
 	// Create run with zero StartedAt (defaults to current time)
@@ -278,13 +280,13 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
 	}
-	if err := CreateScheduleRun(ctx, db, runZero); err != nil {
-		t.Fatalf("CreateScheduleRun(zero StartedAt) err = %v", err)
+	if err := store.CreateScheduleRun(ctx, db, runZero); err != nil {
+		t.Fatalf("store.CreateScheduleRun(zero StartedAt) err = %v", err)
 	}
 
 	// Create invalid run (empty ID)
-	if err := CreateScheduleRun(ctx, db, ScheduleRun{}); err == nil {
-		t.Errorf("CreateScheduleRun() empty ID expected error, got nil")
+	if err := store.CreateScheduleRun(ctx, db, ScheduleRun{}); err == nil {
+		t.Errorf("store.CreateScheduleRun() empty ID expected error, got nil")
 	}
 
 	// Insert older runs to test pruning
@@ -296,18 +298,18 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 			StartedAt:    now.Add(time.Duration(-40*24*i) * time.Hour),
 			Status:       "completed",
 		}
-		if err := CreateScheduleRun(ctx, db, r); err != nil {
-			t.Fatalf("CreateScheduleRun(run-%d) err = %v", i, err)
+		if err := store.CreateScheduleRun(ctx, db, r); err != nil {
+			t.Fatalf("store.CreateScheduleRun(run-%d) err = %v", i, err)
 		}
 	}
 
 	// Prune older than 30 days
-	pruned, err := PruneScheduleRuns(ctx, db, 2, 30*24*time.Hour, now)
+	pruned, err := store.PruneScheduleRuns(ctx, db, 2, 30*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("PruneScheduleRuns() err = %v", err)
+		t.Fatalf("store.PruneScheduleRuns() err = %v", err)
 	}
 	if pruned < 1 {
-		t.Errorf("PruneScheduleRuns() expected pruned >= 1, got %d", pruned)
+		t.Errorf("store.PruneScheduleRuns() expected pruned >= 1, got %d", pruned)
 	}
 }
 
@@ -341,12 +343,12 @@ func TestDB_NilDBGuards(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"GetDueCronSchedules", func() error { _, err := GetDueCronSchedules(ctx, nil, now); return err }()},
-		{"AdvanceCronNextRun", AdvanceCronNextRun(ctx, nil, "id", now)},
-		{"GetDueOneShotSchedules", func() error { _, err := GetDueOneShotSchedules(ctx, nil, now); return err }()},
-		{"DeleteOneShotSchedule", func() error { _, err := DeleteOneShotSchedule(ctx, nil, "id"); return err }()},
-		{"CreateScheduleRun", CreateScheduleRun(ctx, nil, ScheduleRun{ID: "run-id"})},
-		{"PruneScheduleRuns", func() error { _, err := PruneScheduleRuns(ctx, nil, 10, 24*time.Hour, now); return err }()},
+		{"GetDueCronSchedules", func() error { _, err := store.GetDueCronSchedules(ctx, nil, now); return err }()},
+		{"AdvanceCronNextRun", store.AdvanceCronNextRun(ctx, nil, "id", now)},
+		{"GetDueOneShotSchedules", func() error { _, err := store.GetDueOneShotSchedules(ctx, nil, now); return err }()},
+		{"DeleteOneShotSchedule", func() error { _, err := store.DeleteOneShotSchedule(ctx, nil, "id"); return err }()},
+		{"CreateScheduleRun", store.CreateScheduleRun(ctx, nil, ScheduleRun{ID: "run-id"})},
+		{"PruneScheduleRuns", func() error { _, err := store.PruneScheduleRuns(ctx, nil, 10, 24*time.Hour, now); return err }()},
 		{"InsertHeartbeatSchedule", InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
 		{"ListHeartbeatSchedules", func() error { _, err := ListHeartbeatSchedules(ctx, nil, ""); return err }()},
 		{"GetCronSchedule", func() error { _, err := GetCronSchedule(ctx, nil, "id"); return err }()},
@@ -355,9 +357,9 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"GetOneShotSchedule empty id", func() error { _, err := GetOneShotSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
 		{"GetHeartbeatSchedule", func() error { _, err := GetHeartbeatSchedule(ctx, nil, "id"); return err }()},
 		{"UpdateHeartbeatSchedule", UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
-		{"GetDueHeartbeatSchedules", func() error { _, err := GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
-		{"AdvanceHeartbeatNextRun", AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
-		{"HasRunningHeartbeatRun", func() error { _, err := HasRunningHeartbeatRun(ctx, nil, "id", now); return err }()},
+		{"GetDueHeartbeatSchedules", func() error { _, err := store.GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
+		{"AdvanceHeartbeatNextRun", store.AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
+		{"HasRunningHeartbeatRun", func() error { _, err := store.HasRunningHeartbeatRun(ctx, nil, "id", now); return err }()},
 	}
 
 	for _, tc := range tests {
@@ -387,346 +389,4 @@ func (m *mockDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchR
 func (m *mockDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
 	m.dispatchedRequests = append(m.dispatchedRequests, req)
 	return m.dispatchResponse, m.dispatchErr
-}
-
-type evaluateDueSchedulesTestCase struct {
-	name              string
-	setupCron         *CronSchedule
-	setupOneShot      *OneShotSchedule
-	setupHeartbeat    *HeartbeatSchedule
-	dispatcherStatus  string
-	responseChannelID string
-	responseMessageID string
-	dispatcherErr     error
-	evaluateNowOffset time.Duration
-	wantDispatched    int
-	wantRunStatus     string
-	wantRunError      string
-}
-
-func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) {
-	t.Helper()
-	db := setupTestDB(t.Context(), t)
-	ctx := context.Background()
-	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC).Add(tc.evaluateNowOffset)
-
-	var scheduleID string
-	if tc.setupCron != nil {
-		scheduleID = tc.setupCron.ID
-		if err := InsertCronSchedule(ctx, db, *tc.setupCron); err != nil {
-			t.Fatalf("InsertCronSchedule() err = %v", err)
-		}
-	}
-	if tc.setupOneShot != nil {
-		scheduleID = tc.setupOneShot.ID
-		if err := InsertOneShotSchedule(ctx, db, *tc.setupOneShot); err != nil {
-			t.Fatalf("InsertOneShotSchedule() err = %v", err)
-		}
-	}
-	if tc.setupHeartbeat != nil {
-		scheduleID = tc.setupHeartbeat.ID
-		if err := InsertHeartbeatSchedule(ctx, db, *tc.setupHeartbeat); err != nil {
-			t.Fatalf("InsertHeartbeatSchedule() err = %v", err)
-		}
-	}
-
-	mock := &mockDispatcher{
-		response: PromptDispatchResponse{
-			Status:    tc.dispatcherStatus,
-			ChannelID: tc.responseChannelID,
-			MessageID: tc.responseMessageID,
-		},
-		err: tc.dispatcherErr,
-		dispatchResponse: DispatchResponse{
-			Status:     tc.dispatcherStatus,
-			DispatchID: tc.responseMessageID,
-			MessageID:  tc.responseMessageID,
-		},
-		dispatchErr: tc.dispatcherErr,
-	}
-
-	ticker := NewTicker(db, mock, 30*time.Second)
-	ticker.EvaluateDueSchedules(ctx, now)
-
-	totalDispatched := len(mock.dispatched) + len(mock.dispatchedRequests)
-	if totalDispatched != tc.wantDispatched {
-		t.Fatalf("dispatched count = %d, want %d", totalDispatched, tc.wantDispatched)
-	}
-	if tc.setupHeartbeat != nil && len(mock.dispatchedRequests) > 0 {
-		if mock.dispatchedRequests[0].TargetID != tc.setupHeartbeat.TargetID {
-			t.Errorf("dispatchedRequest TargetID = %q, want %q", mock.dispatchedRequests[0].TargetID, tc.setupHeartbeat.TargetID)
-		}
-	}
-
-	assertScheduleRunStatus(ctx, t, db, scheduleID, tc.wantRunStatus, tc.wantRunError)
-}
-
-func assertScheduleRunStatus(ctx context.Context, t *testing.T, db *sql.DB, scheduleID, wantStatus, wantError string) {
-	t.Helper()
-	if wantStatus == "" {
-		return
-	}
-	row := db.QueryRowContext(ctx, "SELECT status, error FROM schedule_runs WHERE schedule_id = ?", scheduleID)
-	var status, errMsg string
-	if err := row.Scan(&status, &errMsg); err != nil {
-		t.Fatalf("failed to query schedule_runs for %s: %v", scheduleID, err)
-	}
-	if status != wantStatus {
-		t.Errorf("schedule_run status = %q, want %q", status, wantStatus)
-	}
-	if wantError != "" && !strings.Contains(errMsg, wantError) {
-		t.Errorf("schedule_run error = %q, want substring %q", errMsg, wantError)
-	}
-}
-
-func cronDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
-	return []evaluateDueSchedulesTestCase{
-		{
-			name: "due cron dispatched successfully",
-			setupCron: &CronSchedule{
-				ID:          "cron-eval-1",
-				TargetID:    "123456789",
-				TitlePrefix: "Eval Title",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "Daily Eval",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "medium",
-			},
-			dispatcherStatus:  "accepted",
-			responseChannelID: "123456789",
-			responseMessageID: "msg-1",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "completed",
-		},
-		{
-			name: "due cron with invalid cron expression uses fallback next run and dispatches",
-			setupCron: &CronSchedule{
-				ID:          "cron-eval-invalid-expr",
-				TargetID:    "123456789",
-				TitlePrefix: "Invalid Expr",
-				CronExpr:    "not a valid cron",
-				Prompt:      "Fallback Eval",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "medium",
-			},
-			dispatcherStatus:  "accepted",
-			responseChannelID: "123456789",
-			responseMessageID: "msg-invalid",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "completed",
-		},
-		{
-			name: "due cron with empty response fields falls back to target and run IDs",
-			setupCron: &CronSchedule{
-				ID:          "cron-eval-empty-resp",
-				TargetID:    "123456789",
-				TitlePrefix: "Empty Resp",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "Empty Resp Eval",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "medium",
-			},
-			dispatcherStatus:  "accepted",
-			responseChannelID: "",
-			responseMessageID: "",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "completed",
-		},
-		{
-			name: "due cron stale over 24h skips dispatch",
-			setupCron: &CronSchedule{
-				ID:          "cron-eval-stale",
-				TargetID:    "123456789",
-				TitlePrefix: "Stale Title",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "Stale Check",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC), // >24h overdue
-				Enabled:     true,
-				Effort:      "low",
-			},
-			evaluateNowOffset: 0,
-			wantDispatched:    0,
-			wantRunStatus:     "failed",
-			wantRunError:      "stale schedule (>24h overdue)",
-		},
-		{
-			name: "due cron dispatch error records failed run",
-			setupCron: &CronSchedule{
-				ID:          "cron-eval-err",
-				TargetID:    "123456789",
-				TitlePrefix: "Error Title",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "Error Check",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "high",
-			},
-			dispatcherErr:     fmt.Errorf("connection refused"),
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "failed",
-			wantRunError:      "connection refused",
-		},
-	}
-}
-
-func oneShotDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
-	return []evaluateDueSchedulesTestCase{
-		{
-			name: "due one shot dispatched successfully",
-			setupOneShot: &OneShotSchedule{
-				ID:       "oneshot-eval-1",
-				ThreadID: "987654321",
-				Prompt:   "Remind me",
-				RunAt:    time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Effort:   "low",
-			},
-			dispatcherStatus:  "accepted",
-			responseChannelID: "987654321",
-			responseMessageID: "msg-os-1",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "completed",
-		},
-		{
-			name: "due one shot with empty response fields falls back to thread and run IDs",
-			setupOneShot: &OneShotSchedule{
-				ID:       "oneshot-eval-empty-resp",
-				ThreadID: "987654321",
-				Prompt:   "Remind me empty",
-				RunAt:    time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Effort:   "low",
-			},
-			dispatcherStatus:  "accepted",
-			responseChannelID: "",
-			responseMessageID: "",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "completed",
-		},
-		{
-			name: "due one shot stale over 24h skips dispatch",
-			setupOneShot: &OneShotSchedule{
-				ID:       "oneshot-eval-stale",
-				ThreadID: "987654321",
-				Prompt:   "Stale Reminder",
-				RunAt:    time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC), // >24h overdue
-				Effort:   "low",
-			},
-			evaluateNowOffset: 0,
-			wantDispatched:    0,
-			wantRunStatus:     "failed",
-			wantRunError:      "stale schedule (>24h overdue)",
-		},
-		{
-			name: "due one shot dispatch error records failed run",
-			setupOneShot: &OneShotSchedule{
-				ID:       "oneshot-eval-err",
-				ThreadID: "987654321",
-				Prompt:   "Error Reminder",
-				RunAt:    time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Effort:   "medium",
-			},
-			dispatcherErr:     fmt.Errorf("network timeout"),
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "failed",
-			wantRunError:      "network timeout",
-		},
-	}
-}
-
-func evaluateDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
-	return append(cronDueSchedulesTestCases(), oneShotDueSchedulesTestCases()...)
-}
-
-func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
-	tests := evaluateDueSchedulesTestCases()
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runEvaluateDueSchedulesCase(t, tc)
-		})
-	}
-}
-
-func TestTicker_GuardsAndPruning(t *testing.T) {
-	db := setupTestDB(t.Context(), t)
-	mock := &mockDispatcher{response: PromptDispatchResponse{Status: "ok"}}
-	ticker := NewTicker(db, mock, 30*time.Second)
-
-	// Interval <= 0 defaults to 30s in NewTicker
-	defaultTicker := NewTicker(db, mock, 0)
-	if defaultTicker.interval != 30*time.Second {
-		t.Errorf("NewTicker with 0 interval = %v, want 30s", defaultTicker.interval)
-	}
-
-	// Nil ticker does not panic
-	var nilTicker *Ticker
-	nilTicker.EvaluateDueSchedules(context.Background(), time.Now().UTC())
-	nilTicker.Start(context.Background())
-
-	// Nil DB or nil dispatcher does not panic
-	nilDBTicker := NewTicker(nil, mock, 30*time.Second)
-	nilDBTicker.EvaluateDueSchedules(context.Background(), time.Now().UTC())
-	nilDispTicker := NewTicker(db, nil, 30*time.Second)
-	nilDispTicker.EvaluateDueSchedules(context.Background(), time.Now().UTC())
-
-	// Cancelled context returns early
-	cancelledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	ticker.EvaluateDueSchedules(cancelledCtx, time.Now().UTC())
-
-	// Pruning is triggered when lastPrune is zero
-	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
-	ticker.EvaluateDueSchedules(context.Background(), now)
-	if ticker.lastPrune.IsZero() {
-		t.Errorf("expected lastPrune to be updated, got zero")
-	}
-
-	// Immediate next evaluate does not prune again
-	prevPrune := ticker.lastPrune
-	ticker.EvaluateDueSchedules(context.Background(), now.Add(1*time.Minute))
-	if ticker.lastPrune != prevPrune {
-		t.Errorf("expected lastPrune unchanged, got %v", ticker.lastPrune)
-	}
-}
-
-func TestTicker_StartLifecycle(t *testing.T) {
-	db := setupTestDB(t.Context(), t)
-	mock := &mockDispatcher{response: PromptDispatchResponse{Status: "ok"}}
-	ticker := NewTicker(db, mock, 10*time.Millisecond)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		ticker.Start(ctx)
-	}()
-
-	cancel()
-
-	select {
-	case <-doneCh:
-		// stopped cleanly without time.Sleep
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for ticker.Start() to stop")
-	}
-
-	// Start with interval <= 0 on Ticker struct
-	zeroTicker := &Ticker{db: db, dispatcher: mock}
-	zeroCtx, zeroCancel := context.WithCancel(context.Background())
-	zeroCancel()
-	zeroTicker.Start(zeroCtx)
 }

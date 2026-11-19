@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
 type memoryMsg struct {
@@ -67,7 +68,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 
 	// 2. Advance to T1
 	t1 := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
-	if err = AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t1); err != nil {
+	if err = store.AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t1); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T1 failed: %v", err)
 	}
 	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
@@ -80,7 +81,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 
 	// 3. Advance to T2 (later)
 	t2 := time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
-	if err = AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t2); err != nil {
+	if err = store.AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t2); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T2 failed: %v", err)
 	}
 	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
@@ -93,7 +94,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 
 	// 4. Attempt advance to earlier timestamp T0 (monotonic invariant: should stay T2)
 	t0 := time.Date(2026, 11, 14, 0, 30, 0, 0, time.UTC)
-	if err = AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t0); err != nil {
+	if err = store.AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t0); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T0 failed: %v", err)
 	}
 	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
@@ -271,7 +272,7 @@ func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, sched
 		Status:       status,
 		StartedAt:    now,
 	}
-	if err := CreateScheduleRun(ctx, db, run); err != nil {
+	if err := store.CreateScheduleRun(ctx, db, run); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 }
@@ -298,7 +299,7 @@ func assertRunStatus(ctx context.Context, t *testing.T, db *sql.DB, runID, wantS
 	if runID == "" || wantStatus == "" {
 		return
 	}
-	run, err := GetScheduleRun(ctx, db, runID)
+	run, err := store.GetScheduleRun(ctx, db, runID)
 	if err != nil {
 		t.Fatalf("GetScheduleRun failed: %v", err)
 	}
@@ -382,7 +383,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		Status:       "running",
 		StartedAt:    now,
 	}
-	if err := CreateScheduleRun(ctx, db, run); err != nil {
+	if err := store.CreateScheduleRun(ctx, db, run); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 
@@ -419,7 +420,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		t.Fatal("timed out waiting for message delivery")
 	}
 
-	updatedRun, err := GetScheduleRun(ctx, db, "run-bus-1")
+	updatedRun, err := store.GetScheduleRun(ctx, db, "run-bus-1")
 	if err != nil {
 		t.Fatalf("GetScheduleRun failed: %v", err)
 	}
@@ -517,7 +518,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		Status:       "running",
 		StartedAt:    now,
 	}
-	if err := CreateScheduleRun(ctx, db, run); err != nil {
+	if err := store.CreateScheduleRun(ctx, db, run); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 
@@ -532,7 +533,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		t.Fatalf("HandleDispatchOutcome fallback failed: %v", err)
 	}
 
-	updatedRun, err := GetScheduleRun(ctx, db, "run-fallback-1")
+	updatedRun, err := store.GetScheduleRun(ctx, db, "run-fallback-1")
 	if err != nil {
 		t.Fatalf("GetScheduleRun failed: %v", err)
 	}
@@ -554,21 +555,21 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	ctx := context.Background()
 
 	// AdvanceHeartbeatLastCompletedAt error paths
-	if err := AdvanceHeartbeatLastCompletedAt(ctx, nil, "hb-1", time.Now()); err == nil {
+	if err := store.AdvanceHeartbeatLastCompletedAt(ctx, nil, "hb-1", time.Now()); err == nil {
 		t.Error("expected error for nil db")
 	}
-	if err := AdvanceHeartbeatLastCompletedAt(ctx, db, "", time.Now()); err == nil {
+	if err := store.AdvanceHeartbeatLastCompletedAt(ctx, db, "", time.Now()); err == nil {
 		t.Error("expected error for empty id")
 	}
 
 	// GetScheduleRun error paths
-	if _, err := GetScheduleRun(ctx, nil, "r1"); err == nil {
+	if _, err := store.GetScheduleRun(ctx, nil, "r1"); err == nil {
 		t.Error("expected error for nil db")
 	}
-	if _, err := GetScheduleRun(ctx, db, ""); err == nil {
+	if _, err := store.GetScheduleRun(ctx, db, ""); err == nil {
 		t.Error("expected error for empty id")
 	}
-	if _, err := GetScheduleRun(ctx, db, "non-existent-run"); err == nil {
+	if _, err := store.GetScheduleRun(ctx, db, "non-existent-run"); err == nil {
 		t.Error("expected error for non-existent run")
 	}
 
