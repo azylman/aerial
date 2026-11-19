@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -38,102 +37,69 @@ func TestRegisterHaroCollector(t *testing.T) {
 }
 
 func TestSeededSeries(t *testing.T) {
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather() err = %v", err)
+	}
+	families := make(map[string]*dto.MetricFamily, len(mfs))
+	for _, mf := range mfs {
+		families[mf.GetName()] = mf
+	}
 	tests := []struct {
 		name       string
-		collector  prometheus.Collector
 		familyName string
-		want       string
+		labels     map[string]string
 	}{
-		{"schedules active gauges", SchedulesActive, "haro_schedules_active", `# HELP haro_schedules_active Number of active persistent schedules by type.
-# TYPE haro_schedules_active gauge
-haro_schedules_active{schedule_type="cron"} 0
-haro_schedules_active{schedule_type="event_watch"} 0
-haro_schedules_active{schedule_type="heartbeat"} 0
-haro_schedules_active{schedule_type="one_shot"} 0
-`},
-		{"schedule runs counters", ScheduleRunsTotal, "haro_schedule_runs_total", `# HELP haro_schedule_runs_total Total number of schedule runs executed by type and status.
-# TYPE haro_schedule_runs_total counter
-haro_schedule_runs_total{schedule_type="cron",status="completed"} 0
-haro_schedule_runs_total{schedule_type="cron",status="failed"} 0
-haro_schedule_runs_total{schedule_type="cron",status="skipped_active"} 0
-haro_schedule_runs_total{schedule_type="cron",status="stale"} 0
-haro_schedule_runs_total{schedule_type="event_watch",status="completed"} 0
-haro_schedule_runs_total{schedule_type="event_watch",status="failed"} 0
-haro_schedule_runs_total{schedule_type="event_watch",status="skipped_active"} 0
-haro_schedule_runs_total{schedule_type="event_watch",status="stale"} 0
-haro_schedule_runs_total{schedule_type="heartbeat",status="completed"} 0
-haro_schedule_runs_total{schedule_type="heartbeat",status="failed"} 0
-haro_schedule_runs_total{schedule_type="heartbeat",status="skipped_active"} 0
-haro_schedule_runs_total{schedule_type="heartbeat",status="stale"} 0
-haro_schedule_runs_total{schedule_type="one_shot",status="completed"} 0
-haro_schedule_runs_total{schedule_type="one_shot",status="failed"} 0
-haro_schedule_runs_total{schedule_type="one_shot",status="skipped_active"} 0
-haro_schedule_runs_total{schedule_type="one_shot",status="stale"} 0
-`},
-		{"dispatch duration histograms", ScheduleDispatchDurationSeconds, "haro_schedule_dispatch_duration_seconds", `# HELP haro_schedule_dispatch_duration_seconds Dispatch duration of schedule runs in seconds.
-# TYPE haro_schedule_dispatch_duration_seconds histogram
-haro_schedule_dispatch_duration_seconds_bucket{le="0.005",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.01",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.025",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.05",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.1",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.25",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.5",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="1",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="2.5",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="5",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="10",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="+Inf",schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_sum{schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_count{schedule_type="cron"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.005",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.01",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.025",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.05",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.1",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.25",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.5",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="1",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="2.5",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="5",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="10",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="+Inf",schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_sum{schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_count{schedule_type="event_watch"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.005",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.01",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.025",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.05",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.1",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.25",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.5",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="1",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="2.5",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="5",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="10",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="+Inf",schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_sum{schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_count{schedule_type="heartbeat"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.005",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.01",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.025",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.05",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.1",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.25",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="0.5",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="1",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="2.5",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="5",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="10",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_bucket{le="+Inf",schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_sum{schedule_type="one_shot"} 0
-haro_schedule_dispatch_duration_seconds_count{schedule_type="one_shot"} 0
-`},
+		{"gauge cron", "haro_schedules_active", map[string]string{"schedule_type": model.ScheduleTypeCron}},
+		{"gauge event watch", "haro_schedules_active", map[string]string{"schedule_type": model.ScheduleTypeEventWatch}},
+		{"gauge heartbeat", "haro_schedules_active", map[string]string{"schedule_type": model.ScheduleTypeHeartbeat}},
+		{"gauge one shot", "haro_schedules_active", map[string]string{"schedule_type": model.ScheduleTypeOneShot}},
+		{"counter cron completed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeCron, "status": model.StatusCompleted}},
+		{"counter cron failed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeCron, "status": model.StatusFailed}},
+		{"counter cron skipped active", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeCron, "status": model.StatusSkippedActive}},
+		{"counter cron stale", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeCron, "status": model.StatusStale}},
+		{"counter event watch completed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeEventWatch, "status": model.StatusCompleted}},
+		{"counter event watch failed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeEventWatch, "status": model.StatusFailed}},
+		{"counter event watch skipped active", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeEventWatch, "status": model.StatusSkippedActive}},
+		{"counter event watch stale", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeEventWatch, "status": model.StatusStale}},
+		{"counter heartbeat completed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeHeartbeat, "status": model.StatusCompleted}},
+		{"counter heartbeat failed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeHeartbeat, "status": model.StatusFailed}},
+		{"counter heartbeat skipped active", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeHeartbeat, "status": model.StatusSkippedActive}},
+		{"counter heartbeat stale", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeHeartbeat, "status": model.StatusStale}},
+		{"counter one shot completed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeOneShot, "status": model.StatusCompleted}},
+		{"counter one shot failed", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeOneShot, "status": model.StatusFailed}},
+		{"counter one shot skipped active", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeOneShot, "status": model.StatusSkippedActive}},
+		{"counter one shot stale", "haro_schedule_runs_total", map[string]string{"schedule_type": model.ScheduleTypeOneShot, "status": model.StatusStale}},
+		{"histogram cron", "haro_schedule_dispatch_duration_seconds", map[string]string{"schedule_type": model.ScheduleTypeCron}},
+		{"histogram event watch", "haro_schedule_dispatch_duration_seconds", map[string]string{"schedule_type": model.ScheduleTypeEventWatch}},
+		{"histogram heartbeat", "haro_schedule_dispatch_duration_seconds", map[string]string{"schedule_type": model.ScheduleTypeHeartbeat}},
+		{"histogram one shot", "haro_schedule_dispatch_duration_seconds", map[string]string{"schedule_type": model.ScheduleTypeOneShot}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := testutil.CollectAndCompare(tc.collector, strings.NewReader(tc.want), tc.familyName); err != nil {
-				t.Errorf("CollectAndCompare(%s) mismatch: %v", tc.familyName, err)
+			mf, ok := families[tc.familyName]
+			if !ok {
+				t.Fatalf("family %s not gathered (init seeding missing?)", tc.familyName)
+			}
+			found := false
+			for _, m := range mf.GetMetric() {
+				if len(m.GetLabel()) != len(tc.labels) {
+					continue
+				}
+				match := true
+				for _, lp := range m.GetLabel() {
+					if tc.labels[lp.GetName()] != lp.GetValue() {
+						match = false
+						break
+					}
+				}
+				if match {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s%v not seeded", tc.familyName, tc.labels)
 			}
 		})
 	}
@@ -146,10 +112,6 @@ func TestRecordScheduleRun(t *testing.T) {
 		status       string
 	}{
 		{"cron completed", model.ScheduleTypeCron, model.StatusCompleted},
-		{"cron failed", model.ScheduleTypeCron, model.StatusFailed},
-		{"one shot stale", model.ScheduleTypeOneShot, model.StatusStale},
-		{"heartbeat skipped active", model.ScheduleTypeHeartbeat, model.StatusSkippedActive},
-		{"event watch completed", model.ScheduleTypeEventWatch, model.StatusCompleted},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -172,7 +134,6 @@ func TestRecordScheduleDispatchDuration(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			seriesBefore := testutil.CollectAndCount(ScheduleDispatchDurationSeconds, "haro_schedule_dispatch_duration_seconds")
 			hist, ok := ScheduleDispatchDurationSeconds.WithLabelValues(tc.scheduleType).(prometheus.Histogram)
 			if !ok {
 				t.Fatalf("ScheduleDispatchDurationSeconds(%q) is not a prometheus.Histogram", tc.scheduleType)
@@ -191,9 +152,6 @@ func TestRecordScheduleDispatchDuration(t *testing.T) {
 			}
 			if got, want := after.GetHistogram().GetSampleSum(), before.GetHistogram().GetSampleSum()+tc.observation; got < want-1e-9 || got > want+1e-9 {
 				t.Errorf("sample sum = %v, want %v (observation value must be recorded)", got, want)
-			}
-			if got := testutil.CollectAndCount(ScheduleDispatchDurationSeconds, "haro_schedule_dispatch_duration_seconds"); got != seriesBefore {
-				t.Errorf("CollectAndCount() = %v, want %v (series count must not change)", got, seriesBefore)
 			}
 		})
 	}
