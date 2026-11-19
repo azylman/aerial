@@ -1,9 +1,9 @@
 /* Telemetry view: deployment pipeline, services grid and the service diagnostic drawer body
-   (ported from static/style.css; class names unchanged). */
+   (Warm Stone & Ink daylight surfaces). */
 .deployment-pipeline-section {
     margin-bottom: 3.5rem;
     padding-bottom: 1.5rem;
-    border-bottom: 1px dashed rgba(0, 242, 254, 0.15);
+    border-bottom: 1px dashed var(--card-border);
 }
 
 .deployments-container {
@@ -14,12 +14,18 @@
 
 .deploy-card {
     background: var(--card-bg);
-    border: 1px solid var(--neon-magenta);
+    border: 1px solid var(--card-border);
     border-radius: 12px;
     padding: 1.25rem 1.5rem;
-    box-shadow: 0 0 25px rgba(255, 0, 127, 0.15);
+    box-shadow: var(--accent-glow);
     position: relative;
     overflow: hidden;
+    transition: all 0.25s ease;
+}
+
+.deploy-card:hover {
+    border-color: var(--card-border-hover);
+    box-shadow: 0 4px 12px rgba(20, 20, 19, 0.08);
 }
 
 .deploy-card-header {
@@ -42,15 +48,15 @@
     font-family: var(--font-heading);
     font-size: 1.2rem;
     font-weight: 800;
-    color: #fff;
+    color: var(--text-primary);
 }
 
 .deploy-commit-time {
     font-family: var(--font-mono);
     font-size: 0.75rem;
     color: var(--text-dim);
-    background: rgba(0, 242, 254, 0.05);
-    border: 1px solid rgba(0, 242, 254, 0.18);
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
     padding: 2px 7px;
     border-radius: 4px;
     display: inline-flex;
@@ -61,11 +67,11 @@
 
 .deploy-repo-badge {
     font-size: 0.78rem;
-    color: var(--neon-purple, #bf5af2);
-    background: rgba(191, 90, 242, 0.12);
+    color: var(--accent-indigo, #4338ca);
+    background: rgba(67, 56, 202, 0.1);
     padding: 2px 8px;
     border-radius: 4px;
-    border: 1px solid rgba(191, 90, 242, 0.35);
+    border: 1px solid rgba(67, 56, 202, 0.25);
     font-weight: 700;
     font-family: var(--font-mono, monospace);
     display: inline-flex;
@@ -85,20 +91,20 @@
 
 .deploy-commit {
     font-size: 0.8rem;
-    color: var(--neon-cyan);
-    background: rgba(0, 242, 254, 0.1);
+    color: var(--accent-primary, #c2410c);
+    background: rgba(194, 65, 12, 0.1);
     padding: 2px 8px;
     border-radius: 4px;
-    border: 1px solid rgba(0, 242, 254, 0.3);
+    border: 1px solid rgba(194, 65, 12, 0.25);
 }
 
 .deploy-commit-link {
     font-size: 0.8rem;
-    color: var(--neon-cyan);
-    background: rgba(0, 242, 254, 0.12);
+    color: var(--accent-primary, #c2410c);
+    background: rgba(194, 65, 12, 0.1);
     padding: 2px 8px;
     border-radius: 4px;
-    border: 1px solid rgba(0, 242, 254, 0.35);
+    border: 1px solid rgba(194, 65, 12, 0.25);
     text-decoration: none;
     font-weight: 700;
     transition: all 0.2s ease;
@@ -108,42 +114,35 @@
 }
 
 .deploy-commit-link:hover {
-    background: rgba(0, 242, 254, 0.25);
-    color: #fff;
-    border-color: var(--neon-cyan);
-    box-shadow: 0 0 10px rgba(0, 242, 254, 0.4);
+    background: rgba(194, 65, 12, 0.18);
+    color: var(--text-primary);
+    border-color: var(--accent-primary, #c2410c);
 }
 
-
 .deploy-card.stage-live {
-    border-color: rgba(0, 255, 135, 0.3);
-    box-shadow: 0 0 20px rgba(0, 255, 135, 0.08);
+    border-color: rgba(21, 128, 61, 0.4);
 }
 
 .deploy-card.stage-swapping {
-    border-color: rgba(176, 38, 255, 0.4);
-    box-shadow: 0 0 25px rgba(176, 38, 255, 0.2);
+    border-color: rgba(67, 56, 202, 0.4);
     position: relative;
     overflow: hidden;
 }
 
 .deploy-card.stage-awaiting_pull, .deploy-card.stage-pulling {
-    border-color: rgba(0, 242, 254, 0.35);
-    box-shadow: 0 0 25px rgba(0, 242, 254, 0.15);
+    border-color: rgba(194, 65, 12, 0.4);
     position: relative;
     overflow: hidden;
 }
 
 .deploy-card.stage-active, .deploy-card.stage-building {
-    border-color: rgba(255, 0, 127, 0.4);
-    box-shadow: 0 0 25px rgba(255, 0, 127, 0.18);
+    border-color: rgba(194, 65, 12, 0.4);
     position: relative;
     overflow: hidden;
 }
 
 .deploy-card.stage-failed, .deploy-card.stage-degraded {
-    border-color: var(--neon-red);
-    box-shadow: 0 0 30px rgba(255, 42, 109, 0.35);
+    border-color: var(--accent-crimson, #b91c1c);
     animation: hud-glitch 0.4s ease-out;
 }
 
@@ -155,8 +154,8 @@
     gap: 12px;
     padding: 8px 14px;
     margin-bottom: 8px;
-    background: rgba(10, 10, 20, 0.6);
-    border: 1px solid rgba(255, 0, 127, 0.25);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
     border-radius: 8px;
     font-size: 0.8rem;
     cursor: pointer;
@@ -164,30 +163,30 @@
 }
 
 .deploy-card-compact:hover {
-    background: rgba(20, 20, 40, 0.85);
-    border-color: rgba(255, 0, 127, 0.5);
+    background: var(--bg-elevated);
+    border-color: var(--card-border-hover);
     transform: translateY(-1px);
 }
 
 .deploy-card-compact.stage-live {
-    border-color: rgba(0, 255, 135, 0.25);
+    border-color: rgba(21, 128, 61, 0.3);
 }
 
 .deploy-card-compact.stage-swapping {
-    border-color: rgba(176, 38, 255, 0.35);
+    border-color: rgba(67, 56, 202, 0.3);
 }
 
 .deploy-card-compact.stage-pulling, .deploy-card-compact.stage-awaiting_pull {
-    border-color: rgba(0, 242, 254, 0.3);
+    border-color: rgba(194, 65, 12, 0.3);
 }
 
 .deploy-card-compact.stage-failed, .deploy-card-compact.stage-degraded {
-    border-color: rgba(255, 42, 109, 0.4);
+    border-color: rgba(185, 28, 28, 0.4);
 }
 
 .compact-commit {
     font-family: var(--font-mono);
-    color: var(--neon-cyan);
+    color: var(--accent-primary, #c2410c);
     font-weight: 700;
 }
 
@@ -209,33 +208,33 @@
 }
 
 .compact-badge.live {
-    background: rgba(0, 255, 135, 0.15);
-    color: var(--neon-green);
-    border: 1px solid rgba(0, 255, 135, 0.3);
+    background: rgba(21, 128, 61, 0.12);
+    color: var(--accent-emerald, #15803d);
+    border: 1px solid rgba(21, 128, 61, 0.3);
 }
 
 .compact-badge.swapping {
-    background: rgba(176, 38, 255, 0.15);
-    color: #b026ff;
-    border: 1px solid rgba(176, 38, 255, 0.3);
+    background: rgba(67, 56, 202, 0.12);
+    color: var(--accent-indigo, #4338ca);
+    border: 1px solid rgba(67, 56, 202, 0.3);
 }
 
 .compact-badge.pulling {
-    background: rgba(0, 242, 254, 0.15);
-    color: var(--neon-cyan);
-    border: 1px solid rgba(0, 242, 254, 0.3);
+    background: rgba(194, 65, 12, 0.12);
+    color: var(--accent-primary, #c2410c);
+    border: 1px solid rgba(194, 65, 12, 0.3);
 }
 
 .compact-badge.failed {
-    background: rgba(255, 42, 109, 0.2);
-    color: var(--neon-red);
-    border: 1px solid rgba(255, 42, 109, 0.4);
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border: 1px solid rgba(185, 28, 28, 0.4);
 }
 
 .compact-badge.active {
-    background: rgba(255, 0, 127, 0.15);
-    color: var(--neon-magenta);
-    border: 1px solid rgba(255, 0, 127, 0.3);
+    background: rgba(194, 65, 12, 0.12);
+    color: var(--accent-primary, #c2410c);
+    border: 1px solid rgba(194, 65, 12, 0.3);
 }
 
 .compact-toggle {
@@ -249,7 +248,7 @@
     left: 0;
     width: 100%;
     height: 2px;
-    background: linear-gradient(90deg, transparent, var(--neon-magenta), var(--neon-cyan), transparent);
+    background: linear-gradient(90deg, transparent, var(--accent-primary, #c2410c), transparent);
 }
 
 html.motion-ready .deploy-card-laser {
@@ -272,11 +271,11 @@ html.motion-ready .deploy-card-laser {
 
 .deploy-run-link {
     font-size: 0.75rem;
-    color: var(--neon-amber);
-    background: rgba(255, 183, 0, 0.12);
+    color: var(--accent-amber, #b45309);
+    background: rgba(180, 83, 9, 0.1);
     padding: 2px 8px;
     border-radius: 4px;
-    border: 1px solid rgba(255, 183, 0, 0.35);
+    border: 1px solid rgba(180, 83, 9, 0.3);
     text-decoration: none;
     font-weight: 700;
     transition: all 0.2s ease;
@@ -286,12 +285,10 @@ html.motion-ready .deploy-card-laser {
 }
 
 .deploy-run-link:hover {
-    background: rgba(255, 183, 0, 0.25);
-    color: #fff;
-    border-color: var(--neon-amber);
-    box-shadow: 0 0 10px rgba(255, 183, 0, 0.4);
+    background: rgba(180, 83, 9, 0.2);
+    color: var(--text-primary);
+    border-color: var(--accent-amber, #b45309);
 }
-
 
 .matrix-chips-container {
     display: flex;
@@ -328,33 +325,32 @@ html.motion-ready .deploy-card-laser {
 
 .matrix-chip:hover {
     transform: translateY(-1px);
-    box-shadow: 0 0 8px rgba(0, 242, 254, 0.4);
+    box-shadow: 0 2px 6px rgba(20, 20, 19, 0.1);
 }
 
 .matrix-chip.chip-done {
-    background: rgba(0, 255, 135, 0.15);
-    color: var(--neon-green);
-    border: 1px solid rgba(0, 255, 135, 0.4);
+    background: rgba(21, 128, 61, 0.12);
+    color: var(--accent-emerald, #15803d);
+    border: 1px solid rgba(21, 128, 61, 0.3);
 }
 
 .matrix-chip.chip-running {
-    background: rgba(255, 183, 0, 0.2);
-    color: var(--neon-amber);
-    border: 1px solid var(--neon-amber);
+    background: rgba(180, 83, 9, 0.12);
+    color: var(--accent-amber, #b45309);
+    border: 1px solid var(--accent-amber, #b45309);
     animation: pulse-border 1.2s infinite alternate;
 }
 
 .matrix-chip.chip-queued {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--bg-elevated);
     color: var(--text-dim);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--card-border);
 }
 
 .matrix-chip.chip-failed {
-    background: rgba(255, 42, 109, 0.25);
-    color: var(--neon-red);
-    border: 1px solid var(--neon-red);
-    box-shadow: 0 0 8px rgba(255, 42, 109, 0.4);
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border: 1px solid var(--accent-crimson, #b91c1c);
 }
 
 .deploy-stage-badge {
@@ -362,52 +358,50 @@ html.motion-ready .deploy-card-laser {
     font-weight: 800;
     padding: 0.3rem 0.8rem;
     border-radius: 4px;
-    background: rgba(255, 0, 127, 0.2);
-    color: var(--neon-magenta);
-    border: 1px solid var(--neon-magenta);
-    letter-spacing: 1px;
+    background: rgba(194, 65, 12, 0.12);
+    color: var(--accent-primary, #c2410c);
+    border: 1px solid var(--accent-primary, #c2410c);
+    letter-spacing: 0.5px;
     animation: pulse-border 1.5s infinite alternate;
 }
 
 .deploy-stage-badge.live {
-    background: rgba(0, 255, 135, 0.2);
-    color: var(--neon-green);
-    border-color: var(--neon-green);
+    background: rgba(21, 128, 61, 0.12);
+    color: var(--accent-emerald, #15803d);
+    border-color: var(--accent-emerald, #15803d);
     animation: none;
-    box-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
 }
 
 .deploy-stage-badge.swapping {
-    background: rgba(176, 38, 255, 0.2);
-    color: #b026ff;
-    border-color: #b026ff;
+    background: rgba(67, 56, 202, 0.12);
+    color: var(--accent-indigo, #4338ca);
+    border-color: var(--accent-indigo, #4338ca);
     animation: pulse-border 1.5s infinite alternate;
 }
 
 .deploy-stage-badge.pulling {
-    background: rgba(0, 242, 254, 0.2);
-    color: var(--neon-cyan);
-    border-color: var(--neon-cyan);
+    background: rgba(194, 65, 12, 0.12);
+    color: var(--accent-primary, #c2410c);
+    border-color: var(--accent-primary, #c2410c);
     animation: pulse-border 1.5s infinite alternate;
 }
 
 .deploy-stage-badge.failed {
-    background: rgba(255, 42, 109, 0.25);
-    color: var(--neon-red);
-    border-color: var(--neon-red);
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border-color: var(--accent-crimson, #b91c1c);
     animation: none;
-    box-shadow: 0 0 12px rgba(255, 42, 109, 0.4);
 }
 
 .step-panel.step-failed {
-    border-color: rgba(255, 42, 109, 0.5);
-    background: rgba(255, 42, 109, 0.08);
+    border-color: var(--accent-crimson, #b91c1c);
+    background: rgba(185, 28, 28, 0.08);
 }
 
 .step-panel.step-failed .step-status-badge {
-    background: rgba(255, 42, 109, 0.25);
-    color: var(--neon-red);
-    border: 1px solid var(--neon-red);
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border: 1px solid var(--accent-crimson, #b91c1c);
 }
 
 /* STEP PANELS GRID */
@@ -419,26 +413,29 @@ html.motion-ready .deploy-card-laser {
 }
 
 .step-panel {
-    background: rgba(0, 0, 0, 0.35);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
     border-radius: 8px;
     padding: 0.75rem;
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    transition: all 0.3s ease;
+    transition: all 0.25s ease;
+}
+
+.step-panel:hover {
+    border-color: var(--card-border-hover);
 }
 
 .step-panel.step-completed {
-    border-color: var(--neon-green);
-    background: rgba(0, 255, 135, 0.08);
-    box-shadow: 0 0 10px rgba(0, 255, 135, 0.15);
+    border-color: rgba(21, 128, 61, 0.35);
+    background: rgba(21, 128, 61, 0.08);
 }
 
 .step-panel.step-active {
-    border-color: var(--neon-magenta);
-    background: rgba(255, 0, 127, 0.12);
-    box-shadow: 0 0 15px rgba(255, 0, 127, 0.3);
+    border-color: var(--accent-primary, #c2410c);
+    background: rgba(194, 65, 12, 0.08);
+    box-shadow: 0 0 0 2px rgba(194, 65, 12, 0.12);
 }
 
 html.motion-ready .step-panel.step-active {
@@ -446,8 +443,8 @@ html.motion-ready .step-panel.step-active {
 }
 
 @keyframes pulse-panel {
-    0% { border-color: var(--neon-cyan); box-shadow: 0 0 5px var(--neon-cyan); }
-    100% { border-color: var(--neon-magenta); box-shadow: 0 0 18px var(--neon-magenta); }
+    0% { border-color: var(--card-border); }
+    100% { border-color: var(--accent-primary, #c2410c); }
 }
 
 .step-panel.step-pending {
@@ -472,11 +469,11 @@ html.motion-ready .step-panel.step-active {
 }
 
 .step-completed .step-status-badge {
-    color: var(--neon-green);
+    color: var(--accent-emerald, #15803d);
 }
 
 .step-active .step-status-badge {
-    color: var(--neon-magenta);
+    color: var(--accent-primary, #c2410c);
 }
 
 .step-pending .step-status-badge {
@@ -486,14 +483,15 @@ html.motion-ready .step-panel.step-active {
 .step-name {
     font-size: 0.75rem;
     font-weight: 700;
-    color: #fff;
+    color: var(--text-primary);
     line-height: 1.2;
 }
 
 .deploy-progress-bg {
     width: 100%;
     height: 8px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
     border-radius: 4px;
     overflow: hidden;
     margin-bottom: 0.6rem;
@@ -501,8 +499,7 @@ html.motion-ready .step-panel.step-active {
 
 .deploy-progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, var(--neon-cyan), var(--neon-magenta));
-    box-shadow: 0 0 12px var(--neon-magenta);
+    background: var(--accent-primary, #c2410c);
     border-radius: 4px;
     transition: width 0.4s ease;
 }
@@ -516,7 +513,7 @@ html.motion-ready .step-panel.step-active {
 
 .deploy-idle-card {
     background: var(--card-bg);
-    border: 1px dashed rgba(255, 255, 255, 0.15);
+    border: 1px dashed var(--card-border);
     border-radius: 12px;
     padding: 1.25rem 1.5rem;
     display: flex;
@@ -525,7 +522,6 @@ html.motion-ready .step-panel.step-active {
     color: var(--text-muted);
     font-size: 0.85rem;
 }
-
 
 .services-grid-section {
     margin-bottom: 2rem;
@@ -544,13 +540,14 @@ html.motion-ready .step-panel.step-active {
     border-radius: 12px;
     padding: 1.5rem;
     cursor: pointer;
+    box-shadow: var(--accent-glow);
     transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .service-card:hover {
-    border-color: var(--neon-cyan);
-    box-shadow: 0 12px 30px -5px rgba(0, 242, 254, 0.2);
-    transform: translateY(-4px);
+    border-color: var(--card-border-hover);
+    box-shadow: 0 6px 16px rgba(20, 20, 19, 0.08);
+    transform: translateY(-2px);
 }
 
 .service-card .header {
@@ -564,30 +561,37 @@ html.motion-ready .step-panel.step-active {
     font-family: var(--font-heading);
     font-size: 1.15rem;
     font-weight: 700;
-    color: #fff;
+    color: var(--text-primary);
     letter-spacing: 0.5px;
 }
 
-/* BADGES WITH PULSE RINGS */
+/* BADGES WITH CRISP CONTRAST */
 
 .badge {
     padding: 0.25rem 0.6rem;
     border-radius: 4px;
     font-size: 0.7rem;
     font-weight: 800;
-    letter-spacing: 1px;
+    letter-spacing: 0.5px;
 }
 
 .badge.healthy {
-    background: rgba(0, 255, 135, 0.12);
-    color: var(--neon-green);
-    border: 1px solid rgba(0, 255, 135, 0.3);
+    background: rgba(21, 128, 61, 0.12);
+    color: var(--accent-emerald, #15803d);
+    border: 1px solid rgba(21, 128, 61, 0.3);
 }
 
+.badge.degraded {
+    background: rgba(180, 83, 9, 0.12);
+    color: var(--accent-amber, #b45309);
+    border: 1px solid rgba(180, 83, 9, 0.3);
+}
+
+.badge.down,
 .badge.unhealthy {
-    background: rgba(255, 42, 109, 0.12);
-    color: var(--neon-red);
-    border: 1px solid rgba(255, 42, 109, 0.3);
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border: 1px solid rgba(185, 28, 28, 0.3);
 }
 
 .service-metrics {
@@ -597,15 +601,15 @@ html.motion-ready .step-panel.step-active {
     color: var(--text-muted);
     margin-top: 1rem;
     padding-top: 0.8rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    border-top: 1px solid var(--card-border);
 }
 
 .card-action-hint {
     font-size: 0.7rem;
-    color: var(--neon-cyan);
+    color: var(--accent-primary, #c2410c);
     margin-top: 0.8rem;
     text-align: right;
-    opacity: 0.6;
+    opacity: 0.7;
     transition: opacity 0.2s;
 }
 
@@ -631,9 +635,6 @@ html.motion-ready .step-panel.step-active {
     }
 }
 
-/* `#expand-tasks-btn` inline style from static/index.html. The vanilla button has no background
-   or text colour of its own, so it paints with the light-scheme UA button face; pinning the scheme
-   on this one control keeps it identical under the React console's dark root scheme. */
 .task-inspect-btn.expand-tasks-btn {
     color-scheme: light;
     cursor: pointer;
