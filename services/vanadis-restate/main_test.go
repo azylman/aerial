@@ -993,11 +993,11 @@ func TestRestateObjectRuntime_SetLaunchedNil(t *testing.T) {
 func TestBuildObject_NilStoreBranches(t *testing.T) {
 	t.Parallel()
 	ctx := makeObjectMockContext(t, "b1")
-	var typedNilStore *PostgresVanadisStore
+	var typedNilStore *store.Store
 	bo := NewBuildObject("", nil).WithAuthority(typedNilStore, nil)
 	router := NewBuildRouterService(typedNilStore)
 	// Strict interface-nil check to ensure typed-nil pointer was normalized to untyped nil interface;
-	// Testify assert.Nil uses reflection and would consider a non-normalized (*PostgresVanadisStore)(nil) interface value nil.
+	// Testify assert.Nil uses reflection and would consider a non-normalized (*store.Store)(nil) interface value nil.
 	assert.True(t, router.store == nil)
 
 	// UpdateBuild nil store

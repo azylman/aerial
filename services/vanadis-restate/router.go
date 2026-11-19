@@ -131,7 +131,7 @@ type BuildRouterService struct {
 
 // NewBuildRouterService constructs a BuildRouterService.
 func NewBuildRouterService(st store.VanadisStore, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
-	if pg, ok := st.(*PostgresVanadisStore); ok && pg == nil {
+	if pg, ok := st.(*store.Store); ok && pg == nil {
 		st = nil
 	}
 	var ifn func(restate.Context) buildObjectInvoker
@@ -356,7 +356,7 @@ var (
 	}
 )
 
-var initPostgres = func(ctx context.Context, pgURL string) (*PostgresVanadisStore, func(context.Context), error) {
+var initPostgres = func(ctx context.Context, pgURL string) (*store.Store, func(context.Context), error) {
 	poolConfig, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse postgres url: %w", err)
@@ -372,7 +372,7 @@ var initPostgres = func(ctx context.Context, pgURL string) (*PostgresVanadisStor
 		closePgxPoolFn(pool)
 		return nil, nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	st := NewPostgresVanadisStore(pool)
+	st := store.New(pool)
 	return st, func(context.Context) {
 		closePgxPoolFn(pool)
 	}, nil

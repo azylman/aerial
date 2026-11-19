@@ -370,7 +370,7 @@ func NewBuildObjectWithAgent(vanadisURL, agentName string, httpClient *http.Clie
 
 // WithAuthority wires the PostgreSQL store and side-effect executor into BuildObject.
 func (b *BuildObject) WithAuthority(st store.VanadisStore, exec *Executor) *BuildObject {
-	if pg, ok := st.(*PostgresVanadisStore); ok && pg == nil {
+	if pg, ok := st.(*store.Store); ok && pg == nil {
 		st = nil
 	}
 	b.store = st

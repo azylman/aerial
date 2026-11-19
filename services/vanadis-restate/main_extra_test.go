@@ -306,10 +306,9 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 				script.execErr = errors.New("persist failed")
 				script.failExec = "UPDATE vanadis_chunks"
 			}
-			st, _ := script.open()
-			observed := &deploymentEvidenceDB{PgxQueryExecer: st.db, chunks: script.chunks}
-			// Rebuild around the observer so the embedded store handle sees it too.
-			st = NewPostgresVanadisStore(observed)
+			raw, _ := script.openRaw()
+			observed := &deploymentEvidenceDB{PgxQueryExecer: raw, chunks: script.chunks}
+			st := store.New(observed)
 			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
 			evidence := &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
 			if tc.nilEvidence {
@@ -375,10 +374,9 @@ func TestDeploymentSuccessPREvent(t *testing.T) {
 			if tc.event == "rollout_updated" {
 				script.failExec = "UPDATE vanadis_chunks"
 			}
-			st, _ := script.open()
-			observed := &deploymentEvidenceDB{PgxQueryExecer: st.db, chunks: script.chunks}
-			// Rebuild around the observer so the embedded store handle sees it too.
-			st = NewPostgresVanadisStore(observed)
+			raw, _ := script.openRaw()
+			observed := &deploymentEvidenceDB{PgxQueryExecer: raw, chunks: script.chunks}
+			st := store.New(observed)
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			if tc.transitionFailure {
 				bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
@@ -519,10 +517,9 @@ func TestDeploymentSuccessBeforeDelayedLifecycle(t *testing.T) {
 				buildRow: &mockRow{b: &build}, chunks: chunks, execTag: "UPDATE 1",
 				routes: []sqlRoute{{match: "c.repo = ANY($1)", row: valuesRow("c1", "b1", 0, "medium", true)}},
 			}
-			st, _ := script.open()
-			db := &deploymentEvidenceDB{PgxQueryExecer: st.db, chunks: chunks}
-			// Rebuild around the observer so the embedded store handle sees it too.
-			st = NewPostgresVanadisStore(db)
+			raw, _ := script.openRaw()
+			db := &deploymentEvidenceDB{PgxQueryExecer: raw, chunks: chunks}
+			st := store.New(db)
 			bus := &deploymentEventRecorder{}
 			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, bus, "token", nil))
 			ctx := makeObjectMockContext(t, "b1")
@@ -1174,8 +1171,8 @@ func TestRunApp_FailFast(t *testing.T) {
 
 	// Missing NATS URL
 	oldInitPg := initPostgres
-	initPostgres = func(context.Context, string) (*PostgresVanadisStore, func(context.Context), error) {
-		return &PostgresVanadisStore{}, func(context.Context) {}, nil
+	initPostgres = func(context.Context, string) (*store.Store, func(context.Context), error) {
+		return &store.Store{}, func(context.Context) {}, nil
 	}
 	defer func() { initPostgres = oldInitPg }()
 
