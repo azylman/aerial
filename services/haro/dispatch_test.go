@@ -13,7 +13,9 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
+	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/ticker"
@@ -47,7 +49,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
-	hb := HeartbeatSchedule{
+	hb := model.HeartbeatSchedule{
 		ID:          "hb-mono-1",
 		TargetID:    "1234567890",
 		TitlePrefix: "Mono Test",
@@ -241,7 +243,7 @@ func seedDispatchHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, schedu
 	if scheduleID == "" || scheduleType != "heartbeat" {
 		return
 	}
-	hb := HeartbeatSchedule{
+	hb := model.HeartbeatSchedule{
 		ID:          scheduleID,
 		TargetID:    "1234567890",
 		TitlePrefix: "HB Test",
@@ -265,7 +267,7 @@ func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, sched
 	if status == "" {
 		status = "running"
 	}
-	run := ScheduleRun{
+	run := model.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   scheduleID,
 		ScheduleType: scheduleType,
@@ -362,7 +364,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
 
-	hb := HeartbeatSchedule{
+	hb := model.HeartbeatSchedule{
 		ID:          "hb-bus-1",
 		TargetID:    "1234567890",
 		TitlePrefix: "Bus HB",
@@ -376,7 +378,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
-	run := ScheduleRun{
+	run := model.ScheduleRun{
 		ID:           "run-bus-1",
 		ScheduleID:   "hb-bus-1",
 		ScheduleType: "heartbeat",
@@ -497,7 +499,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	}
 
 	// 4. Fallback durationMs and startedAt from run.StartedAt when ev.StartedAt is zero
-	hb := HeartbeatSchedule{
+	hb := model.HeartbeatSchedule{
 		ID:          "hb-fallback-1",
 		TargetID:    "1234567890",
 		TitlePrefix: "Fallback HB",
@@ -511,7 +513,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
-	run := ScheduleRun{
+	run := model.ScheduleRun{
 		ID:           "run-fallback-1",
 		ScheduleID:   "hb-fallback-1",
 		ScheduleType: "heartbeat",
@@ -609,7 +611,7 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	// Subscribe failure branch for haro-events in initHaroJetStreamWithFactory
 	errSubBus := &failSubBus{Bus: pubsub.NewMemoryBus()}
 	defer errSubBus.Close()
-	dummyServer := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
+	dummyServer := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db))
 	if bus := initHaroJetStreamWithFactory(ctx, dummyServer, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return errSubBus, nil
 	}); bus == nil {
@@ -620,7 +622,7 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	dispSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer dispSrv.Close()
 	disp := dispatch.NewHTTPPromptDispatcher(dispSrv.URL)
-	serverWithDisp := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), disp)
+	serverWithDisp := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), disp)
 	memBusInit := pubsub.NewMemoryBus()
 	defer memBusInit.Close()
 	if bus := initHaroJetStreamWithFactory(ctx, serverWithDisp, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
