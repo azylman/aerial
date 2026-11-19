@@ -10,14 +10,15 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
 func setupTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	t.Helper()
 	tempPath := filepath.Join(t.TempDir(), fmt.Sprintf("test_%d.db", time.Now().UnixNano()))
-	db, err := OpenDB(ctx, &Config{DatabaseURL: tempPath})
+	db, err := testutil.OpenSQLiteTestDB(tempPath) //nolint:contextcheck // testutil seam takes no ctx by design
 	if err != nil {
-		t.Fatalf("setupTestDB OpenDB(t.Context(), ) failed: %v", err)
+		t.Fatalf("setupTestDB OpenSQLiteTestDB failed: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = db.Close()
