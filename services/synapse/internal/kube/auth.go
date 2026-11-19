@@ -1,4 +1,4 @@
-package main
+package kube
 
 import (
 	"crypto/tls"
@@ -11,11 +11,12 @@ import (
 )
 
 var (
-	kubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	kubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	KubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	KubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
-func loadK8sCertPool(caPath string) *x509.CertPool {
+// LoadK8sCertPool reads the Kubernetes service account CA certificate and returns a CertPool.
+func LoadK8sCertPool(caPath string) *x509.CertPool {
 	if caPath == "" {
 		return nil
 	}
@@ -35,17 +36,23 @@ func loadK8sCertPool(caPath string) *x509.CertPool {
 	return nil
 }
 
-func getKubeServiceAccountToken(explicitToken string) string {
+// GetKubeServiceAccountToken returns the explicit token if provided, or reads from tokenPath (defaulting to KubeTokenPath).
+func GetKubeServiceAccountToken(explicitToken string, tokenPath ...string) string {
 	if explicitToken != "" {
 		return explicitToken
 	}
-	if data, err := os.ReadFile(kubeTokenPath); err == nil {
+	path := KubeTokenPath
+	if len(tokenPath) > 0 && tokenPath[0] != "" {
+		path = tokenPath[0]
+	}
+	if data, err := os.ReadFile(path); err == nil {
 		return strings.TrimSpace(string(data))
 	}
 	return ""
 }
 
-func getK8sHTTPClient(apiServer string, httpClient *http.Client) *http.Client {
+// GetK8sHTTPClient builds an HTTP client configured with service account CA certificates for HTTPS endpoints.
+func GetK8sHTTPClient(apiServer string, httpClient *http.Client, caPath ...string) *http.Client {
 	if httpClient != nil && !strings.HasPrefix(apiServer, "https://") {
 		return httpClient
 	}
@@ -57,7 +64,11 @@ func getK8sHTTPClient(apiServer string, httpClient *http.Client) *http.Client {
 		}).DialContext,
 		IdleConnTimeout: 90 * time.Second,
 	}
-	if rootCAs := loadK8sCertPool(kubeCAPath); rootCAs != nil {
+	path := KubeCAPath
+	if len(caPath) > 0 && caPath[0] != "" {
+		path = caPath[0]
+	}
+	if rootCAs := LoadK8sCertPool(path); rootCAs != nil {
 		transport.TLSClientConfig = &tls.Config{
 			RootCAs: rootCAs,
 		}

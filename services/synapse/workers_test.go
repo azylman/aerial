@@ -18,6 +18,12 @@ import (
 func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
 	d.retryDelay = delay
 	d.maxAttempts = maxAttempts
+	if d.kubeClient != nil {
+		d.kubeClient.SetRetryConfig(delay, maxAttempts)
+	}
+	if d.eriClient != nil {
+		d.eriClient.SetRetryConfig(delay, maxAttempts)
+	}
 }
 
 type defaultOutboundDispatcherCase struct {

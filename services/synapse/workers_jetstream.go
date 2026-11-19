@@ -9,6 +9,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 func resolveJetStreamJobCoords(args any) (string, string) {
@@ -22,7 +23,7 @@ func resolveJetStreamJobCoords(args any) (string, string) {
 	case DiscordInteractionArgs:
 		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
 	default:
-		return "", ""
+		return metrics.ResolveJetStreamJobCoords(args)
 	}
 }
 

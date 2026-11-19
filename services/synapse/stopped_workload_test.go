@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -82,102 +81,6 @@ func TestStoppedWorkloadEvidence(t *testing.T) {
 			done, failed, _ := workloadRolloutComplete(ws[0])
 			if done != tc.wantDone || failed {
 				t.Fatalf("done=%v failed=%v, want done %v", done, failed, tc.wantDone)
-			}
-		})
-	}
-}
-
-func TestKubeLabelSelectorMatches(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, selector       string
-		labels               map[string]string
-		wantMatch, wantValid bool
-	}{
-		{"nil", `null`, nil, false, false},
-		{"empty", `{}`, nil, false, false},
-		{"empty label key", `{"matchLabels":{"":"x"}}`, nil, false, false},
-		{"present empty label", `{"matchLabels":{"a":""}}`, map[string]string{"a": ""}, true, true},
-		{"absent empty label", `{"matchLabels":{"a":""}}`, nil, false, true},
-		{"in", `{"matchExpressions":[{"key":"a","operator":"In","values":["b"]}]}`, map[string]string{"a": "b"}, true, true},
-		{"in missing", `{"matchExpressions":[{"key":"a","operator":"In","values":["b"]}]}`, nil, false, true},
-		{"not in absent", `{"matchExpressions":[{"key":"a","operator":"NotIn","values":["b"]}]}`, nil, true, true},
-		{"exists", `{"matchExpressions":[{"key":"a","operator":"Exists"}]}`, map[string]string{"a": ""}, true, true},
-		{"exists absent", `{"matchExpressions":[{"key":"a","operator":"Exists"}]}`, nil, false, true},
-		{"does not exist", `{"matchExpressions":[{"key":"a","operator":"DoesNotExist"}]}`, nil, true, true},
-		{"does not exist present", `{"matchExpressions":[{"key":"a","operator":"DoesNotExist"}]}`, map[string]string{"a": ""}, false, true},
-		{"unknown operator", `{"matchExpressions":[{"key":"a","operator":"Invalid"}]}`, nil, false, false},
-		{"empty expression key", `{"matchExpressions":[{"key":"","operator":"Exists"}]}`, nil, false, false},
-		{"in no values", `{"matchExpressions":[{"key":"a","operator":"In"}]}`, nil, false, false},
-		{"exists with values", `{"matchExpressions":[{"key":"a","operator":"Exists","values":["b"]}]}`, nil, false, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var selector *kubeLabelSelector
-			if err := json.Unmarshal([]byte(tc.selector), &selector); err != nil {
-				t.Fatal(err)
-			}
-			match, valid := selector.matches(tc.labels)
-			if match != tc.wantMatch || valid != tc.wantValid {
-				t.Fatalf("match=%v valid=%v", match, valid)
-			}
-		})
-	}
-}
-
-func TestStoppedPodRelevant(t *testing.T) {
-	t.Parallel()
-	parent := workloadRollout{
-		UID:      "parent-uid",
-		Name:     "parent-svc",
-		Selector: &kubeLabelSelector{MatchLabels: map[string]string{"app": "svc"}},
-	}
-	tests := []struct {
-		name  string
-		meta  kubeObjectMeta
-		owned map[string]string
-		want  bool
-	}{
-		{
-			name: "matches label selector",
-			meta: kubeObjectMeta{Labels: map[string]string{"app": "svc"}},
-			want: true,
-		},
-		{
-			name:  "matches owned uid",
-			meta:  kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{UID: "rs-1"}}},
-			owned: map[string]string{"rs-1": "rs-name"},
-			want:  true,
-		},
-		{
-			name: "matches parent uid",
-			meta: kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{UID: "parent-uid"}}},
-			want: true,
-		},
-		{
-			name: "matches restate deployment name",
-			meta: kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{Kind: kindRestateDeployment, Name: "parent-svc"}}},
-			want: true,
-		},
-		{
-			name:  "matches owned rs name",
-			meta:  kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{Kind: "ReplicaSet", Name: "rs-name"}}},
-			owned: map[string]string{"rs-1": "rs-name"},
-			want:  true,
-		},
-		{
-			name: "unrelated pod",
-			meta: kubeObjectMeta{Labels: map[string]string{"app": "other"}},
-			want: false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := stoppedPodRelevant(parent, tc.meta, tc.owned)
-			if got != tc.want {
-				t.Fatalf("stoppedPodRelevant() = %v, want %v", got, tc.want)
 			}
 		})
 	}
