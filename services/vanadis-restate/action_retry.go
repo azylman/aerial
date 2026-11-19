@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -70,4 +72,33 @@ func (r retryReconcileRuntime) RunReconcileStep(name string, fn func(context.Con
 
 func retryActionRequestMatches(req store.RetryActionChunkRequest, key string) bool {
 	return validRetryInstructionPair(req) && strings.TrimSpace(req.BuildID) != "" && req.BuildID == key && strings.TrimSpace(req.ChunkID) != "" && strings.TrimSpace(req.ExpectedDispatchID) != "" && strings.TrimSpace(req.Reason) != ""
+}
+
+// Shared retry helpers below (lockRetryBuildAndChunks, validRetryInstructionPair)
+// mirror the internal/store copies byte-for-byte for the remaining root callers
+// (retry request matching here, attachPRTransaction in pr_attachment.go); the
+// store copies are authoritative until later chunks move those callers.
+func validRetryInstructionPair(req store.RetryActionChunkRequest) bool {
+	if req.ExpectedInstructions == nil && req.ReplacementInstructions == nil {
+		return true
+	}
+	return req.ExpectedInstructions != nil && req.ReplacementInstructions != nil && strings.TrimSpace(*req.ExpectedInstructions) != "" && strings.TrimSpace(*req.ReplacementInstructions) != ""
+}
+
+// lockRetryBuildAndChunks follows the parent-first ordering used by existing mutations.
+func lockRetryBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (model.VanadisBuild, []model.VanadisChunk, error) {
+	b, err := store.ScanBuild(tx.QueryRow(ctx, `SELECT `+store.BuildColumns+` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return b, nil, store.ErrBuildNotFound
+	}
+	if err != nil {
+		return b, nil, err
+	}
+	rows, err := tx.Query(ctx, store.SelectChunksForUpdateSQL, buildID)
+	if err != nil {
+		return b, nil, err
+	}
+	defer rows.Close()
+	chunks, err := store.ScanChunks(rows)
+	return b, chunks, err
 }

@@ -1,97 +1,25 @@
 package main
 
+// Shared retry/recovery test fixtures retained in the root package while the
+// remaining consumers complete their moves: action_retry_test.go (handler
+// tests, staying) uses retryFixtureStore; store_pr_recovery_test.go (chunk 8)
+// uses buildRow and retryTransaction. The Test functions that lived in this
+// file moved to internal/store in chunk 7; these helpers are temporarily
+// duplicated across both packages until chunk 8 consolidates them.
+
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-func TestPostgresVanadisStore_RetryActionChunk(t *testing.T) {
-	t.Parallel()
-	injectedErr := errors.New("injected database failure")
-	tests := []struct {
-		name        string
-		buildStatus string
-		chunk       model.VanadisChunk
-		siblings    []model.VanadisChunk
-		expected    string
-		db          dbScript
-		wantErr     bool
-		wantErrIs   error
-		request     *store.RetryActionChunkRequest
-	}{
-		{name: "empty build", request: &store.RetryActionChunkRequest{ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}, wantErr: true, wantErrIs: store.ErrInvalidBuildInput},
-		{name: "empty chunk", request: &store.RetryActionChunkRequest{BuildID: "b1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}, wantErr: true, wantErrIs: store.ErrInvalidBuildInput},
-		{name: "blank reason", request: &store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: " "}, wantErr: true, wantErrIs: store.ErrInvalidBuildInput},
-		{name: "negative generation", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: -1}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "failed replay", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: 1}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "missing prerequisite", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"absent"}}, expected: "vanadis-c1-turn-0", wantErr: true},
-
-		{name: "generation overflow", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: 2147483647}, expected: "vanadis-c1-turn-2147483647", wantErr: true},
-		{name: "transitive completed descendant", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, siblings: []model.VanadisChunk{{ID: "c3", Status: "completed", DependsOn: []string{"c2"}}, {ID: "c2", Status: "pending", DependsOn: []string{"c1"}}}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "nil receiver", db: dbScript{bare: nilReceiver}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "nil database", db: dbScript{bare: nilDB}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "parent not found", db: dbScript{routes: []sqlRoute{{match: "FROM vanadis_builds", row: errRow(pgx.ErrNoRows)}}}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: store.ErrBuildNotFound},
-		{name: "parent query error", db: dbScript{routes: []sqlRoute{{match: "FROM vanadis_builds", row: errRow(injectedErr)}}}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
-		{name: "selected absent", buildStatus: "failed", chunk: model.VanadisChunk{ID: "other", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: ErrChunkNotFound},
-		{name: "failed action", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0"},
-		{name: "committed reset replay pending", buildStatus: "running", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "pending", StallNudges: 1}, expected: "vanadis-c1-turn-0"},
-		{name: "replay after independent sibling launch", buildStatus: "running", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}, siblings: []model.VanadisChunk{{ID: "c2", Status: "running"}}, expected: "vanadis-c1-turn-0"},
-		{name: "committed reset replay running", buildStatus: "running", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}, expected: "vanadis-c1-turn-0"},
-		{name: "terminal replay", buildStatus: "completed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "missing identity", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, wantErr: true},
-		{name: "stale identity", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: 2}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "cancelled parent", buildStatus: "cancelled", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "pr action", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", PRNumber: 12}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "pr mode", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "failed"}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "cancelled selected", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "cancelled"}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "failed sibling", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, siblings: []model.VanadisChunk{{ID: "c2", Status: "failed"}}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "cancelled sibling", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, siblings: []model.VanadisChunk{{ID: "c2", Status: "cancelled"}}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "active sibling", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, siblings: []model.VanadisChunk{{ID: "c2", Status: "deploying"}}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "unready dependency", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}}, siblings: []model.VanadisChunk{{ID: "c0", Mode: "pr", Status: "merged"}}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "completed descendant", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, siblings: []model.VanadisChunk{{ID: "c2", Status: "completed", DependsOn: []string{"c1"}}}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "safe graph", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}}, siblings: []model.VanadisChunk{{ID: "c0", Status: "completed"}, {ID: "c2", Status: "pending", DependsOn: []string{"c1"}}}, expected: "vanadis-c1-turn-0"},
-		{name: "begin failure", db: dbScript{beginErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
-		{name: "query failure", buildStatus: "failed", db: dbScript{queryErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
-		{name: "scan failure", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1"}, db: dbScript{scanErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
-		{name: "rows failure", buildStatus: "failed", db: dbScript{rowsErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
-		{name: "chunk write rollback", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("write")}, wantErr: true},
-		{name: "commit failure", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", db: dbScript{commitErr: errors.New("commit")}, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tc.db.buildRow = buildRow("b1", tc.buildStatus)
-			tc.db.chunks = append([]model.VanadisChunk{tc.chunk}, tc.siblings...)
-			st, _ := tc.db.open()
-			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: tc.expected, Reason: "operator retry"}
-			if tc.request != nil {
-				req = *tc.request
-			}
-			got, err := st.RetryActionChunk(context.Background(), req)
-			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
-				t.Fatalf("err=%v want=%v", err, tc.wantErrIs)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("result=%+v err=%v wantErr=%v", got, err, tc.wantErr)
-			}
-			if !tc.wantErr && (got == nil || *got != (store.RetryActionChunkResult{BuildID: "b1", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Accepted: true})) {
-				t.Fatalf("result=%+v", got)
-			}
-		})
-	}
-}
 
 // retryTransaction models the external database's atomic commit and parent lock.
 // State changes remain private until Commit; Rollback discards them.
@@ -103,70 +31,6 @@ type retryTransaction struct {
 
 func (tx *retryTransaction) Commit(context.Context) error   { return tx.finish(true) }
 func (tx *retryTransaction) Rollback(context.Context) error { return tx.finish(false) }
-
-func TestPostgresVanadisStore_RetryActionChunkTransactions(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name                                          string
-		concurrent                                    int
-		failBuild                                     bool
-		lostCommit                                    bool
-		wantErr                                       bool
-		wantStatus                                    string
-		wantGeneration                                int
-		expectedInstructions, replacementInstructions *string
-		wantInstructions                              string
-		replayChanged                                 bool
-	}{
-		{name: "correction rolls back", concurrent: 1, failBuild: true, wantErr: true, expectedInstructions: new("verify"), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed"},
-		{name: "corrected", concurrent: 8, expectedInstructions: new("verify"), replacementInstructions: new("corrected"), wantInstructions: "corrected", wantStatus: "pending", wantGeneration: 1},
-		{name: "instruction mismatch", concurrent: 1, wantErr: true, expectedInstructions: new("other"), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
-		{name: "exact mismatch", concurrent: 1, wantErr: true, expectedInstructions: new("verify "), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
-		{name: "changed replay payload", concurrent: 1, replayChanged: true, expectedInstructions: new("verify"), replacementInstructions: new("corrected"), wantInstructions: "corrected", wantStatus: "pending", wantGeneration: 1},
-		{name: "missing replacement", concurrent: 1, wantErr: true, expectedInstructions: new("verify"), replacementInstructions: nil, wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
-		{name: "missing expected", concurrent: 1, wantErr: true, expectedInstructions: nil, replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
-		{name: "blank expected", concurrent: 1, wantErr: true, expectedInstructions: new(" "), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
-		{name: "blank replacement", concurrent: 1, wantErr: true, expectedInstructions: new("verify"), replacementInstructions: new(" "), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
-		{name: "duplicate concurrent requests", concurrent: 8, wantStatus: "pending", wantGeneration: 1},
-		{name: "build write rolls back reset", concurrent: 1, failBuild: true, wantErr: true, wantStatus: "failed"},
-		{name: "committed before journal replay", concurrent: 1, lostCommit: true, wantErr: true, wantStatus: "pending", wantGeneration: 1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var mu sync.Mutex
-			buildStatus := "failed"
-			original := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}, StallNudges: 0, Instructions: "verify"}
-			current := original
-			sibling := model.VanadisChunk{ID: "c0", BuildID: "b1", Status: "completed"}
-			lost := tc.lostCommit
-			st := retryFixtureStore(&mu, &current, &buildStatus, sibling, tc.failBuild, &lost)
-			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
-			for err := range retryConcurrentRequests(st, req, tc.concurrent) {
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
-				}
-			}
-			if tc.lostCommit || tc.replayChanged {
-				req.ExpectedInstructions, req.ReplacementInstructions = new("different"), new("ignored")
-				result, err := st.RetryActionChunk(context.Background(), req)
-				if err != nil || !validRetryResult(result) {
-					t.Fatalf("replay=%+v err=%v", result, err)
-				}
-			}
-			if current.Status != tc.wantStatus || current.StallNudges != tc.wantGeneration {
-				t.Fatalf("status=%s generation=%d", current.Status, current.StallNudges)
-			}
-			if current.Instructions != cmp.Or(tc.wantInstructions, "verify") {
-				t.Fatalf("instructions=%q", current.Instructions)
-			}
-			wantParent := map[string]string{"pending": "running", "failed": "failed"}[tc.wantStatus]
-			if buildStatus != wantParent {
-				t.Fatalf("parent=%s", buildStatus)
-			}
-		})
-	}
-}
 
 func retryFixtureStore(mu *sync.Mutex, current *model.VanadisChunk, buildStatus *string, sibling model.VanadisChunk, failBuild bool, lost *bool) *PostgresVanadisStore {
 	return newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) {
@@ -217,10 +81,6 @@ func retryFixtureStore(mu *sync.Mutex, current *model.VanadisChunk, buildStatus 
 	}})
 }
 
-func validRetryResult(result *store.RetryActionChunkResult) bool {
-	return result != nil && result.DispatchID == "vanadis-c1-turn-1" && result.Accepted
-}
-
 func retryFixtureExec(query string, local *model.VanadisChunk, parent *string, failBuild bool, args ...any) (pgconn.CommandTag, error) {
 	switch {
 	case strings.Contains(query, "UPDATE vanadis_chunks"):
@@ -245,23 +105,6 @@ func retryFixtureExec(query string, local *model.VanadisChunk, parent *string, f
 		return pgconn.CommandTag{}, errors.New("unexpected mutation")
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
-}
-
-func retryConcurrentRequests(st *PostgresVanadisStore, req store.RetryActionChunkRequest, concurrent int) <-chan error {
-	results := make(chan error, concurrent)
-	var wg sync.WaitGroup
-	for range concurrent {
-		wg.Go(func() {
-			result, err := st.RetryActionChunk(context.Background(), req)
-			if err == nil && (!validRetryResult(result)) {
-				err = fmt.Errorf("unexpected result %+v", result)
-			}
-			results <- err
-		})
-	}
-	wg.Wait()
-	close(results)
-	return results
 }
 
 func buildRow(id, status string) pgx.Row {
