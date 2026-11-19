@@ -88,11 +88,12 @@ func (e *Executor) ciClient() *cilog.Client {
 	if e == nil {
 		return nil
 	}
-	return &cilog.Client{
-		GitHubToken:  e.gitHubToken,
-		GitHubAPIURL: e.GitHubAPIURL,
-		HTTPClient:   e.HTTPClient,
+	c := cilog.NewClient(e.gitHubToken, e.HTTPClient)
+	c.GitHubAPIURL = e.GitHubAPIURL
+	if e.HTTPClient == nil {
+		c.HTTPClient = nil
 	}
+	return c
 }
 
 // FormatChunkPrompt renders a structured prompt for executing a specific chunk.

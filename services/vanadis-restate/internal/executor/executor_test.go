@@ -352,6 +352,12 @@ func TestExecutorCoordinatorBranches(t *testing.T) {
 	if err := execNoBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
 		t.Fatalf("PublishExternalEvent with nil bus failed: %v", err)
 	}
+
+	// Hand-constructed executor without an HTTP client resolves to details, not a fetch.
+	bare := &Executor{gitHubToken: "t"}
+	if got := bare.ResolveCIFailureDetails(ctx, "aerial", 0, "unit", "sha", "", "details"); got != "details" {
+		t.Errorf("bare executor details = %q, want details", got)
+	}
 }
 
 func TestExecutorCILogDelegation(t *testing.T) {
