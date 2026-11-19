@@ -6,7 +6,6 @@ default_backup_agent = "muse"
 default_backup_model = "muse-spark-1.3-contributor"
 review_backup_agent = "muse"
 review_backup_model = "muse-spark-1.3-contributor"
-muse_cmd = "/usr/local/bin/muse-roborev"
 disable_codex_sandbox = true
 review_reasoning = "low"
 review_min_severity = "medium"
