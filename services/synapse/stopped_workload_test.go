@@ -125,3 +125,60 @@ func TestKubeLabelSelectorMatches(t *testing.T) {
 		})
 	}
 }
+
+func TestStoppedPodRelevant(t *testing.T) {
+	t.Parallel()
+	parent := workloadRollout{
+		UID:      "parent-uid",
+		Name:     "parent-svc",
+		Selector: &kubeLabelSelector{MatchLabels: map[string]string{"app": "svc"}},
+	}
+	tests := []struct {
+		name  string
+		meta  kubeObjectMeta
+		owned map[string]string
+		want  bool
+	}{
+		{
+			name: "matches label selector",
+			meta: kubeObjectMeta{Labels: map[string]string{"app": "svc"}},
+			want: true,
+		},
+		{
+			name:  "matches owned uid",
+			meta:  kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{UID: "rs-1"}}},
+			owned: map[string]string{"rs-1": "rs-name"},
+			want:  true,
+		},
+		{
+			name: "matches parent uid",
+			meta: kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{UID: "parent-uid"}}},
+			want: true,
+		},
+		{
+			name: "matches restate deployment name",
+			meta: kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{Kind: kindRestateDeployment, Name: "parent-svc"}}},
+			want: true,
+		},
+		{
+			name:  "matches owned rs name",
+			meta:  kubeObjectMeta{OwnerReferences: []kubeOwnerReference{{Kind: "ReplicaSet", Name: "rs-name"}}},
+			owned: map[string]string{"rs-1": "rs-name"},
+			want:  true,
+		},
+		{
+			name: "unrelated pod",
+			meta: kubeObjectMeta{Labels: map[string]string{"app": "other"}},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stoppedPodRelevant(parent, tc.meta, tc.owned)
+			if got != tc.want {
+				t.Fatalf("stoppedPodRelevant() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
