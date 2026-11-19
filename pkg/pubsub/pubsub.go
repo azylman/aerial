@@ -29,10 +29,11 @@ const (
 
 // Stream names across the cluster.
 const (
-	StreamAerialEvents    = "AERIAL_EVENTS"
-	StreamAerialJobs      = "AERIAL_JOBS"
-	StreamAerialCoalesced = "AERIAL_COALESCED"
-	StreamVisionJobs      = "VISION_JOBS"
+	StreamAerialEvents      = "AERIAL_EVENTS"
+	StreamAerialJobs        = "AERIAL_JOBS"
+	StreamAerialCoalesced   = "AERIAL_COALESCED"
+	StreamAerialTranscripts = "AERIAL_TRANSCRIPTS"
+	StreamVisionJobs        = "VISION_JOBS"
 )
 
 // Subject prefixes and well-known subjects.
@@ -43,6 +44,9 @@ const (
 	SubjectAerialPRPrefix             = "aerial.pr."
 	SubjectAerialJobsPrefix           = "aerial.jobs."
 	SubjectAerialCoalescedPrefix      = "aerial.coalesced."
+	SubjectAerialTranscriptsPrefix    = "aerial.transcripts."
+	SubjectTranscriptsStepsPrefix     = "aerial.transcripts.steps."
+	SubjectTranscriptsIndexed         = "aerial.transcripts.indexed"
 	SubjectAerialTurnCompleted        = "aerial.turn.completed"
 	SubjectAerialTurnTranscriptSynced = "aerial.turn.transcript_synced"
 	SubjectCovenExtractPrefix         = "aerial.coalesced.coven_extract."
@@ -135,6 +139,21 @@ type TranscriptSyncedEvent struct {
 	ConversationID string    `json:"conversation_id"`
 	StepsInserted  int       `json:"steps_inserted"`
 	SyncedAt       time.Time `json:"synced_at"`
+}
+
+// TranscriptsIndexedEvent represents transcript step-batch indexing completion
+// on aerial.transcripts.indexed. The indexer publishes one event per ingested
+// batch; a duplicate Final batch re-publish is expected and safe.
+type TranscriptsIndexedEvent struct {
+	Stack        string    `json:"stack"`
+	SessionID    string    `json:"session_id"`
+	ThreadID     string    `json:"thread_id,omitempty"`
+	FileMtime    time.Time `json:"file_mtime"`
+	FirstStep    int       `json:"first_step"`
+	LastStep     int       `json:"last_step"`
+	StepsIndexed int       `json:"steps_indexed"`
+	Final        bool      `json:"final"`
+	IndexedAt    time.Time `json:"indexed_at"`
 }
 
 // TurnCompletedEvent represents an agent conversation turn completion on aerial.turn.completed.
@@ -244,6 +263,16 @@ func cleanSubjectToken(token string) string {
 	return t
 }
 
+// SubjectTranscriptsSteps returns the step-batch subject for a session's transcript.
+func SubjectTranscriptsSteps(sessionID string) string {
+	t := cleanSubjectToken(sessionID)
+	t = strings.ReplaceAll(t, ".", "-")
+	if t == "" {
+		t = unknownSubjectToken
+	}
+	return SubjectTranscriptsStepsPrefix + t
+}
+
 // SubjectCovenExtractCoalesced returns the coalesced subject for a thread's fact extraction.
 func SubjectCovenExtractCoalesced(threadID string) string {
 	t := cleanSubjectToken(threadID)
@@ -301,7 +330,7 @@ type PRLifecycleEvent struct {
 	OccurredAt   time.Time       `json:"occurred_at"`
 }
 
-// EnsureCoreStreams ensures the three core streams exist with their specified topologies.
+// EnsureCoreStreams ensures the four core streams exist with their specified topologies.
 func EnsureCoreStreams(ctx context.Context, bus Bus) error {
 	if bus == nil {
 		return errors.New("pubsub: bus is nil")
@@ -579,7 +608,7 @@ func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durab
 	return stream, nil
 }
 
-// EnsureCoreStreams registers and reconciles the 3 primary JetStream streams.
+// EnsureCoreStreams registers and reconciles the 4 primary JetStream streams.
 func (b *JetStreamBus) EnsureCoreStreams(ctx context.Context) error {
 	configs := []*nats.StreamConfig{
 		{
@@ -610,8 +639,19 @@ func (b *JetStreamBus) EnsureCoreStreams(ctx context.Context) error {
 			MaxMsgsPerSubject: 1,
 			Discard:           nats.DiscardOld,
 			Storage:           nats.FileStorage,
-			MaxAge:            24 * time.Hour,
+			MaxAge:            72 * time.Hour,
 			MaxBytes:          64 * 1024 * 1024,
+		},
+		{
+			Name:        StreamAerialTranscripts,
+			Description: "Per-turn transcript step batches",
+			Subjects:    []string{"aerial.transcripts.>"},
+			Retention:   nats.WorkQueuePolicy,
+			Storage:     nats.FileStorage,
+			MaxAge:      72 * time.Hour,
+			MaxBytes:    128 * 1024 * 1024,
+			Discard:     nats.DiscardNew,
+			Duplicates:  30 * time.Minute,
 		},
 	}
 
@@ -623,10 +663,44 @@ func (b *JetStreamBus) EnsureCoreStreams(ctx context.Context) error {
 	return nil
 }
 
+// mergeStreamLimits returns the desired config with retention floors raised to
+// the broker's existing values. Old pods still UpdateStream at startup, so a
+// rollout must never shrink a stream below limits an earlier release set:
+// MaxAge and MaxBytes only ever grow here. A zero MaxAge and a -1 MaxBytes
+// each mean unlimited and always win, so an unlimited stream is never capped.
+func mergeStreamLimits(desired, existing *nats.StreamConfig) *nats.StreamConfig {
+	merged := *desired
+	merged.MaxAge = maxStreamAge(desired.MaxAge, existing.MaxAge)
+	merged.MaxBytes = maxStreamBytes(desired.MaxBytes, existing.MaxBytes)
+	return &merged
+}
+
+// maxStreamAge returns the larger age limit, where zero means unlimited.
+func maxStreamAge(desired, existing time.Duration) time.Duration {
+	if desired == 0 || existing == 0 {
+		return 0
+	}
+	if existing > desired {
+		return existing
+	}
+	return desired
+}
+
+// maxStreamBytes returns the larger byte limit, where -1 means unlimited.
+func maxStreamBytes(desired, existing int64) int64 {
+	if desired == -1 || existing == -1 {
+		return -1
+	}
+	if existing > desired {
+		return existing
+	}
+	return desired
+}
+
 func (b *JetStreamBus) ensureStream(cfg *nats.StreamConfig) error {
 	info, err := b.js.StreamInfo(cfg.Name)
 	if err == nil && info != nil {
-		_, err = b.js.UpdateStream(cfg)
+		_, err = b.js.UpdateStream(mergeStreamLimits(cfg, &info.Config))
 		return err
 	}
 	if errors.Is(err, nats.ErrStreamNotFound) {
