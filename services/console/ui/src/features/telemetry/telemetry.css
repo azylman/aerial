@@ -709,25 +709,27 @@ html.motion-ready .step-panel.step-active {
     border-radius: 8px;
     padding: 0.75rem 1rem;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.6rem;
     text-align: left;
     width: 100%;
     color: var(--text-primary);
     font-family: inherit;
     font-size: 0.85rem;
-    cursor: pointer;
     transition: all 0.2s ease;
     box-sizing: border-box;
 }
 
 .overview-schedule-row {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0.6rem;
+    cursor: pointer;
 }
 
+.overview-build-row {
+    cursor: default;
+}
+
+.overview-build-header,
 .overview-schedule-header {
     display: flex;
     align-items: center;
@@ -738,13 +740,63 @@ html.motion-ready .step-panel.step-active {
     min-width: 0;
 }
 
+.overview-build-header {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+}
+
+.overview-build-header .overview-row-left,
 .overview-schedule-header .overview-row-left {
     min-width: 140px;
 }
 
+.overview-build-header .overview-row-right,
 .overview-schedule-header .overview-row-right {
     flex-wrap: wrap;
     min-width: 0;
+}
+
+.overview-build-dag {
+    margin-top: 0.25rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--card-border);
+    width: 100%;
+}
+
+.overview-build-loading,
+.overview-build-empty,
+.overview-build-error {
+    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    padding: 0.85rem 1rem;
+    text-align: center;
+    border-radius: 6px;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--card-border);
+    box-sizing: border-box;
+}
+
+.overview-build-loading {
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.overview-build-empty {
+    color: var(--text-muted);
+}
+
+.overview-build-error {
+    color: var(--accent-crimson, #b91c1c);
+    border-color: rgba(185, 28, 28, 0.3);
+    background: rgba(185, 28, 28, 0.05);
 }
 
 .overview-schedule-chevron {
@@ -789,7 +841,13 @@ html.motion-ready .step-panel.step-active {
     box-shadow: 0 2px 8px rgba(20, 20, 19, 0.06);
 }
 
+.overview-build-row.expanded,
 .overview-schedule-row.expanded {
+    border-color: var(--accent-primary, #c2410c);
+}
+
+.overview-build-row.expanded:hover,
+.overview-schedule-row.expanded:hover {
     border-color: var(--accent-primary, #c2410c);
 }
 
