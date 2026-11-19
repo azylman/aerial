@@ -38,27 +38,26 @@ const (
 
 // Subject prefixes and well-known subjects.
 const (
-	SubjectAerialDispatchPrefix       = "aerial.dispatch."
-	SubjectAerialEventsPrefix         = "aerial.events."
-	SubjectAerialTurnPrefix           = "aerial.turn."
-	SubjectAerialPRPrefix             = "aerial.pr."
-	SubjectAerialJobsPrefix           = "aerial.jobs."
-	SubjectAerialCoalescedPrefix      = "aerial.coalesced."
-	SubjectAerialTranscriptsPrefix    = "aerial.transcripts."
-	SubjectTranscriptsStepsPrefix     = "aerial.transcripts.steps."
-	SubjectTranscriptsIndexed         = "aerial.transcripts.indexed"
-	SubjectAerialTurnCompleted        = "aerial.turn.completed"
-	SubjectAerialTurnTranscriptSynced = "aerial.turn.transcript_synced"
-	SubjectCovenExtractPrefix         = "aerial.coalesced.coven_extract."
-	SubjectBuildWidgetSyncPrefix      = "aerial.coalesced.widget_sync.build."
-	SubjectBuildWidgetSyncWildcard    = SubjectBuildWidgetSyncPrefix + "*"
-	SubjectProsperaReportJob          = "aerial.jobs.prospera.report"
-	SubjectProsperaVoicemailJob       = "aerial.jobs.prospera.voicemail"
-	SubjectProsperaSMSJob             = "aerial.jobs.prospera.sms"
-	SubjectEriPromptJob               = "aerial.jobs.eri.prompt"
-	SubjectEriDispatchJob             = "aerial.jobs.eri.dispatch"
-	SubjectEriDiscordMessageJob       = "aerial.jobs.eri.discord_message"
-	SubjectHaroOneShotJob             = "aerial.jobs.haro.oneshot"
+	SubjectAerialDispatchPrefix    = "aerial.dispatch."
+	SubjectAerialEventsPrefix      = "aerial.events."
+	SubjectAerialTurnPrefix        = "aerial.turn."
+	SubjectAerialPRPrefix          = "aerial.pr."
+	SubjectAerialJobsPrefix        = "aerial.jobs."
+	SubjectAerialCoalescedPrefix   = "aerial.coalesced."
+	SubjectAerialTranscriptsPrefix = "aerial.transcripts."
+	SubjectTranscriptsStepsPrefix  = "aerial.transcripts.steps."
+	SubjectTranscriptsIndexed      = "aerial.turn.transcripts_indexed"
+	SubjectAerialTurnCompleted     = "aerial.turn.completed"
+	SubjectCovenExtractPrefix      = "aerial.coalesced.coven_extract."
+	SubjectBuildWidgetSyncPrefix   = "aerial.coalesced.widget_sync.build."
+	SubjectBuildWidgetSyncWildcard = SubjectBuildWidgetSyncPrefix + "*"
+	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
+	SubjectProsperaVoicemailJob    = "aerial.jobs.prospera.voicemail"
+	SubjectProsperaSMSJob          = "aerial.jobs.prospera.sms"
+	SubjectEriPromptJob            = "aerial.jobs.eri.prompt"
+	SubjectEriDispatchJob          = "aerial.jobs.eri.dispatch"
+	SubjectEriDiscordMessageJob    = "aerial.jobs.eri.discord_message"
+	SubjectHaroOneShotJob          = "aerial.jobs.haro.oneshot"
 )
 
 // Well-known headers.
@@ -133,16 +132,8 @@ type ExternalEvent struct {
 	OccurredAt    time.Time `json:"occurred_at"`
 }
 
-// TranscriptSyncedEvent represents transcript indexing completion on aerial.turn.transcript_synced.
-type TranscriptSyncedEvent struct {
-	SessionID      string    `json:"session_id"`
-	ConversationID string    `json:"conversation_id"`
-	StepsInserted  int       `json:"steps_inserted"`
-	SyncedAt       time.Time `json:"synced_at"`
-}
-
 // TranscriptsIndexedEvent represents transcript step-batch indexing completion
-// on aerial.transcripts.indexed. The indexer publishes one event per ingested
+// on aerial.turn.transcripts_indexed. The indexer publishes one event per ingested
 // batch; a duplicate Final batch re-publish is expected and safe.
 type TranscriptsIndexedEvent struct {
 	Stack        string    `json:"stack"`
