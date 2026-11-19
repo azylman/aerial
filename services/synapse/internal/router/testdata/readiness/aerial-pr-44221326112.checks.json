@@ -1,0 +1,382 @@
+{
+  "check_runs": [
+    {
+      "id": 134525435721,
+      "name": "Promote Images to :latest",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "5e1eae47-f2ae-5080-8e4d-74a882795b6f",
+      "status": "completed",
+      "conclusion": "skipped",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134525406187,
+      "name": "build-metadata",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:final",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"final\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"results\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-coven:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:f09b9716f4e8549b1024654820ee435f3d2b540e146cd3d4561c82402d42ca10\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-discord-mcp:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:7ceac05482a2951d73ac0ce9085b2a6117e6d354e6deb5730f94cc3b89f41405\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-docket-mcp:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:a355d7f9b5fe9e471f9f5eb768e9e81e0e3759dea8cc4a2d402c010671791878\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-kernel-mcp:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:0fdef5d6efccd430eda4369f97b49811d17b019fd91c4bb075e58e106466644c\"},{\"service\":\"console\",\"image_name\":\"aerial-console\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-console:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:cd4e3527fd5a92ff0294954561f97650f9b46f9638240dc7a0572706eb7ad068\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-prospera:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:c84f16d7d36958e86ef504850bbc41ffc91f860bd3b418ba218439822350ed9f\"}]}"
+      }
+    },
+    {
+      "id": 134524967808,
+      "name": "CI Gate",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "a274e0d3-3686-59da-8a0c-1b1dd89a6bd5",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523991503,
+      "name": "build-metadata-result",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:discord-mcp",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"result\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-discord-mcp:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:7ceac05482a2951d73ac0ce9085b2a6117e6d354e6deb5730f94cc3b89f41405\"}"
+      }
+    },
+    {
+      "id": 134523988377,
+      "name": "build-metadata-result",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:coven",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"result\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"service\":\"coven\",\"image_name\":\"aerial-coven\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-coven:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:f09b9716f4e8549b1024654820ee435f3d2b540e146cd3d4561c82402d42ca10\"}"
+      }
+    },
+    {
+      "id": 134523985481,
+      "name": "build-metadata-result",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:console",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"result\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"service\":\"console\",\"image_name\":\"aerial-console\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-console:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:cd4e3527fd5a92ff0294954561f97650f9b46f9638240dc7a0572706eb7ad068\"}"
+      }
+    },
+    {
+      "id": 134523983946,
+      "name": "build-metadata-result",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:kernel-mcp",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"result\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-kernel-mcp:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:0fdef5d6efccd430eda4369f97b49811d17b019fd91c4bb075e58e106466644c\"}"
+      }
+    },
+    {
+      "id": 134523982921,
+      "name": "build-metadata-result",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:docket-mcp",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"result\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-docket-mcp:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:a355d7f9b5fe9e471f9f5eb768e9e81e0e3759dea8cc4a2d402c010671791878\"}"
+      }
+    },
+    {
+      "id": 134523850809,
+      "name": "build-metadata-result",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:prospera",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"result\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}],\"service\":\"prospera\",\"image_name\":\"aerial-prospera\",\"state\":\"success\",\"pushed\":true,\"source_attempt\":1,\"image_refs\":[\"ghcr.io/azylman/aerial-prospera:tree-d6e643f43d6e01886ed67aa53b778a22270fc37a\"],\"digest\":\"sha256:c84f16d7d36958e86ef504850bbc41ffc91f860bd3b418ba218439822350ed9f\"}"
+      }
+    },
+    {
+      "id": 134523751885,
+      "name": "Lint Microservices & Frontend",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "a0a6d27a-cd1d-5dc6-81ce-c7f63f8ddba7",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751817,
+      "name": "Build & Push Images to GHCR (coven)",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "e4e588e5-420e-506b-b41c-21588fa5aa85",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751801,
+      "name": "Build & Push Images to GHCR (discord-mcp)",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "b6882753-2e11-5460-9d2a-40f6e7ff6f9d",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751782,
+      "name": "Build & Push Images to GHCR (docket-mcp)",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "85c21cce-d177-5fcf-885c-c0620db139b5",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751781,
+      "name": "Build & Push Images to GHCR (kernel-mcp)",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "aec06a9f-5cb4-5312-a2f2-2bc33adc75d7",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751739,
+      "name": "Run Service Unit Tests",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "58084006-2446-5d09-bf3a-6c54a6c32b0b",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751727,
+      "name": "Build & Push Images to GHCR (console)",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "fd374659-f1cd-5206-b124-78a0d7788200",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751718,
+      "name": "Build & Push Images to GHCR (prospera)",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "062db53a-8c04-59a9-9c7c-635856eede01",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523751681,
+      "name": "Console UI E2E Suite",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "ca674864-a1b7-5ad3-a0b3-bc4acbd29d9e",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523724359,
+      "name": "build-metadata",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "build-metadata:v1:azylman/aerial:44221326112:1:manifest",
+      "status": "completed",
+      "conclusion": "neutral",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": "{\"version\":1,\"kind\":\"manifest\",\"repository\":\"azylman/aerial\",\"workflow_path\":\".github/workflows/docker-publish.yml\",\"run_id\":44221326112,\"run_number\":4878,\"run_attempt\":1,\"event\":\"pull_request\",\"source_sha\":\"5a6b51bdfb931bbb0e2d321ff53886f0ada64fea\",\"execution_sha\":\"ca65104a24f394d9de0aef6b14e306553d847a53\",\"pr_number\":1962,\"selected\":[{\"service\":\"coven\",\"image_name\":\"aerial-coven\"},{\"service\":\"discord-mcp\",\"image_name\":\"aerial-discord-mcp\"},{\"service\":\"docket-mcp\",\"image_name\":\"aerial-docket-mcp\"},{\"service\":\"kernel-mcp\",\"image_name\":\"aerial-kernel-mcp\"},{\"service\":\"console\",\"image_name\":\"aerial-console\"},{\"service\":\"prospera\",\"image_name\":\"aerial-prospera\"}]}"
+      }
+    },
+    {
+      "id": 134523618830,
+      "name": "roborev",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "bed2a84d-b241-5aad-9aa8-fd2bdc5d612a",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    },
+    {
+      "id": 134523618718,
+      "name": "Detect Changed Microservices",
+      "head_sha": "5a6b51bdfb931bbb0e2d321ff53886f0ada64fea",
+      "external_id": "08deb545-f1c4-5526-9dbf-15f6b46063bb",
+      "status": "completed",
+      "conclusion": "success",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 119708188883
+      },
+      "output": {
+        "text": null
+      }
+    }
+  ]
+}

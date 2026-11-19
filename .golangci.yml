@@ -120,8 +120,8 @@ linters:
         - (*database/sql.Rows).Close
         - (io.Closer).Close
         - (io.ReadCloser).Close
-        - (*github.com/azylman/aerial/services/synapse.RouterServer).publishPRLifecycleEvent
-        - (*github.com/azylman/aerial/services/synapse.RouterServer).publishDeployLifecycleEvent
+        - (*github.com/azylman/aerial/services/synapse/internal/router.RouterServer).publishPRLifecycleEvent
+        - (*github.com/azylman/aerial/services/synapse/internal/router.RouterServer).publishDeployLifecycleEvent
     funlen:
       lines: 150
       statements: -1
