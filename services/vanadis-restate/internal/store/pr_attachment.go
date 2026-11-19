@@ -1,7 +1,23 @@
-package main
+package store
+
+// PR attachment persistence for vanadis-restate.
+//
+// AttachChunkPR, attachToExistingChunk, attachPRTransaction,
+// attachStandalonePR, resolveAttachChunkPRError, attachmentRecoveryAllowed,
+// AttachmentMatches and firstWorkerFailure moved here from the root package
+// so they promote through the embedded *Store. Attachment matching,
+// standalone PR creation, transaction flow, and error behavior are
+// byte-identical to the root copies they replace.
+//
+// Helper copies below (generateBuildID, cleanRepoName) and the synced and
+// deployed status constants mirror the frozen root router.go and store.go
+// copies byte-for-byte; those root files stay frozen until the
+// facade-removal chunk unifies both copies.
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,15 +27,22 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, req store.AttachChunkPRRequest) (string, string, string, error) {
+// Synced and deployed lifecycle vocabulary needed only by attachment
+// matching below; the remaining status vocabulary lives in
+// build_create_get.go, pr_lifecycle.go, and status_action.go.
+const (
+	statusSynced   = "synced"
+	statusDeployed = "deployed"
+)
+
+func (s *Store) AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
 	if s == nil || s.db == nil {
 		return "", "", "", errors.New("database connection is nil")
 	}
 	if req.PRNumber <= 0 {
-		return "", "", "", fmt.Errorf("%w: chunk id or repo, and valid pr number are required", store.ErrInvalidBuildInput)
+		return "", "", "", fmt.Errorf("%w: chunk id or repo, and valid pr number are required", ErrInvalidBuildInput)
 	}
 	chunkID := strings.TrimSpace(req.ChunkID)
 	if chunkID != "" {
@@ -28,7 +51,7 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, req store.Atta
 	return s.attachStandalonePR(ctx, req)
 }
 
-func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkID string, req store.AttachChunkPRRequest) (string, string, string, error) {
+func (s *Store) attachToExistingChunk(ctx context.Context, chunkID string, req AttachChunkPRRequest) (string, string, string, error) {
 	var mode string
 	chkErr := s.db.QueryRow(ctx, `SELECT mode FROM vanadis_chunks WHERE id = $1;`, chunkID).Scan(&mode)
 	if chkErr != nil {
@@ -38,11 +61,11 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 		return "", "", "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
 	}
 	if mode == chunkModeAction {
-		repo := store.NormalizeRepo(req.Repo)
+		repo := NormalizeRepo(req.Repo)
 		if repo == "" {
-			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", store.ErrInvalidBuildInput)
+			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", ErrInvalidBuildInput)
 		}
-		candidates := store.RepoMatchCandidates(repo)
+		candidates := RepoMatchCandidates(repo)
 		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status = 'failed' OR (c.repo = ANY($4) AND c.pr_number = $2 AND c.status IN ('ci_failed', 'conflict', 'merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed')) THEN c.status ELSE 'pr_opened' END, banner = CASE WHEN c.status IN ('ci_failed', 'conflict') AND (NOT (c.repo = ANY($4)) OR c.pr_number IS DISTINCT FROM $2) THEN '' ELSE c.banner END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.repo = '' OR c.repo = ANY($4)) AND (c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed') OR (c.repo = ANY($4) AND c.pr_number = $2)) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		var buildID, returnChunkID, threadID string
 		err := s.db.QueryRow(ctx, qAction, repo, req.PRNumber, chunkID, candidates).Scan(&buildID, &returnChunkID, &threadID)
@@ -58,7 +81,7 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 }
 
 // Lock the parent before its chunks, matching lifecycle and retry mutations.
-func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID string, req store.AttachChunkPRRequest) (string, string, string, error) {
+func (s *Store) attachPRTransaction(ctx context.Context, chunkID string, req AttachChunkPRRequest) (string, string, string, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return "", "", "", err
@@ -90,13 +113,13 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 		return "", "", "", ErrChunkNotFound
 	}
 	c := *selected
-	if !attachmentMatches(c, b, req) {
-		return "", "", "", store.ErrBuildConflict
+	if !AttachmentMatches(c, b, req) {
+		return "", "", "", ErrBuildConflict
 	}
 
 	recoverWorker := firstWorkerFailure(c)
 	if recoverWorker && !attachmentRecoveryAllowed(b, chunks, c.ID) {
-		return "", "", "", store.ErrBuildConflict
+		return "", "", "", ErrBuildConflict
 	}
 
 	// Recovery clears only worker failure evidence; CI budgets and dispatch identity survive.
@@ -115,10 +138,10 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 	return b.ID, c.ID, b.ThreadID, nil
 }
 
-func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store.AttachChunkPRRequest) (string, string, string, error) {
-	repo := store.NormalizeRepo(req.Repo)
+func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
+	repo := NormalizeRepo(req.Repo)
 	if repo == "" {
-		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", store.ErrInvalidBuildInput)
+		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", ErrInvalidBuildInput)
 	}
 	tx, txErr := s.db.Begin(ctx)
 	if txErr != nil {
@@ -129,7 +152,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store
 			slog.ErrorContext(ctx, "[vanadis] standalone attach tx rollback error", "error", rbErr)
 		}
 	}()
-	candidates := store.RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(repo)
 	const findExisting = `SELECT c.build_id, c.id, b.thread_id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND c.status != 'cancelled' LIMIT 1;`
 	var existingBuildID, existingChunkID, existingThreadID string
 	fErr := tx.QueryRow(ctx, findExisting, candidates, req.PRNumber).Scan(&existingBuildID, &existingChunkID, &existingThreadID)
@@ -144,7 +167,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store
 	}
 	buildID := generateBuildID()
 	chunkID := buildID + "-chunk-1"
-	title := store.FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, cleanRepoName(repo)))
+	title := FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, cleanRepoName(repo)))
 	threadID := normalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
 	build := model.VanadisBuild{
@@ -178,7 +201,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store
 	if _, err := tx.Exec(ctx, bQ, build.ID, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone build %s: %w", buildID, err)
 	}
-	if err := store.InsertBuildChunk(ctx, tx, buildID, chunk, store.InsertChunkSQL); err != nil {
+	if err := InsertBuildChunk(ctx, tx, buildID, chunk, InsertChunkSQL); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone chunk %s: %w", chunkID, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -187,7 +210,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req store
 	return buildID, chunkID, threadID, nil
 }
 
-func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, chunkID, repo string, prNumber int) error {
+func (s *Store) resolveAttachChunkPRError(ctx context.Context, chunkID, repo string, prNumber int) error {
 	var exists bool
 	checkErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks WHERE id = $1);`, chunkID).Scan(&exists)
 	if checkErr == nil && !exists {
@@ -196,13 +219,13 @@ func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, ch
 	var isCancelled bool
 	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR c.status IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed') OR b.status IN ('cancelled', 'completed')));`, chunkID).Scan(&isCancelled)
 	if cancErr == nil && isCancelled {
-		return fmt.Errorf("%w: chunk %s or parent build is in terminal status", store.ErrBuildConflict, chunkID)
+		return fmt.Errorf("%w: chunk %s or parent build is in terminal status", ErrBuildConflict, chunkID)
 	}
-	candidates := store.RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(repo)
 	var repoMismatch bool
 	mismatchErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks WHERE id = $1 AND repo != '' AND NOT (repo = ANY($2)));`, chunkID, candidates).Scan(&repoMismatch)
 	if mismatchErr == nil && repoMismatch {
-		return fmt.Errorf("%w: chunk %s has mismatching repo", store.ErrBuildConflict, chunkID)
+		return fmt.Errorf("%w: chunk %s has mismatching repo", ErrBuildConflict, chunkID)
 	}
 	return fmt.Errorf("attach pr failed for chunk %s #%d", chunkID, prNumber)
 }
@@ -219,8 +242,8 @@ func attachmentRecoveryAllowed(b model.VanadisBuild, chunks []model.VanadisChunk
 	return true
 }
 
-func attachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req store.AttachChunkPRRequest) bool {
-	candidates := store.RepoMatchCandidates(req.Repo)
+func AttachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req AttachChunkPRRequest) bool {
+	candidates := RepoMatchCandidates(req.Repo)
 	matches := len(candidates) == 0
 	for _, repo := range candidates {
 		if repo == c.Repo {
@@ -233,4 +256,18 @@ func attachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req store.Att
 
 func firstWorkerFailure(c model.VanadisChunk) bool {
 	return c.Mode == "pr" && c.Status == statusFailed && c.PRNumber == 0 && c.CIFailCount == 0
+}
+
+func generateBuildID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
+}
+
+func cleanRepoName(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+		return repo[idx+1:]
+	}
+	return repo
 }
