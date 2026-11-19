@@ -11,10 +11,7 @@ package main
 // are the single source of truth.
 
 import (
-	"context"
 	"database/sql"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
@@ -46,29 +43,4 @@ type (
 // NewToolHandler builds a ToolHandler over database.
 func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
 	return tools.NewToolHandler(cfg, database)
-}
-
-// HandleScheduleHeartbeat handles the schedule_heartbeat MCP tool call.
-func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, args map[string]any) (*mcp.CallToolResult, error) {
-	return tools.HandleScheduleHeartbeat(ctx, db, defaultTZ, args)
-}
-
-// HandleUpdateHeartbeat handles the update_heartbeat MCP tool call.
-func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
-	return tools.HandleUpdateHeartbeat(ctx, db, args)
-}
-
-// HandleWatchEvent registers a deterministic one-shot event watch trigger.
-func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extraSources ...string) (*mcp.CallToolResult, error) {
-	return tools.HandleWatchEvent(ctx, db, args, extraSources...)
-}
-
-// HandleListEventWatches returns active deterministic event watches.
-func HandleListEventWatches(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
-	return tools.HandleListEventWatches(ctx, db, args)
-}
-
-// HandleCancelEventWatch cancels a deterministic event watch trigger.
-func HandleCancelEventWatch(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
-	return tools.HandleCancelEventWatch(ctx, db, args)
 }

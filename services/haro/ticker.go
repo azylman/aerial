@@ -4,10 +4,11 @@ package main
 //
 // The scheduling loop (Ticker, NewTicker, EvaluateDueSchedules, Start,
 // HandleDispatchOutcome and helpers) now lives in internal/ticker. This
-// file keeps zero-logic aliases so main.go and server.go compile untouched
-// until the final purge (haro-07b). The dispatch client aliases and the
-// traceFire wrapper stay here until internal/server takes them over in
-// haro-06; the Ticker aliases below delegate to internal/ticker.
+// file keeps zero-logic aliases so main.go compiles untouched until the
+// final purge (haro-07b). The dispatch client aliases below keep the
+// remaining root callers compiling; the Ticker aliases delegate to
+// internal/ticker. The traceFire wrapper moved to internal/server with
+// the server in haro-07a.
 
 import (
 	"context"
@@ -33,12 +34,6 @@ type (
 
 func NewHTTPPromptDispatcher(brainURL string) *HTTPPromptDispatcher {
 	return dispatch.NewHTTPPromptDispatcher(brainURL)
-}
-
-// traceFire delegates to dispatch.TraceFire so event-trigger call sites in
-// server.go compile untouched until internal/server moves in haro-06.
-func traceFire[R any](ctx context.Context, scheduleType, scheduleID string, fn func(context.Context) (R, error)) (R, error) {
-	return dispatch.TraceFire(ctx, scheduleType, scheduleID, fn)
 }
 
 // Ticker periodically evaluates due schedules and dispatches them.
