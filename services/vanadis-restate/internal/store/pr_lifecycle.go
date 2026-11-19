@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -63,6 +64,217 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 	return nil
 }
 
+// SweptChunk identifies one cross-build swept chunk and the foreign build
+// that owns it.
+type SweptChunk struct {
+	ChunkID string
+	BuildID string
+}
+
+// buildPushJobRegex mirrors the widget Build-and-Push check-name parser so
+// the store can derive a deploy job from CI checks without importing the
+// widget package (which imports the store).
+var buildPushJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
+
+// parseBuildPushServices extracts Build-and-Push job services from CI check
+// names, lowercased for case-insensitive intersection.
+func parseBuildPushServices(checks map[string]string) map[string]struct{} {
+	services := make(map[string]struct{})
+	for name := range checks {
+		m := buildPushJobRegex.FindStringSubmatch(name)
+		if len(m) < 2 {
+			continue
+		}
+		if svc := strings.ToLower(strings.TrimSpace(m[1])); svc != "" && !strings.Contains(svc, "${{") {
+			services[svc] = struct{}{}
+		}
+	}
+	return services
+}
+
+// deployJobSet returns the provable deploy jobs for a chunk: the rollout
+// ExpectedJobs when present, otherwise the Build-and-Push services parsed
+// from CI checks. An empty set means no shared job can be proven.
+func deployJobSet(c model.VanadisChunk) map[string]struct{} {
+	if c.RolloutState != nil {
+		jobs := make(map[string]struct{})
+		for _, job := range c.RolloutState.ExpectedJobs {
+			if clean := strings.ToLower(strings.TrimSpace(job)); clean != "" {
+				jobs[clean] = struct{}{}
+			}
+		}
+		if len(jobs) > 0 {
+			return jobs
+		}
+	}
+	return parseBuildPushServices(c.CIChecks)
+}
+
+// sharedDeployJob reports whether both chunks provably deploy at least one
+// common job. Deployment rolls out per job, so repo-only overlap sweeps
+// nothing: either side without a derivable job set blocks the sweep.
+func sharedDeployJob(a, b model.VanadisChunk) bool {
+	aJobs, bJobs := deployJobSet(a), deployJobSet(b)
+	if len(aJobs) == 0 || len(bJobs) == 0 {
+		return false
+	}
+	for job := range aJobs {
+		if _, ok := bJobs[job]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepPreDeployStatus reports whether a chunk is still pre-deploy (merged,
+// synced, or deploying). Terminal and never-merged chunks are never swept.
+func sweepPreDeployStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case statusMerged, "synced", "deploying":
+		return true
+	default:
+		return false
+	}
+}
+
+// sweepStampProvesInclusion reports whether the candidate's merge stamp
+// proves it landed no later than the deploying chunk's landed commit, with
+// stamp ties broken by lower chunk_index. Either stamp unknown means
+// inclusion is unprovable.
+func sweepStampProvesInclusion(candidate, deploying model.VanadisChunk) bool {
+	if candidate.CompletedAt.IsZero() || deploying.CompletedAt.IsZero() {
+		return false
+	}
+	if candidate.CompletedAt.After(deploying.CompletedAt) {
+		return false
+	}
+	if candidate.CompletedAt.Equal(deploying.CompletedAt) && candidate.ChunkIndex >= deploying.ChunkIndex {
+		return false
+	}
+	return true
+}
+
+// sweepStampStrictlyBefore reports whether the candidate's merge stamp
+// proves it landed strictly before the deploying chunk's landed commit.
+// ChunkIndex is scoped within its own build and cannot order merges across
+// independent builds, so cross-build inclusion never uses the same-build
+// stamp tie-break: a same-tick foreign merge may have landed after the
+// deploying commit and must not complete.
+func sweepStampStrictlyBefore(candidate, deploying model.VanadisChunk) bool {
+	if candidate.CompletedAt.IsZero() || deploying.CompletedAt.IsZero() {
+		return false
+	}
+	return candidate.CompletedAt.Before(deploying.CompletedAt)
+}
+
+// crossBuildSweepEligible checks the gates shared by sweep and recovery:
+// another build, PR mode with a number, same repo, proven merge inclusion,
+// and a shared deploy job. Status gating stays with the callers.
+func crossBuildSweepEligible(candidate, deploying model.VanadisChunk) bool {
+	if candidate.BuildID == "" || candidate.BuildID == deploying.BuildID {
+		return false
+	}
+	if candidate.Mode != "pr" || candidate.PRNumber <= 0 {
+		return false
+	}
+	return sameDeployRepo(candidate.Repo, deploying.Repo) && sweepStampStrictlyBefore(candidate, deploying) && sharedDeployJob(candidate, deploying)
+}
+
+// supersededAcrossBuilds reports whether candidate in another build merged
+// early enough and on a shared job to be contained in the deploying chunk's
+// landed commit.
+func supersededAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
+	return crossBuildSweepEligible(candidate, deploying) && sweepPreDeployStatus(candidate.Status)
+}
+
+// recoveredAcrossBuilds reports whether an already-completed chunk in
+// another build matches the cross-build sweep eligibility. A retry that
+// lands after a prior attempt completed the writes but failed before the
+// side effects re-derives these so events, widget sync, and build
+// completion still happen.
+func recoveredAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
+	return crossBuildSweepEligible(candidate, deploying) && strings.EqualFold(strings.TrimSpace(candidate.Status), statusCompleted)
+}
+
+// CrossBuildDeploymentSweepIDs returns the earlier chunks in OTHER builds a
+// deploy_success also completes: same-repo PR chunks still pre-deploy whose
+// merge stamp is at or before the deploying chunk's merge stamp and that
+// share at least one deploy job with the deploying chunk. Terminal and
+// never-merged chunks, same-build chunks, and job-disjoint chunks are never
+// swept.
+func CrossBuildDeploymentSweepIDs(deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
+	if strings.TrimSpace(deploying.BuildID) == "" {
+		return nil
+	}
+	var swept []SweptChunk
+	for _, candidate := range candidates {
+		if supersededAcrossBuilds(candidate, deploying) {
+			swept = append(swept, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
+		}
+	}
+	return swept
+}
+
+// SweepEarlierDeploymentsAcrossBuilds completes eligible earlier chunks in
+// other builds superseded by the deploying chunk's landed commit and
+// returns every affected chunk and build ID, plus already-completed chunks
+// matching the same eligibility so a retry that lands after the writes but
+// before the side effects can still publish events, re-sync widgets, and
+// complete foreign builds. Skipped transitions (a concurrent completion,
+// failure, or cancellation) are harmless; other errors return the chunks
+// completed so far alongside the error so the caller processes partial
+// progress before the journaled step retries the remainder.
+func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) (swept, recovered []SweptChunk, err error) {
+	if s == nil || s.db == nil {
+		return nil, nil, errors.New("database connection is nil")
+	}
+	if strings.TrimSpace(deploying.BuildID) == "" || strings.TrimSpace(deploying.ID) == "" {
+		return nil, nil, nil
+	}
+	repos := RepoMatchCandidates(deploying.Repo)
+	if len(repos) == 0 {
+		return nil, nil, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'failed', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
+	}
+	defer rows.Close()
+	candidates, err := ScanChunks(rows)
+	if err != nil {
+		return nil, nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
+	}
+	for _, sw := range CrossBuildDeploymentSweepIDs(deploying, candidates) {
+		if err := s.CompletePRDeployment(ctx, sw.ChunkID, nil); err != nil {
+			if errors.Is(err, ErrPRTransitionSkipped) {
+				continue
+			}
+			return swept, recoveredCrossBuildChunks(deploying, candidates), err
+		}
+		swept = append(swept, sw)
+	}
+	return swept, recoveredCrossBuildChunks(deploying, candidates), nil
+}
+
+// recoveredCrossBuildChunks re-derives already-completed chunks matching
+// the cross-build sweep eligibility so a retry can finish their side
+// effects idempotently.
+func recoveredCrossBuildChunks(deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
+	if strings.TrimSpace(deploying.BuildID) == "" {
+		return nil
+	}
+	var recovered []SweptChunk
+	for _, candidate := range candidates {
+		if recoveredAcrossBuilds(candidate, deploying) {
+			recovered = append(recovered, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
+		}
+	}
+	return recovered
+}
+
 // EarlierDeploymentSweepIDs returns the IDs of chunks a deploy_success also
 // completes: every earlier chunk in the same build and repo that is still
 // pre-deploy (merged, synced, or deploying) and whose merge stamp is at or
@@ -97,28 +309,7 @@ func supersededByDeployment(candidate, deploying model.VanadisChunk) bool {
 	if candidate.ID == deploying.ID || candidate.BuildID != deploying.BuildID {
 		return false
 	}
-	if !sameDeployRepo(candidate.Repo, deploying.Repo) {
-		return false
-	}
-	if !deployCompletableMode(candidate) {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(candidate.Status)) {
-	case statusMerged, "synced", "deploying":
-		// Merged, synced, or deploying: still pre-deploy.
-	default:
-		return false
-	}
-	if candidate.CompletedAt.IsZero() || deploying.CompletedAt.IsZero() {
-		return false
-	}
-	if candidate.CompletedAt.After(deploying.CompletedAt) {
-		return false
-	}
-	if candidate.CompletedAt.Equal(deploying.CompletedAt) {
-		return candidate.ChunkIndex < deploying.ChunkIndex
-	}
-	return true
+	return sameDeployRepo(candidate.Repo, deploying.Repo) && deployCompletableMode(candidate) && sweepPreDeployStatus(candidate.Status) && sweepStampProvesInclusion(candidate, deploying)
 }
 
 // deployCompletableMode matches the CompletePRDeployment mode guard: plain

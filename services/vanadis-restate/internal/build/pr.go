@@ -135,28 +135,32 @@ const mutationChunkDeploySuccess = "chunk_deploy_success"
 
 var errActionCompletionSkipped = errors.New("action completion not applied")
 
+// findDeployingChunk returns the deploying chunk snapshot from a build's
+// chunk list.
+func findDeployingChunk(chunks []model.VanadisChunk, chunkID string) (model.VanadisChunk, bool) {
+	for _, chunk := range chunks {
+		if chunk.ID == chunkID {
+			return chunk, true
+		}
+	}
+	return model.VanadisChunk{}, false
+}
+
 func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) error {
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
 		return err
 	}
-	alreadyCompleted := false
-	found := false
-	for _, chunk := range chunks {
-		if chunk.ID != mutation.ChunkID {
-			continue
-		}
-		found = true
-		alreadyCompleted = chunk.Status == statusCompleted
-		if chunk.Mode == "action" && chunk.PRNumber == 0 {
-			return b.completeActionDeploymentMutation(ctx, mutation)
-		}
-		if chunk.Status == statusFailed || chunk.Status == statusCancelled || build.Status == statusCancelled || (build.Status == statusFailed && chunk.Status != statusCompleted) {
-			return nil
-		}
-	}
+	deploying, found := findDeployingChunk(chunks, mutation.ChunkID)
 	if !found {
 		return ErrChunkNotFound
+	}
+	alreadyCompleted := deploying.Status == statusCompleted
+	if deploying.Mode == "action" && deploying.PRNumber == 0 {
+		return b.completeActionDeploymentMutation(ctx, mutation)
+	}
+	if deploying.Status == statusFailed || deploying.Status == statusCancelled || build.Status == statusCancelled || (build.Status == statusFailed && deploying.Status != statusCompleted) {
+		return nil
 	}
 	if build.Status == statusCancelled {
 		return nil
@@ -166,6 +170,12 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 			return nil
 		}
 		return err
+	}
+	if mutation.RolloutState != nil {
+		// Mirror the evidence just stored: the deploying snapshot above
+		// predates this write, and the cross-build sweep judges shared
+		// deploy jobs from the deploying chunk.
+		deploying.RolloutState = mutation.RolloutState
 	}
 	if b.executor != nil && !alreadyCompleted {
 		if cErr := b.executor.CancelChunkDispatch(ctx, mutation.ChunkID); cErr != nil {
@@ -178,8 +188,62 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	if err := b.completeSweptDeployments(ctx, chunks, mutation.ChunkID); err != nil {
 		return err
 	}
+	if err := b.completeCrossBuildSweptDeployments(ctx, deploying); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// isTerminalBuildStatus reports whether a build already reached a terminal
+// outcome, in which case re-notifying would duplicate its completion.
+func isTerminalBuildStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case statusCompleted, statusFailed, statusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// completeCrossBuildSweptDeployments completes eligible earlier chunks in
+// other builds superseded by the deploying chunk's landed commit, including
+// already-completed chunks re-derived for retry recovery. Skewed or
+// concurrent transitions surface as skipped writes inside the store sweep;
+// other errors return after processing partial progress so the journaled
+// step retries the remainder. Per affected non-terminal foreign build it
+// publishes a completed event per swept chunk, re-syncs the build widget
+// from the store, and applies the existing build-completion transition.
+func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, deploying model.VanadisChunk) error {
+	swept, recovered, err := b.store.SweepEarlierDeploymentsAcrossBuilds(ctx, deploying)
+	byBuild := make(map[string][]string)
+	var buildOrder []string
+	for _, sw := range append(swept, recovered...) {
+		if _, ok := byBuild[sw.BuildID]; !ok {
+			buildOrder = append(buildOrder, sw.BuildID)
+		}
+		byBuild[sw.BuildID] = append(byBuild[sw.BuildID], sw.ChunkID)
+	}
+	for _, buildID := range buildOrder {
+		build, foreignChunks, getErr := b.store.GetBuild(ctx, buildID)
+		if getErr != nil {
+			return getErr
+		}
+		if build == nil || isTerminalBuildStatus(build.Status) {
+			continue
+		}
+		if b.executor != nil {
+			for _, sweptID := range byBuild[buildID] {
+				if pubErr := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{sweptID}, ""); pubErr != nil {
+					slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
+				}
+			}
+		}
+		if _, evalErr := b.evaluateBuildTerminalStatus(ctx, build, foreignChunks); evalErr != nil {
+			return evalErr
+		}
+	}
+	return err
 }
 
 // completeSweptDeployments completes earlier chunks superseded by the

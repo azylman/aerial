@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"reflect"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -500,6 +503,248 @@ func TestEarlierDeploymentSweepIDs(t *testing.T) {
 			t.Parallel()
 			if got := EarlierDeploymentSweepIDs(tc.chunks, tc.deployID); !slices.Equal(got, tc.want) {
 				t.Errorf("EarlierDeploymentSweepIDs(%q) = %q, want %q", tc.deployID, got, tc.want)
+			}
+		})
+	}
+}
+
+func xbuildChunk(id, buildID string, idx int, mode, repo, status string, pr int, completedAt time.Time, jobs []string, checks map[string]string) model.VanadisChunk {
+	var rs *pubsub.PRRolloutState
+	if jobs != nil {
+		rs = &pubsub.PRRolloutState{ExpectedJobs: jobs}
+	}
+	return model.VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: mode, Repo: repo, Status: status, PRNumber: pr, CompletedAt: completedAt, RolloutState: rs, CIChecks: checks}
+}
+
+func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
+	t.Parallel()
+	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	mergeLater := mergeBase.Add(time.Hour)
+	deploying := func() model.VanadisChunk {
+		return xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, mergeLater, []string{"eri"}, nil)
+	}
+	foreign := func() model.VanadisChunk {
+		return xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, []string{"eri"}, nil)
+	}
+	tests := []struct {
+		name       string
+		deploying  model.VanadisChunk
+		candidates []model.VanadisChunk
+		want       []SweptChunk
+	}{
+		{
+			name: "earlier merged foreign build with shared job completes", deploying: deploying(),
+			candidates: []model.VanadisChunk{foreign()},
+			want:       []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+		},
+		{
+			name: "earlier deploying and synced foreign builds with shared job complete", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "deploying", 5, mergeBase, []string{"eri"}, nil),
+				xbuildChunk("f2", "b3", 1, "pr", "aerial", "synced", 6, mergeBase, []string{"eri"}, nil),
+			},
+			want: []SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b3"}},
+		},
+		{
+			name: "foreign build with disjoint jobs stays untouched", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, []string{"worker"}, nil),
+			},
+			want: nil,
+		},
+		{
+			name: "same build candidate stays untouched", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b1", 0, "pr", "aerial", "merged", 5, mergeBase, []string{"eri"}, nil),
+			},
+			want: nil,
+		},
+		{
+			name: "equal stamp across builds never sweeps despite lower chunk index", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeLater, []string{"eri"}, nil),
+			},
+			want: nil,
+		},
+		{
+			name: "missing expected jobs falls back to build and push service", deploying: xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, mergeLater, nil, map[string]string{"Build & Push (eri)": "passed"}),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, []string{"eri"}, nil),
+			},
+			want: []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+		},
+		{
+			name: "fallback services on both sides intersect", deploying: xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, mergeLater, nil, map[string]string{"Build and Push (worker)": "passed"}),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, nil, map[string]string{"Build & Push (worker)": "passed"}),
+			},
+			want: []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+		},
+		{
+			name: "fallback services disjoint stay untouched", deploying: xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, mergeLater, nil, map[string]string{"Build & Push (eri)": "passed"}),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, nil, map[string]string{"Build & Push (worker)": "passed"}),
+			},
+			want: nil,
+		},
+		{
+			name: "no jobs anywhere stays untouched", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, nil, map[string]string{"lint": "passed"}),
+			},
+			want: nil,
+		},
+		{
+			name: "non pr mode and missing pr number stay untouched", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("act", "b2", 0, "action", "aerial", "merged", 5, mergeBase, []string{"eri"}, nil),
+				xbuildChunk("nopr", "b2", 1, "pr", "aerial", "merged", 0, mergeBase, []string{"eri"}, nil),
+			},
+			want: nil,
+		},
+		{
+			name: "owner qualified repo spelling matches", deploying: deploying(),
+			candidates: []model.VanadisChunk{
+				xbuildChunk("f1", "b2", 0, "pr", "azylman/aerial", "merged", 5, mergeBase, []string{"eri"}, nil),
+			},
+			want: []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CrossBuildDeploymentSweepIDs(tc.deploying, tc.candidates); !slices.Equal(got, tc.want) {
+				t.Errorf("CrossBuildDeploymentSweepIDs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidates []model.VanadisChunk, updates *int) *Store {
+	return New(mockDB{
+		execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+			*updates++
+			if execErr {
+				return pgconn.CommandTag{}, errors.New("database unavailable")
+			}
+			if failChunk != "" && len(args) > 1 && args[1] == failChunk {
+				return pgconn.CommandTag{}, errors.New("database unavailable")
+			}
+			return pgconn.NewCommandTag(execTag), nil
+		},
+		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			if queryErr {
+				return nil, errors.New("database unavailable")
+			}
+			return &mockRows{items: candidates}, nil
+		},
+	})
+}
+
+func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
+	t.Parallel()
+	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	mergeLater := mergeBase.Add(time.Hour)
+	newDeploying := func(jobs []string) model.VanadisChunk {
+		return xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, mergeLater, jobs, nil)
+	}
+	newCandidate := func() model.VanadisChunk {
+		return xbuildChunk("f1", "b2", 0, "pr", "aerial", "merged", 5, mergeBase, nil, nil)
+	}
+	tests := []struct {
+		name          string
+		nilDB         bool
+		deploying     model.VanadisChunk
+		candidates    []model.VanadisChunk
+		queryErr      bool
+		execErr       bool
+		execTag       string
+		failChunk     string
+		want          []SweptChunk
+		wantRecovered []SweptChunk
+		wantErr       bool
+		wantUpdates   int
+	}{
+		{
+			name: "sweeps eligible candidate and returns ids", deploying: newDeploying([]string{"eri"}),
+			candidates:  []model.VanadisChunk{newCandidate()},
+			execTag:     "UPDATE 1",
+			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			wantUpdates: 1,
+		},
+		{
+			name:      "nil database errors",
+			nilDB:     true,
+			deploying: newDeploying([]string{"eri"}),
+			wantErr:   true,
+		},
+		{
+			name: "query error aborts", deploying: newDeploying([]string{"eri"}),
+			candidates: []model.VanadisChunk{newCandidate()},
+			queryErr:   true,
+			wantErr:    true,
+		},
+		{
+			name: "update error aborts", deploying: newDeploying([]string{"eri"}),
+			candidates:  []model.VanadisChunk{newCandidate()},
+			execErr:     true,
+			wantErr:     true,
+			wantUpdates: 1,
+		},
+		{
+			name: "skipped transition is harmless", deploying: newDeploying([]string{"eri"}),
+			candidates:  []model.VanadisChunk{newCandidate()},
+			execTag:     "UPDATE 0",
+			want:        nil,
+			wantUpdates: 1,
+		},
+		{
+			name: "recovers already completed eligible chunk", deploying: newDeploying([]string{"eri"}),
+			candidates: []model.VanadisChunk{
+				newCandidate(),
+				xbuildChunk("r1", "b3", 1, "pr", "aerial", "completed", 5, mergeBase, nil, nil),
+			},
+			execTag:       "UPDATE 1",
+			want:          []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3"}},
+			wantUpdates:   1,
+		},
+		{
+			name: "failing candidate keeps earlier successes alongside error", deploying: newDeploying([]string{"eri"}),
+			candidates: []model.VanadisChunk{
+				newCandidate(),
+				xbuildChunk("f2", "b2", 1, "pr", "aerial", "merged", 6, mergeBase, nil, nil),
+			},
+			execTag:     "UPDATE 1",
+			failChunk:   "f2",
+			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			wantErr:     true,
+			wantUpdates: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var updates int
+			var st *Store
+			if tc.nilDB {
+				st = &Store{}
+			} else {
+				st = sweepMockStore(tc.queryErr, tc.execErr, tc.execTag, tc.failChunk, tc.candidates, &updates)
+			}
+			got, recovered, err := st.SweepEarlierDeploymentsAcrossBuilds(context.Background(), tc.deploying)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("SweepEarlierDeploymentsAcrossBuilds err = %v, wantErr %v", err, tc.wantErr)
+				return
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("SweepEarlierDeploymentsAcrossBuilds = %v, want %v", got, tc.want)
+			}
+			if !slices.Equal(recovered, tc.wantRecovered) {
+				t.Errorf("SweepEarlierDeploymentsAcrossBuilds recovered = %v, want %v", recovered, tc.wantRecovered)
+			}
+			if updates != tc.wantUpdates {
+				t.Errorf("SweepEarlierDeploymentsAcrossBuilds updates = %d, want %d", updates, tc.wantUpdates)
 			}
 		})
 	}
