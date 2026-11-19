@@ -207,23 +207,23 @@ describe('buildChunkDag', () => {
       ],
       wantRanks: [['root'], ['b', 'c'], ['join']],
       wantEdges: [
-        { fromId: 'root', toId: 'b', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 2 },
-        { fromId: 'root', toId: 'c', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 1, toCount: 2 },
-        { fromId: 'b', toId: 'join', fromRank: 1, fromIndex: 0, fromCount: 2, toRank: 2, toIndex: 0, toCount: 1 },
-        { fromId: 'c', toId: 'join', fromRank: 1, fromIndex: 1, fromCount: 2, toRank: 2, toIndex: 0, toCount: 1 },
+        { fromId: 'root', toId: 'b', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 2, tone: 'active' },
+        { fromId: 'root', toId: 'c', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 1, toCount: 2, tone: 'active' },
+        { fromId: 'b', toId: 'join', fromRank: 1, fromIndex: 0, fromCount: 2, toRank: 2, toIndex: 0, toCount: 1, tone: 'pending' },
+        { fromId: 'c', toId: 'join', fromRank: 1, fromIndex: 1, fromCount: 2, toRank: 2, toIndex: 0, toCount: 1, tone: 'pending' },
       ],
     },
     {
       name: 'omitted depends_on sequential fallback',
       chunks: [
         chunk('c1', 'completed'),
-        chunk('c2', 'in_progress'),
-        chunk('c3', 'pending'),
+        chunk('c2', 'completed'),
+        chunk('c3', 'in_progress'),
       ],
       wantRanks: [['c1'], ['c2'], ['c3']],
       wantEdges: [
-        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1 },
-        { fromId: 'c2', toId: 'c3', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 2, toIndex: 0, toCount: 1 },
+        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1, tone: 'completed' },
+        { fromId: 'c2', toId: 'c3', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 2, toIndex: 0, toCount: 1, tone: 'active' },
       ],
     },
     {
@@ -234,7 +234,7 @@ describe('buildChunkDag', () => {
       ],
       wantRanks: [['c1'], ['c2']],
       wantEdges: [
-        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1 },
+        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1, tone: 'pending' },
       ],
     },
     {
@@ -245,14 +245,70 @@ describe('buildChunkDag', () => {
       ],
       wantRanks: [['c2'], ['c1']],
       wantEdges: [
-        { fromId: 'c2', toId: 'c1', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1 },
-        { fromId: 'c1', toId: 'c2', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 0, toIndex: 0, toCount: 1 },
+        { fromId: 'c2', toId: 'c1', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1, tone: 'pending' },
+        { fromId: 'c1', toId: 'c2', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 0, toIndex: 0, toCount: 1, tone: 'pending' },
+      ],
+    },
+    {
+      name: 'long-span edge across intermediate rank uses dagre waypoints and failed tone',
+      chunks: [
+        chunk('c1', 'completed', { depends_on: [] }),
+        chunk('c2', 'ci_failed', { depends_on: ['c1'] }),
+        chunk('c3', 'pending', { depends_on: ['c1', 'c2'] }),
+      ],
+      wantRanks: [['c1'], ['c2'], ['c3']],
+      wantEdges: [
+        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1, tone: 'failed' },
+        { fromId: 'c1', toId: 'c3', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 2, toIndex: 0, toCount: 1, tone: 'pending' },
+        { fromId: 'c2', toId: 'c3', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 2, toIndex: 0, toCount: 1, tone: 'failed' },
       ],
     },
   ])('$name', ({ chunks, wantRanks, wantEdges }) => {
     const layout = buildChunkDag(chunks);
     const gotRanks = layout.ranks.map((r) => r.map((n) => n.chunk.id));
     expect(gotRanks).toEqual(wantRanks);
-    expect(layout.edges).toEqual(wantEdges);
+    expect(
+      layout.edges.map(({ fromId, toId, fromRank, fromIndex, fromCount, toRank, toIndex, toCount, tone }) => ({
+        fromId,
+        toId,
+        fromRank,
+        fromIndex,
+        fromCount,
+        toRank,
+        toIndex,
+        toCount,
+        tone,
+      })),
+    ).toEqual(
+      wantEdges.map(({ fromId, toId, fromRank, fromIndex, fromCount, toRank, toIndex, toCount, tone }) => ({
+        fromId,
+        toId,
+        fromRank,
+        fromIndex,
+        fromCount,
+        toRank,
+        toIndex,
+        toCount,
+        tone,
+      })),
+    );
+    for (const edge of layout.edges) {
+      expect(edge.path).toMatch(/^M \d+ \d+ C /);
+      if (Math.abs(edge.toRank - edge.fromRank) > 1) {
+        expect(edge.points.length).toBeGreaterThan(2);
+        const startY = edge.points[0]!.y;
+        const endY = edge.points[edge.points.length - 1]!.y;
+        for (const pt of edge.points.slice(1, -1)) {
+          expect(pt.y).toBeGreaterThan(startY);
+          expect(pt.y).toBeLessThan(endY);
+        }
+      } else {
+        expect(edge.points.length).toBe(2);
+      }
+    }
+    for (const node of layout.nodes) {
+      expect(node.x).toBeGreaterThan(0);
+      expect(node.y).toBeGreaterThan(0);
+    }
   });
 });
