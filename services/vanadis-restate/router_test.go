@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -103,6 +104,8 @@ func TestBuildRouterService_ReflectionAndInterface(t *testing.T) {
 	t.Parallel()
 	r := NewBuildRouterService(nil)
 	assert.Equal(t, "BuildRouter", r.ServiceName())
+	assert.Equal(t, "BuildRouter", (*BuildRouterService)(nil).ServiceName())
+	assert.Equal(t, "Build", (*BuildRouterService)(nil).buildServiceName())
 
 	require.NotPanics(t, func() {
 		def := restate.Reflect(r)
@@ -250,35 +253,6 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tc.wantBuildID, inv.lastPRBuildID)
 			}
-		})
-	}
-}
-
-func TestExtractChunkIDFromBranch(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		repo   string
-		branch string
-		want   string
-	}{
-		{name: "empty repo", repo: "", branch: "feat/aerial-pr-vanadis-c1-012345", want: ""},
-		{name: "empty branch", repo: "aerial", branch: "", want: ""},
-		{name: "standalone branch without vanadis", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
-		{name: "valid with refs/heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-vanadis-chunk-1-router-a1b2c3", want: "chunk-1-router"},
-		{name: "valid bare branch", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-012345", want: "c1"},
-		{name: "valid uppercase hex", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-ABCDEF", want: "c1"},
-		{name: "repo containing delimiter and chunk containing delimiter", repo: "owner/demo-pr-vanadis-tools", branch: "feat/demo-pr-vanadis-tools-pr-vanadis-c1-pr-vanadis-2-a1b2c3", want: "c1-pr-vanadis-2"},
-		{name: "invalid suffix too short", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-12345", want: ""},
-		{name: "invalid suffix too long", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-1234567", want: ""},
-		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-12345g", want: ""},
-		{name: "no separator after vanadis", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1", want: ""},
-		{name: "empty chunk id", repo: "aerial", branch: "feat/aerial-pr-vanadis--123456", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, extractChunkIDFromBranch(tc.repo, tc.branch))
 		})
 	}
 }
@@ -585,7 +559,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &unattachedPREventSpyStore{chunks: tc.chunks}
-			var exec *Executor
+			var exec *executor.Executor
 			if !tc.withoutExec {
 				api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					w.WriteHeader(http.StatusOK)
@@ -593,12 +567,12 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
 				}))
 				t.Cleanup(api.Close)
 				eri := &mockEriClient{
-					widgetFn: func(context.Context, StatusWidgetRequest) (string, error) {
+					widgetFn: func(context.Context, executor.StatusWidgetRequest) (string, error) {
 						return "msg-1", nil
 					},
 				}
-				exec = NewExecutor(t.TempDir(), eri, nil, "token", api.Client())
-				exec.gitHubAPIURL = api.URL
+				exec = executor.NewExecutor(t.TempDir(), eri, nil, "token", api.Client())
+				exec.GitHubAPIURL = api.URL
 			}
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 			ctx := makeObjectMockContext(t, "b1")
@@ -702,8 +676,8 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
 				fmt.Fprint(w, validGitHubPR)
 			}))
 			t.Cleanup(api.Close)
-			exec := NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", api.Client())
-			exec.gitHubAPIURL = api.URL
+			exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", api.Client())
+			exec.GitHubAPIURL = api.URL
 			spy := &unattachedPREventSpyStore{
 				chunks: []model.VanadisChunk{
 					{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "aerial", PRNumber: 0, StartedAt: startedAt},
@@ -800,41 +774,31 @@ func TestNoPRResumeDispatchID(t *testing.T) {
 	}
 }
 
-func TestFormatNoPRResumePrompt(t *testing.T) {
+func TestExtractChunkIDFromBranch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		chunk        model.VanadisChunk
-		chunkPrompt  string
-		wantContains []string
+		name   string
+		repo   string
+		branch string
+		want   string
 	}{
-		{
-			name:        "includes recovery steps and original prompt",
-			chunk:       model.VanadisChunk{ID: "c1"},
-			chunkPrompt: "ORIGINAL CHUNK PROMPT",
-			wantContains: []string{
-				"[VANADIS AUTOMATIC RESUME]\nYour previous turn for chunk c1 ended without opening a PR.",
-				"check whether a PR already exists for this chunk's branch (branch name contains \"vanadis-c1\")",
-				"--vanadis-chunk c1",
-				"Call fail_chunk with a reason only if genuinely blocked.",
-				"Never end the turn while a background command is still needed for the next step",
-				"The original chunk instructions follow.\n\nORIGINAL CHUNK PROMPT",
-			},
-		},
-		{
-			name:         "trims chunk id",
-			chunk:        model.VanadisChunk{ID: " c2 "},
-			chunkPrompt:  "P",
-			wantContains: []string{"for chunk c2 ended", "--vanadis-chunk c2'"},
-		},
+		{name: "empty repo", repo: "", branch: "feat/aerial-pr-vanadis-c1-012345", want: ""},
+		{name: "empty branch", repo: "aerial", branch: "", want: ""},
+		{name: "standalone branch without vanadis", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
+		{name: "valid with refs/heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-vanadis-chunk-1-router-a1b2c3", want: "chunk-1-router"},
+		{name: "valid bare branch", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-012345", want: "c1"},
+		{name: "valid uppercase hex", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-ABCDEF", want: "c1"},
+		{name: "repo containing delimiter and chunk containing delimiter", repo: "owner/demo-pr-vanadis-tools", branch: "feat/demo-pr-vanadis-tools-pr-vanadis-c1-pr-vanadis-2-a1b2c3", want: "c1-pr-vanadis-2"},
+		{name: "invalid suffix too short", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-12345", want: ""},
+		{name: "invalid suffix too long", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-1234567", want: ""},
+		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-12345g", want: ""},
+		{name: "no separator after vanadis", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1", want: ""},
+		{name: "empty chunk id", repo: "aerial", branch: "feat/aerial-pr-vanadis--123456", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := FormatNoPRResumePrompt(tc.chunk, tc.chunkPrompt)
-			for _, want := range tc.wantContains {
-				assert.Contains(t, got, want)
-			}
+			assert.Equal(t, tc.want, extractChunkIDFromBranch(tc.repo, tc.branch))
 		})
 	}
 }

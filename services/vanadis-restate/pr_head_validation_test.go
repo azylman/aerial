@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -52,13 +53,13 @@ func TestBuildObject_RecordPRHeadRevision(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			defer api.Close()
-			executor := NewExecutor("", nil, nil, "", api.Client())
-			executor.gitHubAPIURL = api.URL
+			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec.GitHubAPIURL = api.URL
 			spy := &checkStatusSpyStore{}
 			if tc.cold {
 				spy.getBuildErr = errors.New("read unavailable")
 			}
-			bo := NewBuildObject("", nil).WithAuthority(spy, executor)
+			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 			if !tc.cold {
 				spy.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "pr_opened", HeadSHA: "head-b"}}
 			}

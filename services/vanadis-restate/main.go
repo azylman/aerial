@@ -26,6 +26,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -206,7 +207,7 @@ func LoadConfigFromEnv() Config {
 	eriURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
 	natsURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
 	ghToken := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
-	shareRoot := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("SHARE_ROOT"), defaultShareRoot))
+	shareRoot := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("SHARE_ROOT"), executor.DefaultShareRoot))
 	agentName := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
@@ -338,7 +339,7 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
 type BuildObject struct {
 	store          store.VanadisStore
-	executor       *Executor
+	executor       *executor.Executor
 	vanadisURL     string
 	httpClient     *http.Client
 	runtimeFactory func(restate.ObjectContext) objectRuntime
@@ -369,7 +370,7 @@ func NewBuildObjectWithAgent(vanadisURL, agentName string, httpClient *http.Clie
 }
 
 // WithAuthority wires the PostgreSQL store and side-effect executor into BuildObject.
-func (b *BuildObject) WithAuthority(st store.VanadisStore, exec *Executor) *BuildObject {
+func (b *BuildObject) WithAuthority(st store.VanadisStore, exec *executor.Executor) *BuildObject {
 	if pg, ok := st.(*store.Store); ok && pg == nil {
 		st = nil
 	}
@@ -1105,7 +1106,7 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.Vana
 func classifyLaunchErrors(errs []error) error {
 	var failures []error
 	for _, err := range errs {
-		if !errors.Is(err, errDispatchActive) {
+		if !errors.Is(err, executor.ErrDispatchActive) {
 			failures = append(failures, err)
 		}
 	}
@@ -1113,13 +1114,13 @@ func classifyLaunchErrors(errs []error) error {
 		return errors.Join(failures...)
 	}
 	if len(errs) > 0 {
-		return errDispatchActive
+		return executor.ErrDispatchActive
 	}
 	return nil
 }
 
 func (b *BuildObject) shouldScheduleReconcile(out reconcileStepOutput) bool {
-	return b.store != nil && out.Error == errDispatchActive.Error() && out.BuildStatus == statusRunning
+	return b.store != nil && out.Error == executor.ErrDispatchActive.Error() && out.BuildStatus == statusRunning
 }
 
 func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, status, reason, promptHeader, promptMsg string) error {
@@ -1258,13 +1259,13 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 
 	launchedMap := cloneLaunchedMap(priorLaunched)
 	launchedChunks, err := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
-	deferred := errors.Is(err, errDispatchActive)
+	deferred := errors.Is(err, executor.ErrDispatchActive)
 	if err != nil && !deferred {
 		return reconcileStepOutput{}, err
 	}
 	recoveryReason := ""
 	if deferred {
-		recoveryReason = errDispatchActive.Error()
+		recoveryReason = executor.ErrDispatchActive.Error()
 	}
 	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks)
 	if err != nil {
@@ -1380,10 +1381,10 @@ func RunApp(ctx context.Context, cfg Config) error {
 	}()
 
 	// Internal clients propagate traceparent; GitHub calls record spans without leaking headers.
-	eriClient := NewHTTPEriClient(cfg.EriURL, tracing.Client(&http.Client{Timeout: 30 * time.Second}))
-	executor := NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}))
+	eriClient := executor.NewHTTPEriClient(cfg.EriURL, tracing.Client(&http.Client{Timeout: 30 * time.Second}))
+	exec := executor.NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}))
 
-	restateObj := NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, executor)
+	restateObj := NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
 	restateServer := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).

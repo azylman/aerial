@@ -1,4 +1,4 @@
-package main
+package executor
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type gitHubPullRequest struct {
@@ -37,7 +38,7 @@ type gitHubPullRequest struct {
 }
 
 func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, number int) (*gitHubPullRequest, string, string, error) {
-	if e == nil || e.httpClient == nil {
+	if e == nil || e.HTTPClient == nil {
 		return nil, "", "", fmt.Errorf("PR head verification unavailable")
 	}
 	repo = strings.TrimSpace(repo)
@@ -54,7 +55,7 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	if err != nil {
 		return nil, "", "", err
 	}
-	resp, err := e.httpClient.Do(req)
+	resp, err := e.HTTPClient.Do(req)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("verify PR head: %w", err)
 	}
@@ -69,16 +70,16 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	return &pr, parts[0], parts[0] + "/" + parts[1], nil
 }
 
-// validatePRHead checks GitHub's current PR rather than trusting webhook delivery
+// ValidatePRHead checks GitHub's current PR rather than trusting webhook delivery
 // order. API errors remain retryable; a superseded event is safely skipped.
-func (e *Executor) validatePRHead(ctx context.Context, repo string, number int, head string) error {
+func (e *Executor) ValidatePRHead(ctx context.Context, repo string, number int, head string) error {
 	pr, _, _, err := e.fetchGitHubPullRequest(ctx, repo, number)
 	if err != nil {
 		return err
 	}
 	// A matching head does not prove that the PR remains eligible to run.
 	if pr.State == "closed" || (pr.Merged != nil && *pr.Merged) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	if pr.State != "open" || pr.Merged == nil {
 		return fmt.Errorf("verify PR head: incomplete or invalid lifecycle")
@@ -87,7 +88,7 @@ func (e *Executor) validatePRHead(ctx context.Context, repo string, number int, 
 		return fmt.Errorf("verify PR head: empty head")
 	}
 	if !strings.EqualFold(pr.Head.SHA, head) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	return nil
 }
@@ -127,28 +128,28 @@ func hasDispatchedChunkAssociation(body string, build model.VanadisBuild, chunk 
 	return buildThread == "" || normalizeDiscordThreadID(trailer.TargetID) == buildThread
 }
 
-func (e *Executor) validateChunkPRAttachment(ctx context.Context, build model.VanadisBuild, chunk model.VanadisChunk, ev pubsub.PRLifecycleEvent) error {
+func (e *Executor) ValidateChunkPRAttachment(ctx context.Context, build model.VanadisBuild, chunk model.VanadisChunk, ev pubsub.PRLifecycleEvent) error {
 	pr, owner, fullRepo, err := e.fetchGitHubPullRequest(ctx, ev.Repo, ev.PRNumber)
 	if err != nil {
 		return err
 	}
 	if pr.Head.Repo == nil || pr.Base.Repo == nil || pr.Head.Repo.Fork || !strings.EqualFold(strings.TrimSpace(pr.Head.Repo.FullName), fullRepo) || !strings.EqualFold(strings.TrimSpace(pr.Base.Repo.FullName), fullRepo) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	if !isTrustedPRAuthor(pr.User.Login, pr.AuthorAssociation, owner) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	headRef := strings.TrimPrefix(strings.TrimSpace(pr.Head.Ref), "refs/heads/")
 	evBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
 	branchChunkID := extractChunkIDFromBranch(fullRepo, headRef)
 	if headRef == "" || (evBranch != "" && headRef != evBranch) || (branchChunkID != "" && branchChunkID != chunk.ID) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	if evHead := strings.TrimSpace(ev.HeadSHA); evHead != "" && (strings.TrimSpace(pr.Head.SHA) == "" || !strings.EqualFold(pr.Head.SHA, evHead)) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	if !hasDispatchedChunkAssociation(pr.Body, build, chunk) {
-		return errPRTransitionSkipped
+		return store.ErrPRTransitionSkipped
 	}
 	return nil
 }

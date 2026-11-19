@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -39,9 +40,9 @@ func TestBuildObject_PRRecoveryAfterRejectedCheck(t *testing.T) {
 				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"h2"}}`))
 			}))
 			t.Cleanup(api.Close)
-			executor := NewExecutor("", nil, nil, "", api.Client())
-			executor.gitHubAPIURL = api.URL
-			bo := NewBuildObject("", nil).WithAuthority(st, executor)
+			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec.GitHubAPIURL = api.URL
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			ctx := mockRunContext{Context: context.Background()}
 			ev := pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2", CheckName: "lint", CheckState: "passed"}
 			if err := bo.handlePREventType(ctx, "b1", "c1", tc.event, ev); !errors.Is(err, errPRTransitionSkipped) {
@@ -103,9 +104,9 @@ func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
 			}
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
 			t.Cleanup(api.Close)
-			executor := NewExecutor("", nil, nil, "", api.Client())
-			executor.gitHubAPIURL = api.URL
-			bo.WithAuthority(st, executor)
+			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec.GitHubAPIURL = api.URL
+			bo.WithAuthority(st, exec)
 			err := bo.handlePREventType(ctx, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2"})
 			if (err != nil) != tc.wantError || errors.Is(err, errPRTransitionSkipped) != tc.wantSkipped {
 				t.Fatalf("sync error=%v", err)
@@ -130,8 +131,8 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := dbScript{buildRow: buildRow("b1", tc.parent), routes: []sqlRoute{{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", Status: "failed"}}}.open()
-			var observed *StatusWidgetRequest
-			eri := &mockEriClient{widgetFn: func(_ context.Context, req StatusWidgetRequest) (string, error) {
+			var observed *executor.StatusWidgetRequest
+			eri := &mockEriClient{widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
 				observed = &req
 				return "widget", nil
 			}}
@@ -139,10 +140,10 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"new"}}`))
 			}))
 			t.Cleanup(api.Close)
-			executor := NewExecutor("", eri, nil, "", nil)
-			executor.gitHubAPIURL = api.URL
-			executor.httpClient = api.Client()
-			bo := NewBuildObject("", nil).WithAuthority(st, executor)
+			exec := executor.NewExecutor("", eri, nil, "", nil)
+			exec.GitHubAPIURL = api.URL
+			exec.HTTPClient = api.Client()
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			err := bo.OnPREvent(makeObjectMockContext(t, "b1"), pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, Event: tc.event, HeadSHA: "new"})
 			if err != nil {
 				t.Fatal(err)
