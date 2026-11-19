@@ -24,7 +24,14 @@ type TasksFilter struct {
 	AfterRowID  int64
 	BeforeRowID int64
 	Limit       int
+	Order       string
 }
+
+// TasksOrderAsc requests oldest-first row ordering from /tasks?order=asc.
+const TasksOrderAsc = "asc"
+
+// TasksOrderDesc requests newest-first row ordering from /tasks?order=desc.
+const TasksOrderDesc = "desc"
 
 func (f TasksFilter) IsZero() bool {
 	return len(f.Statuses) == 0 &&
@@ -33,7 +40,8 @@ func (f TasksFilter) IsZero() bool {
 		f.Since.IsZero() &&
 		f.AfterRowID == 0 &&
 		f.BeforeRowID == 0 &&
-		f.Limit == 0
+		f.Limit == 0 &&
+		f.Order == ""
 }
 
 type ActiveTask struct {
@@ -144,6 +152,12 @@ func buildActiveTasksQuery(flt TasksFilter, hasFilter bool) (string, []any) {
 	orderClause := "ORDER BY m.row_id DESC"
 	if flt.AfterRowID > 0 {
 		orderClause = "ORDER BY m.row_id ASC"
+	}
+	switch strings.ToLower(strings.TrimSpace(flt.Order)) {
+	case TasksOrderAsc:
+		orderClause = "ORDER BY m.row_id ASC"
+	case TasksOrderDesc:
+		orderClause = "ORDER BY m.row_id DESC"
 	}
 
 	limit := flt.Limit

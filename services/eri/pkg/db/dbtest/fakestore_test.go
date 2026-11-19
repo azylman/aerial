@@ -46,6 +46,7 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c1(s.HasActiveThreadTurn(ctx, "t")), "HasActiveThreadTurn")
 	requireErr(t, c1(s.GetActiveTasks(ctx)), "GetActiveTasks")
 	requireErr(t, c1(s.GetSessionID(ctx, "t")), "GetSessionID")
+	requireErr(t, c1(s.ResolveThreadForSession(ctx, "s")), "ResolveThreadForSession")
 	requireErr(t, s.SaveSessionID(ctx, "t", "s"), "SaveSessionID")
 	requireErr(t, c1(s.IncrementSessionTurnCount(ctx, "k")), "IncrementSessionTurnCount")
 	requireErr(t, c1(s.GetSessionTurnCount(ctx, "k")), "GetSessionTurnCount")
@@ -479,6 +480,36 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
 
 	assertFakeStoreUnrotatedSessions(ctx, t, s, now)
+}
+
+func TestFakeStoreResolveThreadForSession(t *testing.T) {
+	t.Parallel()
+	s := NewFakeStore()
+	ctx := context.Background()
+	mustOK(t, s.SaveSessionID(ctx, "111", "sess-a"), "SaveSessionID")
+	mustOK(t, s.RotateSessionID(ctx, "111", "sess-b"), "RotateSessionID")
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "empty resolves empty", query: "   ", want: ""},
+		{name: "unknown resolves empty", query: "nope", want: ""},
+		{name: "current session resolves thread", query: "sess-b", want: "discord-111"},
+		{name: "previous session resolves thread", query: "sess-a", want: "discord-111"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := s.ResolveThreadForSession(ctx, tc.query)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("ResolveThreadForSession(%q) = %q, want %q", tc.query, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
