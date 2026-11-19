@@ -13,10 +13,11 @@
 }
 
 .task-card {
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 12px;
-    padding: 1.25rem 1.5rem;
+    background: #f6f5f1;
+    border: 1px solid #e2dfd7;
+    border-left: 3px solid #c2410c;
+    border-radius: 6px;
+    padding: 10px 12px;
     box-shadow: var(--accent-glow);
     position: relative;
     overflow: hidden;
@@ -38,19 +39,6 @@
 .task-card.pending {
     border-color: var(--accent-amber, #b45309);
     box-shadow: 0 0 0 1px rgba(180, 83, 9, 0.25);
-}
-
-.task-card-laser {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent-primary, #c2410c), transparent);
-}
-
-html.motion-ready .task-card-laser {
-    animation: laser-sweep 2.5s infinite linear;
 }
 
 .task-card-header {

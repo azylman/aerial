@@ -22,10 +22,10 @@ RUN apk add --no-cache tzdata
 WORKDIR /app
 COPY --from=builder --link /app/transcripts /app/transcripts
 
-ENV PORT=8080
-EXPOSE 8080
+ENV PORT=4030
+EXPOSE 4030
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
-  CMD wget -q --spider http://127.0.0.1:8080/health || exit 1
+  CMD wget -q --spider http://127.0.0.1:4030/health || exit 1
 
 ENTRYPOINT ["/app/transcripts"]

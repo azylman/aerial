@@ -79,7 +79,7 @@ describe('TaskQueue', () => {
     expect(cards.map(row)).toEqual([
       {
         className: 'task-card status-processing processing',
-        laser: true,
+        laser: false,
         trigger: ['discord', 'DISCORD'],
         author: 'pilot',
         retry: null,
@@ -91,7 +91,7 @@ describe('TaskQueue', () => {
       },
       {
         className: 'task-card status-processing processing',
-        laser: true,
+        laser: false,
         trigger: ['cron', 'CRON'],
         author: 'scheduler',
         retry: null,
@@ -103,7 +103,7 @@ describe('TaskQueue', () => {
       },
       {
         className: 'task-card status-processing processing',
-        laser: true,
+        laser: false,
         trigger: ['reminder', 'REMINDER'],
         author: 'pilot',
         retry: 'RETRY #1',
