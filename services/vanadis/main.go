@@ -222,7 +222,12 @@ func SetupMux(server *VanadisServer) http.Handler {
 		mux.Handle("GET /metrics", promhttp.Handler())
 	}
 	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
-	mcpHandler := server.newMCPHandler().ServeHTTP
+	// The MCP handler resolves live server dependencies per request so a
+	// store or Restate config replaced after Routes() is observed by /mcp
+	// and /sse, matching the per-request handleRetryActionChunk wrapper.
+	mcpHandler := func(w http.ResponseWriter, r *http.Request) {
+		server.newMCPHandler().ServeHTTP(w, r)
+	}
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,

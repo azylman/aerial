@@ -91,7 +91,7 @@ type MCPUpdateBuildArgs struct {
 	BuildID       string `json:"build_id"                 jsonschema:"Vanadis build identifier to mutate."`
 	Title         string `json:"title,omitempty"          jsonschema:"New build title replacing existing title."`
 	Objective     string `json:"objective,omitempty"      jsonschema:"New build objective replacing existing objective."`
-	SharedContext string `json:"shared_context,omitempty" jsonschema:"New build context replacing existing context."`
+	SharedContext string `json:"shared_context,omitempty" jsonschema:"New shared build context replacing existing context."`
 }
 
 // MCPUpdateBuildOutput defines output for update_build tool.
