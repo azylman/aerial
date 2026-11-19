@@ -3,11 +3,10 @@ package main
 import (
 	"net/http"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/synapse/internal/discord"
 )
 
 // tracedIngress wraps a webhook or internal ingress handler in a server span that starts (or
@@ -16,35 +15,13 @@ func tracedIngress(h http.HandlerFunc) http.Handler {
 	return tracing.Middleware("synapse", h)
 }
 
-// gatewaySpanOptions configure the root span of a turn's trace, opened when synapse receives a
-// Discord gateway event. They carry only the channel id, never message content.
-func gatewaySpanOptions(channelID string) []trace.SpanStartOption {
-	return []trace.SpanStartOption{
-		trace.WithNewRoot(),
-		trace.WithSpanKind(trace.SpanKindProducer),
-		trace.WithAttributes(
-			attribute.String("messaging.system", "discord"),
-			attribute.String("discord.channel.id", channelID),
-		),
-	}
-}
-
 // discordJobSpanOptions configure the consumer span a Discord job opens under the gateway trace
-// persisted on its args. It covers JetStream pickup through every retry until eri accepts the event,
-// so queue wait shows as the gap between the gateway span and this one.
+// persisted on its args.
 func discordJobSpanOptions(queue string) []trace.SpanStartOption {
-	return []trace.SpanStartOption{
-		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(
-			attribute.String("messaging.system", "nats"),
-			attribute.String("messaging.destination.name", queue),
-		),
-	}
+	return discord.DiscordJobSpanOptions(queue)
 }
 
-// markDiscordJobSpan records the job outcome without error text, which can echo eri response bodies.
+// markDiscordJobSpan records the job outcome without error text.
 func markDiscordJobSpan(span trace.Span, err error) {
-	if err != nil {
-		span.SetStatus(codes.Error, "eri dispatch failed")
-	}
+	discord.MarkDiscordJobSpan(span, err)
 }
