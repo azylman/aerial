@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -117,14 +118,14 @@ func TestDeploymentDeadlineLifecycle(t *testing.T) {
 			eri := &mockEriClient{}
 			var dispatchIDs []string
 			failDelivery := tc.fail
-			eri.dispatchFn = func(_ context.Context, req BrainDispatchRequest) error {
+			eri.dispatchFn = func(_ context.Context, req executor.BrainDispatchRequest) error {
 				dispatchIDs = append(dispatchIDs, req.ID)
 				if failDelivery {
 					return errors.New("delivery unavailable")
 				}
 				return nil
 			}
-			b := &BuildObject{store: store, executor: &Executor{eriClient: eri}}
+			b := &BuildObject{store: store, executor: &executor.Executor{EriClient: eri}}
 			require.NoError(t, b.expireDeploymentDeadline(rt, DeploymentDeadlineRequest{"c", "sha", 1}))
 			require.Equal(t, tc.wantDelivered, rt.attempts["c"].Delivered)
 			require.Equal(t, tc.wantRetry, len(rt.scheduled) > 0)

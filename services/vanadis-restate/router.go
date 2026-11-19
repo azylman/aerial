@@ -14,6 +14,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -642,7 +643,7 @@ type prHeadVerifiedContextKey = store.PrHeadVerifiedContextKey
 func (b *BuildObject) recordPRHeadRevision(ctx context.Context, chunkID string, ev pubsub.PRLifecycleEvent) error {
 	headSHA := strings.TrimSpace(ev.HeadSHA)
 	if headSHA != "" && b.executor != nil {
-		if err := b.executor.validatePRHead(ctx, ev.Repo, ev.PRNumber, headSHA); err != nil {
+		if err := b.executor.ValidatePRHead(ctx, ev.Repo, ev.PRNumber, headSHA); err != nil {
 			return err
 		}
 		ctx = context.WithValue(ctx, prHeadVerifiedContextKey{}, true)
@@ -704,7 +705,7 @@ func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bl
 	if len(skipIfActive) > 0 {
 		skip = skipIfActive[0]
 	}
-	return b.executor.DispatchChunkRemediation(rc, BrainDispatchRequest{
+	return b.executor.DispatchChunkRemediation(rc, executor.BrainDispatchRequest{
 		ID:             dispatchID,
 		Source:         "vanadis-restate",
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
@@ -729,12 +730,12 @@ func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunk
 	}
 	if !bld.Quiet {
 		targetID := strings.TrimSpace(bld.ThreadID)
-		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts)
+		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
 		if mErr := b.executor.DispatchDirectMessage(rc, targetID, content); mErr != nil {
 			slog.WarnContext(rc, "[vanadis-restate] direct alert message warning", "error", mErr)
 		}
 	}
-	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
+	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
 	chunks := []model.VanadisChunk{}
 	if chk != nil {
 		chunks = append(chunks, *chk)
@@ -768,16 +769,16 @@ func (b *BuildObject) handleConflictEvent(rc restate.RunContext, buildID, chunkI
 	if b.executor == nil {
 		return nil
 	}
-	dispatchID := conflictRemediationDispatchID(chunkID, ev.HeadSHA)
-	err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatConflictPrompt(ev))
-	if errors.Is(err, errDispatchActive) {
+	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA)
+	err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, executor.FormatConflictPrompt(ev))
+	if errors.Is(err, executor.ErrDispatchActive) {
 		return nil
 	}
 	return err
 }
 
 func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	if isGateAggregatorCheck(ev.CheckName) {
+	if executor.IsGateAggregatorCheck(ev.CheckName) {
 		return nil
 	}
 	if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
@@ -797,7 +798,7 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 		return err
 	}
 	cleanHead := strings.TrimSpace(ev.HeadSHA)
-	if chunk.CIFailCount >= maxCIRemediationAttempts {
+	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
 		var failCount int
 		if b.store != nil {
 			failCount, err = b.store.IncrementChunkCIFailCount(rc, chunkID, banner, cleanHead)
@@ -811,10 +812,10 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 	if err != nil {
 		return err
 	}
-	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
+	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
-	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
-		if errors.Is(err, errDispatchActive) {
+	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
+		if errors.Is(err, executor.ErrDispatchActive) {
 			return nil
 		}
 		return err
@@ -844,14 +845,14 @@ func (b *BuildObject) handleClosedPREvent(rc restate.RunContext, chunkID string,
 }
 
 func (b *BuildObject) handleDeployFailureEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	banner := FormatDeployFailureBanner(ev)
+	banner := executor.FormatDeployFailureBanner(ev)
 	if b.store != nil {
 		if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, "deploy_failed", banner); err != nil {
 			return err
 		}
 	}
 	if b.executor != nil {
-		if err := b.dispatchThreadWakePrompt(rc, buildID, FormatDeployFailurePrompt(ev)); err != nil {
+		if err := b.dispatchThreadWakePrompt(rc, buildID, executor.FormatDeployFailurePrompt(ev)); err != nil {
 			return err
 		}
 	}
@@ -1013,7 +1014,7 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 	if targetChunk == nil {
 		return "", nil
 	}
-	if vErr := b.executor.validateChunkPRAttachment(rc, *build, *targetChunk, ev); vErr != nil {
+	if vErr := b.executor.ValidateChunkPRAttachment(rc, *build, *targetChunk, ev); vErr != nil {
 		if errors.Is(vErr, errPRTransitionSkipped) {
 			return "", nil
 		}
@@ -1147,7 +1148,7 @@ func (b *BuildObject) resumeNoPRChunk(rc restate.RunContext, bld *model.VanadisB
 	}
 	chunk.Effort = store.CapChunkEffort(chunk.Effort)
 	// eri dedupes by dispatch ID, so never skip: a dropped resume would stall the chunk.
-	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, noPRResumeDispatchID(chunk.ID), FormatNoPRResumePrompt(chunk, chunkPrompt), false); err != nil {
+	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, noPRResumeDispatchID(chunk.ID), executor.FormatNoPRResumePrompt(chunk, chunkPrompt), false); err != nil {
 		return err
 	}
 	banner := fmt.Sprintf("Chunk %d turn ended without a PR — automatic resume dispatched", chunk.ChunkIndex+1)

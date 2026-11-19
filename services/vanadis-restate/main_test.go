@@ -23,6 +23,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -688,7 +689,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", eri, bus, "test-token", nil)
+	exec := executor.NewExecutor("", eri, bus, "test-token", nil)
 	b1 := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Obj 1", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b1", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
 	c2 := model.VanadisChunk{ID: "c2", BuildID: "b1", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
@@ -788,7 +789,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", eri, bus, "test-token", nil)
+	exec := executor.NewExecutor("", eri, bus, "test-token", nil)
 
 	b := model.VanadisBuild{ID: "b-trans", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "pending", Repo: "aerial", Mode: "pr"}
@@ -849,7 +850,7 @@ func TestBuildObject_Transitions_Extended(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", eri, bus, "token", nil)
+	exec := executor.NewExecutor("", eri, bus, "token", nil)
 	b := model.VanadisBuild{ID: "b-ext", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-ext", Status: "running", Repo: "aerial", Mode: "pr"}
 
@@ -1130,7 +1131,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	}
 
 	eriMock := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eriMock, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eriMock, nil, "token", nil)
 	storeLaunch, _ := dbScript{
 		buildRow: &mockRow{b: &bLaunch},
 		chunks:   []model.VanadisChunk{chunkPending},
@@ -1303,7 +1304,7 @@ func TestBuildObject_ObjectTransitionsDirect(t *testing.T) {
 		execTag:  "UPDATE 1",
 	}.open()
 	eri := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	rt := newFakeObjectRuntime("b-active")
@@ -1364,7 +1365,7 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 		execTag: "UPDATE 1",
 	}.open()
 	eri := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-auth")
@@ -1425,7 +1426,7 @@ func TestBuildObject_AuthorityCoverageExtra(t *testing.T) {
 	}.open()
 	mockBus := &mockBusExecutor{}
 	eri := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eri, mockBus, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, mockBus, "token", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 	ctx := makeObjectMockContext(t, "b-cov")
 

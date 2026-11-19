@@ -3,39 +3,40 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req BrainDispatchRequest) error
+	dispatchFn func(ctx context.Context, req executor.BrainDispatchRequest) error
 	cancelFn   func(ctx context.Context, chunkID string) error
 	promptFn   func(ctx context.Context, threadID, prompt string) error
-	widgetFn   func(ctx context.Context, req StatusWidgetRequest) (string, error)
+	widgetFn   func(ctx context.Context, req executor.StatusWidgetRequest) (string, error)
 	messageFn  func(ctx context.Context, channelID, content string) error
 
-	lastDispatch *BrainDispatchRequest
+	lastDispatch *executor.BrainDispatchRequest
 	lastCancel   string
 	lastThreadID string
 	lastPrompt   string
-	lastWidget   *StatusWidgetRequest
+	lastWidget   *executor.StatusWidgetRequest
 	lastMsgChan  string
 	lastMsgCont  string
 }
 
-func (m *mockEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
+func (m *mockEriClient) DispatchAccepted(ctx context.Context, req executor.BrainDispatchRequest) error {
+	return m.Dispatch(ctx, req)
+}
+
+func (m *mockEriClient) Dispatch(ctx context.Context, req executor.BrainDispatchRequest) error {
 	m.lastDispatch = &req
 	if m.dispatchFn != nil {
 		return m.dispatchFn(ctx, req)
@@ -60,7 +61,7 @@ func (m *mockEriClient) Prompt(ctx context.Context, threadID, prompt string) err
 	return nil
 }
 
-func (m *mockEriClient) Widget(ctx context.Context, req StatusWidgetRequest) (string, error) {
+func (m *mockEriClient) Widget(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
 	m.lastWidget = &req
 	if m.widgetFn != nil {
 		return m.widgetFn(ctx, req)
@@ -77,995 +78,10 @@ func (m *mockEriClient) Message(ctx context.Context, channelID, content string) 
 	return nil
 }
 
-func TestHTTPEriClient(t *testing.T) {
-	t.Parallel()
-	var gotPromptPayload map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/dispatch":
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case "/prompt":
-			_ = json.NewDecoder(r.Body).Decode(&gotPromptPayload)
-		case "/discord/widget":
-			_, _ = w.Write([]byte(`{"message_id":"widget-msg-999"}`))
-		case "/dispatch/cancel", "/discord/message":
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewHTTPEriClient(srv.URL, srv.Client())
-
-	ctx := context.Background()
-	assert.NoError(t, client.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}))
-	assert.NoError(t, client.CancelDispatch(ctx, "c1"))
-	assert.NoError(t, client.Prompt(ctx, "th1", "wake up"))
-	const wantMsgID = "vanadis-prompt-ad174723f0a135a9c1f7db8600f6ecb0"
-	assert.Equal(t, wantMsgID, gotPromptPayload["message_id"])
-	assert.Equal(t, "th1", gotPromptPayload["channel_id"])
-	assert.Equal(t, "wake up", gotPromptPayload["prompt"])
-	assert.NoError(t, client.Prompt(ctx, "th1", "wake up"))
-	assert.Equal(t, wantMsgID, gotPromptPayload["message_id"])
-	assert.NoError(t, client.Prompt(ctx, "th1", "other prompt"))
-	assert.NotEqual(t, wantMsgID, gotPromptPayload["message_id"])
-	assert.NoError(t, client.Prompt(ctx, "th2", "wake up"))
-	assert.NotEqual(t, wantMsgID, gotPromptPayload["message_id"])
-	assert.NoError(t, client.Prompt(ctx, "", "wake up"))
-	assert.NoError(t, client.Prompt(ctx, "th1", ""))
-	msgID, err := client.Widget(ctx, StatusWidgetRequest{ID: "b1"})
-	assert.NoError(t, err)
-	assert.Equal(t, "widget-msg-999", msgID)
-	assert.NoError(t, client.Message(ctx, "ch1", "hello"))
-
-	// Test errors
-	badClient := NewHTTPEriClient("http://invalid.localhost:99", srv.Client())
-	if err := badClient.Dispatch(ctx, BrainDispatchRequest{}); err == nil {
-		t.Error("expected error on bad client dispatch, got nil")
-	}
-}
-
-func TestExecutor_PromptAndDispatch(t *testing.T) {
-	t.Parallel()
-	eri := &mockEriClient{}
-	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor(t.TempDir(), eri, bus, "test-token", nil)
-
-	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
-	chunks := []model.VanadisChunk{
-		{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do step 1", Effort: "high"},
-		{ID: "c2", Title: "Chunk 2", Repo: "aerial", Instructions: "Do step 2", Mode: chunkModeAction},
-	}
-
-	prompt1, err := exec.FormatChunkPrompt(b, chunks, 0)
-	if err != nil || !strings.Contains(prompt1, "Chunk 1") {
-		t.Fatalf("FormatChunkPrompt 0 failed: %v, prompt: %s", err, prompt1)
-	}
-
-	prompt2, err := exec.FormatChunkPrompt(b, chunks, 1)
-	if err != nil || !strings.Contains(prompt2, "Chunk 2") {
-		t.Fatalf("FormatChunkPrompt 1 failed: %v, prompt: %s", err, prompt2)
-	}
-
-	// Test chunk out of bounds
-	if _, err := exec.FormatChunkPrompt(b, chunks, 9); err == nil {
-		t.Error("expected error on out of bounds chunk index, got nil")
-	}
-
-	st, _ := dbScript{}.open()
-	if err := exec.ExecuteLaunchChunk(context.Background(), st, b, chunks, 0, "[NOTICE]\n"); err != nil {
-		t.Fatalf("ExecuteLaunchChunk failed: %v", err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.VanadisChunkID != "c1" {
-		t.Errorf("lastDispatch chunkID = %+v, want c1", eri.lastDispatch)
-	}
-
-	if err := exec.CancelChunkDispatch(context.Background(), "c1"); err != nil || eri.lastCancel != "c1" {
-		t.Errorf("CancelChunkDispatch failed: %v", err)
-	}
-	if err := exec.DispatchWakePrompt(context.Background(), "th-1", "wake"); err != nil || eri.lastPrompt != "wake" {
-		t.Errorf("DispatchWakePrompt failed: %v", err)
-	}
-	if err := exec.DispatchDirectMessage(context.Background(), "ch-1", "msg"); err != nil || eri.lastMsgCont != "msg" {
-		t.Errorf("DispatchDirectMessage failed: %v", err)
-	}
-}
-
-func TestExecutor_SyncBuildWidget(t *testing.T) {
-	t.Parallel()
-	eri := &mockEriClient{
-		widgetFn: func(ctx context.Context, req StatusWidgetRequest) (string, error) {
-			return "widget-msg-456", nil
-		},
-	}
-	exec := NewExecutor("", eri, nil, "", nil)
-	st, _ := dbScript{execTag: "UPDATE 1"}.open()
-
-	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
-	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
-
-	msgID, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "Notice!")
-	if err != nil || msgID != "widget-msg-456" {
-		t.Fatalf("SyncBuildWidget msgID = %q err = %v", msgID, err)
-	}
-	if eri.lastWidget == nil || eri.lastWidget.Banner != "Notice!" {
-		t.Errorf("expected banner 'Notice!', got %v", eri.lastWidget)
-	}
-
-	// nil executor or eri client
-	if id, err := (*Executor)(nil).SyncBuildWidget(context.Background(), nil, b, chunks, ""); id != "" || err != nil {
-		t.Error("expected empty string and nil error")
-	}
-
-	// eri client error
-	eriErr := &mockEriClient{
-		widgetFn: func(ctx context.Context, req StatusWidgetRequest) (string, error) {
-			return "", errors.New("eri widget failure")
-		},
-	}
-	execErr := NewExecutor("", eriErr, nil, "", nil)
-	if _, err := execErr.SyncBuildWidget(context.Background(), st, b, chunks, ""); err == nil {
-		t.Error("expected error on eri failure")
-	}
-
-	// update message id error branch
-	storeUpdateErr, _ := dbScript{failExec: "UPDATE vanadis_builds", execErr: errors.New("update err")}.open()
-	_, _ = exec.SyncBuildWidget(context.Background(), storeUpdateErr, b, chunks, "")
-
-	// truncatePromptRunes coverage
-	// normalizeSymbolName
-	if sym := normalizeSymbolName("pkg.FooBar()"); sym != "FooBar" {
-		t.Errorf("expected FooBar, got %q", sym)
-	}
-	if sym := normalizeSymbolName("  MyFunc  "); sym != "MyFunc" {
-		t.Errorf("expected MyFunc, got %q", sym)
-	}
-
-	shortStr := "hello"
-	if got := truncatePromptRunes(shortStr, 10); got != shortStr {
-		t.Errorf("expected %q, got %q", shortStr, got)
-	}
-	longStr := "hello world from vanadis"
-	if got := truncatePromptRunes(longStr, 5); !strings.HasSuffix(got, "... (truncated)") {
-		t.Errorf("expected truncation, got %q", got)
-	}
-}
-
-func TestExecutor_PublishExternalEvent(t *testing.T) {
-	t.Parallel()
-	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", nil, bus, "", nil)
-
-	ctx := context.Background()
-	if err := exec.PublishExternalEvent(ctx, "vanadis_build", "completed", []string{"b1"}, "all green"); err != nil {
-		t.Fatalf("PublishExternalEvent failed: %v", err)
-	}
-}
-
-func TestSymbolResolution(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "aerial")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	code := `package test
-
-func DoAwesomeThing() {
-	println("awesome")
-}
-
-type AwesomeStruct struct {
-	Field int
-}
-`
-	if err := os.WriteFile(filepath.Join(repoDir, "awesome.go"), []byte(code), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	spans, ok := ResolveSymbolSpans(tmpDir, "aerial", []string{"awesome.go"}, []string{"DoAwesomeThing", "AwesomeStruct"})
-	if !ok || len(spans) == 0 {
-		t.Fatalf("ResolveSymbolSpans failed, spans = %v, ok = %v", spans, ok)
-	}
-	if !strings.Contains(spans[0], "DoAwesomeThing") || !strings.Contains(spans[0], "AwesomeStruct") {
-		t.Errorf("spans missing symbols: %v", spans)
-	}
-}
-
-func TestCIFailureLogExtraction(t *testing.T) {
-	t.Parallel()
-	rawLog := `2026-11-15T23:00:00.000Z ##[group]Run tests
-2026-11-15T23:00:01.000Z === RUN   TestSomething
-2026-11-15T23:00:02.000Z --- FAIL: TestSomething (0.01s)
-2026-11-15T23:00:02.000Z     main_test.go:42: something failed
-2026-11-15T23:00:03.000Z FAIL
-2026-11-15T23:00:04.000Z ##[endgroup]
-2026-11-15T23:00:05.000Z Post job cleanup.
-`
-	extracted := ExtractCIFailureDetails(rawLog)
-	if !strings.Contains(extracted, "FAIL: TestSomething") {
-		t.Errorf("ExtractCIFailureDetails missing failure: %s", extracted)
-	}
-	if strings.Contains(extracted, "##[group]") || strings.Contains(extracted, "Post job cleanup.") {
-		t.Errorf("ExtractCIFailureDetails contains plumbing lines: %s", extracted)
-	}
-
-	ev := pubsub.PRLifecycleEvent{
-		Repo:      "azylman/aerial",
-		PRNumber:  123,
-		CheckName: "test-unit",
-		Branch:    "feat/test",
-		HeadSHA:   "abcdef1",
-	}
-	prompt := FormatCIFailurePrompt(ev, "extracted failure details")
-	if !strings.Contains(prompt, "PR #123") || !strings.Contains(prompt, "extracted failure details") {
-		t.Errorf("FormatCIFailurePrompt missing details: %s", prompt)
-	}
-
-	conflictPrompt := FormatConflictPrompt(ev)
-	if !strings.Contains(conflictPrompt, "Merge conflict") || !strings.Contains(conflictPrompt, "PR #123") {
-		t.Errorf("FormatConflictPrompt missing details: %s", conflictPrompt)
-	}
-}
-
-func TestWidgetFormatting(t *testing.T) {
-	t.Parallel()
-	c := model.VanadisChunk{
-		ID:     "c1",
-		Status: "open",
-		CIChecks: map[string]string{
-			"lint": "passed",
-			"test": "pending",
-		},
-	}
-	step := FormatChunkActiveStep(c)
-	if !strings.Contains(step, "1/2 passed") {
-		t.Errorf("FormatChunkActiveStep = %q, want '1/2 passed'", step)
-	}
-
-	cFailed := model.VanadisChunk{
-		ID:     "c1-fail",
-		Status: "open",
-		CIChecks: map[string]string{
-			"lint": "passed",
-			"test": "failed",
-		},
-	}
-	if stepFailed := FormatChunkActiveStep(cFailed); stepFailed != "" {
-		t.Errorf("FormatChunkActiveStep failed = %q, want empty", stepFailed)
-	}
-
-	cDeploying := model.VanadisChunk{ID: "c2", Status: "deploying"}
-	stepDeploy := FormatChunkActiveStep(cDeploying)
-	if stepDeploy != "Deploying to cluster" {
-		t.Errorf("FormatChunkActiveStep deploying = %q, want 'Deploying to cluster'", stepDeploy)
-	}
-
-	cEmpty := model.VanadisChunk{ID: "c3", Status: "pending"}
-	if stepEmpty := FormatChunkActiveStep(cEmpty); stepEmpty != "" {
-		t.Errorf("FormatChunkActiveStep pending = %q, want empty", stepEmpty)
-	}
-}
-
-func TestNormalizeWidgetStatus(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{input: "coding", want: "running"},
-		{input: "running", want: "running"},
-		{input: "pr_opened", want: "open"},
-		{input: "open", want: "open"},
-		{input: "completed", want: "completed"},
-		{input: "deployed", want: "completed"},
-		{input: "merged", want: "merged"},
-		{input: "failed", want: "failed"},
-		{input: "crashed", want: "failed"},
-		{input: "timeout", want: "failed"},
-		{input: "cancelled", want: "cancelled"},
-		{input: "custom_status", want: "custom_status"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			t.Parallel()
-			got := normalizeWidgetStatus(tc.input)
-			if got != tc.want {
-				t.Errorf("normalizeWidgetStatus(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestExecutor_ResolveCIFailureDetails(t *testing.T) {
-	t.Parallel()
-	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/issues/10/comments"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"id":1,"body":"some regular comment"},{"id":2,"body":"## roborev:\n` + "`abc1234`" + `\nFound potential issue on line 10"}]`))
-		case strings.Contains(r.URL.Path, "/actions/jobs/555/logs"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL\n"))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(ghServer.Close)
-
-	exec := NewExecutor("", nil, nil, "gh-token", ghServer.Client())
-	exec.gitHubAPIURL = ghServer.URL
-
-	tests := []struct {
-		name      string
-		repo      string
-		pr        int
-		check     string
-		sha       string
-		url       string
-		details   string
-		wantMatch string
-	}{
-		{
-			name:      "roborev comment matched",
-			repo:      "aerial",
-			pr:        10,
-			check:     "roborev",
-			sha:       "abc123456789",
-			details:   "failure",
-			wantMatch: "roborev:",
-		},
-		{
-			name:      "job logs extracted",
-			repo:      "aerial",
-			pr:        10,
-			check:     "unit-tests",
-			url:       "https://github.com/azylman/aerial/actions/runs/123/job/555",
-			details:   "failure",
-			wantMatch: "FAIL: TestA",
-		},
-		{
-			name:      "fallback details when check url has no job id",
-			repo:      "aerial",
-			pr:        10,
-			check:     "unit-tests",
-			url:       "https://github.com/azylman/aerial/actions",
-			details:   "timed_out",
-			wantMatch: "timed_out",
-		},
-		{
-			name:      "custom details preserved",
-			repo:      "aerial",
-			pr:        10,
-			check:     "unit-tests",
-			details:   "already specific error details",
-			wantMatch: "already specific error details",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := exec.ResolveCIFailureDetails(context.Background(), tc.repo, tc.pr, tc.check, tc.sha, tc.url, tc.details)
-			if !strings.Contains(got, tc.wantMatch) {
-				t.Errorf("ResolveCIFailureDetails = %q, want containing %q", got, tc.wantMatch)
-			}
-		})
-	}
-}
-
-func TestFormatChunkPromptWithShareRoot(t *testing.T) {
-	t.Parallel()
-	b := model.VanadisBuild{
-		ID:            "b-1",
-		Title:         "Build Title",
-		Objective:     "Build Objective",
-		SharedContext: "Shared Context",
-		Tier:          2,
-	}
-	chunks := []model.VanadisChunk{
-		{
-			ID:           "c-1",
-			Title:        "Chunk 1",
-			Mode:         "pr",
-			Repo:         "aerial",
-			Instructions: "Do chunk 1",
-			TargetFiles:  []string{"services/vanadis-restate/main.go"},
-		},
-		{
-			ID:           "c-2",
-			Title:        "Action Chunk 2",
-			Mode:         "action",
-			Instructions: "Verify deployment",
-		},
-	}
-
-	tests := []struct {
-		name      string
-		chunks    []model.VanadisChunk
-		activeIdx int
-		wantErr   bool
-		wantPart  string
-	}{
-		{name: "empty chunks error", chunks: nil, activeIdx: 0, wantErr: true},
-		{name: "negative index error", chunks: chunks, activeIdx: -1, wantErr: true},
-		{name: "out of range index error", chunks: chunks, activeIdx: 5, wantErr: true},
-		{name: "first chunk prompt", chunks: chunks, activeIdx: 0, wantPart: "=== Active Chunk (Chunk 1 of 2) ==="},
-		{name: "action chunk prompt", chunks: chunks, activeIdx: 1, wantPart: "=== Active Chunk (Chunk 2 of 2) ==="},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			prompt, err := formatChunkPromptWithShareRoot(b, tc.chunks, tc.activeIdx, "/tmp")
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !strings.Contains(prompt, tc.wantPart) {
-				t.Errorf("prompt missing %q:\n%s", tc.wantPart, prompt)
-			}
-		})
-	}
-}
-
-func TestIsHighSignalLine(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		line string
-		want bool
-	}{
-		{name: "fail test line", line: "--- FAIL: TestFoo (0.01s)", want: true},
-		{name: "fail tab", line: "FAIL\tgithub.com/azylman/aerial", want: true},
-		{name: "panic line", line: "panic: runtime error", want: true},
-		{name: "error line", line: "Error: something failed", want: true},
-		{name: "gha error", line: "##[error] Process failed", want: true},
-		{name: "alert emoji", line: "🚨 test failure", want: true},
-		{name: "go coordinate", line: "pkg/test.go:42:15: syntax error", want: true},
-		{name: "regular log", line: "just some regular output line", want: false},
-		{name: "empty line", line: "", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := isHighSignalLine(tc.line)
-			if got != tc.want {
-				t.Errorf("isHighSignalLine(%q) = %v, want %v", tc.line, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIsBoundedIdent(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		line  string
-		start int
-		end   int
-		want  bool
-	}{
-		{name: "middle bounded", line: " foo ", start: 1, end: 4, want: true},
-		{name: "prefixed", line: "afoo ", start: 1, end: 5, want: false},
-		{name: "suffixed", line: " fooa", start: 1, end: 4, want: false},
-		{name: "start of line", line: "foo ", start: 0, end: 3, want: true},
-		{name: "end of line", line: " foo", start: 1, end: 4, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := isBoundedIdent(tc.line, tc.start, tc.end)
-			if got != tc.want {
-				t.Errorf("isBoundedIdent(%q, %d, %d) = %v, want %v", tc.line, tc.start, tc.end, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
-	t.Parallel()
-	execNil := NewExecutor("", nil, nil, "", nil)
-	ctx := context.Background()
-	if err := execNil.CancelChunkDispatch(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchChunkRemediation(ctx, BrainDispatchRequest{}); err == nil {
-		t.Error("expected error from nil eri client on DispatchChunkRemediation")
-	}
-
-	eri := &mockEriClient{}
-	exec := NewExecutor("", eri, nil, "", nil)
-	if err := exec.CancelChunkDispatch(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastCancel != "c1" {
-		t.Errorf("lastCancel = %q, want c1", eri.lastCancel)
-	}
-	if err := exec.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastPrompt != "prompt" {
-		t.Errorf("lastPrompt = %q, want prompt", eri.lastPrompt)
-	}
-	if err := exec.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastMsgCont != "msg" {
-		t.Errorf("lastMsgCont = %q, want msg", eri.lastMsgCont)
-	}
-}
-
-func TestContainsIdent(t *testing.T) {
-	t.Parallel()
-	if containsIdent("any", "") {
-		t.Error("expected false for empty ident")
-	}
-	if !containsIdent("xfoo foo", "foo") {
-		t.Error("expected true when second occurrence matches")
-	}
-}
-
-func TestRepoCheckoutDir_Cases(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		repo     string
-		wantPath string
-		wantOK   bool
-	}{
-		{repo: "", wantOK: false},
-		{repo: ".", wantOK: false},
-		{repo: "..", wantOK: false},
-		{repo: "aerial", wantPath: "/share/aerial", wantOK: true},
-		{repo: "azylman/aerial", wantPath: "/share/aerial", wantOK: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.repo, func(t *testing.T) {
-			t.Parallel()
-			path, ok := repoCheckoutDir("/share", tc.repo)
-			if ok != tc.wantOK {
-				t.Fatalf("repoCheckoutDir(%q) ok = %v, want %v", tc.repo, ok, tc.wantOK)
-			}
-			if ok && path != tc.wantPath {
-				t.Errorf("repoCheckoutDir(%q) path = %q, want %q", tc.repo, path, tc.wantPath)
-			}
-		})
-	}
-}
-
-func TestStripLineComment(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		line string
-		want string
-	}{
-		{line: "func Foo() { // comment", want: "func Foo() { "},
-		{line: "func Foo() {}", want: "func Foo() {}"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.line, func(t *testing.T) {
-			t.Parallel()
-			got := stripLineComment(tc.line)
-			if got != tc.want {
-				t.Errorf("stripLineComment(%q) = %q, want %q", tc.line, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestHTTPEriClient_Extended(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// Nil receiver
-	var nilClient *HTTPEriClient
-	if err := nilClient.Dispatch(ctx, BrainDispatchRequest{}); err == nil {
-		t.Error("expected error from nil HTTPEriClient")
-	}
-
-	// Empty URL
-	emptyURLClient := NewHTTPEriClient("", nil)
-	if err := emptyURLClient.Dispatch(ctx, BrainDispatchRequest{}); err == nil {
-		t.Error("expected error from empty URL HTTPEriClient")
-	}
-
-	// Empty arguments are no-ops
-	if err := emptyURLClient.CancelDispatch(ctx, ""); err != nil {
-		t.Errorf("unexpected error on empty CancelDispatch: %v", err)
-	}
-	if err := emptyURLClient.Prompt(ctx, "", "prompt"); err != nil {
-		t.Errorf("unexpected error on empty Prompt: %v", err)
-	}
-	if err := emptyURLClient.Prompt(ctx, "th", ""); err != nil {
-		t.Errorf("unexpected error on empty Prompt: %v", err)
-	}
-	if err := emptyURLClient.Message(ctx, "", "content"); err != nil {
-		t.Errorf("unexpected error on empty Message: %v", err)
-	}
-	if err := emptyURLClient.Message(ctx, "ch", ""); err != nil {
-		t.Errorf("unexpected error on empty Message: %v", err)
-	}
-
-	// Server returning 500
-	srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("internal error"))
-	}))
-	defer srv500.Close()
-
-	c500 := NewHTTPEriClient(srv500.URL, srv500.Client())
-	if err := c500.Dispatch(ctx, BrainDispatchRequest{}); err == nil {
-		t.Error("expected error from 500 status")
-	}
-	if _, err := c500.Widget(ctx, StatusWidgetRequest{}); err == nil {
-		t.Error("expected error from 500 status on Widget")
-	}
-
-	// Marshal error
-	if _, err := c500.postEriJSON(ctx, "/path", make(chan int), 1024); err == nil {
-		t.Error("expected marshal error")
-	}
-
-	// Bad URL request error
-	badURLClient := NewHTTPEriClient("http://[::1]:namedport", srv500.Client())
-	if _, err := badURLClient.postEriJSON(ctx, "/path", "test", 1024); err == nil {
-		t.Error("expected create request error")
-	}
-
-	var dispatchResp string
-	srvDispatch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(dispatchResp))
-	}))
-	defer srvDispatch.Close()
-	cDispatch := NewHTTPEriClient(srvDispatch.URL, srvDispatch.Client())
-
-	dispatchResp = `{"status":"skipped_active"}`
-	if err := cDispatch.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); !errors.Is(err, errDispatchActive) {
-		t.Errorf("expected errDispatchActive on skipped_active, got %v", err)
-	}
-	dispatchResp = `{"status":"rejected"}`
-	if err := cDispatch.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
-		t.Error("expected error on rejected dispatch status")
-	}
-	dispatchResp = `{invalid-json`
-	if err := cDispatch.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
-		t.Error("expected error on malformed dispatch JSON")
-	}
-}
-
-func TestFindSymbolSpan_Cases(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		content   string
-		symbol    string
-		wantStart int
-		wantEnd   int
-		wantFound bool
-	}{
-		{name: "empty symbol", content: "func Foo() {}", symbol: "", wantFound: false},
-		{name: "empty content", content: "", symbol: "Foo", wantFound: false},
-		{name: "not found", content: "func Foo() {}", symbol: "Bar", wantFound: false},
-		{name: "decl prefix with closing brace", content: "func Foo() {\n\treturn\n}", symbol: "Foo", wantStart: 1, wantEnd: 3, wantFound: true},
-		{name: "decl prefix without closing brace", content: "type Foo struct {\n\tX int", symbol: "Foo", wantStart: 1, wantEnd: 1, wantFound: true},
-		{name: "fallback non-decl line", content: "\n\tFoo := 123", symbol: "Foo", wantStart: 2, wantEnd: 2, wantFound: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			start, end, found := FindSymbolSpan(tc.content, tc.symbol)
-			if found != tc.wantFound || start != tc.wantStart || end != tc.wantEnd {
-				t.Errorf("FindSymbolSpan(%q, %q) = (%d, %d, %v), want (%d, %d, %v)", tc.content, tc.symbol, start, end, found, tc.wantStart, tc.wantEnd, tc.wantFound)
-			}
-		})
-	}
-}
-
-func TestResolveSymbolSpans_Extended(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "aerial")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	testFile := filepath.Join(repoDir, "test.go")
-	if err := os.WriteFile(testFile, []byte("package main\n\nfunc MyTargetFunc() {\n}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name          string
-		shareRoot     string
-		repo          string
-		files         []string
-		symbols       []string
-		wantResolved  bool
-		wantSpanCount int
-	}{
-		{
-			name:         "invalid repo path",
-			shareRoot:    tmpDir,
-			repo:         ".",
-			files:        []string{"test.go"},
-			symbols:      []string{"MyTargetFunc"},
-			wantResolved: false,
-		},
-		{
-			name:         "nonexistent file",
-			shareRoot:    tmpDir,
-			repo:         "aerial",
-			files:        []string{"nonexistent.go"},
-			symbols:      []string{"MyTargetFunc"},
-			wantResolved: false,
-		},
-		{
-			name:         "file exists symbol missing",
-			shareRoot:    tmpDir,
-			repo:         "aerial",
-			files:        []string{"test.go"},
-			symbols:      []string{"MissingSymbol"},
-			wantResolved: false,
-		},
-		{
-			name:          "success resolving symbol",
-			shareRoot:     tmpDir,
-			repo:          "aerial",
-			files:         []string{"test.go"},
-			symbols:       []string{"MyTargetFunc"},
-			wantResolved:  true,
-			wantSpanCount: 1,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			spans, ok := ResolveSymbolSpans(tc.shareRoot, tc.repo, tc.files, tc.symbols)
-			if ok != tc.wantResolved {
-				t.Fatalf("ResolveSymbolSpans ok = %v, want %v", ok, tc.wantResolved)
-			}
-			if len(spans) != tc.wantSpanCount {
-				t.Errorf("spans count = %d, want %d", len(spans), tc.wantSpanCount)
-			}
-		})
-	}
-}
-
-func TestResolveCIFailureDetails_RoboRevAndLogsBranches(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// Server returning RoboRev comment with non-matching SHA and matching SHA
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/comments"):
-			w.WriteHeader(http.StatusOK)
-			comments := []gitHubIssueComment{
-				{ID: 1, Body: "## roborev: findings for `other12`\nSome finding"},
-				{ID: 2, Body: "## roborev: findings for `abcdef1`\nVerified finding"},
-			}
-			data, _ := json.Marshal(comments)
-			_, _ = w.Write(data)
-		case strings.Contains(r.URL.Path, "/logs"):
-			w.WriteHeader(http.StatusOK)
-			largeLog := strings.Repeat("2026-11-16T00:00:00Z line of log\n", 1000) +
-				"2026-11-16T00:00:00Z FAIL: TestX\nPost job cleanup.\nmore logs\n"
-			_, _ = w.Write([]byte(largeLog))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	exec := NewExecutor("", nil, nil, "token", srv.Client())
-	exec.gitHubAPIURL = srv.URL
-
-	// 1. RoboRev match
-	details := exec.ResolveCIFailureDetails(ctx, "aerial", 101, "roborev", "abcdef123456", "", "failure")
-	if !strings.Contains(details, "Verified finding") {
-		t.Errorf("expected Verified finding, got %q", details)
-	}
-
-	// 2. Fetch logs with actions URL
-	actionsURL := "https://github.com/azylman/aerial/actions/runs/123/job/456789"
-	logDetails := exec.ResolveCIFailureDetails(ctx, "aerial", 0, "test", "abcdef1", actionsURL, "failure")
-	if !strings.Contains(logDetails, "FAIL: TestX") {
-		t.Errorf("expected FAIL: TestX in logs, got %q", logDetails)
-	}
-
-	// 3. FormatCIFailurePrompt with RoboRev
-	prEv := pubsub.PRLifecycleEvent{
-		Repo:      "aerial",
-		PRNumber:  101,
-		CheckName: "roborev",
-		HeadSHA:   "abcdef1",
-		Branch:    "feat/test",
-		CheckURL:  actionsURL,
-	}
-	prompt := FormatCIFailurePrompt(prEv, "details")
-	if !strings.Contains(prompt, "critically evaluate each RoboRev finding") {
-		t.Errorf("expected RoboRev directive, got %q", prompt)
-	}
-
-	// 4. FormatConflictPrompt
-	conflictPrompt := FormatConflictPrompt(prEv)
-	if !strings.Contains(conflictPrompt, "Merge conflict detected on PR #101") {
-		t.Errorf("expected conflict prompt, got %q", conflictPrompt)
-	}
-}
-
-func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
-	t.Parallel()
-	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/actions/jobs/999/logs"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case strings.Contains(r.URL.Path, "/actions/jobs/888/logs"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(""))
-		case strings.Contains(r.URL.Path, "/issues/99/comments"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case strings.Contains(r.URL.Path, "/issues/88/comments"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"id":3,"body":"no roborev here"}]`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer ghServer.Close()
-
-	exec := NewExecutor("", nil, nil, "gh-token", ghServer.Client())
-	exec.gitHubAPIURL = ghServer.URL
-
-	ctx := context.Background()
-
-	// fetchCheckJobFailureLogsChecked nil or invalid
-	if res, _ := (*Executor)(nil).fetchCheckJobFailureLogsChecked(ctx, "aerial", 123); res != "" {
-		t.Errorf("expected empty string, got %q", res)
-	}
-	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "", 123); res != "" {
-		t.Errorf("expected empty string for empty repo, got %q", res)
-	}
-	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "aerial", 0); res != "" {
-		t.Errorf("expected empty string for zero jobID, got %q", res)
-	}
-	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "aerial", 999); res != "" {
-		t.Errorf("expected empty string for 500 status, got %q", res)
-	}
-	if res, _ := exec.fetchCheckJobFailureLogsChecked(ctx, "aerial", 888); res != "" {
-		t.Errorf("expected empty for logs without high signal, got %q", res)
-	}
-
-	// fetchLatestRoboRevCommentChecked nil or invalid
-	if res, _ := (*Executor)(nil).fetchLatestRoboRevCommentChecked(ctx, "aerial", 10, "sha"); res != "" {
-		t.Errorf("expected empty string, got %q", res)
-	}
-	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "", 10, "sha"); res != "" {
-		t.Errorf("expected empty string for empty repo, got %q", res)
-	}
-	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "aerial", 0, "sha"); res != "" {
-		t.Errorf("expected empty string for zero pr, got %q", res)
-	}
-	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "aerial", 99, "sha"); res != "" {
-		t.Errorf("expected empty string for 500 status, got %q", res)
-	}
-	if res, _ := exec.fetchLatestRoboRevCommentChecked(ctx, "aerial", 88, "sha"); res != "" {
-		t.Errorf("expected empty string when no roborev comment found, got %q", res)
-	}
-
-	// Huge logs > 256KB
-	ghServerHuge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		prefix := strings.Repeat("log line\n", 30000)
-		_, _ = w.Write([]byte(prefix + "\n--- FAIL: TestHuge (0.01s)\n"))
-	}))
-	defer ghServerHuge.Close()
-	execHuge := NewExecutor("", nil, nil, "token", ghServerHuge.Client())
-	execHuge.gitHubAPIURL = ghServerHuge.URL
-	if res, _ := execHuge.fetchCheckJobFailureLogsChecked(ctx, "aerial", 111); !strings.Contains(res, "FAIL: TestHuge") {
-		t.Errorf("expected FAIL: TestHuge, got %q", res)
-	}
-
-	// RoboRev non-matching SHA
-	ghServerRoboMismatch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		comments := []gitHubIssueComment{
-			{ID: 1, Body: "## roborev: findings for `other12345`\nFinding"},
-		}
-		data, _ := json.Marshal(comments)
-		_, _ = w.Write(data)
-	}))
-	defer ghServerRoboMismatch.Close()
-	execRoboMismatch := NewExecutor("", nil, nil, "token", ghServerRoboMismatch.Client())
-	execRoboMismatch.gitHubAPIURL = ghServerRoboMismatch.URL
-	if res, _ := execRoboMismatch.fetchLatestRoboRevCommentChecked(ctx, "aerial", 10, "abcdef1"); res != "" {
-		t.Errorf("expected empty string for non-matching SHA, got %q", res)
-	}
-}
-
-func TestExecuteLaunchChunk_Errors(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// nil executor or eri client
-	if err := (*Executor)(nil).ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
-		t.Error("expected error for nil executor")
-	}
-
-	exec := NewExecutor("", &mockEriClient{}, nil, "", nil)
-
-	// out of bounds
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
-		t.Error("expected error for out of bounds chunk")
-	}
-
-	// activeIdx out of bounds
-	chunks := []model.VanadisChunk{{ID: "c1"}}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, -1, ""); err == nil {
-		t.Error("expected error for negative activeIdx")
-	}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, 2, ""); err == nil {
-		t.Error("expected error for out of range activeIdx")
-	}
-
-	// store reserve error branch
-	mockStore := &mockStoreForLaunch{reserveErr: errors.New("database locked")}
-	execWithStore := NewExecutor("", &mockEriClient{}, nil, "", nil)
-	chunksForLaunch := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
-	if err := execWithStore.ExecuteLaunchChunk(ctx, mockStore, model.VanadisBuild{ID: "b1"}, chunksForLaunch, 0, ""); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// TargetSymbols span rendering in FormatChunkPrompt
-	tmpShare := t.TempDir()
-	aerialDir := filepath.Join(tmpShare, "aerial")
-	_ = os.MkdirAll(aerialDir, 0o755)
-	_ = os.WriteFile(filepath.Join(aerialDir, "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644)
-	execShare := NewExecutor(tmpShare, &mockEriClient{}, nil, "", nil)
-	promptWithSpans, err := execShare.FormatChunkPrompt(model.VanadisBuild{ID: "b1"}, []model.VanadisChunk{{
-		ID:            "c1",
-		Title:         "Chunk 1",
-		Mode:          "pr",
-		Repo:          "aerial",
-		TargetFiles:   []string{"main.go"},
-		TargetSymbols: []string{"MySpecialSym"},
-	}}, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(promptWithSpans, "Target Symbol Spans:") {
-		t.Errorf("expected Target Symbol Spans in prompt, got:\n%s", promptWithSpans)
-	}
-
-	// PublishExternalEvent
-	mockB := &mockBusExecutor{}
-	execBus := NewExecutor("", nil, mockB, "", nil)
-	if err := execBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if mockB.lastSubj != "aerial.events.source.type" {
-		t.Errorf("lastSubj = %q, want aerial.events.source.type", mockB.lastSubj)
-	}
-}
-
 type mockStoreForLaunch struct {
 	store.VanadisStore
 
 	reserveErr error
-}
-
-func (m *mockStoreForLaunch) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
-	return m.reserveErr
 }
 
 type mockBusExecutor struct {
@@ -1074,32 +90,53 @@ type mockBusExecutor struct {
 	lastSubj string
 }
 
+func (m *mockStoreForLaunch) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
+	return m.reserveErr
+}
+
 func (m *mockBusExecutor) Publish(ctx context.Context, subject, msgID string, data any) error {
 	m.lastSubj = subject
 	return nil
 }
 
-func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		reserveErr error
-		wantError  bool
-	}{
-		{"reserved", nil, false},
-		{"database unavailable", errors.New("unavailable"), true},
-		{"missing chunk", ErrChunkNotFound, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			eri := &mockEriClient{}
-			executor := NewExecutor(t.TempDir(), eri, nil, "", nil)
-			err := executor.ExecuteLaunchChunk(context.Background(), &mockStoreForLaunch{reserveErr: tc.reserveErr}, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", StallNudges: 1}}, 0, "")
-			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, !tc.wantError, eri.lastDispatch != nil)
-		})
-	}
+func launchRecoveryServer(t *testing.T, id, first string, ready *atomic.Bool) (*httptest.Server, chan string) {
+	t.Helper()
+	ids := make(chan string, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dispatch" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		var req executor.BrainDispatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		select {
+		case ids <- req.ID:
+		default:
+			t.Error("unexpected repeated dispatch")
+		}
+		if req.ID == id && !ready.Load() {
+			switch first {
+			case "active":
+				_, _ = w.Write([]byte(`{"status":"skipped_active"}`))
+			case "lost":
+				w.Header().Set("Content-Length", "100")
+				_, _ = w.Write([]byte(`{"status":"accepted"`))
+			default:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+			return
+		}
+		status := "accepted"
+		if first == "lost" {
+			status = "already_exists"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status, "dispatch_id": req.ID})
+	}))
+	return srv, ids
 }
 
 func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
@@ -1145,16 +182,12 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 			defer srv.Close()
 			build := model.VanadisBuild{ID: "b", Status: "running"}
 			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []model.VanadisChunk{{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}}, execTag: "UPDATE 1"}.open()
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantAcknowledged, out.LaunchedMap[tc.key])
 		})
 	}
-}
-
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error {
-	return m.Dispatch(ctx, req)
 }
 
 func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
@@ -1165,7 +198,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		var req BrainDispatchRequest
+		var req executor.BrainDispatchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -1188,10 +221,10 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 		{ID: "sibling", Mode: "action", Status: "pending"},
 		{ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}},
 	}
-	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
+	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 	launched := map[string]bool{}
 	_, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
-	assert.ErrorIs(t, err, errDispatchActive)
+	assert.ErrorIs(t, err, executor.ErrDispatchActive)
 	assert.False(t, launched["dispatch:vanadis-retry-turn-1"])
 	assert.True(t, launched["sibling"])
 	select {
@@ -1201,299 +234,4 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 		t.Error("independent sibling was not accepted")
 	}
 	assert.False(t, launched["dependent"])
-}
-
-func TestFormatKustomizationAndJobRollout(t *testing.T) {
-	t.Parallel()
-
-	// Deploy target label tests
-	assert.Equal(t, "`default-svc`", formatDeployTargetLabel("default-svc", "job", ""))
-	assert.Equal(t, "[`git-sync`](https://flux.example.com/c/main/flux/sources)", formatDeployTargetLabel("git-sync", "job", "https://flux.example.com/"))
-	assert.Equal(t, "[`github-runner`](https://flux.example.com/c/main/flux/helmreleases)", formatDeployTargetLabel("github-runner", "job", "https://flux.example.com/"))
-	assert.Equal(t, "[`my-app`](https://flux.example.com/c/main/deployments/default/my-app)", formatDeployTargetLabel("my-app", "job", "https://flux.example.com/"))
-	assert.Equal(t, "[`kust-1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/kust-1)", formatDeployTargetLabel("kust-1", "kustomization", "https://flux.example.com/"))
-
-	// Kustomization rollout status
-	s, ok := formatKustomizationRolloutStatus(statusMerged, map[string]string{"kust": "healthy"})
-	assert.False(t, ok)
-	assert.Empty(t, s)
-
-	s, ok = formatKustomizationRolloutStatus(statusDeploying, map[string]string{
-		"k1": statusDeployed,
-		"k2": "progressing",
-	}, "https://flux.example.com")
-	assert.True(t, ok)
-	assert.Contains(t, s, "[`k1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k1): ✅ rolled out")
-	assert.Contains(t, s, "[`k2`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k2): 🔄 rolling out")
-
-	// FormatChunkActiveStep with kustomizations
-	chunkKust := model.VanadisChunk{
-		ID:     "c-kust",
-		Status: statusDeploying,
-		RolloutState: &pubsub.PRRolloutState{
-			KustomizationStatuses: map[string]string{"k1": statusDeployed},
-		},
-	}
-	stepKust := FormatChunkActiveStep(chunkKust, "https://flux.example.com")
-	assert.Contains(t, stepKust, "✅ rolled out")
-
-	// FormatChunkActiveStep with jobs
-	chunkJobs := model.VanadisChunk{
-		ID:     "c-jobs",
-		Status: statusDeploying,
-		RolloutState: &pubsub.PRRolloutState{
-			ExpectedJobs: []string{"svc-a", "svc-b", "svc-c", "svc-d"},
-			StartedJobs:  []string{"svc-b", "svc-c"},
-			DeployedJobs: []string{"svc-a"},
-			JobStates:    map[string]string{"svc-c": "verifying_health"},
-		},
-	}
-	stepJobs := FormatChunkActiveStep(chunkJobs)
-	assert.Contains(t, stepJobs, "`svc-a`: ✅ healthy")
-	assert.Contains(t, stepJobs, "`svc-b`: 🔄 starting")
-	assert.Contains(t, stepJobs, "`svc-c`: 🔄 verifying health")
-	assert.Contains(t, stepJobs, "`svc-d`: ⏳ building image")
-
-	// FormatChunkActiveStep with container image builds on merged
-	chunkImages := model.VanadisChunk{
-		ID:     "c-images",
-		Status: statusMerged,
-		CIChecks: map[string]string{
-			"build-check-1": "passed",
-			"build-check-2": "passed",
-		},
-	}
-	stepImages := FormatChunkActiveStep(chunkImages)
-	assert.Contains(t, stepImages, "Building container images (2/2 completed)")
-
-	// FormatChunkActiveStep with matched build job service on merged
-	chunkService := model.VanadisChunk{
-		ID:     "c-svc",
-		Status: statusMerged,
-		CIChecks: map[string]string{
-			"Build & Push Images (eri)": "passed",
-		},
-	}
-	stepService := FormatChunkActiveStep(chunkService)
-	assert.Contains(t, stepService, "`eri`: 🔄 starting")
-}
-
-func TestResolveGitHubRepoPath(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		repo     string
-		wantPath string
-	}{
-		{name: "empty string", repo: "", wantPath: ""},
-		{name: "whitespace only", repo: "   ", wantPath: ""},
-		{name: "bare repo with slashes prepends default owner", repo: "/aerial/", wantPath: "azylman/aerial"},
-		{name: "qualified repo with leading slash retains owner", repo: "/azylman/mirrormere", wantPath: "azylman/mirrormere"},
-		{name: "external owner retains owner", repo: "other-org/other-repo", wantPath: "other-org/other-repo"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := resolveGitHubRepoPath(tc.repo)
-			assert.Equal(t, tc.wantPath, got)
-		})
-	}
-}
-
-func TestFetchCheckJobFailureLogs_RepoPathResolution(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		repo        string
-		wantSubpath string
-	}{
-		{name: "bare repo prepends azylman", repo: "aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
-		{name: "qualified repo retains owner", repo: "azylman/aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
-		{name: "external repo retains owner", repo: "external/repo", wantSubpath: "/repos/external/repo/actions/jobs/123/logs"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var receivedPath string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				receivedPath = r.URL.Path
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("--- FAIL: TestFail (0.01s)\n"))
-			}))
-			defer server.Close()
-
-			exec := NewExecutor("", nil, nil, "token", server.Client())
-			exec.gitHubAPIURL = server.URL
-			res, _ := exec.fetchCheckJobFailureLogsChecked(context.Background(), tc.repo, 123)
-			assert.NotEmpty(t, res)
-			assert.Equal(t, tc.wantSubpath, receivedPath)
-		})
-	}
-}
-
-func TestFetchLatestRoboRevComment_RepoPathResolution(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		repo        string
-		wantSubpath string
-	}{
-		{name: "bare repo prepends azylman", repo: "aerial", wantSubpath: "/repos/azylman/aerial/issues/42/comments"},
-		{name: "qualified repo retains owner", repo: "azylman/aerial", wantSubpath: "/repos/azylman/aerial/issues/42/comments"},
-		{name: "external repo retains owner", repo: "external/repo", wantSubpath: "/repos/external/repo/issues/42/comments"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var receivedPath string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				receivedPath = r.URL.Path
-				w.WriteHeader(http.StatusOK)
-				comments := []gitHubIssueComment{{ID: 1, Body: "## roborev: findings for `sha1234`\nFinding 1"}}
-				_ = json.NewEncoder(w).Encode(comments)
-			}))
-			defer server.Close()
-
-			exec := NewExecutor("", nil, nil, "token", server.Client())
-			exec.gitHubAPIURL = server.URL
-			res, _ := exec.fetchLatestRoboRevCommentChecked(context.Background(), tc.repo, 42, "sha1234")
-			assert.NotEmpty(t, res)
-			assert.Equal(t, tc.wantSubpath, receivedPath)
-		})
-	}
-}
-
-func TestFormatDeployFailureBanner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		event      pubsub.PRLifecycleEvent
-		wantBanner string
-	}{
-		{
-			name:       "sync failed without details",
-			event:      pubsub.PRLifecycleEvent{Event: "sync_failed"},
-			wantBanner: "Git sync failed",
-		},
-		{
-			name:       "deploy failed with job name",
-			event:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri"},
-			wantBanner: "Deployment failed for eri",
-		},
-		{
-			name:       "deploy failed with job name and details",
-			event:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri", Details: "crash loop"},
-			wantBanner: "Deployment failed for eri: crash loop",
-		},
-		{
-			name:       "deploy failed without job name",
-			event:      pubsub.PRLifecycleEvent{Event: "deploy_failed"},
-			wantBanner: "Deployment failed",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := FormatDeployFailureBanner(tc.event)
-			assert.Equal(t, tc.wantBanner, got)
-		})
-	}
-}
-
-func TestFormatDeployFailurePrompt(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		event        pubsub.PRLifecycleEvent
-		wantContains []string
-	}{
-		{
-			name:         "sync failed on pr",
-			event:        pubsub.PRLifecycleEvent{Event: "sync_failed", Repo: "aerial", PRNumber: 101, MergeSHA: "msha1", Branch: "feat/foo", Details: "failed to sync"},
-			wantContains: []string{"Git sync failed for PR #101 on aerial (commit: msha1)", "Error details:\n```\nfailed to sync\n```", "Branch: feat/foo", "Please investigate and fix the git sync failure."},
-		},
-		{
-			name:         "deploy failed with job on pr",
-			event:        pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse", Repo: "aerial", PRNumber: 202, MergeSHA: "msha2", Details: "pod failed"},
-			wantContains: []string{"Deployment failed for job synapse on aerial (PR #202, commit: msha2)", "Error details:\n```\npod failed\n```", "Please investigate and fix the deployment failure."},
-		},
-		{
-			name:         "deploy failed without job on pr",
-			event:        pubsub.PRLifecycleEvent{Event: "deploy_failed", Repo: "aerial", PRNumber: 303, HeadSHA: "hsha3"},
-			wantContains: []string{"Deployment failed for PR #303 on aerial (commit: hsha3)", "Please investigate and fix the deployment failure."},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := FormatDeployFailurePrompt(tc.event)
-			for _, exp := range tc.wantContains {
-				assert.Contains(t, got, exp)
-			}
-		})
-	}
-}
-
-// launchRecoveryServer models the active-session gate and durable duplicate replay.
-func launchRecoveryServer(t *testing.T, id, first string, ready *atomic.Bool) (*httptest.Server, chan string) {
-	t.Helper()
-	ids := make(chan string, 8)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/dispatch" {
-			_, _ = w.Write([]byte(`{}`))
-			return
-		}
-		var req BrainDispatchRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Error(err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		select {
-		case ids <- req.ID:
-		default:
-			t.Error("unexpected repeated dispatch")
-		}
-		if req.ID == id && !ready.Load() {
-			switch first {
-			case "active":
-				_, _ = w.Write([]byte(`{"status":"skipped_active"}`))
-			case "lost":
-				w.Header().Set("Content-Length", "100")
-				_, _ = w.Write([]byte(`{"status":"accepted"`))
-			default:
-				w.WriteHeader(http.StatusServiceUnavailable)
-			}
-			return
-		}
-		status := "accepted"
-		if first == "lost" {
-			status = "already_exists"
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": status, "dispatch_id": req.ID})
-	}))
-	return srv, ids
-}
-
-func TestBuildStatusWidgetChunk(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		chunk    model.VanadisChunk
-		wantMode string
-		wantRepo string
-	}{
-		{"PRChunkKeepsRepo", model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config"},
-		{"PRChunkWithoutRepoDefaultsToAerial", model.VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial"},
-		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := buildStatusWidgetChunk(tc.chunk)
-			if got.Mode != tc.wantMode || got.Repo != tc.wantRepo {
-				t.Errorf("buildStatusWidgetChunk() mode=%q repo=%q, want mode=%q repo=%q", got.Mode, got.Repo, tc.wantMode, tc.wantRepo)
-			}
-		})
-	}
 }
