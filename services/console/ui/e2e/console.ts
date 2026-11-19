@@ -235,6 +235,7 @@ const MEMORY_HEADINGS = [
   'AVG REINFORCEMENTS',
   '2.79x',
   'VECTOR EMBEDDING MODEL',
+  'SENSES',
 ];
 // Rows with steps press End, click the cards of the last row the list shows, last card first, and
 // then re-select the active tab. The first click waits until the card exists, is visible and has

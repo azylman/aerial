@@ -88,6 +88,7 @@ describe('MemoryView lifecycle', () => {
     seed(payload());
     render(<MemoryView />);
     expect(screen.getByText('3 REINFORCED')).toBeTruthy();
+    expect(screen.getByText('SENSES')).toBeTruthy();
     expect(text('#memory-avg-importance')).toBe('2.60x');
     expect(screen.getByText(`SYNCED ${new Date(NOW).toLocaleTimeString()}`)).toBeTruthy();
     expect(nodes()).toEqual(['NODE #12', 'NODE #7', 'NODE #9', 'NODE #30', 'NODE #4']);

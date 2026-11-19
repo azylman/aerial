@@ -199,7 +199,7 @@ describe('TasksView', () => {
       'Queue Concurrency 0 / 4 WORKERS REAL-TIME DISPATCH',
       'Queued Backlog 0 TURNS FIFO DISPATCH READY',
       'Active Channel Funnel ONLINE DISCORD GATEWAY OK',
-      'Engine Architecture AGY DUAL-ENGINE OLLAMA + GEMINI 3.8',
+      'Engine Architecture AGY DUAL-ENGINE PJEV + ANTIGRAVITY CLI',
     ]);
   });
 });
