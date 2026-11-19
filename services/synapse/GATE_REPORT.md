@@ -1,30 +1,52 @@
-# Synapse Pre-Cutover Readiness Verification Gate (syn-12-pre-cutover-gate)
+# Synapse Post-Cutover Eleven-Package Boundary Verification Gate (syn-14-post-cutover-gate)
 
 ## Summary
-Pre-cutover operational readiness verification for Synapse prior to thin-main router cutover (Chunk 13: `syn-13-thin-main-cutover`). All cluster readiness probes, health endpoints, Prometheus telemetry gauges, and runtime stream logs across live instances have been verified and passed without regressions.
+Post-cutover operational readiness and architectural boundary verification for Synapse following the completion of Chunk 13 (`syn-13-thin-main-cutover`). All cluster readiness probes, health endpoints, Prometheus telemetry gauges, and runtime stream logs across live instances have been verified. The 11 cohesive domain subpackages plus `internal/router` and a thin root `main.go` have been verified with zero raw `sync.Map` caches on `RouterServer`, zero circular dependencies, and statement coverage well exceeding the strict 95.0% floor.
 
-## Cluster Pod Readiness
-Kubernetes pod readiness probes for `app.kubernetes.io/name` across default namespace:
-- `synapse` (`synapse-6c7c8c7c87-nv8z9`): Status `Running`, Ready `2/2`
-- `synapse-miorine` (`synapse-miorine-695d44bd9b-nwfck`): Status `Running`, Ready `2/2`
-- `synapse-suletta` (`synapse-suletta-779797b485-5d28z`): Status `Running`, Ready `2/2`
+## Cluster Pod Readiness & Live Instance Verification
+Kubernetes pod readiness probes and container status across default namespace:
+- `synapse` (`synapse-5d9864468f-4b64g`): Status `Running`, Ready `2/2`, image `ghcr.io/azylman/aerial-synapse:2939eb0970ebb6fe93c93606a45f53a24013dd7a`
+- `synapse-miorine` (`synapse-miorine-78b8fdb486-gkwjt`): Status `Running`, Ready `2/2`, image `ghcr.io/azylman/aerial-synapse:2939eb0970ebb6fe93c93606a45f53a24013dd7a`
+- `synapse-suletta` (`synapse-suletta-5694f4c5cf-l8txm`): Status `Running`, Ready `2/2`, image `ghcr.io/azylman/aerial-synapse:2939eb0970ebb6fe93c93606a45f53a24013dd7a`
+
+All pods are running the deployed cutover image containing the decomposed subpackage architecture.
 
 ## Endpoint Health & Telemetry Verification
 Probed `/healthz` and `/metrics` on all live instances:
-1. `synapse` (`http://synapse.aerial:4020`):
-   - Health: HTTP 200 OK (`{"service":"synapse","status":"ok"}`)
-   - Gateway Latency: `synapse_discord_gateway_latency_seconds ~0.082s`
-   - Queue Depth: `synapse_queue_depth` reporting 0 in-flight / 0 pending across all queues
-   - JetStream / River Job Ingestion: Active and processing (`synapse_jobs_enqueued_total`)
-2. `synapse-miorine` (`http://synapse-miorine.aerial:4020`):
-   - Health: HTTP 200 OK (`{"service":"synapse","status":"ok"}`)
-   - Gateway Latency: `synapse_discord_gateway_latency_seconds ~0.086s`
-   - Queue Depth: Nominal
-3. `synapse-suletta` (`http://synapse-suletta.aerial:4020`):
-   - Health: HTTP 200 OK (`{"service":"synapse","status":"ok"}`)
-   - Gateway Latency: `synapse_discord_gateway_latency_seconds ~0.087s`
-   - Queue Depth: Nominal
+1. `synapse` (`http://10.42.0.254:4020`):
+   - Health: HTTP 200 OK (`{"service":"synapse","status":"ok","time":"2026-11-19T05:24:51Z"}`)
+   - Gateway Latency: `synapse_discord_gateway_latency_seconds ~0.094s`
+   - Queue Depth: `synapse_queue_depth` reporting 0 in-flight / 0 pending across default, discord_ingress, and discord_interaction
+   - JetStream / River Job Ingestion: Active and healthy (`synapse_jobs_enqueued_total`)
+2. `synapse-miorine` (`http://10.42.0.2:4020`):
+   - Health: HTTP 200 OK (`{"service":"synapse","status":"ok","time":"2026-11-19T05:24:51Z"}`)
+   - Gateway Latency: Nominal (<0.10s)
+   - Queue Depth: Nominal (0 pending / 0 in-flight)
+3. `synapse-suletta` (`http://10.42.0.3:4020`):
+   - Health: HTTP 200 OK (`{"service":"synapse","status":"ok","time":"2026-11-19T05:24:51Z"}`)
+   - Gateway Latency: Nominal (<0.10s)
+   - Queue Depth: Nominal (0 pending / 0 in-flight)
 
-## Log Telemetry & Operational Health
-- VictoriaLogs and active container streams inspected: Zero panics, zero unexpected crash-loops, and clean dispatch processing across GitHub webhooks, River/JetStream tasks, and Flux deployment syncs.
-- Monorepo Statement Coverage: `services/synapse` stands at 95.99% (5,148 / 5,363 statements) exceeding the strict 95.0% floor.
+## Architectural Boundary Invariants
+1. **Thin Root Package (`services/synapse`)**:
+   - `services/synapse/main.go`: Exactly 50 lines with injectable seams (`loadConfigFn`, `loadConfigStrictFn`, `initTracingFn`, `runAppFn`, `fatalfFn`).
+   - `services/synapse/main_test.go`: Exactly 128 lines testing hermetic execution and error propagation.
+   - Zero transitional root shims or residual logic remaining in root.
+2. **Eleven Domain Subpackages (`services/synapse/internal/...`)**:
+   - `internal/model`: Pure domain structs and interfaces.
+   - `internal/config`: Typed configuration parsing and reload checks.
+   - `internal/metrics`: Prometheus metrics registry and JetStream job helpers.
+   - `internal/registry`: PostgreSQL PR registry and readiness retry store.
+   - `internal/ericlient`: Outbound Eri client for prompt, DM, and interaction dispatches.
+   - `internal/kube`: Kubernetes client and Flux notification controller helpers.
+   - `internal/buildmeta`: GitHub Actions workflow run build metadata consumer.
+   - `internal/alerts`: VMAlert and event triggers tracker.
+   - `internal/discord`: Discord Gateway consumer, catch-up sweeps, and watermarks.
+   - `internal/flux`: Flux rollout tracking, commit cache, and deploy dedup tracker.
+   - `internal/github`: GitHub webhook processing, status error classification, and state tracker.
+   - Wired together by `internal/router` (`RouterServer`, HTTP routes, JetStream consumer).
+3. **Encapsulation & God-Struct Elimination**:
+   - Zero raw `sync.Map` fields remain on `RouterServer`. State tracking is fully delegated to encapsulated tracker structs (`alerts.Tracker`, `github.StateTracker`, `flux.DeployDedupTracker`, `flux.GitHistoryCache`).
+   - Flat root sprawl completely eliminated; 11-subpackage DAG has zero circular imports.
+4. **Statement Coverage Floor Satisfied**:
+   - Statement coverage stands at 96.11% (5,060 / 5,265 statements), exceeding the strict 95.0% floor.
