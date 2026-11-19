@@ -194,6 +194,7 @@ type ghEventCase struct {
 	wantRerunHit            string
 	wantReconciles          []fluxKustomizationRef
 	wantCIFailedChecks      []string
+	wantSyncEvents          int
 }
 
 func newProcessGitHubEventMockServer(ghPaths *sync.Map) *httptest.Server {
@@ -628,7 +629,7 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	defer mockServer.Close()
 	var inserters []pubsub.Bus
 	activeBus := tc.bus
-	if activeBus == nil && (len(tc.wantCIFailedChecks) > 0 || tc.wantDeployFailedEvents > 0) {
+	if activeBus == nil && (len(tc.wantCIFailedChecks) > 0 || tc.wantDeployFailedEvents > 0 || tc.wantSyncEvents > 0) {
 		activeBus = &mockEventBus{}
 	}
 	if activeBus != nil {
@@ -696,6 +697,28 @@ func assertDeployFailedEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {
 	}
 }
 
+func assertSyncEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {
+	t.Helper()
+	if bus == nil {
+		t.Fatalf("wantSyncEvents specified but no bus available")
+	}
+	syncCount := 0
+	for _, evt := range bus.publishedPREvents {
+		if evt.Event == "synchronize" {
+			syncCount++
+			if tc.wantPR != 0 && evt.PRNumber != tc.wantPR {
+				t.Errorf("synchronize PRNumber = %d, want %d", evt.PRNumber, tc.wantPR)
+			}
+			if tc.wantHeadSHA != "" && evt.HeadSHA != tc.wantHeadSHA {
+				t.Errorf("synchronize HeadSHA = %q, want %q", evt.HeadSHA, tc.wantHeadSHA)
+			}
+		}
+	}
+	if syncCount != tc.wantSyncEvents {
+		t.Errorf("synchronize events count = %d, want %d", syncCount, tc.wantSyncEvents)
+	}
+}
+
 func assertEventBusCalls(t *testing.T, tc ghEventCase, bus *mockEventBus) {
 	t.Helper()
 	if len(tc.wantCIFailedChecks) > 0 {
@@ -714,5 +737,8 @@ func assertEventBusCalls(t *testing.T, tc ghEventCase, bus *mockEventBus) {
 	}
 	if tc.wantDeployFailedEvents > 0 {
 		assertDeployFailedEvents(t, tc, bus)
+	}
+	if tc.wantSyncEvents > 0 {
+		assertSyncEvents(t, tc, bus)
 	}
 }

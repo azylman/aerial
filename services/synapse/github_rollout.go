@@ -450,6 +450,32 @@ func (s *RouterServer) isCachedFailedCISHA(repo string, prNumber int, headSHA st
 	return false
 }
 
+func dedupeLatestCheckRuns(runs []GitHubMetadataCheck) []GitHubMetadataCheck {
+	if len(runs) == 0 {
+		return nil
+	}
+	latestIdx := make(map[string]int, len(runs))
+	out := make([]GitHubMetadataCheck, 0, len(runs))
+	for _, cr := range runs {
+		if isBuildMetadataCheck(cr.Name) || isDependabotAppCheck(cr.App.Slug) {
+			continue
+		}
+		key := canonicalFailedCheckKey(cr.Name)
+		if key == "" {
+			continue
+		}
+		if idx, ok := latestIdx[key]; ok {
+			if cr.ID >= out[idx].ID {
+				out[idx] = cr
+			}
+			continue
+		}
+		latestIdx[key] = len(out)
+		out = append(out, cr)
+	}
+	return out
+}
+
 func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNumber int, headSHA string) bool {
 	if s.isCachedFailedCISHA(repo, prNumber, headSHA) {
 		return true
@@ -466,10 +492,7 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 		return !isGitHubNotFound(err)
 	}
 	hasPending := false
-	for _, cr := range checkRuns.CheckRuns {
-		if isBuildMetadataCheck(cr.Name) || isDependabotAppCheck(cr.App.Slug) {
-			continue
-		}
+	for _, cr := range dedupeLatestCheckRuns(checkRuns.CheckRuns) {
 		state := classifyCheckState(cr.Status, cr.Conclusion)
 		if !isGateAggregatorCheck(cr.Name) && state == statusFailed {
 			s.failedCheckSHAs.Store(key, headSHA)
@@ -508,20 +531,29 @@ func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string
 			return true
 		}
 	}
+	if s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA) {
+		return true
+	}
 	comment := s.fetchLatestRoboRevComment(ctx, repo, prNumber, headSHA)
 	return comment != "" && !strings.Contains(comment, "## roborev: Review Passed")
 }
 
 func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, prNumber int, checkName, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" {
+		return false
+	}
 	if isGateAggregatorCheck(checkName) {
-		headSHA = strings.TrimSpace(headSHA)
 		if s.hasActiveRoboRevFailure(repo, prNumber, headSHA) {
 			return false
 		}
 		if failedSHA, ok := s.nonRoboRevFailedSHAs.Load(prCheckKey(repo, prNumber)); ok && headSHA != "" && failedSHA == headSHA {
 			return true
 		}
-		return s.hasCancelledCheckForSHA(repo, prNumber, headSHA)
+		if s.hasCancelledCheckForSHA(repo, prNumber, headSHA) {
+			return true
+		}
+		return headSHA != "" && s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA)
 	}
 	if isRoboRevCheck(checkName) {
 		return s.canRecoverRoboRevSuccess(ctx, repo, prNumber, headSHA)
@@ -656,7 +688,7 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 	}
 	for _, comment := range slices.Backward(comments) {
 		body := strings.TrimSpace(comment.Body)
-		if !strings.Contains(body, "## roborev:") {
+		if !strings.Contains(body, "## roborev:") && !strings.Contains(body, "## roborev-override") {
 			continue
 		}
 		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
@@ -842,12 +874,22 @@ func (s *RouterServer) recordNonGateCheckFailureDetailed(res *ResolvedGitHubEven
 	return s.recordFailedCheckRunDetailed(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 }
 
-func (s *RouterServer) isPRRegistryCIFailed(ctx context.Context, repo string, prNumber int) bool {
+func (s *RouterServer) isPRRegistryCIFailed(ctx context.Context, repo string, prNumber int, headSHA ...string) bool {
 	if s == nil || s.registry == nil || prNumber <= 0 || normalizeRepo(repo) == "" {
 		return false
 	}
 	lifecycle, err := s.registry.LoadPRBuildLifecycle(ctx, repo, prNumber)
-	return err == nil && strings.EqualFold(strings.TrimSpace(lifecycle.Status), prCIFailed)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(lifecycle.Status), prCIFailed) {
+		return false
+	}
+	if len(headSHA) > 0 {
+		cleanSHA := strings.TrimSpace(headSHA[0])
+		regHead := strings.TrimSpace(lifecycle.HeadSHA)
+		if cleanSHA != "" && regHead != "" && !strings.EqualFold(regHead, cleanSHA) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *RouterServer) shouldRetryCIFailureCompletion(ctx context.Context, res *ResolvedGitHubEvent) bool {

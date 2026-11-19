@@ -117,6 +117,7 @@ var checkRunTestCases = []ghEventCase{
 		wantSyncCalls:     1,
 		wantConclusion:    "success",
 		wantCIFailedCalls: 1,
+		wantSyncEvents:    1,
 	},
 	{
 		name: "check_run success for CI Gate recovers after prior cancelled check on same SHA", event: "check_run", delivery: "del-cr-ci-gate-recover-cancel",
@@ -132,6 +133,7 @@ var checkRunTestCases = []ghEventCase{
 		wantTargetID:   "100000000000000001",
 		wantSyncCalls:  1,
 		wantConclusion: "success",
+		wantSyncEvents: 1,
 	},
 	{
 		name: "check_run success for CI Gate without prior failure ignores UpdatePRSync", event: "check_run", delivery: "del-cr-ci-gate-clean-success",
@@ -159,6 +161,7 @@ var checkRunTestCases = []ghEventCase{
 		wantCIFailedCalls:    1,
 		wantRecordCheckCalls: 1,
 		wantRecordCheckState: "passed",
+		wantSyncEvents:       1,
 	},
 	{
 		name: "check_run success for unrelated non-gate check after another check failed on same SHA does not recover", event: "check_run", delivery: "del-cr-unrelated-nongate-no-recover",
@@ -445,6 +448,31 @@ var checkRunTestCases = []ghEventCase{
 		name: "check_run gate aggregator success handles conflict check error cleanly", event: "check_run", delivery: "del-cr-gate-success-err",
 		payload:           `{"action":"completed","repository":{"full_name":"azylman/unknown-repo"},"check_run":{"name":"CI Gate","head_sha":"head999","status":"completed","conclusion":"success","pull_requests":[{"number":999,"head":{"ref":"feat/unknown","sha":"head999"}}]}}`,
 		autoUpdateAuthors: []string{"trusted-author"}, wantPR: 999, wantHeadSHA: "head999", wantErr: false,
+	},
+	{
+		name: "check_run roborev success triggers open pr conflicts check and branch update", event: "check_run", delivery: "del-cr-roborev-success-update",
+		payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"head543","status":"completed","conclusion":"success","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]}}`,
+		autoUpdateAuthors: []string{"trusted-author"}, wantPR: 543, wantHeadSHA: "head543", wantUpdatedBranchHit: "/repos/azylman/aerial/pulls/543/update-branch",
+	},
+	{
+		name: "check_run recovered check success triggers open pr conflicts check and branch update", event: "check_run", delivery: "del-cr-recovered-success-update",
+		priorEvent: &ghPriorEvent{
+			event:    "check_run",
+			delivery: "del-cr-unit-fail-before-update",
+			payload:  `{"action":"completed","check_run":{"name":"Unit Tests","head_sha":"head543","status":"completed","conclusion":"failure","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+		},
+		payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"head543","status":"completed","conclusion":"success","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]}}`,
+		autoUpdateAuthors:    []string{"trusted-author"},
+		reg:                  &mockPRRegistry{syncTargetID: "100000000000000001", ciFailedTargetID: "100000000000000001", ciFailedUpdated: true},
+		wantPR:               543,
+		wantHeadSHA:          "head543",
+		wantSyncCalls:        1,
+		wantSyncEvents:       1,
+		wantCIFailedCalls:    1,
+		wantConflictCalls:    1,
+		wantRecordCheckCalls: 1,
+		wantRecordCheckState: "passed",
+		wantUpdatedBranchHit: "/repos/azylman/aerial/pulls/543/update-branch",
 	},
 	{
 		name:     "check_run on fork PR resolves PR and branch from cached pull_request synchronize event",
