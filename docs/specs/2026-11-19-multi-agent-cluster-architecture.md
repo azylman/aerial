@@ -88,13 +88,13 @@ Shared infrastructure and stateless/shared MCP backends that operate identically
 Services that already run as a single deployment and aggregate or enforce policy across agents:
 - **`kubernetes-mcp`:** Single deployment configured with `require_oauth = true` so every MCP tool call passes the caller's `Authorization: Bearer <sa-jwt>` directly to `kube-apiserver`.
 - **`console`:** Single web HUD reading all agents' turns, builds, schedules, and memory facts from the `aerial` database, exposing an agent filter and agent badges.
-- **`coven`:** Single deployment indexing semantic facts and procedural skills across all agents' turn histories (per-sibling `coven-<agent>` retired).
 - **`agentsview` / `agentsview-sync` & `coverage-ingest`:** Single deployments aggregating session transcripts and Go coverage profiles across all pods.
 
 ### Category 3: Consolidated Multi-Agent Control Plane (Formerly Per-Agent)
 Services collapsed from per-agent deployments into 1 shared multi-agent deployment:
 - **`db-migrate`:** Single Ariga Atlas migration Job targeting the unified `aerial` database (per-sibling `db-migrate-<agent>` retired).
-- **`transcripts`:** Single deployment indexing NATS `AERIAL_TRANSCRIPTS` step batches and serving session summaries and transcript steps across all agents (per-sibling `transcripts-<agent>` retired).
+- **`coven`:** Single deployment indexing semantic facts and procedural skills across all agents' turn histories (per-sibling `coven-<agent>` retired in Phase 1).
+- **`transcripts`:** Single deployment indexing NATS `AERIAL_TRANSCRIPTS` step batches and serving session summaries and transcript steps across all agents (per-sibling `transcripts-<agent>` retired in Phase 1).
 - **`haro`:** Single deployment evaluating one-shot, cron, heartbeat, and event triggers across all agents and dispatching due turns to the owning agent's `eri` endpoint (per-sibling `haro-<agent>` retired).
 - **`vanadis` Suite (`vanadis`, `vanadis-nats`, `vanadis-restate`):** Single HTTP/MCP API, single NATS bridge, and single RestateDeployment executing against the primary `restate` cluster (per-sibling `vanadis-*-<agent>` and extra Restate clusters retired).
 - **`synapse`:** Single multi-bot deployment managing concurrent Discord Gateway WebSocket connections for all configured bots, owning the unified `pr_registry`, and publishing NATS events (per-sibling `synapse-<agent>` retired; `webhook_forward_urls` deleted).
@@ -262,7 +262,7 @@ Shipped and applied in Phase 2 before the cross-database backfill and `eri` cuto
 6. **`pr_registry`:**
    - Add `agent TEXT NOT NULL DEFAULT 'aerial'` and index `idx_pr_registry_agent_status ON pr_registry(agent, status)`. Keep `UNIQUE (repo, pr_number)` as each PR is owned by the single agent that registered it (or the agent entry with `default_owner: true` in `synapse.yaml`, e.g. `'aerial'`, for external human/Dependabot PRs).
 
-### 8.2 NATS JetStream Single-Account Consolidation & NATS-Native Agent Routing (Zero Per-Agent `eri_urls`)
+### 8.2 NATS JetStream Single-Account Consolidation, Subject Scoping & Authorization ACLs
 All control-plane services route work to agents over the single `aerial` NATS JetStream bus rather than resolving per-agent `eri_urls` HTTP maps:
 - **Agent-Scoped `eri` Job Queues (`AERIAL_JOBS`):** Each `eri-<agent>` pod registers durable queue consumers (`services/eri/jetstream.go`) on:
   - `aerial.jobs.eri.<agent>.prompt` (queue group `eri-<agent>-prompt`) — scheduled prompts, PR/CI wake prompts.
@@ -273,7 +273,19 @@ All control-plane services route work to agents over the single `aerial` NATS Je
   - `aerial.jobs.eri.<agent>.discord_interaction` (queue group `eri-<agent>-discord-interaction`) — inbound Discord interactions published by `synapse`.
   - During the Phase 1 transition, `eri-aerial` additionally drains legacy unscoped `aerial.jobs.eri.{prompt,dispatch,discord_message}` subjects.
 - **Synchronous NATS Request-Reply for Restate Steps (`aerial.rpc.eri.<agent>.*`):** For the synchronous acknowledgments required inside `vanadis-restate`'s `restate.Run` closures (`DispatchAccepted` checking `"skipped_active"`, `CancelDispatch`, and `Widget` returning the initial Discord `message_id`), `eri-<agent>` subscribes to core NATS request-reply subjects `aerial.rpc.eri.<agent>.{dispatch,cancel_dispatch,widget}`, eliminating HTTP `eri_url` from `vanadis-restate`.
-- **Shared Transcripts & Event Streams:** `AERIAL_TRANSCRIPTS` (`aerial.transcripts.steps.>`) and `AERIAL_EVENTS` (`aerial.events.>`) carry the `agent` identifier in the payload and subject token on the single `aerial` NATS account, allowing unified `transcripts` and `coven` deployments to consume events from all agents immediately in Phase 1 and retiring separate per-agent NATS accounts.
+- **Shared Transcripts & Event Streams:** `AERIAL_TRANSCRIPTS` (`aerial.transcripts.steps.<agent>.>`) and `AERIAL_EVENTS` (`aerial.events.<agent>.>`) carry the `agent` identifier in the subject token on the single `aerial` NATS account, allowing unified `transcripts` and `coven` deployments to consume events from all agents immediately in Phase 1 and retiring separate per-agent NATS accounts.
+- **NATS User Authentication, Subject-Level Authorization ACLs & Anti-Spoofing:**
+  To guarantee sibling process isolation and prevent any workload (such as a compromised `uid=1000` shell in a sibling pod) from dispatching unauthorized prompts or spoofing transcript events on the shared bus:
+  1. **Strictly Authenticated Connections (Zero Anonymous Access):** Anonymous or unauthenticated access is completely disabled on NATS. Every in-cluster client must present valid credentials (NKeys user credentials or username/password token) on connect; unauthenticated connection attempts are closed immediately.
+  2. **Credential Projection & Process Isolation:** Scoped per-agent and per-service NATS credentials are generated via Infisical and projected by External Secrets Operator into scoped Kubernetes Secrets (e.g. `eri-<agent>-nats-creds`, `synapse-nats-creds`), mounted into pods at `/secrets/nats:ro` with permissions `0400` owned by `uid=0`. The `PID 1` Go daemon loads credentials on startup; bash subshells spawned as `uid=1000` have zero read access to NATS credentials files or environment variables.
+  3. **Subject-Level Authorization ACL Matrix:**
+     - **Agent Principals (`eri-<agent>`):**
+       - `subscribe`: Strictly restricted to `aerial.jobs.eri.<agent>.>`, `aerial.rpc.eri.<agent>.>`, and temporary reply subjects `_INBOX.<own-client-id>.>`. Attempting to subscribe to another agent's job queue (`aerial.jobs.eri.<other-agent>.>`) is denied by NATS ACL.
+       - `publish`: Strictly restricted to its own outbound streams (`aerial.transcripts.steps.<agent>.>`, `aerial.events.<agent>.>`, `aerial.coalesced.>`) and RPC response subjects (`_INBOX.>`). Publishing to another agent's job queue (`aerial.jobs.eri.<other-agent>.>`) or RPC subject is denied by NATS ACL.
+     - **Control-Plane Supervisor Services (`synapse`, `vanadis`, `vanadis-nats`, `vanadis-restate`, `haro`, `coven`):**
+       - `publish`: Permitted to publish dispatches, prompts, and RPCs across `aerial.jobs.eri.>` and `aerial.rpc.eri.>`.
+       - `subscribe`: Restricted to service-specific queues and inbox response subjects.
+  4. **Consumer-Side Identity Validation:** Services consuming agent-attributed streams derive the owning agent directly from the authenticated subject token rather than trusting unverified payload fields. Specifically, `services/transcripts` extracts `agent` from the subject token (`aerial.transcripts.steps.<agent>.>`), validating that it matches `batch.Agent` and rejecting any mismatched payload.
 
 ### 8.3 PostgreSQL Role, Process Sandbox Boundary & Aerial Direct Operator Access (Answered by Prior Session Decision)
 Per prior engineering decisions (retiring per-stack DB role migration chunks) and the supervisor privilege requirement:
@@ -319,8 +331,13 @@ Before retiring sibling logical PostgreSQL databases in Phase 2, an idempotent d
      ```
 4. **Pre-Cutover Reconciliation & Watermark Verification:**
    - Before any sibling database is retired or decommissioned, an automated reconciliation check verifies:
-     - **Exact Table Row Counts:** Every table receiving an `agent` column is enumerated and verified (`messages`, `sessions`, `dispatches`, `extraction_watermarks`, `session_summaries`, `transcript_steps`, `one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`, `schedule_runs`, `event_triggers`, `vanadis_builds`, `vanadis_chunks`, `facts`, and `procedural_candidates`):
-       `SELECT count(*) FROM <table> WHERE agent = '<agent>'` on the consolidated `aerial` database must equal `SELECT count(*) FROM <table>` on the source sibling database.
+     - **Exact Table Row Counts:** Every table receiving an `agent` or attribution column is enumerated and verified against source sibling databases:
+       - For tables with column `agent` (`messages`, `sessions`, `dispatches`, `extraction_watermarks`, `session_summaries`, `transcript_steps`, `one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`, `schedule_runs`, `event_triggers`, `vanadis_builds`, and `procedural_candidates`):
+         `SELECT count(*) FROM <table> WHERE agent = '<agent>'` on the consolidated `aerial` database must equal `SELECT count(*) FROM <table>` on the source sibling database.
+       - For `facts` (using column `source_agent`):
+         `SELECT count(*) FROM facts WHERE source_agent = '<agent>'` on the consolidated `aerial` database must equal `SELECT count(*) FROM facts` on the source sibling database.
+       - For `vanadis_chunks` (which inherits ownership via `build_id`):
+         `SELECT count(*) FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE b.agent = '<agent>'` on the consolidated `aerial` database must equal `SELECT count(*) FROM vanadis_chunks` on the source sibling database.
      - **`pr_registry` Deduplication Verification:** `SELECT count(DISTINCT (repo, pr_number))` across all source sibling databases equals `SELECT count(*)` in the consolidated `pr_registry`, and the surviving row's `agent` satisfies the Section 8.4.2 disambiguation rule.
      - **Watermark Consistency:** For each thread in `extraction_watermarks`, `last_extracted_rowid <= max(row_id)` in `messages` for that `agent` and `thread_id`.
      - Zero unmigrated rows or broken foreign key references exist across any table.
@@ -335,15 +352,16 @@ Before retiring sibling logical PostgreSQL databases in Phase 2, an idempotent d
   - Remove `memory_forget` from the MCP tool registration and handler switch. Fact deletions are restricted strictly to direct PostgreSQL operations by Aerial.
   - `memory_search`: Open to all authenticated `aerial-agent` callers across the shared `facts` table.
   - `memory_store`: For agent callers (`IsService == false`), extracts `caller_agent` via `pkg/k8sauth` and stamps `source_agent = caller_agent` on inserted/reinforced `facts` rows (ignoring any client-supplied agent string). For service callers (`IsService == true`), requires an explicit `TargetAgent` parameter in the tool payload (rejected with 400 Bad Request if missing or unknown).
-- **Multi-Agent Extraction Loop (`services/coven/config.go`, `db_extraction.go`, `extractor.go`, `scheduler.go`):**
-  - Consumes `aerial.coalesced.coven_extract.>` events across all agents on the shared NATS account and queries completed turns directly from PostgreSQL (`messages` and `transcript_steps` keyed by `agent`), removing `GET <eri_url>/tasks` HTTP polling and requiring zero per-agent `eri_urls`.
+- **Multi-Agent Extraction Loop & Phased Turn Sourcing (`services/coven/config.go`, `db_extraction.go`, `extractor.go`, `scheduler.go`):**
+  - Consumes `aerial.coalesced.coven_extract.<agent>.>` events across all agents on the shared NATS account, removing `GET <eri_url>/tasks` HTTP polling and requiring zero per-agent `eri_urls`.
+  - **Phased Turn Sourcing Contract:** In Phase 1, unified `coven` extracts facts and tracks watermarks exclusively from `transcript_steps` and `extraction_watermarks` (which carry `agent` via the Phase 1 schema migration `001_phase1_transcripts_coven.sql` and receive all agents' step batches via shared NATS `AERIAL_TRANSCRIPTS` ingestion). Turn-extraction queries against `messages` keyed by `agent` are activated in Phase 2 once `002_phase2_core_multiagent.sql` and the database backfill cutover complete (when all agents write `messages` to the unified database).
   - Background LLM fact extraction runs statelessly in `/data/runtimes/ephemeral` against a single static `eri_llm_url: http://eri.aerial/internal/llm`.
 
 ### 9.2 `transcripts` (Phase 1 — Builder Call: Retain NATS `AERIAL_TRANSCRIPTS` Ingestion)
 - **Single Deployment:** Retire duplicate per-sibling `transcripts-<agent>` deployments.
 - **NATS Step-Batch Ingestion (`services/transcripts/ingest.go`, `store.go`):**
   - Keep the existing NATS JetStream `AERIAL_TRANSCRIPTS` ingestion architecture where each `eri-<agent>` pod's `pkg/transcript/publisher.go` tails its local `/data` transcript files and publishes `TranscriptStepBatch` messages over the shared NATS bus (no hostPath mounts needed on the `transcripts` pod).
-  - Update `Store.ApplyBatch` in `services/transcripts` to accept and persist any valid `batch.Agent` (renaming `stack` -> `agent` in `session_summaries` and `transcript_steps`) rather than rejecting batches where `batch.Stack != s.stack`. Stateless session summarization uses the single `eri_llm_url: http://eri.aerial/internal/llm` endpoint with zero per-agent URL map.
+  - Update `Store.ApplyBatch` in `services/transcripts` to accept and persist any valid `batch.Agent` (renaming `stack` -> `agent` in `session_summaries` and `transcript_steps`), deriving and validating `agent` directly from the authenticated NATS subject token (`aerial.transcripts.steps.<agent>.>`) to prevent payload spoofing. Stateless session summarization uses the single `eri_llm_url: http://eri.aerial/internal/llm` endpoint with zero per-agent URL map.
   - Retire `eri`'s legacy in-process transcript DB sync worker (`services/eri/pkg/transcript/worker.go` and `routedTranscriptStore`) and point the `transcript-search` CLI at `http://transcripts.aerial:4030`.
 - **Authorization (`pkg/k8sauth`):**
   - Existing read endpoints (`GET /search`, `GET /steps`, `GET /stats`, `GET /watermarks`, `GET /transcripts/threads/{id}/trajectory`): Require `aerial-agent` (`resource: "transcripts", verb: "get"` or `"list"`). Support optional `?agent=<name>` filter (defaulting to all agents).
@@ -403,7 +421,7 @@ To uphold In-Flight Control-Plane Continuity and zero-downtime migration, rollou
    - Deploy Kubernetes RBAC manifests (`ClusterRole/aerial-agent`, `ClusterRole/aerial-supervisor`, `ClusterRole/aerial-k8s-reader`, `ClusterRole/aerial-auth-delegator`, ServiceAccounts `eri-aerial` and sibling `eri-<agent>`) and L4 `NetworkPolicy` hardening (`infisical-mcp`, `discord-mcp-*`, `restate`, `eri-*`).
    - Enable `require_oauth = true` on `kubernetes-mcp` and remove `infisical-mcp` from sibling `config.yaml` files.
    - Ship Phase 1 schema migration (`001_phase1_transcripts_coven.sql`) in `services/eri/pkg/db/schema.sql` (renaming `stack` -> `agent` on `extraction_watermarks`, `session_summaries`, `transcript_steps`, and adding `source_agent` to `facts` and `agent` to `procedural_candidates`).
-   - Remove `memory_forget` from `coven`, wire `pkg/k8sauth` provenance stamping (`source_agent`) on `memory_store`, unify `coven` and `transcripts` into single multi-agent deployments (retiring `eri`'s legacy in-process transcript DB worker), and retire sibling `coven-<agent>` and `transcripts-<agent>` deployments.
+   - Remove `memory_forget` from `coven`, wire `pkg/k8sauth` provenance stamping (`source_agent`) on `memory_store`, unify `coven` and `transcripts` into single multi-agent deployments (with Phase 1 `coven` extracting facts from `transcript_steps` and `extraction_watermarks` over shared NATS ingestion before `messages` consolidation in Phase 2, and retiring `eri`'s legacy in-process transcript DB worker), and retire sibling `coven-<agent>` and `transcripts-<agent>` deployments.
 2. **Phase 2 — Unified Database & Category 3 Control Plane (`haro` + `vanadis` Suite):**
    - Ship Phase 2 declarative `schema.sql` and Atlas migration (`002_phase2_core_multiagent.sql`) adding `agent` columns and lookup indexes across dispatches, schedules (`one_shot_schedules`, `cron_schedules`, `heartbeat_schedules`, `schedule_runs`, `event_triggers`), `vanadis_builds`, and `pr_registry`, composite unique constraints on `(agent, row_id)` on `messages` and `dispatches`, and composite primary keys on `messages` and `sessions`.
    - Update `eri` store queries to scope `messages`, `sessions`, and `dispatches` by `cfg.Agent`.
