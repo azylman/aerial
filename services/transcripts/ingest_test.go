@@ -111,7 +111,10 @@ func TestHandleBatchMessageFirstBatch(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t, "aerial")
 	var published []pubsub.TranscriptsIndexedEvent
-	ingester := NewIngester(store, func(_ context.Context, _ string, _ string, data any) error {
+	var publishedSubject, publishedMsgID string
+	ingester := NewIngester(store, func(_ context.Context, subject string, msgID string, data any) error {
+		publishedSubject = subject
+		publishedMsgID = msgID
 		ev, ok := data.(pubsub.TranscriptsIndexedEvent)
 		if !ok {
 			return errors.New("published data is not a TranscriptsIndexedEvent")
@@ -120,12 +123,21 @@ func TestHandleBatchMessageFirstBatch(t *testing.T) {
 		return nil
 	})
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	msg := &fakeBatchMessage{data: marshalBatch(t, testBatch("sess-new", epoch, 0, 2, false, false))}
+	b := testBatch("sess-new", epoch, 0, 2, false, false)
+	msg := &fakeBatchMessage{data: marshalBatch(t, b)}
 	if err := ingester.HandleBatchMessage(context.Background(), msg); err != nil {
 		t.Fatalf("HandleBatchMessage() err = %v", err)
 	}
 	if len(published) != 1 || published[0].SessionID != "sess-new" || published[0].Stack != "aerial" {
 		t.Fatalf("published = %+v, want one event for sess-new on aerial", published)
+	}
+	wantSubject := pubsub.SubjectAerialTurnPrefix + "transcripts_indexed"
+	if publishedSubject != wantSubject {
+		t.Errorf("published subject = %q, want %q", publishedSubject, wantSubject)
+	}
+	wantMsgID := "transcript-indexed:" + transcriptwire.MsgID(b)
+	if publishedMsgID != wantMsgID {
+		t.Errorf("published msgID = %q, want %q", publishedMsgID, wantMsgID)
 	}
 }
 

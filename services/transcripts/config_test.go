@@ -57,23 +57,30 @@ func TestLoadConfigFile(t *testing.T) {
 	fullPath := writeCfg("full.yaml", "port: '4017'\nstack: 'aerial'\nnats_url: 'nats://nats:4222'\n")
 	minimalPath := writeCfg("minimal.yaml", "stack: 'miorine'\n")
 	malformedPath := writeCfg("malformed.yaml", "port: [unclosed")
+	deployedPath := writeCfg("deployed.yaml", "port: '4030'\nstack: 'aerial'\neri_llm_url: 'http://eri.aerial/internal/llm'\nollama:\n  base_url: 'http://senses.aerial'\n  model: 'bge-small-en-v1.5'\n")
+	embedderPath := writeCfg("embedder.yaml", "port: '4030'\nstack: 'aerial'\nembedder:\n  base_url: 'http://embedder.aerial'\n  model: 'bge-custom'\n")
 
 	tests := []struct {
-		name      string
-		path      string
-		dbURL     string
-		wantErr   bool
-		wantPort  string
-		wantStack string
-		wantDB    string
-		wantNATS  string
+		name            string
+		path            string
+		dbURL           string
+		wantErr         bool
+		wantPort        string
+		wantStack       string
+		wantDB          string
+		wantNATS        string
+		wantEriLLM      string
+		wantSensesURL   string
+		wantSensesModel string
 	}{
-		{"full config", fullPath, "postgres://user:pass@host:5432/db", false, "4017", "aerial", "postgres://user:pass@host:5432/db", "nats://nats:4222"},
-		{"defaults fill port stack and nats", minimalPath, "postgres://user:pass@host:5432/db", false, DefaultPort, "miorine", "postgres://user:pass@host:5432/db", ""},
-		{"yaml database url wins when arg empty", minimalPath, "", true, "", "", "", ""},
-		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", "", "", ""},
-		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", "", "", ""},
-		{"empty path", "", "postgres://localhost/db", true, "", "", "", ""},
+		{"full config", fullPath, "postgres://user:pass@host:5432/db", false, "4017", "aerial", "postgres://user:pass@host:5432/db", "nats://nats:4222", "", "", ""},
+		{"defaults fill port stack and nats", minimalPath, "postgres://user:pass@host:5432/db", false, DefaultPort, "miorine", "postgres://user:pass@host:5432/db", "", "", "", ""},
+		{"deployed format with ollama", deployedPath, "postgres://user:pass@host:5432/db", false, "4030", "aerial", "postgres://user:pass@host:5432/db", "", "http://eri.aerial/internal/llm", "http://senses.aerial", "bge-small-en-v1.5"},
+		{"embedder format populated", embedderPath, "postgres://user:pass@host:5432/db", false, "4030", "aerial", "postgres://user:pass@host:5432/db", "", "", "http://embedder.aerial", "bge-custom"},
+		{"yaml database url wins when arg empty", minimalPath, "", true, "", "", "", "", "", "", ""},
+		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", "", "", "", "", "", ""},
+		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", "", "", "", "", "", ""},
+		{"empty path", "", "postgres://localhost/db", true, "", "", "", "", "", "", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +102,9 @@ func TestLoadConfigFile(t *testing.T) {
 			}
 			if cfg.Port != tc.wantPort || cfg.Stack != tc.wantStack || cfg.DatabaseURL != tc.wantDB || cfg.NATSURL != tc.wantNATS {
 				t.Fatalf("unexpected config: %+v", cfg)
+			}
+			if cfg.Summarizer.EriLLMURL != tc.wantEriLLM || cfg.Summarizer.SensesURL != tc.wantSensesURL || cfg.Summarizer.SensesModel != tc.wantSensesModel {
+				t.Fatalf("unexpected summarizer in config: %+v", cfg.Summarizer)
 			}
 		})
 	}

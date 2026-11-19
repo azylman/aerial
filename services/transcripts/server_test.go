@@ -29,13 +29,40 @@ func TestServerRoutes(t *testing.T) {
 		wantFrag   string
 	}{
 		{"health ok", "/health", http.StatusOK, `"ok"`},
+		{"healthz ok", "/healthz", http.StatusOK, `"ok"`},
 		{"search finds session steps", "/search?q=content", http.StatusOK, "sess-a"},
+		{"search query alias", "/search?query=content", http.StatusOK, `"query":"content"`},
+		{"transcripts search", "/transcripts/search?q=content", http.StatusOK, `"mode":"auto"`},
+		{"api transcripts search", "/api/transcripts/search?q=content&mode=steps", http.StatusOK, `"mode":"steps"`},
+		{"search mode sessions", "/search?q=content&mode=sessions", http.StatusOK, `"steps":[]`},
 		{"steps range", "/steps?session=sess-a&start=0&end=2", http.StatusOK, "sess-a"},
 		{"steps empty stack reads all", "/steps?session=sess-a", http.StatusOK, "sess-a"},
-		{"stats all stacks", "/stats", http.StatusOK, "aerial"},
-		{"stats scoped stack", "/stats?stack=aerial", http.StatusOK, "aerial"},
+		{"steps window mode", "/steps?session=sess-a&step=1&context=1", http.StatusOK, `"context":1`},
+		{"transcripts steps", "/transcripts/steps?session=sess-a&step=1", http.StatusOK, `"session_id":"sess-a"`},
+		{"api transcripts steps", "/api/transcripts/steps?session=sess-a&step=1", http.StatusOK, `"step":1`},
+		{"steps missing session", "/steps?step=1", http.StatusBadRequest, "session is required"},
+		{"steps invalid step", "/steps?session=sess-a&step=bad", http.StatusBadRequest, "invalid step parameter"},
+		{"steps negative step", "/steps?session=sess-a&step=-1", http.StatusBadRequest, "invalid step parameter"},
+		{"steps invalid context", "/steps?session=sess-a&step=1&context=bad", http.StatusBadRequest, "invalid context parameter"},
+		{"stats all stacks", "/stats", http.StatusOK, `"total_sessions":1`},
+		{"stats scoped stack", "/stats?stack=aerial", http.StatusOK, `"status":"ok"`},
+		{"transcripts stats", "/transcripts/stats", http.StatusOK, `"total_steps":3`},
+		{"api transcripts stats", "/api/transcripts/stats", http.StatusOK, `"status":"ok"`},
 		{"watermarks all stacks", "/watermarks", http.StatusOK, "sess-a"},
 		{"watermarks scoped stack", "/watermarks?stack=aerial", http.StatusOK, "sess-a"},
+		{"v1 watermarks", "/v1/watermarks", http.StatusOK, "sess-a"},
+		{"single watermark present", "/watermark?session_id=sess-a", http.StatusOK, `"last_indexed_step":2`},
+		{"single watermark missing", "/watermark?session_id=missing", http.StatusOK, `"last_indexed_step":-1`},
+		{"single watermark session param", "/watermarks?session=sess-a", http.StatusOK, `"last_indexed_step":2`},
+		{"thread trajectory missing suffix", "/transcripts/threads/th-1", http.StatusNotFound, "404 page not found"},
+		{"thread trajectory missing thread id", "/transcripts/threads/trajectory", http.StatusBadRequest, "thread_id is required"},
+		{"thread trajectory whitespace thread id", "/transcripts/threads/%20/trajectory", http.StatusBadRequest, "thread_id is required"},
+		{"thread trajectory ok", "/transcripts/threads/th-test/trajectory", http.StatusOK, `"retrieved_facts":[]`},
+		{"search since param", "/search?q=content&since=2026-11-18T12:00:00Z", http.StatusOK, `"total":`},
+		{"search invalid since ignored", "/search?q=content&since=bad", http.StatusOK, `"total":`},
+		{"steps context negative clamped", "/steps?session=sess-a&step=1&context=-5", http.StatusOK, `"context":0`},
+		{"steps context over 20 clamped", "/steps?session=sess-a&step=1&context=50", http.StatusOK, `"context":20`},
+		{"steps empty step param", "/steps?session=sess-a&step=", http.StatusBadRequest, "step is required"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,6 +92,7 @@ func TestServerNilStore(t *testing.T) {
 		{"steps", "/steps?session=s"},
 		{"stats", "/stats"},
 		{"watermarks", "/watermarks"},
+		{"trajectory", "/transcripts/threads/th-1/trajectory"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,8 +142,11 @@ func TestServerDBError(t *testing.T) {
 	}{
 		{"search db closed", "/search?q=x"},
 		{"steps db closed", "/steps?session=s"},
+		{"steps window db closed", "/steps?session=s&step=1"},
 		{"stats db closed", "/stats"},
 		{"watermarks db closed", "/watermarks"},
+		{"single watermark db closed", "/watermark?session_id=s"},
+		{"thread trajectory db closed", "/transcripts/threads/th-1/trajectory"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

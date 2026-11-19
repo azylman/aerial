@@ -291,6 +291,20 @@ func applyAppendBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 	return indexed, nil
 }
 
+func parseStepCreatedAt(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Now().UTC()
+	}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t.UTC()
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC()
+	}
+	return time.Now().UTC()
+}
+
 // insertBatchSteps writes batch steps idempotently: replays of a concurrent
 // duplicate first batch collide on the primary key and are ignored, so at-least-once
 // redelivery never double counts.
@@ -304,12 +318,13 @@ func insertBatchSteps(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		if len(st.ToolCalls) > 0 {
 			toolCallID = strings.TrimSpace(st.ToolCalls[0].ID)
 		}
+		createdAt := parseStepCreatedAt(st.CreatedAt)
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO transcript_steps (stack, session_id, step_index, step_type, tool_name, tool_kind, tool_call_id, content, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 ON CONFLICT (stack, session_id, step_index) DO NOTHING`,
 			stack, sessionID, st.StepIndex, strings.TrimSpace(st.Type), strings.TrimSpace(st.ToolName),
-			"", toolCallID, sanitizeTranscriptText(st.Content))
+			"", toolCallID, sanitizeTranscriptText(st.Content), createdAt)
 		if err != nil {
 			return indexed, fmt.Errorf("insert transcript step %d: %w", st.StepIndex, err)
 		}

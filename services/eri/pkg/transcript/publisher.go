@@ -6,6 +6,7 @@ package transcript
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -82,9 +83,193 @@ var _ = func() bool {
 	_ = ResendOnStartup(nil, nil, nil)
 	client := NewIndexerClient("", nil)
 	_, errGet := client.Watermark(context.Background(), "", "")
-	_ = []error{errDrain, errGet}
+	_, errWms := client.Watermarks(context.Background(), "")
+	_, errBatches := p.BuildSessionBatches(SessionBatchParams{})
+	errPubSess := p.PublishSessions(context.Background(), "", nil)
+	errPubOne := p.PublishSession(context.Background(), SessionBatchParams{})
+	_ = []error{errDrain, errGet, errWms, errBatches, errPubSess, errPubOne}
 	return true
 }()
+
+// SessionBatchParams configures batch generation for a session transcript file.
+type SessionBatchParams struct {
+	SessionID  string
+	BrainDir   string
+	Watermark  int
+	ThreadID   string
+	Engine     string
+	ExtraDirs  []string
+	HeadLimit  int
+	TailLimit  int
+	MCPServers []string
+}
+
+func locateTranscriptPath(brainDir, sessionID string, extraDirs []string) (string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", fmt.Errorf("transcript publisher: session ID cannot be empty")
+	}
+	transcriptPath := findTranscriptFile(brainDir, sessionID, extraDirs...)
+	if transcriptPath == "" && brainDir != "" {
+		if entries, err := os.ReadDir(brainDir); err == nil {
+			discovered := discoverSessions(brainDir, entries, "", extraDirs...)
+			if ds, ok := discovered[sessionID]; ok && ds.path != "" {
+				transcriptPath = ds.path
+			}
+		}
+	}
+	if transcriptPath == "" {
+		return "", fmt.Errorf("transcript publisher: transcript file not found for session %s", sessionID)
+	}
+	return transcriptPath, nil
+}
+
+func convertRawStepsToWire(parsed []rawTranscriptStep, watermark, headLimit, tailLimit int) []transcriptwire.TranscriptStep {
+	if headLimit <= 0 && tailLimit <= 0 {
+		headLimit = DefaultHeadLimit
+		tailLimit = DefaultTailLimit
+	}
+	var wireSteps []transcriptwire.TranscriptStep
+	for _, raw := range parsed {
+		if raw.StepIndex <= watermark {
+			continue
+		}
+		content := raw.Content
+		if content == "" && len(raw.ToolCalls) > 0 {
+			content = string(raw.ToolCalls[0].Args)
+		}
+		if !IsSubstantiveStep(raw.Type, raw.ToolName, content) {
+			continue
+		}
+		clipped := ClipContent(content, headLimit, tailLimit)
+		var toolCalls []transcriptwire.TranscriptToolCall
+		for _, tc := range raw.ToolCalls {
+			toolCalls = append(toolCalls, transcriptwire.TranscriptToolCall{
+				Name: tc.Name,
+				Args: tc.Args,
+				ID:   tc.ID,
+			})
+		}
+		wireSteps = append(wireSteps, transcriptwire.TranscriptStep{
+			StepIndex: raw.StepIndex,
+			Source:    raw.Source,
+			Type:      raw.Type,
+			Status:    raw.Status,
+			CreatedAt: raw.CreatedAt,
+			Content:   clipped,
+			ToolName:  raw.ToolName,
+			ToolCalls: toolCalls,
+			Thinking:  raw.Thinking,
+		})
+	}
+	return wireSteps
+}
+
+// BuildSessionBatches locates and scans a session's local transcript file,
+// compares maxStepIndex against watermark W (setting Reset=true and BaseStep=-1 when maxStepIndex < W),
+// converts substantive steps > W into []transcriptwire.TranscriptStep with ClipContent,
+// and returns batches split via SplitStepBatches.
+func (p *Publisher) BuildSessionBatches(params SessionBatchParams) ([]transcriptwire.TranscriptStepBatch, error) {
+	transcriptPath, err := locateTranscriptPath(params.BrainDir, params.SessionID, params.ExtraDirs)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := os.Stat(transcriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("transcript publisher: stat transcript file: %w", err)
+	}
+	st, err := scanSessionTranscriptFile(transcriptPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("transcript publisher: scan transcript file: %w", err)
+	}
+	engine := strings.TrimSpace(params.Engine)
+	if engine == "" {
+		engine = engineForPath(params.BrainDir, transcriptPath, params.ExtraDirs...)
+	}
+
+	watermark := params.Watermark
+	reset := false
+	baseStep := watermark
+	if st.maxStepIndex < watermark {
+		reset = true
+		baseStep = -1
+		watermark = -1
+	}
+
+	wireSteps := convertRawStepsToWire(st.parsedSteps, watermark, params.HeadLimit, params.TailLimit)
+
+	stack := ""
+	if p != nil {
+		stack = p.stack
+	}
+	base := transcriptwire.TranscriptStepBatch{
+		Stack:       stack,
+		SessionID:   strings.TrimSpace(params.SessionID),
+		ThreadID:    strings.TrimSpace(params.ThreadID),
+		Engine:      engine,
+		FileMtime:   fi.ModTime().UTC(),
+		BaseStep:    baseStep,
+		Reset:       reset,
+		Step0Prompt: st.step0Prompt,
+	}
+	batches := transcriptwire.SplitStepBatches(base, wireSteps)
+	if reset {
+		for i := range batches {
+			batches[i].BaseStep = -1
+		}
+	}
+	return batches, nil
+}
+
+// PublishSessions locates and scans sessions, builds batches, enqueues them on p, and drains.
+func (p *Publisher) PublishSessions(ctx context.Context, brainDir string, watermarks map[string]int, sessionIDs ...string) error {
+	if p == nil {
+		return fmt.Errorf("transcript publisher: publisher is nil")
+	}
+	if len(sessionIDs) == 0 && brainDir != "" {
+		if entries, err := os.ReadDir(brainDir); err == nil {
+			discovered := discoverSessions(brainDir, entries, "")
+			for sid := range discovered {
+				sessionIDs = append(sessionIDs, sid)
+			}
+		}
+	}
+	for _, sid := range sessionIDs {
+		sid = strings.TrimSpace(sid)
+		if sid == "" {
+			continue
+		}
+		wm := -1
+		if watermarks != nil {
+			if w, ok := watermarks[sid]; ok {
+				wm = w
+			}
+		}
+		batches, err := p.BuildSessionBatches(SessionBatchParams{
+			SessionID: sid,
+			BrainDir:  brainDir,
+			Watermark: wm,
+		})
+		if err != nil {
+			return err
+		}
+		p.Enqueue(batches...)
+	}
+	return p.Drain(ctx)
+}
+
+// PublishSession builds batches for a single session, enqueues them on p, and drains.
+func (p *Publisher) PublishSession(ctx context.Context, params SessionBatchParams) error {
+	if p == nil {
+		return fmt.Errorf("transcript publisher: publisher is nil")
+	}
+	batches, err := p.BuildSessionBatches(params)
+	if err != nil {
+		return err
+	}
+	p.Enqueue(batches...)
+	return p.Drain(ctx)
+}
 
 // EnqueueSteps splits steps with the shared wire splitter and enqueues the
 // resulting batches. It returns the number of batches enqueued.
