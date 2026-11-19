@@ -661,9 +661,62 @@ func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) 
 	return true
 }
 
-func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
+func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL string) {
+	targetURL, err := url.Parse(indexerURL)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("invalid indexer URL: %v", err))
+		return
+	}
+	reqURL := *targetURL
+	reqURL.Path = strings.TrimRight(targetURL.Path, "/") + r.URL.Path
+	reqURL.RawQuery = r.URL.RawQuery
+
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, reqURL.String(), r.Body)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("create proxy request: %v", err))
+		return
+	}
+	for k, vv := range r.Header {
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, fmt.Sprintf("indexer proxy error: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("[HTTP] Warning copying proxied transcript response: %v", err)
+	}
+}
+
+func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.EmbedderFunc, cfgOpt ...*config.Config) http.HandlerFunc {
+	var cfg *config.Config
+	if len(cfgOpt) > 0 {
+		cfg = cfgOpt[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if cfg != nil {
+			if cur := cfg.Current(); cur != nil && strings.TrimSpace(cur.Transcripts.IndexerURL) != "" {
+				proxyTranscriptRequest(w, r, strings.TrimSpace(cur.Transcripts.IndexerURL))
+				return
+			}
+		}
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database not available")
 			return
 		}
 
@@ -708,9 +761,24 @@ func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.Embedd
 	}
 }
 
-func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
+func handleTranscriptStats(store db.TranscriptStore, cfgOpt ...*config.Config) http.HandlerFunc {
+	var cfg *config.Config
+	if len(cfgOpt) > 0 {
+		cfg = cfgOpt[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if cfg != nil {
+			if cur := cfg.Current(); cur != nil && strings.TrimSpace(cur.Transcripts.IndexerURL) != "" {
+				proxyTranscriptRequest(w, r, strings.TrimSpace(cur.Transcripts.IndexerURL))
+				return
+			}
+		}
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database not available")
 			return
 		}
 
@@ -737,9 +805,24 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 	}
 }
 
-func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
+func handleTranscriptSteps(store db.TranscriptStore, cfgOpt ...*config.Config) http.HandlerFunc {
+	var cfg *config.Config
+	if len(cfgOpt) > 0 {
+		cfg = cfgOpt[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if cfg != nil {
+			if cur := cfg.Current(); cur != nil && strings.TrimSpace(cur.Transcripts.IndexerURL) != "" {
+				proxyTranscriptRequest(w, r, strings.TrimSpace(cur.Transcripts.IndexerURL))
+				return
+			}
+		}
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database not available")
 			return
 		}
 
@@ -1320,12 +1403,12 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
-	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(txStore, embedder))
-	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(txStore, embedder))
-	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(txStore))
-	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(txStore))
-	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(txStore))
-	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(txStore))
+	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(txStore, embedder, cfg))
+	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(txStore, embedder, cfg))
+	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(txStore, cfg))
+	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(txStore, cfg))
+	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(txStore, cfg))
+	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(txStore, cfg))
 	mux.HandleFunc("/tasks", handleTasks(store, pool))
 	var llmFn func(context.Context, string, string) (string, error)
 	if pool != nil {

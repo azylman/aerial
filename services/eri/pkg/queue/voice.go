@@ -129,6 +129,11 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	turnPrompt := prompt
 	if reply, conv, handled, customErr := p.executeCustomVoiceRunner(ctx, turnPrompt, deviceKey, onStatus, sentenceCb); handled {
+		sess := conv
+		if sess == "" {
+			sess = deviceKey
+		}
+		p.EnqueueTranscriptPublish(sess, threadID, "voice")
 		return reply, conv, customErr
 	}
 
@@ -193,6 +198,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	outcome := runner.NewTurnResolver().Resolve(ctx, turnRes, turnErr, activeSession)
 	turnStatus, turnUsage = voiceTurnStatus(ctx, outcome), outcome.Usage
 	reply, conv, err := finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
+	p.EnqueueTranscriptPublish(activeSession, threadID, "voice")
 	return reply, conv, err
 }
 

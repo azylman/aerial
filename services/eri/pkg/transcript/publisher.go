@@ -27,6 +27,7 @@ type BatchPublishFunc func(ctx context.Context, batch transcriptwire.TranscriptS
 // from the indexer watermark instead of replaying stale steps.
 type Publisher struct {
 	mu      sync.Mutex
+	drainMu sync.Mutex
 	stack   string
 	publish BatchPublishFunc
 	queues  map[string][]transcriptwire.TranscriptStepBatch
@@ -66,31 +67,6 @@ func (p *Publisher) Enqueue(batches ...transcriptwire.TranscriptStepBatch) {
 	}
 }
 
-// darkTranscriptAnchor keeps the dark transcript publisher pieces reachable
-// in the production call graph until the turn-end publishing cutover wires
-// live callers. Every call below is a validated no-op: blank sessions are
-// dropped, the indexer client is disabled without a base URL, and Drain on
-// an empty queue with no publish function reports nothing, so this performs
-// no network or database work and changes no behavior. The cutover chunk
-// removes this anchor when it wires the live publisher.
-var _ = func() bool {
-	p := NewPublisher("", nil)
-	p.Enqueue()
-	_ = p.EnqueueSteps(transcriptwire.TranscriptStepBatch{}, nil)
-	_ = p.PendingSessions()
-	_ = p.PendingCount("")
-	errDrain := p.Drain(context.Background())
-	_ = ResendOnStartup(nil, nil, nil)
-	client := NewIndexerClient("", nil)
-	_, errGet := client.Watermark(context.Background(), "", "")
-	_, errWms := client.Watermarks(context.Background(), "")
-	_, errBatches := p.BuildSessionBatches(SessionBatchParams{})
-	errPubSess := p.PublishSessions(context.Background(), "", nil)
-	errPubOne := p.PublishSession(context.Background(), SessionBatchParams{})
-	_ = []error{errDrain, errGet, errWms, errBatches, errPubSess, errPubOne}
-	return true
-}()
-
 // SessionBatchParams configures batch generation for a session transcript file.
 type SessionBatchParams struct {
 	SessionID  string
@@ -102,6 +78,11 @@ type SessionBatchParams struct {
 	HeadLimit  int
 	TailLimit  int
 	MCPServers []string
+}
+
+// FindTranscriptFile locates a transcript file for sessionID across brainDir and extraDirs.
+func FindTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	return findTranscriptFile(brainDir, sessionID, extraDirs...)
 }
 
 func locateTranscriptPath(brainDir, sessionID string, extraDirs []string) (string, error) {
@@ -341,6 +322,9 @@ func (p *Publisher) Drain(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+
 	p.mu.Lock()
 	if p.publish == nil && len(p.order) > 0 {
 		p.mu.Unlock()

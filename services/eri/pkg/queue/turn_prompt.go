@@ -283,6 +283,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	if targetSess != "" {
 		te.activeSessionID = targetSess
 		te.leaseSessionID = targetSess
+		te.touchSessionIDLocked(targetSess)
 		if allowPersist {
 			if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
 				te.logf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)

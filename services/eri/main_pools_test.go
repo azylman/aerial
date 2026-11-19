@@ -655,7 +655,7 @@ func assertLeaderHandoffCase(t *testing.T, tc leaderHandoffCase) {
 	pool.Start()
 	defer pool.Stop()
 
-	errCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, store, pool, nil, ephemPool, cfg, cfg.Current())
+	errCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, pool, []runner.AgentPool{ephemPool})
 	<-lockEntered
 
 	if tc.holdThenUnblk {

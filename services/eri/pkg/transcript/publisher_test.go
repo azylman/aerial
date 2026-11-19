@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -217,6 +218,59 @@ func TestPublisher_DrainFailureKeepsBatchesEnqueuedDuringFlight(t *testing.T) {
 		t.Fatalf("second Drain failed: %v", err)
 	}
 	assertEnvelopesEqual(t, published, []publishedEnvelope{{first: 1, last: 1, final: true}})
+}
+
+// TestPublisher_ConcurrentDrainsSerializeAndPreserveOrder reproduces and guards
+// against race conditions where concurrent Drain calls could read the same head batch
+// or double-shift the session queue, dropping batches or duplicating publishes.
+func TestPublisher_ConcurrentDrainsSerializeAndPreserveOrder(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var published []transcriptwire.TranscriptStepBatch
+	publish := func(_ context.Context, b transcriptwire.TranscriptStepBatch) error {
+		mu.Lock()
+		published = append(published, b)
+		mu.Unlock()
+		return nil
+	}
+	p := NewPublisher("aerial", publish)
+	const batchCount = 10
+	batches := make([]transcriptwire.TranscriptStepBatch, 0, batchCount)
+	for i := range batchCount {
+		batches = append(batches, testBatch("sess-concurrent", i, i, i == batchCount-1))
+	}
+	p.Enqueue(batches...)
+
+	const drainConcurrency = 5
+	errCh := make(chan error, drainConcurrency)
+	var wg sync.WaitGroup
+	for range drainConcurrency {
+		wg.Go(func() {
+			errCh <- p.Drain(context.Background())
+		})
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("unexpected drain error: %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(published) != batchCount {
+		t.Fatalf("published count = %d, want %d", len(published), batchCount)
+	}
+	for i, b := range published {
+		if b.FirstStep != i || b.LastStep != i {
+			t.Errorf("published[%d] step range = [%d, %d], want [%d, %d]", i, b.FirstStep, b.LastStep, i, i)
+		}
+	}
+	if p.PendingCount("sess-concurrent") != 0 {
+		t.Errorf("pending count = %d, want 0", p.PendingCount("sess-concurrent"))
+	}
 }
 
 type publishedEnvelope struct {

@@ -864,7 +864,7 @@ func setupDiscordFunnel(
 	cleanup := func() {
 		log.Printf("Stopping worker pool...")
 		if pool != nil {
-			pool.Stop()
+			pool.StopWithContext(ctx)
 		}
 		if dgSession != nil {
 			log.Printf("Closing Discord gateway session...")
@@ -879,14 +879,8 @@ func setupDiscordFunnel(
 func startLeaderHandoff(
 	ctx context.Context,
 	store db.Store,
-	txStore db.TranscriptStore,
 	pool *queue.WorkerPool,
 	allPools []runner.AgentPool,
-	ephemeralPool interface {
-		EphemeralLLMFunc(model string) runner.LLMFunc
-	},
-	cfg *config.Config,
-	cur *config.ConfigData,
 ) (<-chan error, func(), func()) {
 	leaderCtx, cancelLeader := context.WithCancel(ctx)
 	leaderDone := make(chan struct{})
@@ -913,15 +907,9 @@ func startLeaderHandoff(
 		}
 		queue.RecoverInterrupted(leaderCtx, store, pool)
 		PrewarmProcessPoolsSequentially(leaderCtx, allPools...)
-		var rawLLM func(context.Context, string, string) (string, error)
-		if ephemeralPool != nil {
-			rawLLM = ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
-		}
-		syncLLM := buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
-		transcript.StartTranscriptSync(leaderCtx, txStore, cfg, "", syncLLM, 5*time.Minute)
-		if pool != nil && pool.EventBus() != nil {
-			if subErr := transcript.StartTurnTranscriptSyncSubscriber(leaderCtx, pool.EventBus(), txStore, cfg, "", func() transcript.LLMClientFunc { return syncLLM }); subErr != nil {
-				log.Printf("[TranscriptSync] Warning starting turn transcript sync subscriber: %v", subErr)
+		if pool != nil {
+			if resendErr := pool.RunStartupResend(leaderCtx); resendErr != nil {
+				log.Printf("[StartupResend] Warning running startup transcript resend: %v", resendErr)
 			}
 		}
 	}()
@@ -1219,6 +1207,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		ParentContext:    ctx,
 		Store:            store,
+		TranscriptStore:  txStore,
 		Classifier:       cls,
 		SessionManager:   sessionMgr,
 		Pools:            pools.discord,
@@ -1278,7 +1267,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, txStore, pool, pools.all, pools.ephemeral, cfg, cur)
+	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, pool, pools.all)
 	releaseLeaderLock = releaseLock
 	defer stopHandoff()
 

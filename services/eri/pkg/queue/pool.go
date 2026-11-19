@@ -32,6 +32,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
+	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 const (
@@ -123,6 +124,11 @@ type WorkerPoolConfig struct {
 	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
 	TraceContent                     bool                       // record prompt/response on invoke_agent spans (tracing capture_content)
 	ActiveTurns                      *runner.ActiveTurnRegistry // daemons' active turn spans for the MCP trace proxy; nil gets a private registry
+	TranscriptStore                  db.TranscriptStore
+	TranscriptsIndexerURL            string
+	TranscriptRecheckDelay           time.Duration
+	TranscriptPublisher              *transcript.Publisher
+	TranscriptIndexerClient          *transcript.IndexerClient
 }
 
 type queueItem struct {
@@ -137,37 +143,52 @@ type threadWorkerState struct {
 	lastEnqueuedDiscordMsgID string
 }
 
+type transcriptPublishJob struct {
+	sessionID string
+	threadID  string
+	source    string
+	retried   bool
+}
+
 type WorkerPool struct {
-	appCfg              *config.Config
-	hasExplicitAppCfg   bool
-	overrideModel       string
-	cfg                 WorkerPoolConfig
-	sessionMgr          *session.Manager
-	mu                  sync.Mutex
-	threadChs           map[string]*threadWorkerState
-	activeTurns         map[string]*turnExecution
-	wg                  sync.WaitGroup
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	stopped, leaderHold bool
-	quotaLockedUntil    atomic.Int64
-	scopeLocks          sync.Map
-	webhookDispatcher   WebhookDispatcher
-	summaryGroup        singleflight.Group
-	pools               map[PoolKey]runner.AgentPool
-	voiceProcessPool    runner.AgentPool
-	eventBus            pubsub.Bus
-	createThreadFn      func(channelID, title string) (string, error)
-	widgetDeliveryMu    sync.Mutex
-	widgetLockHolder    atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
-	widgetChannelLocks  sync.Map                       // channelID string -> *widgetChannelLock
-	widgetMu            sync.Mutex
-	widgetsByID         map[string]discord.StatusWidgetRequest
-	widgetOrder         []string
-	chunkToBuildID      map[string]string
-	activeChunkSteps    map[string]string
-	activeChunkTurns    map[string]string
-	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
+	appCfg                  *config.Config
+	hasExplicitAppCfg       bool
+	overrideModel           string
+	cfg                     WorkerPoolConfig
+	sessionMgr              *session.Manager
+	mu                      sync.Mutex
+	threadChs               map[string]*threadWorkerState
+	activeTurns             map[string]*turnExecution
+	wg                      sync.WaitGroup
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	stopped, leaderHold     bool
+	quotaLockedUntil        atomic.Int64
+	scopeLocks              sync.Map
+	webhookDispatcher       WebhookDispatcher
+	summaryGroup            singleflight.Group
+	pools                   map[PoolKey]runner.AgentPool
+	voiceProcessPool        runner.AgentPool
+	eventBus                pubsub.Bus
+	createThreadFn          func(channelID, title string) (string, error)
+	widgetDeliveryMu        sync.Mutex
+	widgetLockHolder        atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
+	widgetChannelLocks      sync.Map                       // channelID string -> *widgetChannelLock
+	widgetMu                sync.Mutex
+	widgetsByID             map[string]discord.StatusWidgetRequest
+	widgetOrder             []string
+	chunkToBuildID          map[string]string
+	activeChunkSteps        map[string]string
+	activeChunkTurns        map[string]string
+	startedAt               time.Time // anchors queue.wait for rows resumed after a restart
+	transcriptsIndexerURL   string
+	transcriptRecheckDelay  time.Duration
+	transcriptStore         db.TranscriptStore
+	transcriptPublisher     *transcript.Publisher
+	indexerClient           *transcript.IndexerClient
+	transcriptPublishCh     chan transcriptPublishJob
+	transcriptWorkerStarted bool
+	transcriptWorkerMu      sync.Mutex
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -200,8 +221,12 @@ func (p *WorkerPool) SetEventBus(bus pubsub.Bus) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.eventBus = bus
+	p.mu.Unlock()
+	p.transcriptWorkerMu.Lock()
+	p.transcriptPublisher = nil
+	p.transcriptWorkerMu.Unlock()
+	p.ensureTranscriptPublishWorker()
 }
 
 // EventBus returns the event bus attached to the worker pool, if any.
@@ -506,10 +531,16 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
 		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
-		widgetsByID:      make(map[string]discord.StatusWidgetRequest),
-		chunkToBuildID:   make(map[string]string),
-		activeChunkSteps: make(map[string]string),
-		activeChunkTurns: make(map[string]string),
+		widgetsByID:            make(map[string]discord.StatusWidgetRequest),
+		chunkToBuildID:         make(map[string]string),
+		activeChunkSteps:       make(map[string]string),
+		activeChunkTurns:       make(map[string]string),
+		transcriptsIndexerURL:  cfg.TranscriptsIndexerURL,
+		transcriptRecheckDelay: cfg.TranscriptRecheckDelay,
+		transcriptStore:        cfg.TranscriptStore,
+		transcriptPublisher:    cfg.TranscriptPublisher,
+		indexerClient:          cfg.TranscriptIndexerClient,
+		transcriptPublishCh:    make(chan transcriptPublishJob, 1024),
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -669,6 +700,7 @@ func (p *WorkerPool) GetRuntimeConfig() string {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
+	p.ensureTranscriptPublishWorker()
 	if p.AgentPool() != nil || p.cfg.Store != nil {
 		p.wg.Go(func() {
 			interval := p.cfg.MaintenanceInterval
@@ -818,7 +850,13 @@ func (p *WorkerPool) collectUniquePoolsLocked() []runner.AgentPool {
 	return out
 }
 
+// Stop cleanly shuts down worker routines and process pools using a background context.
 func (p *WorkerPool) Stop() {
+	p.StopWithContext(context.Background())
+}
+
+// StopWithContext cleanly shuts down worker routines and drains transcript publisher with the provided context.
+func (p *WorkerPool) StopWithContext(ctx context.Context) {
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
@@ -840,6 +878,8 @@ func (p *WorkerPool) Stop() {
 	case <-time.After(2 * time.Second):
 		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
 	}
+
+	p.drainTranscriptPublisher(ctx)
 
 	p.mu.Lock()
 	pools := p.collectUniquePoolsLocked()
