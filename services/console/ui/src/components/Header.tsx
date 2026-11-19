@@ -17,16 +17,11 @@ const PermetGauge = memo(function PermetGauge() {
   const score = useMemo(() => permetScore(services), [services]);
   const color = TONE_COLOR[score.tone];
   return (
-    <div className="permet-gauge">
-      <div className="permet-gauge-header">
-        <span className="permet-label">PERMET SCORE</span>
-        <span className="permet-value" style={color === undefined ? undefined : { color }}>
-          {score.label}
-        </span>
-      </div>
-      <div className="permet-bar-bg">
-        <div className="permet-bar-fill" style={{ width: `${score.percent}%` }} />
-      </div>
+    <div className="permet-gauge status-pill">
+      <span className="pulse-dot healthy" />
+      <span id="permet-score-val" className={`permet-val ${score.tone}`} style={color === undefined ? undefined : { color }}>
+        {score.label}
+      </span>
     </div>
   );
 });
@@ -72,22 +67,22 @@ const QuickLaunchDock = memo(function QuickLaunchDock() {
 export const Header = memo(function Header() {
   return (
     <header className="hud-header">
-      <div className="header-top">
+      <div className="cmd-left">
         <div className="brand-block">
           <div className="brand-badge">
+            <span className="brand-monogram">A</span>
             <Icon name="bolt" size={18} />
           </div>
           <div className="brand-text">
-            <h1>
-              AERIAL <span className="version">v3.0</span>
-            </h1>
-            <div className="sub">PERMET COMMAND HUD // TACTICAL GATEWAY</div>
+            <h1>Aerial Console</h1>
           </div>
         </div>
+        <TabBar />
+      </div>
+      <div className="cmd-right">
+        <QuickLaunchDock />
         <PermetGauge />
       </div>
-      <TabBar />
-      <QuickLaunchDock />
     </header>
   );
 });

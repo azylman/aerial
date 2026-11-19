@@ -66,16 +66,16 @@ export interface ConsoleRow {
 // ---- Fixture-derived literals ----
 
 /** 15 of 18 services healthy (status.json) -> 83% -> stable. */
-const PERMET_STABLE = 'LVL 3 // STABLE';
+const PERMET_STABLE = '15 / 18 Healthy';
 /** Static header value: status is not polled on schedules/memory/builds deep links. */
-const PERMET_STATIC = 'LVL 5 // ACTIVE';
+const PERMET_STATIC = 'Ready';
 
 /** status.json: 5 tasks; schedules.json: 28 crons + 12 one-shots; facts.json: 150; builds.json: 4 running + 6 queued. */
-const BADGES_ALL = { 'ACTIVE TASKS': '5', SCHEDULES: '40', 'MEMORY ARCHIVE': '150', 'BUILD QUEUE': '10' };
+const BADGES_ALL = { Tasks: '5', Schedules: '40', Memory: '150', Builds: '10' };
 /** Same, before any status poll (deep link to a non-status tab). */
-const BADGES_NO_STATUS = { ...BADGES_ALL, 'ACTIVE TASKS': '0' };
+const BADGES_NO_STATUS = { ...BADGES_ALL, Tasks: '0' };
 
-const BRAND = ['PERMET COMMAND HUD // TACTICAL GATEWAY', 'PERMET SCORE'];
+const BRAND = ['Aerial Console'];
 /** status.json quick_launch_links (all six have a name and url). */
 const DOCK = ['🛰️ Console', '📈 Grafana', '📚 Docs', '🔭 Agentsview', '🏠 Homepage', '🏡 Home Assistant'];
 
@@ -154,7 +154,7 @@ const DRAWER_TEXTS = [
  */
 // Rows with steps end by scrolling to the bottom and re-selecting the active SCHEDULES tab, which
 // proves re-selecting a tab keeps pill and search state.
-const settleScroll = (): readonly Step[] => [{ kind: 'scrollBottom' }, { kind: 'clickTab', tab: 'SCHEDULES' }];
+const settleScroll = (): readonly Step[] => [{ kind: 'scrollBottom' }, { kind: 'clickTab', tab: 'Schedules' }];
 const SCHEDULES_SEARCH = "SEARCH SCHEDULES, PROMPTS, TARGET IDs (PRESS '/' TO FOCUS)...";
 const SCHEDULE_HEADINGS = ['ACTIVE CRONS', 'PENDING ONCE', 'NEXT TRIGGER', '24H SUCCESS RATE', '94.0%', '50 RUNS LOGGED (24H)'];
 
@@ -168,7 +168,7 @@ const scheduleCounts = (crons: number, oneShots: number, runs: number, marks: nu
 
 const schedulesExpect = (texts: readonly string[], counts: readonly CountExpectation[]): Expectation => ({
   hash: '#schedules',
-  activeTab: 'SCHEDULES',
+  activeTab: 'Schedules',
   badges: BADGES_NO_STATUS,
   texts: [...SCHEDULE_HEADINGS, ...texts],
   // The earliest trigger (schedules.json: a cron due 11:58, 2 min before FIXTURE_NOW) reads OVERDUE.
@@ -212,7 +212,7 @@ const settleMemory = (lastRow: readonly [string, string, string]): readonly Step
   { kind: 'openDrawer', text: lastRow[2] },
   { kind: 'openDrawer', text: lastRow[0] },
   { kind: 'openDrawer', text: lastRow[1] },
-  { kind: 'clickTab', tab: 'MEMORY ARCHIVE' },
+  { kind: 'clickTab', tab: 'Memory' },
 ];
 /** The last row of each list (three columns on desktop; the last three cards on mobile). */
 const LAST_ROW_ALL = ['NODE #1128', 'NODE #1080', 'NODE #1019'] as const;
@@ -221,7 +221,7 @@ const FIRST_FACT = 'Builds ship through the Vanadis queue (#100)';
 
 const memoryExpect = (texts: readonly string[], activePill: string): Expectation => ({
   hash: '#memory',
-  activeTab: 'MEMORY ARCHIVE',
+  activeTab: 'Memory',
   badges: BADGES_NO_STATUS,
   texts: [...MEMORY_HEADINGS, ...texts],
   counts: [
@@ -276,7 +276,7 @@ const buildsExpect = (
   extra: readonly CountExpectation[] = [],
 ): Expectation => ({
   hash: '#builds',
-  activeTab: 'BUILD QUEUE',
+  activeTab: 'Builds',
   badges: BADGES_NO_STATUS,
   texts: [...BUILD_HEADINGS, ...texts],
   counts: [
@@ -384,12 +384,12 @@ const BUILD_DRAWER_COUNTS: readonly CountExpectation[] = [
 
 const DOCKET_SEARCH = "SEARCH TASKS (PRESS '/' TO FOCUS)...";
 
-/** The docket tab never polls status, so ACTIVE TASKS stays 0; the tab itself has no badge. */
+/** The docket tab never polls status, so Tasks stays 0; the tab itself has no badge. */
 const docketExpect = (texts: readonly string[], counts: readonly CountExpectation[]): Expectation => ({
   hash: '#docket',
-  activeTab: 'DOCKET',
+  activeTab: 'Docket',
   badges: BADGES_NO_STATUS,
-  texts: ['DOCKET', ...texts],
+  texts: ['Docket', ...texts],
   counts: [
     { selector: '.view-tab-btn', count: 6 },
     { selector: '#tab-docket-btn .tab-badge', count: 0 },
@@ -409,19 +409,19 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     name: 'shell: bare URL lands on telemetry',
     start: '',
     steps: [],
-    expect: { hash: '#telemetry', activeTab: 'TELEMETRY', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
+    expect: { hash: '#telemetry', activeTab: 'Overview', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
   },
   {
     name: 'shell: clicking a tab switches and updates the hash',
     start: '#telemetry',
-    steps: [{ kind: 'clickTab', tab: 'BUILD QUEUE' }],
-    expect: { hash: '#builds', activeTab: 'BUILD QUEUE', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
+    steps: [{ kind: 'clickTab', tab: 'Builds' }],
+    expect: { hash: '#builds', activeTab: 'Builds', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
   },
   {
     name: 'shell: keyboard activation of a tab',
     start: '#tasks',
-    steps: [{ kind: 'keyTab', tab: 'MEMORY ARCHIVE', key: 'Enter' }],
-    expect: { hash: '#memory', activeTab: 'MEMORY ARCHIVE', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
+    steps: [{ kind: 'keyTab', tab: 'Memory', key: 'Enter' }],
+    expect: { hash: '#memory', activeTab: 'Memory', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
   },
   {
     name: 'shell: schedules deep link never polls status',
@@ -429,7 +429,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     steps: [],
     expect: {
       hash: '#schedules',
-      activeTab: 'SCHEDULES',
+      activeTab: 'Schedules',
       badges: BADGES_NO_STATUS,
       texts: [...BRAND, PERMET_STATIC],
       counts: [
@@ -444,7 +444,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     steps: [],
     expect: {
       hash: '#telemetry',
-      activeTab: 'TELEMETRY',
+      activeTab: 'Overview',
       badges: BADGES_ALL,
       texts: ['GIT SYNC: BEHIND (Δ 1m 15s)'],
       counts: [{ selector: '.gitsync-pill.lagging', count: 1 }, DEPLOY_TIMERS_TICKED],
@@ -456,7 +456,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     steps: [],
     expect: {
       hash: '#telemetry',
-      activeTab: 'TELEMETRY',
+      activeTab: 'Overview',
       badges: BADGES_ALL,
       texts: [
         'LIVE AGENT EXECUTION QUEUE',
@@ -483,7 +483,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     steps: [],
     expect: {
       hash: '#tasks',
-      activeTab: 'ACTIVE TASKS',
+      activeTab: 'Tasks',
       badges: BADGES_ALL,
       texts: TASK_TEXTS,
       counts: TASK_COUNTS,
@@ -499,7 +499,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     ],
     expect: {
       hash: '#telemetry',
-      activeTab: 'TELEMETRY',
+      activeTab: 'Overview',
       badges: BADGES_ALL,
       texts: DRAWER_TEXTS,
       counts: [
@@ -620,7 +620,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     steps: [
       { kind: 'type', placeholder: MEMORY_SEARCH, text: 'oat milk' },
       { kind: 'openDrawer', text: 'SHOWING 15 / 150 NODES' },
-      { kind: 'clickTab', tab: 'MEMORY ARCHIVE' },
+      { kind: 'clickTab', tab: 'Memory' },
     ],
     expect: memoryExpect(['SHOWING 15 / 150 NODES', 'NODE #1030', 'oat milk'], 'ALL'),
   },
@@ -720,10 +720,10 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     name: 'walk: every tab in order with no console or page errors',
     start: '',
     steps: [
-      { kind: 'clickTab', tab: 'ACTIVE TASKS' },
-      { kind: 'clickTab', tab: 'SCHEDULES' },
-      { kind: 'clickTab', tab: 'MEMORY ARCHIVE' },
-      { kind: 'clickTab', tab: 'BUILD QUEUE' },
+      { kind: 'clickTab', tab: 'Tasks' },
+      { kind: 'clickTab', tab: 'Schedules' },
+      { kind: 'clickTab', tab: 'Memory' },
+      { kind: 'clickTab', tab: 'Builds' },
     ],
     expect: { ...buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS), badges: BADGES_ALL },
   },
