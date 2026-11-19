@@ -9,9 +9,9 @@ package store
 // *Store. SQL text, status transition rules and dispatch-ID semantics are
 // byte-identical to the root copies they replace.
 //
-// Helper copies below (actionDispatchID, actionCompletionAccepted,
-// actionFailureAllowed, failureSkipped, lockFailureParent) mirror the frozen
-// root router.go copies byte-for-byte; router.go stays frozen.
+// Action dispatch identity delegates to the canonical internal/model helper.
+// ActionCompletionAllowed and ActionFailureAllowed are the single
+// authoritative copies consumed by the build package.
 
 import (
 	"context"
@@ -83,8 +83,9 @@ func (s *Store) ReserveChunkForLaunch(ctx context.Context, chunkID string) error
 	return nil
 }
 
-func actionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	identityMatches := dispatchID == actionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
+// ActionCompletionAllowed reports whether an action chunk completion applies.
+func ActionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
+	identityMatches := dispatchID == model.ActionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
 	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
 }
 
@@ -145,7 +146,7 @@ func (s *Store) CompleteActionChunk(ctx context.Context, chunkID, dispatchID str
 	chunk := model.VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}
 
 	res.CompletionAccepted = actionCompletionAccepted(chunk, b.Status, dispatchID)
-	if !actionCompletionAllowed(model.VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}, b.Status, dispatchID) {
+	if !ActionCompletionAllowed(model.VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}, b.Status, dispatchID) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit complete action chunk tx: %w", err)
 		}
@@ -280,32 +281,29 @@ func (s *Store) FailChunk(ctx context.Context, chunkID, reason, dispatchID strin
 	return &b, &c, true, nil
 }
 
-func actionDispatchID(chunk model.VanadisChunk) string {
-	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
-}
-
 func actionCompletionAccepted(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
 	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
 		chunk.Status = statusRunning
 		buildStatus = statusRunning
 	}
-	return actionCompletionAllowed(chunk, buildStatus, dispatchID)
+	return ActionCompletionAllowed(chunk, buildStatus, dispatchID)
 }
 
-func actionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) bool {
+// ActionFailureAllowed reports whether an action chunk failure applies.
+func ActionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) bool {
 	if c.PRNumber == 0 {
-		return actionCompletionAllowed(c, buildStatus, dispatchID)
+		return ActionCompletionAllowed(c, buildStatus, dispatchID)
 	}
 	// PR attachment retains action mode. PR closure and remediation retain their
 	// identities, while old action-turn identities must still match the generation.
 	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
 		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
 	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
-		(prIdentity || dispatchID == actionDispatchID(c))
+		(prIdentity || dispatchID == model.ActionDispatchID(c))
 }
 
 func failureSkipped(c model.VanadisChunk, buildStatus, dispatchID string) bool {
-	return (c.Mode == chunkModeAction && !actionFailureAllowed(c, buildStatus, dispatchID)) || c.Status == statusFailed || c.Status == statusCompleted || c.Status == statusCancelled
+	return (c.Mode == chunkModeAction && !ActionFailureAllowed(c, buildStatus, dispatchID)) || c.Status == statusFailed || c.Status == statusCompleted || c.Status == statusCancelled
 }
 
 func lockFailureParent(ctx context.Context, tx pgx.Tx, chunkID string) (string, error) {

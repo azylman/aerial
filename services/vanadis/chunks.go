@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
 const (
@@ -138,25 +138,12 @@ type AppendChunksRequest struct {
 	Chunks []CreateChunkInput `json:"chunks"`
 }
 
-func resolveChunkRef(chunks []VanadisChunk, chunkRef string) int {
-	clean := strings.TrimSpace(chunkRef)
-	if clean == "" {
-		return -1
-	}
-	for i, c := range chunks {
-		if c.ID == clean {
-			return i
-		}
-	}
-	if idx, err := strconv.Atoi(clean); err == nil {
-		for i, c := range chunks {
-			if c.ChunkIndex == idx {
-				return i
-			}
-		}
-	}
-	return -1
-}
+var (
+	resolveChunkRef = model.ResolveChunkRef
+
+	// ResolveChunkRef resolves a chunk ID or chunk index reference to a slice position.
+	ResolveChunkRef = model.ResolveChunkRef
+)
 
 // GetChunk retrieves a VanadisChunk and its parent VanadisBuild by chunkID.
 func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error) {
