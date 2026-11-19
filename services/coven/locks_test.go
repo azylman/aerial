@@ -259,12 +259,12 @@ func TestWithFactWriteLock(t *testing.T) {
 			wantQueries:  []string{"BEGIN"},
 		},
 		{
-			name:         "commit error surfaces",
+			name:         "commit error rolls back",
 			lockKey:      "th-1",
 			xactAcquired: true,
 			failOn:       "COMMIT",
 			wantErr:      true,
-			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "COMMIT"},
+			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "COMMIT", "ROLLBACK"},
 		},
 		{
 			name:         "lock query error rolls back",

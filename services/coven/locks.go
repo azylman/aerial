@@ -94,6 +94,7 @@ func withFactWriteLock(ctx context.Context, db DBTX, lockKey string, fn func(ctx
 		return err
 	}
 	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		rollback()
 		return fmt.Errorf("coven lock: failed to commit fact-write lock: %w", err)
 	}
 	committed = true
