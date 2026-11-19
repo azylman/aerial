@@ -355,7 +355,7 @@ describe('App with a fully seeded store', () => {
     // One synchronous act, no flush: a suspended body would leave the null Suspense fallback here.
     act(() => screen.getByText('Console React rewrite #1').click());
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
-    expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
+    expect(screen.getByText('BUILD CHUNK DAG (3)')).toBeTruthy();
   });
 
   // The task body ships in the docket chunk, yet the drawer opens from any tab.
@@ -402,7 +402,7 @@ describe('App with a fully seeded store', () => {
     await act(async () => within(document.getElementById('builds-view')!).getByText('Console React rewrite #1').click());
     await flush();
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
-    expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
+    expect(screen.getByText('BUILD CHUNK DAG (3)')).toBeTruthy();
   });
 });
 

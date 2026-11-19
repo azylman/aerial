@@ -7,7 +7,7 @@ import { InlineMarkdown, Markdown } from '../../lib/markdown';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import { BuildStatusBadge, ChunkProgress } from './BuildCard';
 import { syncBuildDetail } from './data';
-import { chunkNumber, chunkPrUrl, chunkStatusBadge, findBuild, resolveBuildDetail } from './model';
+import { buildChunkDag, chunkNumber, chunkPrUrl, chunkStatusBadge, findBuild, resolveBuildDetail } from './model';
 import './builds.css';
 
 /** The drawer re-fetches its build at the queue's cadence while open and visible. */
@@ -31,8 +31,72 @@ function TagSection({ label, tags, className }: { readonly label: string; readon
   );
 }
 
-/** One ordered chunk card; memoized on the reconciled chunk so unchanged polls skip it. */
-const ChunkCard = memo(function ChunkCard({ chunk, position }: { readonly chunk: VanadisChunkDTO; readonly position: number }) {
+/** Interactive DAG graph of build chunks rendered across rank rows with SVG bezier connectors. */
+export function BuildDagGraph({
+  buildId,
+  chunks,
+  activeChunkId,
+}: {
+  readonly buildId: string;
+  readonly chunks: readonly VanadisChunkDTO[];
+  readonly activeChunkId?: string | undefined;
+}) {
+  const dag = useMemo(() => buildChunkDag(chunks), [chunks]);
+  if (dag.ranks.length === 0) return null;
+
+  return (
+    <div className="build-dag-graph">
+      {dag.edges.length > 0 ? (
+        <svg className="build-dag-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          {dag.edges.map((edge) => {
+            const fromX = ((edge.fromIndex + 0.5) / edge.fromCount) * 100;
+            const fromY = ((edge.fromRank + 0.5) / dag.ranks.length) * 100;
+            const toX = ((edge.toIndex + 0.5) / edge.toCount) * 100;
+            const toY = ((edge.toRank + 0.5) / dag.ranks.length) * 100;
+            const midY = (fromY + toY) / 2;
+            const d = `M ${fromX} ${fromY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${toY}`;
+            return <path key={`${edge.fromId}->${edge.toId}`} className="build-dag-edge" d={d} />;
+          })}
+        </svg>
+      ) : null}
+      {dag.ranks.map((rankNodes, rankIdx) => (
+        <div key={rankIdx} className="build-dag-rank" data-rank={rankIdx}>
+          {rankNodes.map((node) => {
+            const isActive =
+              activeChunkId !== undefined && (activeChunkId === node.chunk.id || activeChunkId === String(node.number));
+            return (
+              <button
+                key={node.chunk.id}
+                type="button"
+                className={`build-dag-node${isActive ? ' active' : ''}`}
+                data-chunk-id={node.chunk.id}
+                data-chunk-index={node.number}
+                onClick={() =>
+                  useConsoleStore.getState().openDrawer({ kind: 'build', id: buildId, chunkId: node.chunk.id })
+                }
+              >
+                <span className="chunk-index-badge">#{node.number}</span>
+                <span className="chunk-title">{node.chunk.title || `Chunk ${node.number}`}</span>
+                <span className={node.status.className}>{node.status.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** One chunk card; memoized on the reconciled chunk so unchanged polls skip it. */
+export const ChunkCard = memo(function ChunkCard({
+  chunk,
+  position,
+  defaultOpen,
+}: {
+  readonly chunk: VanadisChunkDTO;
+  readonly position: number;
+  readonly defaultOpen?: boolean;
+}) {
   const number = chunkNumber(chunk, position);
   const status = chunkStatusBadge(chunk.status);
   const prUrl = chunkPrUrl(chunk);
@@ -59,7 +123,7 @@ const ChunkCard = memo(function ChunkCard({ chunk, position }: { readonly chunk:
       </div>
       <div className="chunk-body">
         {chunk.instructions ? (
-          <details className="chunk-section chunk-instructions-details">
+          <details className="chunk-section chunk-instructions-details" open={defaultOpen ? true : undefined}>
             <summary className="chunk-section-label chunk-instructions-toggle">
               <span className="chunk-instructions-chevron">
                 <Icon name="chevron-right" size={11} />
@@ -90,14 +154,21 @@ const ChunkCard = memo(function ChunkCard({ chunk, position }: { readonly chunk:
   );
 });
 
-interface ContentProps {
+export interface ContentProps {
   readonly build: VanadisBuildDTO;
   readonly chunks: readonly VanadisChunkDTO[];
+  readonly chunkId?: string | undefined;
 }
 
-/** Build detail content: summary header, then the ordered chunk list. */
-const BuildDetailContent = memo(function BuildDetailContent({ build, chunks }: ContentProps) {
+/** Build detail content: summary header, topological DAG graph, and chunk detail overlay. */
+export const BuildDetailContent = memo(function BuildDetailContent({ build, chunks, chunkId }: ContentProps) {
   const stats = computeBuildChunkStats({ ...build, chunks });
+  const selectedIndex =
+    chunkId !== undefined
+      ? chunks.findIndex((c, i) => c.id === chunkId || String(chunkNumber(c, i)) === chunkId)
+      : -1;
+  const selectedChunk = selectedIndex >= 0 ? chunks[selectedIndex] : undefined;
+
   return (
     <>
       <div className="build-drawer-header-summary">
@@ -126,12 +197,26 @@ const BuildDetailContent = memo(function BuildDetailContent({ build, chunks }: C
         </div>
       </div>
       <div className="build-drawer-chunks-section">
-        <h4 className="chunks-section-title">ORDERED BUILD CHUNKS ({chunks.length})</h4>
+        <h4 className="chunks-section-title">BUILD CHUNK DAG ({chunks.length})</h4>
         <div className="chunks-list">
           {chunks.length === 0 ? (
             <div className="drawer-no-chunks">NO CHUNKS REGISTERED</div>
           ) : (
-            chunks.map((chunk, i) => <ChunkCard key={chunk.id || i} chunk={chunk} position={i} />)
+            <>
+              <BuildDagGraph buildId={build.id} chunks={chunks} activeChunkId={chunkId} />
+              {selectedChunk !== undefined ? (
+                <div className="chunk-detail-panel">
+                  <button
+                    type="button"
+                    className="chunk-back-btn"
+                    onClick={() => useConsoleStore.getState().openDrawer({ kind: 'build', id: build.id })}
+                  >
+                    ← Back to Build DAG
+                  </button>
+                  <ChunkCard chunk={selectedChunk} position={selectedIndex} defaultOpen />
+                </div>
+              ) : null}
+            </>
           )}
         </div>
       </div>
@@ -139,7 +224,7 @@ const BuildDetailContent = memo(function BuildDetailContent({ build, chunks }: C
   );
 });
 
-function BuildDetail({ id }: { readonly id: string }) {
+export function BuildDetail({ id, chunkId }: { readonly id: string; readonly chunkId?: string | undefined }) {
   const poll = useMemo(() => syncBuildDetail(id), [id]);
   usePollingSync(poll, BUILD_DETAIL_POLL_MS, true);
 
@@ -148,7 +233,7 @@ function BuildDetail({ id }: { readonly id: string }) {
   const entry = useConsoleStore((s) => findBuild(s.builds.list.data, id));
   const model = useMemo(() => resolveBuildDetail(id, detail, entry), [id, detail, entry]);
 
-  if (model !== null) return <BuildDetailContent build={model.build} chunks={model.chunks} />;
+  if (model !== null) return <BuildDetailContent build={model.build} chunks={model.chunks} chunkId={chunkId} />;
   if (error !== null) {
     return (
       <div className="empty-state">
@@ -172,6 +257,14 @@ function BuildDetail({ id }: { readonly id: string }) {
  * fetched detail, and keeps polling the build while the drawer is open; closing the drawer (or
  * hiding the page) aborts the in-flight request. Keyed by id, so switching builds restarts the poll.
  */
-export const BuildDetailPanel = memo(function BuildDetailPanel({ target }: { readonly target: { readonly id: string } }) {
-  return <BuildDetail key={target.id} id={target.id} />;
+export const BuildDetailPanel = memo(function BuildDetailPanel({
+  target,
+}: {
+  readonly target: { readonly id: string; readonly chunkId?: string | undefined };
+}) {
+  const storeChunkId = useConsoleStore((s) =>
+    s.drawer.kind === 'build' && s.drawer.id === target.id ? s.drawer.chunkId : undefined,
+  );
+  const chunkId = target.chunkId ?? storeChunkId;
+  return <BuildDetail key={target.id} id={target.id} chunkId={chunkId} />;
 });

@@ -476,6 +476,113 @@
     transform: rotate(90deg);
 }
 
+/* --- BUILD CHUNK DAG GRAPH & OVERLAY --- */
+.build-dag-graph {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    margin-top: 0.75rem;
+    margin-bottom: 1rem;
+    width: 100%;
+}
+
+.build-dag-edges {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+    z-index: 1;
+}
+
+.build-dag-edge {
+    fill: none;
+    stroke: var(--card-border);
+    stroke-width: 2px;
+    stroke-linecap: round;
+    opacity: 0.75;
+}
+
+.build-dag-rank {
+    display: flex;
+    justify-content: space-around;
+    align-items: stretch;
+    gap: 1rem;
+    position: relative;
+    z-index: 2;
+    width: 100%;
+}
+
+.build-dag-node {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 100%;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-main);
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: var(--accent-glow);
+}
+
+.build-dag-node:hover {
+    border-color: var(--card-border-hover);
+    transform: translateY(-1px);
+}
+
+.build-dag-node.active {
+    border-color: var(--accent-primary, #c2410c);
+    background: var(--bg-surface);
+    box-shadow: 0 0 0 2px rgba(194, 65, 12, 0.2);
+}
+
+.build-dag-node .chunk-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.chunk-detail-panel {
+    margin-top: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.chunk-back-btn {
+    align-self: flex-start;
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent-primary, #c2410c);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.chunk-back-btn:hover {
+    border-color: var(--accent-primary, #c2410c);
+    background: var(--card-bg);
+}
+
 .chunk-instructions-box {
     font-size: 0.8rem;
     font-family: var(--font-main);

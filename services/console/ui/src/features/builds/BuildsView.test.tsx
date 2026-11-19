@@ -278,7 +278,8 @@ const detailPayload = (b: VanadisBuildDTO = DETAIL_BUILD, chunks = DETAIL_CHUNKS
   chunks: structuredClone(chunks),
 });
 
-const renderDetail = (id: string) => render(<BuildDetailPanel target={{ id }} />);
+const renderDetail = (id: string, chunkId?: string) =>
+  render(<BuildDetailPanel target={{ id, ...(chunkId !== undefined ? { chunkId } : {}) }} />);
 
 describe('BuildDetailPanel', () => {
   it('renders the queue entry at once, then the fetched detail', async () => {
@@ -294,12 +295,14 @@ describe('BuildDetailPanel', () => {
     expect(text('.build-objective-text')).toBe('Ship kiosk refresh (live)');
     expect(document.querySelector('.build-context-box strong')?.textContent).toBe('ui');
     expect(text('.build-drawer-progress-bar .build-chunk-progress-label')).toBe('1 / 2 CHUNKS COMPLETED');
-    expect(text('.chunks-section-title')).toBe('ORDERED BUILD CHUNKS (2)');
+    expect(text('.chunks-section-title')).toBe('BUILD CHUNK DAG (2)');
     expect([...document.querySelectorAll('.chunk-title')].map((t) => t.textContent)).toEqual(['Chunk r1', 'Chunk 1']);
     expect([...document.querySelectorAll('.chunk-status-badge')].map((b) => b.className)).toEqual([
       'chunk-status-badge chunk-status-merged',
       'chunk-status-badge chunk-status-in_progress',
     ]);
+    fireEvent.click(document.querySelector('.build-dag-node[data-chunk-id="r1"]') as Element);
+    expect(screen.getByRole('button', { name: '← Back to Build DAG' })).toBeTruthy();
     expect(screen.getByRole('link', { name: /#41/ }).getAttribute('href')).toBe('https://github.com/acme/kiosk/pull/41');
     expect(screen.getByRole('heading', { name: 'Objective', level: 2 })).toBeTruthy();
     expect([...document.querySelectorAll('.chunk-instructions-box li')].map((li) => li.textContent)).toEqual(['keep the budget', 'add tests']);
@@ -311,7 +314,7 @@ describe('BuildDetailPanel', () => {
   it('polls while open, keeps an expanded chunk open across polls and stops on close', async () => {
     seed(payload());
     fetchMock.mockImplementation(() => json(detailPayload()));
-    const { unmount } = renderDetail('b-run');
+    const { unmount } = renderDetail('b-run', 'r1');
     await act(async () => {
       await vi.waitFor(() => expect(screen.getByText('Kiosk refresh (live)')).toBeTruthy());
     });

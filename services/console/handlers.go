@@ -114,6 +114,7 @@ type VanadisChunkDTO struct {
 	TargetSymbols      []string  `json:"target_symbols,omitempty"`
 	Effort             string    `json:"effort,omitempty"`
 	AcceptanceCriteria []string  `json:"acceptance_criteria,omitempty"`
+	DependsOn          []string  `json:"depends_on"`
 	Status             string    `json:"status"`
 	PRNumber           int       `json:"pr_number,omitempty"`
 	StartedAt          time.Time `json:"started_at,omitempty"`
@@ -342,6 +343,27 @@ func scheduleRunsHandler(haroBaseURL string) http.HandlerFunc {
 	}
 }
 
+func ensureChunksDependsOn(chunks []VanadisChunkDTO) {
+	for i := range chunks {
+		if chunks[i].DependsOn == nil {
+			chunks[i].DependsOn = []string{}
+		}
+	}
+}
+
+func normalizeBuildDetailChunks(data *BuildDetailAPIResponse) {
+	if data.Chunks == nil {
+		data.Chunks = []VanadisChunkDTO{}
+	}
+	ensureChunksDependsOn(data.Chunks)
+	if data.Build != nil {
+		ensureChunksDependsOn(data.Build.Chunks)
+	}
+	if data.Entry != nil {
+		ensureChunksDependsOn(data.Entry.Chunks)
+	}
+}
+
 func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		targetURL, _, err := BuildVanadisBuildsUpstreamURL(vanadisBaseURL, r.URL.Query())
@@ -367,6 +389,7 @@ func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 						d.Builds[i].Chunks[j].TargetSymbols = nil
 						d.Builds[i].Chunks[j].AcceptanceCriteria = nil
 					}
+					ensureChunksDependsOn(d.Builds[i].Chunks)
 				}
 			},
 		)
@@ -443,9 +466,7 @@ func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
 		if data.Status == "" {
 			data.Status = "ok"
 		}
-		if data.Chunks == nil {
-			data.Chunks = []VanadisChunkDTO{}
-		}
+		normalizeBuildDetailChunks(&data)
 
 		writeJSON(w, r, http.StatusOK, data)
 	}

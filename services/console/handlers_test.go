@@ -562,6 +562,14 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 						QueueState:    "running",
 						Chunks: []VanadisChunkDTO{
 							{
+								ID:         "chunk-0",
+								BuildID:    "build-101",
+								ChunkIndex: 0,
+								Title:      "Chunk 0",
+								DependsOn:  []string{},
+								Status:     "completed",
+							},
+							{
 								ID:                 "chunk-1",
 								BuildID:            "build-101",
 								ChunkIndex:         1,
@@ -570,6 +578,7 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 								TargetFiles:        []string{"main.go"},
 								TargetSymbols:      []string{"Run"},
 								AcceptanceCriteria: []string{"pass"},
+								DependsOn:          []string{"chunk-0"},
 								Status:             "completed",
 							},
 						},
@@ -590,11 +599,20 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 					},
 					"chunks": []VanadisChunkDTO{
 						{
+							ID:         "chunk-0",
+							BuildID:    "build-101",
+							ChunkIndex: 0,
+							Title:      "Chunk 0",
+							DependsOn:  []string{},
+							Status:     "completed",
+						},
+						{
 							ID:           "chunk-1",
 							BuildID:      "build-101",
 							ChunkIndex:   1,
 							Title:        "Chunk 1",
 							Instructions: "drawer-only-instructions",
+							DependsOn:    []string{"chunk-0"},
 							Status:       "completed",
 						},
 					},
@@ -636,7 +654,7 @@ func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTes
 			method:            http.MethodGet,
 			target:            "/api/builds?limit=25&status=running&queue_state=running",
 			wantStatus:        http.StatusOK,
-			wantBodySubstr:    []string{"build-101", "Vanadis Feature", "chunk-1"},
+			wantBodySubstr:    []string{"build-101", "Vanadis Feature", "chunk-1", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
 			wantBodyNotSubstr: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria"},
 		},
 		{
@@ -687,7 +705,7 @@ func vanadisBuildsDetailCases(mockVanadisURL, offlineURL string) []vanadisBuildT
 			method:         http.MethodGet,
 			target:         "/api/builds/build-101",
 			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions"},
+			wantBodySubstr: []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
 		},
 		{
 			name:           "BuildDetail_Success_ConsolePrefix",

@@ -357,10 +357,7 @@ const OPEN_BUILD_ONE: readonly Step[] = [
   ...settleBuilds('SHOWING 25 / 25 BUILDS'),
   { kind: 'openDrawer', text: 'Console React rewrite #1' },
   { kind: 'openDrawer', text: 'BUILD // CONSOLE REACT REWRITE #1' },
-  { kind: 'press', key: 'Tab' },
-  { kind: 'press', key: 'Tab' },
-  { kind: 'press', key: 'Tab' },
-  { kind: 'press', key: 'Enter' },
+  { kind: 'click', selector: '.build-dag-node' },
 ];
 
 /**
@@ -377,14 +374,15 @@ const BUILD_DRAWER_TEXTS = [
   'SHARED BUILD CONTEXT',
   'Layout: services/console/ui is a standalone Vite project.',
   '2 / 3 CHUNKS COMPLETED',
-  'ORDERED BUILD CHUNKS (3)',
+  'BUILD CHUNK DAG (3)',
   'Scaffold for Console React rewrite',
   'Port logic for Console React rewrite',
   'Shell for Console React rewrite',
   'MERGED',
   'IN_PROGRESS',
+  '← Back to Build DAG',
   'low',
-  'azylman/mirrormere',
+  'azylman/aerial',
   'Objective',
   'Implement chunk 1.',
   'keep the budget',
@@ -399,19 +397,21 @@ const BUILD_DRAWER_TEXTS = [
 ];
 const BUILD_DRAWER_COUNTS: readonly CountExpectation[] = [
   { selector: '.diagnostic-drawer.active', count: 1 },
-  { selector: '.diagnostic-drawer.active .chunk-card', count: 3 },
-  { selector: '.diagnostic-drawer.active .chunk-status-badge.chunk-status-merged', count: 2 },
+  { selector: '.diagnostic-drawer.active .build-dag-graph', count: 1 },
+  { selector: '.diagnostic-drawer.active .build-dag-node', count: 3 },
+  { selector: '.diagnostic-drawer.active .chunk-detail-panel', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-card', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-status-badge.chunk-status-merged', count: 3 },
   { selector: '.diagnostic-drawer.active .chunk-status-badge.chunk-status-in_progress', count: 1 },
-  { selector: '.diagnostic-drawer.active .chunk-pr-link', count: 2 },
+  { selector: '.diagnostic-drawer.active .chunk-pr-link', count: 1 },
   { selector: '.diagnostic-drawer.active .chunk-pr-link[href="https://github.com/azylman/aerial/pull/1500"]', count: 1 },
-  { selector: '.diagnostic-drawer.active .chunk-pr-link[href="https://github.com/azylman/aerial-config/pull/1501"]', count: 1 },
-  { selector: '.diagnostic-drawer.active .chunk-instructions-details', count: 3 },
+  { selector: '.diagnostic-drawer.active .chunk-instructions-details', count: 1 },
   { selector: '.diagnostic-drawer.active .chunk-instructions-details[open]', count: 1 },
   { selector: '.diagnostic-drawer.active .chunk-instructions-details[open] h2.md-heading', count: 1 },
   { selector: '.diagnostic-drawer.active .chunk-instructions-details[open] ul.md-list > li', count: 2 },
   { selector: '.diagnostic-drawer.active .chunk-instructions-details[open] pre.md-code-block', count: 1 },
-  { selector: '.diagnostic-drawer.active .chunk-tag.file-tag', count: 6 },
-  { selector: '.diagnostic-drawer.active .chunk-tag.symbol-tag', count: 3 },
+  { selector: '.diagnostic-drawer.active .chunk-tag.file-tag', count: 2 },
+  { selector: '.diagnostic-drawer.active .chunk-tag.symbol-tag', count: 1 },
 ];
 
 // ---- Docket (docket-*.json: 30 tasks, ids 201-230; 21 open, 6 completed, 3 won't do) ----

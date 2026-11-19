@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BuildDetailAPIResponse, BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
 import {
+  buildChunkDag,
   chunkNumber,
   chunkProgress,
   chunkPrUrl,
@@ -15,18 +16,21 @@ import {
   showsReconnect,
 } from './model';
 
-const chunk = (id: string, status: string, repo?: string): VanadisChunkDTO => ({
-  id,
-  build_id: 'b',
-  chunk_index: 0,
-  title: id,
-  status,
-  started_at: '2026-11-08T11:00:00Z',
-  completed_at: '0001-01-01T00:00:00Z',
-  created_at: '2026-11-08T11:00:00Z',
-  updated_at: '2026-11-08T11:00:00Z',
-  ...(repo === undefined ? {} : { repo }),
-});
+const chunk = (id: string, status: string, extra?: string | Partial<VanadisChunkDTO>): VanadisChunkDTO => {
+  const extraObj = typeof extra === 'string' ? { repo: extra } : (extra ?? {});
+  return {
+    id,
+    build_id: 'b',
+    chunk_index: 0,
+    title: id,
+    status,
+    started_at: '2026-11-08T11:00:00Z',
+    completed_at: '0001-01-01T00:00:00Z',
+    created_at: '2026-11-08T11:00:00Z',
+    updated_at: '2026-11-08T11:00:00Z',
+    ...extraObj,
+  };
+};
 
 const build = (id: string, status: string, title: string, chunks: readonly VanadisChunkDTO[] = []): VanadisBuildDTO => ({
   id,
@@ -173,5 +177,92 @@ describe('chunk helpers', () => {
     { name: 'no payload', data: null, id: 'b-q', want: undefined },
   ])('findBuild: $name', ({ data, id, want }) => {
     expect(findBuild(data, id)?.id).toBe(want);
+  });
+});
+
+describe('buildChunkDag', () => {
+  it.each([
+    {
+      name: 'empty chunks returns empty layout',
+      chunks: [],
+      wantRanks: [],
+      wantEdges: [],
+    },
+    {
+      name: 'parallel roots depends_on: []',
+      chunks: [
+        chunk('c1', 'pending', { depends_on: [] }),
+        chunk('c2', 'pending', { depends_on: [] }),
+      ],
+      wantRanks: [['c1', 'c2']],
+      wantEdges: [],
+    },
+    {
+      name: 'proxied parallel roots where all chunks arrive with empty depends_on arrays',
+      chunks: [
+        chunk('r1', 'completed', { depends_on: [] }),
+        chunk('r2', 'in_progress', { depends_on: [] }),
+        chunk('r3', 'pending', { depends_on: [] }),
+      ],
+      wantRanks: [['r1', 'r2', 'r3']],
+      wantEdges: [],
+    },
+    {
+      name: 'diamond/multi-rank DAG',
+      chunks: [
+        chunk('root', 'completed', { depends_on: [] }),
+        chunk('b', 'in_progress', { depends_on: ['root'] }),
+        chunk('c', 'in_progress', { depends_on: ['root'] }),
+        chunk('join', 'pending', { depends_on: ['b', 'c'] }),
+      ],
+      wantRanks: [['root'], ['b', 'c'], ['join']],
+      wantEdges: [
+        { fromId: 'root', toId: 'b', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 2 },
+        { fromId: 'root', toId: 'c', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 1, toCount: 2 },
+        { fromId: 'b', toId: 'join', fromRank: 1, fromIndex: 0, fromCount: 2, toRank: 2, toIndex: 0, toCount: 1 },
+        { fromId: 'c', toId: 'join', fromRank: 1, fromIndex: 1, fromCount: 2, toRank: 2, toIndex: 0, toCount: 1 },
+      ],
+    },
+    {
+      name: 'omitted depends_on sequential fallback',
+      chunks: [
+        chunk('c1', 'completed'),
+        chunk('c2', 'in_progress'),
+        chunk('c3', 'pending'),
+      ],
+      wantRanks: [['c1'], ['c2'], ['c3']],
+      wantEdges: [
+        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1 },
+        { fromId: 'c2', toId: 'c3', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 2, toIndex: 0, toCount: 1 },
+      ],
+    },
+    {
+      name: 'unknown dep IDs and self-dependency ignored',
+      chunks: [
+        chunk('c1', 'completed', { depends_on: ['c1', 'unknown-node'] }),
+        chunk('c2', 'pending', { depends_on: ['c1', 'ghost'] }),
+      ],
+      wantRanks: [['c1'], ['c2']],
+      wantEdges: [
+        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1 },
+      ],
+    },
+    {
+      name: 'cycle breaking deterministically at rank 0',
+      chunks: [
+        chunk('c1', 'pending', { depends_on: ['c2'] }),
+        chunk('c2', 'pending', { depends_on: ['c1'] }),
+      ],
+      wantRanks: [['c2'], ['c1']],
+      wantEdges: [
+        { fromId: 'c2', toId: 'c1', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1 },
+        { fromId: 'c1', toId: 'c2', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 0, toIndex: 0, toCount: 1 },
+      ],
+    },
+  ])('$name', ({ chunks, wantRanks, wantEdges }) => {
+    const layout = buildChunkDag(chunks);
+    const gotRanks = layout.ranks.map((r) => r.map((n) => n.chunk.id));
+    expect(gotRanks).toEqual(wantRanks);
+    expect(layout.edges).toEqual(wantEdges);
   });
 });
