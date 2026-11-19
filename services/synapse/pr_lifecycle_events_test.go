@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/alerts"
 )
 
 const lifecycleTargetID = "123456789012345678"
@@ -515,7 +516,7 @@ func TestSanitizeSubjectToken(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := sanitizeSubjectToken(tc.token); got != tc.want {
+			if got := alerts.SanitizeSubjectToken(tc.token); got != tc.want {
 				t.Errorf("sanitizeSubjectToken(%q) = %q, want %q", tc.token, got, tc.want)
 			}
 		})

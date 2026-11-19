@@ -23,6 +23,9 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/synapse/internal/alerts"
+	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 const (
@@ -71,7 +74,77 @@ type RouterServer struct {
 	gitHistory               gitHistoryCache
 	discordIngressRetryDelay time.Duration
 	discordIngressMaxAge     time.Duration
-	firingAlerts             sync.Map
+	alertTracker             alerts.Tracker
+}
+
+func (s *RouterServer) GetGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
+	return s.getGitHubJSON(ctx, path, maxBytes, out)
+}
+
+func (s *RouterServer) FetchRunLogsArchive(ctx context.Context, repo string, runID int64, attempt int) ([]byte, error) {
+	path := fmt.Sprintf("/repos/%s/actions/runs/%d/attempts/%d/logs", repo, runID, attempt)
+	req, err := s.newGitHubRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.githubClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("historical execution logs unavailable: status %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > 16<<20 {
+		return nil, fmt.Errorf("historical log archive too large")
+	}
+	return raw, nil
+}
+
+type buildMetadataRegistryAdapter struct {
+	inner PRRegistryUpdater
+}
+
+func (a buildMetadataRegistryAdapter) LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error) {
+	if a.inner == nil {
+		return model.PRBuildLifecycle{}, nil
+	}
+	lc, err := a.inner.LoadPRBuildLifecycle(ctx, repo, prNumber)
+	if err != nil {
+		return model.PRBuildLifecycle{}, err
+	}
+	return model.PRBuildLifecycle{
+		Status:   lc.Status,
+		HeadSHA:  lc.HeadSHA,
+		MergeSHA: lc.MergeSHA,
+		Started:  lc.Started,
+	}, nil
+}
+
+func (a buildMetadataRegistryAdapter) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata model.BuildMetadata) (bool, error) {
+	if a.inner == nil {
+		return false, nil
+	}
+	return a.inner.RecordPRBuildMetadata(ctx, repo, prNumber, metadata)
+}
+
+func (a buildMetadataRegistryAdapter) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (model.BuildMetadata, bool, error) {
+	if a.inner == nil {
+		return model.BuildMetadata{}, false, nil
+	}
+	return a.inner.LoadPRBuildMetadata(ctx, repo, prNumber)
+}
+
+func (s *RouterServer) buildConsumer() *buildmeta.Consumer {
+	var reg buildmeta.PRMetadataRegistry
+	if s.registry != nil {
+		reg = buildMetadataRegistryAdapter{inner: s.registry}
+	}
+	return buildmeta.NewConsumer(s, reg, s.cfgSrc, s.resolveLegacyWorkflowRunImages)
 }
 
 // NewRouterServer constructs a new RouterServer instance.
