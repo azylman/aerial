@@ -1525,6 +1525,89 @@ if grep -q -- "review --wait --panel none" "$CALL_LOG"; then
   echo 'wrapper_toml_sets_panel_none:ok'
 fi
 rm -f "$REPO_DIR/.roborev.toml"
+
+# Subtests: quota branch re-fetches and honours late workflow-style overrides
+# (posted while the review was running), and stays fail-closed otherwise.
+printf 'agent quota exceeded for model\n' > "$STATE_DIR/mock_review_output"
+export MOCK_REVIEW_RC=1
+printf '[]\n' > "$STATE_DIR/comments_empty.json"
+jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nQuota override full.")}]' > "$STATE_DIR/comments_quota_full.json"
+jq -n --arg short "$COMMIT2_SHORT" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $short + "`.\n\n**Technical Rebuttal:**\nQuota override short.")}]' > "$STATE_DIR/comments_quota_short.json"
+jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"randomdude"},author_association:"NONE",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nNot the owner.")}]' > "$STATE_DIR/comments_quota_nonowner.json"
+jq -n '[{user:{login:"owneruser"},author_association:"OWNER",body:"## roborev-override\n\nOverride for `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`.\n\n**Technical Rebuttal:**\nWrong sha."}]' > "$STATE_DIR/comments_quota_wrongsha.json"
+# First two fetches (pre-review backfill + pre-review workflow check) see no
+# override; the quota-branch fetch sees the late comment.
+curl() { n=$(($(cat "$STATE_DIR/curl_count" 2>/dev/null || echo 0)+1)); echo "$n" > "$STATE_DIR/curl_count"; if [[ "$n" -ge 3 ]]; then cat "$STATE_DIR/$LATE_COMMENTS_FILE"; else cat "$STATE_DIR/comments_empty.json"; fi; }
+export -f curl
+quota_case() {
+  local marker="$1" late_file="$2" want_rc="$3" want_body="${4:-}"
+  export LATE_COMMENTS_FILE="$late_file"
+  echo 0 > "$STATE_DIR/curl_count"
+  : > "$CALL_LOG"
+  set +e
+  quota_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough 2>&1); quota_rc=$?
+  set -e
+  if [[ "${quota_rc}" == "$want_rc" ]]; then
+    if [[ "$want_rc" == 0 ]]; then
+      if echo "$quota_out" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)" && echo "$quota_out" | grep -q "${want_body}"; then
+        echo "${marker}:ok"
+      fi
+    else
+      echo "$quota_out" | grep -q "failed on agent quota" && echo "${marker}:ok"
+    fi
+  fi
+}
+quota_case 'quota_override_full' 'comments_quota_full.json' 0 'Quota override full'
+quota_case 'quota_override_short' 'comments_quota_short.json' 0 'Quota override short'
+quota_case 'quota_nonowner_closed' 'comments_quota_nonowner.json' 1
+quota_case 'quota_wrongsha_closed' 'comments_quota_wrongsha.json' 1
+quota_case 'quota_nooverride_closed' 'comments_empty.json' 1
+# Quota-branch test with the override visible only on comments page 2: the
+# first page holds 100 filler comments, the override arrives on page 2.
+jq -n '[range(100) | {user:{login:"filler"},author_association:"NONE",body:("filler comment \(.)")}]' > "$STATE_DIR/comments_page1_full.json"
+jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nPage two win.")}]' > "$STATE_DIR/comments_page2_override.json"
+# The fake dispatches on the page= query parameter (not call order), so a
+# production regression that re-requests page 1 or the wrong page fails.
+curl() {
+  if [[ "$*" == *"&page=2"* ]]; then
+    p2=$(($(cat "$STATE_DIR/curl_p2" 2>/dev/null || echo 0)+1)); echo "$p2" > "$STATE_DIR/curl_p2"
+    if [[ "$p2" -ge 2 ]]; then cat "$STATE_DIR/comments_page2_override.json"; else printf '[]\n'; fi
+  else
+    cat "$STATE_DIR/comments_page1_full.json"
+  fi
+}
+export -f curl
+echo 0 > "$STATE_DIR/curl_p2"
+: > "$CALL_LOG"
+set +e
+quota_page2_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough 2>&1); quota_page2_rc=$?
+set -e
+if [[ "${quota_page2_rc}" == 0 ]] && echo "$quota_page2_out" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)" && echo "$quota_page2_out" | grep -q "Page two win" && [[ "$(grep -c "review --wait" "$CALL_LOG")" == 1 ]]; then
+  echo 'quota_override_page2:ok'
+fi
+rm -f "$STATE_DIR/mock_review_output"
+unset MOCK_REVIEW_RC
+
+# Subtest: stateless fallback (no derivable ref) honours an owner override
+# without running any agent, and still execs when no override exists.
+jq -n '{}' > "$STATE_DIR/event_empty.json"
+export GITHUB_EVENT_PATH="$STATE_DIR/event_empty.json"
+curl() { cat "$STATE_DIR/comments_fallback.json"; }
+export -f curl
+jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nFallback win.")}]' > "$STATE_DIR/comments_fallback.json"
+: > "$CALL_LOG"
+set +e
+fallback_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --gh-repo owneruser/aerial --pr 99 2>&1); fallback_rc=$?
+set -e
+if [[ "${fallback_rc}" == 0 ]] && ! grep -q "ci review" "$CALL_LOG" && echo "$fallback_out" | grep -q "^## roborev: Review Passed"; then
+  echo 'fallback_override_noagent:ok'
+fi
+printf '[]\n' > "$STATE_DIR/comments_fallback.json"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --gh-repo owneruser/aerial --pr 99 >/dev/null 2>&1)
+if grep -q "ci review --gh-repo owneruser/aerial --pr 99" "$CALL_LOG"; then
+  echo 'fallback_nooverride_execs:ok'
+fi
 CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
@@ -1543,6 +1626,14 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_static_c
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_default_omits_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper omits --panel none by default"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_flag_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when --review-types default is passed"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_toml_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when .roborev.toml sets review_types = ['default']"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_override_full:ok' && echo true || echo false)" "github-runner roborev wrapper honours a late owner+full-SHA override on the quota branch"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_override_short:ok' && echo true || echo false)" "github-runner roborev wrapper honours a late owner+7-char-SHA override on the quota branch"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_nonowner_closed:ok' && echo true || echo false)" "github-runner roborev wrapper stays fail-closed on quota when the override is not from the owner"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_wrongsha_closed:ok' && echo true || echo false)" "github-runner roborev wrapper stays fail-closed on quota when the override SHA does not match HEAD"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_nooverride_closed:ok' && echo true || echo false)" "github-runner roborev wrapper stays fail-closed on quota with no override"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_override_page2:ok' && echo true || echo false)" "github-runner roborev wrapper honours a late owner override on comments page 2 with a single daemon review"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'fallback_override_noagent:ok' && echo true || echo false)" "github-runner roborev wrapper skips the stateless agent fallback when an owner override matches HEAD"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'fallback_nooverride_execs:ok' && echo true || echo false)" "github-runner roborev wrapper still execs the stateless fallback when no override exists"
 
 # Case 18: Vanadis PR attach and direct attachment in submit_scratch
 VANADIS_ATTACH_CHECK=$(bash -c "
