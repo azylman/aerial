@@ -58,23 +58,35 @@ export interface TriggerBadge {
   readonly icon: IconName;
   readonly text: string;
   /** Modifier class suffix in the console stylesheet (`trigger-badge <css>`). */
-  readonly css: 'cron' | 'reminder' | 'http' | 'discord';
+  readonly css: 'cron' | 'reminder' | 'http' | 'vanadis' | 'discord';
 }
 
 const TRIGGER_CRON: TriggerBadge = Object.freeze({ icon: 'alarm', text: 'CRON', css: 'cron' });
+const TRIGGER_HEARTBEAT: TriggerBadge = Object.freeze({ icon: 'alarm', text: 'HEARTBEAT', css: 'cron' });
 const TRIGGER_REMINDER: TriggerBadge = Object.freeze({ icon: 'timer', text: 'REMINDER', css: 'reminder' });
 const TRIGGER_API: TriggerBadge = Object.freeze({ icon: 'bolt', text: 'API', css: 'http' });
+const TRIGGER_VANADIS: TriggerBadge = Object.freeze({ icon: 'wrench', text: 'VANADIS', css: 'vanadis' });
 const TRIGGER_DISCORD: TriggerBadge = Object.freeze({ icon: 'chat', text: 'DISCORD', css: 'discord' });
 
 /** Maps a task trigger_type to its badge; unknown or empty triggers read as Discord. */
 export function getTriggerBadge(triggerType: string | null | undefined): TriggerBadge {
-  switch ((triggerType ?? '').toLowerCase()) {
+  const norm = (triggerType ?? '').trim().toLowerCase();
+  if (norm === 'vanadis' || norm.startsWith('vanadis-') || norm === 'build') return TRIGGER_VANADIS;
+  switch (norm) {
     case 'cron':
       return TRIGGER_CRON;
+    case 'heartbeat':
+      return TRIGGER_HEARTBEAT;
     case 'reminder':
+    case 'one_shot':
+    case 'oneshot':
       return TRIGGER_REMINDER;
     case 'http':
     case 'api':
+    case 'webhook':
+    case 'event':
+    case 'event_watch':
+    case 'watch':
       return TRIGGER_API;
     default:
       return TRIGGER_DISCORD;

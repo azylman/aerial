@@ -42,19 +42,6 @@ export const TaskCard = memo(function TaskCard({ task }: { readonly task: Active
       </div>
       <div className="task-prompt-box">&gt; {m.summary}</div>
       <div className="task-card-footer">
-        <div>
-          <span>
-            THREAD: {task.thread_id ? <code className="task-thread-id">{task.thread_id}</code> : 'N/A'}
-          </span>
-          {m.session === null ? null : (
-            <>
-              {' '}
-              <span className="task-session">
-                SESSION: <code className="task-session-id">{m.session}</code>
-              </span>
-            </>
-          )}
-        </div>
         {m.session === null ? (
           <a
             href={m.inspectUrl}

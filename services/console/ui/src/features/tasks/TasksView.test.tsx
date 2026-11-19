@@ -73,7 +73,6 @@ describe('TaskQueue', () => {
       timer: c.querySelector('.timer-text')?.textContent?.trim() ?? null,
       pill: c.querySelector('.task-status-pill')?.textContent?.trim(),
       prompt: c.querySelector('.task-prompt-box')?.textContent,
-      footer: c.querySelector('.task-card-footer > div')?.textContent,
       inspect: [c.querySelector('.task-inspect-btn')?.textContent?.trim(), c.querySelector('.task-inspect-btn')?.getAttribute('href')],
     });
     expect(cards.map(row)).toEqual([
@@ -86,7 +85,6 @@ describe('TaskQueue', () => {
         timer: '01:00s',
         pill: 'RUNNING',
         prompt: '> working',
-        footer: 'THREAD: 100000000000000001 SESSION: session-1',
         inspect: ['INSPECT IN AGENTSVIEW ↗', '/agentsview/sessions/antigravity-cli%3Asession-1'],
       },
       {
@@ -98,7 +96,6 @@ describe('TaskQueue', () => {
         timer: '02:00s',
         pill: 'RUNNING',
         prompt: '> working',
-        footer: 'THREAD: 100000000000000002 SESSION: session-2',
         inspect: ['INSPECT IN AGENTSVIEW ↗', '/agentsview/sessions/antigravity-cli%3Asession-2'],
       },
       {
@@ -110,7 +107,6 @@ describe('TaskQueue', () => {
         timer: '01:00s',
         pill: 'RUNNING',
         prompt: '> working',
-        footer: 'THREAD: 100000000000000003 SESSION: session-3',
         inspect: ['INSPECT IN AGENTSVIEW ↗', '/agentsview/sessions/antigravity-cli%3Asession-3'],
       },
       {
@@ -122,7 +118,6 @@ describe('TaskQueue', () => {
         timer: null,
         pill: 'QUEUED',
         prompt: '> queued',
-        footer: 'THREAD: 100000000000000004',
         inspect: ['OPEN AGENTSVIEW ↗', '/agentsview/'],
       },
       {
@@ -134,7 +129,6 @@ describe('TaskQueue', () => {
         timer: null,
         pill: 'QUEUED',
         prompt: '> queued',
-        footer: 'THREAD: N/A SESSION: session-5',
         inspect: ['INSPECT IN AGENTSVIEW ↗', '/agentsview/sessions/antigravity-cli%3Asession-5'],
       },
     ]);
