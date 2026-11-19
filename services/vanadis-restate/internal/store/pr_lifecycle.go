@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -62,8 +63,91 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 	return nil
 }
 
+// EarlierDeploymentSweepIDs returns the IDs of chunks a deploy_success also
+// completes: every earlier chunk in the same build and repo that is still
+// pre-deploy (merged, synced, or deploying) and whose merge stamp is at or
+// before the deploying chunk's merge stamp, breaking stamp ties by lower
+// chunk_index. Either stamp unknown means inclusion is unprovable, so the
+// candidate is skipped. Terminal (failed, cancelled, completed) and
+// never-merged chunks are never swept, so in-flight builds keep working and
+// completed work is unaffected.
+func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []string {
+	var deploying *model.VanadisChunk
+	for i := range chunks {
+		if chunks[i].ID == chunkID {
+			deploying = &chunks[i]
+			break
+		}
+	}
+	if deploying == nil {
+		return nil
+	}
+	var swept []string
+	for i := range chunks {
+		if supersededByDeployment(chunks[i], *deploying) {
+			swept = append(swept, chunks[i].ID)
+		}
+	}
+	return swept
+}
+
+// supersededByDeployment reports whether candidate merged early enough to be
+// contained in the deploying chunk's landed commit.
+func supersededByDeployment(candidate, deploying model.VanadisChunk) bool {
+	if candidate.ID == deploying.ID || candidate.BuildID != deploying.BuildID {
+		return false
+	}
+	if !sameDeployRepo(candidate.Repo, deploying.Repo) {
+		return false
+	}
+	if !deployCompletableMode(candidate) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(candidate.Status)) {
+	case statusMerged, "synced", "deploying":
+		// Merged, synced, or deploying: still pre-deploy.
+	default:
+		return false
+	}
+	if candidate.CompletedAt.IsZero() || deploying.CompletedAt.IsZero() {
+		return false
+	}
+	if candidate.CompletedAt.After(deploying.CompletedAt) {
+		return false
+	}
+	if candidate.CompletedAt.Equal(deploying.CompletedAt) {
+		return candidate.ChunkIndex < deploying.ChunkIndex
+	}
+	return true
+}
+
+// deployCompletableMode matches the CompletePRDeployment mode guard: plain
+// PR chunks and PR-attached action chunks.
+func deployCompletableMode(c model.VanadisChunk) bool {
+	if c.Mode == "pr" {
+		return true
+	}
+	return c.Mode == "action" && c.PRNumber > 0
+}
+
+// sameDeployRepo matches repo spellings the chunk lookup already treats as
+// the same repository, including the owner-qualified variant.
+func sameDeployRepo(a, b string) bool {
+	a, b = NormalizeRepo(a), NormalizeRepo(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return slices.Contains(RepoMatchCandidates(a), b) || slices.Contains(RepoMatchCandidates(b), a)
+}
+
 // UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening
-// a terminal chunk. Notifications follow only an applied write.
+// a terminal chunk. Notifications follow only an applied write. The deploying
+// transition preserves the merge stamp: the landed commit contains every
+// earlier merge, so deploy_success needs the deploying chunk's merge time to
+// prove which earlier chunks it includes.
 func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -71,7 +155,7 @@ func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status str
 	if strings.TrimSpace(chunkID) == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 IN ('merged', 'deploying') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
 	if err != nil {
 		return fmt.Errorf("update pr lifecycle status: %w", err)
 	}
