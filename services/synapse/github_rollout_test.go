@@ -61,10 +61,10 @@ func runFailedCheckTrackerCase(t *testing.T, tc failedCheckTrackerTestCase) {
 		srv = newTestRouter(cfg, client, reg, nil)
 	}
 	if srv != nil && tc.presetCancelledSHA != "" {
-		srv.cancelledCheckSHAs.Store(prCheckKey(tc.repo, tc.prNumber), tc.presetCancelledSHA)
+		srv.GHState().RecordCancelledCheckSHA(tc.repo, tc.prNumber, tc.presetCancelledSHA)
 	}
 	if srv != nil && tc.presetNonRoboRevBlocked {
-		srv.nonRoboRevFailedSHAs.Store(prCheckKey(tc.repo, tc.prNumber), tc.presetHeadSHA)
+		srv.GHState().RecordNonRoboRevFailedSHA(tc.repo, tc.prNumber, tc.presetHeadSHA)
 	}
 	if srv != nil && tc.presetHeadSHA != "" {
 		for i, c := range tc.presetFailedChecks {
@@ -470,14 +470,13 @@ func TestIsCachedFailedCISHA(t *testing.T) {
 			var srv *RouterServer
 			if !tc.nilServer {
 				srv = &RouterServer{}
-				key := prCheckKey(tc.repo, tc.prNumber)
 				switch tc.presetMap {
 				case "failedCheckSHAs":
-					srv.failedCheckSHAs.Store(key, tc.presetSHA)
+					srv.GHState().RecordFailedCISHA(tc.repo, tc.prNumber, tc.presetSHA)
 				case "nonRoboRevFailedSHAs":
-					srv.nonRoboRevFailedSHAs.Store(key, tc.presetSHA)
+					srv.GHState().RecordNonRoboRevFailedSHA(tc.repo, tc.prNumber, tc.presetSHA)
 				case "cancelledCheckSHAs":
-					srv.cancelledCheckSHAs.Store(key, tc.presetSHA)
+					srv.GHState().RecordCancelledCheckSHA(tc.repo, tc.prNumber, tc.presetSHA)
 				}
 			}
 			got := srv.isCachedFailedCISHA(tc.repo, tc.prNumber, tc.headSHA)
@@ -644,9 +643,6 @@ func TestFailedCheckRunTracking_Validation(t *testing.T) {
 
 	var nilSrv *RouterServer
 	nilSrv.recordFailedCheckRun(repo, pr, sha1, "lint")
-	if nilSrv.loadMatchingFailedCheckState(repo, pr, sha1) != nil {
-		t.Errorf("expected nil for nil server")
-	}
 	if nilSrv.hasActiveRoboRevFailure(repo, pr, sha1) {
 		t.Errorf("expected false for nil server hasActiveRoboRevFailure")
 	}
@@ -694,9 +690,8 @@ func TestFailedCheckRunTracking_Flow(t *testing.T) {
 		t.Errorf("expected true for third distinct failure on sha1")
 	}
 
-	state := srv.loadMatchingFailedCheckState(repo, pr, sha1)
-	if state == nil || len(state.activeFailed) != 2 || !state.roboRevActiveFailed {
-		t.Fatalf("expected state with 2 active non-roborev and roborev active failed, got %v", state)
+	if !srv.GHState().HasActiveCheckRun(repo, pr, sha1, "lint") || !srv.GHState().HasActiveCheckRun(repo, pr, sha1, "unit") || !srv.GHState().HasActiveRoboRevFailure(repo, pr, sha1) {
+		t.Fatalf("expected state with 2 active non-roborev and roborev active failed")
 	}
 
 	srv.clearActiveFailedCheckRun(repo, pr, sha1, "roborev")
@@ -718,15 +713,14 @@ func TestFailedCheckRunTracking_Flow(t *testing.T) {
 	}
 
 	srv.recordFailedCheckRun(repo, pr, sha2, "lint")
-	state2 := srv.loadMatchingFailedCheckState(repo, pr, sha2)
-	if state2 == nil || state2.headSHA != sha2 || len(state2.activeFailed) != 1 {
-		t.Fatalf("expected reset state for sha2, got %v", state2)
+	if !srv.GHState().HasActiveCheckRun(repo, pr, sha2, "lint") || srv.GHState().HasActiveCheckRun(repo, pr, sha2, "unit") {
+		t.Fatalf("expected reset state for sha2")
 	}
 
 	if srv.hasCancelledCheckForSHA(repo, pr, sha1) {
 		t.Errorf("expected false when no cancelled check")
 	}
-	srv.cancelledCheckSHAs.Store(prCheckKey(repo, pr), sha1)
+	srv.GHState().RecordCancelledCheckSHA(repo, pr, sha1)
 	if !srv.hasCancelledCheckForSHA(repo, pr, sha1) {
 		t.Errorf("expected true after storing cancelled check")
 	}
@@ -986,12 +980,59 @@ func TestHasFailedCIForSHA_ResponseHandling(t *testing.T) {
 
 			srv := newTestRouter(Config{GitHubAPIURL: ts.URL}, ts.Client(), nil, nil)
 			if tc.presetCachedFailed {
-				srv.failedCheckSHAs.Store(prCheckKey(repo, prNumber), headSHA)
+				srv.GHState().RecordFailedCISHA(repo, prNumber, headSHA)
 			}
 			got := srv.hasFailedCIForSHA(context.Background(), repo, prNumber, headSHA)
 			if got != tc.wantResult {
 				t.Errorf("hasFailedCIForSHA() = %v, want %v", got, tc.wantResult)
 			}
 		})
+	}
+}
+
+func TestRouterServer_NilGuards(t *testing.T) {
+	t.Parallel()
+	var nilSrv *RouterServer
+	nilSrv.rollbackFailedCheckRun("repo", 1, "sha", "check", false, false)
+	nilSrv.clearActiveFailedCheckRun("repo", 1, "sha", "check")
+	nilSrv.clearUpdatedPRsForMainCommit("repo", "sha")
+	if nilSrv.hasCancelledCheckForSHA("repo", 1, "sha") {
+		t.Errorf("expected false")
+	}
+	if nilSrv.isAutoUpdateAuthorAllowed("author") {
+		t.Errorf("expected false")
+	}
+	nilSrv.recordCommitSHAPR("repo", "sha", 1, "main")
+	if _, _, ok := nilSrv.lookupCommitSHAPR("repo", "sha"); ok {
+		t.Errorf("expected false")
+	}
+	if nilSrv.GHState() != nil {
+		t.Errorf("expected nil GHState")
+	}
+	if err := nilSrv.completeCIFailureTransition(context.Background(), nil, "", ""); err != nil {
+		t.Errorf("expected nil err, got %v", err)
+	}
+	if nilSrv.isMergeSHAFailure(context.Background(), nil) {
+		t.Errorf("expected false for nil event")
+	}
+	if nilSrv.isPRRegistryCIFailed(context.Background(), "repo", 1) {
+		t.Errorf("expected false for nil server")
+	}
+	if recordCollaboratorSHAAlert(nil, "repo", 1, "sha") {
+		t.Errorf("expected false for nil map")
+	}
+	srv := &RouterServer{}
+	srv.handleStaleOpenPR(context.Background(), "repo", 1)
+	if srv.isPRRegistryCIFailed(context.Background(), "repo", 1) {
+		t.Errorf("expected false for nil registry")
+	}
+	if nilSrv.fetchLatestRoboRevComment(context.Background(), "repo", 1, "sha") != "" {
+		t.Errorf("expected empty string")
+	}
+	if err := nilSrv.notifyCollaboratorConflict(context.Background(), "repo", GitHubPullRequest{}); err != nil {
+		t.Errorf("expected nil err, got %v", err)
+	}
+	if err := nilSrv.notifyCollaboratorCIFailure(context.Background(), nil, ""); err != nil {
+		t.Errorf("expected nil err, got %v", err)
 	}
 }

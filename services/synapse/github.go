@@ -2,11 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/github"
 )
 
 const (
@@ -73,35 +70,25 @@ func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNu
 	return buildPRRolloutState(meta)
 }
 
+func (s *RouterServer) ghClient() *github.Client {
+	if s == nil {
+		return nil
+	}
+	cfg := s.cfgSrc.Current()
+	return github.NewClient(s.githubClient, cfg.GitHubAPIURL, cfg.GitHubToken)
+}
+
 // newGitHubRequest builds an authenticated GitHub REST request against the
 // live config snapshot's API URL and token.
 func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	cfg := s.cfgSrc.Current()
-	req, err := http.NewRequestWithContext(ctx, method, firstNonEmpty(cfg.GitHubAPIURL, "https://api.github.com")+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+cfg.GitHubToken)
-	}
-	return req, nil
+	return github.NewRequest(ctx, cfg.GitHubAPIURL, cfg.GitHubToken, method, path, body)
 }
 
-type gitHubStatusError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *gitHubStatusError) Error() string {
-	return e.Message
-}
+type gitHubStatusError = github.StatusError
 
 func isGitHubNotFound(err error) bool {
-	if statusErr, ok := errors.AsType[*gitHubStatusError](err); ok {
-		return statusErr.StatusCode == http.StatusNotFound
-	}
-	return false
+	return github.IsNotFound(err)
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -109,32 +96,7 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	if err != nil {
 		return fmt.Errorf("create github api request: %w", err)
 	}
-	resp, err := s.githubClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("github api request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden {
-		return &gitHubStatusError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("github api rate limit or forbidden (remaining: %s)", resp.Header.Get("X-Ratelimit-Remaining")),
-		}
-	}
-	if resp.StatusCode != http.StatusOK {
-		return &gitHubStatusError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("github api returned status %d", resp.StatusCode),
-		}
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
-	if err != nil {
-		return fmt.Errorf("read github api response: %w", err)
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("unmarshal github api response: %w", err)
-	}
-	return nil
+	return github.GetJSON(ctx, s.githubClient, req, maxBytes, out)
 }
 
 func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, targetID string, prNum int) error {
@@ -271,22 +233,7 @@ func extractPRNumberFromCommitMessage(msg string) int {
 }
 
 func verifyGitHubWebhookSignature(secret, signatureHeader string, body []byte) bool {
-	trimmedSecret := strings.TrimSpace(secret)
-	if trimmedSecret == "" {
-		return false
-	}
-	if !strings.HasPrefix(signatureHeader, "sha256=") {
-		return false
-	}
-	sigHex := strings.TrimPrefix(signatureHeader, "sha256=")
-	expectedSig, err := hex.DecodeString(sigHex)
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(trimmedSecret))
-	mac.Write(body)
-	actualSig := mac.Sum(nil)
-	return hmac.Equal(actualSig, expectedSig)
+	return github.VerifySignature(secret, signatureHeader, body)
 }
 
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +429,7 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(res.Status), "completed") && strings.EqualFold(strings.TrimSpace(res.Conclusion), "cancelled") {
-		s.cancelledCheckSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		s.ghState.RecordCancelledCheckSHA(res.Repo, res.PRNumber, res.HeadSHA)
 	}
 	if isDependabotBranch(res.Branch) {
 		return
@@ -567,6 +514,10 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	s.recordCheckRunStatus(ctx, res)
 
 	details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
+	if lines := github.ExtractLogErrorLines(details, 10); len(lines) > 0 {
+		details = strings.Join(lines, "\n")
+	}
+	details = github.SanitizeDetailsForPrompt(details, 2000)
 	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
 	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
 		return nil, err
