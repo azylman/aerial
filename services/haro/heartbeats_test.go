@@ -10,13 +10,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/azylman/aerial/services/haro/internal/config"
+	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
-func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) HeartbeatSchedule {
+func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) model.HeartbeatSchedule {
 	t.Helper()
-	hb1 := HeartbeatSchedule{
+	hb1 := model.HeartbeatSchedule{
 		ID:          "hb-op-1",
 		TargetID:    "chan-1",
 		TitlePrefix: "Alert 1",
@@ -32,7 +34,7 @@ func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, no
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
-	hb2 := HeartbeatSchedule{
+	hb2 := model.HeartbeatSchedule{
 		ID:        "hb-op-2",
 		TargetID:  "chan-2",
 		CronExpr:  "*/15 * * * *",
@@ -61,7 +63,7 @@ func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, no
 	return hb1
 }
 
-func testHeartbeatListAndUpdate(ctx context.Context, t *testing.T, db *sql.DB, hb1 HeartbeatSchedule) {
+func testHeartbeatListAndUpdate(ctx context.Context, t *testing.T, db *sql.DB, hb1 model.HeartbeatSchedule) {
 	t.Helper()
 	allHBs, err := store.ListHeartbeatSchedules(ctx, db, "")
 	if err != nil || len(allHBs) != 2 {
@@ -146,7 +148,7 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 	}
 
 	// Invalid effort falls back to low on heartbeat insert
-	hbInvalid := HeartbeatSchedule{ID: "hb-invalid-effort", TargetID: "chan-1", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", Effort: "bogus", NextRunAt: now, Enabled: true, CreatedAt: now}
+	hbInvalid := model.HeartbeatSchedule{ID: "hb-invalid-effort", TargetID: "chan-1", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", Effort: "bogus", NextRunAt: now, Enabled: true, CreatedAt: now}
 	if err = store.InsertHeartbeatSchedule(ctx, db, hbInvalid); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule invalid effort failed: %v", err)
 	}
@@ -274,7 +276,7 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 
 	// Seed a heartbeat with a stored cron expression that no longer parses,
 	// bypassing tool validation via direct insert.
-	badCronHB := HeartbeatSchedule{ID: "hb-bad-cron", TargetID: "1562847268833337377", CronExpr: "bad cron", Prompt: "p", Timezone: "UTC", Effort: "low", NextRunAt: time.Now().UTC(), Enabled: true, CreatedAt: time.Now().UTC()}
+	badCronHB := model.HeartbeatSchedule{ID: "hb-bad-cron", TargetID: "1562847268833337377", CronExpr: "bad cron", Prompt: "p", Timezone: "UTC", Effort: "low", NextRunAt: time.Now().UTC(), Enabled: true, CreatedAt: time.Now().UTC()}
 	if err := store.InsertHeartbeatSchedule(ctx, db, badCronHB); err != nil {
 		t.Fatalf("failed to seed bad-cron heartbeat: %v", err)
 	}
@@ -361,10 +363,10 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
-	handler := tools.NewToolHandler(&Config{Timezone: "UTC"}, db)
+	handler := tools.NewToolHandler(&config.Config{Timezone: "UTC"}, db)
 
 	// Initially empty
-	emptyOut, err := handler.ListSchedules(ctx, ListSchedulesArgs{})
+	emptyOut, err := handler.ListSchedules(ctx, tools.ListSchedulesArgs{})
 	if err != nil {
 		t.Fatalf("ListSchedules empty failed: %v", err)
 	}
@@ -373,7 +375,7 @@ func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 	}
 
 	// Add 1 recurring, 1 one-shot, and 1 heartbeat
-	_, err = handler.ScheduleRecurring(ctx, ScheduleRecurringArgs{
+	_, err = handler.ScheduleRecurring(ctx, tools.ScheduleRecurringArgs{
 		ChannelID:      "1562847268833337377",
 		CronExpression: "0 12 * * *",
 		Prompt:         "Daily Summary",
@@ -382,7 +384,7 @@ func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 		t.Fatalf("ScheduleRecurring failed: %v", err)
 	}
 
-	_, err = handler.ScheduleOnce(ctx, ScheduleOnceArgs{
+	_, err = handler.ScheduleOnce(ctx, tools.ScheduleOnceArgs{
 		TargetID: "1562847268833337377",
 		RunAt:    "1h",
 		Prompt:   "One shot reminder",
@@ -400,7 +402,7 @@ func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
 		t.Fatalf("HandleScheduleHeartbeat failed: %v", err)
 	}
 
-	out, err := handler.ListSchedules(ctx, ListSchedulesArgs{})
+	out, err := handler.ListSchedules(ctx, tools.ListSchedulesArgs{})
 	if err != nil {
 		t.Fatalf("ListSchedules failed: %v", err)
 	}
