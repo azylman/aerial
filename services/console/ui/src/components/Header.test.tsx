@@ -88,11 +88,18 @@ describe('Header', () => {
   });
 
   it('clicking a tab navigates through the store', () => {
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
     render(<Header />);
     act(() => screen.getByRole('tab', { name: /BUILD QUEUE/ }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('builds');
     expect(screen.getByRole('tab', { name: /BUILD QUEUE/ }).className).toBe('view-tab-btn active');
     expect(screen.getByRole('tab', { name: /TELEMETRY/ }).getAttribute('aria-selected')).toBe('false');
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    Object.defineProperty(window, 'scrollY', { value: 240, configurable: true });
+    act(() => screen.getByRole('tab', { name: /BUILD QUEUE/ }).click());
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: 'instant' });
+    Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
   });
 });
 

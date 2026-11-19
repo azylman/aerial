@@ -25,6 +25,7 @@ func TestStaticAssetsIntegrity(t *testing.T) {
 		"static/favicon-32x32.png",
 		"static/favicon-16x16.png",
 		"static/apple-touch-icon.png",
+		"static/manifest.webmanifest",
 	}
 
 	for _, reqFile := range requiredFiles {
