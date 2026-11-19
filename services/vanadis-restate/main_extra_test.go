@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -67,9 +67,11 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	// 7. handlePREventType error branches
 	eriErr := &mockEriClient{
 		promptFn: func(context.Context, string, string) error { return errors.New("prompt err") },
-		widgetFn: func(context.Context, StatusWidgetRequest) (string, error) { return "", errors.New("widget err") },
+		widgetFn: func(context.Context, executor.StatusWidgetRequest) (string, error) {
+			return "", errors.New("widget err")
+		},
 	}
-	execErr := NewExecutor(t.TempDir(), eriErr, &mockBusError{err: errors.New("pub err")}, "token", nil)
+	execErr := executor.NewExecutor(t.TempDir(), eriErr, &mockBusError{err: errors.New("pub err")}, "token", nil)
 	boHandleErr := NewBuildObject("", nil).WithAuthority(storeUpdErr, execErr)
 	_, _ = restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
 		boHandleErr.handlePREventType(rc, "b-more", "c1", "ci_failed", pubsub.PRLifecycleEvent{Event: "ci_failed", Repo: "aerial"})
@@ -120,7 +122,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 			return nil
 		},
 	}
-	execFlaky := NewExecutor(t.TempDir(), flakyEri, pubsub.NewMemoryBus(), "token", nil)
+	execFlaky := executor.NewExecutor(t.TempDir(), flakyEri, pubsub.NewMemoryBus(), "token", nil)
 	spyStore := &terminalRetrySpyStore{}
 	boRetry := NewBuildObject("", nil).WithAuthority(spyStore, execFlaky)
 
@@ -193,43 +195,6 @@ func (s *terminalRetrySpyStore) UpdateBuildStatus(_ context.Context, _ string, s
 
 func (*terminalRetrySpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
 	return nil
-}
-
-type badReader struct{}
-
-func (badReader) Read([]byte) (int, error) {
-	return 0, errors.New("read error")
-}
-
-func TestHTTPEriClient_ReadError(t *testing.T) {
-	t.Parallel()
-	client := &http.Client{
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusInternalServerError,
-				Body:       io.NopCloser(badReader{}),
-			}, nil
-		}),
-	}
-	c := NewHTTPEriClient("http://eri.test", client)
-	err := c.Dispatch(context.Background(), BrainDispatchRequest{})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-
-	clientBadJSON := &http.Client{
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("not json")),
-			}, nil
-		}),
-	}
-	cBadJSON := NewHTTPEriClient("http://eri.test", clientBadJSON)
-	_, err = cBadJSON.Widget(context.Background(), StatusWidgetRequest{})
-	if err == nil {
-		t.Fatal("expected unmarshal error")
-	}
 }
 
 func TestDag_ExtraValidationBranches(t *testing.T) {
@@ -309,7 +274,7 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 			raw, _ := script.openRaw()
 			observed := &deploymentEvidenceDB{PgxQueryExecer: raw, chunks: script.chunks}
 			st := store.New(observed)
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
 			evidence := &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
 			if tc.nilEvidence {
 				evidence = nil
@@ -485,7 +450,7 @@ func TestRejectedDeploymentMutation(t *testing.T) {
 			}
 			st, _ := script.open()
 			bus := &deploymentEventRecorder{}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, bus, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", &mockEriClient{}, bus, "token", nil))
 			err := bo.applyMutation(context.Background(), "b1", &BuildMutationRequest{Action: tc.action, ChunkID: "c1"})
 			if tc.fail {
 				assert.ErrorContains(t, err, "database unavailable")
@@ -521,7 +486,7 @@ func TestDeploymentSuccessBeforeDelayedLifecycle(t *testing.T) {
 			db := &deploymentEvidenceDB{PgxQueryExecer: raw, chunks: chunks}
 			st := store.New(db)
 			bus := &deploymentEventRecorder{}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, bus, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", &mockEriClient{}, bus, "token", nil))
 			ctx := makeObjectMockContext(t, "b1")
 			evidence := &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
 			assert.NoError(t, bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Event: "deploy_success", Repo: "owner/repo", PRNumber: 42, RolloutState: evidence}))
@@ -580,7 +545,7 @@ func TestActionCompletionMutationIdentity(t *testing.T) {
 			}
 			st, _ := (dbScript{row: &mockRow{b: &build}, chunks: chunks, countRow: valuesRow(1)}).open()
 			bus := &deploymentEventRecorder{}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, bus, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", &mockEriClient{}, bus, "token", nil))
 			err := bo.applyMutation(context.Background(), tc.buildID, &BuildMutationRequest{Action: tc.action, ChunkID: " c1 ", DispatchID: tc.dispatchID})
 			assert.ErrorIs(t, err, tc.wantErr)
 			assert.Empty(t, bus.events)
@@ -619,7 +584,7 @@ func TestActionCompletionContinuation(t *testing.T) {
 				queuedPrompts = append(queuedPrompts, prompt)
 				return nil
 			}}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", eri, bus, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
 			rt := newFakeObjectRuntime("b1")
 			identities := tc.identities
 			if len(identities) == 0 {
@@ -717,10 +682,10 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 					prompts = append(prompts, prompt)
 					return nil
 				},
-				dispatchFn: func(context.Context, BrainDispatchRequest) error { return tc.dispatchErr },
-				widgetFn:   func(context.Context, StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
+				dispatchFn: func(context.Context, executor.BrainDispatchRequest) error { return tc.dispatchErr },
+				widgetFn:   func(context.Context, executor.StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
 			}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", eri, bus, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
 			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
 				rt := newFakeObjectRuntime("b1")
 				if tc.transitionFailure {
@@ -777,7 +742,7 @@ func TestMixedBuildCompletionRedelivery(t *testing.T) {
 				queuedPrompts = append(queuedPrompts, prompt)
 				return nil
 			}}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", eri, bus, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
 			rt := newFakeObjectRuntime("b1")
 			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
 			assert.NoError(t, err)
@@ -894,9 +859,9 @@ func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
 			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: chunks, execTag: "UPDATE 1"}.open()
 			eri := &mockEriClient{}
 			if tc.dispatchError {
-				eri.dispatchFn = func(context.Context, BrainDispatchRequest) error { return errors.New("rejected") }
+				eri.dispatchFn = func(context.Context, executor.BrainDispatchRequest) error { return errors.New("rejected") }
 			}
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), eri, nil, "", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, tc.prior, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantDispatch, eri.lastDispatch != nil)
@@ -942,11 +907,11 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 				chunks = append(chunks, model.VanadisChunk{ID: "pending-sibling", Mode: "pr", Repo: "aerial", Status: "pending"})
 			}
 			var dispatched []string
-			eri := &mockEriClient{dispatchFn: func(_ context.Context, req BrainDispatchRequest) error {
+			eri := &mockEriClient{dispatchFn: func(_ context.Context, req executor.BrainDispatchRequest) error {
 				dispatched = append(dispatched, req.ID)
 				return nil
 			}}
-			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, NewExecutor(t.TempDir(), eri, nil, "", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), eri, nil, "", nil))
 			launched := map[string]bool{"dispatch:vanadis-retry-turn-1": true, "dependency": true}
 			if tc.nudges > 0 {
 				launched["retry"] = true
@@ -988,7 +953,7 @@ func TestBuildObject_DeferredLaunchReleasesInvocation(t *testing.T) {
 			build := model.VanadisBuild{ID: "b", Status: "running"}
 			chunks := []model.VanadisChunk{{ID: "retry", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}, {ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}}}
 			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: chunks, execTag: "UPDATE 1"}.open()
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 			rt := newFakeObjectRuntime("b")
 			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
 			assert.Equal(t, !tc.deferred, err != nil)
@@ -1025,17 +990,17 @@ func TestClassifyLaunchErrors(t *testing.T) {
 		wantError, wantDeferred bool
 	}{
 		{"no failures", nil, false, false},
-		{"active dispatch", []error{errDispatchActive}, true, true},
-		{"several active dispatches", []error{errDispatchActive, errDispatchActive}, true, true},
+		{"active dispatch", []error{executor.ErrDispatchActive}, true, true},
+		{"several active dispatches", []error{executor.ErrDispatchActive, executor.ErrDispatchActive}, true, true},
 		{"transport failure", []error{errors.New("unavailable")}, true, false},
-		{"mixed failures", []error{errDispatchActive, errors.New("unavailable")}, true, false},
+		{"mixed failures", []error{executor.ErrDispatchActive, errors.New("unavailable")}, true, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			err := classifyLaunchErrors(tc.failures)
 			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, tc.wantDeferred, errors.Is(err, errDispatchActive))
+			assert.Equal(t, tc.wantDeferred, errors.Is(err, executor.ErrDispatchActive))
 		})
 	}
 }
@@ -1060,7 +1025,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	buildQuiet := model.VanadisBuild{ID: "b-quiet", Quiet: true}
 	storeQuiet, _ := dbScript{buildRow: &mockRow{b: &buildQuiet}}.open()
 	eriQuiet := &mockEriClient{}
-	boQuiet := NewBuildObject("", nil).WithAuthority(storeQuiet, NewExecutor(t.TempDir(), eriQuiet, nil, "", nil))
+	boQuiet := NewBuildObject("", nil).WithAuthority(storeQuiet, executor.NewExecutor(t.TempDir(), eriQuiet, nil, "", nil))
 	boQuiet.notifyTransitionError(context.Background(), "b-quiet", "step", nil, errors.New("trans err"))
 	assert.Nil(t, eriQuiet.lastWidget)
 
@@ -1068,7 +1033,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	buildActive := model.VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
 	storeActive, _ := dbScript{buildRow: &mockRow{b: &buildActive}, chunks: []model.VanadisChunk{{ID: "c1", Title: "Chunk 1"}}}.open()
 	eriActive := &mockEriClient{}
-	boActive := NewBuildObject("", nil).WithAuthority(storeActive, NewExecutor(t.TempDir(), eriActive, nil, "", nil))
+	boActive := NewBuildObject("", nil).WithAuthority(storeActive, executor.NewExecutor(t.TempDir(), eriActive, nil, "", nil))
 	boActive.notifyTransitionError(context.Background(), "b-active", "step", nil, errors.New("trans err"))
 	require.NotNil(t, eriActive.lastWidget)
 	assert.Equal(t, "b-active", eriActive.lastWidget.ID)
@@ -1078,7 +1043,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 
 	// Fallback to priorState when store is nil
 	eriPrior := &mockEriClient{}
-	boNoStore := NewBuildObject("", nil).WithAuthority(nil, NewExecutor(t.TempDir(), eriPrior, nil, "", nil))
+	boNoStore := NewBuildObject("", nil).WithAuthority(nil, executor.NewExecutor(t.TempDir(), eriPrior, nil, "", nil))
 	prior := &model.BuildObjectState{Build: model.VanadisBuild{ID: "b-prior", Title: "Prior Build"}, Chunks: []model.VanadisChunk{{ID: "c-prior", Title: "Prior Chunk"}}}
 	boNoStore.notifyTransitionError(context.Background(), "b-prior", "step", prior, errors.New("trans err"))
 	require.NotNil(t, eriPrior.lastWidget)
@@ -1091,14 +1056,14 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	attempts := 0
 	var retryBanners []string
 	eriRetry := &mockEriClient{
-		dispatchFn: func(context.Context, BrainDispatchRequest) error {
+		dispatchFn: func(context.Context, executor.BrainDispatchRequest) error {
 			attempts++
 			if attempts == 1 {
 				return errors.New("transient dispatch failure")
 			}
 			return nil
 		},
-		widgetFn: func(_ context.Context, req StatusWidgetRequest) (string, error) {
+		widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
 			retryBanners = append(retryBanners, req.Banner)
 			return "msg-retry", nil
 		},
@@ -1108,7 +1073,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 		chunks:   []model.VanadisChunk{{ID: "c1", BuildID: "b-active", Mode: "action", Status: "pending", Title: "Chunk 1"}},
 		execTag:  "UPDATE 1",
 	}.open()
-	boRetry := NewBuildObject("", nil).WithAuthority(storeRetry, NewExecutor(t.TempDir(), eriRetry, nil, "", nil))
+	boRetry := NewBuildObject("", nil).WithAuthority(storeRetry, executor.NewExecutor(t.TempDir(), eriRetry, nil, "", nil))
 	rtRetry := &retryingObjectRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-active")}
 	beforeCount := reconcileErrorsCount(t, "reconcile-retry-test")
 	res, err := boRetry.executeObjectTransition(rtRetry, "reconcile-retry-test", nil)

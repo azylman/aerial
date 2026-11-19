@@ -1,4 +1,4 @@
-package main
+package executor
 
 import (
 	"testing"
@@ -26,7 +26,7 @@ func TestIsGateAggregatorCheck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.checkName, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, isGateAggregatorCheck(tc.checkName))
+			assert.Equal(t, tc.want, IsGateAggregatorCheck(tc.checkName))
 		})
 	}
 }
@@ -47,7 +47,7 @@ func TestCIRemediationDispatchID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, ciRemediationDispatchID(tc.chunkID, tc.headSHA, tc.failCount))
+			assert.Equal(t, tc.want, CIRemediationDispatchID(tc.chunkID, tc.headSHA, tc.failCount))
 		})
 	}
 }
@@ -68,7 +68,7 @@ func TestConflictRemediationDispatchID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, conflictRemediationDispatchID(tc.chunkID, tc.headSHA))
+			assert.Equal(t, tc.want, ConflictRemediationDispatchID(tc.chunkID, tc.headSHA))
 		})
 	}
 }
