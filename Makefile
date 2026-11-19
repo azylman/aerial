@@ -1,7 +1,7 @@
 .PHONY: all test lint tidy build help console-ui
 .DEFAULT_GOAL := help
 
-SERVICES := services/eri services/haro mcp/kernel-mcp services/console services/coven services/vanadis services/synapse services/prospera pkg
+SERVICES := services/eri services/haro mcp/kernel-mcp services/console services/coven services/vanadis services/synapse services/prospera services/transcripts pkg
 
 help: ## Display available targets
 	@echo "Aerial Monorepo Development Commands:"

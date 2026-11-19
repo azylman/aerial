@@ -1,0 +1,175 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestResolveConfigPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
+	fallbackFile := filepath.Join(tmpDir, "transcripts.yaml")
+	_ = os.WriteFile(validLocal, []byte("port: '4017'\n"), 0o644)
+	_ = os.WriteFile(emptyLocal, []byte{}, 0o644)
+	_ = os.WriteFile(fallbackFile, []byte("port: '4017'\n"), 0o644)
+
+	fallback := "/config/transcripts.yaml"
+	tests := []struct {
+		name         string
+		envVal       string
+		localPath    string
+		fallbackPath string
+		want         string
+	}{
+		{"env override takes precedence", "/custom/override.yaml", validLocal, fallback, "/custom/override.yaml"},
+		{"local config non-empty exists", "", validLocal, fallback, validLocal},
+		{"local config empty falls back to fallbackFile", "", emptyLocal, fallbackFile, fallbackFile},
+		{"local config missing falls back to fallbackFile", "", nonExistent, fallbackFile, fallbackFile},
+		{"fallback missing falls back to default", "", nonExistent, fallback, fallback},
+		{"fallback empty falls back to defaultConfigPath", "", nonExistent, "", DefaultConfigPath},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", tc.envVal)
+			oldLocal := localConfigPath
+			localConfigPath = tc.localPath
+			defer func() {
+				localConfigPath = oldLocal
+			}()
+
+			if got := ResolveConfigPath(tc.fallbackPath); got != tc.want {
+				t.Errorf("ResolveConfigPath(%q) = %q, want %q", tc.fallbackPath, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeCfg := func(name, body string) string {
+		p := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		return p
+	}
+	fullPath := writeCfg("full.yaml", "port: '4017'\nstack: 'aerial'\nnats_url: 'nats://nats:4222'\n")
+	minimalPath := writeCfg("minimal.yaml", "stack: 'miorine'\n")
+	malformedPath := writeCfg("malformed.yaml", "port: [unclosed")
+
+	tests := []struct {
+		name      string
+		path      string
+		dbURL     string
+		wantErr   bool
+		wantPort  string
+		wantStack string
+		wantDB    string
+		wantNATS  string
+	}{
+		{"full config", fullPath, "postgres://user:pass@host:5432/db", false, "4017", "aerial", "postgres://user:pass@host:5432/db", "nats://nats:4222"},
+		{"defaults fill port stack and nats", minimalPath, "postgres://user:pass@host:5432/db", false, DefaultPort, "miorine", "postgres://user:pass@host:5432/db", ""},
+		{"yaml database url wins when arg empty", minimalPath, "", true, "", "", "", ""},
+		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", "", "", ""},
+		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", "", "", ""},
+		{"empty path", "", "postgres://localhost/db", true, "", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "")
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", "")
+			t.Setenv("POSTGRES_DB", "")
+			t.Setenv("NATS_URL", "")
+
+			cfg, err := LoadConfigFile(tc.path, tc.dbURL)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if cfg.Port != tc.wantPort || cfg.Stack != tc.wantStack || cfg.DatabaseURL != tc.wantDB || cfg.NATSURL != tc.wantNATS {
+				t.Fatalf("unexpected config: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFileDatabaseURLFromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "db.yaml")
+	_ = os.WriteFile(p, []byte("port: '4017'\nstack: 'aerial'\ndatabase_url: 'postgres://yaml:pass@host:5432/db'\n"), 0o644)
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_URL", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_DB", "")
+
+	cfg, err := LoadConfigFile(p, "")
+	if err != nil {
+		t.Fatalf("LoadConfigFile() err = %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://yaml:pass@host:5432/db" {
+		t.Fatalf("DatabaseURL = %q, want yaml value", cfg.DatabaseURL)
+	}
+}
+
+func TestLoadConfigFileEnvFallbacks(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "env.yaml")
+	if err := os.WriteFile(p, []byte("stack: 'aerial'\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_URL", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_DB", "")
+	t.Setenv("NATS_URL", "nats://env:4222")
+
+	cfg, err := LoadConfigFile(p, "postgres://arg:pass@host:5432/db")
+	if err != nil {
+		t.Fatalf("LoadConfigFile() err = %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://arg:pass@host:5432/db" {
+		t.Fatalf("DatabaseURL = %q, want arg value", cfg.DatabaseURL)
+	}
+	if cfg.NATSURL != "nats://env:4222" {
+		t.Fatalf("NATSURL = %q, want env value", cfg.NATSURL)
+	}
+	if cfg.Port != DefaultPort || cfg.Stack != "aerial" {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+}
+
+func TestLoadConfigFileDefaultStack(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "nostack.yaml")
+	if err := os.WriteFile(p, []byte("port: '4017'\ndatabase_url: 'postgres://x'\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_URL", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_DB", "")
+	t.Setenv("NATS_URL", "")
+	cfg, err := LoadConfigFile(p, "")
+	if err != nil {
+		t.Fatalf("LoadConfigFile() err = %v", err)
+	}
+	if cfg.Stack != DefaultStack {
+		t.Fatalf("Stack = %q, want default %q", cfg.Stack, DefaultStack)
+	}
+}

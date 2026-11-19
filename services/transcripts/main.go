@@ -1,0 +1,171 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
+)
+
+var (
+	openDBFn = openDB
+	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+		return pubsub.NewJetStreamBus(ctx, url)
+	}
+	httpShutdown = (*http.Server).Shutdown
+)
+
+func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return nil, fmt.Errorf("db: connection string cannot be empty")
+	}
+	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
+		return nil, fmt.Errorf("db: unsupported database scheme: only postgres:// or postgresql:// supported")
+	}
+	database, err := sql.Open("pgx", trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("db: open failed: %w", err)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := database.PingContext(pingCtx); err != nil {
+		httpkit.CloseWarn(database, "database on ping failure")
+		return nil, fmt.Errorf("db: ping failed: %w", err)
+	}
+	return database, nil
+}
+
+// RunApp bootstraps the transcripts indexer: JetStream step-batch consumer plus
+// HTTP read API, with graceful shutdown.
+func RunApp(ctx context.Context, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("app: config cannot be nil")
+	}
+	port := strings.TrimSpace(cfg.Port)
+	if port == "" {
+		return fmt.Errorf("app: port cannot be empty")
+	}
+
+	database, err := openDBFn(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer httpkit.CloseWarn(database, "database on shutdown")
+
+	store := NewStore(database, cfg.Stack)
+	ingester := NewIngester(store, nil)
+
+	bus := initTranscriptsJetStream(ctx, ingester, cfg.NATSURL)
+	defer func() {
+		if bus != nil {
+			if closeErr := bus.Close(); closeErr != nil {
+				log.Printf("[Transcripts] bus close error: %v", closeErr)
+			}
+		}
+	}()
+	if bus != nil {
+		ingester.publish = NewBusIngester(store, bus).publish
+	}
+
+	server := NewServer(store)
+	httpServer := &http.Server{
+		Addr:              ":" + port,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		log.Printf("[Transcripts] Indexer listening on port %s (stack: %s)", port, cfg.Stack)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case err := <-errChan:
+		return err
+	}
+
+	log.Println("[Transcripts] Shutting down indexer gracefully...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpShutdown(httpServer, shutdownCtx); err != nil {
+		log.Printf("[Transcripts] HTTP server shutdown error: %v", err)
+		return err
+	}
+	return nil
+}
+
+func initTranscriptsJetStream(ctx context.Context, ingester *Ingester, natsURL string) pubsub.Bus {
+	return initTranscriptsJetStreamWithFactory(ctx, ingester, natsURL, newBusFn)
+}
+
+func initTranscriptsJetStreamWithFactory(ctx context.Context, ingester *Ingester, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+	natsURL = strings.TrimSpace(natsURL)
+	if natsURL == "" || ingester == nil {
+		return nil
+	}
+	b, err := factory(ctx, natsURL)
+	if err != nil {
+		log.Printf("[Transcripts] warning: failed to connect to nats at %s: %v", natsURL, err)
+		return nil
+	}
+	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
+		log.Printf("[Transcripts] warning: failed to ensure core streams: %v", err)
+	}
+	if _, err := b.ConsumeQueue(ctx, pubsub.SubjectAerialTranscriptsPrefix+">", "transcripts-indexer", func(msgCtx context.Context, msg pubsub.Message) error {
+		return ingester.HandleBatchMessage(msgCtx, msg)
+	}); err != nil {
+		log.Printf("[Transcripts] warning: failed to subscribe transcripts-indexer: %v", err)
+	} else {
+		log.Println("[Transcripts] Subscribed transcripts-indexer queue consumer to " + pubsub.SubjectAerialTranscriptsPrefix + ">")
+	}
+	return b
+}
+
+var (
+	configPath = DefaultConfigPath
+	runAppFn   = RunApp
+	exitFn     = log.Fatalf
+)
+
+func main() {
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))))
+
+	resolvedPath := ResolveConfigPath(configPath)
+	cfg, err := LoadConfig(resolvedPath)
+	if err != nil {
+		exitFn("Fatal configuration error: %v", err)
+		return
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	_, flushTracing := tracing.Init(ctx, "transcripts", tracing.DefaultConfigPath)
+
+	err = runAppFn(ctx, cfg)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		exitFn("Server failure: %v", err)
+	}
+}
