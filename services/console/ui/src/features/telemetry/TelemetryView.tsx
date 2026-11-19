@@ -3,8 +3,7 @@ import type { CronSchedule, VanadisBuildDTO, VanadisChunkDTO } from '../../api/t
 import { GitSyncBadge } from '../../components/GitSyncBadge';
 import { Icon } from '../../components/Icon';
 import {
-  type BuildQueueState,
-  classifyBuildQueueState,
+  compareBuilds,
   computeBuildChunkStats,
   getBuildStatusBadgeInfo,
 } from '../../lib/builds';
@@ -26,7 +25,6 @@ const viewSchedules = (): void => useConsoleStore.getState().setActiveTab('sched
 const EMPTY_BUILDS: readonly VanadisBuildDTO[] = Object.freeze([]);
 const EMPTY_CHUNKS: readonly VanadisChunkDTO[] = Object.freeze([]);
 const EMPTY_CRONS: readonly CronSchedule[] = Object.freeze([]);
-const BUILD_ORDER: Readonly<Record<BuildQueueState, number>> = { running: 0, queued: 1, completed: 2 };
 
 export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
   const builds = useConsoleStore((s) => s.builds.list.data?.builds ?? EMPTY_BUILDS);
@@ -36,7 +34,7 @@ export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
   const topBuilds = useMemo(
     () =>
       [...builds]
-        .sort((a, b) => BUILD_ORDER[classifyBuildQueueState(a)] - BUILD_ORDER[classifyBuildQueueState(b)])
+        .sort(compareBuilds)
         .slice(0, 3),
     [builds],
   );

@@ -166,6 +166,52 @@ function maxTimestamp(values: Iterable<string | undefined>): number | null {
   return max;
 }
 
+const QUEUE_STATE_BUCKET: Readonly<Record<BuildQueueState, number>> = Object.freeze({
+  running: 0,
+  queued: 1,
+  completed: 2,
+});
+
+/**
+ * Returns completion timestamp in milliseconds for completed builds using chunk completion times
+ * or build/chunk update timestamps. Returns null for non-completed builds or builds without timestamps.
+ */
+export function getBuildCompletionMs(build: BuildLike | null | undefined): number | null {
+  if (!build || classifyBuildQueueState(build) !== 'completed') return null;
+  const chunks = build.chunks ?? [];
+  return (
+    maxTimestamp(chunks.map((c) => c.completed_at)) ??
+    maxTimestamp([build.updated_at, ...chunks.map((c) => c.updated_at)])
+  );
+}
+
+/**
+ * Compares two builds for display order:
+ * 1. Queue state bucket: running (0), queued (1), completed (2)
+ * 2. For completed builds: completion time descending, falling back to created_at descending
+ * 3. Otherwise: preserves relative order (0)
+ */
+export function compareBuilds(a: BuildLike, b: BuildLike): number {
+  const bucketA = QUEUE_STATE_BUCKET[classifyBuildQueueState(a)];
+  const bucketB = QUEUE_STATE_BUCKET[classifyBuildQueueState(b)];
+  if (bucketA !== bucketB) {
+    return bucketA - bucketB;
+  }
+  if (bucketA === QUEUE_STATE_BUCKET.completed) {
+    const compA = getBuildCompletionMs(a) ?? 0;
+    const compB = getBuildCompletionMs(b) ?? 0;
+    if (compA !== compB) {
+      return compB - compA;
+    }
+    const createdA = parseValidTimestampMs(a.created_at) ?? 0;
+    const createdB = parseValidTimestampMs(b.created_at) ?? 0;
+    if (createdA !== createdB) {
+      return createdB - createdA;
+    }
+  }
+  return 0;
+}
+
 /**
  * Start/end/duration for a build card. Start is the earliest chunk start (else build creation);
  * a completed build ends at its latest chunk completion, else its latest update. Running builds
@@ -177,13 +223,7 @@ export function getBuildTimingInfo(build: BuildLike | null | undefined, now: num
   const chunks = build.chunks ?? [];
 
   const startMs = minTimestamp(chunks.map((c) => c.started_at)) ?? parseValidTimestampMs(build.created_at);
-
-  let endMs: number | null = null;
-  if (qState === 'completed') {
-    endMs =
-      maxTimestamp(chunks.map((c) => c.completed_at)) ??
-      maxTimestamp([build.updated_at, ...chunks.map((c) => c.updated_at)]);
-  }
+  const endMs = getBuildCompletionMs(build);
 
   if (startMs === null) {
     return { startText: '--', endText: endMs === null ? '' : formatBuildTimestamp(endMs, true), durationText: '--' };
