@@ -25,6 +25,7 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/alerts"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
+	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -58,23 +59,21 @@ type RouterServer struct {
 	registry                 PRRegistryUpdater
 	dispatcher               OutboundDispatcher
 	onProcessed              func(event, delivery string)
-	nonRoboRevFailedSHAs     sync.Map
-	cancelledCheckSHAs       sync.Map
-	failedCheckSHAs          sync.Map
-	failedCheckRuns          sync.Map
-	collaboratorAlertedSHAs  sync.Map
-	collaboratorConflictSHAs sync.Map
-	updatedForCurrentMain    sync.Map
-	lastMainPushSHA          sync.Map
 	deploySuccessDispatched  sync.Map
-	conflictPublishedSHAs    sync.Map
 	queueStats               consumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration
-	commitSHAPRs             sync.Map
 	gitHistory               gitHistoryCache
 	discordIngressRetryDelay time.Duration
 	discordIngressMaxAge     time.Duration
 	alertTracker             alerts.Tracker
+	ghState                  github.StateTracker
+}
+
+func (s *RouterServer) GHState() *github.StateTracker {
+	if s == nil {
+		return nil
+	}
+	return &s.ghState
 }
 
 func (s *RouterServer) GetGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {

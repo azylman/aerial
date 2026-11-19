@@ -21,7 +21,6 @@ export const TaskCard = memo(function TaskCard({ task }: { readonly task: Active
   const trigger = getTriggerBadge(task.trigger_type);
   return (
     <div className={m.cardClass}>
-      {m.processing ? <div className="task-card-laser" /> : null}
       <div className="task-card-header">
         <div className="task-meta-left">
           <span className={`task-trigger-badge ${trigger.css}`} data-trigger={trigger.css}>

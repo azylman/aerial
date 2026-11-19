@@ -651,11 +651,11 @@ func runPRAutoMergeDisabledCase(ctx context.Context, t *testing.T, tc prAutoMerg
 		t.Fatalf("published conflict events = %d, want %d", conflictCount, tc.wantConflictPublished)
 	}
 	if tc.wantFailedNonRoboRev != "" {
-		val, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey(tc.resRepo, tc.resPRNum))
-		if !ok || fmt.Sprint(val) != tc.wantFailedNonRoboRev {
+		val, ok := srv.GHState().GetNonRoboRevFailedSHA(tc.resRepo, tc.resPRNum)
+		if !ok || val != tc.wantFailedNonRoboRev {
 			t.Errorf("nonRoboRevFailedSHAs[%s#%d] = %v (ok=%v), want %q", tc.resRepo, tc.resPRNum, val, ok, tc.wantFailedNonRoboRev)
 		}
-	} else if val, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey(tc.resRepo, tc.resPRNum)); ok {
+	} else if val, ok := srv.GHState().GetNonRoboRevFailedSHA(tc.resRepo, tc.resPRNum); ok {
 		t.Errorf("unexpected nonRoboRevFailedSHAs entry: %v", val)
 	}
 }

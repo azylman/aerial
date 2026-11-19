@@ -334,7 +334,7 @@ func TestRecordNonGateCheckFailure(t *testing.T) {
 	if srv.recordNonGateCheckFailure(res1) {
 		t.Errorf("expected false for initial check failure")
 	}
-	if sha, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey("azylman/aerial", 42)); !ok || sha != "sha123" {
+	if sha, ok := srv.GHState().GetNonRoboRevFailedSHA("azylman/aerial", 42); !ok || sha != "sha123" {
 		t.Errorf("expected nonRoboRevFailedSHAs to record sha123, got %v", sha)
 	}
 	res2 := &ResolvedGitHubEvent{
@@ -351,13 +351,7 @@ func TestRecordNonGateCheckFailure(t *testing.T) {
 
 func assertActiveCheckState(t *testing.T, srv *RouterServer, repo string, prNumber int, headSHA, checkName string, wantActive bool) {
 	t.Helper()
-	entry := srv.loadMatchingFailedCheckState(repo, prNumber, headSHA)
-	if entry == nil {
-		t.Fatalf("expected non-nil failedCheckState entry for %s#%d@%s", repo, prNumber, headSHA)
-	}
-	entry.mu.Lock()
-	active := entry.activeFailed[checkName]
-	entry.mu.Unlock()
+	active := srv.GHState().HasActiveCheckRun(repo, prNumber, headSHA, checkName)
 	if active != wantActive {
 		t.Errorf("activeFailed[%s] = %v, want %v", checkName, active, wantActive)
 	}
@@ -699,12 +693,11 @@ func TestRollbackFailedCheckRun(t *testing.T) {
 		CheckName: "roborev",
 	}
 	srv.recordNonGateCheckFailureDetailed(resRR)
-	entryRR := srv.loadMatchingFailedCheckState("azylman/aerial", 42, "sha123")
-	if entryRR == nil || !entryRR.roboRevActiveFailed || !entryRR.everFailed["roborev"] {
+	if !srv.GHState().HasActiveRoboRevFailure("azylman/aerial", 42, "sha123") || !srv.GHState().HasEverFailedCheckRun("azylman/aerial", 42, "sha123", "roborev") {
 		t.Fatalf("expected roborev activeFailed and everFailed before rollback")
 	}
 	srv.rollbackFailedCheckRun("azylman/aerial", 42, "sha123", "roborev", false, false)
-	if entryRR.roboRevActiveFailed || entryRR.everFailed["roborev"] {
+	if srv.GHState().HasActiveRoboRevFailure("azylman/aerial", 42, "sha123") || srv.GHState().HasEverFailedCheckRun("azylman/aerial", 42, "sha123", "roborev") {
 		t.Errorf("expected roborev activeFailed and everFailed cleared after rollback")
 	}
 
@@ -717,28 +710,27 @@ func TestRollbackFailedCheckRun(t *testing.T) {
 		CheckName: "build",
 	}
 	srv.recordNonGateCheckFailureDetailed(resNonRR)
-	entryNonRR := srv.loadMatchingFailedCheckState("azylman/aerial", 43, "sha123")
-	if entryNonRR == nil || !entryNonRR.activeFailed["build"] || !entryNonRR.everFailed["build"] {
+	if !srv.GHState().HasActiveCheckRun("azylman/aerial", 43, "sha123", "build") || !srv.GHState().HasEverFailedCheckRun("azylman/aerial", 43, "sha123", "build") {
 		t.Fatalf("expected build activeFailed and everFailed before rollback")
 	}
-	if sha, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey("azylman/aerial", 43)); !ok || sha != "sha123" {
+	if sha, ok := srv.GHState().GetNonRoboRevFailedSHA("azylman/aerial", 43); !ok || sha != "sha123" {
 		t.Fatalf("expected nonRoboRevFailedSHAs to record sha123 before rollback")
 	}
 	srv.rollbackFailedCheckRun("azylman/aerial", 43, "sha123", "build", false, false)
-	if entryNonRR.activeFailed["build"] || entryNonRR.everFailed["build"] {
+	if srv.GHState().HasActiveCheckRun("azylman/aerial", 43, "sha123", "build") || srv.GHState().HasEverFailedCheckRun("azylman/aerial", 43, "sha123", "build") {
 		t.Errorf("expected build activeFailed and everFailed cleared after rollback")
 	}
-	if _, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey("azylman/aerial", 43)); ok {
+	if _, ok := srv.GHState().GetNonRoboRevFailedSHA("azylman/aerial", 43); ok {
 		t.Errorf("expected nonRoboRevFailedSHAs to be cleared after rolling back only active failure")
 	}
 
 	// Test hadPriorEverFailed preserves everFailed
 	srv.recordNonGateCheckFailureDetailed(resNonRR)
 	srv.rollbackFailedCheckRun("azylman/aerial", 43, "sha123", "build", false, true)
-	if entryNonRR.activeFailed["build"] {
+	if srv.GHState().HasActiveCheckRun("azylman/aerial", 43, "sha123", "build") {
 		t.Errorf("expected activeFailed cleared on rollback")
 	}
-	if !entryNonRR.everFailed["build"] {
+	if !srv.GHState().HasEverFailedCheckRun("azylman/aerial", 43, "sha123", "build") {
 		t.Errorf("expected everFailed preserved when hadPriorEverFailed was true")
 	}
 }

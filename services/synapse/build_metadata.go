@@ -30,10 +30,6 @@ func isBuildMetadataCheck(name string) bool {
 	return model.IsBuildMetadataCheck(name)
 }
 
-func isDependabotAppCheck(appSlug string) bool {
-	return model.IsDependabotAppCheck(appSlug)
-}
-
 func parseStoredBuildMetadata(raw []byte) (BuildMetadata, error) {
 	return model.ParseStoredBuildMetadata(raw)
 }

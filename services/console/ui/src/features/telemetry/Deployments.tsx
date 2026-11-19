@@ -63,7 +63,6 @@ export const DeployCard = memo(function DeployCard({ dep }: { readonly dep: Depl
   const m = deployCardModel(dep);
   return (
     <div className={m.className}>
-      {m.inFlight ? <div className="deploy-card-laser" /> : null}
       <div className="deploy-card-header">
         <div className="deploy-target">
           {m.repo === null ? null : (
