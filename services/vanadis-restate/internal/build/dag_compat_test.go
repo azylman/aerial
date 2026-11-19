@@ -1,5 +1,13 @@
 package build
 
+// Compatibility shims for the pure DAG domain (internal/dag).
+//
+// These thin package-private wrappers exist only so the untouched
+// internal/build test files keep compiling against the historic lowercase
+// names; production code must call dag.* directly. They live in a _test.go
+// file because they are reachable only from tests: non-test files containing
+// test-only helpers are rejected by the production-graph deadcode gate.
+
 import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"

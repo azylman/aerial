@@ -932,14 +932,20 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	}
 	boReplayFail := NewBuildObject("", nil).WithAuthority(&replayFailStore{},
 		executor.NewExecutor(t.TempDir(), eriReplayFail, &mockBusExecutor{}, "token", nil))
-	_, err = boReplayFail.executeAuthoritativeTransition(context.Background(), "b-replay-fail",
-		&BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}, nil, false)
+	rtReplayFail := newFakeObjectRuntime("b-replay-fail")
+	_, err = boReplayFail.executeObjectTransition(rtReplayFail, labelMutateBuild,
+		&BuildMutationRequest{Action: "action_completed", ChunkID: "c1"})
 	assert.Error(t, err)
 
 	bDeadline := model.VanadisBuild{ID: "b-deadline", Status: "running", ThreadID: "th-1"}
 	cDeadline := model.VanadisChunk{ID: "c1", BuildID: "b-deadline", Status: statusDeploying, Mode: "pr", Repo: "aerial", PRNumber: 1, MergeSHA: "sha"}
 	stDeadline, _ := dbScript{buildRow: &mockRow{b: &bDeadline}, chunks: []model.VanadisChunk{cDeadline}, execTag: "UPDATE 1"}.open()
-	boDeadline := NewBuildObject("", nil).WithAuthority(stDeadline, nil)
+	eriDeadlineWidgetFail := &mockEriClient{}
+	eriDeadlineWidgetFail.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
+		return "", errors.New("widget fail")
+	}
+	boDeadline := NewBuildObject("", nil).WithAuthority(stDeadline,
+		executor.NewExecutor(t.TempDir(), eriDeadlineWidgetFail, &mockBusExecutor{}, "token", nil))
 	rtDeadline := &errDeploymentAttemptsRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-deadline")}
 	rtDeadline.SetState(model.BuildObjectState{Build: bDeadline, Chunks: []model.VanadisChunk{cDeadline}})
 	_, err = boDeadline.executeObjectTransition(rtDeadline, "reconcile", nil)
