@@ -1,5 +1,5 @@
-import { memo, useMemo, useState } from 'react';
-import type { CronSchedule, VanadisBuildDTO } from '../../api/types';
+import { memo, useEffect, useMemo, useState } from 'react';
+import type { CronSchedule, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
 import { GitSyncBadge } from '../../components/GitSyncBadge';
 import { Icon } from '../../components/Icon';
 import {
@@ -12,6 +12,9 @@ import { buildsBadgeCount } from '../../store/selectors';
 import { useConsoleStore } from '../../store/store';
 import '../../styles/sections.css';
 import { QueueBadge, TaskQueue } from '../tasks/TaskQueue';
+import { BuildDagGraph } from '../builds/BuildDetail';
+import { resolveBuildDetail } from '../builds/model';
+import { syncBuildDetail } from '../builds/data';
 import { DeployBadge, Deployments } from './Deployments';
 import { HealthyCount, ServicesGrid } from './ServicesGrid';
 import './telemetry.css';
@@ -21,12 +24,14 @@ const viewAllBuilds = (): void => useConsoleStore.getState().setActiveTab('build
 const viewSchedules = (): void => useConsoleStore.getState().setActiveTab('schedules');
 
 const EMPTY_BUILDS: readonly VanadisBuildDTO[] = Object.freeze([]);
+const EMPTY_CHUNKS: readonly VanadisChunkDTO[] = Object.freeze([]);
 const EMPTY_CRONS: readonly CronSchedule[] = Object.freeze([]);
 const BUILD_ORDER: Readonly<Record<BuildQueueState, number>> = { running: 0, queued: 1, completed: 2 };
 
 export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
   const builds = useConsoleStore((s) => s.builds.list.data?.builds ?? EMPTY_BUILDS);
   const data = useConsoleStore((s) => s.builds.list.data);
+  const detailData = useConsoleStore((s) => s.builds.detail.data);
   const activeCount = buildsBadgeCount(data);
   const topBuilds = useMemo(
     () =>
@@ -35,6 +40,33 @@ export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
         .slice(0, 3),
     [builds],
   );
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [failed, setFailed] = useState<{ readonly id: string; readonly error: string } | null>(null);
+
+  const targetBuild = useMemo(
+    () => (expandedId ? topBuilds.find((b) => b.id === expandedId) : undefined),
+    [topBuilds, expandedId],
+  );
+  const hasInlineChunks = Boolean(targetBuild?.chunks && targetBuild.chunks.length > 0);
+  const hasDetailMatch = (detailData?.build?.id ?? detailData?.entry?.id) === expandedId;
+
+  useEffect(() => {
+    if (!expandedId || hasInlineChunks || hasDetailMatch) {
+      return;
+    }
+    const controller = new AbortController();
+    void syncBuildDetail(expandedId)(controller.signal).finally(() => {
+      if (!controller.signal.aborted) {
+        const latest = useConsoleStore.getState().builds.detail;
+        if (latest.error) {
+          setFailed({ id: expandedId, error: latest.error });
+        }
+      }
+    });
+    return () => {
+      controller.abort();
+    };
+  }, [expandedId, hasInlineChunks, hasDetailMatch]);
 
   return (
     <section className="hud-section bento-cell bento-span-2 overview-bento-section" aria-label="Vanadis Build Pipeline Overview">
@@ -59,23 +91,60 @@ export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
           topBuilds.map((build, i) => {
             const stats = computeBuildChunkStats(build);
             const badge = getBuildStatusBadgeInfo(build);
+            const expanded = expandedId === build.id;
+            const model = resolveBuildDetail(build.id, detailData, build);
+            const resolvedChunks = model?.chunks ?? EMPTY_CHUNKS;
+            const isBuildDetailMatch = (detailData?.build?.id ?? detailData?.entry?.id) === build.id;
+            const isLoaded = (build.chunks?.length ?? 0) > 0 || isBuildDetailMatch;
+            const hasFailed = !isLoaded && failed?.id === build.id;
+            const isPending = !isLoaded && !hasFailed;
+
+            const rowClass = [
+              'overview-build-row',
+              i === 0 ? 'dag-box' : null,
+              expanded ? 'expanded' : null,
+            ].filter(Boolean).join(' ');
+
             return (
-              <button
-                key={build.id}
-                type="button"
-                className={i === 0 ? 'overview-build-row dag-box' : 'overview-build-row'}
-                onClick={() => useConsoleStore.getState().openDrawer({ kind: 'build', id: build.id })}
-              >
-                <div className="overview-row-left">
-                  <span className="overview-row-title">{build.title || `Build #${build.id}`}</span>
-                </div>
-                <div className="overview-row-right">
-                  <span className={`overview-status-pill status-${badge.tone}`}>{badge.label}</span>
-                  <span className="overview-chunk-progress">
-                    {stats.completed}/{stats.total} chunks
-                  </span>
-                </div>
-              </button>
+              <div key={build.id} className={rowClass}>
+                <button
+                  type="button"
+                  className="overview-build-header"
+                  aria-expanded={expanded}
+                  onClick={() => {
+                    setExpandedId(expanded ? null : build.id);
+                    setFailed(null);
+                  }}
+                >
+                  <div className="overview-row-left">
+                    <span className="overview-row-title">{build.title || `Build #${build.id}`}</span>
+                  </div>
+                  <div className="overview-row-right">
+                    <span className={`overview-status-pill status-${badge.tone}`}>{badge.label}</span>
+                    <span className="overview-chunk-progress">
+                      {stats.completed}/{stats.total} chunks
+                    </span>
+                    <span className="overview-schedule-chevron" aria-hidden="true">
+                      {expanded ? '▴' : '▾'}
+                    </span>
+                  </div>
+                </button>
+                {expanded ? (
+                  <div className="overview-build-dag">
+                    {resolvedChunks.length > 0 ? (
+                      <BuildDagGraph buildId={build.id} chunks={resolvedChunks} />
+                    ) : isPending ? (
+                      <div className="overview-build-loading">
+                        <span className="pulse-dot healthy" /> LOADING BUILD CHUNKS...
+                      </div>
+                    ) : hasFailed ? (
+                      <div className="overview-build-error">FAILED TO LOAD BUILD CHUNKS // {failed.error}</div>
+                    ) : (
+                      <div className="overview-build-empty">NO CHUNKS REGISTERED</div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
             );
           })
         )}
