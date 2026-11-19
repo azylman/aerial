@@ -233,3 +233,52 @@ test('prepare-config: run generates runtime.env with generic HOMEPAGE_VAR_<KEY> 
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 });
+
+test('prepare-config: loads cleanly and merges core and user configs when /local/core-homepage/config is used', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-local-core-'));
+  const localCoreDir = path.join(tmpBase, 'local-core');
+  const localCoreConfigDir = path.join(localCoreDir, 'config');
+  const userDir = path.join(tmpBase, 'user');
+  const targetDir = path.join(tmpBase, 'target');
+
+  fs.mkdirSync(localCoreDir, { recursive: true });
+  fs.mkdirSync(localCoreConfigDir, { recursive: true });
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.mkdirSync(targetDir, { recursive: true });
+
+  // Simulate ConfigMap flat mount of merge.js alongside prepare-config.js in localCoreDir
+  const origPrepareSrc = fs.readFileSync(path.join(__dirname, '../prepare-config.js'), 'utf8');
+  const mergeSrc = fs.readFileSync(path.join(__dirname, '../lib/merge.js'), 'utf8');
+
+  fs.writeFileSync(path.join(localCoreDir, 'prepare-config.js'), origPrepareSrc, 'utf8');
+  fs.writeFileSync(path.join(localCoreDir, 'merge.js'), mergeSrc, 'utf8');
+
+  try {
+    // Write sample core config and user config
+    fs.writeFileSync(path.join(localCoreConfigDir, 'settings.yaml'), '{"theme":"dark","color":"slate"}\n', 'utf8');
+    fs.writeFileSync(path.join(userDir, 'settings.yaml'), '{"showStats":true}\n', 'utf8');
+
+    // Require the prepare-config in localCoreDir to verify it resolved ./merge when ./lib/merge.js is absent
+    assert.equal(fs.existsSync(path.join(localCoreDir, 'lib', 'merge.js')), false);
+    const localPrepare = require(path.join(localCoreDir, 'prepare-config.js'));
+
+    const stubYaml = {
+      load: (str) => JSON.parse(str),
+      dump: (obj) => JSON.stringify(obj)
+    };
+
+    localPrepare.run({
+      coreDir: localCoreConfigDir,
+      userDir,
+      targetDir,
+      yaml: stubYaml,
+      candidatePaths: []
+    });
+
+    const mergedSettings = JSON.parse(fs.readFileSync(path.join(targetDir, 'settings.yaml'), 'utf8'));
+    assert.equal(mergedSettings.theme, 'dark');
+    assert.equal(mergedSettings.showStats, true);
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
