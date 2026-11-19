@@ -13,8 +13,10 @@ import (
 
 	"github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -904,4 +906,171 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	_, fErr := boFailChunk.FailChunk(ctxMock, model.FailChunkRequest{ChunkID: "c1", Reason: "hard error"})
 	assert.Error(t, fErr)
 	assert.False(t, fakeRT.cleared, "ClearState must not be called when notification step fails")
+}
+
+type deploymentStartStore struct {
+	*checkStatusSpyStore
+
+	writeErr error
+}
+
+func (s *deploymentStartStore) RecordPRRolloutState(_ context.Context, id, status string, rollout *pubsub.PRRolloutState) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	c := s.chunk(id)
+	c.Status = status
+	c.RolloutState = rollout
+	return nil
+}
+
+type deadlineLifecycleStore struct{ *checkStatusSpyStore }
+
+func (s *deadlineLifecycleStore) GetBuild(ctx context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	b, c, err := s.checkStatusSpyStore.GetBuild(ctx, id)
+	return b, append([]model.VanadisChunk(nil), c...), err
+}
+
+func (s *deadlineLifecycleStore) UpdateChunkBannerAndStatus(_ context.Context, id, status, banner string) error {
+	if s.bannerErr != nil {
+		return s.bannerErr
+	}
+	c := s.chunk(id)
+	c.Status = status
+	c.Banner = banner
+	return nil
+}
+
+func (s *deadlineLifecycleStore) UpdatePRLifecycleStatus(_ context.Context, id, status string) error {
+	c := s.chunk(id)
+	c.Status = status
+	return nil
+}
+
+func (s *deadlineLifecycleStore) RecordPRRolloutState(_ context.Context, id, status string, rollout *pubsub.PRRolloutState) error {
+	c := s.chunk(id)
+	if status != "" {
+		c.Status = status
+	}
+	c.RolloutState = rollout
+	return nil
+}
+
+// deploymentGateFakeRuntime is an in-memory deploygate.Runtime for deployment
+// gate tests that exercise BuildObject wrappers end to end.
+type deploymentGateFakeRuntime struct {
+	*fakeObjectRuntime
+
+	now       time.Time
+	attempts  map[string]deploygate.Attempt
+	pending   map[string]deploygate.PendingStart
+	scheduled []deploygate.DeploymentDeadlineRequest
+}
+
+func (r *deploymentGateFakeRuntime) GetAttempts() (map[string]deploygate.Attempt, error) {
+	return r.attempts, nil
+}
+
+func (r *deploymentGateFakeRuntime) SetAttempts(a map[string]deploygate.Attempt) { r.attempts = a }
+
+func (r *deploymentGateFakeRuntime) Now() (time.Time, error) { return r.now, nil }
+
+func (r *deploymentGateFakeRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
+	return r.pending, nil
+}
+
+func (r *deploymentGateFakeRuntime) SetPendingStarts(p map[string]deploygate.PendingStart) {
+	r.pending = p
+}
+
+func (r *deploymentGateFakeRuntime) ScheduleDeadline(req deploygate.DeploymentDeadlineRequest, d time.Duration) {
+	r.scheduled = append(r.scheduled, req)
+}
+
+func (r *deploymentGateFakeRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
+	out, err := r.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
+		o, runErr := fn(ctx)
+		return reconcileStepOutput(o), runErr
+	})
+	return deploygate.StepOutput(out), err
+}
+
+func TestDeploymentStartEvent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		rollout       *pubsub.PRRolloutState
+		writeErr      error
+		wantLifecycle string
+	}{
+		{"without snapshot", nil, nil, statusDeploying},
+		{"with snapshot", &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}, nil, ""},
+		{"snapshot write unavailable", &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}, errors.New("write unavailable"), ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, MergeSHA: "sha", Status: statusMerged}}}}
+			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, MergeSHA: "sha", RolloutState: tc.rollout})
+			require.Equal(t, tc.writeErr != nil, err != nil)
+			require.Equal(t, tc.wantLifecycle, st.lifecycleStatus)
+			if tc.writeErr == nil {
+				require.Equal(t, tc.rollout, st.chunks[0].RolloutState)
+			} else {
+				require.Nil(t, st.chunks[0].RolloutState)
+			}
+		})
+	}
+}
+
+func TestDeploymentStartPreservesFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		rollout *pubsub.PRRolloutState
+	}{
+		{"duplicate without evidence", nil},
+		{"additional job evidence", &pubsub.PRRolloutState{ExpectedJobs: []string{"web", "worker"}, StartedJobs: []string{"worker"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
+			b := &BuildObject{store: st}
+			_, err := b.recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", RolloutState: tc.rollout})
+			require.NoError(t, err)
+			require.Equal(t, statusDeployFailed, st.chunks[0].Status)
+			require.Equal(t, "expired", st.chunks[0].Banner)
+			require.Equal(t, tc.rollout, st.chunks[0].RolloutState)
+		})
+	}
+}
+
+func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name string }{{"start then repeated merge then expiry"}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
+			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
+			b := &BuildObject{store: st}
+			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
+			rc := mockRunContext{Context: context.Background()}
+			_, err := b.recordDeploymentPREvent(rc, "b", ev)
+			require.NoError(t, err)
+			require.NoError(t, b.armDeploymentStart(rt, "b", ev))
+			require.Equal(t, now.Add(15*time.Minute), rt.attempts["c1"].Deadline)
+			require.NoError(t, b.handlePREventType(rc, "b", "c1", "merged", pubsub.PRLifecycleEvent{MergeSHA: "sha"}))
+			require.Equal(t, statusMerged, st.chunks[0].Status)
+			eri := &mockEriClient{}
+			b.executor = &executor.Executor{EriClient: eri}
+			rt.now = now.Add(15 * time.Minute)
+			require.NoError(t, b.expireDeploymentDeadline(rt, deploygate.DeploymentDeadlineRequest{ChunkID: "c1", Revision: "sha", Generation: 1}))
+			require.Equal(t, statusDeployFailed, st.chunks[0].Status)
+			require.NotNil(t, eri.lastDispatch)
+			require.True(t, rt.attempts["c1"].Delivered)
+		})
+	}
 }

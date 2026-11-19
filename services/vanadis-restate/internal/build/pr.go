@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	prEventOpened = "opened"
+	prEventOpened        = "opened"
+	prEventDeployStarted = "deploy_started"
 )
 
 func CanFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
@@ -561,6 +562,40 @@ func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, e
 		return b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
 	}
 	return b.handlePREventType(rc, buildID, chunkID, event, ev)
+}
+
+func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (bool, error) {
+	chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
+	if cErr != nil || chunkID == "" {
+		return false, cErr
+	}
+	rolloutStatus := ""
+	event := strings.ToLower(strings.TrimSpace(ev.Event))
+	if event == prEventDeployStarted {
+		valid, status, e := b.recordDeploymentStart(rc, buildID, chunkID, ev)
+		rolloutStatus = status
+		if e != nil || !valid {
+			return false, e
+		}
+	}
+
+	eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
+	if eventErr != nil {
+		if errors.Is(eventErr, errPRTransitionSkipped) {
+			return false, nil
+		}
+		return false, eventErr
+	}
+	b.refreshFailedPRWidget(rc, buildID, event)
+	if event != "deploy_success" && ev.RolloutState != nil {
+		if rErr := b.store.RecordPRRolloutState(rc, chunkID, rolloutStatus, ev.RolloutState); rErr != nil {
+			if event == prEventDeployStarted {
+				return false, rErr
+			}
+			slog.WarnContext(rc, "[vanadis-restate] record rollout state warning", "error", rErr)
+		}
+	}
+	return true, nil
 }
 
 // OnPREvent receives PR lifecycle events for this build.
