@@ -103,7 +103,7 @@ func TestCommitSHAPRCacheHelpers(t *testing.T) {
 				srv = &RouterServer{}
 			}
 			if tc.corruptKey != "" && srv != nil {
-				srv.commitSHAPRs.Store(tc.corruptKey, tc.corruptVal)
+				srv.GHState().StoreRawCommitSHAPRForTest(tc.corruptKey, tc.corruptVal)
 			} else {
 				srv.recordCommitSHAPR(tc.repo, tc.sha, tc.prNumber, tc.branch)
 			}

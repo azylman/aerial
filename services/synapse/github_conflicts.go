@@ -6,18 +6,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/github"
 )
 
 func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
-	clean := strings.TrimSpace(author)
-	return clean != "" && s != nil && slices.ContainsFunc(s.cfgSrc.Current().AutoUpdatePRAuthors, func(a string) bool {
-		return strings.EqualFold(clean, strings.TrimSpace(a))
-	})
+	if s == nil {
+		return false
+	}
+	return github.IsAutoUpdateAuthorAllowed(author, s.cfgSrc.Current().AutoUpdatePRAuthors)
 }
 
 func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo string, prNumber int, branch, headSHA string) (bool, error) {
@@ -29,7 +29,6 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		return false, err
 	}
 	normHeadSHA := strings.TrimSpace(headSHA)
-	key := prCheckKey(repo, prNumber)
 	if updated {
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        prConflict,
@@ -46,7 +45,7 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 			return false, err
 		}
 		if normHeadSHA != "" {
-			s.conflictPublishedSHAs.Store(key, normHeadSHA)
+			s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
 		}
 		return true, nil
 	}
@@ -59,8 +58,7 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	if tid == "" {
 		return false, nil
 	}
-	publishedSHA, ok := s.conflictPublishedSHAs.Load(key)
-	if ok && strings.EqualFold(fmt.Sprint(publishedSHA), normHeadSHA) {
+	if s.ghState.WasConflictPublished(repo, prNumber, normHeadSHA) {
 		return true, nil
 	}
 	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -78,7 +76,7 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		return false, err
 	}
 	if normHeadSHA != "" {
-		s.conflictPublishedSHAs.Store(key, normHeadSHA)
+		s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
 	}
 	return true, nil
 }
@@ -90,7 +88,7 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 		return
 	}
 	if pr.Head.SHA != "" {
-		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.Number), strings.TrimSpace(pr.Head.SHA))
+		s.ghState.RecordNonRoboRevFailedSHA(repo, pr.Number, pr.Head.SHA)
 	}
 	s.recordFailedCISHA(repo, pr.Number, pr.Head.SHA)
 	if !handled {
@@ -134,7 +132,7 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 
 func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNumber int) {
 	s.clearFailedCISHA(repo, prNumber)
-	s.updatedForCurrentMain.Delete(prCheckKey(repo, prNumber))
+	s.ghState.ClearUpdatedForMain(repo, prNumber)
 	if s.registry == nil {
 		return
 	}
@@ -235,7 +233,7 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 
 func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGitHubEvent, merged bool) error {
 	s.clearFailedCISHA(res.Repo, res.PRNumber)
-	s.updatedForCurrentMain.Delete(prCheckKey(res.Repo, res.PRNumber))
+	s.ghState.ClearUpdatedForMain(res.Repo, res.PRNumber)
 	if merged {
 		targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
 		if err != nil {
@@ -293,7 +291,7 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 		return err
 	}
 	if res.HeadSHA != "" {
-		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		s.ghState.RecordNonRoboRevFailedSHA(res.Repo, res.PRNumber, res.HeadSHA)
 	}
 	s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA)
 	if handled {
@@ -332,11 +330,6 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 			return err
 		}
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
-		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.failedCheckRuns.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.collaboratorAlertedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-		s.collaboratorConflictSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        ghActionSynchronize,

@@ -180,13 +180,13 @@ func assertConflictCheckDispatcherCalls(t *testing.T, tc checkOpenPRConflictsTes
 func assertConflictCheckCacheAndPuts(t *testing.T, tc checkOpenPRConflictsTestCase, srv *RouterServer, putPaths []string) {
 	t.Helper()
 	for prNum, wantSHA := range tc.wantCachedFailedSHAs {
-		v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum))
-		if !ok || fmt.Sprint(v) != wantSHA {
+		v, ok := srv.GHState().GetFailedCISHA("azylman/aerial", prNum)
+		if !ok || v != wantSHA {
 			t.Errorf("cached failedCheckSHAs[%d] = %v (ok=%v), want %q", prNum, v, ok, wantSHA)
 		}
 	}
 	for _, prNum := range tc.wantUncachedFailedPRs {
-		if v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum)); ok {
+		if v, ok := srv.GHState().GetFailedCISHA("azylman/aerial", prNum); ok {
 			t.Errorf("cached failedCheckSHAs[%d] = %v, want uncached", prNum, v)
 		}
 	}

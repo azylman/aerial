@@ -372,6 +372,9 @@ type collaboratorConflictTestCase struct {
 	resHeadSHA    string
 	pr            GitHubPullRequest
 	alertRules    []CollaboratorCIAlertRule
+	dmErr         error
+	apiErr        bool
+	wantErr       bool
 	wantDMCalls   int
 	wantDMChannel string
 	wantContains  string
@@ -381,15 +384,29 @@ func runCollaboratorConflictCase(ctx context.Context, t *testing.T, tc collabora
 	t.Helper()
 	t.Parallel()
 
-	disp := &mockOutboundDispatcher{}
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tc.apiErr {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(tc.pr)
+	}))
+	defer mockServer.Close()
+
+	disp := &mockOutboundDispatcher{directMessageErr: tc.dmErr}
 	cfg := Config{
+		GitHubAPIURL:         mockServer.URL,
 		CollaboratorCIAlerts: tc.alertRules,
 	}
-	srv := newTestRouter(cfg, nil, nil, disp)
+	srv := newTestRouter(cfg, mockServer.Client(), nil, disp)
 
 	err := srv.notifyCollaboratorConflict(ctx, tc.resRepo, tc.pr)
-	if err != nil {
-		t.Fatalf("notifyCollaboratorConflict() err = %v", err)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("notifyCollaboratorConflict() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
 	}
 
 	calls := disp.DirectMessageCalls()
@@ -474,12 +491,62 @@ func TestNotifyCollaboratorConflict(t *testing.T) {
 			alertRules:  standardRules,
 			wantDMCalls: 0,
 		},
+		{
+			name:       "dm error propagates and clears state",
+			resRepo:    "azylman/aerial",
+			resPRNum:   52,
+			resBranch:  "feat/conflict",
+			resHeadSHA: "sha-conflict-3",
+			pr: GitHubPullRequest{
+				Number: 52,
+				Title:  "Conflict PR",
+				State:  "open",
+				User: struct {
+					Login string `json:"login"`
+				}{Login: "collab-user"},
+				Head: GitHubPRRef{
+					Ref: "feat/conflict",
+					SHA: "sha-conflict-3",
+				},
+			},
+			alertRules:    standardRules,
+			dmErr:         errors.New("dm send failed"),
+			wantErr:       true,
+			wantDMCalls:   1,
+			wantDMChannel: "111111111111111111",
+		},
+		{
+			name:        "unconfigured repo skips conflict dm",
+			resRepo:     "other/repo",
+			resPRNum:    53,
+			alertRules:  standardRules,
+			wantDMCalls: 0,
+		},
+		{
+			name:       "api error during resolve returns error",
+			resRepo:    "azylman/aerial",
+			resPRNum:   54,
+			resBranch:  "feat/conflict",
+			resHeadSHA: "sha-conflict-4",
+			pr: GitHubPullRequest{
+				Number: 54,
+			},
+			alertRules: standardRules,
+			apiErr:     true,
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runCollaboratorConflictCase(ctx, t, tc)
 		})
+	}
+
+	// Nil router server guard
+	var nilSrv *RouterServer
+	if err := nilSrv.notifyCollaboratorConflict(ctx, "azylman/aerial", GitHubPullRequest{}); err != nil {
+		t.Errorf("expected nil error on nil router server")
 	}
 }
 
@@ -574,6 +641,13 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 			channelID: "111111111111111111",
 			sha:       "0000000000000000000000000000000000000000",
 		},
+		{
+			name:      "successful dispatch records dedup",
+			srv:       srvWithDisp,
+			dedup:     &sync.Map{},
+			channelID: "111111111111111111",
+			sha:       "abcdef1",
+		},
 	}
 
 	for _, tc := range tests {
@@ -584,10 +658,29 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 				t.Errorf("dispatchCollaboratorDM error = %v, want nil", err)
 			}
 			afterCalls := len(mockDisp.DirectMessageCalls())
-			if afterCalls != beforeCalls {
+			if tc.name != "successful dispatch records dedup" && afterCalls != beforeCalls {
 				t.Errorf("expected no direct message dispatches for invalid guard input, got %d", afterCalls-beforeCalls)
 			}
 		})
+	}
+
+	customDedup := &sync.Map{}
+	if err := srvWithDisp.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	beforeCalls := len(mockDisp.DirectMessageCalls())
+	if err := srvWithDisp.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+		t.Fatalf("unexpected error on duplicate: %v", err)
+	}
+	if len(mockDisp.DirectMessageCalls()) != beforeCalls {
+		t.Errorf("expected duplicate dispatch to be suppressed by dedup")
+	}
+
+	failDisp := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
+	srvFail := &RouterServer{dispatcher: failDisp}
+	errDedup := &sync.Map{}
+	if err := srvFail.dispatchCollaboratorDM(ctx, errDedup, "repo", 1, "sha2", "111111111111111111", "msg"); err == nil {
+		t.Fatalf("expected error from failed dispatch")
 	}
 }
 

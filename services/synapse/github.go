@@ -2,11 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/github"
 )
 
 const (
@@ -88,20 +85,10 @@ func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string
 	return req, nil
 }
 
-type gitHubStatusError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *gitHubStatusError) Error() string {
-	return e.Message
-}
+type gitHubStatusError = github.StatusError
 
 func isGitHubNotFound(err error) bool {
-	if statusErr, ok := errors.AsType[*gitHubStatusError](err); ok {
-		return statusErr.StatusCode == http.StatusNotFound
-	}
-	return false
+	return github.IsNotFound(err)
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -271,22 +258,7 @@ func extractPRNumberFromCommitMessage(msg string) int {
 }
 
 func verifyGitHubWebhookSignature(secret, signatureHeader string, body []byte) bool {
-	trimmedSecret := strings.TrimSpace(secret)
-	if trimmedSecret == "" {
-		return false
-	}
-	if !strings.HasPrefix(signatureHeader, "sha256=") {
-		return false
-	}
-	sigHex := strings.TrimPrefix(signatureHeader, "sha256=")
-	expectedSig, err := hex.DecodeString(sigHex)
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(trimmedSecret))
-	mac.Write(body)
-	actualSig := mac.Sum(nil)
-	return hmac.Equal(actualSig, expectedSig)
+	return github.VerifySignature(secret, signatureHeader, body)
 }
 
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +454,7 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(res.Status), "completed") && strings.EqualFold(strings.TrimSpace(res.Conclusion), "cancelled") {
-		s.cancelledCheckSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		s.ghState.RecordCancelledCheckSHA(res.Repo, res.PRNumber, res.HeadSHA)
 	}
 	if isDependabotBranch(res.Branch) {
 		return
