@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,6 +22,8 @@ type Server struct {
 	mcpServer     *mcp.Server
 	opts          *mcp.StreamableHTTPOptions
 	streamHandler http.Handler
+	role          string
+	extractFn     func(ctx context.Context, threadID string) error
 }
 
 // serverInstructions is sent on initialize so clients that defer tool schemas
@@ -31,7 +34,7 @@ Never store secrets, tokens or credentials, including in supersedes_id updates (
 memory_forget permanently deletes a fact by ID; use it only for facts that are wrong with no replacement.`
 
 // NewServer creates and initializes the Server.
-func NewServer(handler *ToolHandler) *Server {
+func NewServer(handler *ToolHandler, extractFn ...func(ctx context.Context, threadID string) error) *Server {
 	if handler == nil {
 		panic("server: handler cannot be nil")
 	}
@@ -46,10 +49,17 @@ func NewServer(handler *ToolHandler) *Server {
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
+	fn := handler.Extract
+	if len(extractFn) > 0 {
+		fn = extractFn[0]
+	}
+
 	s := &Server{
 		handler:   handler,
 		mcpServer: mcpServer,
 		opts:      opts,
+		role:      handler.Role(),
+		extractFn: fn,
 	}
 	s.registerTools()
 
@@ -92,6 +102,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("coven"))
 	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/admin/extract", s.handleAdminExtract)
+
+	if strings.EqualFold(s.role, "extractor") {
+		return mux
+	}
+
 	mux.HandleFunc("/facts", s.handleFacts)
 	mux.HandleFunc("/context", s.handleContext)
 	mux.Handle("/consolidate", tracing.Middleware("coven", http.HandlerFunc(s.handleConsolidate)))
@@ -214,6 +230,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		s.handleMetrics(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/extract" {
+		s.handleAdminExtract(w, r)
+		return
+	}
 	if r.URL.Path == "/facts" {
 		s.handleFacts(w, r)
 		return
@@ -228,4 +248,41 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpkit.ServeMCPStream(w, r, s.streamHandler, "Aerial Memory MCP Server (Streamable HTTP) Ready\n", "memory_memory_", "memory_")
+}
+
+func (s *Server) handleAdminExtract(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	threadID := strings.TrimSpace(r.URL.Query().Get("thread_id"))
+	if threadID == "" && r.Body != nil {
+		var body struct {
+			ThreadID string `json:"thread_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			threadID = strings.TrimSpace(body.ThreadID)
+		}
+	}
+
+	if threadID == "" {
+		http.Error(w, `{"error":"thread_id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := s.extractFn(r.Context(), threadID); err != nil {
+		if errors.Is(err, ErrAdvisoryLockBusy) {
+			http.Error(w, `{"error":"advisory lock busy"}`, http.StatusConflict)
+			return
+		}
+		log.Printf("[coven] admin extract error: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	httpkit.WriteResponse(w, r, "coven", []byte(`{"status":"ok"}`))
 }

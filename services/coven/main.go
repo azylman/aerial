@@ -62,19 +62,47 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 		}
 		return nil
 	}
-	if err := worker.ExtractThread(ctx, args.ThreadID); err != nil {
-		if msg.NumDelivered() >= 5 {
-			slog.ErrorContext(ctx, "[Coven] dropping coven extract job after max delivery attempts", "thread_id", args.ThreadID, "delivered", msg.NumDelivered(), "error", err)
-			if termErr := msg.Term(); termErr != nil {
-				slog.WarnContext(ctx, "[Coven] error terming coven extract job", "error", termErr)
-			}
-			return nil
+	threadID := strings.TrimSpace(args.ThreadID)
+	if threadID == "" {
+		if termErr := msg.Term(); termErr != nil {
+			slog.WarnContext(ctx, "[Coven] error terming empty thread coven extract job", "error", termErr)
 		}
-		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+		return nil
+	}
+	if err := worker.ExtractThread(ctx, threadID); err != nil {
+		if errors.Is(err, ErrAdvisoryLockBusy) {
+			if nakErr := msg.NakWithDelay(5 * time.Second); nakErr != nil {
+				slog.WarnContext(ctx, "[Coven] error naking coven extract job on advisory lock busy", "error", nakErr)
+			}
+			return err
+		}
+		if nakErr := msg.NakWithDelay(covenNakDelay(msg.NumDelivered())); nakErr != nil {
 			slog.WarnContext(ctx, "[Coven] error naking coven extract job", "error", nakErr)
 		}
 		return err
 	}
+	return nil
+}
+
+func subscribeCovenTranscriptsIndexed(ctx context.Context, b pubsub.Bus, stack string) error {
+	if b == nil {
+		return nil
+	}
+	subject := pubsub.SubjectAerialTurnPrefix + "transcripts_indexed"
+	_, err := b.Subscribe(ctx, subject, "coven-transcripts-indexed", func(msgCtx context.Context, msg pubsub.Message) error {
+		return handleTranscriptsIndexedEvent(msgCtx, msg, stack, func(extractCtx context.Context, threadID string) error {
+			msgID := fmt.Sprintf("coven:extract:%s:%d", threadID, time.Now().UnixNano())
+			args := pubsub.CovenExtractJobArgs{
+				ThreadID: threadID,
+			}
+			return b.Publish(extractCtx, pubsub.SubjectCovenExtractCoalesced(threadID), msgID, args)
+		})
+	})
+	if err != nil {
+		log.Printf("[Coven] warning: failed to subscribe coven-transcripts-indexed: %v", err)
+		return err
+	}
+	log.Println("[Coven] Subscribed coven-transcripts-indexed durable consumer to " + subject)
 	return nil
 }
 
@@ -116,8 +144,8 @@ func subscribeCovenExtract(ctx context.Context, b pubsub.Bus, worker *Worker) er
 }
 
 type covenConsumers struct {
-	subscribedTranscriptSynced bool
-	subscribedExtract          bool
+	subscribedTranscriptsIndexed bool
+	subscribedExtract            bool
 }
 
 func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker *Worker) error {
@@ -127,11 +155,11 @@ func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker 
 	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
 		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
 	}
-	if !c.subscribedTranscriptSynced {
-		if err := subscribeCovenTranscriptSynced(ctx, b); err != nil {
+	if !c.subscribedTranscriptsIndexed {
+		if err := subscribeCovenTranscriptsIndexed(ctx, b, worker.Stack()); err != nil {
 			return err
 		}
-		c.subscribedTranscriptSynced = true
+		c.subscribedTranscriptsIndexed = true
 	}
 	if !c.subscribedExtract {
 		if err := subscribeCovenExtract(ctx, b, worker); err != nil {
@@ -206,6 +234,12 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	store := NewSQLStore(database)
 	store.SetBrainURL(cfg.EriURL)
+	store.SetStack(cfg.EffectiveStack())
+	if cfg.TranscriptsURL != "" {
+		indexerClient := NewIndexerClient(cfg.TranscriptsURL, cfg.EffectiveStack(), nil)
+		indexerClient.SetMaxSteps(cfg.ExtractBatchLimit())
+		store.SetIndexerClient(indexerClient)
+	}
 	ollama := NewOllamaClient(&cfg.Ollama)
 	publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
 		Token:           cfg.GitHubPAT,
@@ -225,6 +259,9 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		CustomSkillsDir: cfg.CustomSkillsDir,
 		InitialDelay:    DefaultWorkerInitialDelay,
 		TickInterval:    DefaultWorkerTickInterval,
+		Role:            cfg.Role,
+		Stack:           cfg.EffectiveStack(),
+		ExtractTimeout:  cfg.ExtractTimeout(),
 	})
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
@@ -239,11 +276,13 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		}
 	}()
 
-	go func() {
-		if err := worker.Start(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[Coven Worker] Background worker exited: %v", err)
-		}
-	}()
+	if !strings.EqualFold(cfg.Role, "extractor") {
+		go func() {
+			if err := worker.Start(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[Coven Worker] Background worker exited: %v", err)
+			}
+		}()
+	}
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,

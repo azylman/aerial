@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,11 +54,12 @@ func TestLoadConfigFile_DarkStackDefaults(t *testing.T) {
 		wantMaxSteps    int
 	}{
 		{
-			name:         "empty stack defaults to aerial per K8s N2",
-			extraYAML:    "",
-			wantStack:    "aerial",
-			wantTimeout:  120 * time.Second,
-			wantMaxSteps: 50,
+			name:            "empty stack defaults to aerial per K8s N2",
+			extraYAML:       "",
+			wantStack:       "aerial",
+			wantTranscripts: "http://transcripts.aerial",
+			wantTimeout:     120 * time.Second,
+			wantMaxSteps:    50,
 		},
 		{
 			name:            "explicit dark stack fields load",
@@ -68,6 +70,22 @@ func TestLoadConfigFile_DarkStackDefaults(t *testing.T) {
 			wantLLMEffort:   "",
 			wantTimeout:     30 * time.Second,
 			wantMaxSteps:    25,
+		},
+		{
+			name:            "indexer_url acts as alias for transcripts_url",
+			extraYAML:       "stack: 'canary'\nindexer_url: 'http://indexer-alias:4020'\n",
+			wantStack:       "canary",
+			wantTranscripts: "http://indexer-alias:4020",
+			wantTimeout:     120 * time.Second,
+			wantMaxSteps:    50,
+		},
+		{
+			name:            "non-aerial stack with empty transcripts_url does not default",
+			extraYAML:       "stack: 'canary'\n",
+			wantStack:       "canary",
+			wantTranscripts: "",
+			wantTimeout:     120 * time.Second,
+			wantMaxSteps:    50,
 		},
 	}
 
@@ -198,6 +216,78 @@ func TestNormalizeStack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := NormalizeStack(tc.stack); got != tc.want {
 				t.Errorf("NormalizeStack(%q) = %q, want %q", tc.stack, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFile_ExtractorRole(t *testing.T) {
+	extractorMinimalYAML := `port: '4011'
+database_url: 'postgres://localhost/coven_test'
+eri_url: 'http://eri.aerial'
+eri_llm_url: 'http://eri.aerial/internal/llm'
+role: 'extractor'
+stack: 'miorine'
+ollama:
+  base_url: 'http://ollama:11434'
+  model: 'all-minilm'
+  num_ctx: 512
+`
+	allRoleMinimalYAML := `port: '4011'
+database_url: 'postgres://localhost/coven_test'
+eri_url: 'http://eri.aerial'
+eri_llm_url: 'http://eri.aerial/internal/llm'
+role: 'all'
+stack: 'aerial'
+ollama:
+  base_url: 'http://ollama:11434'
+  model: 'all-minilm'
+  num_ctx: 512
+`
+
+	tests := []struct {
+		name      string
+		yaml      string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "extractor role succeeds without pr and config repo keys",
+			yaml:    extractorMinimalYAML,
+			wantErr: false,
+		},
+		{
+			name:      "all role requires pr_register_url",
+			yaml:      allRoleMinimalYAML,
+			wantErr:   true,
+			errSubstr: "pr_register_url is required",
+		},
+		{
+			name:      "malformed yaml returns error",
+			yaml:      "port: [bad yaml",
+			wantErr:   true,
+			errSubstr: "failed to parse YAML",
+		},
+		{
+			name:      "missing port returns error",
+			yaml:      strings.Replace(extractorMinimalYAML, "port: '4011'", "port: ''", 1),
+			wantErr:   true,
+			errSubstr: "port is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeCovenDarkConfig(t, tc.yaml)
+			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("error %q missing expected substring %q", err.Error(), tc.errSubstr)
+			}
+			if !tc.wantErr && cfg.Role != "extractor" {
+				t.Errorf("Role = %q, want 'extractor'", cfg.Role)
 			}
 		})
 	}

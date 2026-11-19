@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
@@ -27,6 +28,9 @@ type WorkerConfig struct {
 	CustomSkillsDir string
 	InitialDelay    time.Duration
 	TickInterval    time.Duration
+	Role            string
+	Stack           string
+	ExtractTimeout  time.Duration
 }
 
 // Worker coordinates periodic embedding backfills, fact extraction, and importance decay/pruning.
@@ -39,6 +43,9 @@ type Worker struct {
 	initialDelay    time.Duration
 	tickInterval    time.Duration
 	tickCount       int64
+	role            string
+	stack           string
+	extractTimeout  time.Duration
 }
 
 // NewWorker initializes a new background Worker instance.
@@ -52,6 +59,10 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	if customDir == "" {
 		customDir = DefaultCustomSkillsDir
 	}
+	extractTimeout := cfg.ExtractTimeout
+	if extractTimeout <= 0 {
+		extractTimeout = DefaultExtractTimeout
+	}
 	return &Worker{
 		store:           cfg.Store,
 		ollama:          cfg.Ollama,
@@ -61,23 +72,41 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		initialDelay:    initDelay,
 		tickInterval:    tickInt,
 		tickCount:       1,
+		role:            strings.TrimSpace(cfg.Role),
+		stack:           NormalizeStack(cfg.Stack),
+		extractTimeout:  extractTimeout,
 	}
 }
 
-// ExtractThread extracts facts for a single thread within a 2-minute timeout.
+// Stack returns the configured stack namespace, defaulting to DefaultStack ("aerial").
+func (w *Worker) Stack() string {
+	if w != nil && w.stack != "" {
+		return w.stack
+	}
+	return DefaultStack
+}
+
+// ExtractThread extracts facts for a single thread within the configured extraction timeout.
 func (w *Worker) ExtractThread(ctx context.Context, threadID string) error {
 	if w == nil {
 		return errors.New("coven worker is nil")
 	}
-	extractCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	timeout := w.extractTimeout
+	if timeout <= 0 {
+		timeout = DefaultExtractTimeout
+	}
+	extractCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return ExtractThreadFacts(extractCtx, w.store, w.ollama, w.llmClient, threadID)
 }
 
-// Start begins the maintenance worker, executing a startup catch-up extraction sweep
-// followed by the periodic maintenance loop (dreaming/pruning), running until ctx is canceled.
+// Start begins the maintenance worker, executing the periodic maintenance loop
+// (dreaming/pruning), running until ctx is canceled.
 func (w *Worker) Start(ctx context.Context) error {
-	w.RunStartupCatchUp(ctx)
+	if w != nil && strings.EqualFold(w.role, "extractor") {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 
 	if w.initialDelay > 0 {
 		timer := time.NewTimer(w.initialDelay)
