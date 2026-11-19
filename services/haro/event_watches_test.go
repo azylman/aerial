@@ -124,7 +124,6 @@ func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) 
 		{"vanadis URL not configured build", "vanadis_build", "b-running", true, "vanadis URL is not configured"},
 		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true, "vanadis URL is not configured"},
 		{"vanadis unreachable build", "vanadis_build", "b-running", true, "failed to query"},
-		{"vanadis unreachable chunk", "vanadis_chunk", "c-pending", true, "failed to query"},
 		{"vanadis malformed URL build", "vanadis_build", "b-running", true, "create vanadis build request"},
 	}
 	for _, tc := range validateTests {

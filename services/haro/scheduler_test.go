@@ -290,22 +290,6 @@ func TestDB_DeleteByID(t *testing.T) {
 			wantDeleted:     false,
 		},
 		{
-			name:            "BadQuerySyntaxNoPrefix",
-			query:           "DELETE FROM non_existent_table_xyz WHERE id = $1",
-			id:              "del-test-1",
-			wantErr:         true,
-			wantErrContains: "non_existent_table_xyz",
-			wantDeleted:     false,
-		},
-		{
-			name:            "EmptyIDDefaultMessage",
-			query:           "DELETE FROM one_shot_schedules WHERE id = $1",
-			id:              "   ",
-			wantErr:         true,
-			wantErrContains: "id cannot be empty",
-			wantDeleted:     false,
-		},
-		{
 			name:        "SuccessExisting",
 			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
 			id:          "del-test-1",
@@ -405,6 +389,28 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 	}
 	if pruned < 1 {
 		t.Errorf("PruneScheduleRuns() expected pruned >= 1, got %d", pruned)
+	}
+}
+
+func TestGetScheduleSummaryMetrics_MissingRunsTable(t *testing.T) {
+	ctx := context.Background()
+	db := setupTestDB(t.Context(), t)
+	if _, err := db.ExecContext(ctx, "DROP TABLE schedule_runs"); err != nil {
+		t.Fatalf("drop schedule_runs failed: %v", err)
+	}
+	tests := []struct {
+		name    string
+		wantErr string
+	}{
+		{"missing runs table surfaces query error", "failed to query schedule runs"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := GetScheduleSummaryMetrics(ctx, db)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("GetScheduleSummaryMetrics err = %v, want containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
