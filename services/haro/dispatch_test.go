@@ -13,7 +13,11 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/haro/internal/dispatch"
+	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
+	"github.com/azylman/aerial/services/haro/internal/ticker"
+	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
 type memoryMsg struct {
@@ -194,9 +198,9 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 			seedDispatchHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
 			seedDispatchRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, now)
 			msg := &memoryMsg{data: dispatchPayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed"}
-			err := HandleDispatchOutcome(ctx, db, msg)
+			err := ticker.HandleDispatchOutcome(ctx, db, msg)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleDispatchOutcome() error = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("ticker.HandleDispatchOutcome() error = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantNaked != msg.naked {
 				t.Errorf("msg.naked = %v, want %v", msg.naked, tc.wantNaked)
@@ -223,7 +227,7 @@ func TestHandleDispatchOutcome_OrphanHeartbeatRun(t *testing.T) {
 			ctx := context.Background()
 			seedDispatchRun(ctx, t, db, tc.runID, "heartbeat", tc.scheduleID, "running", now)
 			msg := &memoryMsg{data: dispatchPayload(t, "", &pubsub.DispatchOutcomeEvent{DispatchID: tc.runID, Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000}), subject: "aerial.dispatch.completed"}
-			if err := HandleDispatchOutcome(ctx, db, msg); err != nil {
+			if err := ticker.HandleDispatchOutcome(ctx, db, msg); err != nil {
 				t.Fatalf("HandleDispatchOutcome err = %v, want nil", err)
 			}
 			assertRunStatus(ctx, t, db, tc.runID, "completed", "", false)
@@ -470,10 +474,10 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	now := time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
 
 	// 1. HandleDispatchOutcome database == nil or msg == nil
-	if err := HandleDispatchOutcome(ctx, nil, &memoryMsg{}); err == nil {
+	if err := ticker.HandleDispatchOutcome(ctx, nil, &memoryMsg{}); err == nil {
 		t.Error("expected error for nil database")
 	}
-	if err := HandleDispatchOutcome(ctx, db, nil); err == nil {
+	if err := ticker.HandleDispatchOutcome(ctx, db, nil); err == nil {
 		t.Error("expected error for nil msg")
 	}
 
@@ -481,14 +485,14 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	closedDB := setupTestDB(t.Context(), t)
 	closedDB.Close()
 	failEvBytes, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"})
-	if err := HandleDispatchOutcome(ctx, closedDB, &memoryMsg{data: failEvBytes}); err == nil {
+	if err := ticker.HandleDispatchOutcome(ctx, closedDB, &memoryMsg{data: failEvBytes}); err == nil {
 		t.Error("expected error from HandleDispatchOutcome on closed DB")
 	}
 
 	// 3. Empty dispatch ID returns nil
 	emptyEvent := pubsub.DispatchOutcomeEvent{DispatchID: "   "}
 	emptyBytes, _ := json.Marshal(emptyEvent)
-	if err := HandleDispatchOutcome(ctx, db, &memoryMsg{data: emptyBytes}); err != nil {
+	if err := ticker.HandleDispatchOutcome(ctx, db, &memoryMsg{data: emptyBytes}); err != nil {
 		t.Errorf("expected nil for empty dispatch id, got %v", err)
 	}
 
@@ -529,7 +533,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		DurationMs:  0, // tests duration fallback to run.StartedAt
 	}
 	evBytes, _ := json.Marshal(evZeroStart)
-	if err := HandleDispatchOutcome(ctx, db, &memoryMsg{data: evBytes}); err != nil {
+	if err := ticker.HandleDispatchOutcome(ctx, db, &memoryMsg{data: evBytes}); err != nil {
 		t.Fatalf("HandleDispatchOutcome fallback failed: %v", err)
 	}
 
@@ -605,7 +609,7 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	// Subscribe failure branch for haro-events in initHaroJetStreamWithFactory
 	errSubBus := &failSubBus{Bus: pubsub.NewMemoryBus()}
 	defer errSubBus.Close()
-	dummyServer := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
+	dummyServer := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
 	if bus := initHaroJetStreamWithFactory(ctx, dummyServer, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return errSubBus, nil
 	}); bus == nil {
@@ -615,8 +619,8 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	// configureServerEventBus with dispatcher
 	dispSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer dispSrv.Close()
-	disp := NewHTTPPromptDispatcher(dispSrv.URL)
-	serverWithDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), disp)
+	disp := dispatch.NewHTTPPromptDispatcher(dispSrv.URL)
+	serverWithDisp := server.NewServer(tools.NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), disp)
 	memBusInit := pubsub.NewMemoryBus()
 	defer memBusInit.Close()
 	if bus := initHaroJetStreamWithFactory(ctx, serverWithDisp, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {

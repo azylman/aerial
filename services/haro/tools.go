@@ -11,8 +11,6 @@ package main
 // are the single source of truth.
 
 import (
-	"database/sql"
-
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
@@ -39,8 +37,3 @@ type (
 	ListEventWatchesArgs     = tools.ListEventWatchesArgs
 	CancelEventWatchArgs     = tools.CancelEventWatchArgs
 )
-
-// NewToolHandler builds a ToolHandler over database.
-func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
-	return tools.NewToolHandler(cfg, database)
-}
