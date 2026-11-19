@@ -1,4 +1,4 @@
-/* Service diagnostic drawer body (ported from static/style.css). */
+/* Service diagnostic drawer body (Warm Stone & Ink daylight surfaces). */
 
 .diag-grid {
     display: grid;
@@ -8,10 +8,10 @@
 }
 
 .diag-item {
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--bg-elevated);
     padding: 0.8rem 1rem;
     border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--card-border);
 }
 
 .diag-item .lbl {
@@ -24,16 +24,16 @@
 .diag-item .val {
     font-size: 1rem;
     font-weight: 700;
-    color: #fff;
+    color: var(--text-primary);
 }
 
 .console-box {
-    background: #040609;
-    border: 1px solid rgba(0, 242, 254, 0.2);
+    background: #141413;
+    border: 1px solid var(--card-border);
     border-radius: 8px;
     padding: 1rem;
     font-family: var(--font-mono);
-    color: var(--neon-cyan);
+    color: #f6f5f1;
     font-size: 0.8rem;
     line-height: 1.5;
 }

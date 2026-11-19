@@ -1,5 +1,6 @@
-/* Section chrome shared by every view (ported verbatim from static/style.css): summary bar,
-   section title bars and badges, idle rows, pulse dots and the live timer badge. */
+/* Section chrome shared by every view: summary bar, section title bars and badges,
+   idle rows, pulse dots and the live timer badge (Warm Stone & Ink daylight surfaces). */
+
 /* --- SUMMARY BAR --- */
 .summary-bar {
     display: grid;
@@ -14,6 +15,7 @@
     border: 1px solid var(--card-border);
     border-radius: 10px;
     padding: 1.25rem;
+    box-shadow: var(--accent-glow);
     transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     overflow: hidden;
 }
@@ -21,13 +23,13 @@
 .summary-card:hover {
     border-color: var(--card-border-hover);
     transform: translateY(-2px);
-    box-shadow: 0 10px 25px -5px rgba(0, 242, 254, 0.15);
+    box-shadow: 0 4px 12px rgba(20, 20, 19, 0.08);
 }
 
 .summary-card .label {
     display: block;
     font-size: 0.7rem;
-    letter-spacing: 1.5px;
+    letter-spacing: 1px;
     color: var(--text-muted);
     margin-bottom: 0.5rem;
     font-weight: 700;
@@ -37,8 +39,9 @@
     font-size: 1.6rem;
     font-weight: 800;
     font-family: var(--font-heading);
-    letter-spacing: 1px;
-    color: #fff;
+    letter-spacing: 0.5px;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
 }
 
 .summary-card .sub-label {
@@ -48,10 +51,10 @@
     margin-top: 0.4rem;
 }
 
-.text-success { color: var(--neon-green) !important; text-shadow: 0 0 10px rgba(0, 255, 135, 0.4); }
-.text-danger { color: var(--neon-red) !important; text-shadow: 0 0 10px rgba(255, 42, 109, 0.4); }
-.text-cyan { color: var(--neon-cyan) !important; text-shadow: 0 0 10px rgba(0, 242, 254, 0.4); }
-.text-warning { color: var(--neon-amber) !important; text-shadow: 0 0 10px rgba(255, 183, 0, 0.4); }
+.text-success { color: var(--accent-emerald, #15803d) !important; }
+.text-danger { color: var(--accent-crimson, #b91c1c) !important; }
+.text-cyan { color: var(--accent-primary, #c2410c) !important; }
+.text-warning { color: var(--accent-amber, #b45309) !important; }
 
 /* --- SECTION TITLE BAR --- */
 .section-title-bar {
@@ -60,7 +63,7 @@
     align-items: center;
     margin-bottom: 1rem;
     padding-bottom: 0.5rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid var(--card-border);
 }
 
 .section-title {
@@ -73,8 +76,8 @@
     font-family: var(--font-heading);
     font-size: 1.1rem;
     font-weight: 700;
-    letter-spacing: 1.5px;
-    color: #fff;
+    letter-spacing: 0.5px;
+    color: var(--text-primary);
 }
 
 .title-icon {
@@ -86,68 +89,60 @@
     font-weight: 700;
     padding: 0.25rem 0.6rem;
     border-radius: 4px;
-    background: rgba(0, 242, 254, 0.1);
-    color: var(--neon-cyan);
-    border: 1px solid rgba(0, 242, 254, 0.3);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--card-border);
 }
 
 /* --- LIVE AGENT TASK QUEUE --- */
 
 .section-badge.live {
-    background: rgba(0, 255, 135, 0.15);
-    color: var(--neon-green);
-    border-color: var(--neon-green);
-    box-shadow: 0 0 12px rgba(0, 255, 135, 0.25);
+    background: rgba(21, 128, 61, 0.12);
+    color: var(--accent-emerald, #15803d);
+    border-color: rgba(21, 128, 61, 0.3);
 }
 
 .section-badge.active, .section-badge.building {
-    background: rgba(255, 0, 127, 0.2);
-    color: var(--neon-magenta);
-    border-color: var(--neon-magenta);
-    animation: pulse-border 1.5s infinite alternate;
+    background: rgba(194, 65, 12, 0.12);
+    color: var(--accent-primary, #c2410c);
+    border-color: rgba(194, 65, 12, 0.3);
 }
 
 .section-badge.failed {
-    background: rgba(255, 42, 109, 0.25);
-    color: var(--neon-red);
-    border-color: var(--neon-red);
-    box-shadow: 0 0 15px rgba(255, 42, 109, 0.4);
-    animation: pulse-border 1s infinite alternate;
+    background: rgba(185, 28, 28, 0.12);
+    color: var(--accent-crimson, #b91c1c);
+    border-color: rgba(185, 28, 28, 0.3);
 }
 
 .section-badge.swapping {
-    background: rgba(176, 38, 255, 0.2);
-    color: #b026ff;
-    border-color: #b026ff;
-    box-shadow: 0 0 15px rgba(176, 38, 255, 0.35);
+    background: rgba(67, 56, 202, 0.12);
+    color: var(--accent-indigo, #4338ca);
+    border-color: rgba(67, 56, 202, 0.3);
 }
 
 .section-badge.pulling {
-    background: rgba(0, 242, 254, 0.2);
-    color: var(--neon-cyan);
-    border-color: var(--neon-cyan);
+    background: rgba(194, 65, 12, 0.12);
+    color: var(--accent-primary, #c2410c);
+    border-color: rgba(194, 65, 12, 0.3);
 }
-
 
 .deploy-timer-badge {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background: rgba(0, 0, 0, 0.5);
-    border: 1px solid var(--neon-magenta);
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
     padding: 3px 8px;
     border-radius: 6px;
     font-size: 0.75rem;
-    color: #fff;
-    box-shadow: 0 0 10px rgba(255, 0, 127, 0.3);
+    color: var(--text-primary);
 }
 
 .pulse-indicator {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background-color: var(--neon-magenta);
-    box-shadow: 0 0 6px var(--neon-magenta);
+    background-color: var(--accent-primary, #c2410c);
 }
 
 html.motion-ready .pulse-indicator {
@@ -165,7 +160,7 @@ html.motion-ready .pulse-indicator {
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    color: var(--neon-green);
+    color: var(--accent-emerald, #15803d);
 }
 
 /* --- SERVICES GRID --- */
@@ -184,13 +179,11 @@ html.motion-ready .pulse-indicator {
 }
 
 .pulse-dot.healthy {
-    background-color: var(--neon-green);
-    box-shadow: 0 0 8px var(--neon-green);
+    background-color: var(--accent-emerald, #15803d);
 }
 
 .pulse-dot.unhealthy {
-    background-color: var(--neon-red);
-    box-shadow: 0 0 8px var(--neon-red);
+    background-color: var(--accent-crimson, #b91c1c);
 }
 
 .pulse-dot.unhealthy::after {
@@ -201,7 +194,7 @@ html.motion-ready .pulse-indicator {
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    border: 1.5px solid var(--neon-red);
+    border: 1.5px solid var(--accent-crimson, #b91c1c);
 }
 
 html.motion-ready .pulse-dot.unhealthy::after {
@@ -212,7 +205,6 @@ html.motion-ready .pulse-dot.unhealthy::after {
     0% { transform: scale(0.5); opacity: 0.9; }
     80%, 100% { transform: scale(1.6); opacity: 0; }
 }
-
 
 /* React polish: inline SVG glyphs replace the vanilla emoji chrome inside badges and pills. */
 /* Glyphs scale with the owning badge's font and never grow its line box. */
@@ -240,7 +232,8 @@ html.motion-ready .pulse-dot.unhealthy::after {
 
 @media (max-width: 768px) {
     .summary-bar {
-        grid-template-columns: 1fr;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.75rem;
     }
 }
 
