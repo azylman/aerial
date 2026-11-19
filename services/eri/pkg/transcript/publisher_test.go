@@ -175,6 +175,47 @@ func TestPublisher_DrainEnqueueDuringDrainKeepsSingleOrderEntry(t *testing.T) {
 	}
 }
 
+// TestPublisher_DrainFailureKeepsBatchesEnqueuedDuringFlight covers an Enqueue
+// to the same session landing while its publish is blocked in flight: when
+// that publish fails, Drain must abandon only the snapshotted chain and keep
+// the never-attempted batch for the next Drain instead of dropping it.
+func TestPublisher_DrainFailureKeepsBatchesEnqueuedDuringFlight(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	var published []transcriptwire.TranscriptStepBatch
+	publish := func(_ context.Context, b transcriptwire.TranscriptStepBatch) error {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+			return errors.New("publish boom")
+		}
+		published = append(published, b)
+		return nil
+	}
+	p := NewPublisher("aerial", publish)
+	p.Enqueue(testBatch("s1", 0, 0, false))
+	done := make(chan error, 1)
+	go func() { done <- p.Drain(context.Background()) }()
+	<-started
+	p.Enqueue(testBatch("s1", 1, 1, true))
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatalf("expected Drain error from s1 failure, got nil")
+	}
+	if got := p.PendingSessions(); len(got) != 1 || got[0] != "s1" {
+		t.Fatalf("PendingSessions = %q, want exactly [s1]", got)
+	}
+	if n := p.PendingCount("s1"); n != 1 {
+		t.Fatalf("PendingCount(s1) = %d, want 1", n)
+	}
+	if err := p.Drain(context.Background()); err != nil {
+		t.Fatalf("second Drain failed: %v", err)
+	}
+	assertEnvelopesEqual(t, published, []publishedEnvelope{{first: 1, last: 1, final: true}})
+}
+
 type publishedEnvelope struct {
 	first int
 	last  int

@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -15,7 +14,6 @@ func TestResolveThreadForSession(t *testing.T) {
 		rotate  string
 		query   string
 		want    string
-		wantErr string
 	}{
 		{name: "empty session resolves empty", query: "   ", want: ""},
 		{name: "unknown session resolves empty", query: "nope", want: ""},
@@ -37,15 +35,6 @@ func TestResolveThreadForSession(t *testing.T) {
 				mustOK(t, store.RotateSessionID(ctx, tc.thread, tc.rotate), "RotateSessionID")
 			}
 			got, err := store.ResolveThreadForSession(ctx, tc.query)
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
