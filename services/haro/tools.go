@@ -15,17 +15,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/robfig/cron/v3"
+
+	"github.com/azylman/aerial/services/haro/internal/model"
 )
 
-const (
-	fieldStatus  = "status"
-	fieldEffort  = "effort"
-	fieldMessage = "message"
-)
+// Shared field keys (fieldStatus, fieldEffort, fieldMessage) now live in
+// internal/model; pure.go keeps zero-logic aliases for this package.
 
 var (
-	cronParser           = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	reRelative           = regexp.MustCompile(`^(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$`)
 	explicitZonedLayouts = []string{time.RFC3339, time.RFC3339Nano}
 	localLayouts         = []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02T15:04", "2006-01-02 15:04", "2006-01-02"}
@@ -94,20 +91,10 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 	return time.Time{}, fmt.Errorf("unrecognized run_at format %q: expected ISO timestamp (e.g. 2026-08-28T21:00:00Z) or relative duration (e.g. 30m, 2h, 1d)", raw)
 }
 
+// CalculateNextCronRun delegates to the internal/model cron parser so tools
+// callers keep compiling; the logic lives in internal/model/cron.go.
 func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
-	sched, err := cronParser.Parse(cronExpr)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid cron expression %q: %w", cronExpr, err)
-	}
-	tzTrimmed := strings.TrimSpace(timezone)
-	if tzTrimmed == "" {
-		return time.Time{}, fmt.Errorf("timezone cannot be empty")
-	}
-	loc, err := time.LoadLocation(tzTrimmed)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err)
-	}
-	return sched.Next(from.In(loc)).UTC(), nil
+	return model.CalculateNextCronRun(cronExpr, timezone, from)
 }
 
 type ToolHandler struct {

@@ -46,162 +46,6 @@ func setupTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	return db
 }
 
-func TestPureHelpers_IsScheduleStale(t *testing.T) {
-	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name        string
-		scheduledAt time.Time
-		maxOverdue  time.Duration
-		wantStale   bool
-	}{
-		{
-			name:        "not stale within maxOverdue",
-			scheduledAt: now.Add(-1 * time.Hour),
-			maxOverdue:  24 * time.Hour,
-			wantStale:   false,
-		},
-		{
-			name:        "stale when overdue by more than maxOverdue",
-			scheduledAt: now.Add(-25 * time.Hour),
-			maxOverdue:  24 * time.Hour,
-			wantStale:   true,
-		},
-		{
-			name:        "zero maxOverdue never reports stale",
-			scheduledAt: now.Add(-48 * time.Hour),
-			maxOverdue:  0,
-			wantStale:   false,
-		},
-		{
-			name:        "negative maxOverdue never reports stale",
-			scheduledAt: now.Add(-48 * time.Hour),
-			maxOverdue:  -1 * time.Hour,
-			wantStale:   false,
-		},
-		{
-			name:        "future scheduledAt is not stale",
-			scheduledAt: now.Add(1 * time.Hour),
-			maxOverdue:  24 * time.Hour,
-			wantStale:   false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := IsScheduleStale(tc.scheduledAt, now, tc.maxOverdue)
-			if got != tc.wantStale {
-				t.Errorf("IsScheduleStale() = %v, want %v", got, tc.wantStale)
-			}
-		})
-	}
-}
-
-func TestPureHelpers_ShouldPruneRuns(t *testing.T) {
-	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name        string
-		lastPrune   time.Time
-		interval    time.Duration
-		shouldPrune bool
-	}{
-		{
-			name:        "zero lastPrune triggers prune",
-			lastPrune:   time.Time{},
-			interval:    24 * time.Hour,
-			shouldPrune: true,
-		},
-		{
-			name:        "interval elapsed triggers prune",
-			lastPrune:   now.Add(-25 * time.Hour),
-			interval:    24 * time.Hour,
-			shouldPrune: true,
-		},
-		{
-			name:        "exact interval triggers prune",
-			lastPrune:   now.Add(-24 * time.Hour),
-			interval:    24 * time.Hour,
-			shouldPrune: true,
-		},
-		{
-			name:        "less than interval does not trigger prune",
-			lastPrune:   now.Add(-12 * time.Hour),
-			interval:    24 * time.Hour,
-			shouldPrune: false,
-		},
-		{
-			name:        "zero or negative interval does not trigger prune",
-			lastPrune:   now.Add(-48 * time.Hour),
-			interval:    0,
-			shouldPrune: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := ShouldPruneRuns(now, tc.lastPrune, tc.interval)
-			if got != tc.shouldPrune {
-				t.Errorf("ShouldPruneRuns() = %v, want %v", got, tc.shouldPrune)
-			}
-		})
-	}
-}
-
-func TestPureHelpers_CalculateNextRun(t *testing.T) {
-	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name     string
-		cronExpr string
-		timezone string
-		wantErr  bool
-		wantHour int
-	}{
-		{
-			name:     "valid cron expression UTC",
-			cronExpr: "0 12 * * *",
-			timezone: "UTC",
-			wantErr:  false,
-			wantHour: 12,
-		},
-		{
-			name:     "valid cron expression America/Los_Angeles",
-			cronExpr: "0 12 * * *",
-			timezone: "America/Los_Angeles",
-			wantErr:  false,
-			wantHour: 19, // 12 PM PDT is 19:00 UTC
-		},
-		{
-			name:     "invalid cron expression",
-			cronExpr: "not a cron",
-			timezone: "UTC",
-			wantErr:  true,
-		},
-		{
-			name:     "invalid timezone",
-			cronExpr: "0 12 * * *",
-			timezone: "NonExistent/Zone",
-			wantErr:  true,
-		},
-		{
-			name:     "empty timezone",
-			cronExpr: "0 12 * * *",
-			timezone: "",
-			wantErr:  true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			next, err := CalculateNextRun(tc.cronExpr, tc.timezone, now)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("CalculateNextRun() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && next.Hour() != tc.wantHour {
-				t.Errorf("CalculateNextRun() hour = %d, want %d", next.Hour(), tc.wantHour)
-			}
-		})
-	}
-}
-
 func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t.Context(), t)
@@ -254,6 +98,20 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	msgWithServer := &memoryMsg{data: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
 	if err := HandleOneShotJob(ctx, srv, nil, msgWithServer); err != nil {
 		t.Fatalf("HandleOneShotJob with server failed: %v", err)
+	}
+}
+
+func TestHandleOneShotJob_ClosedDB(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	closedDB, err := OpenDB(ctx, &Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	msgClosed := &memoryMsg{data: []byte(`{"id":"os-closed-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}
+	if err := HandleOneShotJob(ctx, nil, closedDB, msgClosed); err == nil {
+		t.Error("expected error for closed database")
 	}
 }
 
@@ -531,6 +389,28 @@ func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 	}
 	if pruned < 1 {
 		t.Errorf("PruneScheduleRuns() expected pruned >= 1, got %d", pruned)
+	}
+}
+
+func TestGetScheduleSummaryMetrics_MissingRunsTable(t *testing.T) {
+	ctx := context.Background()
+	db := setupTestDB(t.Context(), t)
+	if _, err := db.ExecContext(ctx, "DROP TABLE schedule_runs"); err != nil {
+		t.Fatalf("drop schedule_runs failed: %v", err)
+	}
+	tests := []struct {
+		name    string
+		wantErr string
+	}{
+		{"missing runs table surfaces query error", "failed to query schedule runs"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := GetScheduleSummaryMetrics(ctx, db)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("GetScheduleSummaryMetrics err = %v, want containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

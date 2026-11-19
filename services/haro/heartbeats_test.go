@@ -12,118 +12,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
-	completedTime := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name         string
-		schedule     HeartbeatSchedule
-		wantContains []string
-	}{
-		{
-			name: "default title when empty with initial watermark",
-			schedule: HeartbeatSchedule{
-				ID:          "hb-1",
-				TargetID:    "1234567890",
-				TitlePrefix: "",
-				Prompt:      "Check node exporter disk",
-			},
-			wantContains: []string{
-				"Target Discord Channel ID for Escalations: 1234567890",
-				`channel_id "1234567890"`,
-				`title "Heartbeat Alert"`,
-				"Check node exporter disk",
-				`<\HEARTBEAT_INSTRUCTIONS>`,
-				"Last Successful Check Started At: none (initial run)",
-			},
-		},
-		{
-			name: "custom title prefix and trimmed fields with last_completed_at watermark",
-			schedule: HeartbeatSchedule{
-				ID:              "hb-2",
-				TargetID:        " 9876543210 ",
-				TitlePrefix:     " Disk Space Alert ",
-				Prompt:          "  Check high disk usage  ",
-				LastCompletedAt: &completedTime,
-			},
-			wantContains: []string{
-				"Target Discord Channel ID for Escalations: 9876543210",
-				`channel_id "9876543210"`,
-				`title "Disk Space Alert"`,
-				"Check high disk usage",
-				"Last Successful Check Started At: 2026-11-14T01:00:00Z (1794618000)",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := BuildHeartbeatPrompt(tc.schedule)
-			for _, substr := range tc.wantContains {
-				if !strings.Contains(got, substr) {
-					t.Errorf("BuildHeartbeatPrompt() missing %q, got:\n%s", substr, got)
-				}
-			}
-		})
-	}
-}
-
-func TestPureHelpers_NormalizeEffort(t *testing.T) {
-	tests := []struct {
-		name       string
-		input      string
-		wantResult string
-		wantErr    bool
-	}{
-		{name: "empty defaults to low", input: "", wantResult: "low", wantErr: false},
-		{name: "whitespace defaults to low", input: "   ", wantResult: "low", wantErr: false},
-		{name: "low lowercase", input: "low", wantResult: "low", wantErr: false},
-		{name: "low uppercase trimmed", input: " LOW ", wantResult: "low", wantErr: false},
-		{name: "medium lowercase", input: "medium", wantResult: "medium", wantErr: false},
-		{name: "medium uppercase", input: "MEDIUM", wantResult: "medium", wantErr: false},
-		{name: "high lowercase", input: "high", wantResult: "high", wantErr: false},
-		{name: "high uppercase", input: "HIGH", wantResult: "high", wantErr: false},
-		{name: "invalid tier ultra", input: "ultra", wantResult: "", wantErr: true},
-		{name: "invalid tier numeric", input: "10", wantResult: "", wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := NormalizeEffort(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("NormalizeEffort(%q) error = %v, wantErr = %v", tc.input, err, tc.wantErr)
-			}
-			if got != tc.wantResult {
-				t.Errorf("NormalizeEffort(%q) = %q, want %q", tc.input, got, tc.wantResult)
-			}
-		})
-	}
-}
-
-func TestPureHelpers_IsNumericSnowflake(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{name: "empty string", input: "", want: false},
-		{name: "whitespace only", input: "   ", want: false},
-		{name: "valid numeric snowflake", input: "1562847268833337377", want: true},
-		{name: "valid short numeric", input: "12345", want: true},
-		{name: "valid with whitespace padding", input: " 1562847268833337377 ", want: true},
-		{name: "alphanumeric string", input: "12345abc", want: false},
-		{name: "alpha string", input: "general", want: false},
-		{name: "negative number", input: "-12345", want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsNumericSnowflake(tc.input); got != tc.want {
-				t.Errorf("IsNumericSnowflake(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
 func testHeartbeatInsertAndGet(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) HeartbeatSchedule {
 	t.Helper()
 	hb1 := HeartbeatSchedule{
@@ -254,6 +142,19 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 	if err != nil || hasRunningEmpty {
 		t.Errorf("HasRunningHeartbeatRun with empty scheduleID got (%v, %v), want (false, nil)", hasRunningEmpty, err)
 	}
+
+	// Invalid effort falls back to low on heartbeat insert
+	hbInvalid := HeartbeatSchedule{ID: "hb-invalid-effort", TargetID: "chan-1", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", Effort: "bogus", NextRunAt: now, Enabled: true, CreatedAt: now}
+	if err = InsertHeartbeatSchedule(ctx, db, hbInvalid); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule invalid effort failed: %v", err)
+	}
+	gotHB, err := GetHeartbeatSchedule(ctx, db, "hb-invalid-effort")
+	if err != nil {
+		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
+	}
+	if gotHB.Effort != "low" {
+		t.Errorf("invalid effort fallback = %q, want %q", gotHB.Effort, "low")
+	}
 }
 
 func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
@@ -369,6 +270,13 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 		t.Fatalf("schedule_id is %T, want string", seedMap["schedule_id"])
 	}
 
+	// Seed a heartbeat with a stored cron expression that no longer parses,
+	// bypassing tool validation via direct insert.
+	badCronHB := HeartbeatSchedule{ID: "hb-bad-cron", TargetID: "1562847268833337377", CronExpr: "bad cron", Prompt: "p", Timezone: "UTC", Effort: "low", NextRunAt: time.Now().UTC(), Enabled: true, CreatedAt: time.Now().UTC()}
+	if err := InsertHeartbeatSchedule(ctx, db, badCronHB); err != nil {
+		t.Fatalf("failed to seed bad-cron heartbeat: %v", err)
+	}
+
 	tests := []struct {
 		name    string
 		args    map[string]any
@@ -402,6 +310,11 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 		{
 			name:    "invalid effort",
 			args:    map[string]any{"id": hbID, "effort": "extreme"},
+			wantErr: true,
+		},
+		{
+			name:    "recompute fails on stored invalid cron",
+			args:    map[string]any{"id": "hb-bad-cron", "timezone": "UTC"},
 			wantErr: true,
 		},
 		{
