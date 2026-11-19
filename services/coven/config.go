@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -56,21 +58,68 @@ type OllamaConfig struct {
 	NumCtx      int    `yaml:"num_ctx"`
 }
 
+// DefaultStack is the stack every coven serves when no stack is configured (K8s N2).
+const DefaultStack = "aerial"
+
+// DefaultExtractTimeout is the fallback per-thread extraction deadline.
+const DefaultExtractTimeout = 120 * time.Second
+
+// DefaultExtractMaxSteps caps one extraction batch before timeout-driven halving.
+const DefaultExtractMaxSteps = 50
+
 // Config represents runtime configuration for the memory MCP server.
 type Config struct {
-	Port            string       `yaml:"port"`
-	DatabaseURL     string       `yaml:"database_url"`
-	EriURL          string       `yaml:"eri_url"`
-	EriLLMURL       string       `yaml:"eri_llm_url"`
-	Ollama          OllamaConfig `yaml:"ollama"`
-	CustomSkillsDir string       `yaml:"custom_skills_dir"`
-	RulesDir        string       `yaml:"rules_dir"`
-	GitHubPAT       string       `yaml:"github_pat"`
-	ConfigRepoOwner string       `yaml:"config_repo_owner"`
-	ConfigRepoName  string       `yaml:"config_repo_name"`
-	PRRegisterURL   string       `yaml:"pr_register_url"`
-	SystemChannelID string       `yaml:"system_channel_id"`
-	NATSURL         string       `yaml:"nats_url"`
+	Port                  string       `yaml:"port"`
+	DatabaseURL           string       `yaml:"database_url"`
+	EriURL                string       `yaml:"eri_url"`
+	EriLLMURL             string       `yaml:"eri_llm_url"`
+	Ollama                OllamaConfig `yaml:"ollama"`
+	CustomSkillsDir       string       `yaml:"custom_skills_dir"`
+	RulesDir              string       `yaml:"rules_dir"`
+	GitHubPAT             string       `yaml:"github_pat"`
+	ConfigRepoOwner       string       `yaml:"config_repo_owner"`
+	ConfigRepoName        string       `yaml:"config_repo_name"`
+	PRRegisterURL         string       `yaml:"pr_register_url"`
+	SystemChannelID       string       `yaml:"system_channel_id"`
+	NATSURL               string       `yaml:"nats_url"`
+	Stack                 string       `yaml:"stack"`
+	Role                  string       `yaml:"role"`
+	TranscriptsURL        string       `yaml:"transcripts_url"`
+	LLMEffort             string       `yaml:"llm_effort"`
+	ExtractTimeoutSeconds int          `yaml:"extract_timeout_seconds"`
+	ExtractMaxSteps       int          `yaml:"extract_max_steps"`
+}
+
+// NormalizeStack trims s and defaults empty stacks to DefaultStack.
+func NormalizeStack(s string) string {
+	if trimmed := strings.TrimSpace(s); trimmed != "" {
+		return trimmed
+	}
+	return DefaultStack
+}
+
+// EffectiveStack returns the configured stack, defaulting to DefaultStack.
+func (c *Config) EffectiveStack() string {
+	if c == nil {
+		return DefaultStack
+	}
+	return NormalizeStack(c.Stack)
+}
+
+// ExtractTimeout returns the configured per-thread extraction deadline.
+func (c *Config) ExtractTimeout() time.Duration {
+	if c == nil || c.ExtractTimeoutSeconds <= 0 {
+		return DefaultExtractTimeout
+	}
+	return time.Duration(c.ExtractTimeoutSeconds) * time.Second
+}
+
+// ExtractBatchLimit returns the configured max steps per extraction batch.
+func (c *Config) ExtractBatchLimit() int {
+	if c == nil || c.ExtractMaxSteps <= 0 {
+		return DefaultExtractMaxSteps
+	}
+	return c.ExtractMaxSteps
 }
 
 func resolveFirstNonEmpty(values ...string) string {
@@ -80,6 +129,14 @@ func resolveFirstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// resolvePositiveInt prefers a positive env override, falling back to the YAML value.
+func resolvePositiveInt(env string, yamlVal int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(env)); err == nil && n > 0 {
+		return n
+	}
+	return yamlVal
 }
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
@@ -115,6 +172,12 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		EriPRRegisterURL string       `yaml:"eri_pr_register_url"`
 		SystemChannelID  string       `yaml:"system_channel_id"`
 		NATSURL          string       `yaml:"nats_url"`
+		Stack            string       `yaml:"stack"`
+		Role             string       `yaml:"role"`
+		TranscriptsURL   string       `yaml:"transcripts_url"`
+		LLMEffort        string       `yaml:"llm_effort"`
+		ExtractTimeout   int          `yaml:"extract_timeout_seconds"`
+		ExtractMaxSteps  int          `yaml:"extract_max_steps"`
 	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
@@ -175,20 +238,30 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		systemChannelID = ""
 	}
 	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
+	stack := resolveFirstNonEmpty(os.Getenv("COVEN_STACK"), os.Getenv("STACK"), ycfg.Stack)
+	role := resolveFirstNonEmpty(os.Getenv("COVEN_ROLE"), ycfg.Role)
+	transcriptsURL := resolveFirstNonEmpty(os.Getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL)
+	llmEffort := resolveFirstNonEmpty(os.Getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
 	return &Config{
-		Port:            port,
-		DatabaseURL:     databaseURL,
-		EriURL:          eriURL,
-		EriLLMURL:       eriLLMURL,
-		CustomSkillsDir: customSkillsDir,
-		RulesDir:        rulesDir,
-		GitHubPAT:       gitHubPAT,
-		ConfigRepoOwner: configRepoOwner,
-		ConfigRepoName:  configRepoName,
-		PRRegisterURL:   prRegisterURL,
-		SystemChannelID: systemChannelID,
-		NATSURL:         natsURL,
+		Port:                  port,
+		DatabaseURL:           databaseURL,
+		EriURL:                eriURL,
+		EriLLMURL:             eriLLMURL,
+		CustomSkillsDir:       customSkillsDir,
+		RulesDir:              rulesDir,
+		GitHubPAT:             gitHubPAT,
+		ConfigRepoOwner:       configRepoOwner,
+		ConfigRepoName:        configRepoName,
+		PRRegisterURL:         prRegisterURL,
+		SystemChannelID:       systemChannelID,
+		NATSURL:               natsURL,
+		Stack:                 strings.TrimSpace(stack),
+		Role:                  strings.TrimSpace(role),
+		TranscriptsURL:        strings.TrimSpace(transcriptsURL),
+		LLMEffort:             strings.TrimSpace(llmEffort),
+		ExtractTimeoutSeconds: resolvePositiveInt(os.Getenv("EXTRACT_TIMEOUT_SECONDS"), ycfg.ExtractTimeout),
+		ExtractMaxSteps:       resolvePositiveInt(os.Getenv("EXTRACT_MAX_STEPS"), ycfg.ExtractMaxSteps),
 		Ollama: OllamaConfig{
 			BaseURL:     ollamaBaseURL,
 			Model:       ollamaModel,
