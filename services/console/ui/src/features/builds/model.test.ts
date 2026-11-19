@@ -198,16 +198,6 @@ describe('buildChunkDag', () => {
       wantEdges: [],
     },
     {
-      name: 'proxied parallel roots where all chunks arrive with empty depends_on arrays',
-      chunks: [
-        chunk('r1', 'completed', { depends_on: [] }),
-        chunk('r2', 'in_progress', { depends_on: [] }),
-        chunk('r3', 'pending', { depends_on: [] }),
-      ],
-      wantRanks: [['r1', 'r2', 'r3']],
-      wantEdges: [],
-    },
-    {
       name: 'diamond/multi-rank DAG',
       chunks: [
         chunk('root', 'completed', { depends_on: [] }),

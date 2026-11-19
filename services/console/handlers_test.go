@@ -546,40 +546,40 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(BuildsAPIResponse{
-				Status:         "ok",
-				Total:          1,
-				RunningCount:   1,
-				QueuedCount:    0,
-				CompletedCount: 0,
-				Builds: []VanadisBuildDTO{
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":          "ok",
+				"total":           1,
+				"running_count":   1,
+				"queued_count":    0,
+				"completed_count": 0,
+				"builds": []map[string]any{
 					{
-						ID:            "build-101",
-						Tier:          2,
-						Title:         "Vanadis Feature",
-						SharedContext: "drawer-only-shared-context",
-						Status:        "running",
-						QueueState:    "running",
-						Chunks: []VanadisChunkDTO{
+						"id":             "build-101",
+						"tier":           2,
+						"title":          "Vanadis Feature",
+						"shared_context": "drawer-only-shared-context",
+						"status":         "running",
+						"queue_state":    "running",
+						"chunks": []map[string]any{
 							{
-								ID:         "chunk-0",
-								BuildID:    "build-101",
-								ChunkIndex: 0,
-								Title:      "Chunk 0",
-								DependsOn:  []string{},
-								Status:     "completed",
+								"id":          "chunk-0",
+								"build_id":    "build-101",
+								"chunk_index": 0,
+								"title":       "Chunk 0",
+								"depends_on":  nil,
+								"status":      "completed",
 							},
 							{
-								ID:                 "chunk-1",
-								BuildID:            "build-101",
-								ChunkIndex:         1,
-								Title:              "Chunk 1",
-								Instructions:       "drawer-only-instructions",
-								TargetFiles:        []string{"main.go"},
-								TargetSymbols:      []string{"Run"},
-								AcceptanceCriteria: []string{"pass"},
-								DependsOn:          []string{"chunk-0"},
-								Status:             "completed",
+								"id":                  "chunk-1",
+								"build_id":            "build-101",
+								"chunk_index":         1,
+								"title":               "Chunk 1",
+								"instructions":        "drawer-only-instructions",
+								"target_files":        []string{"main.go"},
+								"target_symbols":      []string{"Run"},
+								"acceptance_criteria": []string{"pass"},
+								"depends_on":          []string{"chunk-0"},
+								"status":              "completed",
 							},
 						},
 					},
@@ -591,34 +591,50 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 			case "build-101":
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"build": VanadisBuildDTO{
-						ID:            "build-101",
-						Title:         "Vanadis Feature",
-						SharedContext: "drawer-only-shared-context",
-						Status:        "running",
-					},
-					"chunks": []VanadisChunkDTO{
-						{
-							ID:         "chunk-0",
-							BuildID:    "build-101",
-							ChunkIndex: 0,
-							Title:      "Chunk 0",
-							DependsOn:  []string{},
-							Status:     "completed",
-						},
-						{
-							ID:           "chunk-1",
-							BuildID:      "build-101",
-							ChunkIndex:   1,
-							Title:        "Chunk 1",
-							Instructions: "drawer-only-instructions",
-							DependsOn:    []string{"chunk-0"},
-							Status:       "completed",
+					"build": map[string]any{
+						"id":             "build-101",
+						"title":          "Vanadis Feature",
+						"shared_context": "drawer-only-shared-context",
+						"status":         "running",
+						"chunks": []map[string]any{
+							{
+								"id":         "chunk-build-0",
+								"title":      "Chunk Build 0",
+								"depends_on": nil,
+								"status":     "completed",
+							},
 						},
 					},
-					"entry": VanadisBuildDTO{
-						ID:         "build-101",
-						QueueState: "running",
+					"chunks": []map[string]any{
+						{
+							"id":          "chunk-0",
+							"build_id":    "build-101",
+							"chunk_index": 0,
+							"title":       "Chunk 0",
+							"depends_on":  nil,
+							"status":      "completed",
+						},
+						{
+							"id":           "chunk-1",
+							"build_id":     "build-101",
+							"chunk_index":  1,
+							"title":        "Chunk 1",
+							"instructions": "drawer-only-instructions",
+							"depends_on":   []string{"chunk-0"},
+							"status":       "completed",
+						},
+					},
+					"entry": map[string]any{
+						"id":          "build-101",
+						"queue_state": "running",
+						"chunks": []map[string]any{
+							{
+								"id":         "chunk-entry-0",
+								"title":      "Chunk Entry 0",
+								"depends_on": nil,
+								"status":     "completed",
+							},
+						},
 					},
 				})
 			case "test-build-1", "test-build-2":
@@ -655,7 +671,7 @@ func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTes
 			target:            "/api/builds?limit=25&status=running&queue_state=running",
 			wantStatus:        http.StatusOK,
 			wantBodySubstr:    []string{"build-101", "Vanadis Feature", "chunk-1", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
-			wantBodyNotSubstr: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria"},
+			wantBodyNotSubstr: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria", `"depends_on":null`},
 		},
 		{
 			name:           "Builds_DegradedFallback",
@@ -699,13 +715,14 @@ func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTes
 func vanadisBuildsDetailCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
 	return []vanadisBuildTestCase{
 		{
-			name:           "BuildDetail_Success_APIPrefix",
-			isDetail:       true,
-			vanadisURL:     mockVanadisURL,
-			method:         http.MethodGet,
-			target:         "/api/builds/build-101",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
+			name:              "BuildDetail_Success_APIPrefix",
+			isDetail:          true,
+			vanadisURL:        mockVanadisURL,
+			method:            http.MethodGet,
+			target:            "/api/builds/build-101",
+			wantStatus:        http.StatusOK,
+			wantBodySubstr:    []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions", "chunk-0", "chunk-build-0", "chunk-entry-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
+			wantBodyNotSubstr: []string{`"depends_on":null`},
 		},
 		{
 			name:           "BuildDetail_Success_ConsolePrefix",
