@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,6 +15,12 @@ const DefaultSummarizerBatchLimit = 10
 // DefaultSummarizerMaxSteps caps stored steps folded into one summary prompt.
 const DefaultSummarizerMaxSteps = 50
 
+// DefaultSummarizerIdleThreshold bounds how recently a session must have been updated to be considered active.
+const DefaultSummarizerIdleThreshold = 10 * time.Minute
+
+// DefaultSummarizerMinStepDelta is the minimum number of new steps required before re-summarizing an already-summarized session.
+const DefaultSummarizerMinStepDelta = 20
+
 // maxSummaryPromptChars bounds one step's contribution to the summary prompt.
 const maxSummaryPromptChars = 2000
 
@@ -25,12 +32,14 @@ var ErrSummaryLockBusy = errors.New("transcripts summary lock busy")
 // Enabled defaults to false; the indexer ships dark until the summaries
 // cutover chunk flips it on.
 type SummarizerConfig struct {
-	Enabled     bool   `yaml:"enabled"`
-	BatchLimit  int    `yaml:"batch_limit"`
-	MaxSteps    int    `yaml:"max_steps"`
-	EriLLMURL   string `yaml:"eri_llm_url"`
-	SensesURL   string `yaml:"senses_url"`
-	SensesModel string `yaml:"senses_model"`
+	Enabled       bool          `yaml:"enabled"`
+	BatchLimit    int           `yaml:"batch_limit"`
+	MaxSteps      int           `yaml:"max_steps"`
+	IdleThreshold time.Duration `yaml:"idle_threshold"`
+	MinStepDelta  int           `yaml:"min_step_delta"`
+	EriLLMURL     string        `yaml:"eri_llm_url"`
+	SensesURL     string        `yaml:"senses_url"`
+	SensesModel   string        `yaml:"senses_model"`
 }
 
 // withDefaults fills non-positive sweep bounds; Enabled stays as configured.
@@ -41,6 +50,12 @@ func (c SummarizerConfig) withDefaults() SummarizerConfig {
 	if c.MaxSteps <= 0 {
 		c.MaxSteps = DefaultSummarizerMaxSteps
 	}
+	if c.IdleThreshold <= 0 {
+		c.IdleThreshold = DefaultSummarizerIdleThreshold
+	}
+	if c.MinStepDelta <= 0 {
+		c.MinStepDelta = DefaultSummarizerMinStepDelta
+	}
 	return c
 }
 
@@ -48,6 +63,7 @@ func (c SummarizerConfig) withDefaults() SummarizerConfig {
 type summaryCandidate struct {
 	sessionID   string
 	threadID    string
+	summary     string
 	lastIndexed int
 	watermark   int
 }
@@ -60,6 +76,7 @@ type Summarizer struct {
 	llm      LLMClient
 	embedder Embedder
 	cfg      SummarizerConfig
+	now      func() time.Time
 	acquire  func(ctx context.Context, threadID string) (func(), error)
 }
 
@@ -68,7 +85,7 @@ type Summarizer struct {
 // leak-safe through Store.AcquireThreadSummaryLock.
 func NewSummarizer(store *Store, llm LLMClient, embedder Embedder, cfg SummarizerConfig) *Summarizer {
 	cfg = cfg.withDefaults()
-	s := &Summarizer{store: store, llm: llm, embedder: embedder, cfg: cfg}
+	s := &Summarizer{store: store, llm: llm, embedder: embedder, cfg: cfg, now: time.Now}
 	s.acquire = func(ctx context.Context, threadID string) (func(), error) {
 		return store.AcquireThreadSummaryLock(ctx, threadID)
 	}
@@ -78,12 +95,17 @@ func NewSummarizer(store *Store, llm LLMClient, embedder Embedder, cfg Summarize
 // buildSummaryPrompt renders the LLM prompt from one session's stored steps.
 // The prompt carries the session id plus the step indexes, types, tool names,
 // and clipped contents the summarizer actually read.
-func buildSummaryPrompt(sessionID string, steps []StepResult) string {
+func buildSummaryPrompt(sessionID, priorSummary string, steps []StepResult) string {
 	var b strings.Builder
 	b.WriteString("Summarize the following indexed transcript steps for session ")
 	b.WriteString(strings.TrimSpace(sessionID))
 	b.WriteString(" into a concise durable summary of what happened and what was decided. ")
 	b.WriteString("Output plain text only, no markdown formatting.\n")
+	if strings.TrimSpace(priorSummary) != "" {
+		b.WriteString("Prior summary: ")
+		b.WriteString(strings.TrimSpace(priorSummary))
+		b.WriteString("\n")
+	}
 	for _, st := range steps {
 		label := strings.TrimSpace(st.StepType)
 		if tool := strings.TrimSpace(st.ToolName); tool != "" {
@@ -153,27 +175,44 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	rows, err := s.store.db.QueryContext(queryCtx,
-		`SELECT session_id, thread_id, last_indexed_step, summary_step_watermark FROM session_summaries
-		 WHERE stack = $1 AND summary_step_watermark < last_indexed_step
-		 ORDER BY updated_at ASC LIMIT $2`, s.store.stack, s.cfg.BatchLimit)
+		`SELECT session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
+		 WHERE stack = $1 AND summary_step_watermark < last_indexed_step AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $2))
+		 ORDER BY updated_at ASC`, s.store.stack, s.cfg.MinStepDelta)
 	if err != nil {
 		return nil, fmt.Errorf("select summary candidates: %w", err)
 	}
 	defer rows.Close()
+	nowFn := s.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	cutoff := nowFn().UTC().Add(-s.cfg.IdleThreshold)
 	var out []summaryCandidate
 	for rows.Next() {
 		var cand summaryCandidate
-		var lastIndexed, watermark int
-		if err := rows.Scan(&cand.sessionID, &cand.threadID, &lastIndexed, &watermark); err != nil {
+		var rawMtime any
+		var isSettled sql.NullBool
+		if err := rows.Scan(&cand.sessionID, &cand.threadID, &cand.summary, &cand.lastIndexed, &cand.watermark, &rawMtime, &isSettled); err != nil {
 			return nil, fmt.Errorf("scan summary candidate: %w", err)
 		}
 		cand.sessionID = strings.TrimSpace(cand.sessionID)
 		cand.threadID = strings.TrimSpace(cand.threadID)
-		cand.lastIndexed, cand.watermark = lastIndexed, watermark
+		cand.summary = strings.TrimSpace(cand.summary)
 		if cand.sessionID == "" {
 			continue
 		}
+		var lastMtime time.Time
+		if t, ok := parseDBTime(rawMtime); ok {
+			lastMtime = t
+		}
+		settled := isSettled.Valid && isSettled.Bool
+		if !settled && !lastMtime.IsZero() && lastMtime.After(cutoff) {
+			continue
+		}
 		out = append(out, cand)
+		if len(out) >= s.cfg.BatchLimit {
+			break
+		}
 	}
 	return out, rows.Err()
 }
@@ -203,7 +242,7 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate
 	if len(steps) == 0 {
 		return 0, nil
 	}
-	summary, err := s.llm.Complete(ctx, buildSummaryPrompt(cand.sessionID, steps))
+	summary, err := s.llm.Complete(ctx, buildSummaryPrompt(cand.sessionID, cand.summary, steps))
 	if err != nil {
 		return 0, fmt.Errorf("summarize session with llm: %w", err)
 	}

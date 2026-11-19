@@ -91,20 +91,22 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	t.Parallel()
 	longContent := strings.Repeat("x", maxSummaryPromptChars+100)
 	tests := []struct {
-		name       string
-		session    string
-		stepIndex  int
-		stepType   string
-		toolName   string
-		content    string
-		stepCount  int
-		wantFrag   string
-		wantAbsent string
+		name         string
+		session      string
+		priorSummary string
+		stepIndex    int
+		stepType     string
+		toolName     string
+		content      string
+		stepCount    int
+		wantFrag     string
+		wantAbsent   string
 	}{
-		{"empty steps names session", "sess-1", 0, "", "", "", 0, "sess-1", "Step 0"},
-		{"single step carries content and tool", "sess-1", 2, "tool_result", "bash", "hello out", 1, "Step 2 (tool_result/bash): hello out", ""},
-		{"typeless step falls back to step label", "sess-9", 0, "", "", "plain", 1, "Step 0 (step): plain", ""},
-		{"oversize content clips with marker", "sess-1", 1, "model_response", "", longContent, 1, "...[clipped]", longContent},
+		{"empty steps names session", "sess-1", "", 0, "", "", "", 0, "sess-1", "Step 0"},
+		{"single step carries content and tool", "sess-1", "", 2, "tool_result", "bash", "hello out", 1, "Step 2 (tool_result/bash): hello out", ""},
+		{"typeless step falls back to step label", "sess-9", "", 0, "", "", "plain", 1, "Step 0 (step): plain", ""},
+		{"oversize content clips with marker", "sess-1", "", 1, "model_response", "", longContent, 1, "...[clipped]", longContent},
+		{"prior summary folded into prompt", "sess-1", "prior context from earlier", 1, "model_response", "", "more steps", 1, "Prior summary: prior context from earlier", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,7 +115,7 @@ func TestBuildSummaryPrompt(t *testing.T) {
 			for range tc.stepCount {
 				steps = append(steps, StepResult{SessionID: tc.session, StepIndex: tc.stepIndex, StepType: tc.stepType, ToolName: tc.toolName, Content: tc.content})
 			}
-			got := buildSummaryPrompt(tc.session, steps)
+			got := buildSummaryPrompt(tc.session, tc.priorSummary, steps)
 			if !strings.Contains(got, tc.wantFrag) {
 				t.Errorf("buildSummaryPrompt() missing %q in:\n%s", tc.wantFrag, got)
 			}
@@ -142,6 +144,7 @@ type summarizerRunCase struct {
 	deleteSteps     bool
 	maxSteps        int
 	emptyThread     bool
+	recentMtime     bool
 	wantSummarized  int
 	wantErr         bool
 	wantWatermark   int
@@ -164,6 +167,14 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) *Store {
 	}
 	if tc.applyPreset {
 		presetSummaryWatermark(t, store, "sess-1", tc.presetWatermark, tc.presetSummary)
+	}
+	if tc.recentMtime {
+		testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
+		if _, err := store.db.ExecContext(context.Background(),
+			`UPDATE session_summaries SET last_mtime = $1 WHERE stack = 'aerial' AND session_id = 'sess-1'`,
+			testNow.Add(-5*time.Minute)); err != nil {
+			t.Fatalf("preset recent mtime: %v", err)
+		}
 	}
 	if tc.deleteSteps {
 		if _, err := store.db.ExecContext(context.Background(),
@@ -195,6 +206,8 @@ func runSummarizerSweep(t *testing.T, store *Store, tc summarizerRunCase) (int, 
 	}
 	cfg := SummarizerConfig{Enabled: true, BatchLimit: tc.batchLimit, MaxSteps: tc.maxSteps}.withDefaults()
 	sum := NewSummarizer(store, llm, embedder, cfg)
+	testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
+	sum.now = func() time.Time { return testNow }
 	if tc.lockBusy {
 		sum.acquire = func(context.Context, string) (func(), error) {
 			return nil, ErrSummaryLockBusy
@@ -267,18 +280,22 @@ func assertSummarizerSweep(t *testing.T, store *Store, tc summarizerRunCase, got
 func TestSummarizerRunOnce(t *testing.T) {
 	t.Parallel()
 	tests := []summarizerRunCase{
-		{"due session summarizes from stored steps", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, false, 1, false, 2, "fresh summary", 1, 1, "content"},
-		{"up-to-date session skips", 0, 2, true, 2, "old", 0, 0, false, false, false, false, false, false, false, 0, false, 0, false, 2, "old", 0, 0, ""},
-		{"busy lock skips without error or llm call", 0, 2, false, 0, "", 0, 0, true, false, false, false, false, false, false, 0, false, 0, false, -1, "", 0, 0, ""},
-		{"lock error fails the sweep", 0, 2, false, 0, "", 0, 0, false, true, false, false, false, false, false, 0, false, 0, true, -1, "", 0, 0, ""},
-		{"llm failure keeps watermark and summary", 0, 2, false, 0, "", 0, 0, false, false, true, false, false, false, false, 0, false, 0, true, -1, "", 1, 0, ""},
-		{"empty llm reply keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, true, false, false, false, 0, false, 0, true, -1, "", 1, 0, ""},
-		{"embed failure keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, false, true, false, false, 0, false, 0, true, -1, "", 1, 1, ""},
-		{"store failure keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, true, false, 0, false, 0, true, -1, "", 1, 1, ""},
-		{"pruned steps skip without calls", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, true, 0, false, 0, false, -1, "", 0, 0, ""},
-		{"max steps window summarizes tail", 0, 9, false, 0, "", 0, 0, false, false, false, false, false, false, false, 3, false, 1, false, 9, "fresh summary", 1, 1, "Step 9"},
-		{"empty thread falls back to session lock", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, true, 1, false, 2, "fresh summary", 1, 1, "content"},
-		{"batch limit summarizes one of three", 0, 1, false, 0, "", 2, 1, false, false, false, false, false, false, false, 0, false, 1, false, -2, "fresh summary", 1, 1, "content"},
+		{"due session summarizes from stored steps", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, false, false, 1, false, 2, "fresh summary", 1, 1, "content"},
+		{"up-to-date session skips", 0, 2, true, 2, "old", 0, 0, false, false, false, false, false, false, false, 0, false, false, 0, false, 2, "old", 0, 0, ""},
+		{"busy lock skips without error or llm call", 0, 2, false, 0, "", 0, 0, true, false, false, false, false, false, false, 0, false, false, 0, false, -1, "", 0, 0, ""},
+		{"lock error fails the sweep", 0, 2, false, 0, "", 0, 0, false, true, false, false, false, false, false, 0, false, false, 0, true, -1, "", 0, 0, ""},
+		{"llm failure keeps watermark and summary", 0, 2, false, 0, "", 0, 0, false, false, true, false, false, false, false, 0, false, false, 0, true, -1, "", 1, 0, ""},
+		{"empty llm reply keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, true, false, false, false, 0, false, false, 0, true, -1, "", 1, 0, ""},
+		{"embed failure keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, false, true, false, false, 0, false, false, 0, true, -1, "", 1, 1, ""},
+		{"store failure keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, true, false, 0, false, false, 0, true, -1, "", 1, 1, ""},
+		{"pruned steps skip without calls", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, true, 0, false, false, 0, false, -1, "", 0, 0, ""},
+		{"max steps window summarizes tail", 0, 9, false, 0, "", 0, 0, false, false, false, false, false, false, false, 3, false, false, 1, false, 9, "fresh summary", 1, 1, "Step 9"},
+		{"empty thread falls back to session lock", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, true, false, 1, false, 2, "fresh summary", 1, 1, "content"},
+		{"batch limit summarizes one of three", 0, 1, false, 0, "", 2, 1, false, false, false, false, false, false, false, 0, false, false, 1, false, -2, "fresh summary", 1, 1, "content"},
+		{"legacy pre-populated summary skips", 0, 2, true, 0, "legacy summary", 0, 0, false, false, false, false, false, false, false, 0, false, false, 0, false, 0, "legacy summary", 0, 0, ""},
+		{"sub-delta steps skip re-summarization", 0, 25, true, 10, "prior summary", 0, 0, false, false, false, false, false, false, false, 0, false, false, 0, false, 10, "prior summary", 0, 0, ""},
+		{"delta reaches threshold folds prior summary", 0, 35, true, 10, "prior summary", 0, 0, false, false, false, false, false, false, false, 0, false, false, 1, false, 35, "fresh summary", 1, 1, "Prior summary: prior summary"},
+		{"active unsettled session skips until idle", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, false, true, 0, false, -1, "", 0, 0, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,6 +303,58 @@ func TestSummarizerRunOnce(t *testing.T) {
 			store := seedSummarizerRunCase(t, tc)
 			got, llm, embedder, err := runSummarizerSweep(t, store, tc)
 			assertSummarizerSweep(t, store, tc, got, err, llm, embedder)
+		})
+	}
+}
+
+func TestSummarizerConfigWithDefaults(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		input             SummarizerConfig
+		wantBatchLimit    int
+		wantMaxSteps      int
+		wantIdleThreshold time.Duration
+		wantMinStepDelta  int
+	}{
+		{
+			name:              "zero values fill defaults",
+			input:             SummarizerConfig{},
+			wantBatchLimit:    DefaultSummarizerBatchLimit,
+			wantMaxSteps:      DefaultSummarizerMaxSteps,
+			wantIdleThreshold: DefaultSummarizerIdleThreshold,
+			wantMinStepDelta:  DefaultSummarizerMinStepDelta,
+		},
+		{
+			name: "custom values preserved",
+			input: SummarizerConfig{
+				BatchLimit:    5,
+				MaxSteps:      100,
+				IdleThreshold: 30 * time.Minute,
+				MinStepDelta:  50,
+			},
+			wantBatchLimit:    5,
+			wantMaxSteps:      100,
+			wantIdleThreshold: 30 * time.Minute,
+			wantMinStepDelta:  50,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.input.withDefaults()
+			if got.BatchLimit != tc.wantBatchLimit {
+				t.Errorf("BatchLimit = %d, want %d", got.BatchLimit, tc.wantBatchLimit)
+			}
+			if got.MaxSteps != tc.wantMaxSteps {
+				t.Errorf("MaxSteps = %d, want %d", got.MaxSteps, tc.wantMaxSteps)
+			}
+			if got.IdleThreshold != tc.wantIdleThreshold {
+				t.Errorf("IdleThreshold = %v, want %v", got.IdleThreshold, tc.wantIdleThreshold)
+			}
+			if got.MinStepDelta != tc.wantMinStepDelta {
+				t.Errorf("MinStepDelta = %d, want %d", got.MinStepDelta, tc.wantMinStepDelta)
+			}
 		})
 	}
 }
