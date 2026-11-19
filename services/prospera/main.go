@@ -18,6 +18,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 )
 
 var newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
@@ -44,18 +45,31 @@ func flushActiveSessions(ctx context.Context, sessionMgr *CallSessionManager, re
 	if sessionMgr == nil || reporter == nil {
 		return
 	}
-	sessionMgr.mu.RLock()
-	callIDs := make([]string, 0, len(sessionMgr.sessions))
-	for id := range sessionMgr.sessions {
-		callIDs = append(callIDs, id)
-	}
-	sessionMgr.mu.RUnlock()
 
-	for _, id := range callIDs {
+	for _, id := range sessionMgr.ActiveCallIDs() {
 		if err := reporter.FlushLiveTranscript(ctx, id); err != nil {
 			slog.ErrorContext(ctx, "prospera: flush transcript failed", "call_id", id, "error", err)
 		}
 	}
+}
+
+// newProsperaMediaSession adapts a mediastream session request to the root
+// MediaStreamSession bridge implementation.
+func newProsperaMediaSession(cfg mediastream.SessionConfig) mediastream.Session {
+	return NewMediaStreamSession(MediaStreamSessionConfig{
+		CallID:           cfg.CallID,
+		TwilioConn:       cfg.Conn,
+		Config:           cfg.Config,
+		Store:            cfg.Store,
+		TwilioClient:     cfg.TwilioClient,
+		ConsultClient:    cfg.ConsultClient,
+		OpeningGreeting:  cfg.OpeningGreeting,
+		VoicemailMessage: cfg.VoicemailMessage,
+		SystemPrompt:     cfg.SystemPrompt,
+		Language:         cfg.Language,
+		PacerInterval:    cfg.PacerInterval,
+		GeminiDialer:     cfg.GeminiDialer,
+	})
 }
 
 func setupProsperaBus(ctx context.Context, server *Server, rawNATSURL string) pubsub.Bus {
@@ -107,7 +121,8 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
 
 	tokenMgr := NewStreamTokenManager(time.Now)
 	consultClient := NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
-	sessionMgr := NewCallSessionManager(cfgSrc, store, twilioClient, consultClient, tokenMgr)
+	sessionMgr := NewCallSessionManager(cfgSrc, store, twilioClient, consultClient, tokenMgr,
+		WithSessionFactory(newProsperaMediaSession))
 	reporter := NewReporter(cfgSrc, store, twilioClient, WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
 
 	server := NewServer(cfgSrc, store, twilioClient, tokenMgr, sessionMgr, reporter)

@@ -55,7 +55,9 @@ func setupTestServer() (*Server, *mockStoreForDelivery, *Config) {
 		contentType: "audio/wav",
 	}
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr)
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr,
+		WithSessionFactory(newProsperaMediaSession),
+	)
 	reporter := NewReporter(staticConfig{cfg: cfg}, store, twilioMock)
 
 	server := NewServer(newTestConfigSource(cfg), store, twilioMock, tokenMgr, sessionMgr, reporter)
@@ -1057,7 +1059,7 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{
 		CallID: "call-unbound-amd",
 	})
-	server.sessionMgr.registerSession("call-unbound-amd", sess)
+	server.sessionMgr.RegisterSession("call-unbound-amd", sess)
 
 	amdForm := url.Values{
 		"CallSid":    []string{"CA-amd-unbound"},
@@ -1173,6 +1175,7 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 				WithGeminiDialer(func(context.Context, string) (*websocket.Conn, error) {
 					return nil, errors.New("gemini unavailable")
 				}),
+				WithSessionFactory(newProsperaMediaSession),
 			)
 			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, NewReporter(staticConfig{cfg: cfg}, store, nil))
 			srv := httptest.NewServer(server.Routes())

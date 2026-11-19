@@ -240,7 +240,7 @@ func TestRunApp_TranscriptBatcher(t *testing.T) {
 	sess := &MediaStreamSession{
 		callID: "call-batch-test",
 	}
-	sessionMgr.registerSession("call-batch-test", sess)
+	sessionMgr.RegisterSession("call-batch-test", sess)
 	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
 		CallID: "call-batch-test",
 		Transcript: []TranscriptTurn{
