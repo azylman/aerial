@@ -1253,12 +1253,13 @@ REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
 cat "$ROBOREV_WRAPPER_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" > "$WRAPPER_SCRIPT"
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" > "$WRAPPER_SCRIPT"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
 
 cat << 'MOCK_EOF' > "$MOCK_REAL"
 #!/usr/bin/env bash
 echo "[branch=${ROBOREV_SYNC_BRANCH:-}] $*" >> "${CALL_LOG}"
+echo "[token=${CLAUDE_CODE_OAUTH_TOKEN:-}]" >> "${CALL_LOG}"
 case "${1:-}" in
   list) cat "${STATE_DIR}/jobs.json" ;;
   show) cat "${STATE_DIR}/show.json" ;;
@@ -1315,13 +1316,25 @@ if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG"
   echo 'head_shortcircuit:ok'
 fi
 
-# Subtests for legacy flag stripping
+# Subtests for Claude Code OAuth token export/unset and legacy flag stripping
+mkdir -p "$TEST_ROOT/bin"
+cat << 'CLAUDE_BIN_EOF' > "$TEST_ROOT/bin/claude"
+#!/usr/bin/env bash
+exit 0
+CLAUDE_BIN_EOF
+chmod +x "$TEST_ROOT/bin/claude"
+PATH="$TEST_ROOT/bin:$PATH"
+
 printf '[]\n' > "$STATE_DIR/comments.json"
 printf '[]\n' > "$STATE_DIR/jobs.json"
 
-# Subtest 3a: Strips legacy --agent and --reasoning flags
+# Subtest 3a: Token exists -> exports token and strips legacy --agent and --reasoning flags
+printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG"; then
+  echo 'claude_token_export:ok'
+fi
 if ! grep -q -- "--agent" "$CALL_LOG" && ! grep -q -- "--reasoning" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
   echo 'wrapper_strips_agent_reasoning:ok'
 fi
@@ -1331,6 +1344,14 @@ fi
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent=claude-code --min-severity medium --reasoning=low >/dev/null 2>&1)
 if ! grep -q -- "--agent" "$CALL_LOG" && ! grep -q -- "--reasoning" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
   echo 'wrapper_strips_agent_reasoning_eq:ok'
+fi
+
+# Subtest 3c: Token removed -> unsets token
+rm -f "$STATE_DIR/claude-oauth-token"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent claude-code --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q "\[token=\]" "$CALL_LOG"; then
+  echo 'claude_token_unset:ok'
 fi
 
 # Subtest 3c: Stateless fallback strips --agent and --reasoning flags so roborev.real uses config.toml
@@ -1476,6 +1497,29 @@ if echo "$static_cfg" | grep -q 'default_agent = "claude-code"' && \
   echo 'entrypoint_static_config:ok'
 fi
 
+# Subtest: entrypoint strips [sync] when postgres-password is absent
+CONFIG_NOPW_TEST="$TEST_ROOT/config-nopw-test.sh"
+cat << 'CONFIG_NOPW_EOF' > "$CONFIG_NOPW_TEST"
+#!/usr/bin/env bash
+set -euo pipefail
+CONFIG_NOPW_EOF
+awk '/if \[ -s "\/local\/roborev-config.toml" \]; then/ {flag=1} flag {print} flag && /RUNNER_LABELS=/ {flag=0; exit}' "$ENTRYPOINT_FILE" \
+  | sed -e "s|/root/.roborev/config.toml|$TEST_ROOT/nopw-config.toml|g" \
+        -e "s|/root/.roborev/postgres-password|$TEST_ROOT/nonexistent-pw|g" \
+        -e "s|/local/roborev-config.toml|$TEST_ROOT/nonexistent-local.toml|g" \
+        -e "s|/etc/roborev/config.toml|$TEST_ROOT/nonexistent-etc.toml|g" \
+        -e "s|/local/postgres-password|$TEST_ROOT/nonexistent-local-pw|g" \
+        -e "s|/secrets/postgres-password|$TEST_ROOT/nonexistent-sec-pw|g" \
+        -e "s|\$(dirname \"\$0\")/roborev-config.toml|${SCRIPT_DIR}/../services/github-runner/roborev-config.toml|g" >> "$CONFIG_NOPW_TEST"
+chmod +x "$CONFIG_NOPW_TEST"
+
+bash "$CONFIG_NOPW_TEST"
+nopw_cfg=$(cat "$TEST_ROOT/nopw-config.toml")
+if ! echo "$nopw_cfg" | grep -q '^\[sync\]$' && \
+   ! echo "$nopw_cfg" | grep -q 'postgres_url'; then
+  echo 'entrypoint_sync_stripped_when_nopw:ok'
+fi
+
 # Subtest: roborev-wrapper omits --panel none by default
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low >/dev/null 2>&1)
@@ -1588,6 +1632,8 @@ CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_token_export:ok' && echo true || echo false)" "github-runner roborev wrapper exports CLAUDE_CODE_OAUTH_TOKEN when token exists"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_token_unset:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN when token is absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_strips_agent_reasoning:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent and --reasoning flags so roborev.real uses config.toml"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_strips_agent_reasoning_eq:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent=* and --reasoning=* flags"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_stateless_strips_agent_reasoning:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent and --reasoning flags from stateless ci review fallback"
@@ -1597,6 +1643,7 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_env_seed:ok'
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_pass_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Passed when roborev.real exits 0 with low findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_fail_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Complete when roborev.real exits 1 with findings"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_static_config:ok' && echo true || echo false)" "services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ['default', 'test-value'], default_panel = 'ci', and members = ['default', 'test-value']"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_sync_stripped_when_nopw:ok' && echo true || echo false)" "github-runner entrypoint strips [sync] from config.toml when postgres password is absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_default_omits_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper omits --panel none by default"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_flag_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when --review-types default is passed"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_toml_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when .roborev.toml sets review_types = ['default']"

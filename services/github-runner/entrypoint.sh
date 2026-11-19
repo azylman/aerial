@@ -49,7 +49,7 @@ cat > /root/.claude/settings.json <<'EOF'
 EOF
 chmod 0600 /root/.claude/settings.json
 
-# Seed claude-oauth-token into /actions-runner/.env from /local/claude-oauth-token (or fallback /secrets/claude-oauth-token)
+# Seed claude-oauth-token into /actions-runner/.env and /root/.roborev/claude-oauth-token from /local/claude-oauth-token (or fallback /secrets/claude-oauth-token)
 : > /actions-runner/.env
 chmod 0600 /actions-runner/.env
 CLAUDE_TOKEN_SRC=""
@@ -63,6 +63,9 @@ if [ -n "${CLAUDE_TOKEN_SRC}" ]; then
   if [ -n "${CLAUDE_TOKEN_VAL}" ]; then
     export CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_TOKEN_VAL}"
     echo "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_TOKEN_VAL}" >> /actions-runner/.env
+    mkdir -p /root/.roborev 2>/dev/null || true
+    cp -f "${CLAUDE_TOKEN_SRC}" "/root/.roborev/claude-oauth-token" 2>/dev/null || true
+    chmod 0600 "/root/.roborev/claude-oauth-token" 2>/dev/null || true
   fi
 fi
 
@@ -108,6 +111,11 @@ elif [ -s "/secrets/postgres-password" ]; then
   cp -f "/secrets/postgres-password" "/root/.roborev/postgres-password"
   chmod 0600 "/root/.roborev/postgres-password"
 fi
+
+if [ ! -s "/root/.roborev/postgres-password" ]; then
+  sed -i -e '/^\[sync\]/,/^interval = .*/d' /root/.roborev/config.toml
+fi
+chmod 0600 /root/.roborev/config.toml
 
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 
