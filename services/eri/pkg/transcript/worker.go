@@ -16,17 +16,17 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
-// legacySyncDeadcodeAnchor retains references to StartTranscriptSync and
-// StartTurnTranscriptSyncSubscriber until spl2-c20a-eri-legacy deletes those
-// legacy functions after the readiness gate without invoking goroutines at init time.
+// legacySyncDeadcodeAnchor retains references to residual transcript sync functions
+// in pkg/transcript until their downstream removal so deadcode analysis against main packages passes.
 var _ = []any{
-	StartTranscriptSync,
-	StartTurnTranscriptSyncSubscriber,
 	(*Publisher).EnqueueSteps,
 	(*Publisher).PendingSessions,
 	(*Publisher).PendingCount,
 	(*Publisher).PublishSessions,
 	(*Publisher).PublishSession,
+	RunTranscriptSync,
+	SyncSessionTranscript,
+	ShouldRunTranscriptSync,
 }
 
 // Step vocabulary for synthesized transcript steps.

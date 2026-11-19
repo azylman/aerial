@@ -3,17 +3,13 @@ package transcript
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
@@ -121,114 +117,4 @@ func RunTranscriptSync(ctx context.Context, store db.TranscriptStore, cfg *confi
 			stats.Synced, stats.StepsInserted, stats.SummariesGenerated, stats.Duration)
 	}
 	return stats, nil
-}
-
-// HandleTurnCompletedTranscriptSync processes an incoming TurnCompletedEvent on aerial.turn.completed,
-// indexes that session's transcript file into Postgres transcript_steps, and unconditionally emits
-// a TranscriptSyncedEvent to aerial.turn.transcript_synced.
-func HandleTurnCompletedTranscriptSync(
-	ctx context.Context,
-	msg pubsub.Message,
-	bus pubsub.Bus,
-	store db.TranscriptStore,
-	cfg *config.Config,
-	brainDir string,
-	getLLM func() LLMClientFunc,
-) error {
-	if msg == nil {
-		return nil
-	}
-
-	var ev pubsub.TurnCompletedEvent
-	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-		log.Printf("[TranscriptSync] Warning unmarshaling turn completed event: %v", err)
-		return nil
-	}
-
-	sessionID := strings.TrimSpace(ev.SessionID)
-	conversationID := strings.TrimSpace(ev.ConversationID)
-	if conversationID == "" || sessionID == "healthcheck-ping" || sessionID == "" {
-		return nil
-	}
-
-	targetBrainDir := resolveTargetBrainDir(cfg, brainDir)
-	var llmFunc LLMClientFunc
-	if getLLM != nil {
-		llmFunc = getLLM()
-	}
-	opts := buildSyncOptions(cfg, targetBrainDir, llmFunc)
-
-	var stats SyncStats
-	if !isNilStore(store) {
-		var syncErr error
-		stats, syncErr = SyncSessionTranscript(ctx, store, targetBrainDir, sessionID, opts)
-		if syncErr != nil && !os.IsNotExist(syncErr) && !errors.Is(syncErr, os.ErrNotExist) {
-			log.Printf("[TranscriptSync] Warning syncing session transcript for %s: %v", sessionID, syncErr)
-		}
-	}
-
-	if bus != nil {
-		syncedEv := pubsub.TranscriptSyncedEvent{
-			SessionID:      sessionID,
-			ConversationID: conversationID,
-			StepsInserted:  stats.StepsInserted,
-			SyncedAt:       time.Now().UTC(),
-		}
-		msgID := fmt.Sprintf("transcript-synced:%s:%d", sessionID, time.Now().UnixNano())
-		if err := bus.Publish(ctx, pubsub.SubjectAerialTurnTranscriptSynced, msgID, syncedEv); err != nil {
-			log.Printf("[TranscriptSync] Error publishing transcript synced event for session %s: %v", sessionID, err)
-			return err
-		}
-	}
-	return nil
-}
-
-// StartTurnTranscriptSyncSubscriber starts a durable queue consumer on aerial.turn.completed named "eri-transcript-sync".
-func StartTurnTranscriptSyncSubscriber(
-	ctx context.Context,
-	bus pubsub.Bus,
-	store db.TranscriptStore,
-	cfg *config.Config,
-	brainDir string,
-	getLLM func() LLMClientFunc,
-) error {
-	if bus == nil {
-		return errors.New("transcript: bus is nil")
-	}
-	_, err := bus.ConsumeQueue(ctx, pubsub.SubjectAerialTurnCompleted, "eri-transcript-sync", func(hCtx context.Context, msg pubsub.Message) error {
-		return HandleTurnCompletedTranscriptSync(hCtx, msg, bus, store, cfg, brainDir, getLLM)
-	})
-	return err
-}
-
-// StartTranscriptSync starts a background goroutine running RunTranscriptSync immediately and on each ticker interval.
-func StartTranscriptSync(ctx context.Context, store db.TranscriptStore, cfg *config.Config, brainDir string, llmFunc LLMClientFunc, interval time.Duration) {
-	if interval <= 0 {
-		interval = 5 * time.Minute
-	}
-	go func() {
-		var lastSync time.Time
-		if ShouldRunTranscriptSync(time.Now(), lastSync, interval) {
-			if _, err := RunTranscriptSync(ctx, store, cfg, brainDir, llmFunc); err != nil && ctx.Err() == nil {
-				log.Printf("[TranscriptSync] Background sync startup error: %v", err)
-			}
-			lastSync = time.Now()
-		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case now := <-ticker.C:
-				if !ShouldRunTranscriptSync(now, lastSync, interval) {
-					continue
-				}
-				if _, err := RunTranscriptSync(ctx, store, cfg, brainDir, llmFunc); err != nil && ctx.Err() == nil {
-					log.Printf("[TranscriptSync] Background periodic sync error: %v", err)
-				}
-				lastSync = now
-			}
-		}
-	}()
 }

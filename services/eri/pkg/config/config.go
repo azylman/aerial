@@ -237,14 +237,54 @@ type VoiceConfig struct {
 	AmbientContext   *AmbientContextConfig `yaml:"ambient_context,omitempty"   json:"ambient_context,omitempty"`
 }
 
-// TranscriptsConfig points the transcript index at a shared database. Database names the
-// logical DB holding the shared transcript tables (empty keeps the stack's own DatabaseURL DB);
+// TranscriptsConfig points the transcript index at the transcripts service or stack label.
 // Stack labels the rows this instance writes (empty defaults to its own DatabaseURL DB name).
 type TranscriptsConfig struct {
-	Database      string `yaml:"database,omitempty"        json:"database,omitempty"`
 	Stack         string `yaml:"stack,omitempty"           json:"stack,omitempty"`
 	IndexerURL    string `yaml:"indexer_url,omitempty"     json:"indexer_url,omitempty"`
 	MaxBatchBytes int    `yaml:"max_batch_bytes,omitempty" json:"max_batch_bytes,omitempty"`
+}
+
+// UnmarshalYAML rejects stale transcripts.database keys to avoid silent index fragmentation.
+func (c *TranscriptsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawTranscripts struct {
+		Stack         string  `yaml:"stack"`
+		IndexerURL    string  `yaml:"indexer_url"`
+		MaxBatchBytes int     `yaml:"max_batch_bytes"`
+		Database      *string `yaml:"database"`
+	}
+	var raw rawTranscripts
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.Database != nil && strings.TrimSpace(*raw.Database) != "" {
+		return fmt.Errorf("transcripts: 'database' is deprecated and unsupported; transcripts are stored in the database configured by database_url")
+	}
+	c.Stack = strings.TrimSpace(raw.Stack)
+	c.IndexerURL = strings.TrimRight(strings.TrimSpace(raw.IndexerURL), "/")
+	c.MaxBatchBytes = raw.MaxBatchBytes
+	return nil
+}
+
+// UnmarshalJSON rejects stale transcripts.database keys to avoid silent index fragmentation.
+func (c *TranscriptsConfig) UnmarshalJSON(b []byte) error {
+	type rawTranscripts struct {
+		Stack         string  `json:"stack"`
+		IndexerURL    string  `json:"indexer_url"`
+		MaxBatchBytes int     `json:"max_batch_bytes"`
+		Database      *string `json:"database"`
+	}
+	var raw rawTranscripts
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if raw.Database != nil && strings.TrimSpace(*raw.Database) != "" {
+		return fmt.Errorf("transcripts: 'database' is deprecated and unsupported; transcripts are stored in the database configured by database_url")
+	}
+	c.Stack = strings.TrimSpace(raw.Stack)
+	c.IndexerURL = strings.TrimRight(strings.TrimSpace(raw.IndexerURL), "/")
+	c.MaxBatchBytes = raw.MaxBatchBytes
+	return nil
 }
 
 // EffectiveMaxBatchBytes returns the configured per-batch byte budget, falling
@@ -497,7 +537,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.CovenURL = strings.TrimRight(strings.TrimSpace(raw.CovenURL), "/")
 	c.NATSURL = strings.TrimRight(strings.TrimSpace(raw.NATSURL), "/")
 	c.Transcripts = TranscriptsConfig{
-		Database:      strings.TrimSpace(raw.Transcripts.Database),
 		Stack:         strings.TrimSpace(raw.Transcripts.Stack),
 		IndexerURL:    strings.TrimRight(strings.TrimSpace(raw.Transcripts.IndexerURL), "/"),
 		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
