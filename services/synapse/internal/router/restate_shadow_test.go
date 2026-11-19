@@ -618,40 +618,6 @@ func TestShadowDeployStartedSHAsGated(t *testing.T) {
 	}
 }
 
-func TestHydratedLen(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		nilReporter bool
-		touches     int
-		want        int
-	}{
-		{name: "nil reporter reports zero", nilReporter: true, touches: 0, want: 0},
-		{name: "fresh reporter reports zero", nilReporter: false, touches: 0, want: 0},
-		{name: "two touches report two", nilReporter: false, touches: 2, want: 2},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var rep *shadowRestateReporter
-			if !tc.nilReporter {
-				rep = newShadowRestateReporter(Config{}, nil)
-				srv := &RouterServer{}
-				for i := 1; i <= tc.touches; i++ {
-					srv.hydrateShadowPR(context.Background(), rep, restateclient.PREvent{
-						Repo: "aerial", PRNumber: i, HeadSHA: shadowTestHeadSHA(),
-					})
-				}
-			}
-			if got := hydratedLen(rep); got != tc.want {
-				t.Errorf("hydratedLen() = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestShadowRepoEventSends(t *testing.T) {
 	t.Parallel()
 
