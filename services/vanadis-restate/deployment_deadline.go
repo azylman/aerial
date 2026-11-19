@@ -11,6 +11,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -281,10 +282,10 @@ func (b *BuildObject) deliverDeploymentDeadline(ctx context.Context, buildID str
 		}
 		details := "Readiness remains unconfirmed after the 15-minute deployment deadline. Last persisted job/Kustomization evidence (not a fresh Kubernetes observation): " + string(evidence)
 		ev := pubsub.PRLifecycleEvent{Event: "deploy_failed", Repo: c.Repo, PRNumber: c.PRNumber, MergeSHA: a.Revision, Details: details}
-		if e = b.store.UpdateChunkBannerAndStatus(ctx, c.ID, statusDeployFailed, FormatDeployFailureBanner(ev)); e != nil {
+		if e = b.store.UpdateChunkBannerAndStatus(ctx, c.ID, statusDeployFailed, executor.FormatDeployFailureBanner(ev)); e != nil {
 			return deploymentDeliveryFailure(e)
 		}
-		if b.executor == nil || b.executor.eriClient == nil {
+		if b.executor == nil || b.executor.EriClient == nil {
 			result.Error = "deadline wake executor unavailable"
 			return result, nil
 		}
@@ -292,7 +293,7 @@ func (b *BuildObject) deliverDeploymentDeadline(ctx context.Context, buildID str
 		// Eri's dedup retention bounds that guarantee; delivery after retention may
 		// duplicate a wake if an earlier acceptance response was lost.
 		id := fmt.Sprintf("vanadis-deploy-deadline-%s-%d-%s-%d", c.ID, a.PRNumber, a.Revision, a.Generation)
-		e = b.executor.eriClient.DispatchAccepted(ctx, BrainDispatchRequest{ID: id, Source: "discord", SessionID: "vanadis-deploy-deadline-" + c.ID, TargetID: build.ThreadID, Prompt: FormatDeployFailurePrompt(ev)})
+		e = b.executor.EriClient.DispatchAccepted(ctx, executor.BrainDispatchRequest{ID: id, Source: "discord", SessionID: "vanadis-deploy-deadline-" + c.ID, TargetID: build.ThreadID, Prompt: executor.FormatDeployFailurePrompt(ev)})
 		if e != nil {
 			result.Error = e.Error()
 		}

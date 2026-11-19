@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -104,7 +105,7 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 			require.NoError(t, b.handlePREventType(rc, "b", "c1", "merged", pubsub.PRLifecycleEvent{MergeSHA: "sha"}))
 			require.Equal(t, statusMerged, store.chunks[0].Status)
 			eri := &mockEriClient{}
-			b.executor = &Executor{eriClient: eri}
+			b.executor = &executor.Executor{EriClient: eri}
 			rt.now = now.Add(15 * time.Minute)
 			require.NoError(t, b.expireDeploymentDeadline(rt, DeploymentDeadlineRequest{"c1", "sha", 1}))
 			require.Equal(t, statusDeployFailed, store.chunks[0].Status)

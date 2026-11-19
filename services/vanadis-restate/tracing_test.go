@@ -12,12 +12,15 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 )
 
 func TestMain(m *testing.M) {
@@ -111,7 +114,7 @@ func TestRunInSpan_EriClientPropagatesTrace(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client := NewHTTPEriClient(srv.URL, tracing.Client(srv.Client()))
+			client := executor.NewHTTPEriClient(srv.URL, tracing.Client(srv.Client()))
 			var logBuf bytes.Buffer
 			logger := slog.New(tracing.SlogHandler(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
 				ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
@@ -141,4 +144,25 @@ func TestRunInSpan_EriClientPropagatesTrace(t *testing.T) {
 			assert.Equal(t, tc.wantTraceID, traceID)
 		})
 	}
+}
+
+func TestSpanContextHandler_WithGroup(t *testing.T) {
+	t.Parallel()
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x01},
+		SpanID:     trace.SpanID{0x02},
+		TraceFlags: trace.FlagsSampled,
+	})
+	spanCtx := trace.ContextWithSpanContext(context.Background(), sc)
+	var buf bytes.Buffer
+	h := spanContextHandler{Handler: slog.NewJSONHandler(&buf, nil), spanCtx: spanCtx}
+	grouped, ok := h.WithGroup("test-group").(spanContextHandler)
+	require.True(t, ok, "WithGroup must preserve the span handler chain")
+	assert.True(t, grouped.spanCtx == spanCtx, "WithGroup must preserve the step span context")
+	rec := slog.NewRecord(time.Now(), slog.LevelInfo, "grouped message", 0)
+	rec.AddAttrs(slog.String("k", "v"))
+	require.NoError(t, grouped.Handle(context.Background(), rec))
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	assert.Equal(t, map[string]any{"k": "v"}, got["test-group"])
 }

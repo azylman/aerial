@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -174,9 +175,9 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 		fmt.Fprintf(w, `{"state":"open","merged":false,"head":{"sha":%q}}`, currentHead.Load())
 	}))
 	defer api.Close()
-	executor := NewExecutor("", nil, nil, "", api.Client())
-	executor.gitHubAPIURL = api.URL
-	bo := NewBuildObject("", nil).WithAuthority(spy, executor)
+	exec := executor.NewExecutor("", nil, nil, "", api.Client())
+	exec.GitHubAPIURL = api.URL
+	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 
 	// Empty check name is ignored
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: ""}))
@@ -246,13 +247,15 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 		execTag:  "UPDATE 1",
 	}.open()
 	eriErr := &mockEriClient{
-		cancelFn:  func(context.Context, string) error { return errors.New("cancel err") },
-		promptFn:  func(context.Context, string, string) error { return errors.New("prompt err") },
-		widgetFn:  func(context.Context, StatusWidgetRequest) (string, error) { return "", errors.New("widget err") },
+		cancelFn: func(context.Context, string) error { return errors.New("cancel err") },
+		promptFn: func(context.Context, string, string) error { return errors.New("prompt err") },
+		widgetFn: func(context.Context, executor.StatusWidgetRequest) (string, error) {
+			return "", errors.New("widget err")
+		},
 		messageFn: func(context.Context, string, string) error { return errors.New("msg err") },
 	}
 	mockBusErr := &mockBusError{err: errors.New("pub err")}
-	execErr := NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", nil)
+	execErr := executor.NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", nil)
 	boErr := NewBuildObject("", nil).WithAuthority(st, execErr)
 
 	// notifyBuildTerminal error branches
@@ -391,7 +394,7 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 				skipFailApply: tc.skipFailApply,
 			}
 			eri := &mockEriClient{}
-			exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 
 			err := bo.handlePREventType(nil, "b1", "c1", tc.event, tc.prEvent)
@@ -416,14 +419,14 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 	t.Helper()
 	eri := &mockEriClient{}
 	var active bool
-	var activeDispatch *BrainDispatchRequest
-	eri.dispatchFn = func(_ context.Context, req BrainDispatchRequest) error {
+	var activeDispatch *executor.BrainDispatchRequest
+	eri.dispatchFn = func(_ context.Context, req executor.BrainDispatchRequest) error {
 		if dispatchErr != nil {
 			return dispatchErr
 		}
 		if req.SkipIfActive && active {
 			eri.lastDispatch = activeDispatch
-			return errDispatchActive
+			return executor.ErrDispatchActive
 		}
 		active = true
 		activeDispatch = &req
@@ -433,10 +436,10 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 	if notifyErr != nil {
 		eri.cancelFn = func(context.Context, string) error { return notifyErr }
 		eri.messageFn = func(context.Context, string, string) error { return notifyErr }
-		eri.widgetFn = func(context.Context, StatusWidgetRequest) (string, error) { return "", notifyErr }
+		eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
 		bus = &mockBusError{err: notifyErr}
 	}
-	exec := NewExecutor(t.TempDir(), eri, bus, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
 	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 	return bo, eri
 }
@@ -506,7 +509,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "ci_failed check with suffix gate is ignored", event: "ci_failed", prEvent: ciFailEv("Build Gate", "sha-1")},
 		{name: "ci_failed within cap dispatches background remediation and increments accepted count", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 1, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2", wantSkipIfActive: &falseVal},
 		{name: "six failing checks on same head coalesce into one accepted remediation attempt", event: "ci_failed", prEvent: ciFailEv("check-1", "abcdef1234"), extraEvents: sixChecks, wantBanners: sixBanners, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &falseVal},
-		{name: "ci_failed skipped_active dispatch returns nil without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), remediatedSHA: "abcdef1234", dispatchErr: errDispatchActive, wantErr: false, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &trueVal},
+		{name: "ci_failed skipped_active dispatch returns nil without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), remediatedSHA: "abcdef1234", dispatchErr: executor.ErrDispatchActive, wantErr: false, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &trueVal},
 		{name: "ci_failed dispatch transport error propagates without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &falseVal},
 		{name: "ci_failed banner update error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), bannerErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
 		{name: "ci_failed get build error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), getBuildErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
@@ -519,7 +522,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "conflict updates chunk banner and dispatches background remediation", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantSkipIfActive: &trueVal},
 		{name: "conflict on superseded head skipped", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "superseded-sha"}, headSHA: "current-sha", wantErr: true},
 		{name: "conflict get build error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, getBuildErr: dbErr, wantErr: true},
-		{name: "conflict skipped_active dispatch returns nil", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: errDispatchActive, wantErr: false, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1", wantSkipIfActive: &trueVal},
+		{name: "conflict skipped_active dispatch returns nil", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: executor.ErrDispatchActive, wantErr: false, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1", wantSkipIfActive: &trueVal},
 		{name: "conflict dispatch transport error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1", wantSkipIfActive: &trueVal},
 		{name: "conflict update banner error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, bannerErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
 		{name: "merged cancels chunk dispatch and resets check state", event: "merged", prEvent: pubsub.PRLifecycleEvent{Event: "merged", HeadSHA: "head-sha", MergeSHA: "merge-sha"}, wantCancel: "c1"},
@@ -585,13 +588,13 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			name:             "ci_failed skipped_active ignores active worker without failing or incrementing budget",
 			ev:               ciFailEv("unit-tests", "abcdef1234"),
 			remediatedSHA:    "abcdef1234",
-			firstDispatchErr: errDispatchActive,
+			firstDispatchErr: executor.ErrDispatchActive,
 			wantErr:          false,
 		},
 		{
 			name:             "conflict skipped_active ignores active worker without failing",
 			ev:               pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42},
-			firstDispatchErr: errDispatchActive,
+			firstDispatchErr: executor.ErrDispatchActive,
 			wantErr:          false,
 		},
 		{
@@ -669,7 +672,7 @@ func TestResolveCIFailureDetailsChecked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if tc.nilExec {
-				got, err := (*Executor)(nil).ResolveCIFailureDetailsChecked(context.Background(), "aerial", 10, "unit-tests", "abc", "", "default-details")
+				got, err := (*executor.Executor)(nil).ResolveCIFailureDetailsChecked(context.Background(), "aerial", 10, "unit-tests", "abc", "", "default-details")
 				assert.NoError(t, err)
 				assert.Equal(t, "default-details", got)
 				return
@@ -689,8 +692,8 @@ func TestResolveCIFailureDetailsChecked(t *testing.T) {
 				apiURL = "http://127.0.0.1:1"
 			}
 
-			exec := NewExecutor("", nil, nil, "token", client)
-			exec.gitHubAPIURL = apiURL
+			exec := executor.NewExecutor("", nil, nil, "token", client)
+			exec.GitHubAPIURL = apiURL
 
 			checkName := "unit-tests"
 			prNum := 0
@@ -793,7 +796,7 @@ func TestBuildObject_TransitionErrorPropagation(t *testing.T) {
 				},
 			}.open()
 
-			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor(t.TempDir(), &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
 			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
 				rt := newFakeObjectRuntime("b-trans")
 				rt.runStepErr = errors.New("transition failed")
@@ -836,7 +839,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 		queuedPrompts = append(queuedPrompts, prompt)
 		return nil
 	}}
-	bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", eri, bus, "token", nil))
+	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
 
 	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{
 		Action:     "chunk_failed",
@@ -884,7 +887,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	eriFail := &mockEriClient{
 		promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") },
 	}
-	execFail := NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", nil)
+	execFail := executor.NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", nil)
 	bRunning := model.VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
 	cAction := model.VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
 	storeFailChunk, _ := dbScript{
