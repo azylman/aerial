@@ -92,6 +92,39 @@ const SERVICES_HEALTHY = '15 / 18';
 /** dep-console-1 (building) is the only full card; its steps are CI, BUILD, PULL, SWAP. */
 const PIPELINE_STEPS = ['CI', 'BUILD', 'PULL', 'SWAP'];
 
+const TELEMETRY_HEADINGS = [
+  'Active Agent Turns',
+  'Vanadis Build Pipeline',
+  'Upcoming Schedules',
+  'Cluster Service Matrix',
+  'Deployment Pipeline',
+];
+const OVERVIEW_BUILDS = [
+  'Console React rewrite #1',
+  'Scheduler heartbeat jitter #2',
+  'Kiosk widget refresh #3',
+];
+const OVERVIEW_SCHEDULES = [
+  'Morning standup digest 1',
+  'Meal prep planner 1',
+  'Weekly review 1',
+  'Plant watering 1',
+];
+const TELEMETRY_TEXTS = [
+  ...TELEMETRY_HEADINGS,
+  ...OVERVIEW_BUILDS,
+  ...OVERVIEW_SCHEDULES,
+  SERVICES_HEALTHY,
+  'aerial-vision',
+  'aerial-kernel-mcp',
+  'DEGRADED',
+  'DOWN',
+  ...PIPELINE_STEPS,
+  'STARTED: 11:57:00 AM',
+  '"feat(console/ui): app shell and parity suite"',
+  'eri • fix(eri): retry transient ingress errors',
+];
+
 /** Every deploy timer started minutes before FIXTURE_NOW (status.json), so none reads 00:00s. */
 const DEPLOY_TIMERS_TICKED: CountExpectation = { selector: '#telemetry-view .deploy-timer-badge .timer-text:has-text("00:00s")', count: 0 };
 
@@ -458,22 +491,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
       hash: '#telemetry',
       activeTab: 'Overview',
       badges: BADGES_ALL,
-      texts: [
-        'LIVE AGENT EXECUTION QUEUE',
-        'DEPLOYMENT PIPELINE',
-        'ACTIVE STACK COMPONENTS',
-        'VANADIS BUILD QUEUE',
-        'UPCOMING SCHEDULED ROUTINES',
-        SERVICES_HEALTHY,
-        'aerial-vision',
-        'aerial-kernel-mcp',
-        'DEGRADED',
-        'DOWN',
-        ...PIPELINE_STEPS,
-        'STARTED: 11:57:00 AM',
-        '"feat(console/ui): app shell and parity suite"',
-        'eri • fix(eri): retry transient ingress errors',
-      ],
+      texts: TELEMETRY_TEXTS,
       counts: TELEMETRY_COUNTS,
     },
   },

@@ -375,7 +375,7 @@ describe('App with a fully seeded store', () => {
     initRouteFromLocation();
     render(<App />);
     const walk = [
-      { hash: '#telemetry', panel: 'telemetry-view', heading: 'LIVE AGENT EXECUTION QUEUE' },
+      { hash: '#telemetry', panel: 'telemetry-view', heading: 'Active Agent Turns' },
       { hash: '#tasks', panel: 'tasks-view', heading: 'LIVE DISPATCH STREAM' },
       { hash: '#schedules', panel: 'schedules-view', heading: 'ACTIVE SCHEDULED ROUTINES' },
       { hash: '#memory', panel: 'memory-view', heading: 'TOTAL MEMORY NODES' },

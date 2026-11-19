@@ -54,7 +54,9 @@ async function assertExpectation(page: Page, want: Expectation): Promise<void> {
     await expect(tabByLabel(page, label).locator('.tab-badge'), `badge ${label}`).toHaveText(count);
   }
   for (const text of want.texts) {
-    await expect(page.getByText(text, { exact: true }).first(), `text "${text}"`).toBeVisible();
+    const inActive = page.locator('.view-panel.active').getByText(text, { exact: true });
+    const target = (await inActive.count()) > 0 ? inActive.first() : page.getByText(text, { exact: true }).first();
+    await expect(target, `text "${text}"`).toBeVisible();
   }
   for (const { selector, count } of want.counts) {
     await expect(page.locator(selector), `count ${selector}`).toHaveCount(count);
