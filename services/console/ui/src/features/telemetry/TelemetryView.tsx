@@ -1,8 +1,13 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState } from 'react';
 import type { CronSchedule, VanadisBuildDTO } from '../../api/types';
 import { GitSyncBadge } from '../../components/GitSyncBadge';
 import { Icon } from '../../components/Icon';
-import { computeBuildChunkStats, getBuildStatusBadgeInfo } from '../../lib/builds';
+import {
+  type BuildQueueState,
+  classifyBuildQueueState,
+  computeBuildChunkStats,
+  getBuildStatusBadgeInfo,
+} from '../../lib/builds';
 import { buildsBadgeCount } from '../../store/selectors';
 import { useConsoleStore } from '../../store/store';
 import '../../styles/sections.css';
@@ -17,15 +22,22 @@ const viewSchedules = (): void => useConsoleStore.getState().setActiveTab('sched
 
 const EMPTY_BUILDS: readonly VanadisBuildDTO[] = Object.freeze([]);
 const EMPTY_CRONS: readonly CronSchedule[] = Object.freeze([]);
+const BUILD_ORDER: Readonly<Record<BuildQueueState, number>> = { running: 0, queued: 1, completed: 2 };
 
 export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
   const builds = useConsoleStore((s) => s.builds.list.data?.builds ?? EMPTY_BUILDS);
   const data = useConsoleStore((s) => s.builds.list.data);
   const activeCount = buildsBadgeCount(data);
-  const topBuilds = useMemo(() => builds.slice(0, 3), [builds]);
+  const topBuilds = useMemo(
+    () =>
+      [...builds]
+        .sort((a, b) => BUILD_ORDER[classifyBuildQueueState(a)] - BUILD_ORDER[classifyBuildQueueState(b)])
+        .slice(0, 3),
+    [builds],
+  );
 
   return (
-    <section className="hud-section bento-cell overview-bento-section" aria-label="Vanadis Build Pipeline Overview">
+    <section className="hud-section bento-cell bento-span-2 overview-bento-section" aria-label="Vanadis Build Pipeline Overview">
       <div className="section-title-bar section-header">
         <div className="section-title">
           <span className="title-icon">
@@ -77,9 +89,10 @@ export const OverviewSchedulesSection = memo(function OverviewSchedulesSection()
   const summary = useConsoleStore((s) => s.schedules.list.data?.summary ?? null);
   const activeCount = summary ? summary.total_active : crons.length;
   const topCrons = useMemo(() => crons.slice(0, 4), [crons]);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
-    <section className="hud-section bento-cell overview-bento-section" aria-label="Upcoming Scheduled Routines Overview">
+    <section className="hud-section bento-cell bento-span-2 overview-bento-section" aria-label="Upcoming Scheduled Routines Overview">
       <div className="section-title-bar section-header">
         <div className="section-title">
           <span className="title-icon">
@@ -101,16 +114,34 @@ export const OverviewSchedulesSection = memo(function OverviewSchedulesSection()
           topCrons.map((cron) => {
             const desc = cron.cron_description || (cron as unknown as { description?: string }).description;
             const exprWithTz = cron.timezone ? `${cron.cron_expr} (${cron.timezone})` : cron.cron_expr;
+            const expanded = expandedId === cron.id;
             return (
-              <div key={cron.id} className="overview-schedule-row">
-                <div className="overview-row-left">
-                  <span className="overview-row-title">{cron.title_prefix || 'Recurring Routine'}</span>
+              <button
+                key={cron.id}
+                type="button"
+                className={expanded ? 'overview-schedule-row expanded' : 'overview-schedule-row'}
+                aria-expanded={expanded}
+                onClick={() => setExpandedId(expanded ? null : cron.id)}
+              >
+                <div className="overview-schedule-header">
+                  <div className="overview-row-left">
+                    <span className="overview-row-title">{cron.title_prefix || 'Recurring Routine'}</span>
+                  </div>
+                  <div className="overview-row-right">
+                    <span className="overview-cron-expr">{exprWithTz}</span>
+                    {desc ? <span className="overview-cron-desc">{desc}</span> : null}
+                    <span className="overview-schedule-chevron" aria-hidden="true">
+                      {expanded ? '▴' : '▾'}
+                    </span>
+                  </div>
                 </div>
-                <div className="overview-row-right">
-                  <span className="overview-cron-expr">{exprWithTz}</span>
-                  {desc ? <span className="overview-cron-desc">{desc}</span> : null}
-                </div>
-              </div>
+                {expanded ? (
+                  <div className="overview-schedule-prompt">
+                    <span className="overview-schedule-prompt-label">PROMPT DIRECTIVE</span>
+                    <div className="overview-schedule-prompt-body">{cron.prompt || 'No prompt configured'}</div>
+                  </div>
+                ) : null}
+              </button>
             );
           })
         )}
@@ -126,7 +157,7 @@ export const OverviewSchedulesSection = memo(function OverviewSchedulesSection()
 export default function TelemetryView() {
   return (
     <div className="overview-bento-grid">
-      <section className="hud-section bento-cell active-tasks-section" aria-live="polite">
+      <section className="hud-section bento-cell bento-span-2 active-tasks-section" aria-live="polite">
         <div className="section-title-bar section-header">
           <div className="section-title">
             <span className="title-icon">
@@ -149,7 +180,7 @@ export default function TelemetryView() {
       <OverviewBuildsSection />
       <OverviewSchedulesSection />
 
-      <section className="hud-section bento-cell bento-span-2 services-grid-section">
+      <section className="hud-section bento-cell bento-span-3 services-grid-section">
         <div className="section-title-bar section-header">
           <div className="section-title">
             <span className="title-icon">
@@ -162,7 +193,7 @@ export default function TelemetryView() {
         <ServicesGrid />
       </section>
 
-      <section className="hud-section bento-cell deployment-pipeline-section">
+      <section className="hud-section bento-cell bento-span-3 deployment-pipeline-section">
         <div className="section-title-bar section-header">
           <div className="section-title">
             <span className="title-icon">

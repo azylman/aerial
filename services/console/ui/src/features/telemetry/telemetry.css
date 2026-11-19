@@ -625,7 +625,7 @@ html.motion-ready .step-panel.step-active {
 
 .overview-bento-grid {
     display: grid;
-    grid-template-columns: 1.15fr 1.05fr 0.9fr;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 14px;
     align-items: stretch;
     margin-bottom: 2rem;
@@ -635,11 +635,18 @@ html.motion-ready .step-panel.step-active {
     grid-column: span 2;
 }
 
+.bento-span-3 {
+    grid-column: span 3;
+}
+
 @media (max-width: 1024px) {
     .overview-bento-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .bento-span-2 {
+        grid-column: span 1;
+    }
+    .bento-span-3 {
         grid-column: span 2;
     }
 }
@@ -648,7 +655,8 @@ html.motion-ready .step-panel.step-active {
     .overview-bento-grid {
         grid-template-columns: 1fr;
     }
-    .bento-span-2 {
+    .bento-span-2,
+    .bento-span-3 {
         grid-column: span 1;
     }
 }
@@ -661,6 +669,7 @@ html.motion-ready .step-panel.step-active {
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
+    min-width: 0;
     transition: all 0.2s ease;
     margin-bottom: 0;
 }
@@ -708,19 +717,80 @@ html.motion-ready .step-panel.step-active {
     color: var(--text-primary);
     font-family: inherit;
     font-size: 0.85rem;
+    cursor: pointer;
     transition: all 0.2s ease;
     box-sizing: border-box;
 }
 
-.overview-build-row {
-    cursor: pointer;
+.overview-schedule-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.6rem;
 }
 
-.overview-build-row:hover {
+.overview-schedule-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    width: 100%;
+    min-width: 0;
+}
+
+.overview-schedule-header .overview-row-left {
+    min-width: 140px;
+}
+
+.overview-schedule-header .overview-row-right {
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.overview-schedule-chevron {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    line-height: 1;
+}
+
+.overview-schedule-prompt {
+    background: var(--bg-elevated, #f6f5f1);
+    border: 1px solid var(--card-border, #e2dfd7);
+    border-left: 3px solid var(--accent-primary, #c2410c);
+    border-radius: 6px;
+    padding: 0.65rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.overview-schedule-prompt-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.5px;
+    font-family: var(--font-mono);
+}
+
+.overview-schedule-prompt-body {
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+}
+
+.overview-build-row:hover,
+.overview-schedule-row:hover {
     background: var(--bg-elevated);
     border-color: var(--card-border-hover);
     transform: translateY(-1px);
     box-shadow: 0 2px 8px rgba(20, 20, 19, 0.06);
+}
+
+.overview-schedule-row.expanded {
+    border-color: var(--accent-primary, #c2410c);
 }
 
 .overview-row-left {
