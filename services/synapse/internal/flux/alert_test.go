@@ -1,0 +1,578 @@
+package flux
+
+import (
+	"testing"
+	"time"
+
+	"github.com/azylman/aerial/services/synapse/internal/model"
+)
+
+type translateFluxAlertCase struct {
+	name       string
+	alert      model.FluxAlertEvent
+	wantOK     bool
+	wantEvent  string
+	wantStatus string
+	wantJob    string
+	wantRepo   string
+	wantSHA    string
+	wantDetail string
+	wantKind   string
+}
+
+func translateFluxAlertGitRepoCases(now time.Time) []translateFluxAlertCase {
+	return []translateFluxAlertCase{
+		{
+			name: "GitRepository NewArtifact maps to sync_success",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "GitRepository", Name: "aerial-config", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "NewArtifact",
+				Message:        "stored new artifact for commit 'main@sha1:1234567890abcdef'",
+				Metadata:       map[string]string{"revision": "main@sha1:1234567890abcdef"},
+			},
+			wantOK:     true,
+			wantKind:   "GitRepository",
+			wantEvent:  "sync_success",
+			wantStatus: "success",
+			wantJob:    "git-sync",
+			wantRepo:   "azylman/aerial",
+			wantSHA:    "1234567890abcdef",
+			wantDetail: "stored new artifact for commit 'main@sha1:1234567890abcdef'",
+		},
+		{
+			name: "GitRepository GitOperationSucceeded maps to sync_success",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "GitOperationSucceeded",
+				Message:        "sync succeeded",
+				Metadata:       map[string]string{"revision": "sha1:abcdef1234567890"},
+			},
+			wantOK:     true,
+			wantKind:   "GitRepository",
+			wantEvent:  "sync_success",
+			wantStatus: "success",
+			wantJob:    "git-sync",
+			wantRepo:   "azylman/aerial",
+			wantSHA:    "abcdef1234567890",
+			wantDetail: "sync succeeded",
+		},
+		{
+			name: "GitRepository GitOperationFailed maps to sync_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"},
+				Severity:       "error",
+				Timestamp:      now,
+				Reason:         "GitOperationFailed",
+				Message:        "authentication failed",
+			},
+			wantOK:     true,
+			wantKind:   "GitRepository",
+			wantEvent:  "sync_failed",
+			wantStatus: "failed",
+			wantJob:    "git-sync",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "authentication failed",
+		},
+		{
+			name: "GitRepository severity error without reason maps to sync_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"},
+				Severity:       "error",
+				Timestamp:      now,
+				Reason:         "UnknownFailure",
+				Message:        "clone timeout",
+			},
+			wantOK:     true,
+			wantKind:   "GitRepository",
+			wantEvent:  "sync_failed",
+			wantStatus: "failed",
+			wantJob:    "git-sync",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "clone timeout",
+		},
+		{
+			name: "GitRepository unknown reason ignored",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "Progressing",
+			},
+			wantOK: false,
+		},
+	}
+}
+
+func translateFluxAlertKustomizationSuccessCases(now time.Time) []translateFluxAlertCase {
+	return []translateFluxAlertCase{
+		{
+			name: "Kustomization Progressing maps to deploy_started",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "Progressing",
+				Message:        "reconciling",
+				Metadata:       map[string]string{"revision": "main@sha1:1111222233334444"},
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_started",
+			wantStatus: "started",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantSHA:    "1111222233334444",
+			wantDetail: "reconciling",
+		},
+		{
+			name: "Kustomization ReconciliationSucceeded maps to deploy_success",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "ReconciliationSucceeded",
+				Message:        "applied revision",
+				Metadata:       map[string]string{"revision": "main@sha1:5555666677778888"},
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_success",
+			wantStatus: "success",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantSHA:    "5555666677778888",
+			wantDetail: "applied revision",
+		},
+	}
+}
+
+func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxAlertCase {
+	return []translateFluxAlertCase{
+		{
+			name: "Kustomization ReconciliationFailed maps to deploy_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "error",
+				Timestamp:      now,
+				Reason:         "ReconciliationFailed",
+				Message:        "dry-run failed",
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_failed",
+			wantStatus: "failed",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "dry-run failed",
+		},
+		{
+			name: "Kustomization HealthCheckFailed maps to deploy_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "HealthCheckFailed",
+				Message:        "readiness probe timed out",
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_failed",
+			wantStatus: "failed",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "readiness probe timed out",
+		},
+		{
+			name: "Kustomization BuildFailed maps to deploy_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "BuildFailed",
+				Message:        "kustomize build error",
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_failed",
+			wantStatus: "failed",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "kustomize build error",
+		},
+		{
+			name: "Kustomization ArtifactFailed maps to deploy_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "ArtifactFailed",
+				Message:        "artifact not found",
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_failed",
+			wantStatus: "failed",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "artifact not found",
+		},
+		{
+			name: "Kustomization ValidationFailed maps to deploy_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "ValidationFailed",
+				Message:        "schema validation error",
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_failed",
+			wantStatus: "failed",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "schema validation error",
+		},
+		{
+			name: "Kustomization severity error without failure reason maps to deploy_failed",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "error",
+				Timestamp:      now,
+				Reason:         "CustomErrorReason",
+				Message:        "unspecified error",
+			},
+			wantOK:     true,
+			wantKind:   "Kustomization",
+			wantEvent:  "deploy_failed",
+			wantStatus: "failed",
+			wantJob:    "synapse",
+			wantRepo:   "azylman/aerial",
+			wantDetail: "unspecified error",
+		},
+		{
+			name: "Kustomization unknown reason ignored",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Kustomization", Name: "synapse", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "UnknownReason",
+			},
+			wantOK: false,
+		},
+		{
+			name: "Unsupported Kind ignored",
+			alert: model.FluxAlertEvent{
+				InvolvedObject: model.FluxInvolvedObject{Kind: "Receiver", Name: "generic", Namespace: "flux-system"},
+				Severity:       "info",
+				Timestamp:      now,
+				Reason:         "NewArtifact",
+			},
+			wantOK: false,
+		},
+	}
+}
+
+func translateFluxAlertKustomizationCases(now time.Time) []translateFluxAlertCase {
+	return append(translateFluxAlertKustomizationSuccessCases(now), translateFluxAlertKustomizationFailureCases(now)...)
+}
+
+func assertTranslatedDeployEvent(t *testing.T, tc translateFluxAlertCase, got model.DeployEvent) {
+	t.Helper()
+	if got.Event != tc.wantEvent {
+		t.Errorf("Event = %q, want %q", got.Event, tc.wantEvent)
+	}
+	if got.Status != tc.wantStatus {
+		t.Errorf("Status = %q, want %q", got.Status, tc.wantStatus)
+	}
+	if got.JobName != tc.wantJob {
+		t.Errorf("JobName = %q, want %q", got.JobName, tc.wantJob)
+	}
+	if got.Repo != tc.wantRepo {
+		t.Errorf("Repo = %q, want %q", got.Repo, tc.wantRepo)
+	}
+	if got.CommitSHA != tc.wantSHA {
+		t.Errorf("CommitSHA = %q, want %q", got.CommitSHA, tc.wantSHA)
+	}
+	if got.Details != tc.wantDetail {
+		t.Errorf("Details = %q, want %q", got.Details, tc.wantDetail)
+	}
+	if got.SourceKind != tc.wantKind {
+		t.Errorf("SourceKind = %q, want %q", got.SourceKind, tc.wantKind)
+	}
+	if got.Timestamp.IsZero() {
+		t.Errorf("Timestamp is zero, expected set timestamp")
+	}
+}
+
+func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+	tests := append(translateFluxAlertGitRepoCases(now), translateFluxAlertKustomizationCases(now)...)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := TranslateFluxAlertToDeployEvent(tc.alert)
+			if ok != tc.wantOK {
+				t.Fatalf("TranslateFluxAlertToDeployEvent() ok = %v, wantOK = %v", ok, tc.wantOK)
+			}
+			if tc.wantOK {
+				assertTranslatedDeployEvent(t, tc, got)
+			}
+		})
+	}
+
+	// Zero timestamp fallback
+	zeroAlert := model.FluxAlertEvent{
+		InvolvedObject: model.FluxInvolvedObject{Kind: "GitRepository", Name: "aerial"},
+		Reason:         "NewArtifact",
+	}
+	evt, ok := TranslateFluxAlertToDeployEvent(zeroAlert)
+	if !ok || evt.Timestamp.IsZero() {
+		t.Errorf("expected ok=true and non-zero timestamp for zero-time alert")
+	}
+}
+
+func TestAlertPayloadRepoAndResolveFluxRepo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		alert    model.FluxAlertEvent
+		wantP    string
+		wantRepo string
+	}{
+		{
+			name:     "explicit repo field",
+			alert:    model.FluxAlertEvent{Repo: "acme/custom"},
+			wantP:    "acme/custom",
+			wantRepo: "acme/custom",
+		},
+		{
+			name:     "metadata repo field",
+			alert:    model.FluxAlertEvent{Metadata: map[string]string{"repo": "acme/meta"}},
+			wantP:    "acme/meta",
+			wantRepo: "acme/meta",
+		},
+		{
+			name:     "empty repo falls back to azylman/aerial",
+			alert:    model.FluxAlertEvent{},
+			wantP:    "",
+			wantRepo: "azylman/aerial",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotP := AlertPayloadRepo(tc.alert)
+			if gotP != tc.wantP {
+				t.Errorf("AlertPayloadRepo() = %q, want %q", gotP, tc.wantP)
+			}
+			gotRepo := ResolveFluxRepo(tc.alert)
+			if gotRepo != tc.wantRepo {
+				t.Errorf("ResolveFluxRepo() = %q, want %q", gotRepo, tc.wantRepo)
+			}
+		})
+	}
+}
+
+func TestIsFluxFailureReason(t *testing.T) {
+	t.Parallel()
+	failures := []string{"ReconciliationFailed", "HealthCheckFailed", "BuildFailed", "ArtifactFailed", "ValidationFailed"}
+	for _, reason := range failures {
+		if !IsFluxFailureReason(reason) {
+			t.Errorf("expected IsFluxFailureReason(%q) = true", reason)
+		}
+	}
+	if IsFluxFailureReason("Progressing") || IsFluxFailureReason("ReconciliationSucceeded") || IsFluxFailureReason("") {
+		t.Errorf("expected IsFluxFailureReason to return false for non-failures")
+	}
+}
+
+func TestImageTag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{name: "plain tag", image: "ghcr.io/azylman/aerial-synapse:abc123", want: "abc123"},
+		{name: "registry with port and tag", image: "registry.lan:5000/aerial/haro:def456", want: "def456"},
+		{name: "registry with port untagged", image: "registry.lan:5000/aerial/haro"},
+		{name: "tag with digest", image: "ghcr.io/azylman/aerial-synapse:abc123@sha256:beef", want: "abc123"},
+		{name: "digest only", image: "ghcr.io/azylman/aerial-synapse@sha256:beef"},
+		{name: "untagged", image: "busybox"},
+		{name: "bare name with tag", image: "postgres:18", want: "18"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ImageTag(tc.image); got != tc.want {
+				t.Errorf("ImageTag(%q) = %q, want %q", tc.image, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLinkManagedWorkloadsAndReloadsOn(t *testing.T) {
+	t.Parallel()
+	workloads := []model.WorkloadRollout{
+		{Kind: "Deployment", Name: "dep"},
+		{Kind: "RestateCluster", Name: "restate-cluster", Namespace: "ns1"},
+		{Kind: "StatefulSet", Name: "restate", Namespace: "ns1"},
+		{Kind: "StatefulSet", Name: "restate-cluster", Namespace: "ns1"},
+		{Kind: "StatefulSet", Name: "other", Namespace: "ns1"},
+	}
+	LinkManagedWorkloads(workloads)
+	if len(workloads[1].ManagedWorkloads) != 2 {
+		t.Errorf("expected 2 statefulsets linked to cluster, got %d", len(workloads[1].ManagedWorkloads))
+	}
+
+	w := model.WorkloadRollout{
+		Annotations:   map[string]string{reloaderConfigMapAnnotation: "cm1, cm2"},
+		ConfigMapRefs: []string{"cm1"},
+	}
+	if !ReloadsOn(w, "cm1") || !ReloadsOn(w, "cm2") || ReloadsOn(w, "cm3") {
+		t.Errorf("ReloadsOn failed for explicit annotation")
+	}
+}
+
+func TestWorkloadRolloutComplete(t *testing.T) {
+	t.Parallel()
+	synapseImage := "ghcr.io/azylman/aerial-synapse:0123abcd"
+
+	deployRollout := func(name, image string, gen, observed int64, replicas, updated, available, total int32, deadline bool) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "Deployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, UpdatedReplicas: updated, AvailableReplicas: available, StatusReplicas: total, ProgressDeadlineExceeded: deadline}
+	}
+	stsRollout := func(name, image string, gen, observed int64, replicas, available int32, updateRev, currentRev string) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "StatefulSet", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, AvailableReplicas: available, UpdateRevision: updateRev, CurrentRevision: currentRev}
+	}
+	dsRollout := func(name, image string, gen, observed int64, desired, updated, available int32) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "DaemonSet", Namespace: "kube-system", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, DesiredNumberScheduled: desired, UpdatedNumberScheduled: updated, NumberAvailable: available}
+	}
+	restateDeployRollout := func(name, image string, gen, observed int64, replicas, ready, available int32, deployID string, readyCond bool) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "RestateDeployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, ReadyReplicas: ready, AvailableReplicas: available, DeploymentID: deployID, ReadyConditionTrue: readyCond}
+	}
+	restateClusterRollout := func(name, image string, gen, observed int64, readyCond bool) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "RestateCluster", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: 1, ReadyConditionTrue: readyCond}
+	}
+	restateClusterRolloutWithManaged := func(name, image string, gen, observed int64, readyCond bool, managed ...model.WorkloadRollout) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "RestateCluster", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: 1, ReadyConditionTrue: readyCond, ManagedWorkloads: managed}
+	}
+
+	tests := []struct {
+		name       string
+		workload   model.WorkloadRollout
+		wantDone   bool
+		wantFailed bool
+		wantReason string
+	}{
+		{name: "zero cluster child residual StatusReplicas", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster child residual ReadyReplicas", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, ReadyReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster child residual AvailableReplicas", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster child residual UpdatedReplicas", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster stale child", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 1}}}, wantReason: "managed StatefulSet default/restate: generation 2 not yet observed"},
+		{name: "RestateDeployment stopped without child evidence", workload: model.WorkloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2}, wantReason: "waiting for stopped child evidence"},
+		{name: "RestateDeployment stopped stale generation", workload: model.WorkloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 1}, wantReason: "generation 2 not yet observed"},
+		{name: "StatefulSet stopped with inactive status", workload: model.WorkloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}, wantDone: true},
+		{name: "StatefulSet stopped stale generation", workload: model.WorkloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 1}, wantReason: "generation 2 not yet observed"},
+		{name: "StatefulSet stopped residual StatusReplicas", workload: model.WorkloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "zero cluster verifies stopped child without Ready", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantDone: true},
+		{name: "zero cluster missing child", workload: model.WorkloadRollout{Kind: "RestateCluster"}, wantReason: "waiting for managed statefulset"},
+		{name: "zero cluster child desired replicas mismatch", workload: model.WorkloadRollout{Kind: "RestateCluster", ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Replicas: 1}}}, wantReason: "managed StatefulSet default/restate replicas 1 do not match cluster replicas 0"},
+		{name: "zero cluster Images mismatch", workload: model.WorkloadRollout{Kind: "RestateCluster", Images: []string{"new"}, ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantReason: "managed StatefulSet default/restate images [] do not match cluster image new"},
+		{name: "zero cluster Env mismatch", workload: model.WorkloadRollout{Kind: "RestateCluster", Env: map[string]string{"A": "1"}, ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantReason: "managed StatefulSet default/restate env A=\"\" does not match cluster \"1\""},
+		{name: "zero cluster Resources mismatch", workload: model.WorkloadRollout{Kind: "RestateCluster", Resources: model.KubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}, ManagedWorkloads: []model.WorkloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantReason: "managed StatefulSet default/restate resource limit cpu=\"\" does not match cluster \"1\""},
+		{name: "deployment rolled out", workload: deployRollout("synapse", synapseImage, 3, 3, 2, 2, 2, 2, false), wantDone: true},
+		{name: "deployment with old replicas still present", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 2, false), wantReason: "1/1 updated, 1/1 available, 2 total"},
+		{name: "deployment new replica unavailable", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 1, false), wantReason: "1/1 updated, 0/1 available, 1 total"},
+		{name: "deployment with stale observed generation", workload: deployRollout("synapse", synapseImage, 4, 3, 1, 1, 1, 1, false), wantReason: "generation 4 not yet observed"},
+		{name: "deployment progress deadline exceeded", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true), wantFailed: true, wantReason: "progress deadline exceeded"},
+		{name: "statefulset rolled out", workload: stsRollout("db", synapseImage, 2, 2, 2, 2, "db-2", "db-2"), wantDone: true},
+		{name: "statefulset with old revision pods", workload: stsRollout("db", synapseImage, 2, 2, 2, 2, "db-2", "db-1"), wantReason: "revision db-1 of db-2, 2/2 available"},
+		{name: "daemonset rolled out", workload: dsRollout("agent", synapseImage, 5, 5, 3, 3, 3), wantDone: true},
+		{name: "daemonset unavailable", workload: dsRollout("agent", synapseImage, 5, 5, 3, 3, 2), wantReason: "3/3 updated, 2/3 available"},
+		{name: "restatedeployment rolled out", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "dp_12345", true), wantDone: true},
+		{name: "restatedeployment ready replicas unavailable", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 1, 2, "dp_12345", true), wantReason: "1/2 ready, 2/2 available, deploymentId=dp_12345, ready=true"},
+		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 0, false), wantReason: "ready=false"},
+		{name: "restatecluster without managed statefulset pending", workload: restateClusterRollout("restate", synapseImage, 2, 0, true), wantReason: "waiting for managed statefulset"},
+		{
+			name:       "restatecluster with managed statefulset matching spec rolled out",
+			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1")),
+			wantDone:   true,
+			wantReason: "",
+		},
+		{name: "unsupported kind", workload: model.WorkloadRollout{Kind: "Job"}, wantReason: "unsupported workload kind"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			done, failed, reason := WorkloadRolloutComplete(tc.workload)
+			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
+				t.Errorf("WorkloadRolloutComplete() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestPRRolloutStatus(t *testing.T) {
+	t.Parallel()
+	rolloutClock := func(hh, mm, ss int) time.Time {
+		return time.Date(2026, time.November, 8, hh, mm, ss, 0, time.UTC)
+	}
+	withChange := func(w model.WorkloadRollout, changedAt time.Time, annotations map[string]string, configMapRefs ...string) model.WorkloadRollout {
+		w.ChangedAt, w.Annotations, w.ConfigMapRefs = changedAt, annotations, configMapRefs
+		return w
+	}
+	deployRollout := func(name, image string, gen, observed int64, replicas, updated, available, total int32, deadline bool) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "Deployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, UpdatedReplicas: updated, AvailableReplicas: available, StatusReplicas: total, ProgressDeadlineExceeded: deadline}
+	}
+	stsRollout := func(name, image string, gen, observed int64, replicas, available int32, updateRev, currentRev string) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "StatefulSet", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, AvailableReplicas: available, UpdateRevision: updateRev, CurrentRevision: currentRev}
+	}
+
+	const otherImage = "ghcr.io/azylman/aerial-haro:feedface"
+	const rolloutSHA = "0123abcd"
+	const synapseImage = "ghcr.io/azylman/aerial-synapse:" + rolloutSHA
+	since := rolloutClock(10, 0, 0)
+	auto := map[string]string{"reloader.stakater.com/auto": "true"}
+	eriDone := deployRollout("eri", otherImage, 2, 2, 1, 1, 1, 1, false)
+	eriRolling := deployRollout("eri", otherImage, 2, 2, 1, 1, 0, 2, false)
+	eriConfig := []model.ConfigMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}}
+
+	tests := []struct {
+		name       string
+		workloads  []model.WorkloadRollout
+		configMaps []model.ConfigMapChange
+		commitSHA  string
+		now        time.Time
+		wantDone   bool
+		wantFailed bool
+		wantReason string
+	}{
+		{name: "no workloads is done", commitSHA: rolloutSHA, wantDone: true},
+		{name: "image match pending", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total)"},
+		{name: "image match done", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "image match failed", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/synapse: progress deadline exceeded"},
+		{name: "manifest-only change done", workloads: []model.WorkloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 1, 1, false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "reloader pending restart", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{name: "reloader restarted and rolling out", workloads: []model.WorkloadRollout{withChange(eriRolling, rolloutClock(10, 1, 5), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (1/1 updated, 0/1 available, 2 total)"},
+		{name: "reloader restarted and rolled out", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(10, 1, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
+		{name: "reloader restart timeout fails", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 6, 1), wantFailed: true, wantReason: "Deployment default/eri: not restarted by Reloader within 5m0s of ConfigMap default/eri-config changing"},
+		{name: "reloader reload annotation names configmap", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), map[string]string{"configmap.reloader.stakater.com/reload": "eri-flags, eri-config"})}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{name: "reloader configmap auto annotation gates", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), map[string]string{"configmap.reloader.stakater.com/auto": "true"}, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			done, failed, reason := PRRolloutStatus(PRRolloutInput{Workloads: tc.workloads, ConfigMaps: tc.configMaps, CommitSHA: tc.commitSHA, Since: since, Now: tc.now})
+			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
+				t.Errorf("PRRolloutStatus() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
+			}
+		})
+	}
+}

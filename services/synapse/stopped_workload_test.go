@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/services/synapse/internal/flux"
 )
 
 const (
@@ -78,7 +80,7 @@ func TestStoppedWorkloadEvidence(t *testing.T) {
 			if len(ws) != 1 {
 				t.Fatalf("workloads = %v", ws)
 			}
-			done, failed, _ := workloadRolloutComplete(ws[0])
+			done, failed, _ := flux.WorkloadRolloutComplete(toModelWorkloadRollout(ws[0]))
 			if done != tc.wantDone || failed {
 				t.Fatalf("done=%v failed=%v, want done %v", done, failed, tc.wantDone)
 			}

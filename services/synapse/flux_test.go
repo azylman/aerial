@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azylman/aerial/services/synapse/internal/flux"
 )
 
 func scanPreImagePRRow(dest ...any) error {
@@ -720,7 +722,7 @@ func TestImageTag(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := imageTag(tc.image); got != tc.want {
+			if got := flux.ImageTag(tc.image); got != tc.want {
 				t.Errorf("imageTag(%q) = %q, want %q", tc.image, got, tc.want)
 			}
 		})
@@ -836,7 +838,7 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			done, failed, reason := workloadRolloutComplete(tc.workload)
+			done, failed, reason := flux.WorkloadRolloutComplete(toModelWorkloadRollout(tc.workload))
 			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
 				t.Errorf("workloadRolloutComplete() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
 			}
