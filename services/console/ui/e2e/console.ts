@@ -356,8 +356,8 @@ const settleBuilds = (label: string): readonly Step[] => [
 const OPEN_BUILD_ONE: readonly Step[] = [
   ...settleBuilds('SHOWING 25 / 25 BUILDS'),
   { kind: 'openDrawer', text: 'Console React rewrite #1' },
+  { kind: 'click', selector: '#builds-view .build-card.expanded .build-dag-node' },
   { kind: 'openDrawer', text: 'BUILD // CONSOLE REACT REWRITE #1' },
-  { kind: 'click', selector: '.build-dag-node' },
 ];
 
 /**
