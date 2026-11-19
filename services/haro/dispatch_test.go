@@ -53,12 +53,12 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 		NextRunAt:   time.Now().UTC(),
 		Enabled:     true,
 	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
 	// 1. Initial schedule has nil last_completed_at
-	loaded, err := GetHeartbeatSchedule(ctx, db, "hb-mono-1")
+	loaded, err := store.GetHeartbeatSchedule(ctx, db, "hb-mono-1")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	if err = store.AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t1); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T1 failed: %v", err)
 	}
-	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
+	loaded, err = store.GetHeartbeatSchedule(ctx, db, "hb-mono-1")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule after T1 failed: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	if err = store.AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t2); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T2 failed: %v", err)
 	}
-	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
+	loaded, err = store.GetHeartbeatSchedule(ctx, db, "hb-mono-1")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule after T2 failed: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	if err = store.AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t0); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T0 failed: %v", err)
 	}
-	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
+	loaded, err = store.GetHeartbeatSchedule(ctx, db, "hb-mono-1")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule after T0 failed: %v", err)
 	}
@@ -247,7 +247,7 @@ func seedDispatchHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, schedu
 		NextRunAt:   now,
 		Enabled:     true,
 	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 }
@@ -327,7 +327,7 @@ func assertHeartbeatWatermark(ctx context.Context, t *testing.T, db *sql.DB, sch
 	if scheduleID == "" || scheduleType != "heartbeat" {
 		return
 	}
-	hb, err := GetHeartbeatSchedule(ctx, db, scheduleID)
+	hb, err := store.GetHeartbeatSchedule(ctx, db, scheduleID)
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		NextRunAt:   now,
 		Enabled:     true,
 	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
@@ -428,7 +428,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		t.Errorf("updatedRun.Status = %q, want completed", updatedRun.Status)
 	}
 
-	updatedHB, err := GetHeartbeatSchedule(ctx, db, "hb-bus-1")
+	updatedHB, err := store.GetHeartbeatSchedule(ctx, db, "hb-bus-1")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for one-shot delivery")
 	}
-	osSched, err := GetOneShotSchedule(ctx, db, "os-bus-integration")
+	osSched, err := store.GetOneShotSchedule(ctx, db, "os-bus-integration")
 	if err != nil {
 		t.Fatalf("GetOneShotSchedule failed: %v", err)
 	}
@@ -503,7 +503,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		NextRunAt:   now,
 		Enabled:     true,
 	}
-	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+	if err := store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
@@ -540,7 +540,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	if updatedRun.DurationMs != 4000 {
 		t.Errorf("expected DurationMs = 4000, got %d", updatedRun.DurationMs)
 	}
-	updatedHB, err := GetHeartbeatSchedule(ctx, db, "hb-fallback-1")
+	updatedHB, err := store.GetHeartbeatSchedule(ctx, db, "hb-fallback-1")
 	if err != nil {
 		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
 	}

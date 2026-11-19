@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
 // Regression cover for the root-owned nil-context tolerance on
@@ -29,8 +31,8 @@ func TestShim_NilCtxDefaults(t *testing.T) {
 					t.Errorf("ListEventTriggers(nil ctx) err = %v", err)
 				}
 			default:
-				if _, err := DeleteEventTrigger(nil, db, "missing"); err != nil {
-					t.Errorf("DeleteEventTrigger(nil ctx) err = %v", err)
+				if _, err := store.DeleteEventTrigger(nil, db, "missing"); err != nil {
+					t.Errorf("store.DeleteEventTrigger(nil ctx) err = %v", err)
 				}
 			}
 		})
