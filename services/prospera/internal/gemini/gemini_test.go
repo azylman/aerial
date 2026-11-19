@@ -1,15 +1,48 @@
-package main
+package gemini
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
+
+func TestMain(m *testing.M) {
+	otel.SetTracerProvider(sdktrace.NewTracerProvider())
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	os.Exit(m.Run())
+}
+
+// traceCaller returns a context carrying a sampled caller span (or a bare context) and the
+// caller's trace id ("" without a span).
+func traceCaller(withParent bool) (context.Context, string) {
+	if !withParent {
+		return context.Background(), ""
+	}
+	ctx, span := otel.Tracer("test").Start(context.Background(), "caller")
+	span.End()
+	return ctx, span.SpanContext().TraceID().String()
+}
+
+// headerTraceID returns the trace id of a W3C traceparent header, or "" when absent or invalid.
+func headerTraceID(h http.Header) string {
+	sc := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(h)))
+	if !sc.IsValid() {
+		return ""
+	}
+	return sc.TraceID().String()
+}
 
 func TestDialGeminiLive(t *testing.T) {
 	t.Parallel()
@@ -136,15 +169,18 @@ func TestBuildGeminiMessages(t *testing.T) {
 }
 
 type consultTestCase struct {
-	name        string
-	overrideURL string
-	sessionID   string
-	startISO    string
-	endISO      string
-	statusCode  int
-	respBody    string
-	wantSubstr  string
-	wantErr     bool
+	name                  string
+	overrideURL           string
+	sessionID             string
+	startISO              string
+	endISO                string
+	statusCode            int
+	respBody              string
+	failFollowup          bool
+	failNotificationsOnly bool
+	truncateBody          bool
+	wantSubstr            string
+	wantErr               bool
 }
 
 func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
@@ -207,6 +243,28 @@ func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
 				overrideURL: "none",
 				wantSubstr:  "unavailable",
 			},
+			{
+				name:         "calendar tools call 500 after init success",
+				statusCode:   http.StatusOK,
+				respBody:     `{"jsonrpc":"2.0","id":1,"result":{}}`,
+				failFollowup: true,
+				wantErr:      true,
+			},
+			{
+				name:                  "calendar notifications init 500 with session",
+				sessionID:             "mcp-sess-9",
+				statusCode:            http.StatusOK,
+				respBody:              `{"jsonrpc":"2.0","id":1,"result":{}}`,
+				failNotificationsOnly: true,
+				wantErr:               true,
+			},
+			{
+				name:         "calendar truncated body read error",
+				statusCode:   http.StatusOK,
+				respBody:     `{"jsonrpc":"2.0","id":1}`,
+				truncateBody: true,
+				wantErr:      true,
+			},
 		}
 
 		for _, tc := range tests {
@@ -253,6 +311,13 @@ func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
 				overrideURL: "none",
 				wantSubstr:  "unavailable",
 			},
+			{
+				name:         "memory truncated body read error",
+				statusCode:   http.StatusOK,
+				respBody:     `{"partial`,
+				truncateBody: true,
+				wantErr:      true,
+			},
 		}
 
 		for _, tc := range tests {
@@ -264,6 +329,39 @@ func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
 	})
 }
 
+func handleConsultCalendarMock(t *testing.T, w http.ResponseWriter, r *http.Request, tc consultTestCase) {
+	t.Helper()
+	if tc.sessionID != "" {
+		w.Header().Set("Mcp-Session-Id", tc.sessionID)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if tc.truncateBody {
+		w.Header().Set("Content-Length", "100")
+	}
+	if tc.failNotificationsOnly {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("notifications/initialized")) {
+			http.Error(w, "notifications failed", http.StatusInternalServerError)
+			return
+		}
+		if bytes.Contains(body, []byte(`"id":2`)) {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Sunday is free"}]}}`))
+			return
+		}
+	}
+	if tc.failFollowup {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("notifications/initialized")) || bytes.Contains(body, []byte(`"id":2`)) {
+			http.Error(w, "followup failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	if tc.statusCode != 0 {
+		w.WriteHeader(tc.statusCode)
+	}
+	_, _ = w.Write([]byte(tc.respBody))
+}
+
 func runConsultCalendarCase(t *testing.T, tc consultTestCase) {
 	t.Helper()
 	calURL := tc.overrideURL
@@ -271,14 +369,7 @@ func runConsultCalendarCase(t *testing.T, tc consultTestCase) {
 		calURL = ""
 	} else if calURL == "" {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if tc.sessionID != "" {
-				w.Header().Set("Mcp-Session-Id", tc.sessionID)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			if tc.statusCode != 0 {
-				w.WriteHeader(tc.statusCode)
-			}
-			_, _ = w.Write([]byte(tc.respBody))
+			handleConsultCalendarMock(t, w, r, tc)
 		}))
 		t.Cleanup(server.Close)
 		calURL = server.URL
@@ -300,6 +391,9 @@ func runConsultMemoryCase(t *testing.T, tc consultTestCase) {
 	} else if memURL == "" {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain")
+			if tc.truncateBody {
+				w.Header().Set("Content-Length", "100")
+			}
 			if tc.statusCode != 0 {
 				w.WriteHeader(tc.statusCode)
 			}
