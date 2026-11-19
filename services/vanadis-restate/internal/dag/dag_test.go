@@ -223,7 +223,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 			name: "concurrent_mixed_modes_skip_disjoint_check",
 			chunks: []model.VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
-				{ID: "c2", Mode: "action", DependsOn: []string{}},
+				{ID: "c2", Mode: "action", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
 			},
 			wantDeps: [][]string{nil, nil},
 		},

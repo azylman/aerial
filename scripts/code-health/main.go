@@ -39,8 +39,9 @@ var splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Unco
 
 // bannedTestFilenameSuffixes rejects catch-all test filenames that accumulate
 // unrelated coverage-slop cases outside their domain scope. Fold such files
-// into canonical domain-scoped test tables instead of renaming around this
-// list: any new catch-all suffix is itself a violation of this ratchet.
+// into canonical domain-scoped test tables. Extend this list when a new
+// catch-all pattern appears; renaming a file to dodge a listed suffix
+// defeats the ratchet.
 var bannedTestFilenameSuffixes = []string{"_extra_test.go", "_more_test.go", "_coverage_gaps_test.go", "_additional_test.go"}
 
 func isCatchAllTestFilename(rel string) bool {

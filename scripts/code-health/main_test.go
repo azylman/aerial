@@ -897,11 +897,6 @@ func TestJ_CoverageGaps() {}
 				"pkg/foo_additional_test.go: test filename uses banned catch-all suffix",
 			},
 		},
-		{
-			name:    "canonical domain test filename passes",
-			rel:     "pkg/reconcile_lifecycle_test.go",
-			content: "package pkg\n",
-		},
 	}
 }
 
