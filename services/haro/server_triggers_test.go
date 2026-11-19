@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/services/haro/internal/metrics"
 )
 
 func TestDirectDB_SummaryAndRunsErrors(t *testing.T) {
@@ -114,7 +116,7 @@ func TestServer_Metrics_Table(t *testing.T) {
 	RecordScheduleDispatchDuration("event_watch", 1.25)
 
 	serverNilDB := &Server{handler: &ToolHandler{}}
-	registerHaroCollector(SchedulesActive)
+	metrics.RegisterHaroCollector(SchedulesActive)
 
 	tests := []struct {
 		name           string
