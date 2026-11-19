@@ -1,79 +1,41 @@
 package main
 
+// Root compatibility shims for the Layer-1 metrics package.
+//
+// Every metric vector and record helper formerly defined here now lives in
+// internal/metrics (Layer 1, imports model only). This file keeps zero-logic
+// aliases only so all not-yet-moved callers (ticker.go, server.go) compile
+// unchanged until the final purge (haro-07b). Shims contain no logic and
+// carry no coverage-bearing statements. The Server.handleMetrics handler
+// stays here; it moves to internal/server in haro-07a.
+
 import (
-	"errors"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-)
 
-const (
-	labelScheduleType = "schedule_type"
-)
-
-var (
-	SchedulesActive = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "haro_schedules_active",
-			Help: "Number of active persistent schedules by type.",
-		},
-		[]string{labelScheduleType},
-	)
-
-	ScheduleRunsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "haro_schedule_runs_total",
-			Help: "Total number of schedule runs executed by type and status.",
-		},
-		[]string{labelScheduleType, fieldStatus},
-	)
-
-	ScheduleDispatchDurationSeconds = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "haro_schedule_dispatch_duration_seconds",
-			Help:    "Dispatch duration of schedule runs in seconds.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{labelScheduleType},
-	)
+	"github.com/azylman/aerial/services/haro/internal/metrics"
 )
 
 var (
-	knownScheduleTypes = []string{scheduleTypeCron, scheduleTypeOneShot, scheduleTypeHeartbeat, scheduleTypeEventWatch}
-	knownRunStatuses   = []string{statusCompleted, statusFailed, statusStale, statusSkippedActive}
+	SchedulesActive                 = metrics.SchedulesActive
+	ScheduleRunsTotal               = metrics.ScheduleRunsTotal
+	ScheduleDispatchDurationSeconds = metrics.ScheduleDispatchDurationSeconds
 )
-
-func registerHaroCollector(c prometheus.Collector) {
-	if err := prometheus.Register(c); err != nil {
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
-		}
-	}
-}
-
-func init() {
-	registerHaroCollector(SchedulesActive)
-	registerHaroCollector(ScheduleRunsTotal)
-	registerHaroCollector(ScheduleDispatchDurationSeconds)
-
-	for _, st := range knownScheduleTypes {
-		SchedulesActive.WithLabelValues(st).Set(0)
-		ScheduleDispatchDurationSeconds.WithLabelValues(st)
-		for _, status := range knownRunStatuses {
-			ScheduleRunsTotal.WithLabelValues(st, status).Add(0)
-		}
-	}
-}
 
 // RecordScheduleRun records a schedule execution count partitioned by schedule_type and status.
 func RecordScheduleRun(scheduleType, status string) {
-	ScheduleRunsTotal.WithLabelValues(scheduleType, status).Inc()
+	metrics.RecordScheduleRun(scheduleType, status)
 }
 
 // RecordScheduleDispatchDuration observes the prompt dispatch duration in seconds for a schedule type.
 func RecordScheduleDispatchDuration(scheduleType string, durationSeconds float64) {
-	ScheduleDispatchDurationSeconds.WithLabelValues(scheduleType).Observe(durationSeconds)
+	metrics.RecordScheduleDispatchDuration(scheduleType, durationSeconds)
+}
+
+func registerHaroCollector(c prometheus.Collector) {
+	metrics.RegisterHaroCollector(c)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
