@@ -461,6 +461,7 @@ spec:
                   - scratch-service
                   - mirrormere-core
                   - eri
+                  - transcripts
     - from:
         - podSelector:
             matchLabels:
@@ -471,6 +472,30 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: eri
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: transcripts-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - eri
+                  - coven
+      ports:
+        - port: 4030
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: transcripts
   policyTypes:
     - Ingress
 ---
