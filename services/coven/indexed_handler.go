@@ -7,51 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // covenMaxNakDelay caps the retry-forever backoff for indexed events.
 const covenMaxNakDelay = 1 * time.Hour
-
-// darkAnchorMessage feeds the reachability anchor below an empty event.
-type darkAnchorMessage struct{}
-
-func (darkAnchorMessage) Data() []byte                     { return []byte(`{}`) }
-func (darkAnchorMessage) Subject() string                  { return "" }
-func (darkAnchorMessage) Header() nats.Header              { return nil }
-func (darkAnchorMessage) NumDelivered() uint64             { return 0 }
-func (darkAnchorMessage) Ack() error                       { return nil }
-func (darkAnchorMessage) NakWithDelay(time.Duration) error { return nil }
-func (darkAnchorMessage) Term() error                      { return nil }
-func (darkAnchorMessage) Snooze(time.Duration) error       { return nil }
-func (darkAnchorMessage) InProgress() error                { return nil }
-
-// darkCovenAnchor keeps the per-stack extraction pieces reachable in the
-// production call graph until the indexed-event cutover chunk subscribes
-// handleTranscriptsIndexedEvent. Every call below is a validated no-op:
-// empty inputs return before any I/O, so this performs no network or
-// database work and changes no behavior. The cutover chunk removes this
-// anchor when it wires the live subscription.
-var _ = func() bool {
-	_ = NormalizeStack("")
-	cfg := &Config{}
-	_ = cfg.EffectiveStack()
-	_ = cfg.ExtractTimeout()
-	_ = cfg.ExtractBatchLimit()
-	client := NewIndexerClient("", "", nil)
-	client.SetMaxSteps(1)
-	_, errGet := client.GetTrajectoryContext(context.Background(), "")
-	_ = ScopedThreadKey("", "")
-	_ = covenNakDelay(0)
-	errHandle := handleTranscriptsIndexedEvent(context.Background(), darkAnchorMessage{}, "", nil)
-	locker := NewThreadLocker(nil)
-	_, errLock := locker.Lock(context.Background(), "")
-	errWrite := withFactWriteLock(context.Background(), nil, "", nil)
-	_ = []error{errGet, errHandle, errLock, errWrite}
-	return true
-}()
 
 // covenNakDelay returns min(1s*2^(n-1), 1h) for delivery count n.
 // Coven never gives up on a decodable event: failures always NakWithDelay,
@@ -87,9 +47,6 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 	if es := strings.TrimSpace(ev.Stack); es != "" && es != NormalizeStack(stack) {
 		return nil
 	}
-	if extract == nil {
-		return nil
-	}
 	if err := extract(ctx, threadID); err != nil {
 		if nakErr := msg.NakWithDelay(covenNakDelay(msg.NumDelivered())); nakErr != nil {
 			slog.WarnContext(ctx, "[Coven] error naking transcripts indexed event", "error", nakErr)
@@ -98,3 +55,15 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 	}
 	return nil
 }
+
+// darkCovenAnchor keeps legacy transcript sync and deferred watermark symbols reachable
+// in the production call graph until removed in spl2-c20b-coven-legacy and wired in spl2-c16-watermark-pk.
+var _ = func() bool {
+	_ = ScopedThreadKey("", "")
+	_ = nakBackoffDelay(0)
+	errSub := subscribeCovenTranscriptSynced(context.Background(), nil)
+	var w Worker
+	w.RunStartupCatchUp(context.Background())
+	_ = []error{errSub}
+	return true
+}()

@@ -209,7 +209,7 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 		t.Fatal("expected non-nil bus")
 	}
 
-	if err := memBus.Publish(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "bad-sync-1", "not-a-valid-json"); err != nil {
+	if err := memBus.Publish(ctx, pubsub.SubjectAerialTurnPrefix+"transcripts_indexed", "bad-sync-1", "not-a-valid-json"); err != nil {
 		t.Fatalf("Publish bad json: %v", err)
 	}
 
@@ -290,6 +290,8 @@ type mockPubsubMsg struct {
 	termed    bool
 	naked     bool
 	nakDelay  time.Duration
+	termErr   error
+	nakErr    error
 }
 
 func (m *mockPubsubMsg) Data() []byte         { return m.data }
@@ -300,9 +302,13 @@ func (*mockPubsubMsg) Ack() error             { return nil }
 func (m *mockPubsubMsg) NakWithDelay(d time.Duration) error {
 	m.naked = true
 	m.nakDelay = d
-	return nil
+	return m.nakErr
 }
-func (m *mockPubsubMsg) Term() error                { m.termed = true; return nil }
+
+func (m *mockPubsubMsg) Term() error {
+	m.termed = true
+	return m.termErr
+}
 func (*mockPubsubMsg) Snooze(_ time.Duration) error { return nil }
 func (*mockPubsubMsg) InProgress() error            { return nil }
 
@@ -428,16 +434,17 @@ func TestHandleTranscriptSyncedEvent_Scenarios(t *testing.T) {
 }
 
 type handleCovenExtractJobTestCase struct {
-	name       string
-	msgData    string
-	delivered  uint64
-	worker     *Worker
-	wantErr    bool
-	wantTerm   bool
-	wantNak    bool
-	wantMinNak time.Duration
-	checkWater bool
-	wantWater  int64
+	name         string
+	msgData      string
+	delivered    uint64
+	worker       *Worker
+	wantErr      bool
+	wantTerm     bool
+	wantNak      bool
+	wantMinNak   time.Duration
+	wantExactNak time.Duration
+	checkWater   bool
+	wantWater    int64
 }
 
 func runHandleCovenExtractJobCase(ctx context.Context, t *testing.T, tc handleCovenExtractJobTestCase, memStore *TestMemStore) {
@@ -459,6 +466,9 @@ func runHandleCovenExtractJobCase(ctx context.Context, t *testing.T, tc handleCo
 	}
 	if tc.wantMinNak > 0 && msg.nakDelay < tc.wantMinNak {
 		t.Errorf("nakDelay = %v, want >= %v", msg.nakDelay, tc.wantMinNak)
+	}
+	if tc.wantExactNak > 0 && msg.nakDelay != tc.wantExactNak {
+		t.Errorf("nakDelay = %v, want %v", msg.nakDelay, tc.wantExactNak)
 	}
 	if tc.checkWater && tc.worker != nil && memStore != nil {
 		wm, _, _ := memStore.GetConversationFactWatermark(ctx, "th-ext-1")
@@ -496,10 +506,25 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 		LLMClient: llm,
 	})
 
+	lockBusyStore := newTestMemStore()
+	lockBusyStore.SetFail("GetUnextractedAdminTurns", ErrAdvisoryLockBusy)
+	workerLockBusy := NewWorker(WorkerConfig{
+		Store:     lockBusyStore,
+		Ollama:    client,
+		LLMClient: llm,
+	})
+
 	tests := []handleCovenExtractJobTestCase{
 		{
 			name:      "UnmarshalErrorTermsMessageAndReturnsNil",
 			msgData:   "bad-json",
+			delivered: 1,
+			worker:    worker,
+			wantTerm:  true,
+		},
+		{
+			name:      "EmptyThreadIDTermsMessageAndReturnsNil",
+			msgData:   `{"thread_id":"   "}`,
 			delivered: 1,
 			worker:    worker,
 			wantTerm:  true,
@@ -531,11 +556,22 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 			wantMinNak: 8 * time.Second,
 		},
 		{
-			name:      "WorkerErrorAttempt5TermsAndReturnsNil",
-			msgData:   `{"thread_id":"th-ext-1"}`,
-			delivered: 5,
-			worker:    workerErr,
-			wantTerm:  true,
+			name:       "WorkerErrorAttempt5NaksWithBackoff",
+			msgData:    `{"thread_id":"th-ext-1"}`,
+			delivered:  5,
+			worker:     workerErr,
+			wantErr:    true,
+			wantNak:    true,
+			wantMinNak: 16 * time.Second,
+		},
+		{
+			name:         "WorkerLockBusyNaksWithFixed5Seconds",
+			msgData:      `{"thread_id":"th-ext-1"}`,
+			delivered:    5,
+			worker:       workerLockBusy,
+			wantErr:      true,
+			wantNak:      true,
+			wantExactNak: 5 * time.Second,
 		},
 	}
 
@@ -562,7 +598,7 @@ func (a *ackExtractBus) Subscribe(ctx context.Context, subject, durable string, 
 	})
 }
 
-func TestCoven_TranscriptSyncedToCoalescedExtractIntegration(t *testing.T) {
+func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	memStore := newTestMemStore()
@@ -605,14 +641,16 @@ func TestCoven_TranscriptSyncedToCoalescedExtractIntegration(t *testing.T) {
 		t.Fatal("expected non-nil bus")
 	}
 
-	ev := pubsub.TranscriptSyncedEvent{
-		SessionID:      "sess-e2e-1",
-		ConversationID: "th-e2e-1",
-		StepsInserted:  2,
-		SyncedAt:       time.Now().UTC(),
+	ev := pubsub.TranscriptsIndexedEvent{
+		Stack:        "aerial",
+		SessionID:    "sess-e2e-1",
+		ThreadID:     "th-e2e-1",
+		StepsIndexed: 2,
+		Final:        true,
+		IndexedAt:    time.Now().UTC(),
 	}
-	if err := memBus.Publish(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "sync-1", ev); err != nil {
-		t.Fatalf("Publish TranscriptSynced: %v", err)
+	if err := memBus.Publish(ctx, pubsub.SubjectAerialTurnPrefix+"transcripts_indexed", "sync-1", ev); err != nil {
+		t.Fatalf("Publish TranscriptsIndexed: %v", err)
 	}
 
 	select {
@@ -638,6 +676,9 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	defer memBus.Close()
 
 	// Nil bus or nil worker returns nil safely
+	if err := subscribeCovenTranscriptsIndexed(ctx, nil, "aerial"); err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
 	if err := subscribeCovenTranscriptSynced(ctx, nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -656,6 +697,9 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 
 	// Broken subscribe returns error
 	brokenSub := &brokenBus{Bus: memBus, errOnSubscribe: true}
+	if err := subscribeCovenTranscriptsIndexed(ctx, brokenSub, "aerial"); err == nil {
+		t.Error("expected error when subscribe fails")
+	}
 	if err := subscribeCovenTranscriptSynced(ctx, brokenSub); err == nil {
 		t.Error("expected error when subscribe fails")
 	}
@@ -666,9 +710,9 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 		t.Error("expected error when subscribe fails")
 	}
 
-	brokenTranscript := &brokenBus{Bus: memBus, failDurable: "coven-transcript-synced"}
-	if err := (&covenConsumers{}).subscribeAll(ctx, brokenTranscript, worker); err == nil {
-		t.Error("expected error when subscribe coven-transcript-synced fails")
+	brokenIndexed := &brokenBus{Bus: memBus, failDurable: "coven-transcripts-indexed"}
+	if err := (&covenConsumers{}).subscribeAll(ctx, brokenIndexed, worker); err == nil {
+		t.Error("expected error when subscribe coven-transcripts-indexed fails")
 	}
 	brokenExtract := &brokenBus{Bus: memBus, failDurable: "coven-extract"}
 	if err := (&covenConsumers{}).subscribeAll(ctx, brokenExtract, worker); err == nil {

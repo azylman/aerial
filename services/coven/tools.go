@@ -82,6 +82,22 @@ func NewToolHandler(cfg *Config, store Store, ollama OllamaClient, publisher ...
 	}
 }
 
+// Role returns the configured role from cfg, or empty if nil.
+func (h *ToolHandler) Role() string {
+	if h != nil && h.cfg != nil {
+		return h.cfg.Role
+	}
+	return ""
+}
+
+// Extract extracts and reconciles facts for a single conversation thread.
+func (h *ToolHandler) Extract(ctx context.Context, threadID string) error {
+	if h == nil || h.store == nil || h.llmClient == nil {
+		return errors.New("extract handler not configured")
+	}
+	return ExtractThreadFacts(ctx, h.store, h.ollama, h.llmClient, threadID)
+}
+
 // Consolidate runs a complete-linkage clique dreaming pass over all stored facts,
 // and if a publisher is configured, triggers procedural skill consolidation.
 func (h *ToolHandler) Consolidate(ctx context.Context) (int, error) {

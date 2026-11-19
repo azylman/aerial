@@ -4,39 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
-
-func TestDarkAnchorMessage(t *testing.T) {
-	msg := darkAnchorMessage{}
-	tests := []struct {
-		name string
-		got  string
-		want string
-	}{
-		{name: "data returns empty event", got: string(msg.Data()), want: `{}`},
-		{name: "subject empty", got: msg.Subject(), want: ""},
-		{name: "header nil", got: fmt.Sprintf("%v", msg.Header()), want: "map[]"},
-		{name: "delivered zero", got: strconv.FormatUint(msg.NumDelivered(), 10), want: "0"},
-		{name: "ack nil", got: fmt.Sprintf("%v", msg.Ack()), want: "<nil>"},
-		{name: "nak nil", got: fmt.Sprintf("%v", msg.NakWithDelay(time.Second)), want: "<nil>"},
-		{name: "term nil", got: fmt.Sprintf("%v", msg.Term()), want: "<nil>"},
-		{name: "snooze nil", got: fmt.Sprintf("%v", msg.Snooze(time.Second)), want: "<nil>"},
-		{name: "in progress nil", got: fmt.Sprintf("%v", msg.InProgress()), want: "<nil>"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.got != tc.want {
-				t.Errorf("got %q, want %q", tc.got, tc.want)
-			}
-		})
-	}
-}
 
 func indexedTestEvent(t *testing.T, stack, threadID string) []byte {
 	t.Helper()
@@ -90,6 +62,8 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 		stack          string
 		delivered      uint64
 		extractErr     error
+		termErr        error
+		nakErr         error
 		wantErr        bool
 		wantTermed     bool
 		wantNaked      bool
@@ -100,6 +74,14 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			name:       "undecodable terms without retry",
 			data:       `{not json`,
 			stack:      "aerial",
+			wantTermed: true,
+			wantCalls:  0,
+		},
+		{
+			name:       "undecodable term error handled cleanly",
+			data:       `{not json`,
+			stack:      "aerial",
+			termErr:    errors.New("term failed"),
 			wantTermed: true,
 			wantCalls:  0,
 		},
@@ -148,6 +130,20 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			wantNakDelay:   4 * time.Second,
 			wantCalls:      1,
 		},
+		{
+			name:           "extract error with nak failure returns extract error",
+			dataFromHelper: true,
+			eventStack:     "aerial",
+			eventThread:    "th-1",
+			stack:          "aerial",
+			delivered:      1,
+			extractErr:     errors.New("boom"),
+			nakErr:         errors.New("nak failed"),
+			wantErr:        true,
+			wantNaked:      true,
+			wantNakDelay:   1 * time.Second,
+			wantCalls:      1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -156,7 +152,12 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			if tc.dataFromHelper {
 				data = indexedTestEvent(t, tc.eventStack, tc.eventThread)
 			}
-			msg := &mockPubsubMsg{data: data, delivered: tc.delivered}
+			msg := &mockPubsubMsg{
+				data:      data,
+				delivered: tc.delivered,
+				termErr:   tc.termErr,
+				nakErr:    tc.nakErr,
+			}
 			calls := 0
 			retErr := tc.extractErr
 			extract := func(_ context.Context, _ string) error {

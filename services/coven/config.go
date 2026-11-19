@@ -175,6 +175,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		Stack            string       `yaml:"stack"`
 		Role             string       `yaml:"role"`
 		TranscriptsURL   string       `yaml:"transcripts_url"`
+		IndexerURL       string       `yaml:"indexer_url"`
 		LLMEffort        string       `yaml:"llm_effort"`
 		ExtractTimeout   int          `yaml:"extract_timeout_seconds"`
 		ExtractMaxSteps  int          `yaml:"extract_max_steps"`
@@ -195,25 +196,17 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if eriLLMURL == "" {
 		return nil, fmt.Errorf("config: eri_llm_url is required in %s", cleanPath)
 	}
+	role := resolveFirstNonEmpty(os.Getenv("COVEN_ROLE"), ycfg.Role)
+	stack := resolveFirstNonEmpty(os.Getenv("COVEN_STACK"), os.Getenv("STACK"), ycfg.Stack)
+
 	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), os.Getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
-	if prRegisterURL == "" {
-		return nil, fmt.Errorf("config: pr_register_url is required in %s", cleanPath)
-	}
 	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
-	if customSkillsDir == "" {
-		return nil, fmt.Errorf("config: custom_skills_dir is required in %s", cleanPath)
-	}
 	rulesDir := strings.TrimSpace(ycfg.RulesDir)
-	if rulesDir == "" {
-		return nil, fmt.Errorf("config: rules_dir is required in %s", cleanPath)
-	}
 	configRepoOwner := strings.TrimSpace(ycfg.ConfigRepoOwner)
-	if configRepoOwner == "" {
-		return nil, fmt.Errorf("config: config_repo_owner is required in %s", cleanPath)
-	}
 	configRepoName := strings.TrimSpace(ycfg.ConfigRepoName)
-	if configRepoName == "" {
-		return nil, fmt.Errorf("config: config_repo_name is required in %s", cleanPath)
+
+	if err := validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, rulesDir, configRepoOwner, configRepoName, cleanPath); err != nil {
+		return nil, err
 	}
 	ollamaBaseURL := strings.TrimSpace(ycfg.Ollama.BaseURL)
 	if ollamaBaseURL == "" {
@@ -238,9 +231,10 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		systemChannelID = ""
 	}
 	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
-	stack := resolveFirstNonEmpty(os.Getenv("COVEN_STACK"), os.Getenv("STACK"), ycfg.Stack)
-	role := resolveFirstNonEmpty(os.Getenv("COVEN_ROLE"), ycfg.Role)
-	transcriptsURL := resolveFirstNonEmpty(os.Getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL)
+	transcriptsURL := resolveFirstNonEmpty(os.Getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL, ycfg.IndexerURL)
+	if transcriptsURL == "" && NormalizeStack(stack) == DefaultStack {
+		transcriptsURL = "http://transcripts.aerial"
+	}
 	llmEffort := resolveFirstNonEmpty(os.Getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
 	return &Config{
@@ -269,4 +263,26 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 			NumCtx:      ycfg.Ollama.NumCtx,
 		},
 	}, nil
+}
+
+func validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, rulesDir, configRepoOwner, configRepoName, cleanPath string) error {
+	if strings.EqualFold(role, "extractor") {
+		return nil
+	}
+	if prRegisterURL == "" {
+		return fmt.Errorf("config: pr_register_url is required in %s", cleanPath)
+	}
+	if customSkillsDir == "" {
+		return fmt.Errorf("config: custom_skills_dir is required in %s", cleanPath)
+	}
+	if rulesDir == "" {
+		return fmt.Errorf("config: rules_dir is required in %s", cleanPath)
+	}
+	if configRepoOwner == "" {
+		return fmt.Errorf("config: config_repo_owner is required in %s", cleanPath)
+	}
+	if configRepoName == "" {
+		return fmt.Errorf("config: config_repo_name is required in %s", cleanPath)
+	}
+	return nil
 }

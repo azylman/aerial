@@ -42,7 +42,16 @@ func newServerFixture(t *testing.T) (*TestMemStore, *Server) {
 	store := newTestMemStore()
 	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
 	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
-	return store, NewServer(handler)
+	server := NewServer(handler, func(_ context.Context, threadID string) error {
+		if threadID == "th-busy" {
+			return ErrAdvisoryLockBusy
+		}
+		if threadID == "th-err" {
+			return errors.New("extract error")
+		}
+		return nil
+	})
+	return store, server
 }
 
 func assertServerRequest(t *testing.T, handler http.Handler, store *TestMemStore, tc serverRequestCase) {
@@ -78,6 +87,13 @@ func TestServer_Routes(t *testing.T) {
 		{name: "CoverageFlush", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
 		{name: "CoverageFlushError", method: http.MethodGet, path: "/debug/coverage/flush", counterErr: errors.New("flush err"), wantStatus: http.StatusInternalServerError},
 		{name: "Metrics", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK, wantSubstr: "coven_facts_total"},
+		{name: "AdminExtractMethodNotAllowed", method: http.MethodGet, path: "/admin/extract", wantStatus: http.StatusMethodNotAllowed},
+		{name: "AdminExtractBlankThreadID", method: http.MethodPost, path: "/admin/extract", wantStatus: http.StatusBadRequest},
+		{name: "AdminExtractBlankJSONThreadID", method: http.MethodPost, path: "/admin/extract", body: strings.NewReader(`{"thread_id":"   "}`), wantStatus: http.StatusBadRequest},
+		{name: "AdminExtractSuccessQuery", method: http.MethodPost, path: "/admin/extract?thread_id=th-1", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "AdminExtractSuccessBody", method: http.MethodPost, path: "/admin/extract", body: strings.NewReader(`{"thread_id":"th-1"}`), wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "AdminExtractLockBusy", method: http.MethodPost, path: "/admin/extract?thread_id=th-busy", wantStatus: http.StatusConflict},
+		{name: "AdminExtractError", method: http.MethodPost, path: "/admin/extract?thread_id=th-err", wantStatus: http.StatusInternalServerError},
 		{name: "FactsJSON", method: http.MethodGet, path: "/facts?limit=10&offset=0", wantStatus: http.StatusOK, wantSubstr: `"facts"`},
 		{name: "FactsStoreError", method: http.MethodGet, path: "/facts", storeFail: "GetFactsPaginated", wantStatus: http.StatusInternalServerError},
 		{name: "FactsMethodNotAllowed", method: http.MethodPost, path: "/facts", wantStatus: http.StatusMethodNotAllowed},
@@ -88,6 +104,44 @@ func TestServer_Routes(t *testing.T) {
 		{name: "ConsolidateStoreError", method: http.MethodPost, path: "/consolidate", storeFail: "GetAllFactsWithEmbeddings", wantStatus: http.StatusInternalServerError},
 		{name: "ConsolidateMethodNotAllowed", method: http.MethodGet, path: "/consolidate", wantStatus: http.StatusMethodNotAllowed},
 		{name: "MCPRoute", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Memory MCP Server"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertServerRequest(t, routes, store, tc)
+		})
+	}
+
+	t.Run("AdminExtractDefaultHandlerExtraction", func(t *testing.T) {
+		memStore := newTestMemStore()
+		handler := NewToolHandler(&Config{}, memStore, &MockOllamaClient{embedding: testEmbedding(1.0)})
+		srv := NewServer(handler)
+		req := httptest.NewRequest(http.MethodPost, "/admin/extract?thread_id=th-empty", http.NoBody)
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+	})
+}
+
+func TestServer_Routes_ExtractorRole(t *testing.T) {
+	store := newTestMemStore()
+	handler := NewToolHandler(&Config{Role: "extractor"}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
+	server := NewServer(handler, func(_ context.Context, _ string) error {
+		return nil
+	})
+	routes := server.Routes()
+
+	tests := []serverRequestCase{
+		{name: "ExtractorHealth", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "ExtractorCoverageFlush", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
+		{name: "ExtractorMetrics", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK, wantSubstr: "coven_facts_total"},
+		{name: "ExtractorAdminExtract", method: http.MethodPost, path: "/admin/extract?thread_id=th-1", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "ExtractorFactsBlocked", method: http.MethodGet, path: "/facts", wantStatus: http.StatusNotFound},
+		{name: "ExtractorContextBlocked", method: http.MethodGet, path: "/context", wantStatus: http.StatusNotFound},
+		{name: "ExtractorConsolidateBlocked", method: http.MethodPost, path: "/consolidate", wantStatus: http.StatusNotFound},
+		{name: "ExtractorMCPBlocked", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusNotFound},
 	}
 
 	for _, tc := range tests {
@@ -110,6 +164,7 @@ func TestServer_HandleMCP(t *testing.T) {
 		{name: "MCPDirectHealthRoute", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK},
 		{name: "MCPDirectFlushRoute", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
 		{name: "MCPDirectMetricsRoute", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK},
+		{name: "MCPDirectAdminExtractRoute", method: http.MethodPost, path: "/admin/extract?thread_id=th-1", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
 		{name: "MCPDirectFactsRoute", method: http.MethodGet, path: "/facts", wantStatus: http.StatusOK},
 		{name: "MCPDirectContextRoute", method: http.MethodGet, path: "/context?q=test", wantStatus: http.StatusOK},
 		{name: "MCPDirectConsolidateRoute", method: http.MethodPost, path: "/consolidate", wantStatus: http.StatusOK},
@@ -324,6 +379,11 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		{
 			name:    "CleanLifecycleWithMockPostgres",
 			cfg:     &Config{Port: "0", DatabaseURL: validDSN},
+			wantErr: false,
+		},
+		{
+			name:    "CleanLifecycleExtractorWithTranscriptsURL",
+			cfg:     &Config{Port: "0", DatabaseURL: validDSN, TranscriptsURL: "http://mock-transcripts", Role: "extractor"},
 			wantErr: false,
 		},
 	}
