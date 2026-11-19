@@ -304,15 +304,6 @@ func (m *TestMemStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredF
 	return res, nil
 }
 
-func (m *TestMemStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.failOp == "GetActiveConversationsForExtraction" {
-		return nil, m.failErr
-	}
-	return append([]string(nil), m.activeThreads...), nil
-}
-
 func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
