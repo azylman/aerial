@@ -49,7 +49,7 @@ export default function TasksView() {
           {' '}
           <span className="summary-value kpi-engine">AGY DUAL-ENGINE</span>
           {' '}
-          <span className="summary-sub">OLLAMA + GEMINI 3.8</span>
+          <span className="summary-sub">PJEV + ANTIGRAVITY CLI</span>
         </div>
       </section>
 

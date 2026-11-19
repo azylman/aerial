@@ -102,8 +102,8 @@ const MemoryMetrics = memo(function MemoryMetrics({ index, syncedAt }: MetricsPr
       </div>
       <div className="summary-card">
         <div className="card-glow" />
-        <span className="label">VECTOR EMBEDDING MODEL</span> <span className="value">OLLAMA</span>{' '}
-        <span className="sub-label">all-minilm:latest (384d)</span>
+        <span className="label">VECTOR EMBEDDING MODEL</span> <span className="value">SENSES</span>{' '}
+        <span className="sub-label">bge-small-en-v1.5 (384d)</span>
       </div>
     </section>
   );
