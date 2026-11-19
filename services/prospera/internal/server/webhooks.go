@@ -1,317 +1,27 @@
-package main
+package server
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/model"
+	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
 
-const (
-	serviceName = "prospera"
-	fieldStatus = "status"
-)
-
-type ReloadableConfigSource = config.ReloadableConfigSource
-
-// Server encapsulates the Prospera HTTP router, webhook handlers, and Streamable HTTP MCP server.
-type Server struct {
-	cfgSrc        ReloadableConfigSource
-	store         Store
-	twilio        TwilioClient
-	tokenMgr      *StreamTokenManager
-	sessionMgr    *CallSessionManager
-	reporter      *Reporter
-	toolHandler   *ToolHandler
-	mcpServer     *mcp.Server
-	streamHandler http.Handler
-	busMu         sync.RWMutex
-	bus           pubsub.Bus
-	bgWg          sync.WaitGroup
-}
-
-// SetEventBus sets the pubsub.Bus used for durable job queueing.
-func (s *Server) SetEventBus(b pubsub.Bus) {
-	if s == nil {
-		return
-	}
-	s.busMu.Lock()
-	defer s.busMu.Unlock()
-	s.bus = b
-}
-
-// EventBus returns the current pubsub.Bus instance.
-func (s *Server) EventBus() pubsub.Bus {
-	if s == nil {
-		return nil
-	}
-	s.busMu.RLock()
-	defer s.busMu.RUnlock()
-	return s.bus
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if t := strings.TrimSpace(v); t != "" {
-			return t
-		}
-	}
-	return ""
-}
-
-func nakBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
-
-func nakOrDropJob(ctx context.Context, msg pubsub.Message, jobName, entityID string, err error) error {
-	if msg == nil {
-		return err
-	}
-	delivered := msg.NumDelivered()
-	if delivered >= 5 {
-		slog.ErrorContext(ctx, "prospera: dropping job after max deliveries", "job", jobName, "entity_id", entityID, "delivered", delivered, "error", err)
-		if termErr := msg.Term(); termErr != nil {
-			slog.WarnContext(ctx, "prospera: term job after max deliveries failed", "job", jobName, "error", termErr)
-		}
-		return nil
-	}
-	if nakErr := msg.NakWithDelay(nakBackoffDelay(delivered)); nakErr != nil {
-		slog.WarnContext(ctx, "prospera: nak job error", "job", jobName, "error", nakErr)
-	}
-	return err
-}
-
-// StartJobConsumers subscribes durable competing-consumer queue subscriptions on AERIAL_JOBS.
-func (s *Server) StartJobConsumers(ctx context.Context) error {
-	bus := s.EventBus()
-	if bus == nil {
-		return nil
-	}
-
-	if _, err := bus.ConsumeQueue(ctx, pubsub.SubjectProsperaReportJob, "prospera-report", func(msgCtx context.Context, msg pubsub.Message) error {
-		return s.HandleReportJob(msgCtx, msg)
-	}); err != nil {
-		return fmt.Errorf("subscribe prospera-report consumer: %w", err)
-	}
-
-	if _, err := bus.ConsumeQueue(ctx, pubsub.SubjectProsperaVoicemailJob, "prospera-voicemail", func(msgCtx context.Context, msg pubsub.Message) error {
-		return s.HandleVoicemailJob(msgCtx, msg)
-	}); err != nil {
-		return fmt.Errorf("subscribe prospera-voicemail consumer: %w", err)
-	}
-
-	if _, err := bus.ConsumeQueue(ctx, pubsub.SubjectProsperaSMSJob, "prospera-sms", func(msgCtx context.Context, msg pubsub.Message) error {
-		return s.HandleSMSJob(msgCtx, msg)
-	}); err != nil {
-		return fmt.Errorf("subscribe prospera-sms consumer: %w", err)
-	}
-
-	return nil
-}
-
-// HandleReportJob handles asynchronous post-call report delivery jobs from AERIAL_JOBS.
-func (s *Server) HandleReportJob(ctx context.Context, msg pubsub.Message) error {
-	if msg == nil {
-		return errors.New("message cannot be nil")
-	}
-	if s.reporter == nil {
-		return errors.New("reporter is nil")
-	}
-	var args pubsub.ProsperaReportJobArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		slog.ErrorContext(ctx, "prospera: unmarshal report job error", "error", err)
-		if termErr := msg.Term(); termErr != nil {
-			slog.WarnContext(ctx, "prospera: term invalid report job failed", "error", termErr)
-		}
-		return nil
-	}
-	callID := strings.TrimSpace(args.CallID)
-	if callID == "" {
-		slog.ErrorContext(ctx, "prospera: empty call_id in report job")
-		if termErr := msg.Term(); termErr != nil {
-			slog.WarnContext(ctx, "prospera: term empty call_id report job failed", "error", termErr)
-		}
-		return nil
-	}
-
-	if err := s.reporter.DeliverCallReport(ctx, callID); err != nil {
-		return nakOrDropJob(ctx, msg, "report", callID, err)
-	}
-	return nil
-}
-
-// HandleVoicemailJob handles asynchronous voicemail processing jobs from AERIAL_JOBS.
-func (s *Server) HandleVoicemailJob(ctx context.Context, msg pubsub.Message) error {
-	if msg == nil {
-		return errors.New("message cannot be nil")
-	}
-	var args pubsub.ProsperaVoicemailJobArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		slog.ErrorContext(ctx, "prospera: unmarshal voicemail job error", "error", err)
-		if termErr := msg.Term(); termErr != nil {
-			slog.WarnContext(ctx, "prospera: term invalid voicemail job failed", "error", termErr)
-		}
-		return nil
-	}
-	callID := strings.TrimSpace(args.CallID)
-	recURL := strings.TrimSpace(args.RecordingURL)
-	if callID == "" || recURL == "" {
-		slog.ErrorContext(ctx, "prospera: missing call_id or recording_url in voicemail job")
-		if termErr := msg.Term(); termErr != nil {
-			slog.WarnContext(ctx, "prospera: term incomplete voicemail job failed", "error", termErr)
-		}
-		return nil
-	}
-
-	if s.reporter == nil {
-		return errors.New("reporter is nil")
-	}
-
-	if err := s.reporter.ProcessVoicemailRecording(ctx, callID, recURL); err != nil {
-		return nakOrDropJob(ctx, msg, "voicemail", callID, err)
-	}
-	return nil
-}
-
-// HandleSMSJob handles asynchronous inbound SMS processing jobs from AERIAL_JOBS.
-func (s *Server) HandleSMSJob(ctx context.Context, msg pubsub.Message) error {
-	if msg == nil {
-		return errors.New("message cannot be nil")
-	}
-	if s.reporter == nil {
-		return errors.New("reporter is nil")
-	}
-	var args pubsub.ProsperaSMSJobArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		slog.ErrorContext(ctx, "prospera: unmarshal sms job error", "error", err)
-		if termErr := msg.Term(); termErr != nil {
-			slog.WarnContext(ctx, "prospera: term invalid sms job failed", "error", termErr)
-		}
-		return nil
-	}
-
-	voiceMsg := VoiceMessage{
-		MessageSID:    args.MessageSID,
-		Direction:     directionInbound,
-		FromNumber:    args.FromNumber,
-		ToNumber:      args.ToNumber,
-		Body:          args.Body,
-		MediaURLs:     args.MediaURLs,
-		RelatedCallID: args.RelatedCallID,
-	}
-
-	if err := s.reporter.DeliverInboundSMS(ctx, voiceMsg); err != nil {
-		return nakOrDropJob(ctx, msg, "sms", args.MessageSID, err)
-	}
-	return nil
-}
-
-// Wait blocks until all in-flight background webhook tasks (reports, voicemails) finish.
-func (s *Server) Wait() {
-	s.bgWg.Wait()
-}
-
-// NewServer initializes a new Server.
-func NewServer(
-	cfgSrc ReloadableConfigSource,
-	store Store,
-	twilio TwilioClient,
-	tokenMgr *StreamTokenManager,
-	sessionMgr *CallSessionManager,
-	reporter *Reporter,
-) *Server {
-	if cfgSrc == nil {
-		panic("server: config source cannot be nil")
-	}
-
-	toolHandler := NewToolHandler(cfgSrc, store, twilio, sessionMgr, reporter)
-	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    serviceName,
-		Version: "1.0.0",
-	}, &mcp.ServerOptions{Instructions: serverInstructions})
-	RegisterProsperaMCPTools(mcpServer, toolHandler)
-
-	streamHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-		return mcpServer
-	}, &mcp.StreamableHTTPOptions{
-		Stateless:    true,
-		JSONResponse: true,
-	})
-
-	return &Server{
-		cfgSrc:        cfgSrc,
-		store:         store,
-		twilio:        twilio,
-		tokenMgr:      tokenMgr,
-		sessionMgr:    sessionMgr,
-		reporter:      reporter,
-		toolHandler:   toolHandler,
-		mcpServer:     mcpServer,
-		streamHandler: streamHandler,
-	}
-}
-
-// Routes builds and returns the HTTP serve mux for Prospera.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.Handle("POST /-/reload", s.cfgSrc.Handler("prospera"))
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera"))
-
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		httpkit.ServeMCPStream(w, r, s.streamHandler, "Prospera Voice Subsystem MCP Server Ready\n", "", "")
-	})
-
-	mux.HandleFunc("POST /api/webhooks/twilio/voice", s.handleTwilioVoice)
-	mux.HandleFunc("POST /twilio/voice", s.handleTwilioVoice)
-	mux.HandleFunc("GET /api/webhooks/twilio/stream/{token}", s.handleTwilioStream)
-	mux.HandleFunc("GET /api/webhooks/twilio/stream", s.handleTwilioStream)
-	mux.HandleFunc("/twilio/media-stream", s.handleTwilioStream)
-	mux.HandleFunc("POST /api/webhooks/twilio/amd", s.handleTwilioAMD)
-	mux.HandleFunc("POST /twilio/amd", s.handleTwilioAMD)
-	mux.HandleFunc("POST /api/webhooks/twilio/status", s.handleTwilioStatus)
-	mux.HandleFunc("POST /twilio/status", s.handleTwilioStatus)
-	mux.HandleFunc("POST /api/webhooks/twilio/voicemail", s.handleTwilioVoicemail)
-	mux.HandleFunc("POST /twilio/voicemail", s.handleTwilioVoicemail)
-	mux.HandleFunc("POST /api/webhooks/twilio/sms", s.handleTwilioSMS)
-	mux.HandleFunc("POST /twilio/sms", s.handleTwilioSMS)
-
-	// One server span per request for every route; /mcp is not wrapped again.
-	return tracing.Middleware("prospera", mux)
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-		fieldStatus: "ok",
-		"service":   serviceName,
-		"port":      s.cfgSrc.Current().Port,
-	})
-}
-
-func validateTwilioRequest(cfg *Config, w http.ResponseWriter, r *http.Request) bool {
+func validateTwilioRequest(cfg *config.Config, w http.ResponseWriter, r *http.Request) bool {
 	fullURL := strings.TrimRight(cfg.PublicWebhookBaseURL, "/") + r.URL.RequestURI()
 	sig := r.Header.Get("X-Twilio-Signature")
-	if !ValidateTwilioSignature(cfg.TwilioAuthToken, fullURL, r.PostForm, sig) {
+	if !twilio.ValidateTwilioSignature(cfg.TwilioAuthToken, fullURL, r.PostForm, sig) {
 		http.Error(w, "invalid twilio signature", http.StatusForbidden)
 		return false
 	}
@@ -321,6 +31,7 @@ func validateTwilioRequest(cfg *Config, w http.ResponseWriter, r *http.Request) 
 func writeXML(w http.ResponseWriter, content string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
+	//nolint:gosec // G705 false positive: content is server-generated TwiML (literals plus Generate* builders over a fresh random stream token); request-derived IDs never appear verbatim.
 	if _, err := w.Write([]byte(content)); err != nil {
 		log.Printf("server: write xml response: %v", err)
 	}
@@ -328,7 +39,7 @@ func writeXML(w http.ResponseWriter, content string) {
 
 // resolveAndBindCall resolves a VoiceCall by provider CallSid, falling back to call_id query or form param.
 // If found via call_id and ProviderCallSID is empty, it binds callSid.
-func (s *Server) resolveAndBindCall(ctx context.Context, r *http.Request, callSid string) *VoiceCall {
+func (s *Server) resolveAndBindCall(ctx context.Context, r *http.Request, callSid string) *model.VoiceCall {
 	if s.store == nil {
 		return nil
 	}
@@ -380,7 +91,7 @@ func (s *Server) handleTwilioVoice(w http.ResponseWriter, r *http.Request) {
 	s.handleInboundVoiceRouting(cfg, w, r, callSid)
 }
 
-func (s *Server) handleOutboundVoiceConnect(cfg *Config, w http.ResponseWriter, existingCall *VoiceCall) {
+func (s *Server) handleOutboundVoiceConnect(cfg *config.Config, w http.ResponseWriter, existingCall *model.VoiceCall) {
 	if existingCall == nil || existingCall.CallID == "" {
 		http.Error(w, "outbound call not found", http.StatusNotFound)
 		return
@@ -391,15 +102,15 @@ func (s *Server) handleOutboundVoiceConnect(cfg *Config, w http.ResponseWriter, 
 		return
 	}
 	wsURL := fmt.Sprintf("%s/api/webhooks/twilio/stream/%s", toWSS(cfg.PublicWebhookBaseURL), token)
-	twiml := GenerateConnectStreamTwiML(wsURL)
+	twiml := twilio.GenerateConnectStreamTwiML(wsURL)
 	writeXML(w, twiml)
 }
 
-func (s *Server) handleInboundVoiceRouting(cfg *Config, w http.ResponseWriter, r *http.Request, callSid string) {
+func (s *Server) handleInboundVoiceRouting(cfg *config.Config, w http.ResponseWriter, r *http.Request, callSid string) {
 	fromRaw := r.PostForm.Get("From")
 	toRaw := r.PostForm.Get("To")
-	normFrom, errFrom := NormalizeE164(fromRaw)
-	normTo, errTo := NormalizeE164(toRaw)
+	normFrom, errFrom := config.NormalizeE164(fromRaw)
+	normTo, errTo := config.NormalizeE164(toRaw)
 	if errFrom != nil || errTo != nil {
 		http.Error(w, "invalid phone numbers", http.StatusBadRequest)
 		return
@@ -407,7 +118,7 @@ func (s *Server) handleInboundVoiceRouting(cfg *Config, w http.ResponseWriter, r
 
 	// Tier 1: AllowFrom allowlist
 	for _, a := range cfg.AllowFrom {
-		if normA, err := NormalizeE164(a); err == nil && normA == normFrom {
+		if normA, err := config.NormalizeE164(a); err == nil && normA == normFrom {
 			s.connectInboundStream(r.Context(), cfg, w, callSid, normFrom, normTo, nil)
 			return
 		}
@@ -418,7 +129,7 @@ func (s *Server) handleInboundVoiceRouting(cfg *Config, w http.ResponseWriter, r
 	if window <= 0 {
 		window = 10080 * time.Minute
 	}
-	var recentCall *VoiceCall
+	var recentCall *model.VoiceCall
 	if s.store != nil {
 		var findErr error
 		recentCall, findErr = s.store.FindRecentOutboundCall(r.Context(), normFrom, window)
@@ -435,9 +146,9 @@ func (s *Server) handleInboundVoiceRouting(cfg *Config, w http.ResponseWriter, r
 	s.routeVoicemailRecording(r.Context(), cfg, w, callSid, normFrom, normTo)
 }
 
-func (s *Server) connectInboundStream(ctx context.Context, cfg *Config, w http.ResponseWriter, callSid, normFrom, normTo string, callbackOf *VoiceCall) {
+func (s *Server) connectInboundStream(ctx context.Context, cfg *config.Config, w http.ResponseWriter, callSid, normFrom, normTo string, callbackOf *model.VoiceCall) {
 	callID := "call-in-" + uuid.NewString()
-	c := VoiceCall{
+	c := model.VoiceCall{
 		CallID:           callID,
 		ProviderCallSID:  callSid,
 		Direction:        directionInbound,
@@ -452,16 +163,16 @@ func (s *Server) connectInboundStream(ctx context.Context, cfg *Config, w http.R
 
 	if callbackOf != nil {
 		c.CallbackOfCallID = callbackOf.CallID
-		c.Brief = CallBrief{
+		c.Brief = model.CallBrief{
 			Task:      "Answer the inbound call naturally, listen to what the caller needs, and take a message or update without volunteering prior call details upfront before the caller brings them up. Do not commit to new terms beyond original approvals.",
 			Context:   fmt.Sprintf("Inbound callback regarding prior call %s (Prior task: %s; Prior context: %s)", callbackOf.CallID, callbackOf.Brief.Task, callbackOf.Brief.Context),
 			Approvals: callbackOf.Brief.Approvals,
 		}
 	} else {
-		c.Brief = CallBrief{
+		c.Brief = model.CallBrief{
 			Task:      "Greet the caller professionally, take their message, and offer to have the person they are trying to reach return their call. If asked for your name, say you are Aerial and phrase your role naturally as their assistant (using their name if known from context); only disclose that you are an AI if explicitly asked.",
 			Context:   fmt.Sprintf("Inbound call from allowlisted contact %s.", normFrom),
-			Approvals: defaultApprovalFirewall,
+			Approvals: model.DefaultApprovalFirewall,
 		}
 	}
 
@@ -476,13 +187,13 @@ func (s *Server) connectInboundStream(ctx context.Context, cfg *Config, w http.R
 		return
 	}
 	wsURL := fmt.Sprintf("%s/api/webhooks/twilio/stream/%s", toWSS(cfg.PublicWebhookBaseURL), token)
-	twiml := GenerateConnectStreamTwiML(wsURL)
+	twiml := twilio.GenerateConnectStreamTwiML(wsURL)
 	writeXML(w, twiml)
 }
 
-func (s *Server) routeVoicemailRecording(ctx context.Context, cfg *Config, w http.ResponseWriter, callSid, normFrom, normTo string) {
+func (s *Server) routeVoicemailRecording(ctx context.Context, cfg *config.Config, w http.ResponseWriter, callSid, normFrom, normTo string) {
 	callID := "call-in-" + uuid.NewString()
-	c := VoiceCall{
+	c := model.VoiceCall{
 		CallID:           callID,
 		ProviderCallSID:  callSid,
 		Direction:        directionInbound,
@@ -501,7 +212,7 @@ func (s *Server) routeVoicemailRecording(ctx context.Context, cfg *Config, w htt
 	}
 	greeting := "Please leave a message after the tone."
 	vmCallbackURL := fmt.Sprintf("%s/api/webhooks/twilio/voicemail?call_id=%s", strings.TrimRight(cfg.PublicWebhookBaseURL, "/"), callID)
-	twiml := GenerateVoicemailTwiML(greeting, vmCallbackURL)
+	twiml := twilio.GenerateVoicemailTwiML(greeting, vmCallbackURL)
 	writeXML(w, twiml)
 }
 
@@ -673,11 +384,11 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 	to := r.PostForm.Get("To")
 	body := r.PostForm.Get("Body")
 
-	normFrom, errFrom := NormalizeE164(from)
+	normFrom, errFrom := config.NormalizeE164(from)
 	if errFrom != nil {
 		normFrom = from
 	}
-	normTo, errTo := NormalizeE164(to)
+	normTo, errTo := config.NormalizeE164(to)
 	if errTo != nil {
 		normTo = to
 	}
@@ -704,7 +415,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	msg := VoiceMessage{
+	msg := model.VoiceMessage{
 		MessageSID:       msgSid,
 		Direction:        directionInbound,
 		FromNumber:       normFrom,
@@ -748,7 +459,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 	// Delivery outlives the webhook request that triggered it.
 	bgCtx := context.WithoutCancel(r.Context())
 	s.bgWg.Add(1)
-	go func(vMsg VoiceMessage) {
+	go func(vMsg model.VoiceMessage) {
 		defer s.bgWg.Done()
 		if delivErr := s.reporter.DeliverInboundSMS(bgCtx, vMsg); delivErr != nil {
 			slog.ErrorContext(bgCtx, "server: deliver inbound sms failed", "message_sid", vMsg.MessageSID, "error", delivErr)

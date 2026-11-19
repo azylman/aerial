@@ -3,194 +3,36 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
-	"sync"
 	"syscall"
-	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/prospera/internal/config"
-	"github.com/azylman/aerial/services/prospera/internal/mediastream"
+	"github.com/azylman/aerial/services/prospera/internal/server"
 )
-
-var newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
-	return pubsub.NewJetStreamBus(ctx, url)
-}
-
-var transcriptBatchInterval = 5 * time.Second
-
-func runTranscriptBatcher(ctx context.Context, sessionMgr *CallSessionManager, reporter *Reporter) {
-	ticker := time.NewTicker(transcriptBatchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			flushActiveSessions(ctx, sessionMgr, reporter)
-		}
-	}
-}
-
-func flushActiveSessions(ctx context.Context, sessionMgr *CallSessionManager, reporter *Reporter) {
-	if sessionMgr == nil || reporter == nil {
-		return
-	}
-
-	for _, id := range sessionMgr.ActiveCallIDs() {
-		if err := reporter.FlushLiveTranscript(ctx, id); err != nil {
-			slog.ErrorContext(ctx, "prospera: flush transcript failed", "call_id", id, "error", err)
-		}
-	}
-}
-
-// newProsperaMediaSession adapts a mediastream session request to the root
-// MediaStreamSession bridge implementation.
-func newProsperaMediaSession(cfg mediastream.SessionConfig) mediastream.Session {
-	return NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID:           cfg.CallID,
-		TwilioConn:       cfg.Conn,
-		Config:           cfg.Config,
-		Store:            cfg.Store,
-		TwilioClient:     cfg.TwilioClient,
-		ConsultClient:    cfg.ConsultClient,
-		OpeningGreeting:  cfg.OpeningGreeting,
-		VoicemailMessage: cfg.VoicemailMessage,
-		SystemPrompt:     cfg.SystemPrompt,
-		Language:         cfg.Language,
-		PacerInterval:    cfg.PacerInterval,
-		GeminiDialer:     cfg.GeminiDialer,
-	})
-}
-
-func setupProsperaBus(ctx context.Context, server *Server, rawNATSURL string) pubsub.Bus {
-	natsURL := strings.TrimSpace(rawNATSURL)
-	if natsURL == "" {
-		return nil
-	}
-	bus, busErr := newProsperaBusFn(ctx, natsURL)
-	if busErr != nil {
-		log.Printf("prospera: failed to connect to nats at %s: %v", natsURL, busErr)
-		return nil
-	}
-	if streamErr := pubsub.EnsureCoreStreams(ctx, bus); streamErr != nil {
-		log.Printf("prospera: failed to ensure core streams: %v", streamErr)
-	}
-	server.SetEventBus(bus)
-	if consErr := server.StartJobConsumers(ctx); consErr != nil {
-		log.Printf("prospera: failed to start job consumers: %v", consErr)
-	}
-	return bus
-}
-
-// RunApp bootstraps and runs the Prospera service HTTP server with graceful shutdown.
-// Startup-bound settings (listen port, database, Twilio credentials, consult
-// endpoints) are read once here; everything else is read per request from cfgSrc.
-func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
-	if cfgSrc == nil {
-		return fmt.Errorf("app: config cannot be nil")
-	}
-	cfg := cfgSrc.Current()
-	port := strings.TrimSpace(cfg.Port)
-	if port == "" {
-		return fmt.Errorf("app: port cannot be empty")
-	}
-
-	db, err := OpenDB(cfg.DatabaseURL)
-	if err != nil {
-		return fmt.Errorf("app: open db: %w", err)
-	}
-	store := NewPGStore(db)
-	defer httpkit.CloseWarn(store, "prospera store on shutdown")
-
-	twilioClient := NewHTTPTwilioClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken)
-
-	// Initial reconciliation of unended orphan calls
-	if _, err := store.ReconcileOrphanedCalls(ctx, twilioClient.IsCallActive); err != nil {
-		log.Printf("prospera: initial orphan reconciliation notice: %v", err)
-	}
-
-	tokenMgr := NewStreamTokenManager(time.Now)
-	consultClient := NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
-	sessionMgr := NewCallSessionManager(cfgSrc, store, twilioClient, consultClient, tokenMgr,
-		WithSessionFactory(newProsperaMediaSession))
-	reporter := NewReporter(cfgSrc, store, twilioClient, WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
-
-	server := NewServer(cfgSrc, store, twilioClient, tokenMgr, sessionMgr, reporter)
-
-	if bus := setupProsperaBus(ctx, server, cfg.NATSURL); bus != nil {
-		defer httpkit.CloseWarn(bus, "prospera event bus on shutdown")
-	}
-
-	httpServer := &http.Server{
-		Addr:              ":" + port,
-		Handler:           server.Routes(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	serverErr := make(chan error, 1)
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-		close(serverErr)
-	}()
-
-	workerCtx, workerCancel := context.WithCancel(ctx)
-	defer workerCancel()
-
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		runTranscriptBatcher(workerCtx, sessionMgr, reporter)
-	})
-
-	select {
-	case <-ctx.Done():
-		workerCancel()
-		wg.Wait()
-
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			server.Wait()
-			return fmt.Errorf("app: server shutdown: %w", err)
-		}
-		server.Wait()
-		return nil
-	case err := <-serverErr:
-		workerCancel()
-		wg.Wait()
-		server.Wait()
-		return err
-	}
-}
 
 var prosperaRestartRequired = config.RestartRequired
 
 var (
-	configPath   = DefaultConfigPath
-	loadConfigFn = LoadConfig
-	runAppFn     = RunApp
+	configPath   = config.DefaultConfigPath
+	loadConfigFn = config.LoadConfig
+	runAppFn     = server.RunApp
 	exitFn       = log.Fatalf
 )
 
 func main() {
-	resolvedPath := ResolveConfigPath(configPath)
+	resolvedPath := config.ResolveConfigPath(configPath)
 	cfg, err := loadConfigFn(resolvedPath)
 	if err != nil {
 		exitFn("failed to load config: %v", err)
 		return
 	}
-	cfgSrc := httpkit.NewReloadable(cfg, func() (*Config, error) {
+	cfgSrc := httpkit.NewReloadable(cfg, func() (*config.Config, error) {
 		return loadConfigFn(resolvedPath)
 	}, prosperaRestartRequired)
 

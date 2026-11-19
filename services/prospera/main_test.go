@@ -1,366 +1,21 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/prospera/internal/config"
 )
-
-func TestRunApp_Validation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		cfg     *Config
-		wantErr bool
-	}{
-		{
-			name:    "nil config",
-			cfg:     nil,
-			wantErr: true,
-		},
-		{
-			name:    "empty port",
-			cfg:     &Config{Port: "   ", DatabaseURL: "sqlite://:memory:"},
-			wantErr: true,
-		},
-		{
-			name:    "invalid database url",
-			cfg:     &Config{Port: "4019", DatabaseURL: "invalid://url"},
-			wantErr: true,
-		},
-		{
-			name:    "server listen error",
-			cfg:     &Config{Port: "-1", DatabaseURL: "sqlite://:memory:"},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var cfgSrc *httpkit.Reloadable[Config]
-			if tc.cfg != nil {
-				cfgSrc = newTestConfigSource(tc.cfg)
-			}
-			err := RunApp(context.Background(), cfgSrc)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("RunApp() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestRunApp_Lifecycle(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "prospera_app_test.db")
-
-	origBusFn := newProsperaBusFn
-	newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
-		return pubsub.NewMemoryBus(), nil
-	}
-	defer func() { newProsperaBusFn = origBusFn }()
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("failed to open sqlite: %v", err)
-	}
-
-	schema := `
-	CREATE TABLE voice_calls (
-		call_id TEXT PRIMARY KEY,
-		provider_call_sid TEXT UNIQUE,
-		direction TEXT NOT NULL,
-		state TEXT NOT NULL,
-		end_reason TEXT,
-		from_number TEXT NOT NULL,
-		to_number TEXT NOT NULL,
-		callback_of_call_id TEXT,
-		discord_channel_id TEXT,
-		discord_thread_id TEXT,
-		brief TEXT NOT NULL DEFAULT '{}',
-		owner_instructions TEXT NOT NULL DEFAULT '[]',
-		transcript TEXT NOT NULL DEFAULT '[]',
-		live_transcript_cursor INTEGER NOT NULL DEFAULT 0,
-		answered_by TEXT,
-		voicemail_recording_url TEXT,
-		report_status TEXT NOT NULL DEFAULT 'pending',
-		report_summary TEXT,
-		started_at TIMESTAMP NOT NULL,
-		answered_at TIMESTAMP,
-		ended_at TIMESTAMP,
-		updated_at TIMESTAMP NOT NULL
-	);
-	CREATE TABLE voice_messages (
-		message_sid TEXT PRIMARY KEY,
-		direction TEXT NOT NULL,
-		from_number TEXT NOT NULL,
-		to_number TEXT NOT NULL,
-		body TEXT NOT NULL,
-		media_urls TEXT NOT NULL DEFAULT '[]',
-		related_call_id TEXT,
-		discord_delivered BOOLEAN NOT NULL DEFAULT FALSE,
-		created_at TIMESTAMP NOT NULL
-	);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		t.Fatalf("failed to create test schema: %v", err)
-	}
-	_ = db.Close()
-
-	cfg := &Config{
-		Port:                  "0",
-		DatabaseURL:           "sqlite://" + dbPath,
-		DefaultDiscordChannel: "prospera",
-		NATSURL:               "nats://127.0.0.1:4222",
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	appDone := make(chan error, 1)
-
-	go func() {
-		appDone <- RunApp(ctx, newTestConfigSource(cfg))
-	}()
-
-	cancel()
-
-	select {
-	case err := <-appDone:
-		if err != nil {
-			t.Fatalf("RunApp() shutdown error = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunApp() did not shut down within timeout")
-	}
-}
-
-func TestSetupProsperaBus(t *testing.T) {
-	tests := []struct {
-		name       string
-		natsURL    string
-		busFactory func(context.Context, string) (pubsub.Bus, error)
-		wantNil    bool
-	}{
-		{
-			name:    "empty url returns nil",
-			natsURL: "   ",
-			wantNil: true,
-		},
-		{
-			name:    "bus factory error returns nil",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return nil, errors.New("connection failed")
-			},
-			wantNil: true,
-		},
-		{
-			name:    "successful bus sets event bus and consumers",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return pubsub.NewMemoryBus(), nil
-			},
-			wantNil: false,
-		},
-		{
-			name:    "consumer start failure logs and returns bus",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
-			},
-			wantNil: false,
-		},
-		{
-			name:    "ensure streams failure logs and returns bus",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return &failEnsureStreamsBus{Bus: pubsub.NewMemoryBus()}, nil
-			},
-			wantNil: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			origBusFn := newProsperaBusFn
-			defer func() { newProsperaBusFn = origBusFn }()
-			if tc.busFactory != nil {
-				newProsperaBusFn = tc.busFactory
-			}
-
-			server, _, _ := setupTestServer()
-			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
-			if (bus == nil) != tc.wantNil {
-				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
-			}
-			if !tc.wantNil {
-				if server.EventBus() != bus {
-					t.Fatalf("server.EventBus() = %v, want %v", server.EventBus(), bus)
-				}
-			}
-		})
-	}
-}
-
-type failEnsureStreamsBus struct {
-	pubsub.Bus
-}
-
-func (*failEnsureStreamsBus) EnsureCoreStreams(ctx context.Context) error {
-	return errors.New("ensure streams failed")
-}
-
-func TestRunApp_TranscriptBatcher(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{DefaultDiscordChannel: "prospera"}
-	store := newMockStoreForDelivery()
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
-	reporter := NewReporter(staticConfig{cfg: cfg}, store, &mockTwilioForDelivery{})
-
-	// Test flush with nil sessionMgr or reporter
-	flushActiveSessions(context.Background(), nil, reporter)
-	flushActiveSessions(context.Background(), sessionMgr, nil)
-
-	// Test flush with no sessions
-	flushActiveSessions(context.Background(), sessionMgr, reporter)
-
-	// Test flush with active session
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-batch-test"})
-	sessionMgr.RegisterSession("call-batch-test", sess)
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
-		CallID: "call-batch-test",
-		Transcript: []TranscriptTurn{
-			{Role: "user", Text: "Batch turn"},
-		},
-	}, 5)
-
-	flushActiveSessions(context.Background(), sessionMgr, reporter)
-
-	// Test runTranscriptBatcher exiting immediately on canceled context
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	runTranscriptBatcher(ctx, sessionMgr, reporter)
-}
-
-type errTermJobMsg struct {
-	mockJobMsg
-
-	termErr error
-}
-
-func (m *errTermJobMsg) Term() error {
-	m.termed = true
-	return m.termErr
-}
-
-func TestNakOrDropJob_MaxDeliveriesTerms(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		delivered uint64
-		termErr   error
-		wantErr   bool
-	}{
-		{
-			name:      "max deliveries terms and drops without error",
-			delivered: 5,
-			wantErr:   false,
-		},
-		{
-			name:      "term failure still drops without error",
-			delivered: 5,
-			termErr:   errors.New("term failed"),
-			wantErr:   false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			msg := &errTermJobMsg{termErr: tc.termErr}
-			msg.delivered = tc.delivered
-			err := nakOrDropJob(context.Background(), msg, "test", "id1", errors.New("underlying error"))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("nakOrDropJob() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !msg.termed {
-				t.Fatal("nakOrDropJob() did not term job at max deliveries")
-			}
-		})
-	}
-}
-
-func TestRoutes_HealthAndCoverage(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{Port: "4019"}
-	store := newMockStoreForDelivery()
-	server := NewServer(newTestConfigSource(cfg), store, &mockTwilioForDelivery{}, nil, nil, nil)
-	handler := server.Routes()
-
-	tests := []struct {
-		name       string
-		method     string
-		path       string
-		wantStatus int
-		wantBody   string
-	}{
-		{
-			name:       "health endpoint",
-			method:     http.MethodGet,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-			wantBody:   `"status":"ok"`,
-		},
-		{
-			name:       "coverage flush get",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "coverage flush post",
-			method:     http.MethodPost,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus && rec.Code != http.StatusInternalServerError {
-				t.Fatalf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.wantStatus)
-			}
-			if tc.wantBody != "" && !bytes.Contains(rec.Body.Bytes(), []byte(tc.wantBody)) {
-				t.Fatalf("body %s missing %s", rec.Body.String(), tc.wantBody)
-			}
-		})
-	}
-}
 
 type runAppMainSignalTestCase struct {
 	name         string
 	loadErr      error
 	runErr       error
-	reloadCfg    *Config
+	reloadCfg    *config.Config
 	wantExit     bool
 	wantStatus   httpkit.ReloadStatus
 	wantCanceled bool
@@ -399,13 +54,13 @@ func TestRunApp_MainSignal(t *testing.T) {
 		},
 		{
 			name:         "port change requests graceful restart",
-			reloadCfg:    &Config{Port: "9090", DatabaseURL: "sqlite://:memory:"},
+			reloadCfg:    &config.Config{Port: "9090", DatabaseURL: "sqlite://:memory:"},
 			wantStatus:   "restarting",
 			wantCanceled: true,
 		},
 		{
 			name:       "live field change keeps running",
-			reloadCfg:  &Config{Port: "4019", DatabaseURL: "sqlite://:memory:", DefaultDiscordChannel: "new-chan"},
+			reloadCfg:  &config.Config{Port: "4019", DatabaseURL: "sqlite://:memory:", DefaultDiscordChannel: "new-chan"},
 			wantStatus: "reloaded",
 		},
 	}
@@ -424,7 +79,7 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 		exited = true
 	}
 	loads := 0
-	loadConfigFn = func(_ string) (*Config, error) {
+	loadConfigFn = func(_ string) (*config.Config, error) {
 		loads++
 		if tc.loadErr != nil {
 			return nil, tc.loadErr
@@ -432,11 +87,11 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 		if loads > 1 && tc.reloadCfg != nil {
 			return tc.reloadCfg, nil
 		}
-		return &Config{Port: "4019", DatabaseURL: "sqlite://:memory:"}, nil
+		return &config.Config{Port: "4019", DatabaseURL: "sqlite://:memory:"}, nil
 	}
 	var gotStatus httpkit.ReloadStatus
 	canceled := false
-	runAppFn = func(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
+	runAppFn = func(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config]) error {
 		if tc.reloadCfg == nil {
 			return tc.runErr
 		}
@@ -468,7 +123,7 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 
 func TestProsperaRestartRequired(t *testing.T) {
 	t.Parallel()
-	base := Config{
+	base := config.Config{
 		Port:             "8080",
 		DatabaseURL:      "postgres://db/aerial",
 		TwilioAccountSID: "AC1",
@@ -479,18 +134,18 @@ func TestProsperaRestartRequired(t *testing.T) {
 	}
 	tests := []struct {
 		name string
-		next Config
+		next config.Config
 		want bool
 	}{
-		{name: "identical", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: false},
-		{name: "live model change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-2", DefaultDiscordChannel: "chan", MaxConcurrentCalls: 9}, want: false},
-		{name: "port change", next: Config{Port: "9090", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "database change", next: Config{Port: "8080", DatabaseURL: "postgres://db2/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "twilio account change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC2", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "twilio token change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok2", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "google mcp change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp-2", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "coven change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven-2", GeminiLiveModel: "live-1"}, want: true},
-		{name: "nats url change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1", NATSURL: "nats://nats.aerial:4222"}, want: true},
+		{name: "identical", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: false},
+		{name: "live model change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-2", DefaultDiscordChannel: "chan", MaxConcurrentCalls: 9}, want: false},
+		{name: "port change", next: config.Config{Port: "9090", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
+		{name: "database change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db2/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
+		{name: "twilio account change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC2", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
+		{name: "twilio token change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok2", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
+		{name: "google mcp change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp-2", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
+		{name: "coven change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven-2", GeminiLiveModel: "live-1"}, want: true},
+		{name: "nats url change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1", NATSURL: "nats://nats.aerial:4222"}, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

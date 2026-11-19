@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -15,9 +15,19 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/delivery"
+	"github.com/azylman/aerial/services/prospera/internal/mediastream"
+	"github.com/azylman/aerial/services/prospera/internal/model"
+	"github.com/azylman/aerial/services/prospera/internal/tools"
+	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
+
+// ---- webhook/route tests (moved from root server_test.go) ----
 
 func generateTwilioSignature(authToken, fullURL string, form url.Values) string {
 	keys := make([]string, 0, len(form))
@@ -38,8 +48,8 @@ func generateTwilioSignature(authToken, fullURL string, form url.Values) string 
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func setupTestServer() (*Server, *mockStoreForDelivery, *Config) {
-	cfg := &Config{
+func setupTestServer() (*Server, *mockStoreForDelivery, *config.Config) {
+	cfg := &config.Config{
 		Port:                  "4019",
 		TwilioAuthToken:       "secret-token-123",
 		TwilioFromNumber:      "+15105550100",
@@ -54,11 +64,11 @@ func setupTestServer() (*Server, *mockStoreForDelivery, *Config) {
 		audioData:   []byte("test-audio"),
 		contentType: "audio/wav",
 	}
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr,
-		WithSessionFactory(newProsperaMediaSession),
+	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr,
+		mediastream.WithSessionFactory(newProsperaMediaSession),
 	)
-	reporter := NewReporter(staticConfig{cfg: cfg}, store, twilioMock)
+	reporter := delivery.NewReporter(staticConfig{cfg: cfg}, store, twilioMock)
 
 	server := NewServer(newTestConfigSource(cfg), store, twilioMock, tokenMgr, sessionMgr, reporter)
 	return server, store, cfg
@@ -80,7 +90,7 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 	mux := server.Routes()
 
 	// Pre-populate outbound call dialed 3 days ago for Tier 2 test
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:       "call-out-prior",
 		Direction:    "outbound",
 		FromNumber:   cfg.TwilioFromNumber,
@@ -89,13 +99,13 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 		ReportStatus: "delivered",
 		StartedAt:    time.Now().UTC().Add(-72 * time.Hour),
 		UpdatedAt:    time.Now().UTC().Add(-72 * time.Hour),
-		Brief: CallBrief{
+		Brief: model.CallBrief{
 			Task: "Dentist appointment confirmation",
 		},
 	}, 5)
 
 	// Pre-populate an outbound call waiting for connect
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-out-active",
 		ProviderCallSID: "CA-out-123",
 		Direction:       "outbound",
@@ -176,7 +186,7 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 	}
 }
 
-func runThreeTierInboundCase(t *testing.T, tc threeTierInboundTestCase, cfg *Config, mux http.Handler, store *mockStoreForDelivery) {
+func runThreeTierInboundCase(t *testing.T, tc threeTierInboundTestCase, cfg *config.Config, mux http.Handler, store *mockStoreForDelivery) {
 	t.Helper()
 	path := "/api/webhooks/twilio/voice"
 	fullURL := cfg.PublicWebhookBaseURL + path
@@ -216,7 +226,7 @@ func assertThreeTierCall(t *testing.T, tc threeTierInboundTestCase, store *mockS
 			t.Fatalf("tier1 Task = %q, want default receptionist greeting", c.Brief.Task)
 		}
 		if c.Brief.Approvals == "" {
-			t.Fatal("tier1 Approvals should be set to defaultApprovalFirewall")
+			t.Fatal("tier1 Approvals should be set to model.DefaultApprovalFirewall")
 		}
 	case "tier2":
 		c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier2")
@@ -249,7 +259,7 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 	// Tier 3 inbound call created in awaiting_recording status
 	callID := "call-vm-ordering-test"
 	providerSID := "CA-ordering-123"
-	_ = store.CreateInboundCall(context.Background(), VoiceCall{
+	_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
 		CallID:          callID,
 		ProviderCallSID: providerSID,
 		Direction:       "inbound",
@@ -317,7 +327,7 @@ func TestTwilioWebhook_AMD(t *testing.T) {
 	server, store, cfg := setupTestServer()
 	mux := server.Routes()
 
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-amd-test",
 		ProviderCallSID: "CA-amd-1",
 		Direction:       "outbound",
@@ -357,7 +367,7 @@ func TestTwilioWebhook_SMS(t *testing.T) {
 	server, store, cfg := setupTestServer()
 	mux := server.Routes()
 
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:     "call-prior-sms",
 		Direction:  "outbound",
 		FromNumber: cfg.TwilioFromNumber,
@@ -416,7 +426,7 @@ func TestTwilioWebhook_StatusCompletedReport(t *testing.T) {
 	server, store, cfg := setupTestServer()
 	mux := server.Routes()
 
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-status-pending",
 		ProviderCallSID: "CA-stat-pend-1",
 		Direction:       "outbound",
@@ -530,7 +540,7 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 
 	t.Run("voicemail webhook resolves call id from call sid", func(t *testing.T) {
 		t.Parallel()
-		_ = store.CreateInboundCall(context.Background(), VoiceCall{
+		_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
 			CallID:          "call-vm-by-sid",
 			ProviderCallSID: "CA-vm-sid-1",
 			ReportStatus:    "awaiting_recording",
@@ -781,14 +791,14 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 func TestServer_TokenIssueFailures(t *testing.T) {
 	t.Parallel()
 	server, store, cfg := setupTestServer()
-	tokenMgrFail := NewStreamTokenManager(nil, WithEntropyReader(func([]byte) (int, error) {
+	tokenMgrFail := twilio.NewStreamTokenManager(nil, twilio.WithEntropyReader(func([]byte) (int, error) {
 		return 0, errors.New("entropy failure")
 	}))
 	server.tokenMgr = tokenMgrFail
 	mux := server.Routes()
 
 	// 1. Outbound connect token issue failure -> 500
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-out-err",
 		ProviderCallSID: "CA-out-err",
 		Direction:       "outbound",
@@ -871,9 +881,9 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 
 	// 3. Status completed with failing reporter
 	serverFailRep, storeFail, cfgFail := setupTestServer()
-	serverFailRep.reporter = NewReporter(staticConfig{cfg: &Config{BrainURL: ""}}, storeFail, nil)
+	serverFailRep.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: ""}}, storeFail, nil)
 	muxFail := serverFailRep.Routes()
-	_ = storeFail.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = storeFail.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-stat-failrep",
 		ProviderCallSID: "CA-stat-failrep",
 		ReportStatus:    "pending",
@@ -916,7 +926,7 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 	mux := server.Routes()
 
 	// 1. Unbound outbound call arrives before BindProviderCallSID commits.
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-out-unbound",
 		ProviderCallSID: "",
 		Direction:       "outbound",
@@ -954,7 +964,7 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 	}
 
 	// 1b. Unbound outbound call with call_id in form body
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-out-unbound-form",
 		ProviderCallSID: "",
 		Direction:       "outbound",
@@ -1011,7 +1021,7 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 	mux := server.Routes()
 
 	// 1. Status webhook with unbound SID resolves by call_id query param
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-unbound-stat",
 		ProviderCallSID: "",
 		Direction:       "outbound",
@@ -1047,7 +1057,7 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 	}
 
 	// 2. AMD webhook with unbound SID resolves by call_id query param
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-unbound-amd",
 		ProviderCallSID: "",
 		Direction:       "outbound",
@@ -1056,7 +1066,7 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 		UpdatedAt:       time.Now().UTC(),
 	}, 5)
 
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{
+	sess := mediastream.NewMediaStreamSession(mediastream.MediaStreamSessionConfig{
 		CallID: "call-unbound-amd",
 	})
 	server.sessionMgr.RegisterSession("call-unbound-amd", sess)
@@ -1100,20 +1110,20 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name         string
-		reloadedCfg  *Config
+		reloadedCfg  *config.Config
 		wantStatus   string
 		wantSMSFrom  string
 		wantRestarts bool
 	}{
 		{
 			name:        "live field applied to next tool call",
-			reloadedCfg: &Config{Port: "4019", TwilioFromNumber: "+15105550222"},
+			reloadedCfg: &config.Config{Port: "4019", TwilioFromNumber: "+15105550222"},
 			wantStatus:  `"status":"reloaded"`,
 			wantSMSFrom: "+15105550222",
 		},
 		{
 			name:         "restart field keeps serving old snapshot",
-			reloadedCfg:  &Config{Port: "5000", TwilioFromNumber: "+15105550222"},
+			reloadedCfg:  &config.Config{Port: "5000", TwilioFromNumber: "+15105550222"},
 			wantStatus:   `"status":"restarting"`,
 			wantSMSFrom:  "+15105550100",
 			wantRestarts: true,
@@ -1122,8 +1132,8 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfgSrc := httpkit.NewReloadable(&Config{Port: "4019", TwilioFromNumber: "+15105550100"},
-				func() (*Config, error) { return tc.reloadedCfg, nil }, prosperaRestartRequired)
+			cfgSrc := httpkit.NewReloadable(&config.Config{Port: "4019", TwilioFromNumber: "+15105550100"},
+				func() (*config.Config, error) { return tc.reloadedCfg, nil }, config.RestartRequired)
 			twilioMock := &mockTwilioForDelivery{}
 			server := NewServer(cfgSrc, newMockStoreForDelivery(), twilioMock, nil, nil, nil)
 
@@ -1135,7 +1145,7 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 				t.Fatalf("reload = %d %s, want 200 containing %s", rec.Code, rec.Body.String(), tc.wantStatus)
 			}
 
-			if _, err := server.toolHandler.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: "hi"}); err != nil {
+			if _, err := server.toolHandler.SendSMS(context.Background(), tools.SendSMSArgs{To: "+15105550199", Body: "hi"}); err != nil {
 				t.Fatalf("SendSMS() error = %v", err)
 			}
 			if twilioMock.lastSendSMSFrom != tc.wantSMSFrom {
@@ -1168,16 +1178,16 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := &Config{GeminiLiveModel: "gemini-3.8-live"}
+			cfg := &config.Config{GeminiLiveModel: "gemini-3.8-live"}
 			store := newMockStoreForDelivery()
-			tokenMgr := NewStreamTokenManager(time.Now)
-			sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, tokenMgr,
-				WithGeminiDialer(func(context.Context, string) (*websocket.Conn, error) {
+			tokenMgr := twilio.NewStreamTokenManager(time.Now)
+			sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, tokenMgr,
+				mediastream.WithGeminiDialer(func(context.Context, string) (*websocket.Conn, error) {
 					return nil, errors.New("gemini unavailable")
 				}),
-				WithSessionFactory(newProsperaMediaSession),
+				mediastream.WithSessionFactory(newProsperaMediaSession),
 			)
-			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, NewReporter(staticConfig{cfg: cfg}, store, nil))
+			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, delivery.NewReporter(staticConfig{cfg: cfg}, store, nil))
 			srv := httptest.NewServer(server.Routes())
 			t.Cleanup(srv.Close)
 
@@ -1197,5 +1207,161 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 				t.Errorf("handshake status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
 		})
+	}
+}
+
+// ---- instructions test (moved from root instructions_test.go) ----
+
+func TestServerInstructions(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{TwilioFromNumber: "+15105550100", MaxConcurrentCalls: 5}
+	ts := httptest.NewServer(NewServer(newTestConfigSource(cfg), newMockStoreForDelivery(), &mockTwilioForDelivery{}, nil, nil, nil).Routes())
+	t.Cleanup(ts.Close)
+
+	tests := []struct {
+		name     string
+		path     string
+		wantTool string
+	}{
+		{"initialize advertises workflow instructions", "/mcp", "ensure_phone_number"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := mcp.NewClient(&mcp.Implementation{Name: "instructions-test", Version: "1.0.0"}, nil)
+			session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+				Endpoint:             ts.URL + tc.path,
+				HTTPClient:           ts.Client(),
+				DisableStandaloneSSE: true,
+			}, nil)
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			defer session.Close()
+
+			got := session.InitializeResult().Instructions
+			if got == "" || len(got) > 1024 {
+				t.Fatalf("instructions length = %d, want 1..1024", len(got))
+			}
+			if !strings.Contains(got, tc.wantTool) {
+				t.Errorf("instructions missing tool name %q: %q", tc.wantTool, got)
+			}
+		})
+	}
+}
+
+// ---- bus setup tests (bus/consumer lifecycle) ----
+
+func TestSetupProsperaBus(t *testing.T) {
+	tests := []struct {
+		name       string
+		natsURL    string
+		busFactory func(context.Context, string) (pubsub.Bus, error)
+		wantNil    bool
+	}{
+		{
+			name:    "empty url returns nil",
+			natsURL: "   ",
+			wantNil: true,
+		},
+		{
+			name:    "bus factory error returns nil",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return nil, errors.New("connection failed")
+			},
+			wantNil: true,
+		},
+		{
+			name:    "successful bus sets event bus and consumers",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return pubsub.NewMemoryBus(), nil
+			},
+			wantNil: false,
+		},
+		{
+			name:    "consumer start failure logs and returns bus",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
+			},
+			wantNil: false,
+		},
+		{
+			name:    "ensure streams failure logs and returns bus",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return &failEnsureStreamsBus{Bus: pubsub.NewMemoryBus()}, nil
+			},
+			wantNil: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origBusFn := newProsperaBusFn
+			defer func() { newProsperaBusFn = origBusFn }()
+			if tc.busFactory != nil {
+				newProsperaBusFn = tc.busFactory
+			}
+
+			server, _, _ := setupTestServer()
+			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
+			if (bus == nil) != tc.wantNil {
+				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
+			}
+			if !tc.wantNil {
+				if server.EventBus() != bus {
+					t.Fatalf("server.EventBus() = %v, want %v", server.EventBus(), bus)
+				}
+			}
+		})
+	}
+}
+
+type failEnsureStreamsBus struct {
+	pubsub.Bus
+}
+
+func (*failEnsureStreamsBus) EnsureCoreStreams(ctx context.Context) error {
+	return errors.New("ensure streams failed")
+}
+
+func TestFirstNonEmptyAndNakBackoff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input []string
+		want  string
+	}{
+		{input: []string{"", "  ", "first", "second"}, want: "first"},
+		{input: []string{"", "   "}, want: ""},
+		{input: []string{"only"}, want: "only"},
+	}
+
+	for _, tc := range tests {
+		if got := firstNonEmpty(tc.input...); got != tc.want {
+			t.Errorf("firstNonEmpty(%v) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	delayTests := []struct {
+		delivered uint64
+		want      time.Duration
+	}{
+		{delivered: 0, want: 1 * time.Second},
+		{delivered: 1, want: 1 * time.Second},
+		{delivered: 2, want: 2 * time.Second},
+		{delivered: 3, want: 4 * time.Second},
+		{delivered: 4, want: 8 * time.Second},
+		{delivered: 5, want: 16 * time.Second},
+		{delivered: 10, want: 16 * time.Second},
+	}
+
+	for _, dt := range delayTests {
+		if got := nakBackoffDelay(dt.delivered); got != dt.want {
+			t.Errorf("nakBackoffDelay(%d) = %v, want %v", dt.delivered, got, dt.want)
+		}
 	}
 }
