@@ -263,6 +263,17 @@ describe('buildChunkDag', () => {
         { fromId: 'c2', toId: 'c3', fromRank: 1, fromIndex: 0, fromCount: 1, toRank: 2, toIndex: 0, toCount: 1, tone: 'failed' },
       ],
     },
+    {
+      name: 'deploy_failed and conflict statuses produce failed edge tone',
+      chunks: [
+        chunk('c1', 'deploy_failed', { depends_on: [] }),
+        chunk('c2', 'conflict', { depends_on: ['c1'] }),
+      ],
+      wantRanks: [['c1'], ['c2']],
+      wantEdges: [
+        { fromId: 'c1', toId: 'c2', fromRank: 0, fromIndex: 0, fromCount: 1, toRank: 1, toIndex: 0, toCount: 1, tone: 'failed' },
+      ],
+    },
   ])('$name', ({ chunks, wantRanks, wantEdges }) => {
     const layout = buildChunkDag(chunks);
     const gotRanks = layout.ranks.map((r) => r.map((n) => n.chunk.id));

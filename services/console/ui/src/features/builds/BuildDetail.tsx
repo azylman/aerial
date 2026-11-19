@@ -109,6 +109,7 @@ export function BuildDagGraph({
                   data-chunk-id={node.chunk.id}
                   data-chunk-index={node.number}
                   title={titleText}
+                  aria-label={`${titleText}, chunk ${node.number}, status ${node.status.label}`}
                   style={{
                     left: `${leftPct}%`,
                     top: `${node.y - Math.round(node.height / 2)}px`,
@@ -120,10 +121,6 @@ export function BuildDagGraph({
                   }
                 >
                   {node.dependsOn.length > 0 ? <span className="dag-node-port port-in" aria-hidden="true" /> : null}
-                  <span className="dag-node-meta">
-                    <span className="chunk-index-badge">#{node.number}</span>
-                    <span className={node.status.className}>{node.status.label}</span>
-                  </span>
                   <span className="chunk-title">{titleText}</span>
                   {node.hasOutEdge ? <span className="dag-node-port port-out" aria-hidden="true" /> : null}
                 </button>
