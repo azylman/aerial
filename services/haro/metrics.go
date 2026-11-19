@@ -34,13 +34,13 @@ func RecordScheduleDispatchDuration(scheduleType string, durationSeconds float64
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if s.handler != nil && s.handler.db != nil {
-		if summary, err := GetScheduleSummaryMetrics(r.Context(), s.handler.db); err == nil {
+	if s.handler != nil && s.handler.DB != nil {
+		if summary, err := GetScheduleSummaryMetrics(r.Context(), s.handler.DB); err == nil {
 			SchedulesActive.WithLabelValues(scheduleTypeCron).Set(float64(summary.CronCount))
 			SchedulesActive.WithLabelValues(scheduleTypeHeartbeat).Set(float64(summary.HeartbeatCount))
 			SchedulesActive.WithLabelValues(scheduleTypeOneShot).Set(float64(summary.OneShotCount))
 		}
-		if triggers, err := ListEventTriggers(r.Context(), s.handler.db, ""); err == nil {
+		if triggers, err := ListEventTriggers(r.Context(), s.handler.DB, ""); err == nil {
 			SchedulesActive.WithLabelValues(scheduleTypeEventWatch).Set(float64(len(triggers)))
 		}
 	}

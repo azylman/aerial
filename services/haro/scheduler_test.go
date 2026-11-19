@@ -81,7 +81,7 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	if err := HandleOneShotJob(ctx, nil, db, msgValid); err != nil {
 		t.Fatalf("HandleOneShotJob valid failed: %v", err)
 	}
-	sched, err := GetOneShotSchedule(ctx, db, "os-valid-1")
+	sched, err := store.GetOneShotSchedule(ctx, db, "os-valid-1")
 	if err != nil {
 		t.Fatalf("GetOneShotSchedule failed: %v", err)
 	}
@@ -157,8 +157,8 @@ func TestDB_CronOperations(t *testing.T) {
 	}
 
 	for _, c := range []CronSchedule{cron1, cronFuture, cronDisabled} {
-		if err := InsertCronSchedule(ctx, db, c); err != nil {
-			t.Fatalf("InsertCronSchedule() err = %v", err)
+		if err := store.InsertCronSchedule(ctx, db, c); err != nil {
+			t.Fatalf("store.InsertCronSchedule() err = %v", err)
 		}
 	}
 
@@ -349,14 +349,14 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"DeleteOneShotSchedule", func() error { _, err := store.DeleteOneShotSchedule(ctx, nil, "id"); return err }()},
 		{"CreateScheduleRun", store.CreateScheduleRun(ctx, nil, ScheduleRun{ID: "run-id"})},
 		{"PruneScheduleRuns", func() error { _, err := store.PruneScheduleRuns(ctx, nil, 10, 24*time.Hour, now); return err }()},
-		{"InsertHeartbeatSchedule", InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
+		{"InsertHeartbeatSchedule", store.InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
 		{"ListHeartbeatSchedules", func() error { _, err := ListHeartbeatSchedules(ctx, nil, ""); return err }()},
-		{"GetCronSchedule", func() error { _, err := GetCronSchedule(ctx, nil, "id"); return err }()},
-		{"GetCronSchedule empty id", func() error { _, err := GetCronSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
-		{"GetOneShotSchedule", func() error { _, err := GetOneShotSchedule(ctx, nil, "id"); return err }()},
-		{"GetOneShotSchedule empty id", func() error { _, err := GetOneShotSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
-		{"GetHeartbeatSchedule", func() error { _, err := GetHeartbeatSchedule(ctx, nil, "id"); return err }()},
-		{"UpdateHeartbeatSchedule", UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
+		{"GetCronSchedule", func() error { _, err := store.GetCronSchedule(ctx, nil, "id"); return err }()},
+		{"GetCronSchedule empty id", func() error { _, err := store.GetCronSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
+		{"GetOneShotSchedule", func() error { _, err := store.GetOneShotSchedule(ctx, nil, "id"); return err }()},
+		{"GetOneShotSchedule empty id", func() error { _, err := store.GetOneShotSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
+		{"GetHeartbeatSchedule", func() error { _, err := store.GetHeartbeatSchedule(ctx, nil, "id"); return err }()},
+		{"UpdateHeartbeatSchedule", store.UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
 		{"GetDueHeartbeatSchedules", func() error { _, err := store.GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
 		{"AdvanceHeartbeatNextRun", store.AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
 		{"HasRunningHeartbeatRun", func() error { _, err := store.HasRunningHeartbeatRun(ctx, nil, "id", now); return err }()},

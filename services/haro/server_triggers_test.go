@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/haro/internal/metrics"
+	"github.com/azylman/aerial/services/haro/internal/store"
 )
 
 func TestDirectDB_SummaryAndRunsErrors(t *testing.T) {
@@ -77,7 +78,7 @@ func TestServer_Metrics_Table(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	_ = InsertCronSchedule(ctx, server.handler.db, CronSchedule{
+	_ = store.InsertCronSchedule(ctx, server.handler.DB, CronSchedule{
 		ID:        "m-cron-1",
 		TargetID:  "chan-1",
 		CronExpr:  "0 0 * * *",
@@ -85,7 +86,7 @@ func TestServer_Metrics_Table(t *testing.T) {
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
 	})
-	_ = InsertHeartbeatSchedule(ctx, server.handler.db, HeartbeatSchedule{
+	_ = store.InsertHeartbeatSchedule(ctx, server.handler.DB, HeartbeatSchedule{
 		ID:        "m-hb-1",
 		TargetID:  "chan-2",
 		CronExpr:  "0 0 * * *",
@@ -93,13 +94,13 @@ func TestServer_Metrics_Table(t *testing.T) {
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
 	})
-	_ = InsertOneShotSchedule(ctx, server.handler.db, OneShotSchedule{
+	_ = InsertOneShotSchedule(ctx, server.handler.DB, OneShotSchedule{
 		ID:       "m-once-1",
 		ThreadID: "chan-3",
 		Prompt:   "once",
 		RunAt:    time.Now().UTC(),
 	})
-	_ = InsertEventTrigger(ctx, server.handler.db, EventTrigger{
+	_ = InsertEventTrigger(ctx, server.handler.DB, EventTrigger{
 		ID:        "m-trig-1",
 		ChannelID: "chan-4",
 		Source:    "github",

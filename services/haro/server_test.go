@@ -220,7 +220,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 	}
 
 	rpcCtx := context.Background()
-	_ = InsertCronSchedule(rpcCtx, server.handler.db, CronSchedule{
+	_ = store.InsertCronSchedule(rpcCtx, server.handler.DB, CronSchedule{
 		ID:        "test-cron-id",
 		TargetID:  "123",
 		CronExpr:  "0 0 * * *",
@@ -228,7 +228,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
 	})
-	_ = InsertHeartbeatSchedule(rpcCtx, server.handler.db, HeartbeatSchedule{
+	_ = store.InsertHeartbeatSchedule(rpcCtx, server.handler.DB, HeartbeatSchedule{
 		ID:        "test-hb-id",
 		TargetID:  "123",
 		CronExpr:  "0 0 * * *",
@@ -236,7 +236,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
 	})
-	_ = InsertOneShotSchedule(rpcCtx, server.handler.db, OneShotSchedule{
+	_ = InsertOneShotSchedule(rpcCtx, server.handler.DB, OneShotSchedule{
 		ID:       "test-once-id",
 		ThreadID: "123",
 		Prompt:   "test",
@@ -289,7 +289,7 @@ func TestServer_ScheduleHeartbeatPersistsExplicitFields(t *testing.T) {
 			if rpcResp.Error != nil {
 				t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
 			}
-			got, err := ListHeartbeatSchedules(t.Context(), server.handler.db, tc.channelID)
+			got, err := ListHeartbeatSchedules(t.Context(), server.handler.DB, tc.channelID)
 			if err != nil {
 				t.Fatalf("ListHeartbeatSchedules err = %v", err)
 			}
@@ -416,7 +416,7 @@ func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {
 	now := time.Now().UTC()
 	c := CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
 	s := OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
-	if err := InsertCronSchedule(ctx, db, c); err != nil {
+	if err := store.InsertCronSchedule(ctx, db, c); err != nil {
 		t.Fatalf("InsertCronSchedule failed: %v", err)
 	}
 	if err := InsertOneShotSchedule(ctx, db, s); err != nil {
@@ -430,23 +430,23 @@ func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {
 	}
 
 	eff := "high"
-	if err := UpdateCronSchedule(ctx, db, "c1", &eff, nil, nil, nil, nil, nil); err != nil {
+	if err := store.UpdateCronSchedule(ctx, db, "c1", &eff, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateCronSchedule(ctx, db, "missing-id", &eff, nil, nil, nil, nil, nil); err == nil {
+	if err := store.UpdateCronSchedule(ctx, db, "missing-id", &eff, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error")
 	}
-	if err := UpdateCronSchedule(ctx, db, "", nil, nil, nil, nil, nil, nil); err == nil {
+	if err := store.UpdateCronSchedule(ctx, db, "", nil, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error")
 	}
-	if err := UpdateCronSchedule(ctx, db, "c1", nil, nil, nil, nil, nil, nil); err != nil {
+	if err := store.UpdateCronSchedule(ctx, db, "c1", nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	if delFalse, err := DeleteSchedule(ctx, db, "missing"); err != nil || delFalse {
+	if delFalse, err := store.DeleteSchedule(ctx, db, "missing"); err != nil || delFalse {
 		t.Fatal(err)
 	}
-	if delTrue, err := DeleteSchedule(ctx, db, "c1"); err != nil || !delTrue {
+	if delTrue, err := store.DeleteSchedule(ctx, db, "c1"); err != nil || !delTrue {
 		t.Fatal(err)
 	}
 
@@ -462,7 +462,7 @@ func testDBCRUDOperations(ctx context.Context, t *testing.T, db *sql.DB) {
 
 func runDBOpCase(t *testing.T, tc dbOpTestCase, c CronSchedule, s OneShotSchedule, eff string) {
 	t.Helper()
-	if err := InsertCronSchedule(tc.ctx, tc.db, c); err == nil {
+	if err := store.InsertCronSchedule(tc.ctx, tc.db, c); err == nil {
 		t.Errorf("%s: expected err InsertCron", tc.name)
 	}
 	if err := InsertOneShotSchedule(tc.ctx, tc.db, s); err == nil {
@@ -474,13 +474,13 @@ func runDBOpCase(t *testing.T, tc dbOpTestCase, c CronSchedule, s OneShotSchedul
 	if _, err := ListOneShotSchedules(tc.ctx, tc.db, ""); err == nil {
 		t.Errorf("%s: expected err ListOneShot", tc.name)
 	}
-	if err := UpdateCronSchedule(tc.ctx, tc.db, "c1", &eff, nil, nil, nil, nil, nil); err == nil {
+	if err := store.UpdateCronSchedule(tc.ctx, tc.db, "c1", &eff, nil, nil, nil, nil, nil); err == nil {
 		t.Errorf("%s: expected err UpdateCron", tc.name)
 	}
-	if err := UpdateHeartbeatSchedule(tc.ctx, tc.db, HeartbeatSchedule{ID: "hb1"}); err == nil {
+	if err := store.UpdateHeartbeatSchedule(tc.ctx, tc.db, HeartbeatSchedule{ID: "hb1"}); err == nil {
 		t.Errorf("%s: expected err UpdateHeartbeat", tc.name)
 	}
-	if _, err := DeleteSchedule(tc.ctx, tc.db, "c1"); err == nil {
+	if _, err := store.DeleteSchedule(tc.ctx, tc.db, "c1"); err == nil {
 		t.Errorf("%s: expected err Delete", tc.name)
 	}
 	if err := InsertEventTrigger(tc.ctx, tc.db, EventTrigger{}); err == nil {
@@ -489,10 +489,10 @@ func runDBOpCase(t *testing.T, tc dbOpTestCase, c CronSchedule, s OneShotSchedul
 	if _, err := ListEventTriggers(tc.ctx, tc.db, ""); err == nil {
 		t.Errorf("%s: expected err ListEventTriggers", tc.name)
 	}
-	if _, err := DeleteEventTrigger(tc.ctx, tc.db, "e1"); err == nil {
+	if _, err := store.DeleteEventTrigger(tc.ctx, tc.db, "e1"); err == nil {
 		t.Errorf("%s: expected err DeleteEventTrigger", tc.name)
 	}
-	if err := ValidateLiveEventTarget(tc.ctx, tc.db, "vanadis_build", "b1"); err == nil {
+	if err := store.ValidateLiveEventTarget(tc.ctx, tc.db, "vanadis_build", "b1"); err == nil {
 		t.Errorf("%s: expected err ValidateLiveEventTarget", tc.name)
 	}
 	if _, err := ClaimEventTriggers(tc.ctx, tc.db, "flux", []string{"aerial"}, "sync_success"); err == nil {
@@ -703,7 +703,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	err = InsertCronSchedule(ctx, db, CronSchedule{
+	err = store.InsertCronSchedule(ctx, db, CronSchedule{
 		ID:          "cron-1",
 		TargetID:    "123456789012345678",
 		TitlePrefix: "Cron Token: ghp_12345678901234567890",
@@ -719,7 +719,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		t.Fatalf("failed to insert cron: %v", err)
 	}
 
-	err = InsertHeartbeatSchedule(ctx, db, HeartbeatSchedule{
+	err = store.InsertHeartbeatSchedule(ctx, db, HeartbeatSchedule{
 		ID:          "hb-1",
 		TargetID:    "123456789012345678",
 		TitlePrefix: "HB Alert",
