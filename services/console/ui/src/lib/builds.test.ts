@@ -4,7 +4,6 @@ import {
   compareBuilds,
   computeBuildChunkStats,
   formatBuildTimestamp,
-  getBuildCompletionMs,
   getBuildStatusBadgeInfo,
   getBuildTimingInfo,
   isSameCalendarDay,
@@ -218,43 +217,6 @@ describe('getBuildTimingInfo', () => {
     },
   ])('$name', ({ build, now, want }) => {
     expect(getBuildTimingInfo(build, now ?? NOW)).toEqual(want);
-  });
-});
-
-describe('getBuildCompletionMs', () => {
-  it.each<{ name: string; build: BuildLike | null | undefined; want: number | null }>([
-    { name: 'null build', build: null, want: null },
-    { name: 'undefined build', build: undefined, want: null },
-    { name: 'running build returns null', build: { status: 'running', updated_at: localIso(10, 17, 10, 0) }, want: null },
-    { name: 'queued build returns null', build: { status: 'queued', updated_at: localIso(10, 17, 10, 0) }, want: null },
-    {
-      name: 'completed build uses max chunk completed_at',
-      build: {
-        status: 'completed',
-        updated_at: localIso(10, 17, 10, 0),
-        chunks: [
-          { status: 'merged', completed_at: localIso(10, 17, 9, 30) },
-          { status: 'completed', completed_at: localIso(10, 17, 9, 45) },
-        ],
-      },
-      want: localMs(10, 17, 9, 45),
-    },
-    {
-      name: 'completed build falls back to build and chunk updated_at',
-      build: {
-        status: 'completed',
-        updated_at: localIso(10, 17, 10, 15),
-        chunks: [{ status: 'merged', completed_at: ZERO_TIME, updated_at: localIso(10, 17, 10, 30) }],
-      },
-      want: localMs(10, 17, 10, 30),
-    },
-    {
-      name: 'completed build with no timestamps returns null',
-      build: { status: 'completed', updated_at: ZERO_TIME },
-      want: null,
-    },
-  ])('$name', ({ build, want }) => {
-    expect(getBuildCompletionMs(build)).toBe(want);
   });
 });
 

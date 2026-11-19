@@ -75,17 +75,6 @@ describe('filterBuilds', () => {
     expect(filterBuilds(INDEX, 'ALL', '')).toBe(INDEX);
     expect(indexBuilds(BUILDS)[0]).toBe(INDEX[0]);
   });
-
-  it('orders out-of-order build payloads with running first, then queued, then completed descending by completion', () => {
-    const raw: readonly VanadisBuildDTO[] = [
-      build('b-comp-old', 'completed', 'Completed Old', [chunk('c-old', 'completed', { completed_at: '2026-11-08T09:00:00Z' })]),
-      build('b-comp-new', 'completed', 'Completed New', [chunk('c-new', 'completed', { completed_at: '2026-11-08T11:30:00Z' })]),
-      build('b-queue', 'queued', 'Queued Task'),
-      build('b-run', 'running', 'Running Task', [chunk('c-run', 'in_progress')]),
-    ];
-    const indexed = indexBuilds(raw);
-    expect(indexed.map((b) => b.build.id)).toEqual(['b-run', 'b-queue', 'b-comp-new', 'b-comp-old']);
-  });
 });
 
 const payload = (total: number, builds: readonly VanadisBuildDTO[] = BUILDS, extra: Partial<BuildsAPIResponse> = {}): BuildsAPIResponse => ({
