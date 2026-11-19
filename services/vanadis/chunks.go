@@ -1,19 +1,16 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
+	"github.com/azylman/aerial/services/vanadis/internal/store"
 )
 
 const (
@@ -78,12 +75,7 @@ type VanadisAdvancementResult struct {
 }
 
 // VanadisChunkPRLookup represents the result of looking up a chunk by repository and PR number.
-type VanadisChunkPRLookup struct {
-	Matched bool   `json:"matched"`
-	ChunkID string `json:"chunk_id,omitempty"`
-	BuildID string `json:"build_id,omitempty"`
-	Effort  string `json:"effort,omitempty"`
-}
+type VanadisChunkPRLookup = store.VanadisChunkPRLookup
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
 type AttachChunkPRRequest struct {
@@ -144,40 +136,6 @@ var (
 	// ResolveChunkRef resolves a chunk ID or chunk index reference to a slice position.
 	ResolveChunkRef = model.ResolveChunkRef
 )
-
-// GetChunk retrieves a VanadisChunk and its parent VanadisBuild by chunkID.
-func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error) {
-	if s == nil || s.db == nil {
-		return nil, nil, errors.New("database connection is nil")
-	}
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
-		return nil, nil, errors.New("chunk id cannot be empty")
-	}
-	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
-	rows, err := s.db.Query(ctx, chunkQuery, chunkID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("query chunk %s: %w", chunkID, err)
-	}
-	defer rows.Close()
-	chunks, err := scanChunks(rows)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(chunks) == 0 {
-		return nil, nil, ErrChunkNotFound
-	}
-	c := chunks[0]
-	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds WHERE id = $1;`
-	b, err := scanBuild(s.db.QueryRow(ctx, buildQuery, c.BuildID))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, ErrBuildNotFound
-		}
-		return nil, nil, fmt.Errorf("query build %s for chunk %s: %w", c.BuildID, chunkID, err)
-	}
-	return &c, &b, nil
-}
 
 func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
