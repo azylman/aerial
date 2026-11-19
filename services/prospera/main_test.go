@@ -254,6 +254,55 @@ func TestRunApp_TranscriptBatcher(t *testing.T) {
 	runTranscriptBatcher(ctx, sessionMgr, reporter)
 }
 
+type errTermJobMsg struct {
+	mockJobMsg
+
+	termErr error
+}
+
+func (m *errTermJobMsg) Term() error {
+	m.termed = true
+	return m.termErr
+}
+
+func TestNakOrDropJob_MaxDeliveriesTerms(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		delivered uint64
+		termErr   error
+		wantErr   bool
+	}{
+		{
+			name:      "max deliveries terms and drops without error",
+			delivered: 5,
+			wantErr:   false,
+		},
+		{
+			name:      "term failure still drops without error",
+			delivered: 5,
+			termErr:   errors.New("term failed"),
+			wantErr:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := &errTermJobMsg{termErr: tc.termErr}
+			msg.delivered = tc.delivered
+			err := nakOrDropJob(context.Background(), msg, "test", "id1", errors.New("underlying error"))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("nakOrDropJob() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !msg.termed {
+				t.Fatal("nakOrDropJob() did not term job at max deliveries")
+			}
+		})
+	}
+}
+
 func TestRoutes_HealthAndCoverage(t *testing.T) {
 	t.Parallel()
 
