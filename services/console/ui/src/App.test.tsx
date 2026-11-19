@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import buildsRaw from '../e2e/fixtures/builds.json?raw';
@@ -399,7 +399,7 @@ describe('App with a fully seeded store', () => {
     expect(screen.getByText('COMMENTS (2)')).toBeTruthy();
     // Back on the builds tab, the build drawer body ships in the builds chunk and opens from a card.
     await goTo('#builds');
-    await act(async () => screen.getByText('Console React rewrite #1').click());
+    await act(async () => within(document.getElementById('builds-view')!).getByText('Console React rewrite #1').click());
     await flush();
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
@@ -534,7 +534,7 @@ const ISOLATION: readonly {
     name: 'schedules',
     action: 'setSchedules',
     data: { ...SCHEDULES, crons: SCHEDULES.crons.map((c, i) => (i === 0 ? { ...c, title: 'Renamed cron' } : c)) },
-    owners: ['schedules'],
+    owners: ['schedules', 'telemetry'],
   },
   {
     name: 'memory',
@@ -546,7 +546,7 @@ const ISOLATION: readonly {
     name: 'builds',
     action: 'setBuilds',
     data: { ...BUILDS, builds: BUILDS.builds.map((b, i) => (i === 0 ? { ...b, title: 'Renamed build' } : b)) },
-    owners: ['builds'],
+    owners: ['builds', 'telemetry'],
   },
 ];
 const FEATURES = ['telemetry', 'tasks', 'schedules', 'memory', 'builds'] as const;

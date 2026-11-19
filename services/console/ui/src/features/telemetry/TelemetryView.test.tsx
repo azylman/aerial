@@ -1,13 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClusterResponse, DeploymentStatus, ServiceStatus } from '../../api/types';
+import type { BuildsAPIResponse, ClusterResponse, DeploymentStatus, SchedulesAPIResponse, ServiceStatus } from '../../api/types';
 import { useConsoleStore } from '../../store/store';
 import { Deployments, DeployBadge } from './Deployments';
 import { openServiceDrawer } from './openService';
 import { ServiceDiagnostics } from './ServiceDiagnostics';
 import { HealthyCount, ServiceCard, ServicesGrid } from './ServicesGrid';
-import TelemetryView from './TelemetryView';
+import TelemetryView, { OverviewBuildsSection, OverviewSchedulesSection } from './TelemetryView';
 
 const svc = (name: string, status: string, uptime: number): ServiceStatus => ({
   name,
@@ -287,13 +287,189 @@ describe('Deployments', () => {
   });
 });
 
+const sampleBuilds = (over: Partial<BuildsAPIResponse> = {}): BuildsAPIResponse => ({
+  status: 'ok',
+  total: 3,
+  running_count: 2,
+  queued_count: 1,
+  completed_count: 0,
+  builds: [
+    {
+      id: 'build-01',
+      thread_id: '1',
+      tier: 1,
+      title: 'Console Bento View',
+      objective: 'Ship Bento',
+      status: 'running',
+      created_at: '2026-11-08T12:00:00Z',
+      updated_at: '2026-11-08T12:00:00Z',
+      total_chunks: 3,
+      completed_chunks: 1,
+      running_chunks: 1,
+      pending_chunks: 1,
+      failed_chunks: 0,
+    },
+    {
+      id: 'build-02',
+      thread_id: '2',
+      tier: 2,
+      title: 'Scheduler Jitter',
+      objective: 'Fix jitter',
+      status: 'queued',
+      created_at: '2026-11-08T12:00:00Z',
+      updated_at: '2026-11-08T12:00:00Z',
+      total_chunks: 2,
+      completed_chunks: 0,
+      running_chunks: 0,
+      pending_chunks: 2,
+      failed_chunks: 0,
+    },
+    {
+      id: 'build-03',
+      thread_id: '3',
+      tier: 1,
+      title: '',
+      objective: 'Build without title',
+      status: 'completed',
+      created_at: '2026-11-08T12:00:00Z',
+      updated_at: '2026-11-08T12:00:00Z',
+      total_chunks: 1,
+      completed_chunks: 1,
+      running_chunks: 0,
+      pending_chunks: 0,
+      failed_chunks: 0,
+    },
+  ],
+  ...over,
+});
+
+const sampleSchedules = (over: Partial<SchedulesAPIResponse> = {}): SchedulesAPIResponse => ({
+  status: 'ok',
+  system_time: '2026-11-08T12:00:00Z',
+  summary: {
+    total_active: 4,
+    cron_count: 4,
+    one_shot_count: 0,
+    total_runs_24h: 10,
+    success_rate_24h: 100,
+  },
+  crons: [
+    {
+      id: 'cron-1',
+      channel_id: 'ch-1',
+      title_prefix: 'Morning standup',
+      cron_expr: '0 9 * * *',
+      cron_description: 'Every day at 9am',
+      prompt: 'Standup',
+      timezone: 'UTC',
+      next_run_at: '2026-11-08T13:00:00Z',
+      enabled: true,
+      created_at: '2026-11-01T12:00:00Z',
+    },
+    {
+      id: 'cron-2',
+      channel_id: 'ch-1',
+      title_prefix: '',
+      cron_expr: '*/15 * * * *',
+      cron_description: 'Every 15 min',
+      prompt: 'Check',
+      timezone: 'UTC',
+      next_run_at: '2026-11-08T13:00:00Z',
+      enabled: true,
+      created_at: '2026-11-01T12:00:00Z',
+    },
+    {
+      id: 'cron-3',
+      channel_id: 'ch-1',
+      title_prefix: 'Evening review',
+      cron_expr: '0 18 * * *',
+      cron_description: '',
+      prompt: 'Review',
+      timezone: 'UTC',
+      next_run_at: '2026-11-08T18:00:00Z',
+      enabled: true,
+      created_at: '2026-11-01T12:00:00Z',
+    },
+    {
+      id: 'cron-4',
+      channel_id: 'ch-1',
+      title_prefix: 'Weekly summary',
+      cron_expr: '0 12 * * 5',
+      cron_description: 'Fridays at noon',
+      prompt: 'Summary',
+      timezone: 'UTC',
+      next_run_at: '2026-11-13T12:00:00Z',
+      enabled: true,
+      created_at: '2026-11-01T12:00:00Z',
+    },
+  ],
+  one_shots: [],
+  ...over,
+});
+
+const seedBuilds = (data: BuildsAPIResponse): void => act(() => useConsoleStore.getState().setBuilds(data));
+const seedSchedules = (data: SchedulesAPIResponse): void => act(() => useConsoleStore.getState().setSchedules(data));
+
+describe('OverviewBuildsSection', () => {
+  it('renders idle empty state when no builds exist', () => {
+    const { container } = render(<OverviewBuildsSection />);
+    expect(screen.getByText('ALL BUILDS IDLE // NO QUEUED RUNS')).toBeTruthy();
+    expect(container.querySelector('.section-badge')?.textContent).toBe('0 ACTIVE');
+    expect(container.querySelectorAll('.overview-build-row')).toHaveLength(0);
+  });
+
+  it('renders populated build rows, opens drawer on click, and navigates to builds tab', () => {
+    const { container } = render(<OverviewBuildsSection />);
+    seedBuilds(sampleBuilds());
+    expect(container.querySelector('.section-badge')?.textContent).toBe('3 ACTIVE');
+    const rows = container.querySelectorAll('.overview-build-row');
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0] as HTMLElement).getByText('BUILD // Console Bento View')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('RUNNING')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('1/3 chunks')).toBeTruthy();
+    expect(within(rows[2] as HTMLElement).getByText('BUILD // build-03')).toBeTruthy();
+
+    act(() => (rows[0] as HTMLElement).click());
+    expect(useConsoleStore.getState().drawer).toEqual({ kind: 'build', id: 'build-01' });
+
+    act(() => screen.getByRole('button', { name: 'VIEW ALL BUILDS ↗' }).click());
+    expect(useConsoleStore.getState().ui.activeTab).toBe('builds');
+  });
+});
+
+describe('OverviewSchedulesSection', () => {
+  it('renders idle empty state when no schedules exist', () => {
+    const { container } = render(<OverviewSchedulesSection />);
+    expect(screen.getByText('ALL ROUTINES IDLE // NO ACTIVE CRONS')).toBeTruthy();
+    expect(container.querySelector('.section-badge')?.textContent).toBe('0 ACTIVE');
+    expect(container.querySelectorAll('.overview-schedule-row')).toHaveLength(0);
+  });
+
+  it('renders populated routine rows and navigates to schedules tab', () => {
+    const { container } = render(<OverviewSchedulesSection />);
+    seedSchedules(sampleSchedules());
+    expect(container.querySelector('.section-badge')?.textContent).toBe('4 ACTIVE');
+    const rows = container.querySelectorAll('.overview-schedule-row');
+    expect(rows).toHaveLength(4);
+    expect(within(rows[0] as HTMLElement).getByText('ROUTINE // Morning standup')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('0 9 * * *')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('Every day at 9am')).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText('ROUTINE // RECURRING ROUTINE')).toBeTruthy();
+
+    act(() => screen.getByRole('button', { name: 'VIEW SCHEDULES ↗' }).click());
+    expect(useConsoleStore.getState().ui.activeTab).toBe('schedules');
+  });
+});
+
 describe('TelemetryView', () => {
-  it('renders the three sections and expands to the tasks tab', () => {
+  it('renders the five sections and expands to the tasks tab', () => {
     render(<TelemetryView />);
     seed(cluster());
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
       'LIVE AGENT EXECUTION QUEUE',
       'DEPLOYMENT PIPELINE',
+      'VANADIS BUILD QUEUE',
+      'UPCOMING SCHEDULED ROUTINES',
       'ACTIVE STACK COMPONENTS',
     ]);
     expect(screen.getByText('GIT SYNC: IN SYNC (Δ 0s)')).toBeTruthy();
