@@ -25,6 +25,7 @@ func TestStaticAssetsIntegrity(t *testing.T) {
 		"static/favicon-32x32.png",
 		"static/favicon-16x16.png",
 		"static/apple-touch-icon.png",
+		"static/manifest.webmanifest",
 	}
 
 	for _, reqFile := range requiredFiles {
@@ -47,6 +48,7 @@ var builtConsoleFS = fstest.MapFS{
 	"assets/index-Ef56Gh78.css": {Data: []byte(`:root{color-scheme:dark}`)},
 	"favicon-32x32.png":         {Data: []byte{0, 0, 1, 0}},
 	"apple-touch-icon.png":      {Data: []byte("\x89PNG")},
+	"manifest.webmanifest":      {Data: []byte(`{"name":"Aerial Console"}`)},
 }
 
 func TestAssetRegistry_ServeHTTP(t *testing.T) {
@@ -78,6 +80,7 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 		{name: "hashed_js_immutable", reg: builtReg, method: "GET", path: "/console/assets/index-Ab12Cd34.js", wantCode: http.StatusOK, wantContentType: "text/javascript; charset=utf-8", wantCache: "public, max-age=31536000, immutable", wantETag: `"7ef459c7e6b1475d"`, wantBody: `console.log("console")`},
 		{name: "hashed_css_immutable_root", reg: builtReg, method: "GET", path: "/assets/index-Ef56Gh78.css", wantCode: http.StatusOK, wantContentType: "text/css; charset=utf-8", wantCache: "public, max-age=31536000, immutable", wantETag: `"df0a81bf0e43dd5d"`, wantBody: `:root{color-scheme:dark}`},
 		{name: "favicon_revalidates", reg: builtReg, method: "GET", path: "/console/favicon-32x32.png", wantCode: http.StatusOK, wantContentType: "image/png", wantCache: "no-cache, must-revalidate", wantETag: `"6b1e73a0094b7b81"`, wantBody: "\x00\x00\x01\x00"},
+		{name: "manifest_revalidates", reg: builtReg, method: "GET", path: "/console/manifest.webmanifest", wantCode: http.StatusOK, wantContentType: GetMimeType("manifest.webmanifest"), wantCache: "no-cache, must-revalidate", wantETag: `"7b04bd8c85617ea8"`, wantBody: `{"name":"Aerial Console"}`},
 		{name: "hashed_asset_304", reg: builtReg, method: "GET", path: "/assets/index-Ab12Cd34.js", ifNoneMatch: `"7ef459c7e6b1475d"`, wantCode: http.StatusNotModified, wantContentType: "text/javascript; charset=utf-8", wantCache: "public, max-age=31536000, immutable", wantETag: `"7ef459c7e6b1475d"`},
 		{name: "shell_304_weak_etag", reg: builtReg, method: "GET", path: "/console/", ifNoneMatch: `W/"06c6880aaf6bbd18"`, wantCode: http.StatusNotModified, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`},
 		{name: "head_headers_without_body", reg: builtReg, method: "HEAD", path: "/apple-touch-icon.png", wantCode: http.StatusOK, wantContentType: "image/png", wantCache: "no-cache, must-revalidate", wantETag: `"0f4636c78f65d363"`},

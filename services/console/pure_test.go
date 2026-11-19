@@ -654,6 +654,7 @@ func TestGetMimeType_TableDriven(t *testing.T) {
 		{path: "photo.png", wantSubstr: "image/png"},
 		{path: "font.woff2", wantSubstr: "woff2"},
 		{path: "font.woff", wantSubstr: "woff"},
+		{path: "manifest.webmanifest", wantSubstr: "application/manifest+json"},
 		{path: "unknown.xyz123", wantSubstr: "application/octet-stream"},
 	}
 
