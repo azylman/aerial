@@ -29,6 +29,41 @@ spec:
         passwordSecret:
           name: postgres-aerial-role
         superuser: true
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: false
+        name: transcripts
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        inRoles:
+          - transcripts
+        login: true
+        name: transcripts_aerial
+        passwordSecret:
+          name: postgres-transcripts-aerial-role
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: true
+        name: eri
+        passwordSecret:
+          name: postgres-eri-role
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: false
+        name: memory_writer
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        inRoles:
+          - memory_writer
+        login: true
+        name: coven_aerial
+        passwordSecret:
+          name: postgres-coven-aerial-role
   maxSyncReplicas: 0
   minSyncReplicas: 0
   monitoring:
@@ -633,6 +668,123 @@ spec:
 apiVersion: generators.external-secrets.io/v1alpha1
 kind: Password
 metadata:
+  name: postgres-transcripts-aerial-password-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - password
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-transcripts-aerial-role
+  namespace: default
+spec:
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: postgres-transcripts-aerial-password-generator
+  refreshInterval: "0"
+  refreshPolicy: CreatedOnce
+  target:
+    creationPolicy: CreateOrMerge
+    deletionPolicy: Retain
+    immutable: true
+    name: postgres-transcripts-aerial-role
+    template:
+      data:
+        username: transcripts_aerial
+      mergePolicy: Merge
+      type: kubernetes.io/basic-auth
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: postgres-eri-password-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - password
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-eri-role
+  namespace: default
+spec:
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: postgres-eri-password-generator
+  refreshInterval: "0"
+  refreshPolicy: CreatedOnce
+  target:
+    creationPolicy: CreateOrMerge
+    deletionPolicy: Retain
+    immutable: true
+    name: postgres-eri-role
+    template:
+      data:
+        username: eri
+      mergePolicy: Merge
+      type: kubernetes.io/basic-auth
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: postgres-coven-aerial-password-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - password
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-coven-aerial-role
+  namespace: default
+spec:
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: postgres-coven-aerial-password-generator
+  refreshInterval: "0"
+  refreshPolicy: CreatedOnce
+  target:
+    creationPolicy: CreateOrMerge
+    deletionPolicy: Retain
+    immutable: true
+    name: postgres-coven-aerial-role
+    template:
+      data:
+        username: coven_aerial
+      mergePolicy: Merge
+      type: kubernetes.io/basic-auth
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
   name: infisical-secret-generator
   namespace: default
 spec:
@@ -858,6 +1010,69 @@ spec:
   selector:
     secret:
       name: postgres-aerial-role
+  updatePolicy: IfNotExists
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: postgres-transcripts-aerial-role-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: POSTGRES_TRANSCRIPTS_AERIAL_PASSWORD
+        secretKey: password
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    secret:
+      name: postgres-transcripts-aerial-role
+  updatePolicy: IfNotExists
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: postgres-eri-role-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: POSTGRES_ERI_PASSWORD
+        secretKey: password
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    secret:
+      name: postgres-eri-role
+  updatePolicy: IfNotExists
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: postgres-coven-aerial-role-push
+  namespace: default
+spec:
+  data:
+    - match:
+        remoteRef:
+          remoteKey: POSTGRES_COVEN_AERIAL_PASSWORD
+        secretKey: password
+  deletionPolicy: None
+  refreshInterval: 1h
+  secretStoreRefs:
+    - kind: SecretStore
+      name: infisical
+  selector:
+    secret:
+      name: postgres-coven-aerial-role
   updatePolicy: IfNotExists
 ---
 apiVersion: external-secrets.io/v1alpha1
