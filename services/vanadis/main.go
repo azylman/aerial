@@ -23,6 +23,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
+	vanadismcp "github.com/azylman/aerial/services/vanadis/internal/mcp"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
 )
@@ -51,13 +52,6 @@ var (
 	// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 	LoadConfigFromEnv = config.LoadConfigFromEnv
 )
-
-func nonNilSlice[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return s
-}
 
 // ExecuteChunkArgs defines the job payload for executing a single Vanadis build chunk.
 type ExecuteChunkArgs struct {
@@ -116,10 +110,6 @@ var (
 	isValidVanadisChunkID = model.IsValidVanadisChunkID
 )
 
-const (
-	serviceName = "vanadis"
-)
-
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
 	cfg        Config
@@ -140,6 +130,24 @@ func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client) *Van
 
 // SetStore updates the VanadisStore backing the server.
 func (s *VanadisServer) SetStore(st VanadisStore) { s.store = st }
+
+// mcpHandler builds the L2 MCP handler from live server dependencies.
+func (s *VanadisServer) mcpHandler() *vanadismcp.Handler {
+	if s == nil {
+		return vanadismcp.NewHandler(nil, NewClient(RestateConfig{}, nil), false)
+	}
+	return vanadismcp.NewHandler(s.store, s.restateClient(), s.restateCfg.Enabled)
+}
+
+// newMCPHandler constructs and returns the Streamable HTTP MCP server handler.
+func (s *VanadisServer) newMCPHandler() http.HandlerFunc {
+	return s.mcpHandler().NewHTTPHandler()
+}
+
+// handleRetryActionChunk serves POST /builds/{id}/retry-action.
+func (s *VanadisServer) handleRetryActionChunk(w http.ResponseWriter, r *http.Request) {
+	s.mcpHandler().HandleRetryActionChunk(w, r)
+}
 
 func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	if s == nil {
@@ -214,7 +222,12 @@ func SetupMux(server *VanadisServer) http.Handler {
 		mux.Handle("GET /metrics", promhttp.Handler())
 	}
 	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
-	mcpHandler := server.newMCPHandler().ServeHTTP
+	// The MCP handler resolves live server dependencies per request so a
+	// store or Restate config replaced after Routes() is observed by /mcp
+	// and /sse, matching the per-request handleRetryActionChunk wrapper.
+	mcpHandler := func(w http.ResponseWriter, r *http.Request) {
+		server.newMCPHandler().ServeHTTP(w, r)
+	}
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
