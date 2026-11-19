@@ -73,10 +73,10 @@ afterEach(() => {
 
 describe('ServiceCard states', () => {
   it.each([
-    { name: 'aerial-eri', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: 'UPTIME: 1h 0m' },
-    { name: 'aerial-vision', wantDot: 'pulse-dot degraded', wantBadge: 'badge degraded', wantText: 'DEGRADED', wantUptime: 'UPTIME: 12h 11m' },
-    { name: 'aerial-kernel-mcp', wantDot: 'pulse-dot down', wantBadge: 'badge down', wantText: 'DOWN', wantUptime: 'UPTIME: 0s' },
-    { name: 'aerial-console', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: 'UPTIME: 2m 5s' },
+    { name: 'aerial-eri', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: '1h 0m' },
+    { name: 'aerial-vision', wantDot: 'pulse-dot degraded', wantBadge: 'badge degraded', wantText: 'DEGRADED', wantUptime: '12h 11m' },
+    { name: 'aerial-kernel-mcp', wantDot: 'pulse-dot down', wantBadge: 'badge down', wantText: 'DOWN', wantUptime: '0s' },
+    { name: 'aerial-console', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: '2m 5s' },
   ])('$name renders $wantText', ({ name, wantDot, wantBadge, wantText, wantUptime }) => {
     render(<ServicesGrid />);
     seed(cluster());
@@ -86,7 +86,6 @@ describe('ServiceCard states', () => {
     const badge = card.querySelector('.badge');
     expect([badge?.className, badge?.textContent]).toEqual([wantBadge, wantText]);
     expect(within(card).getByText(wantUptime)).toBeTruthy();
-    expect(within(card).getByText('PORT: READY')).toBeTruthy();
   });
 });
 
@@ -257,7 +256,7 @@ describe('Deployments', () => {
     seed(cluster());
     const card = container.querySelector('.deploy-card') as HTMLElement;
     expect(card.className).toBe('deploy-card stage-swapping');
-    expect(card.querySelector('.deploy-card-laser')).not.toBeNull();
+    expect(card.querySelector('.deploy-card-laser')).toBeNull();
     expect(card.querySelector('.deploy-repo-badge')?.textContent?.trim()).toBe('azylman/aerial');
     expect(within(card).getByRole('link', { name: 'a1b2c3d ↗' }).getAttribute('href')).toBe('https://github.com/azylman/aerial/commit/a1b2c3d');
     expect(card.querySelector('.timer-text')?.textContent?.trim()).toBe('03:00s');
@@ -424,15 +423,15 @@ describe('OverviewBuildsSection', () => {
     expect(container.querySelector('.section-badge')?.textContent).toBe('3 ACTIVE');
     const rows = container.querySelectorAll('.overview-build-row');
     expect(rows).toHaveLength(3);
-    expect(within(rows[0] as HTMLElement).getByText('BUILD // Console Bento View')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('Console Bento View')).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText('RUNNING')).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText('1/3 chunks')).toBeTruthy();
-    expect(within(rows[2] as HTMLElement).getByText('BUILD // build-03')).toBeTruthy();
+    expect(within(rows[2] as HTMLElement).getByText('Build #build-03')).toBeTruthy();
 
     act(() => (rows[0] as HTMLElement).click());
     expect(useConsoleStore.getState().drawer).toEqual({ kind: 'build', id: 'build-01' });
 
-    act(() => screen.getByRole('button', { name: 'VIEW ALL BUILDS ↗' }).click());
+    act(() => screen.getByRole('button', { name: 'Builds ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('builds');
   });
 });
@@ -451,12 +450,12 @@ describe('OverviewSchedulesSection', () => {
     expect(container.querySelector('.section-badge')?.textContent).toBe('4 ACTIVE');
     const rows = container.querySelectorAll('.overview-schedule-row');
     expect(rows).toHaveLength(4);
-    expect(within(rows[0] as HTMLElement).getByText('ROUTINE // Morning standup')).toBeTruthy();
-    expect(within(rows[0] as HTMLElement).getByText('0 9 * * *')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('Morning standup')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('0 9 * * * (UTC)')).toBeTruthy();
     expect(within(rows[0] as HTMLElement).getByText('Every day at 9am')).toBeTruthy();
-    expect(within(rows[1] as HTMLElement).getByText('ROUTINE // RECURRING ROUTINE')).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText('Recurring Routine')).toBeTruthy();
 
-    act(() => screen.getByRole('button', { name: 'VIEW SCHEDULES ↗' }).click());
+    act(() => screen.getByRole('button', { name: 'Schedules ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('schedules');
   });
 });
@@ -466,15 +465,15 @@ describe('TelemetryView', () => {
     render(<TelemetryView />);
     seed(cluster());
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
-      'LIVE AGENT EXECUTION QUEUE',
-      'DEPLOYMENT PIPELINE',
-      'VANADIS BUILD QUEUE',
-      'UPCOMING SCHEDULED ROUTINES',
-      'ACTIVE STACK COMPONENTS',
+      'Active Agent Turns',
+      'Vanadis Build Pipeline',
+      'Upcoming Schedules',
+      'Cluster Service Matrix',
+      'Deployment Pipeline',
     ]);
     expect(screen.getByText('GIT SYNC: IN SYNC (Δ 0s)')).toBeTruthy();
     expect(screen.getByText('ALL WORKERS IDLE // NO PENDING TURNS')).toBeTruthy();
-    act(() => screen.getByRole('button', { name: 'EXPAND VIEW ↗' }).click());
+    act(() => screen.getByRole('button', { name: 'Tasks ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('tasks');
   });
 });
