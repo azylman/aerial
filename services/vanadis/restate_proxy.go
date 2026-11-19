@@ -59,11 +59,6 @@ func (s *VanadisServer) callRestateIngress(ctx context.Context, path string, pay
 	return s.restateClient().CallIngress(ctx, path, payload, out)
 }
 
-// callRetryAction posts a durable action-retry request for a build.
-func (s *VanadisServer) callRetryAction(ctx context.Context, buildID string, body []byte, idempotencyKey string, out any) error {
-	return s.restateClient().CallRetryAction(ctx, buildID, body, idempotencyKey, out)
-}
-
 // CancelBuildRequest represents a cancel build mutation payload.
 type CancelBuildRequest struct{}
 
