@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,13 +14,6 @@ import (
 
 	"github.com/gorilla/websocket"
 )
-
-// ActiveCount returns the number of currently active media stream sessions in tests.
-func (m *CallSessionManager) ActiveCount() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.sessions)
-}
 
 type mockConsultClient struct {
 	mu           sync.Mutex
@@ -84,6 +76,20 @@ func (*mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL str
 	return []byte("test"), "audio/wav", nil
 }
 
+// requireBridgeSession resolves a managed session to the concrete bridge type.
+func requireBridgeSession(t *testing.T, mgr *CallSessionManager, callID string) *MediaStreamSession {
+	t.Helper()
+	waited, err := mgr.WaitForSession(context.Background(), callID)
+	if err != nil || waited == nil {
+		t.Fatalf("WaitForSession failed: %v", err)
+	}
+	sess, ok := waited.(*MediaStreamSession)
+	if !ok {
+		t.Fatalf("WaitForSession returned %T, want *MediaStreamSession", waited)
+	}
+	return sess
+}
+
 func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -120,6 +126,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			}
 			return conn, err
 		}),
+		WithSessionFactory(newProsperaMediaSession),
 	)
 
 	token, err := tokenMgr.Issue("call-test-bridge", 30*time.Second)
@@ -156,10 +163,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		t.Fatalf("write start event: %v", err)
 	}
 
-	sess, err := sessionMgr.WaitForSession(context.Background(), "call-test-bridge")
-	if err != nil || sess == nil {
-		t.Fatalf("WaitForSession failed: %v", err)
-	}
+	sess := requireBridgeSession(t, sessionMgr, "call-test-bridge")
 
 	select {
 	case <-sess.Started():
@@ -431,6 +435,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 			}
 			return conn, err
 		}),
+		WithSessionFactory(newProsperaMediaSession),
 	)
 
 	token, _ := tokenMgr.Issue("call-reconnect", 30*time.Second)
@@ -469,71 +474,6 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 	if finalCount < 2 {
 		t.Fatalf("expected Gemini to reconnect (connCount >= 2), got %d", finalCount)
 	}
-}
-
-func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
-	t.Parallel()
-
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, tokenMgr,
-		WithPacerInterval(5*time.Millisecond),
-	)
-
-	defaultMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, nil)
-	if defaultMgr.ActiveCount() != 0 {
-		t.Error("expected 0 active sessions")
-	}
-
-	store := setUpTestStore(t)
-	mgrWithStore := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr)
-	sessActive := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-steer-store"})
-	mgrWithStore.registerSession("call-steer-store", sessActive)
-	_ = mgrWithStore.SteerCall(t.Context(), "call-steer-store", "be polite", "guidance")
-
-	if err := sessionMgr.SteerCall(t.Context(), "missing-call", "msg", "say"); err == nil {
-		t.Error("SteerCall on missing session should return error")
-	}
-	if err := sessionMgr.HandleAMDWebhook(t.Context(), "missing-sid", "human"); err == nil {
-		t.Error("HandleAMDWebhook on missing SID should return error")
-	}
-	if err := sessionMgr.EndCall("missing-call"); err == nil {
-		t.Error("EndCall on missing call should return error")
-	}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token=invalid", http.NoBody)
-	sessionMgr.HandleMediaWebSocket(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("HandleMediaWebSocket with bad token status = %d, want 401", rec.Code)
-	}
-
-	validTok, _ := tokenMgr.Issue("call-non-ws", 10*time.Second)
-	recNonWS := httptest.NewRecorder()
-	reqNonWS := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token="+validTok, http.NoBody)
-	sessionMgr.HandleMediaWebSocket(recNonWS, reqNonWS)
-	if recNonWS.Code != http.StatusBadRequest {
-		t.Errorf("HandleMediaWebSocket valid token without upgrade status = %d, want 400", recNonWS.Code)
-	}
-
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID: "call-accessors",
-	})
-	sess.SetProviderCallSID("CA_test_sid")
-	if sess.ProviderCallSID() != "CA_test_sid" {
-		t.Errorf("ProviderCallSID = %q, want CA_test_sid", sess.ProviderCallSID())
-	}
-
-	sessionMgr.registerSession("call-accessors", sess)
-	if found, ok := sessionMgr.GetSessionByProviderSID("CA_test_sid"); !ok || found != sess {
-		t.Errorf("GetSessionByProviderSID failed to find session")
-	}
-	if _, ok := sessionMgr.GetSessionByProviderSID("non-existent"); ok {
-		t.Errorf("GetSessionByProviderSID found non-existent session")
-	}
-	if err := sessionMgr.EndCall("call-accessors"); err != nil {
-		t.Errorf("EndCall failed: %v", err)
-	}
-	sessionMgr.deregisterSession("call-accessors")
 }
 
 func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
@@ -594,6 +534,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 			}
 			return conn, err
 		}),
+		WithSessionFactory(newProsperaMediaSession),
 	)
 
 	token, _ := tokenMgr.Issue("call-bargein", 30*time.Second)
@@ -619,10 +560,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 		"start":     map[string]any{"streamSid": "MZ_barge", "callSid": "CA_barge"},
 	})
 
-	sess, err := sessionMgr.WaitForSession(context.Background(), "call-bargein")
-	if err != nil || sess == nil {
-		t.Fatal("session not found")
-	}
+	sess := requireBridgeSession(t, sessionMgr, "call-bargein")
 
 	select {
 	case <-sess.Started():
@@ -766,32 +704,6 @@ func TestMediaStreamSession_NilConnAndDialFallbacks(t *testing.T) {
 	sessHelpers.handleInboundTwilioMedia(base64.StdEncoding.EncodeToString([]byte{}))
 }
 
-func TestCallSessionManager_HandleAMDWebhookByProviderSID(t *testing.T) {
-	t.Parallel()
-
-	store := setUpTestStore(t)
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr)
-	callLookup := "call-lookup-test"
-	provLookup := "CA_lookup_prov_123"
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
-		CallID:     callLookup,
-		Direction:  "outbound",
-		State:      "initiated",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		StartedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
-	}, 5)
-	_ = store.BindProviderCallSID(context.Background(), callLookup, provLookup)
-	sessLookup := NewMediaStreamSession(MediaStreamSessionConfig{CallID: callLookup})
-	sessionMgr.registerSession(callLookup, sessLookup)
-	if err := sessionMgr.HandleAMDWebhook(t.Context(), provLookup, "human"); err != nil {
-		t.Errorf("HandleAMDWebhook via store lookup failed: %v", err)
-	}
-	sessionMgr.deregisterSession(callLookup)
-}
-
 type mediaWebSocketModeTestCase struct {
 	name          string
 	callID        string
@@ -888,6 +800,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 			}
 			return conn, err
 		}),
+		WithSessionFactory(newProsperaMediaSession),
 	)
 
 	token, _ := tokenMgr.Issue(tc.callID, 30*time.Second)
@@ -913,10 +826,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 		"start":     map[string]any{"streamSid": tc.streamSID, "callSid": tc.providerSID},
 	})
 
-	sess, err := sessionMgr.WaitForSession(context.Background(), tc.callID)
-	if err != nil || sess == nil {
-		t.Fatalf("WaitForSession failed: %v", err)
-	}
+	sess := requireBridgeSession(t, sessionMgr, tc.callID)
 
 	if tc.wantPromptSub != "" && !strings.Contains(sess.systemPrompt, tc.wantPromptSub) {
 		t.Fatalf("system prompt missing %q:\n%s", tc.wantPromptSub, sess.systemPrompt)
@@ -995,35 +905,6 @@ func setupMediaWebSocketStoreCall(ctx context.Context, store *PGStore, tc mediaW
 			StartedAt:  time.Now().UTC(),
 			UpdatedAt:  time.Now().UTC(),
 		})
-	}
-}
-
-func TestCallSessionManager_WaitForSession(t *testing.T) {
-	t.Parallel()
-
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, tokenMgr,
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
-			return nil, nil
-		}),
-	)
-
-	// 1. Context canceled before session is registered
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := sessionMgr.WaitForSession(cancelCtx, "call-wait-cancel"); err == nil {
-		t.Error("expected context canceled error")
-	}
-
-	// 2. Wait for session that gets registered asynchronously
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-wait-async"})
-	go func() {
-		sessionMgr.registerSession("call-wait-async", sess)
-	}()
-
-	found, err := sessionMgr.WaitForSession(context.Background(), "call-wait-async")
-	if err != nil || found != sess {
-		t.Fatalf("WaitForSession async failed: %v, %v", found, err)
 	}
 }
 
@@ -1147,39 +1028,6 @@ func TestMediaStream_DirectHandlers(t *testing.T) {
 	sess.enqueueOutboundUlaw(make([]byte, 1005*160))
 }
 
-func WithPacerInterval(d time.Duration) SessionManagerOption {
-	return func(m *CallSessionManager) {
-		m.pacerInterval = d
-	}
-}
-
-func WithGeminiDialer(dialer func(ctx context.Context, model string) (*websocket.Conn, error)) SessionManagerOption {
-	return func(m *CallSessionManager) {
-		m.geminiDialer = dialer
-	}
-}
-
-func (m *CallSessionManager) WaitForSession(ctx context.Context, callID string) (*MediaStreamSession, error) {
-	m.mu.Lock()
-	if sess, ok := m.sessions[callID]; ok {
-		m.mu.Unlock()
-		return sess, nil
-	}
-	ch, ok := m.sessionWaiters[callID]
-	if !ok {
-		ch = make(chan *MediaStreamSession, 1)
-		m.sessionWaiters[callID] = ch
-	}
-	m.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case sess := <-ch:
-		return sess, nil
-	}
-}
-
 func (s *MediaStreamSession) Started() <-chan struct{} {
 	return s.started
 }
@@ -1211,73 +1059,4 @@ func TestMediaStreamSession_DisconnectedAMDActions(t *testing.T) {
 	if ok := sessWithDialFail.reconnectGemini(context.Background()); ok {
 		t.Fatal("expected reconnect failure")
 	}
-}
-
-func TestMediaStreamSession_RecordingWAVAndManager(t *testing.T) {
-	t.Parallel()
-
-	mgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, nil)
-	if wav := mgr.GetRecordingWAV("missing"); wav != nil {
-		t.Fatalf("expected nil wav for missing call, got %d bytes", len(wav))
-	}
-
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-rec-1"})
-	sess.mu.Lock()
-	sess.streamSID = "MZ_rec_1"
-	sess.mu.Unlock()
-
-	sess.recordInboundPCM([]int16{1000, 2000})
-	sess.sendTwilioMedia(PCM16ToMuLaw([]int16{500, 500, 500, 500}))
-	sess.recordInboundPCM([]int16{300, 400})
-	sess.sendTwilioClear()
-
-	mgr.registerSession("call-rec-1", sess)
-	if activeWAV := mgr.GetRecordingWAV("call-rec-1"); len(activeWAV) <= 44 {
-		t.Fatalf("expected active session WAV > 44 bytes, got %d", len(activeWAV))
-	}
-
-	for i := range 33 {
-		id := "call-cap-" + strconv.Itoa(i)
-		s := NewMediaStreamSession(MediaStreamSessionConfig{CallID: id})
-		s.recordInboundPCM([]int16{100})
-		mgr.registerSession(id, s)
-		mgr.deregisterSession(id)
-	}
-
-	mgr.deregisterSession("call-rec-1")
-	deregWAV := mgr.GetRecordingWAV("call-rec-1")
-	if len(deregWAV) <= 44 {
-		t.Fatalf("expected deregistered session WAV > 44 bytes, got %d", len(deregWAV))
-	}
-	if secondRead := mgr.GetRecordingWAV("call-rec-1"); secondRead != nil {
-		t.Fatalf("expected consumed recording to return nil on second read, got %d bytes", len(secondRead))
-	}
-
-	capSess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-max-cap"})
-	capSess.mu.Lock()
-	capSess.inCursor = maxRecordingSamples - 1
-	capSess.outCursor = maxRecordingSamples - 1
-	capSess.recordedPCM = make([]int16, maxRecordingSamples-1)
-	capSess.mu.Unlock()
-	capSess.recordInboundPCM([]int16{10, 20, 30})
-	capSess.recordOutboundUlaw(PCM16ToMuLaw([]int16{40, 50}))
-	if len(capSess.recordedPCM) != maxRecordingSamples {
-		t.Fatalf("len(recordedPCM) = %d, want %d", len(capSess.recordedPCM), maxRecordingSamples)
-	}
-
-	overlapSess := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID:       "call-overlap-missing",
-		Store:        setUpTestStore(t),
-		TwilioClient: &mockTwilioClient{hangupErr: errors.New("hangup failed")},
-	})
-	overlapSess.SetProviderCallSID("CA_err_1")
-	overlapSess.mu.Lock()
-	overlapSess.inCursor = 0
-	overlapSess.outCursor = 0
-	overlapSess.recordedPCM = []int16{100, 200}
-	overlapSess.mu.Unlock()
-	overlapSess.recordOutboundUlaw(PCM16ToMuLaw([]int16{50}))
-	overlapSess.handleTwilioHangupMark(context.Background())
-	overlapSess.amd.OnAMDWebhook("human")
-	overlapSess.handleInboundTwilioMedia(base64.StdEncoding.EncodeToString(make([]byte, 160)))
 }

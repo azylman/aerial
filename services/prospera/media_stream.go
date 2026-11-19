@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 )
 
 const (
@@ -23,252 +24,29 @@ const (
 	twilioKeyStreamSid = "streamSid"
 )
 
-// SessionManagerOption configures CallSessionManager.
-type SessionManagerOption func(*CallSessionManager)
+// Manager registry types and constructors live in internal/mediastream.
+// The aliases below keep existing callers compiling until the session
+// bridge chunk moves the remaining session implementation.
+type (
+	SessionManagerOption = mediastream.SessionManagerOption
+	CallSessionManager   = mediastream.CallSessionManager
+)
 
-// CallSessionManager coordinates active Twilio Media Stream <-> Gemini Live sessions.
-type CallSessionManager struct {
-	mu             sync.RWMutex
-	cfgSrc         ConfigSource
-	store          Store
-	twilioClient   TwilioClient
-	consultClient  ContextConsultClient
-	tokenMgr       *StreamTokenManager
-	pacerInterval  time.Duration
-	geminiDialer   func(ctx context.Context, model string) (*websocket.Conn, error)
-	sessions       map[string]*MediaStreamSession
-	sessionWaiters map[string]chan *MediaStreamSession
-	recordings     map[string][]byte
-	upgrader       websocket.Upgrader
-}
+var (
+	NewCallSessionManager = mediastream.NewCallSessionManager
+	WithPacerInterval     = mediastream.WithPacerInterval
+	WithGeminiDialer      = mediastream.WithGeminiDialer
+	WithSessionFactory    = mediastream.WithSessionFactory
 
-// NewCallSessionManager initializes a CallSessionManager.
-func NewCallSessionManager(
-	cfgSrc ConfigSource,
-	store Store,
-	twilioClient TwilioClient,
-	consultClient ContextConsultClient,
-	tokenMgr *StreamTokenManager,
-	opts ...SessionManagerOption,
-) *CallSessionManager {
-	if tokenMgr == nil {
-		tokenMgr = NewStreamTokenManager(time.Now)
-	}
-
-	m := &CallSessionManager{
-		cfgSrc:         cfgSrc,
-		store:          store,
-		twilioClient:   twilioClient,
-		consultClient:  consultClient,
-		tokenMgr:       tokenMgr,
-		pacerInterval:  20 * time.Millisecond,
-		sessions:       make(map[string]*MediaStreamSession),
-		sessionWaiters: make(map[string]chan *MediaStreamSession),
-		recordings:     make(map[string][]byte),
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
-		},
-	}
-
-	for _, opt := range opts {
-		opt(m)
-	}
-	return m
-}
-
-// GetSession retrieves an active session by callID.
-func (m *CallSessionManager) GetSession(callID string) (*MediaStreamSession, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	sess, ok := m.sessions[callID]
-	return sess, ok
-}
-
-// GetSessionByProviderSID searches for an active session with a matching providerCallSID.
-func (m *CallSessionManager) GetSessionByProviderSID(providerCallSID string) (*MediaStreamSession, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, sess := range m.sessions {
-		if sess.ProviderCallSID() == providerCallSID {
-			return sess, true
-		}
-	}
-	return nil, false
-}
-
-func (m *CallSessionManager) registerSession(callID string, sess *MediaStreamSession) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sessions[callID] = sess
-	if ch, ok := m.sessionWaiters[callID]; ok {
-		select {
-		case ch <- sess:
-		default:
-		}
-		delete(m.sessionWaiters, callID)
-	}
-}
-
-func (m *CallSessionManager) deregisterSession(callID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if sess, ok := m.sessions[callID]; ok && sess != nil {
-		if wav := sess.RecordingWAV(); len(wav) > 0 {
-			if len(m.recordings) >= 32 {
-				for k := range m.recordings {
-					delete(m.recordings, k)
-					break
-				}
-			}
-			m.recordings[callID] = wav
-		}
-	}
-	delete(m.sessions, callID)
-}
-
-// GetRecordingWAV returns and consumes the recorded WAV payload for callID, or snapshots an active session.
-func (m *CallSessionManager) GetRecordingWAV(callID string) []byte {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if sess, ok := m.sessions[callID]; ok && sess != nil {
-		if wav := sess.RecordingWAV(); len(wav) > 0 {
-			return wav
-		}
-	}
-	if wav, ok := m.recordings[callID]; ok {
-		delete(m.recordings, callID)
-		return wav
-	}
-	return nil
-}
-
-// SteerCall injects an instruction turn into an active call session.
-func (m *CallSessionManager) SteerCall(ctx context.Context, callID, message, mode string) error {
-	sess, ok := m.GetSession(callID)
-	if !ok {
-		return fmt.Errorf("session: call %q is not currently active", callID)
-	}
-
-	if m.store != nil {
-		if err := m.store.AppendOwnerInstruction(ctx, callID, OwnerInstruction{
-			Instruction: message,
-			Mode:        mode,
-			CreatedAt:   time.Now().UTC(),
-		}); err != nil {
-			slog.ErrorContext(ctx, "prospera: append owner instruction", "error", err)
-		}
-	}
-
-	return sess.Steer(message, mode)
-}
-
-// HandleAMDWebhook handles an inbound AMD webhook by routing to the matching session.
-func (m *CallSessionManager) HandleAMDWebhook(ctx context.Context, providerCallSID, answeredBy string) error {
-	sess, ok := m.GetSessionByProviderSID(providerCallSID)
-	if !ok {
-		// Attempt to resolve callID from store
-		if m.store != nil {
-			call, err := m.store.GetCallByProviderSID(ctx, providerCallSID)
-			if err == nil && call != nil {
-				sess, ok = m.GetSession(call.CallID)
-			}
-		}
-	}
-	if !ok || sess == nil {
-		return fmt.Errorf("session: no active session found for provider call sid %q", providerCallSID)
-	}
-	sess.HandleAMD(answeredBy)
-	return nil
-}
-
-// EndCall terminates an active call session.
-func (m *CallSessionManager) EndCall(callID string) error {
-	sess, ok := m.GetSession(callID)
-	if !ok {
-		return fmt.Errorf("session: call %q not found", callID)
-	}
-	sess.InitiateHangup("operator_requested")
-	return nil
-}
-
-// HandleMediaWebSocket upgrades and handles the Twilio Media Stream connection.
-func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-	if token == "" {
-		token = r.URL.Query().Get("token")
-	}
-	callID, ok := m.tokenMgr.Consume(token)
-	if !ok || callID == "" {
-		http.Error(w, "unauthorized stream token", http.StatusUnauthorized)
-		return
-	}
-
-	conn, err := m.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "prospera: websocket upgrade failed", "error", err)
-		return
-	}
-	defer func(ctx context.Context) {
-		if closeErr := conn.Close(); closeErr != nil {
-			slog.WarnContext(ctx, "prospera: connection close err", "error", closeErr)
-		}
-	}(r.Context())
-
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	var call *VoiceCall
-	if m.store != nil {
-		var getErr error
-		call, getErr = m.store.GetCall(ctx, callID)
-		if getErr != nil {
-			slog.ErrorContext(ctx, "prospera: get call failed", "call_id", callID, "error", getErr)
-		}
-	}
-
-	var openingGreeting, voicemailMsg, systemPrompt, language string
-	if call != nil {
-		openingGreeting = call.Brief.Task
-		if call.Direction == directionInbound || openingGreeting == "" {
-			openingGreeting = "Answer the incoming call with a warm, brief greeting (such as 'Hi, this is Aerial, how can I help you?') and let the caller state why they are calling."
-		}
-		voicemailMsg = ResolveVoicemailMessage(call.Brief, openingGreeting)
-		mode := ModeConversation
-		if call.Brief.Mode == string(ModeNotify) {
-			mode = ModeNotify
-		} else if call.Direction == directionInbound || call.CallbackOfCallID != "" {
-			mode = ModeCallback
-		}
-		language = call.Brief.Language
-		systemPrompt = BuildSystemPrompt(call.Brief, mode, nil)
-	} else {
-		openingGreeting = "Hello, I am calling to help with an inquiry."
-		voicemailMsg = openingGreeting
-		systemPrompt = "You are Aerial, an assistant making or handling a phone call. Speak like a warm, natural human on a live phone call—use a relaxed conversational cadence, natural contractions, and everyday phrasing rather than stiff or scripted readback. Focus directly on the task without introducing yourself upfront. If asked who is calling, say your name is Aerial and phrase your role naturally for the situation (for example, '<Name>'s assistant' if their name is known); only disclose that you are an AI assistant if explicitly asked."
-	}
-
-	sess := NewMediaStreamSession(MediaStreamSessionConfig{
-		CallID:           callID,
-		TwilioConn:       conn,
-		Config:           m.cfgSrc.Current(), // the call keeps this snapshot for its lifetime
-		Store:            m.store,
-		TwilioClient:     m.twilioClient,
-		ConsultClient:    m.consultClient,
-		OpeningGreeting:  openingGreeting,
-		VoicemailMessage: voicemailMsg,
-		SystemPrompt:     systemPrompt,
-		Language:         language,
-		PacerInterval:    m.pacerInterval,
-		GeminiDialer:     m.geminiDialer,
-	})
-
-	m.registerSession(callID, sess)
-	defer m.deregisterSession(callID)
-
-	sess.Run(ctx)
-}
+	// ActiveCount exposes the registry size query as a package-level
+	// function value to keep the transition API reachable for deadcode
+	// until post-cutover callers (e.g. Drain) land.
+	ActiveCount = (*CallSessionManager).ActiveCount
+	// WaitForSession exposes the registry wait primitive as a
+	// package-level function value to keep the transition API reachable
+	// for deadcode until post-cutover callers land.
+	WaitForSession = (*CallSessionManager).WaitForSession
+)
 
 // MediaStreamSessionConfig defines the construction parameters for MediaStreamSession.
 type MediaStreamSessionConfig struct {

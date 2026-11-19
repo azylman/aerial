@@ -251,7 +251,7 @@ func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
 		callID:     callID,
 		geminiConn: wsConn,
 	}
-	handler.sessionMgr.registerSession(callID, sess)
+	handler.sessionMgr.RegisterSession(callID, sess)
 }
 
 func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) {
