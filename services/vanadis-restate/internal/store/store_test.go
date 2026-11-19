@@ -197,6 +197,7 @@ func TestIsValidVanadisChunkID(t *testing.T) {
 		{name: "empty", id: "", valid: false},
 		{name: "blank", id: "   ", valid: false},
 		{name: "too long", id: strings.Repeat("a", 121), valid: false},
+		{name: "max length", id: strings.Repeat("a", 120), valid: true},
 		{name: "slash", id: "a/b", valid: false},
 		{name: "space", id: "a b", valid: false},
 	}
