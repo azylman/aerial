@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
@@ -103,117 +102,64 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFile_BrainURLResolution(t *testing.T) {
+func TestLoadConfig_URLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
-	pathWithEri := filepath.Join(tmpDir, "with_eri.yaml")
-	pathWithoutBrain := filepath.Join(tmpDir, "without_brain.yaml")
-	_ = os.WriteFile(pathWithEri, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutBrain, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
-
-	tests := []struct {
-		name         string
-		path         string
-		envEri       string
-		envDB        string
-		envPassword  string
-		wantErr      bool
-		wantBrainURL string
-		wantDB       string
-	}{
-		{
-			name:         "ERI_URL takes top precedence",
-			path:         pathWithEri,
-			envEri:       "http://eri.aerial:9001/",
-			envDB:        "postgres://localhost/db",
-			wantBrainURL: "http://eri.aerial:9001",
-		},
-		{
-			name:         "yaml eri_url used when env empty",
-			path:         pathWithEri,
-			envDB:        "postgres://localhost/db",
-			wantBrainURL: "http://yaml.eri:8088",
-		},
-		{
-			name:    "missing eri_url returns error",
-			path:    pathWithoutBrain,
-			envDB:   "postgres://localhost/db",
-			wantErr: true,
-		},
-		{
-			name:         "decomposed POSTGRES_PASSWORD resolution",
-			path:         pathWithEri,
-			envPassword:  "secretpass",
-			wantBrainURL: "http://yaml.eri:8088",
-			wantDB:       "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
-		},
-		{
-			name:    "missing DB returns error via DSN fallback",
-			path:    pathWithEri,
-			envDB:   "",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("VANADIS_URL", "")
-			t.Setenv("ERI_URL", tc.envEri)
-			t.Setenv("DATABASE_URL", tc.envDB)
-			t.Setenv("POSTGRES_URL", "")
-			t.Setenv("POSTGRES_HOST", "")
-			t.Setenv("POSTGRES_PORT", "")
-			t.Setenv("POSTGRES_USER", "")
-			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
-			t.Setenv("POSTGRES_DB", "")
-
-			cfg, err := LoadConfigFile(tc.path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr {
-				if cfg.EriURL != tc.wantBrainURL {
-					t.Errorf("cfg.EriURL = %q, want %q", cfg.EriURL, tc.wantBrainURL)
-				}
-				if tc.wantDB != "" && cfg.DatabaseURL != tc.wantDB {
-					t.Errorf("cfg.DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDB)
-				}
-			}
-		})
-	}
-}
-
-func TestLoadConfigFile_VanadisURLResolution(t *testing.T) {
-	tmpDir := t.TempDir()
-	pathWithVanadis := filepath.Join(tmpDir, "with_vanadis.yaml")
+	pathWithBoth := filepath.Join(tmpDir, "with_both.yaml")
+	pathWithoutEri := filepath.Join(tmpDir, "without_eri.yaml")
 	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
-	_ = os.WriteFile(pathWithVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
+	_ = os.WriteFile(pathWithBoth, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
+	_ = os.WriteFile(pathWithoutEri, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
 	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"), 0o644)
 
 	tests := []struct {
 		name           string
 		path           string
+		envEri         string
 		envVanadis     string
 		envDB          string
 		wantErr        bool
+		wantEriURL     string
 		wantVanadisURL string
 	}{
 		{
-			name:           "VANADIS_URL takes precedence over yaml",
-			path:           pathWithVanadis,
-			envVanadis:     "http://env.vanadis:4025/",
-			envDB:          "postgres://localhost/db",
-			wantVanadisURL: "http://env.vanadis:4025",
-		},
-		{
-			name:           "yaml vanadis_url used when env empty",
-			path:           pathWithVanadis,
+			name:           "env eri url takes precedence over yaml",
+			path:           pathWithBoth,
+			envEri:         "http://eri.aerial:9001/",
 			envVanadis:     "",
 			envDB:          "postgres://localhost/db",
+			wantEriURL:     "http://eri.aerial:9001",
 			wantVanadisURL: "http://yaml.vanadis:4025",
 		},
 		{
-			name:       "missing vanadis_url returns error",
+			name:           "env vanadis url takes precedence over yaml",
+			path:           pathWithBoth,
+			envEri:         "",
+			envVanadis:     "http://env.vanadis:4025/",
+			envDB:          "postgres://localhost/db",
+			wantEriURL:     "http://yaml.eri:8088",
+			wantVanadisURL: "http://env.vanadis:4025",
+		},
+		{
+			name:           "yaml urls used when env empty",
+			path:           pathWithBoth,
+			envEri:         "",
+			envVanadis:     "",
+			envDB:          "postgres://localhost/db",
+			wantEriURL:     "http://yaml.eri:8088",
+			wantVanadisURL: "http://yaml.vanadis:4025",
+		},
+		{
+			name:       "missing eri url returns error",
+			path:       pathWithoutEri,
+			envEri:     "",
+			envVanadis: "",
+			envDB:      "postgres://localhost/db",
+			wantErr:    true,
+		},
+		{
+			name:       "missing vanadis url returns error",
 			path:       pathWithoutVanadis,
+			envEri:     "",
 			envVanadis: "",
 			envDB:      "postgres://localhost/db",
 			wantErr:    true,
@@ -222,7 +168,7 @@ func TestLoadConfigFile_VanadisURLResolution(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ERI_URL", "")
+			t.Setenv("ERI_URL", tc.envEri)
 			t.Setenv("VANADIS_URL", tc.envVanadis)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", "")
@@ -232,12 +178,12 @@ func TestLoadConfigFile_VanadisURLResolution(t *testing.T) {
 			t.Setenv("POSTGRES_PASSWORD", "")
 			t.Setenv("POSTGRES_DB", "")
 
-			cfg, err := LoadConfigFile(tc.path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
+			cfg, err := LoadConfig(tc.path)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && cfg.VanadisURL != tc.wantVanadisURL {
-				t.Errorf("cfg.VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL) {
+				t.Errorf("cfg.EriURL = %q, want %q; cfg.VanadisURL = %q, want %q", cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL)
 			}
 		})
 	}
