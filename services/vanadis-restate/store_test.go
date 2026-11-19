@@ -20,7 +20,7 @@ import (
 )
 
 type (
-	bareStore struct{ store *PostgresVanadisStore }
+	bareStore struct{ store *store.Store }
 	dbScript  struct {
 		bare                        *bareStore
 		routes                      []sqlRoute
@@ -81,11 +81,16 @@ func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string
 	return s.row
 }
 
-func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
-	candidates := new([]string)
+func (s dbScript) open() (*store.Store, *[]string) {
 	if s.bare != nil {
-		return s.bare.store, candidates
+		return s.bare.store, new([]string)
 	}
+	db, candidates := s.openRaw()
+	return store.New(db), candidates
+}
+
+func (s dbScript) openRaw() (mockDB, *[]string) {
+	candidates := new([]string)
 	tag := store.FirstNonEmpty(s.execTag, "UPDATE 1")
 	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
 		return s.resolveQueryRow(query, args, candidates)
@@ -103,7 +108,7 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		return pgconn.NewCommandTag(tag), nil
 	}
 	tx := &mockTx{commitErr: s.commitErr, rollbackErr: s.rollbackErr, queryRowFn: queryRow, queryFn: query, execFn: exec}
-	return newMockStore(mockDB{
+	return mockDB{
 		queryRowFn: queryRow,
 		queryFn:    query,
 		execFn:     exec,
@@ -113,10 +118,10 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 			}
 			return tx, nil
 		},
-	}), candidates
+	}, candidates
 }
 
-var nilDB = &bareStore{store: &PostgresVanadisStore{}}
+var nilDB = &bareStore{store: &store.Store{}}
 
 func errRow(err error) *mockRow { return &mockRow{err: err} }
 func assertStoreErr(t *testing.T, err, wantErrIs error, wantErr bool) bool {
@@ -349,8 +354,8 @@ func (db mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 	return &mockTx{}, nil
 }
 
-func newMockStore(db mockDB) *PostgresVanadisStore {
-	return NewPostgresVanadisStore(db)
+func newMockStore(db mockDB) *store.Store {
+	return store.New(db)
 }
 
 func attachRoutes(mode string, exists, cancelled bool) []sqlRoute {

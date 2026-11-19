@@ -42,13 +42,3 @@ type CreateBuildRequest struct {
 type AppendChunksRequest struct {
 	Chunks []store.CreateChunkInput `json:"chunks"`
 }
-
-type PostgresVanadisStore struct {
-	*store.Store
-
-	db store.PgxQueryExecer
-}
-
-func NewPostgresVanadisStore(db store.PgxQueryExecer) *PostgresVanadisStore {
-	return &PostgresVanadisStore{Store: store.New(db), db: db}
-}

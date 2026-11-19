@@ -15,10 +15,11 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // The database boundary keeps transaction writes private until commit.
-type recoveryReadFailureStore struct{ *PostgresVanadisStore }
+type recoveryReadFailureStore struct{ *store.Store }
 
 func (recoveryReadFailureStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	return nil, nil, errors.New("read unavailable")
@@ -33,14 +34,14 @@ func TestBuildObject_PRRecoveryAfterRejectedCheck(t *testing.T) {
 			var mu sync.Mutex
 			parent := "failed"
 			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}}
-			store := recoveryReadFailureStore{recoveryFixtureStore(&mu, &parent, &chunks, false)}
+			st := recoveryReadFailureStore{recoveryFixtureStore(&mu, &parent, &chunks, false)}
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"h2"}}`))
 			}))
 			t.Cleanup(api.Close)
 			executor := NewExecutor("", nil, nil, "", api.Client())
 			executor.gitHubAPIURL = api.URL
-			bo := NewBuildObject("", nil).WithAuthority(store, executor)
+			bo := NewBuildObject("", nil).WithAuthority(st, executor)
 			ctx := mockRunContext{Context: context.Background()}
 			ev := pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2", CheckName: "lint", CheckState: "passed"}
 			if err := bo.handlePREventType(ctx, "b1", "c1", tc.event, ev); !errors.Is(err, errPRTransitionSkipped) {
@@ -57,7 +58,7 @@ func TestBuildObject_PRRecoveryAfterRejectedCheck(t *testing.T) {
 }
 
 type recoveryLifecycleStore struct {
-	*PostgresVanadisStore
+	*store.Store
 
 	parent *string
 	chunks *[]model.VanadisChunk
@@ -91,8 +92,8 @@ func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
 			var mu sync.Mutex
 			parent := "running"
 			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "pr_opened", HeadSHA: "h1"}}
-			store := recoveryLifecycleStore{recoveryFixtureStore(&mu, &parent, &chunks, false), &parent, &chunks}
-			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			st := recoveryLifecycleStore{recoveryFixtureStore(&mu, &parent, &chunks, false), &parent, &chunks}
+			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			ctx := mockRunContext{Context: context.Background()}
 			if err := bo.handlePREventType(ctx, "b1", "c1", "closed_unmerged", pubsub.PRLifecycleEvent{HeadSHA: "h2"}); err != nil {
 				t.Fatal(err)
@@ -104,7 +105,7 @@ func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
 			t.Cleanup(api.Close)
 			executor := NewExecutor("", nil, nil, "", api.Client())
 			executor.gitHubAPIURL = api.URL
-			bo.WithAuthority(store, executor)
+			bo.WithAuthority(st, executor)
 			err := bo.handlePREventType(ctx, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2"})
 			if (err != nil) != tc.wantError || errors.Is(err, errPRTransitionSkipped) != tc.wantSkipped {
 				t.Fatalf("sync error=%v", err)
@@ -128,7 +129,7 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := dbScript{buildRow: buildRow("b1", tc.parent), routes: []sqlRoute{{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", Status: "failed"}}}.open()
+			st, _ := dbScript{buildRow: buildRow("b1", tc.parent), routes: []sqlRoute{{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", Status: "failed"}}}.open()
 			var observed *StatusWidgetRequest
 			eri := &mockEriClient{widgetFn: func(_ context.Context, req StatusWidgetRequest) (string, error) {
 				observed = &req
@@ -141,7 +142,7 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 			executor := NewExecutor("", eri, nil, "", nil)
 			executor.gitHubAPIURL = api.URL
 			executor.httpClient = api.Client()
-			bo := NewBuildObject("", nil).WithAuthority(store, executor)
+			bo := NewBuildObject("", nil).WithAuthority(st, executor)
 			err := bo.OnPREvent(makeObjectMockContext(t, "b1"), pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, Event: tc.event, HeadSHA: "new"})
 			if err != nil {
 				t.Fatal(err)
@@ -153,7 +154,7 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 	}
 }
 
-func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *PostgresVanadisStore {
+func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *store.Store {
 	return newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 		return pgconn.NewCommandTag("UPDATE 0"), nil
 	}, beginFn: func(context.Context) (pgx.Tx, error) {

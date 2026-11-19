@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // retryTransaction models the external database's atomic commit and parent lock.
@@ -32,7 +33,7 @@ type retryTransaction struct {
 func (tx *retryTransaction) Commit(context.Context) error   { return tx.finish(true) }
 func (tx *retryTransaction) Rollback(context.Context) error { return tx.finish(false) }
 
-func retryFixtureStore(mu *sync.Mutex, current *model.VanadisChunk, buildStatus *string, sibling model.VanadisChunk, failBuild bool, lost *bool) *PostgresVanadisStore {
+func retryFixtureStore(mu *sync.Mutex, current *model.VanadisChunk, buildStatus *string, sibling model.VanadisChunk, failBuild bool, lost *bool) *store.Store {
 	return newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) {
 		var local model.VanadisChunk
 		var parent string
