@@ -502,6 +502,9 @@ spec:
         - podSelector:
             matchLabels:
               app: coverage-ingest
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: coverage-ingest
       ports:
         - port: 4030
           protocol: TCP
