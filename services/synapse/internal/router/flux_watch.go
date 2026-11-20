@@ -281,7 +281,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	}
 	if jobsUpdated {
 		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
-			return err
+			slog.WarnContext(ctx, "[synapse] [flux-watch] failed to route rollout progress", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
 		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        "rollout_updated",
@@ -296,7 +296,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
 			OccurredAt:   time.Now().UTC(),
 		}); err != nil {
-			return err
+			slog.WarnContext(ctx, "[synapse] [flux-watch] failed to publish rollout_updated lifecycle event", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
 		}
 	}
 	slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)

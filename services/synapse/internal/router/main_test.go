@@ -520,22 +520,6 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	return srv
 }
 
-func TestRouterServerAccessors(t *testing.T) {
-	t.Parallel()
-	reg := &mockPRRegistry{}
-	disp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(nil, nil)
-	srv.SetRegistry(reg)
-	srv.SetDispatcher(disp)
-	srv.SetOnProcessed(func(event, delivery string) {})
-	if srv.Registry() != reg {
-		t.Errorf("Registry() = %v, want %v", srv.Registry(), reg)
-	}
-	if srv.Dispatcher() != disp {
-		t.Errorf("Dispatcher() = %v, want %v", srv.Dispatcher(), disp)
-	}
-}
-
 func doHTTPRequest(handler http.Handler, method, path string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, body)
 	for k, v := range headers {

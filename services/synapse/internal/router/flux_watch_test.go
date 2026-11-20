@@ -422,7 +422,7 @@ func TestApplyKustomizationStatus(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "partial rollout publish lifecycle event error returns error",
+			name: "partial rollout publish lifecycle event error is logged and tolerated",
 			prs:  []DeployingPR{trackedPR(42, twoTargets)},
 			obs:  kobs("aerial-core", reqT1, reqT1, false, ready),
 			workloads: []workloadRollout{
@@ -434,7 +434,7 @@ func TestApplyKustomizationStatus(t *testing.T) {
 			want: rolloutOutcome{
 				markJobs: []string{"aerial-synapse", "synapse"},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 	for _, tc := range tests {
