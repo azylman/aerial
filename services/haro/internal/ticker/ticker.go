@@ -100,13 +100,13 @@ func (t *Ticker) processDueCron(ctx context.Context, c model.CronSchedule, now t
 		nextRun = now.Add(24 * time.Hour)
 	}
 
+	runID := deterministicScheduleRunID(model.ScheduleTypeCron, c.ID, c.NextRunAt)
 	if model.IsScheduleStale(c.NextRunAt, now, 24*time.Hour) {
 		log.Printf("[Haro Ticker] Cron %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
 			c.ID, c.CronExpr, c.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
 		if advErr := store.AdvanceCronNextRun(ctx, t.db, c.ID, nextRun); advErr != nil {
 			log.Printf("[Haro Ticker] Error advancing cron %s next_run_at: %v", c.ID, advErr)
 		}
-		runID := uuid.NewString()
 		completedAt := now
 		staleRun := model.ScheduleRun{
 			ID:           runID,
@@ -136,7 +136,6 @@ func (t *Ticker) processDueCron(ctx context.Context, c model.CronSchedule, now t
 		return
 	}
 
-	runID := uuid.NewString()
 	req := dispatch.PromptDispatchRequest{
 		Prompt:    c.Prompt,
 		ChannelID: c.TargetID,
@@ -213,7 +212,7 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s model.OneShotSchedule,
 		return
 	}
 
-	runID := uuid.NewString()
+	runID := deterministicScheduleRunID(model.ScheduleTypeOneShot, s.ID, s.RunAt)
 	if model.IsScheduleStale(s.RunAt, now, 24*time.Hour) {
 		log.Printf("[Haro Ticker] One-shot %s is stale (>24h overdue: due %s, now %s). Skipping dispatch.",
 			s.ID, s.RunAt.Format(time.RFC3339), now.Format(time.RFC3339))
@@ -312,13 +311,13 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 		nextRun = now.Add(24 * time.Hour)
 	}
 
+	runID := deterministicScheduleRunID(model.ScheduleTypeHeartbeat, hb.ID, hb.NextRunAt)
 	if model.IsScheduleStale(hb.NextRunAt, now, 24*time.Hour) {
 		log.Printf("[Haro Ticker] Heartbeat %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
 			hb.ID, hb.CronExpr, hb.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
 		if advErr := store.AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
 			log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
 		}
-		runID := uuid.NewString()
 		completedAt := now
 		staleRun := model.ScheduleRun{
 			ID:           runID,
@@ -355,7 +354,6 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 		return
 	}
 
-	runID := uuid.NewString()
 	wrappedPrompt := model.BuildHeartbeatPrompt(hb, now)
 	req := dispatch.DispatchRequest{
 		ID:           runID,
@@ -503,6 +501,12 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	advanceHeartbeatWatermark(ctx, database, run, status, startedAt)
 
 	return nil
+}
+
+// deterministicScheduleRunID computes a deterministic UUIDv5 for a schedule run
+// derived from scheduleType, scheduleID, and the scheduled run timestamp (UTC RFC3339Nano).
+func deterministicScheduleRunID(scheduleType, scheduleID string, dueAt time.Time) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(scheduleType+":"+strings.TrimSpace(scheduleID)+":"+dueAt.UTC().Format(time.RFC3339Nano))).String()
 }
 
 // Start evaluates due schedules immediately, then on every tick of the

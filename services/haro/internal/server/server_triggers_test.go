@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -320,7 +321,7 @@ func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub
 	}
 }
 
-func verifyDispatchedPrompt(t *testing.T, disp *stubScenarioDispatcher, wantChannel, wantPrompt string) {
+func verifyDispatchedPrompt(t *testing.T, disp *stubScenarioDispatcher, wantChannel, wantPrompt, wantMessageID string) {
 	t.Helper()
 	if len(disp.dispatched) != 1 {
 		t.Fatalf("expected 1 dispatched prompt, got %d", len(disp.dispatched))
@@ -330,6 +331,9 @@ func verifyDispatchedPrompt(t *testing.T, disp *stubScenarioDispatcher, wantChan
 	}
 	if disp.dispatched[0].Prompt != wantPrompt {
 		t.Errorf("Prompt = %q, want %q", disp.dispatched[0].Prompt, wantPrompt)
+	}
+	if wantMessageID != "" && disp.dispatched[0].MessageID != wantMessageID {
+		t.Errorf("MessageID = %s, want %s", disp.dispatched[0].MessageID, wantMessageID)
 	}
 }
 
@@ -419,7 +423,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		{
 			name:      "successful dispatch claims and fires trigger",
 			server:    serverOK,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
+			ev:        pubsub.ExternalEvent{EventID: "evt-cam-123", Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
 			wantErr:   false,
 			checkDBID: "trig-ext-1",
 			wantInDB:  false,
@@ -445,7 +449,8 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 				}
 			}
 			if tc.name == "successful dispatch claims and fires trigger" {
-				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway")
+				wantMsgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:trig-ext-1:evt-cam-123")).String()
+				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway", wantMsgID)
 			}
 		})
 	}

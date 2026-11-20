@@ -490,16 +490,18 @@ func (s *Server) recoverFailedEventTrigger(ctx context.Context, trig model.Event
 	}
 }
 
-func (s *Server) fireClaimedTrigger(ctx context.Context, trig model.EventTrigger, contextHeader string) error {
+func (s *Server) fireClaimedTrigger(ctx context.Context, trig model.EventTrigger, contextHeader string, eventID string) error {
 	if s.dispatcher == nil {
 		s.recoverFailedEventTrigger(ctx, trig)
 		return errors.New("dispatcher not initialized")
 	}
 	prompt := model.FormatEventTriggerPrompt(contextHeader, trig.Prompt)
+	msgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:"+strings.TrimSpace(trig.ID)+":"+strings.TrimSpace(eventID))).String()
 	start := time.Now()
 	_, dispErr := dispatch.TraceFire(ctx, model.ScheduleTypeEventWatch, trig.ID, func(dispCtx context.Context) (dispatch.PromptDispatchResponse, error) {
 		return s.dispatcher.DispatchPrompt(dispCtx, dispatch.PromptDispatchRequest{
 			ChannelID: trig.ChannelID,
+			MessageID: msgID,
 			Prompt:    prompt,
 			Effort:    trig.Effort,
 		})
@@ -526,7 +528,7 @@ func (s *Server) HandleExternalEvent(ctx context.Context, ev pubsub.ExternalEven
 		return err
 	}
 	for _, trig := range triggers {
-		if fireErr := s.fireClaimedTrigger(ctx, trig, ev.ContextHeader); fireErr != nil {
+		if fireErr := s.fireClaimedTrigger(ctx, trig, ev.ContextHeader, ev.EventID); fireErr != nil {
 			log.Printf("[Haro] error firing claimed event trigger %s (%s): %v", trig.ID, trig.Source, fireErr)
 		}
 	}

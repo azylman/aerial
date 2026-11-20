@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -97,6 +98,7 @@ type evaluateDueSchedulesTestCase struct {
 	wantRunError        string
 	wantThreadID        string
 	wantMessageNonEmpty bool
+	wantDeterministicID string
 }
 
 func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) {
@@ -145,9 +147,9 @@ func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) 
 	if tc.wantRunStatus == "" {
 		return
 	}
-	row := db.QueryRowContext(ctx, "SELECT status, error, thread_id, message_id FROM schedule_runs WHERE schedule_id = ?", scheduleID)
-	var status, errMsg, threadID, messageID string
-	if err := row.Scan(&status, &errMsg, &threadID, &messageID); err != nil {
+	row := db.QueryRowContext(ctx, "SELECT id, status, error, thread_id, message_id FROM schedule_runs WHERE schedule_id = ?", scheduleID)
+	var runID, status, errMsg, threadID, messageID string
+	if err := row.Scan(&runID, &status, &errMsg, &threadID, &messageID); err != nil {
 		t.Fatalf("failed to query schedule_runs for %s: %v", scheduleID, err)
 	}
 	if status != tc.wantRunStatus {
@@ -161,6 +163,12 @@ func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) 
 	}
 	if tc.wantMessageNonEmpty && messageID == "" {
 		t.Error("schedule_run message_id is empty, want generated run ID fallback")
+	}
+	if tc.wantDeterministicID != "" && runID != tc.wantDeterministicID {
+		t.Errorf("schedule_run id = %q, want deterministic %q", runID, tc.wantDeterministicID)
+	}
+	if tc.wantDeterministicID != "" && len(mock.dispatched) > 0 && mock.dispatched[0].MessageID != tc.wantDeterministicID {
+		t.Errorf("dispatched prompt MessageID = %q, want deterministic %q", mock.dispatched[0].MessageID, tc.wantDeterministicID)
 	}
 }
 
@@ -176,6 +184,7 @@ func TestTicker_EvaluateDueSchedules(t *testing.T) {
 			},
 			dispatcherStatus: "accepted", responseChannelID: "123456789", responseMessageID: "msg-1",
 			wantDispatched: 1, wantRunStatus: "completed",
+			wantDeterministicID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cron:cron-eval-1:"+time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC).Format(time.RFC3339Nano))).String(),
 		},
 		{
 			name: "due cron with invalid cron expression uses fallback next run and dispatches",
@@ -225,6 +234,7 @@ func TestTicker_EvaluateDueSchedules(t *testing.T) {
 			},
 			dispatcherStatus: "accepted", responseChannelID: "987654321", responseMessageID: "msg-os-1",
 			wantDispatched: 1, wantRunStatus: "completed",
+			wantDeterministicID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("one_shot:oneshot-eval-1:"+time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC).Format(time.RFC3339Nano))).String(),
 		},
 		{
 			name: "due one shot with empty response fields falls back to thread and run IDs",
@@ -460,6 +470,10 @@ func assertHeartbeatDispatch(t *testing.T, mock *fakeDispatcher, tc evaluateDueH
 	}
 	if !req.SkipIfActive {
 		t.Error("expected req.SkipIfActive = true")
+	}
+	wantRunID := deterministicScheduleRunID(model.ScheduleTypeHeartbeat, tc.hbID, tc.nextRunAt)
+	if req.ID != wantRunID {
+		t.Errorf("req.ID = %q, want deterministic %q", req.ID, wantRunID)
 	}
 }
 
