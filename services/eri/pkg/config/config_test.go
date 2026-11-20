@@ -445,7 +445,10 @@ func TestLoadConfig_Ingestion(t *testing.T) {
 	t.Setenv("AGY_MODEL", "")
 	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("TZ", "")
-	_, _ = New()
+	t.Setenv("CONFIG_PATH", "")
+	if _, err := New(); err == nil || !strings.Contains(err.Error(), "no configuration file found in search paths") {
+		t.Fatalf("expected error containing 'no configuration file found in search paths', got: %v", err)
+	}
 }
 
 type loadConfigLKGCBootCase struct {
@@ -456,6 +459,28 @@ type loadConfigLKGCBootCase struct {
 	errSubstr     string
 	testReload    bool
 	badReloadYAML string
+}
+
+func assertReloadWithSupplierCases(t *testing.T) {
+	t.Helper()
+	if err := ReloadWithSupplier(nil, New); err == nil {
+		t.Errorf("expected error for ReloadWithSupplier(nil, New)")
+	}
+	if err := ReloadWithSupplier(nil, nil); err == nil {
+		t.Errorf("expected error for ReloadWithSupplier(nil)")
+	}
+	if err := ReloadWithSupplier(ActiveConfig(), func() (*Config, error) {
+		return nil, fmt.Errorf("supplier failed")
+	}); err == nil {
+		t.Errorf("expected error for ReloadWithSupplier failure")
+	}
+	if err := ReloadWithSupplier(ActiveConfig(), func() (*Config, error) {
+		return NewTestConfig(func(d *ConfigData) { d.Model = "reloaded-hermetic" }), nil
+	}); err != nil || ActiveConfig().Current().Model != "reloaded-hermetic" {
+		t.Errorf("expected ReloadWithSupplier success, got err=%v model=%q", err, ActiveConfig().Current().Model)
+	}
+	_ = ReloadWithSupplier(ActiveConfig(), nil)
+	_ = ReloadWithSupplier(ActiveConfig(), New)
 }
 
 func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
@@ -579,24 +604,7 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	_ = isContainerColdBoot(filepath.Join(tmpDir, "absent"))
 	_ = isContainerColdBoot(validBoot)
 
-	if err := ReloadWithSupplier(nil, New); err == nil {
-		t.Errorf("expected error for ReloadWithSupplier(nil, New)")
-	}
-	if err := ReloadWithSupplier(nil, nil); err == nil {
-		t.Errorf("expected error for ReloadWithSupplier(nil)")
-	}
-	if err := ReloadWithSupplier(ActiveConfig(), func() (*Config, error) {
-		return nil, fmt.Errorf("supplier failed")
-	}); err == nil {
-		t.Errorf("expected error for ReloadWithSupplier failure")
-	}
-	if err := ReloadWithSupplier(ActiveConfig(), func() (*Config, error) {
-		return NewTestConfig(func(d *ConfigData) { d.Model = "reloaded-hermetic" }), nil
-	}); err != nil || ActiveConfig().Current().Model != "reloaded-hermetic" {
-		t.Errorf("expected ReloadWithSupplier success, got err=%v model=%q", err, ActiveConfig().Current().Model)
-	}
-	_ = ReloadWithSupplier(ActiveConfig(), nil)
-	_ = ReloadWithSupplier(ActiveConfig(), New)
+	assertReloadWithSupplierCases(t)
 
 	defaultPaths := []string{"/default/a.yaml", "/default/b.yaml"}
 	if got := ResolveConfigSearchPaths(nil, defaultPaths...); len(got) != len(defaultPaths) || got[0] != defaultPaths[0] {
@@ -617,6 +625,17 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	t.Setenv("AGY_MODEL", "")
 	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("TZ", "")
+	t.Setenv("CONFIG_PATH", "")
+	if _, err := New(); err == nil || !strings.Contains(err.Error(), "no configuration file found in search paths") {
+		t.Fatalf("New() with empty CONFIG_PATH expected error containing 'no configuration file found in search paths', got: %v", err)
+	}
+
+	nonexistentBoot := filepath.Join(tmpDir, "nonexistent-config.yaml")
+	t.Setenv("CONFIG_PATH", nonexistentBoot)
+	if _, err := New(); err == nil || !strings.Contains(err.Error(), "no configuration file found in search paths") {
+		t.Fatalf("New() with nonexistent CONFIG_PATH expected error containing 'no configuration file found in search paths', got: %v", err)
+	}
+
 	t.Setenv("CONFIG_PATH", validBoot)
 	newCfg, errNew := New()
 	if errNew != nil {
