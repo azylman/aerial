@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,131 +16,240 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
-func TestNewEriRestateServer(t *testing.T) {
-	t.Parallel()
-
-	srv := NewEriRestateServer(nil, "aerial")
-	require.NotNil(t, srv)
-	h, err := srv.Handler()
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
-	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "ThreadSession")
-	assert.Contains(t, rec.Body.String(), "DispatchSession")
-	assert.Contains(t, rec.Body.String(), "VoiceSession")
-	assert.Contains(t, rec.Body.String(), "SessionManager")
+type remoteQuotaCase struct {
+	name           string
+	statusCode     int
+	responseBody   string
+	transportError bool
+	wantGroups     int
+	wantFirstName  string
 }
 
-func TestReconcileRestateServiceTimeouts(t *testing.T) {
+func runRemoteQuotaCase(t *testing.T, tc remoteQuotaCase) {
+	t.Helper()
 	t.Parallel()
 
-	tests := []struct {
-		name           string
-		agent          string
-		adminURL       string
-		statusCode     int
-		returnBody     string
-		transportError bool
-		wantErrorSub   string
-		wantCallCount  int
-	}{
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/internal/quota", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+		w.WriteHeader(tc.statusCode)
+		_, _ = w.Write([]byte(tc.responseBody))
+	}))
+	defer ts.Close()
+
+	client := ts.Client()
+	if tc.transportError {
+		client = &http.Client{Transport: &errRoundTripper{err: assert.AnError}}
+	}
+
+	p := NewRemoteQuotaProvider(ts.URL, client)
+	require.NotNil(t, p)
+	groups := p.LatestQuotaGroups()
+	assert.Len(t, groups, tc.wantGroups)
+	if tc.wantGroups > 0 {
+		assert.Equal(t, tc.wantFirstName, groups[0].Name)
+	}
+
+	fn := p.ProviderFunc()
+	fnGroups := fn()
+	assert.Len(t, fnGroups, tc.wantGroups)
+}
+
+func TestRemoteQuotaProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []remoteQuotaCase{
 		{
-			name:          "successful timeout reconciliation for all 3 services",
-			agent:         "aerial",
+			name:          "successful quota retrieval",
 			statusCode:    http.StatusOK,
-			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 3,
+			responseBody:  `[{"name":"Claude","buckets":[{"id":"claude-5h","window":"5h","remaining_fraction":0.8}]}]`,
+			wantGroups:    1,
+			wantFirstName: "Claude",
 		},
 		{
-			name:          "successful timeout reconciliation with namespaced agent",
-			agent:         "miorine",
-			statusCode:    http.StatusOK,
-			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 3,
+			name:         "server error status",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"internal"}`,
+			wantGroups:   0,
 		},
 		{
-			name:          "admin returns 500 error",
-			agent:         "aerial",
-			statusCode:    http.StatusInternalServerError,
-			returnBody:    `{"error":"internal"}`,
-			wantErrorSub:  "failed with status 500",
-			wantCallCount: 1,
+			name:         "invalid json body",
+			statusCode:   http.StatusOK,
+			responseBody: `not-valid-json`,
+			wantGroups:   0,
 		},
 		{
-			name:          "admin returns 404 error",
-			agent:         "aerial",
-			statusCode:    http.StatusNotFound,
-			returnBody:    `{"error":"not found"}`,
-			wantErrorSub:  "failed with status 404",
-			wantCallCount: 1,
-		},
-		{
-			name:           "http transport error",
-			agent:          "aerial",
+			name:           "transport error",
+			statusCode:     http.StatusOK,
 			transportError: true,
-			wantErrorSub:   "patch service",
-			wantCallCount:  1,
+			wantGroups:     0,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			var mu sync.Mutex
-			recordedPaths := make([]string, 0)
-			recordedBodies := make([]string, 0)
-			recordedMethods := make([]string, 0)
-
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				recordedPaths = append(recordedPaths, r.URL.Path)
-				recordedMethods = append(recordedMethods, r.Method)
-				bodyBytes, _ := io.ReadAll(r.Body)
-				recordedBodies = append(recordedBodies, string(bodyBytes))
-				mu.Unlock()
-
-				w.WriteHeader(tc.statusCode)
-				_, _ = w.Write([]byte(tc.returnBody))
-			}))
-			defer ts.Close()
-
-			targetURL := ts.URL
-			if tc.adminURL != "" {
-				targetURL = tc.adminURL
-			}
-			client := ts.Client()
-			if tc.transportError {
-				client = &http.Client{
-					Transport: &errRoundTripper{err: assert.AnError},
-				}
-			}
-
-			err := ReconcileRestateServiceTimeouts(context.Background(), targetURL, tc.agent, client)
-			if tc.wantErrorSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrorSub)
-				return
-			}
-
-			require.NoError(t, err)
-			mu.Lock()
-			defer mu.Unlock()
-			assert.Equal(t, tc.wantCallCount, len(recordedPaths))
-			for i := range recordedPaths {
-				assert.Equal(t, http.MethodPatch, recordedMethods[i])
-				var p serviceTimeoutPayload
-				uErr := json.Unmarshal([]byte(recordedBodies[i]), &p)
-				require.NoError(t, uErr)
-				assert.Equal(t, "1h", p.InactivityTimeout)
-				assert.Equal(t, "1h", p.AbortTimeout)
-			}
+			runRemoteQuotaCase(t, tc)
 		})
 	}
+}
+
+func TestRemoteQuotaProvider_NilSafetyAndDefaultURL(t *testing.T) {
+	t.Parallel()
+
+	var nilProvider *RemoteQuotaProvider
+	assert.Nil(t, nilProvider.LatestQuotaGroups())
+	assert.Nil(t, nilProvider.ProviderFunc()())
+
+	defaultProvider := NewRemoteQuotaProvider("")
+	assert.Equal(t, "http://eri-restate-health:4028", defaultProvider.eriRestateURL)
+}
+
+type remoteLLMCase struct {
+	name           string
+	statusCode     int
+	responseBody   string
+	transportError bool
+	model          string
+	prompt         string
+	wantResponse   string
+	wantErrorSub   string
+}
+
+func runRemoteLLMCase(t *testing.T, tc remoteLLMCase) {
+	t.Helper()
+	t.Parallel()
+
+	var mu sync.Mutex
+	var gotModel, gotPrompt string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/internal/llm", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+		var body struct {
+			Model  string `json:"model"`
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		gotModel = body.Model
+		gotPrompt = body.Prompt
+		mu.Unlock()
+
+		w.WriteHeader(tc.statusCode)
+		_, _ = w.Write([]byte(tc.responseBody))
+	}))
+	defer ts.Close()
+
+	client := ts.Client()
+	if tc.transportError {
+		client = &http.Client{Transport: &errRoundTripper{err: assert.AnError}}
+	}
+
+	llmFn := NewRemoteEphemeralLLMFunc(ts.URL, client)
+	resp, err := llmFn(context.Background(), tc.model, tc.prompt)
+
+	if tc.wantErrorSub != "" {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tc.wantErrorSub)
+		return
+	}
+
+	require.NoError(t, err)
+	assert.Equal(t, tc.wantResponse, resp)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, tc.model, gotModel)
+	assert.Equal(t, tc.prompt, gotPrompt)
+}
+
+func TestRemoteEphemeralLLMFunc(t *testing.T) {
+	t.Parallel()
+
+	tests := []remoteLLMCase{
+		{
+			name:         "successful generation",
+			statusCode:   http.StatusOK,
+			responseBody: `{"response":"generated text"}`,
+			model:        "gemini-flash",
+			prompt:       "summarize this",
+			wantResponse: "generated text",
+		},
+		{
+			name:         "server returns error status",
+			statusCode:   http.StatusServiceUnavailable,
+			responseBody: `{"error":"unavailable"}`,
+			model:        "gemini-flash",
+			prompt:       "summarize",
+			wantErrorSub: "internal llm returned status 503",
+		},
+		{
+			name:         "invalid json body",
+			statusCode:   http.StatusOK,
+			responseBody: `not-valid-json`,
+			model:        "gemini-flash",
+			prompt:       "summarize",
+			wantErrorSub: "unmarshal internal llm response",
+		},
+		{
+			name:           "transport error",
+			statusCode:     http.StatusOK,
+			transportError: true,
+			model:          "gemini-flash",
+			prompt:         "summarize",
+			wantErrorSub:   "post internal llm request",
+		},
+		{
+			name:         "oversized response body rejected",
+			statusCode:   http.StatusOK,
+			responseBody: `{"response":"` + strings.Repeat("x", (1<<20)+16) + `"}`,
+			model:        "gemini-flash",
+			prompt:       "summarize",
+			wantErrorSub: "internal llm response body exceeds 1MiB limit",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runRemoteLLMCase(t, tc)
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestRemoteEphemeralLLMFunc_DefaultURL(t *testing.T) {
+	t.Parallel()
+
+	var gotURL string
+	var gotMethod string
+	var gotBody string
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotURL = r.URL.String()
+			gotMethod = r.Method
+			bodyBytes, _ := io.ReadAll(r.Body)
+			gotBody = string(bodyBytes)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"response":"default-url-ok"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	fn := NewRemoteEphemeralLLMFunc("", client)
+	require.NotNil(t, fn)
+
+	resp, err := fn(context.Background(), "test-model", "test-prompt")
+	require.NoError(t, err)
+	assert.Equal(t, "default-url-ok", resp)
+	assert.Equal(t, "http://eri-restate-health:4028/internal/llm", gotURL)
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Contains(t, gotBody, "test-prompt")
 }
 
 type errRoundTripper struct {

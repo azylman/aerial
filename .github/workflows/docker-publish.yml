@@ -32,6 +32,7 @@ jobs:
     outputs:
       pkg: ${{ steps.filter.outputs.pkg }}
       eri: ${{ steps.filter.outputs.eri }}
+      eri-restate: ${{ steps.filter.outputs.eri-restate }}
       haro: ${{ steps.filter.outputs.haro }}
       coven: ${{ steps.filter.outputs.coven }}
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
@@ -60,6 +61,10 @@ jobs:
             pkg:
               - 'pkg/**'
             eri:
+              - 'services/eri/**'
+              - 'pkg/**'
+            eri-restate:
+              - 'services/eri-restate/**'
               - 'services/eri/**'
               - 'pkg/**'
             haro:
@@ -120,6 +125,7 @@ jobs:
           node -e '
             const filter = {
               eri: "${{ steps.filter.outputs.eri }}",
+              "eri-restate": "${{ steps.filter.outputs.eri-restate }}",
               haro: "${{ steps.filter.outputs.haro }}",
               coven: "${{ steps.filter.outputs.coven }}",
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
@@ -141,6 +147,7 @@ jobs:
 
             const catalog = [
               { service: "eri", context: ".", file: "./services/eri/Dockerfile", image_name: "aerial-eri" },
+              { service: "eri-restate", context: ".", file: "./services/eri-restate/Dockerfile", image_name: "aerial-eri-restate" },
               { service: "haro", context: ".", file: "./services/haro/Dockerfile", image_name: "aerial-haro" },
               { service: "coven", context: ".", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
               { service: "discord-mcp", context: ".", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
@@ -730,9 +737,9 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Promote non-eri dependencies before eri to prevent RPC skew on Watchtower restart
+          # Promote non-eri dependencies before eri and eri-restate to prevent RPC skew on Watchtower restart
           pids=""
-          for IMG in $(echo "$MATRIX_JSON" | jq -r '.[] | select(.service != "eri") | .image_name'); do
+          for IMG in $(echo "$MATRIX_JSON" | jq -r '.[] | select(.service != "eri" and .service != "eri-restate") | .image_name'); do
             echo "Promoting non-eri manifest ghcr.io/${OWNER}/${IMG}:${SHA} -> ghcr.io/${OWNER}/${IMG}:latest"
             docker buildx imagetools create \
               --tag "ghcr.io/${OWNER}/${IMG}:latest" \
@@ -743,6 +750,14 @@ jobs:
           for pid in $pids; do
             wait "$pid" || exit 1
           done
+
+          if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri-restate")' >/dev/null; then
+            echo "Promoting eri-restate manifest ghcr.io/${OWNER}/aerial-eri-restate:${SHA} -> ghcr.io/${OWNER}/aerial-eri-restate:latest"
+            docker buildx imagetools create \
+              --tag "ghcr.io/${OWNER}/aerial-eri-restate:latest" \
+              --annotation "index:org.opencontainers.image.revision=${SHA}" \
+              "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}"
+          fi
 
           if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri")' >/dev/null; then
             echo "Promoting eri manifest ghcr.io/${OWNER}/aerial-eri:${SHA} -> ghcr.io/${OWNER}/aerial-eri:latest"

@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -585,6 +584,8 @@ func TestThreadSessionObject_RunTurn(t *testing.T) {
 		storeErr      bool
 		claimFail     bool
 		nilPool       bool
+		withRunner    bool
+		unfinalized   bool
 		wantProcessed int
 		wantDrained   int
 		wantErrorSub  string
@@ -631,6 +632,22 @@ func TestThreadSessionObject_RunTurn(t *testing.T) {
 			storeErr:     true,
 			wantErrorSub: "store read error",
 		},
+		{
+			name:          "burst executes with runner pool and finalizes successfully",
+			threadID:      "th-runner-success",
+			pendingCount:  2,
+			withRunner:    true,
+			wantProcessed: 1,
+			wantDrained:   2,
+		},
+		{
+			name:         "burst aborts unfinalized when store fails to update status",
+			threadID:     "th-runner-unfinalized",
+			pendingCount: 1,
+			withRunner:   true,
+			unfinalized:  true,
+			wantErrorSub: "burst execution aborted unfinalized",
+		},
 	}
 
 	for _, tc := range tests {
@@ -654,7 +671,17 @@ func TestThreadSessionObject_RunTurn(t *testing.T) {
 
 			var pool *WorkerPool
 			if !tc.nilPool {
-				pool = NewWorkerPool(WorkerPoolConfig{Store: store})
+				cfg := WorkerPoolConfig{Store: store}
+				if tc.withRunner {
+					cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMins int) (string, string, int, error) {
+						return `{"response": "completed successfully", "status": "SUCCESS"}`, "", 0, nil
+					}
+				}
+				pool = NewWorkerPool(cfg)
+				pool.startedAt = time.Now().UTC()
+			}
+			if tc.unfinalized {
+				store.FailNext("UpdateMessageStatus", errors.New("db write failed"))
 			}
 			obj := NewThreadSessionObject(pool, "aerial")
 
@@ -809,6 +836,8 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 		storeErr       bool
 		claimFail      bool
 		nilPool        bool
+		withRunner     bool
+		unfinalized    bool
 		wantDisparches int
 		wantErrorSub   string
 	}{
@@ -843,6 +872,21 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 			storeErr:     true,
 			wantErrorSub: "disp read error",
 		},
+		{
+			name:           "dispatch executes with runner pool and finalizes successfully",
+			sessionKey:     "vanadis-runner-success",
+			pendingCount:   1,
+			withRunner:     true,
+			wantDisparches: 1,
+		},
+		{
+			name:         "dispatch aborts unfinalized when store fails to update status",
+			sessionKey:   "vanadis-runner-unfinalized",
+			pendingCount: 1,
+			withRunner:   true,
+			unfinalized:  true,
+			wantErrorSub: "dispatch execution aborted unfinalized",
+		},
 	}
 
 	for _, tc := range tests {
@@ -868,7 +912,17 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 
 			var pool *WorkerPool
 			if !tc.nilPool {
-				pool = NewWorkerPool(WorkerPoolConfig{Store: store})
+				cfg := WorkerPoolConfig{Store: store}
+				if tc.withRunner {
+					cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMins int) (string, string, int, error) {
+						return `{"response": "chunk executed", "status": "SUCCESS"}`, "", 0, nil
+					}
+				}
+				pool = NewWorkerPool(cfg)
+				pool.startedAt = time.Now().UTC()
+			}
+			if tc.unfinalized {
+				store.FailNext("UpdateDispatchStatus", errors.New("db write failed"))
 			}
 			obj := NewDispatchSessionObject(pool, "aerial")
 
@@ -980,151 +1034,6 @@ func TestDispatchSessionObject_Cancel(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "ok", resp.Status)
 			assert.Equal(t, tc.wantCancelledCount, resp.CancelledCount)
-		})
-	}
-}
-
-type voiceAskTestCase struct {
-	name         string
-	deviceKey    string
-	req          VoiceSessionRequest
-	nilPool      bool
-	storeFail    bool
-	runnerReply  string
-	runnerConvID string
-	runnerErr    error
-	wantReply    string
-	wantErrorSub string
-}
-
-func resolveEffectiveVoiceKey(deviceKey string, req VoiceSessionRequest) string {
-	if deviceKey != "" {
-		return deviceKey
-	}
-	if req.DeviceKey != "" {
-		return req.DeviceKey
-	}
-	if req.SessionID != "" {
-		return req.SessionID
-	}
-	return req.ConversationID
-}
-
-func runVoiceSessionAskCase(t *testing.T, tc voiceAskTestCase) {
-	t.Helper()
-	var pool *WorkerPool
-	store := dbtest.NewFakeStore()
-	if tc.storeFail {
-		store.FailNext("RotateSessionID", errors.New("store voice rotate err"))
-	}
-
-	if !tc.nilPool {
-		memBus := pubsub.NewMemoryBus()
-		t.Cleanup(func() { _ = memBus.Close() })
-		cfg := WorkerPoolConfig{
-			Store:    store,
-			EventBus: memBus,
-			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-				if tc.runnerErr != nil {
-					return "", "", tc.runnerErr
-				}
-				if onStatus != nil {
-					onStatus("thinking")
-				}
-				if onSentence != nil {
-					onSentence("sentence text")
-				}
-				return tc.runnerReply, tc.runnerConvID, nil
-			},
-		}
-		pool = NewWorkerPool(cfg)
-	}
-
-	obj := NewVoiceSessionObject(pool, "aerial")
-	mc, _ := setupActorMockContext(t, tc.deviceKey, "")
-
-	res, err := obj.Ask(restate.WithMockContext(mc), tc.req)
-	if tc.wantErrorSub != "" {
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), tc.wantErrorSub)
-		return
-	}
-
-	require.NoError(t, err)
-	assert.Equal(t, tc.wantReply, res.Reply)
-	assert.Equal(t, tc.runnerConvID, res.ConversationID)
-	assert.Equal(t, resolveEffectiveVoiceKey(tc.deviceKey, tc.req), res.DeviceKey)
-}
-
-func TestVoiceSessionObject_Ask(t *testing.T) {
-	t.Parallel()
-
-	tests := []voiceAskTestCase{
-		{
-			name:         "empty device_key returns error",
-			deviceKey:    "",
-			req:          VoiceSessionRequest{Prompt: "hello"},
-			wantErrorSub: "device_key is required",
-		},
-		{
-			name:         "empty prompt returns error",
-			deviceKey:    "dev-1",
-			req:          VoiceSessionRequest{DeviceKey: "dev-1", Prompt: ""},
-			wantErrorSub: "prompt is required",
-		},
-		{
-			name:         "nil pool returns error",
-			deviceKey:    "dev-2",
-			req:          VoiceSessionRequest{DeviceKey: "dev-2", Prompt: "hello"},
-			nilPool:      true,
-			wantErrorSub: "worker pool is nil",
-		},
-		{
-			name:         "fallback from empty key to session id",
-			deviceKey:    "",
-			req:          VoiceSessionRequest{SessionID: "sess-voice-dev-1", Prompt: "what is up?"},
-			runnerReply:  "chilling",
-			runnerConvID: "conv-1",
-			wantReply:    "chilling",
-		},
-		{
-			name:         "fallback from empty key to conversation id",
-			deviceKey:    "",
-			req:          VoiceSessionRequest{ConversationID: "conv-voice-dev-2", Prompt: "hey"},
-			runnerReply:  "sup",
-			runnerConvID: "conv-2",
-			wantReply:    "sup",
-		},
-		{
-			name:         "successful voice turn streams events and rotates session",
-			deviceKey:    "kiosk-living-room",
-			req:          VoiceSessionRequest{DeviceKey: "kiosk-living-room", Prompt: "what time is it?", TurnID: "turn-voice-1"},
-			runnerReply:  "it is 6 PM",
-			runnerConvID: "conv-voice-1",
-			wantReply:    "it is 6 PM",
-		},
-		{
-			name:         "successful voice turn handles store rotate error gracefully",
-			deviceKey:    "kiosk-bedroom",
-			req:          VoiceSessionRequest{DeviceKey: "kiosk-bedroom", Prompt: "lights off"},
-			storeFail:    true,
-			runnerReply:  "done",
-			runnerConvID: "conv-voice-3",
-			wantReply:    "done",
-		},
-		{
-			name:         "runner failure streams error event and returns terminal error",
-			deviceKey:    "kiosk-kitchen",
-			req:          VoiceSessionRequest{DeviceKey: "kiosk-kitchen", Prompt: "bad turn", TurnID: "turn-voice-2"},
-			runnerErr:    errors.New("voice backend failure"),
-			wantErrorSub: "voice backend failure",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runVoiceSessionAskCase(t, tc)
 		})
 	}
 }
@@ -1317,4 +1226,223 @@ func TestDispatchSessionObject_RunTurn_Exceeds100PendingDispatches(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Status)
 	assert.Equal(t, 1, res.DispatchesExecuted)
+}
+
+func TestAtLeastOnceRecovery(t *testing.T) {
+	t.Parallel()
+
+	t.Run("thread recovers in-flight processing message and increments restart count", func(t *testing.T) {
+		t.Parallel()
+		store := dbtest.NewFakeStore()
+		_ = store.InsertMessage(context.Background(), db.Message{
+			ID:           "msg-proc-1",
+			ThreadID:     "th-recover",
+			Status:       db.StatusProcessing,
+			RestartCount: 0,
+			Content:      "recover me",
+		})
+		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+		pool.startedAt = time.Now().UTC()
+		obj := NewThreadSessionObject(pool, "aerial")
+
+		mc, _ := setupActorMockContext(t, "th-recover", "")
+		res, err := obj.RunTurn(restate.WithMockContext(mc), ThreadTurnRequest{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, res.MessagesDrained)
+		savedMsg, mErr := store.GetMessage(context.Background(), "msg-proc-1")
+		require.NoError(t, mErr)
+		assert.Equal(t, 1, savedMsg.RestartCount)
+	})
+
+	t.Run("dispatch recovers in-flight processing dispatch and increments restart count", func(t *testing.T) {
+		t.Parallel()
+		store := dbtest.NewFakeStore()
+		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
+			ID:           "d-proc-1",
+			SessionID:    "sess-recover",
+			Status:       db.StatusProcessing,
+			RestartCount: 0,
+			Prompt:       "recover dispatch",
+		})
+		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+		pool.startedAt = time.Now().UTC()
+		obj := NewDispatchSessionObject(pool, "aerial")
+
+		mc, _ := setupActorMockContext(t, "sess-recover", "")
+		res, err := obj.RunTurn(restate.WithMockContext(mc), BrainDispatchRequest{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, res.DispatchesExecuted)
+		savedDisp, dErr := store.GetDispatch(context.Background(), "d-proc-1")
+		require.NoError(t, dErr)
+		assert.Equal(t, 1, savedDisp.RestartCount)
+	})
+
+	t.Run("dispatch enqueue sends run_turn even when already exists", func(t *testing.T) {
+		t.Parallel()
+		store := dbtest.NewFakeStore()
+		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
+			ID:        "d-conflict",
+			SessionID: "sess-conflict",
+			Prompt:    "conflict",
+			Status:    db.StatusPending,
+		})
+		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+		obj := NewDispatchSessionObject(pool, "aerial")
+
+		mc, client := setupActorMockContext(t, "sess-conflict", "")
+		resp, err := obj.Enqueue(restate.WithMockContext(mc), BrainDispatchRequest{ID: "d-conflict", Prompt: "conflict"})
+		require.NoError(t, err)
+		assert.Equal(t, "already_exists", resp.Status)
+		client.AssertCalled(t, "Send", mock.Anything)
+	})
+
+	t.Run("claim pending burst recovery edge cases", func(t *testing.T) {
+		t.Parallel()
+		store := dbtest.NewFakeStore()
+		// 1. Completed message should be skipped
+		_ = store.InsertMessage(context.Background(), db.Message{
+			ID:       "msg-done",
+			ThreadID: "th-edge",
+			Status:   db.StatusCompleted,
+		})
+		// 2. Processing message where reset fails
+		_ = store.InsertMessage(context.Background(), db.Message{
+			ID:       "msg-proc-reset-fail",
+			ThreadID: "th-edge",
+			Status:   db.StatusProcessing,
+		})
+		// 3. Processing message where claim fails
+		_ = store.InsertMessage(context.Background(), db.Message{
+			ID:       "msg-proc-claim-fail",
+			ThreadID: "th-edge",
+			Status:   db.StatusProcessing,
+		})
+		// 4. Processing message that recovers successfully
+		_ = store.InsertMessage(context.Background(), db.Message{
+			ID:       "msg-proc-ok",
+			ThreadID: "th-edge",
+			Status:   db.StatusProcessing,
+		})
+
+		store.FailNext("ResetMessageToPendingWithRestart", errors.New("reset fail"))
+		store.FailNext("ClaimPendingMessage", errors.New("claim fail"))
+
+		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+		obj := NewThreadSessionObject(pool, "aerial")
+
+		burst, err := obj.claimPendingBurst(context.Background(), "th-edge")
+		require.NoError(t, err)
+		require.Len(t, burst, 1)
+		assert.Equal(t, "msg-proc-ok", burst[0].ID)
+		assert.Equal(t, 1, burst[0].RestartCount)
+	})
+
+	t.Run("claim next dispatch recovery edge cases", func(t *testing.T) {
+		t.Parallel()
+		store := dbtest.NewFakeStore()
+		// 1. Completed dispatch should be skipped
+		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
+			ID:        "d-done",
+			SessionID: "sess-edge",
+			Status:    db.StatusCompleted,
+		})
+		// 2. Processing dispatch where reset fails
+		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
+			ID:        "d-proc-reset-fail",
+			SessionID: "sess-edge",
+			Status:    db.StatusProcessing,
+		})
+		// 3. Processing dispatch that recovers successfully
+		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
+			ID:        "d-proc-ok",
+			SessionID: "sess-edge",
+			Status:    db.StatusProcessing,
+		})
+
+		store.FailNext("ResetDispatchToPendingWithRestart", errors.New("reset fail"))
+
+		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+		obj := NewDispatchSessionObject(pool, "aerial")
+
+		claimed, found, err := obj.claimNextDispatch(context.Background(), "sess-edge", "")
+		require.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, "d-proc-ok", claimed.ID)
+		assert.Equal(t, 1, claimed.RestartCount)
+	})
+}
+
+func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
+	store := dbtest.NewFakeStore()
+	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
+	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
+	_, _ = store.InsertDispatch(context.Background(), db.Dispatch{ID: "d-proc", Status: db.StatusProcessing})
+	_, _ = store.InsertDispatch(context.Background(), db.Dispatch{ID: "d-done", Status: db.StatusCompleted})
+
+	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+
+	tests := []struct {
+		name       string
+		te         *turnExecution
+		failStore  string
+		wantResult bool
+	}{
+		{
+			name:       "nil turnExecution returns false",
+			te:         nil,
+			wantResult: false,
+		},
+		{
+			name:       "nil store returns false",
+			te:         &turnExecution{pool: &WorkerPool{}},
+			wantResult: false,
+		},
+		{
+			name:       "dispatch with nil dispatch struct returns false",
+			te:         &turnExecution{pool: pool, dispatch: nil},
+			wantResult: false,
+		},
+		{
+			name:       "dispatch with store error fails closed returning true",
+			te:         &turnExecution{pool: pool, dispatch: &db.Dispatch{ID: "d-done"}},
+			failStore:  "GetDispatch",
+			wantResult: true,
+		},
+		{
+			name:       "dispatch still processing returns true",
+			te:         &turnExecution{pool: pool, dispatch: &db.Dispatch{ID: "d-proc"}},
+			wantResult: true,
+		},
+		{
+			name:       "dispatch completed returns false",
+			te:         &turnExecution{pool: pool, dispatch: &db.Dispatch{ID: "d-done"}},
+			wantResult: false,
+		},
+		{
+			name:       "burst with store error fails closed returning true",
+			te:         &turnExecution{pool: pool, burst: []db.Message{{ID: "m-done"}}},
+			failStore:  "GetMessage",
+			wantResult: true,
+		},
+		{
+			name:       "burst with message still processing returns true",
+			te:         &turnExecution{pool: pool, burst: []db.Message{{ID: "m-proc"}}},
+			wantResult: true,
+		},
+		{
+			name:       "burst with message completed returns false",
+			te:         &turnExecution{pool: pool, burst: []db.Message{{ID: "m-done"}}},
+			wantResult: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.failStore != "" {
+				store.FailNext(tc.failStore, errors.New("simulated db err"))
+			}
+			res := tc.te.isRowStillProcessing(context.Background())
+			assert.Equal(t, tc.wantResult, res)
+		})
+	}
 }
