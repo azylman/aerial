@@ -92,6 +92,20 @@ func TestPRStateStaleGuard(t *testing.T) {
 	}
 }
 
+// stubDeployDispatchedErr adapts the verdict-returning dispatch stub to the
+// error-only stub table without a per-row closure.
+func stubDeployDispatchedErr(ctx context.Context, ev PREvent) error {
+	_, err := PRObjectStub{}.HandleDeployDispatched(ctx, ev)
+	return err
+}
+
+// stubDeployPublishedErr adapts the outcome-returning publish-ack stub to the
+// error-only stub table without a per-row closure.
+func stubDeployPublishedErr(ctx context.Context, ev PREvent) error {
+	_, err := PRObjectStub{}.HandleDeploySuccessPublished(ctx, ev)
+	return err
+}
+
 func TestPRStateStubHandlersNoop(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -112,7 +126,8 @@ func TestPRStateStubHandlersNoop(t *testing.T) {
 		{name: "reopened", got: PRObjectStub{}.HandleReopened(ctx, ev)},
 		{name: "readiness retry", got: PRObjectStub{}.HandleReadinessRetry(ctx, ev)},
 		{name: "rollout progress", got: PRObjectStub{}.HandleRolloutProgress(ctx, ev)},
-		{name: "deploy dispatched", got: PRObjectStub{}.HandleDeployDispatched(ctx, ev)},
+		{name: "deploy dispatched", got: stubDeployDispatchedErr(ctx, ev)},
+		{name: "deploy success published", got: stubDeployPublishedErr(ctx, ev)},
 		{name: "kustomization requested", got: PRObjectStub{}.HandleKustomizationRequested(ctx, ev)},
 		{name: "repo main push", got: RepoObjectStub{}.HandleMainPush(ctx, rev)},
 		{name: "repo fanout", got: RepoObjectStub{}.HandleFanout(ctx, rev)},

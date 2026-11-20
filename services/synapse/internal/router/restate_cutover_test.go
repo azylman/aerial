@@ -331,6 +331,10 @@ func flapRestateServer(t *testing.T, calls *atomic.Int64) *httptest.Server {
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
+		// The authoritative deploy decision decodes the verdict body, so the
+		// recovered attempt answers with a publish verdict; fire-and-forget
+		// journals drain it harmlessly.
+		_, _ = w.Write([]byte(publishDecisionBody))
 	}))
 }
 
@@ -342,13 +346,14 @@ func TestAuthoritativeDeployJournalSurvivesRetry(t *testing.T) {
 		prNumber      int
 		wantFirstErr  bool
 		wantSecondErr bool
-		// wantCalls counts ingress attempts: the failed first attempt plus
-		// the retry. The 500 commits nothing, so the retry must resend;
-		// Restate dedups only committed effects.
+		// wantCalls counts ingress attempts: the failed first decision plus
+		// the retry's decision and publish-recorded ack. The 500 commits
+		// nothing, so the retry must re-resolve and re-ack; Restate dedups
+		// only committed effects.
 		wantCalls     int64
 		wantPublishes int
 	}{
-		{name: "deploy success journals on retry after flap", prNumber: 42, wantFirstErr: true, wantSecondErr: false, wantCalls: 2, wantPublishes: 1},
+		{name: "deploy success journals on retry after flap", prNumber: 42, wantFirstErr: true, wantSecondErr: false, wantCalls: 3, wantPublishes: 1},
 		// Non-PR dispatches have no PRObject key and no registry row, so a
 		// redelivery republishes: at-least-once without the deleted map.
 		{name: "non-pr dispatch republishes on redelivery at-least-once", prNumber: 0, wantFirstErr: false, wantSecondErr: false, wantCalls: 0, wantPublishes: 2},
@@ -594,24 +599,31 @@ func TestAuthoritativeKustomizationJournalsBeforeRecord(t *testing.T) {
 	}
 }
 
+// The Restate PRObject verdict is the sole authority for the authoritative
+// deploy publish: a deduped verdict suppresses the republish, and the
+// deployed projection never suppresses it.
 func TestAuthoritativeDeploySuppressHitStillJournals(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name          string
 		seeded        bool
-		wantJournals  int64
+		decisionBody  string
+		wantDecision  int64
+		wantAck       int64
 		wantPublishes int
 	}{
-		{name: "fresh dispatch journals and publishes", seeded: false, wantJournals: 1, wantPublishes: 1},
-		{name: "deployed projection suppresses republish and still journals", seeded: true, wantJournals: 1, wantPublishes: 0},
+		{name: "fresh dispatch resolves, publishes, and acks", decisionBody: publishDecisionBody, wantDecision: 1, wantAck: 1, wantPublishes: 1},
+		{name: "deduped verdict suppresses republish", decisionBody: dedupedDecisionBody, wantDecision: 1},
+		{name: "deployed projection never suppresses the authoritative publish", seeded: true, decisionBody: publishDecisionBody, wantDecision: 1, wantAck: 1, wantPublishes: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calls atomic.Int64
-			capture := cutoverTestServer(t, 202, &calls)
+			var decisionCalls atomic.Int64
+			var ackCalls atomic.Int64
+			capture := decisionTestServer(t, &decisionCalls, &ackCalls, 202, tc.decisionBody, 202)
 			t.Cleanup(capture.Close)
 			cfg := lifecycleCfg()
 			cfg.RestateAuthoritative = true
@@ -629,8 +641,11 @@ func TestAuthoritativeDeploySuppressHitStillJournals(t *testing.T) {
 			if _, err := srv.publishUnownedDeployEvent(context.Background(), evt, false); err != nil {
 				t.Fatalf("publishUnownedDeployEvent() err = %v, want nil", err)
 			}
-			if got := calls.Load(); got != tc.wantJournals {
-				t.Fatalf("journal calls = %d, want %d", got, tc.wantJournals)
+			if got := decisionCalls.Load(); got != tc.wantDecision {
+				t.Fatalf("decision calls = %d, want %d", got, tc.wantDecision)
+			}
+			if got := ackCalls.Load(); got != tc.wantAck {
+				t.Fatalf("ack calls = %d, want %d", got, tc.wantAck)
 			}
 			if got := len(bus.publishedPREvents); got != tc.wantPublishes {
 				t.Fatalf("published lifecycle events = %d, want %d", got, tc.wantPublishes)

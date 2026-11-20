@@ -24,6 +24,7 @@ const (
 	prMerged            = "merged"
 	prOpen              = "open"
 	statusDeploying     = "deploying"
+	statusDeployed      = "deployed"
 	ghEventPullRequest  = "pull_request"
 	ghEventCheckRun     = "check_run"
 	ghEventWorkflowRun  = "workflow_run"

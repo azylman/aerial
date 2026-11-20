@@ -50,6 +50,7 @@ var prHandlers = map[string]bool{
 	"HandleReadinessRetry":         true,
 	"HandleRolloutProgress":        true,
 	"HandleDeployDispatched":       true,
+	"HandleDeploySuccessPublished": true,
 	"HandleKustomizationRequested": true,
 }
 
@@ -96,6 +97,17 @@ type RepoEvent struct {
 // It mirrors the chunk-01 PRObjectKey normalization exactly.
 func PRObjectKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", model.NormalizeRepo(repo), prNumber)
+}
+
+// DeployDispatchDecision mirrors the Restate PRObject deploy verdict: the
+// sole authority for whether synapse publishes deploy_success when
+// restate_authoritative is on. JSON tags match the PRObject handler wire
+// format exactly; a decode failure surfaces so the caller retries.
+type DeployDispatchDecision struct {
+	Disposition   string `json:"disposition"`
+	ShouldPublish bool   `json:"should_publish"`
+	Deduped       bool   `json:"deduped"`
+	EffectKey     string `json:"effect_key"`
 }
 
 // RepoObjectKey returns the Restate key for a repo object: repo.
@@ -164,31 +176,69 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent
 	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
 }
 
+// InvokePREvent delivers ev to one frozen PRObject handler and decodes the
+// JSON verdict into out. Unknown handlers, unconfigured clients, and invalid
+// payloads fail closed without emitting a request; transport failures and
+// undecodable bodies surface so the caller retries instead of losing the
+// signal.
+func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, out any) error {
+	if !prHandlers[handler] {
+		return fmt.Errorf("unknown pr handler %q", handler)
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return errors.New("restate is not configured")
+	}
+	ev.Repo = model.NormalizeRepo(ev.Repo)
+	if ev.Repo == "" {
+		return errors.New("repo is required")
+	}
+	if ev.PRNumber <= 0 {
+		return errors.New("pr_number is required")
+	}
+	if out == nil {
+		return errors.New("output is required")
+	}
+	body, err := c.post(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode restate response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) send(ctx context.Context, service, key, handler string, payload any) error {
+	_, err := c.post(ctx, service, key, handler, payload)
+	return err
+}
+
+func (c *Client) post(ctx context.Context, service, key, handler string, payload any) ([]byte, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal restate payload: %w", err)
+		return nil, fmt.Errorf("marshal restate payload: %w", err)
 	}
 	endpoint := c.baseURL + "/" + service + "/" + url.PathEscape(key) + "/" + handler
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create restate request: %w", err)
+		return nil, fmt.Errorf("create restate request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("restate ingress request failed: %w", err)
+		return nil, fmt.Errorf("restate ingress request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if _, copyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); copyErr != nil {
-			return fmt.Errorf("drain restate response: %w", copyErr)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if readErr != nil {
+			return nil, fmt.Errorf("drain restate response: %w", readErr)
 		}
-		return nil
+		return respBody, nil
 	}
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if readErr != nil {
-		return fmt.Errorf("restate ingress returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("restate ingress returned status %d", resp.StatusCode)
 	}
-	return fmt.Errorf("restate ingress returned status %d: %s", resp.StatusCode, string(respBody))
+	return nil, fmt.Errorf("restate ingress returned status %d: %s", resp.StatusCode, string(respBody))
 }

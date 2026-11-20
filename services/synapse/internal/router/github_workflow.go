@@ -43,7 +43,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		PRNumber:     prNum,
 		HeadSHA:      headSHA,
 		TargetID:     targetID,
-		Status:       "deployed",
+		Status:       statusDeployed,
 		JobName:      "git-merge",
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
