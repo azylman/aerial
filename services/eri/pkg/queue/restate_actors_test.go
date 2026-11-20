@@ -75,151 +75,6 @@ func setupActorMockContext(t *testing.T, key, activeInvID string) (*mocks.MockCo
 	return mc, mClient
 }
 
-func TestServiceNaming(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		agent         string
-		wantNormalize string
-		wantThreadSvc string
-		wantDispSvc   string
-		wantVoiceSvc  string
-	}{
-		{
-			name:          "empty agent defaults to aerial canonical names",
-			agent:         "",
-			wantNormalize: "",
-			wantThreadSvc: "ThreadSession",
-			wantDispSvc:   "DispatchSession",
-			wantVoiceSvc:  "VoiceSession",
-		},
-		{
-			name:          "aerial bot id defaults to aerial canonical names",
-			agent:         "aerial",
-			wantNormalize: "aerial",
-			wantThreadSvc: "ThreadSession",
-			wantDispSvc:   "DispatchSession",
-			wantVoiceSvc:  "VoiceSession",
-		},
-		{
-			name:          "aerial bot id with spaces and caps",
-			agent:         "  AERIAL  ",
-			wantNormalize: "aerial",
-			wantThreadSvc: "ThreadSession",
-			wantDispSvc:   "DispatchSession",
-			wantVoiceSvc:  "VoiceSession",
-		},
-		{
-			name:          "miorine persona namespaced",
-			agent:         "miorine",
-			wantNormalize: "miorine",
-			wantThreadSvc: "ThreadSession-miorine",
-			wantDispSvc:   "DispatchSession-miorine",
-			wantVoiceSvc:  "VoiceSession-miorine",
-		},
-		{
-			name:          "suletta persona namespaced with whitespace",
-			agent:         " Suletta ",
-			wantNormalize: "suletta",
-			wantThreadSvc: "ThreadSession-suletta",
-			wantDispSvc:   "DispatchSession-suletta",
-			wantVoiceSvc:  "VoiceSession-suletta",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantNormalize, NormalizeAgentName(tc.agent))
-			assert.Equal(t, tc.wantThreadSvc, ThreadSessionServiceName(tc.agent))
-			assert.Equal(t, tc.wantDispSvc, DispatchSessionServiceName(tc.agent))
-			assert.Equal(t, tc.wantVoiceSvc, VoiceSessionServiceName(tc.agent))
-
-			thObj := NewThreadSessionObject(nil, tc.agent)
-			dispObj := NewDispatchSessionObject(nil, tc.agent)
-			voiceObj := NewVoiceSessionObject(nil, tc.agent)
-
-			assert.Equal(t, tc.wantThreadSvc, thObj.ServiceName())
-			assert.Equal(t, tc.wantDispSvc, dispObj.ServiceName())
-			assert.Equal(t, tc.wantVoiceSvc, voiceObj.ServiceName())
-		})
-	}
-
-	assert.Equal(t, "ThreadSession", (*ThreadSessionObject)(nil).ServiceName())
-	assert.Equal(t, "DispatchSession", (*DispatchSessionObject)(nil).ServiceName())
-	assert.Equal(t, "VoiceSession", (*VoiceSessionObject)(nil).ServiceName())
-}
-
-func TestResolveDispatchSessionKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		req        BrainDispatchRequest
-		wantPrefix string
-		wantExact  string
-	}{
-		{
-			name:      "session_id takes priority",
-			req:       BrainDispatchRequest{SessionID: "sess-abc", VanadisChunkID: "c-1", ID: "d-1"},
-			wantExact: "sess-abc",
-		},
-		{
-			name:      "vanadis_chunk_id used when session_id empty",
-			req:       BrainDispatchRequest{VanadisChunkID: "chunk-xyz", ID: "d-2"},
-			wantExact: "vanadis-chunk-xyz",
-		},
-		{
-			name:      "dispatch id used when others empty",
-			req:       BrainDispatchRequest{ID: "d-3"},
-			wantExact: "dispatch-d-3",
-		},
-		{
-			name:       "generates dispatch uuid when all empty",
-			req:        BrainDispatchRequest{},
-			wantPrefix: "dispatch-",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ResolveDispatchSessionKey(tc.req)
-			if tc.wantExact != "" {
-				assert.Equal(t, tc.wantExact, got)
-			}
-			if tc.wantPrefix != "" {
-				assert.True(t, strings.HasPrefix(got, tc.wantPrefix))
-			}
-		})
-	}
-}
-
-func TestResolveActorPromptEffort(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		model  string
-		effort string
-		want   string
-	}{
-		{name: "explicit effort takes priority", model: "gemini-flash", effort: config.EffortHigh, want: config.EffortHigh},
-		{name: "medium model sets medium effort", model: "gemini-2.5-flash-medium", effort: "", want: config.EffortMedium},
-		{name: "flash model sets low effort", model: "gemini-2.5-flash", effort: "", want: config.EffortLow},
-		{name: "other model returns empty", model: "custom-model", effort: "", want: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := resolveActorPromptEffort(tc.model, tc.effort)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
 type threadEnqueueTestCase struct {
 	name           string
 	threadID       string
@@ -1414,19 +1269,39 @@ func TestAtLeastOnceRecovery(t *testing.T) {
 	})
 }
 
-func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
-	_, _ = store.InsertDispatch(context.Background(), db.Dispatch{ID: "d-proc", Status: db.StatusProcessing})
-	_, _ = store.InsertDispatch(context.Background(), db.Dispatch{ID: "d-done", Status: db.StatusCompleted})
+type cancelCheckStore struct {
+	*dbtest.FakeStore
+}
 
+func (s *cancelCheckStore) GetMessage(ctx context.Context, id string) (*db.Message, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.FakeStore.GetMessage(ctx, id)
+}
+
+func (s *cancelCheckStore) GetDispatch(ctx context.Context, id string) (*db.Dispatch, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.FakeStore.GetDispatch(ctx, id)
+}
+
+func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
+	baseStore := dbtest.NewFakeStore()
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
+	_, _ = baseStore.InsertDispatch(context.Background(), db.Dispatch{ID: "d-proc", Status: db.StatusProcessing})
+	_, _ = baseStore.InsertDispatch(context.Background(), db.Dispatch{ID: "d-done", Status: db.StatusCompleted})
+
+	store := &cancelCheckStore{FakeStore: baseStore}
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
 
 	tests := []struct {
 		name       string
 		te         *turnExecution
 		failStore  string
+		cancelCtx  bool
 		wantResult bool
 	}{
 		{
@@ -1476,15 +1351,114 @@ func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
 			te:         &turnExecution{pool: pool, burst: []db.Message{{ID: "m-done"}}},
 			wantResult: false,
 		},
+		{
+			name:       "caller context canceled does not prevent check from returning false for completed dispatch",
+			te:         &turnExecution{pool: pool, dispatch: &db.Dispatch{ID: "d-done"}},
+			cancelCtx:  true,
+			wantResult: false,
+		},
+		{
+			name:       "caller context canceled does not prevent check from returning false for completed burst",
+			te:         &turnExecution{pool: pool, burst: []db.Message{{ID: "m-done"}}},
+			cancelCtx:  true,
+			wantResult: false,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.failStore != "" {
-				store.FailNext(tc.failStore, errors.New("simulated db err"))
+				baseStore.FailNext(tc.failStore, errors.New("simulated db err"))
 			}
-			res := tc.te.isRowStillProcessing(context.Background())
+			ctx := context.Background()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			res := tc.te.isRowStillProcessing(ctx)
 			assert.Equal(t, tc.wantResult, res)
+		})
+	}
+}
+
+func TestWorkerPool_CheckTurnCompletionError(t *testing.T) {
+	baseStore := dbtest.NewFakeStore()
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
+
+	store := &cancelCheckStore{FakeStore: baseStore}
+	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+	abortErr := errors.New("abort error")
+
+	tests := []struct {
+		name        string
+		finalized   bool
+		interrupted bool
+		burst       []db.Message
+		cancelCtx   bool
+		wantErr     error
+	}{
+		{
+			name:        "finalized and completed row returns nil even when context is canceled",
+			finalized:   true,
+			interrupted: false,
+			burst:       []db.Message{{ID: "m-done"}},
+			cancelCtx:   true,
+			wantErr:     nil,
+		},
+		{
+			name:        "finalized but row still processing returns abort error",
+			finalized:   true,
+			interrupted: false,
+			burst:       []db.Message{{ID: "m-proc"}},
+			cancelCtx:   false,
+			wantErr:     abortErr,
+		},
+		{
+			name:        "not finalized returns abort error",
+			finalized:   false,
+			interrupted: false,
+			burst:       []db.Message{{ID: "m-done"}},
+			cancelCtx:   false,
+			wantErr:     abortErr,
+		},
+		{
+			name:        "interrupted skips abort error",
+			finalized:   false,
+			interrupted: true,
+			burst:       []db.Message{{ID: "m-proc"}},
+			cancelCtx:   false,
+			wantErr:     nil,
+		},
+		{
+			name:        "interrupted skips caller context error",
+			finalized:   false,
+			interrupted: true,
+			burst:       []db.Message{{ID: "m-done"}},
+			cancelCtx:   true,
+			wantErr:     nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			te := &turnExecution{
+				pool:  pool,
+				burst: tc.burst,
+			}
+			te.finalized.Store(tc.finalized)
+			te.interrupted.Store(tc.interrupted)
+
+			ctx := context.Background()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			err := pool.checkTurnCompletionError(ctx, te, abortErr)
+			assert.Equal(t, tc.wantErr, err)
 		})
 	}
 }

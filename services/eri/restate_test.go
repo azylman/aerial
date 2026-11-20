@@ -1356,11 +1356,11 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			wantIdempotencyKey: "prompt:ch-100:msg-200",
 		},
 		{
-			name:               "idempotency key omitted when skip-if-active is true",
+			name:               "idempotency key populated when skip-if-active is true",
 			skipIfActive:       true,
 			channelID:          "ch-100",
 			msgID:              "msg-200",
-			wantIdempotencyKey: "",
+			wantIdempotencyKey: "prompt:ch-100:msg-200",
 		},
 	}
 
@@ -1389,13 +1389,8 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			}, tc.channelID, tc.msgID)
 			require.NoError(t, err)
 			assert.Equal(t, "accepted", status)
-			if tc.wantIdempotencyKey == "" {
-				assert.False(t, headerPresent)
-				assert.Empty(t, capturedKey)
-			} else {
-				assert.True(t, headerPresent)
-				assert.Equal(t, tc.wantIdempotencyKey, capturedKey)
-			}
+			assert.True(t, headerPresent)
+			assert.Equal(t, tc.wantIdempotencyKey, capturedKey)
 		})
 	}
 }
@@ -1418,11 +1413,11 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			wantIdempotencyKey: "disp-200",
 		},
 		{
-			name:               "idempotency key omitted when skip-if-active is true",
+			name:               "idempotency key populated with dispatch id when skip-if-active is true",
 			skipIfActive:       true,
 			sessionKey:         "sess-100",
 			dispatchID:         "disp-200",
-			wantIdempotencyKey: "",
+			wantIdempotencyKey: "disp-200",
 		},
 	}
 
@@ -1447,13 +1442,8 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			}, tc.sessionKey, tc.dispatchID)
 			require.NoError(t, err)
 			assert.Equal(t, "accepted", res)
-			if tc.wantIdempotencyKey == "" {
-				assert.False(t, hasHeader)
-				assert.Empty(t, receivedKey)
-			} else {
-				assert.True(t, hasHeader)
-				assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
-			}
+			assert.True(t, hasHeader)
+			assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
 		})
 	}
 }

@@ -163,26 +163,46 @@ func IsGateAggregatorCheck(checkName string) bool {
 	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
 }
 
-func CIRemediationDispatchID(chunkID, headSHA string, failCount int) string {
-	cleanChunk := strings.TrimSpace(chunkID)
-	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
-	if cleanSHA != "" {
-		return fmt.Sprintf("vanadis-%s-cifail-%s-%d", cleanChunk, cleanSHA, failCount)
+func appendDiscriminatorSuffix(baseID string, discriminators []string) string {
+	var nonEmpties []string
+	for _, d := range discriminators {
+		if trimmed := strings.TrimSpace(d); trimmed != "" {
+			nonEmpties = append(nonEmpties, trimmed)
+		}
 	}
-	return fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
+	if len(nonEmpties) == 0 {
+		return baseID
+	}
+	digest := sha256.Sum256([]byte(strings.Join(nonEmpties, "\x00")))
+	return fmt.Sprintf("%s-%s", baseID, hex.EncodeToString(digest[:8]))
 }
 
-func ConflictRemediationDispatchID(chunkID, headSHA string) string {
+func CIRemediationDispatchID(chunkID, headSHA string, failCount int, discriminators ...string) string {
 	cleanChunk := strings.TrimSpace(chunkID)
 	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	var base string
+	if cleanSHA != "" {
+		base = fmt.Sprintf("vanadis-%s-cifail-%s-%d", cleanChunk, cleanSHA, failCount)
+	} else {
+		base = fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
+	}
+	return appendDiscriminatorSuffix(base, discriminators)
+}
+
+func ConflictRemediationDispatchID(chunkID, headSHA string, discriminators ...string) string {
+	cleanChunk := strings.TrimSpace(chunkID)
+	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	var base string
 	if cleanSHA != "" {
 		shortSHA := cleanSHA
 		if len(shortSHA) > 7 {
 			shortSHA = shortSHA[:7]
 		}
-		return fmt.Sprintf("vanadis-conflict-%s-%s", cleanChunk, shortSHA)
+		base = fmt.Sprintf("vanadis-conflict-%s-%s", cleanChunk, shortSHA)
+	} else {
+		base = "vanadis-conflict-" + cleanChunk
 	}
-	return "vanadis-conflict-" + cleanChunk
+	return appendDiscriminatorSuffix(base, discriminators)
 }
 
 // DispatchChunkRemediation delegates to Eri's POST /dispatch endpoint for PR failure remediation.

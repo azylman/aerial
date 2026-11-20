@@ -256,7 +256,11 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 	if f.Exec == nil {
 		return nil
 	}
-	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA)
+	var occurrence string
+	if !ev.OccurredAt.IsZero() {
+		occurrence = ev.OccurredAt.UTC().Format(time.RFC3339Nano)
+	}
+	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA, occurrence)
 	err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatConflictPrompt(ev))
 	if errors.Is(err, executor.ErrDispatchActive) {
 		f.syncBuildWidget(ctx, buildID, "Merge conflict detected — remediation in progress")
@@ -328,7 +332,11 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	if err != nil {
 		return err
 	}
-	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
+	var occurrence string
+	if !ev.OccurredAt.IsZero() {
+		occurrence = ev.OccurredAt.UTC().Format(time.RFC3339Nano)
+	}
+	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1, ev.CheckName, ev.CheckURL, occurrence)
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
 	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
 		if errors.Is(err, executor.ErrDispatchActive) {

@@ -97,10 +97,10 @@ func NewEriRestateServer(pool *queue.WorkerPool, agentName string) *server.Resta
 	sessionManager := queue.NewSessionManagerService(pool, agentName)
 
 	return server.NewRestate().
-		Bind(restate.Reflect(threadSession)).
-		Bind(restate.Reflect(dispatchSession)).
-		Bind(restate.Reflect(voiceSession)).
-		Bind(restate.Reflect(sessionManager))
+		Bind(restate.Reflect(threadSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
+		Bind(restate.Reflect(dispatchSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
+		Bind(restate.Reflect(voiceSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
+		Bind(restate.Reflect(sessionManager, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)))
 }
 
 var defaultTimeoutPayload = []byte(`{"inactivity_timeout":"1h","abort_timeout":"1h"}`)
@@ -143,10 +143,10 @@ func wrapDiscoveryTimeoutReconciler(next http.Handler, triggerFn func()) http.Ha
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
 		if r.URL != nil && strings.HasPrefix(r.URL.Path, "/discover") {
 			triggerFn()
 		}
-		next.ServeHTTP(w, r)
 	})
 }
 

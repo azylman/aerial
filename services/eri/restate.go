@@ -257,7 +257,11 @@ func (c *RestateIngressClient) DispatchAccepted(ctx context.Context, req queue.B
 		return errors.New("dispatch id, session id, or chunk id is required")
 	}
 	sessionKey := queue.ResolveDispatchSessionKey(req)
-	resp, err := c.EnqueueDispatch(ctx, sessionKey, req)
+	idKey := strings.TrimSpace(req.ID)
+	if idKey == "" {
+		idKey = sessionKey
+	}
+	resp, err := c.EnqueueDispatch(ctx, sessionKey, req, idKey)
 	if err != nil {
 		return err
 	}
@@ -320,9 +324,6 @@ func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, r
 		IsPrompt:     true,
 	}
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
-	if req.SkipIfActive {
-		idempotencyKey = ""
-	}
 	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
 	if err != nil {
 		return "", err
@@ -343,9 +344,6 @@ func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient,
 		SkipIfActive:   req.SkipIfActive,
 	}
 	idempotencyKey := dispatchID
-	if req.SkipIfActive {
-		idempotencyKey = ""
-	}
 	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, idempotencyKey)
 	if err != nil {
 		return "", err
