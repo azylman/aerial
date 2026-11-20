@@ -654,6 +654,41 @@ func isNotFoundError(err error) bool {
 	return false
 }
 
+// Discord JSON error codes for widget edit/delete recovery.
+const (
+	discordCodeCannotEditForeignAuthor = 50005
+	discordCodeMissingPermissions      = 50013
+)
+
+// discordErrorCode returns the Discord JSON error code carried by a RESTError, or 0.
+func discordErrorCode(err error) int {
+	if restErr, ok := errors.AsType[*discordgo.RESTError](err); ok && restErr.Message != nil {
+		return restErr.Message.Code
+	}
+	return 0
+}
+
+// isForeignAuthorError reports whether an edit failed because the message was authored by
+// a different bot (403 code 50005), e.g. after a per-agent token rotation.
+func isForeignAuthorError(err error) bool {
+	return discordErrorCode(err) == discordCodeCannotEditForeignAuthor
+}
+
+// deleteOldWidgetBestEffort removes a replaced widget message. Failures never propagate:
+// the replacement card is already posted, and the current bot may lack permission to
+// delete another bot's message (403 code 50013).
+func deleteOldWidgetBestEffort(s DiscordWidgetSender, channelID, msgID string, opts ...discordgo.RequestOption) {
+	delErr := s.ChannelMessageDelete(channelID, msgID, opts...)
+	switch {
+	case delErr == nil, isNotFoundError(delErr):
+		return
+	case discordErrorCode(delErr) == discordCodeMissingPermissions:
+		log.Printf("[Widget] Old status widget message %s left in place: missing permission to delete it: %v", msgID, delErr)
+	default:
+		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", msgID, delErr)
+	}
+}
+
 func newWidgetMessageSend(components []discordgo.MessageComponent) *discordgo.MessageSend {
 	return &discordgo.MessageSend{
 		Flags:           discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
@@ -668,9 +703,7 @@ func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, 
 	if sendErr != nil || created == nil {
 		return "", false
 	}
-	if delErr := s.ChannelMessageDelete(channelID, trimmedMsgID, opts...); delErr != nil && !isNotFoundError(delErr) {
-		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", trimmedMsgID, delErr)
-	}
+	deleteOldWidgetBestEffort(s, channelID, trimmedMsgID, opts...)
 	return created.ID, true
 }
 
@@ -704,6 +737,20 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidge
 		if created == nil {
 			return "", errors.New("failed to send new status widget message after 404 edit: received nil message")
 		}
+		return created.ID, nil
+	}
+
+	if isForeignAuthorError(editErr) {
+		log.Printf("[Widget] Status widget message %s was authored by another bot; re-posting with the current sender", trimmedMsgID)
+		send := newWidgetMessageSend(components)
+		created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send, opts...)
+		if sendErr != nil {
+			return "", fmt.Errorf("failed to send new status widget message after foreign-author edit: %w", sendErr)
+		}
+		if created == nil {
+			return "", errors.New("failed to send new status widget message after foreign-author edit: received nil message")
+		}
+		deleteOldWidgetBestEffort(s, req.ChannelID, trimmedMsgID, opts...)
 		return created.ID, nil
 	}
 
