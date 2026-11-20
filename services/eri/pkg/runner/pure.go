@@ -95,6 +95,9 @@ var exactSecretKeys = map[string]struct{}{
 	"CODEX_API_KEY":                   {},
 	"META_API_KEY":                    {},
 	"MODEL_API_KEY":                   {},
+	"NATS_URL":                        {},
+	"RESTATE_INGRESS_URL":             {},
+	"RESTATE_ADMIN_URL":               {},
 }
 
 var secretSuffixes = []string{
