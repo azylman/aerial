@@ -259,7 +259,16 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	if err != nil {
 		return fmt.Errorf("resolve merge time of %s#%d: %w", pr.Repo, pr.PRNumber, err)
 	}
-	done, failed, reason := prRolloutStatus(prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()})
+	in := prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()}
+	done, failed, reason := prRolloutStatus(in)
+	var updated bool
+	if !failed {
+		var err error
+		updated, err = s.recordRolloutJobProgress(ctx, pr, obs.Ref, in)
+		if err != nil {
+			return err
+		}
+	}
 	switch {
 	case failed:
 		return s.failKustomizationRollout(ctx, pr, name, reason)
@@ -267,8 +276,99 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		return s.completeKustomizationRequest(ctx, pr, name)
 	default:
 		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
+		if updated {
+			if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+				return err
+			}
+			if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+				Event:        "rollout_updated",
+				Repo:         pr.Repo,
+				PRNumber:     pr.PRNumber,
+				HeadSHA:      pr.HeadSHA,
+				MergeSHA:     pr.MergeSHA,
+				JobName:      name,
+				Status:       statusDeploying,
+				RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+				Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+				OccurredAt:   time.Now().UTC(),
+			}); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
+}
+
+// recordRolloutJobProgress evaluates ready jobs across all workloads and other pending Kustomizations,
+// recording any progress to pr_registry.
+func (s *RouterServer) recordRolloutJobProgress(ctx context.Context, pr DeployingPR, ref fluxKustomizationRef, in prRolloutInput) (bool, error) {
+	readyJobs, _ := flux.PRRolloutJobProgress(in, pr.Repo)
+	if len(readyJobs) == 0 {
+		return false, nil
+	}
+	requests := recordedKustomizationRequests(pr.Metadata)
+	if len(requests) > 1 {
+		pendingOther, err := s.pendingOtherKustomizationJobs(ctx, pr, ref)
+		if err != nil {
+			return false, fmt.Errorf("check pending kustomizations for %s#%d: %w", pr.Repo, pr.PRNumber, err)
+		}
+		if len(pendingOther) > 0 {
+			filtered := make([]string, 0, len(readyJobs))
+			for _, job := range readyJobs {
+				if !pendingOther[job] {
+					filtered = append(filtered, job)
+				}
+			}
+			readyJobs = filtered
+		}
+	}
+	if len(readyJobs) == 0 || s.registry == nil {
+		return false, nil
+	}
+	return s.registry.RecordDeployedJobs(ctx, pr.Repo, pr.PRNumber, readyJobs)
+}
+
+// pendingOtherKustomizationJobs returns all jobs appearing on workloads in other pending Kustomization requests
+// of pr that are not yet rolled out on commitSHA.
+func (s *RouterServer) pendingOtherKustomizationJobs(ctx context.Context, pr DeployingPR, currentRef fluxKustomizationRef) (map[string]bool, error) {
+	if s == nil || s.dispatcher == nil {
+		return map[string]bool{}, nil
+	}
+	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
+	if commitSHA == "" {
+		return map[string]bool{}, nil
+	}
+	requests := recordedKustomizationRequests(pr.Metadata)
+	if len(requests) <= 1 {
+		return map[string]bool{}, nil
+	}
+	deployed := extractStringSliceFromMetadata(pr.Metadata, deployedKustomizationsKey)
+	pending := make(map[string]bool)
+	for name, req := range requests {
+		if name == currentRef.Name || slices.Contains(deployed, name) {
+			continue
+		}
+		ref := fluxKustomizationRef{Namespace: cmp.Or(req.Namespace, fluxSystemNamespace), Name: name}
+		workloads, err := s.dispatcher.ListKustomizationWorkloads(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("list workloads of %s/%s: %w", ref.Namespace, ref.Name, err)
+		}
+		flux.LinkManagedWorkloads(workloads)
+		for _, w := range workloads {
+			wDone, wFailed, _ := flux.WorkloadRolloutComplete(w)
+			for _, img := range w.Images {
+				_, _, job := model.ResolveImageTag(pr.Repo, img)
+				if job == "" {
+					continue
+				}
+				hasCommitSHA := flux.ImageTag(img) == commitSHA
+				if !hasCommitSHA || !wDone || wFailed {
+					pending[job] = true
+				}
+			}
+		}
+	}
+	return pending, nil
 }
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.

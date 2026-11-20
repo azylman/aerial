@@ -21,6 +21,15 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []postgresPRRegistryUnitCase{
+		// RecordDeployedJobs
+		{name: "RecordDeployedJobs empty repo guard", op: "RecordDeployedJobs", repo: "", prNumber: 42, jobs: []string{"eri"}},
+		{name: "RecordDeployedJobs zero pr guard", op: "RecordDeployedJobs", repo: "azylman/aerial", prNumber: 0, jobs: []string{"eri"}},
+		{name: "RecordDeployedJobs nil pool guard", op: "RecordDeployedJobs", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}},
+		{name: "RecordDeployedJobs empty jobs guard", op: "RecordDeployedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{" "}},
+		{name: "RecordDeployedJobs success", op: "RecordDeployedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, wantUpdated: true, wantSQLSubstr: "'{deployed_jobs}'"},
+		{name: "RecordDeployedJobs already deployed returns false", op: "RecordDeployedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, mockSelectErr: pgx.ErrNoRows},
+		{name: "RecordDeployedJobs db error", op: "RecordDeployedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, mockSelectErr: errors.New("db error"), wantErr: true},
+
 		// RecordKustomizationRequests
 		{name: "RecordKustomizationRequests empty repo guard", op: "RecordKustomizationRequests", repo: "", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("unexpected exec")},
 		{name: "RecordKustomizationRequests zero pr guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 0, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("unexpected exec")},
@@ -54,34 +63,47 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 			pool := buildMockPRRegistryPool(tc, &gotSQL, &gotExecSQL)
 			reg := NewPostgresPRRegistry(pool)
 
-			switch tc.op {
-			case "RecordKustomizationRequests":
-				err := reg.RecordKustomizationRequests(ctx, tc.repo, tc.prNumber, tc.kustRequests)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("RecordKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
-				}
-			case "MarkKustomizationsDeployed":
-				got, err := reg.MarkKustomizationsDeployed(ctx, tc.repo, tc.prNumber, tc.jobs)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("MarkKustomizationsDeployed err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if got != tc.wantUpdated {
-					t.Errorf("transitioned = %v, want %v", got, tc.wantUpdated)
-				}
-			case "HasKustomizationRequests":
-				got, err := reg.HasKustomizationRequests(ctx, tc.repo, tc.prNumber)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("HasKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if got != tc.wantUpdated {
-					t.Errorf("tracked = %v, want %v", got, tc.wantUpdated)
-				}
-			}
+			executeKustomizationUnitOp(ctx, t, reg, tc)
 
 			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) && !strings.Contains(gotExecSQL, tc.wantSQLSubstr) {
 				t.Errorf("gotSQL = %q, gotExecSQL = %q, want substring %q", gotSQL, gotExecSQL, tc.wantSQLSubstr)
 			}
 		})
+	}
+}
+
+func executeKustomizationUnitOp(ctx context.Context, t *testing.T, reg *PostgresPRRegistry, tc postgresPRRegistryUnitCase) {
+	t.Helper()
+	switch tc.op {
+	case "RecordDeployedJobs":
+		got, err := reg.RecordDeployedJobs(ctx, tc.repo, tc.prNumber, tc.jobs)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("RecordDeployedJobs err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if got != tc.wantUpdated {
+			t.Errorf("updated = %v, want %v", got, tc.wantUpdated)
+		}
+	case "RecordKustomizationRequests":
+		err := reg.RecordKustomizationRequests(ctx, tc.repo, tc.prNumber, tc.kustRequests)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("RecordKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
+		}
+	case "MarkKustomizationsDeployed":
+		got, err := reg.MarkKustomizationsDeployed(ctx, tc.repo, tc.prNumber, tc.jobs)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("MarkKustomizationsDeployed err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if got != tc.wantUpdated {
+			t.Errorf("transitioned = %v, want %v", got, tc.wantUpdated)
+		}
+	case "HasKustomizationRequests":
+		got, err := reg.HasKustomizationRequests(ctx, tc.repo, tc.prNumber)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("HasKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if got != tc.wantUpdated {
+			t.Errorf("tracked = %v, want %v", got, tc.wantUpdated)
+		}
 	}
 }
 

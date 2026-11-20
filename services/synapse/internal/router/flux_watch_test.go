@@ -207,7 +207,13 @@ func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref
 }
 
 func (m *mockOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
-	return m.workloads, m.workloadsErr
+	if m.workloadsErr != nil {
+		return nil, m.workloadsErr
+	}
+	if w, ok := m.kustomizationWorkloads[ref.Name]; ok {
+		return w, nil
+	}
+	return m.workloads, nil
 }
 
 func (m *mockOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error) {

@@ -36,6 +36,7 @@ type mockOutboundDispatcher struct {
 	kustomizationsByImage   map[string][]fluxKustomizationRef
 	workloads               []workloadRollout
 	workloadsErr            error
+	kustomizationWorkloads  map[string][]workloadRollout
 	configMaps              []configMapChange
 	configMapsErr           error
 	repoKustomizations      map[string][]fluxKustomizationRef

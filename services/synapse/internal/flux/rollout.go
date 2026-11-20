@@ -223,3 +223,71 @@ func PRRolloutStatus(in PRRolloutInput) (done, failed bool, reason string) {
 	}
 	return true, false, ""
 }
+
+func workloadMatchingJobs(w model.WorkloadRollout, repo, commitSHA string) []string {
+	var jobs []string
+	for _, img := range w.Images {
+		if ImageTag(img) == commitSHA {
+			if _, _, job := model.ResolveImageTag(repo, img); job != "" {
+				jobs = append(jobs, job)
+			}
+		}
+	}
+	return jobs
+}
+
+func workloadReloaderRestartPending(w model.WorkloadRollout, configMaps []model.ConfigMapChange, cutoff time.Time) bool {
+	changed := func(at time.Time) bool { return !at.IsZero() && !at.Before(cutoff) }
+	for _, cm := range configMaps {
+		if cm.Namespace == w.Namespace && changed(cm.ChangedAt) && ReloadsOn(w, cm.Name) {
+			if w.ChangedAt.Before(cm.ChangedAt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// PRRolloutJobProgress reports granular per-job rollout readiness for workloads matching in.CommitSHA.
+func PRRolloutJobProgress(in PRRolloutInput, repo string) (readyJobs, pendingJobs []string) {
+	if in.CommitSHA == "" {
+		return nil, nil
+	}
+	LinkManagedWorkloads(in.Workloads)
+	cutoff := in.Since.Add(-rolloutChangeSkew)
+
+	seenReady := make(map[string]bool)
+	pending := make(map[string]bool)
+
+	for _, w := range in.Workloads {
+		matchingJobs := workloadMatchingJobs(w, repo, in.CommitSHA)
+		if len(matchingJobs) == 0 {
+			continue
+		}
+
+		wDone, wFailed, _ := WorkloadRolloutComplete(w)
+		notDone := !wDone || wFailed || workloadReloaderRestartPending(w, in.ConfigMaps, cutoff)
+
+		for _, job := range matchingJobs {
+			if notDone {
+				pending[job] = true
+			} else {
+				seenReady[job] = true
+			}
+		}
+	}
+
+	for job := range pending {
+		pendingJobs = append(pendingJobs, job)
+	}
+	slices.Sort(pendingJobs)
+
+	for job := range seenReady {
+		if !pending[job] {
+			readyJobs = append(readyJobs, job)
+		}
+	}
+	slices.Sort(readyJobs)
+
+	return readyJobs, pendingJobs
+}
