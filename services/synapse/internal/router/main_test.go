@@ -230,6 +230,9 @@ type mockPRRegistry struct {
 	markKustomizationsCalls []prCall
 	markKustomizationsRes   bool
 	markKustomizationsErr   error
+	markJobsCalls           []prCall
+	markJobsRes             bool
+	markJobsErr             error
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
 
@@ -390,6 +393,14 @@ func (m *mockPRRegistry) MarkKustomizationsDeployed(ctx context.Context, repo st
 		return false, err
 	}
 	return m.markKustomizationsRes, nil
+}
+
+func (m *mockPRRegistry) MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	m.markJobsCalls = append(m.markJobsCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
+	if err := m.checkErr(m.markJobsErr); err != nil {
+		return false, err
+	}
+	return m.markJobsRes, nil
 }
 
 func (m *mockPRRegistry) HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error) {

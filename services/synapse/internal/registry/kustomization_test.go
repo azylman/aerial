@@ -26,8 +26,17 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 		{name: "RecordKustomizationRequests zero pr guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 0, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("unexpected exec")},
 		{name: "RecordKustomizationRequests nil pool guard", op: "RecordKustomizationRequests", nilPool: true, repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}},
 		{name: "RecordKustomizationRequests empty requests guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: nil},
-		{name: "RecordKustomizationRequests replaces requests and clears deployed", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, wantSQLSubstr: "COALESCE(metadata, '{}'::jsonb) - 'deployed_kustomizations', '{kustomization_requests}', $3::jsonb"},
+		{name: "RecordKustomizationRequests replaces requests and clears deployed", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, wantSQLSubstr: "COALESCE(metadata, '{}'::jsonb) - 'deployed_kustomizations' - 'deployed_jobs', '{kustomization_requests}', $3::jsonb"},
 		{name: "RecordKustomizationRequests exec error", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]model.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("exec error"), wantErr: true},
+
+		// MarkJobsDeployed
+		{name: "MarkJobsDeployed empty repo guard", op: "MarkJobsDeployed", repo: "", prNumber: 42, jobs: []string{"eri"}},
+		{name: "MarkJobsDeployed zero pr guard", op: "MarkJobsDeployed", repo: "azylman/aerial", prNumber: 0, jobs: []string{"eri"}},
+		{name: "MarkJobsDeployed nil pool guard", op: "MarkJobsDeployed", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}},
+		{name: "MarkJobsDeployed empty jobs guard", op: "MarkJobsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{" "}},
+		{name: "MarkJobsDeployed returns true on update", op: "MarkJobsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, wantUpdated: true, wantSQLSubstr: "deployed_jobs"},
+		{name: "MarkJobsDeployed unchanged returns false", op: "MarkJobsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, mockSelectErr: pgx.ErrNoRows},
+		{name: "MarkJobsDeployed db error", op: "MarkJobsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// MarkKustomizationsDeployed
 		{name: "MarkKustomizationsDeployed empty repo guard", op: "MarkKustomizationsDeployed", repo: "", prNumber: 42, jobs: []string{"aerial-core"}, mockSelectErr: errors.New("unexpected query")},
@@ -54,34 +63,47 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 			pool := buildMockPRRegistryPool(tc, &gotSQL, &gotExecSQL)
 			reg := NewPostgresPRRegistry(pool)
 
-			switch tc.op {
-			case "RecordKustomizationRequests":
-				err := reg.RecordKustomizationRequests(ctx, tc.repo, tc.prNumber, tc.kustRequests)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("RecordKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
-				}
-			case "MarkKustomizationsDeployed":
-				got, err := reg.MarkKustomizationsDeployed(ctx, tc.repo, tc.prNumber, tc.jobs)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("MarkKustomizationsDeployed err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if got != tc.wantUpdated {
-					t.Errorf("transitioned = %v, want %v", got, tc.wantUpdated)
-				}
-			case "HasKustomizationRequests":
-				got, err := reg.HasKustomizationRequests(ctx, tc.repo, tc.prNumber)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("HasKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if got != tc.wantUpdated {
-					t.Errorf("tracked = %v, want %v", got, tc.wantUpdated)
-				}
-			}
+			executeKustomizationUnitOp(ctx, t, reg, tc)
 
 			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) && !strings.Contains(gotExecSQL, tc.wantSQLSubstr) {
 				t.Errorf("gotSQL = %q, gotExecSQL = %q, want substring %q", gotSQL, gotExecSQL, tc.wantSQLSubstr)
 			}
 		})
+	}
+}
+
+func executeKustomizationUnitOp(ctx context.Context, t *testing.T, reg *PostgresPRRegistry, tc postgresPRRegistryUnitCase) {
+	t.Helper()
+	switch tc.op {
+	case "RecordKustomizationRequests":
+		err := reg.RecordKustomizationRequests(ctx, tc.repo, tc.prNumber, tc.kustRequests)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("RecordKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
+		}
+	case "MarkKustomizationsDeployed":
+		got, err := reg.MarkKustomizationsDeployed(ctx, tc.repo, tc.prNumber, tc.jobs)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("MarkKustomizationsDeployed err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if got != tc.wantUpdated {
+			t.Errorf("transitioned = %v, want %v", got, tc.wantUpdated)
+		}
+	case "MarkJobsDeployed":
+		got, err := reg.MarkJobsDeployed(ctx, tc.repo, tc.prNumber, tc.jobs)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("MarkJobsDeployed err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if got != tc.wantUpdated {
+			t.Errorf("updated = %v, want %v", got, tc.wantUpdated)
+		}
+	case "HasKustomizationRequests":
+		got, err := reg.HasKustomizationRequests(ctx, tc.repo, tc.prNumber)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("HasKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if got != tc.wantUpdated {
+			t.Errorf("tracked = %v, want %v", got, tc.wantUpdated)
+		}
 	}
 }
 
