@@ -40,7 +40,7 @@ func TestServerDelegateEdges(t *testing.T) {
 		{name: "nil server leaves gauges unchanged", target: "build-metrics", storeKind: "nil-server", want: `vanadis_builds_active{queue_state="running"} 7`},
 		{name: "nil store leaves gauges unchanged", target: "build-metrics", storeKind: "nil-store", want: `vanadis_builds_active{queue_state="running"} 7`},
 		{name: "store error leaves gauges unchanged", target: "build-metrics", storeKind: "list-error", want: `vanadis_builds_active{queue_state="running"} 7`},
-		{name: "restate client inherits server config", target: "restate-client", want: "/Build-suletta/b1/Create"},
+		{name: "restate client inherits server config", target: "restate-client", want: "/Build-agent-beta/b1/Create"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,7 +60,7 @@ func TestServerDelegateEdges(t *testing.T) {
 				}
 			case "restate-client":
 				srv := NewVanadisServer(Config{}, nil, nil)
-				srv.restateCfg = RestateConfig{AgentName: "suletta", RestateIngressURL: "http://restate.test"}
+				srv.restateCfg = RestateConfig{AgentName: "agent-beta", RestateIngressURL: "http://restate.test"}
 				if got := srv.restateClient().ObjectPath("b1", "Create"); got != tc.want {
 					t.Errorf("restateClient().ObjectPath() = %q, want %q", got, tc.want)
 				}
