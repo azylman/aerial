@@ -423,7 +423,7 @@ func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
 	twoImages := `{"jobs":[{"name":"Build & Push Images to GHCR (synapse)","status":"completed","conclusion":"success"},{"name":"Build & Push Images to GHCR (eri)","status":"completed","conclusion":"success"}]}`
 	ownedDeployments := `{"items":[
 		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"aerial-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"},{"image":"ghcr.io/azylman/aerial-eri:old"}]}}}},
-		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"marida-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"}]}}}}
+		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"agent-gamma-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"}]}}}}
 	]}`
 	fallbackKustomizations := `{"items":[{"metadata":{"name":"aerial-config","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}}]}`
 
@@ -431,14 +431,14 @@ func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
 		{
 			name: "every owning kustomization reconciles once after all tags are written",
 			routes: kubeWorkloadRoutes(map[string]kubeRoute{
-				jobsPath:                   {body: twoImages},
-				kubeDeploymentsPath:        {body: ownedDeployments},
-				configMapPath:              {body: `{}`},
-				kustPrefix + "aerial-core": {body: `{}`},
-				kustPrefix + "marida-core": {body: `{}`},
+				jobsPath:                        {body: twoImages},
+				kubeDeploymentsPath:             {body: ownedDeployments},
+				configMapPath:                   {body: `{}`},
+				kustPrefix + "aerial-core":      {body: `{}`},
+				kustPrefix + "agent-gamma-core": {body: `{}`},
 			}),
-			wantReconciled: []string{"aerial-core", "marida-core"},
-			wantRecorded:   []string{"aerial-core", "marida-core"},
+			wantReconciled: []string{"aerial-core", "agent-gamma-core"},
+			wantRecorded:   []string{"aerial-core", "agent-gamma-core"},
 		},
 		{
 			name: "no labeled owner falls back to image tag substituting kustomizations",
@@ -454,14 +454,14 @@ func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
 		{
 			name: "partial reconcile failure still records every request before patching",
 			routes: kubeWorkloadRoutes(map[string]kubeRoute{
-				jobsPath:                   {body: twoImages},
-				kubeDeploymentsPath:        {body: ownedDeployments},
-				configMapPath:              {body: `{}`},
-				kustPrefix + "aerial-core": {status: http.StatusForbidden, body: `forbidden`},
-				kustPrefix + "marida-core": {body: `{}`},
+				jobsPath:                        {body: twoImages},
+				kubeDeploymentsPath:             {body: ownedDeployments},
+				configMapPath:                   {body: `{}`},
+				kustPrefix + "aerial-core":      {status: http.StatusForbidden, body: `forbidden`},
+				kustPrefix + "agent-gamma-core": {body: `{}`},
 			}),
-			wantReconciled: []string{"aerial-core", "marida-core"},
-			wantRecorded:   []string{"aerial-core", "marida-core"},
+			wantReconciled: []string{"aerial-core", "agent-gamma-core"},
+			wantRecorded:   []string{"aerial-core", "agent-gamma-core"},
 			wantErr:        true,
 		},
 	}

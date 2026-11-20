@@ -499,7 +499,7 @@ func TestRestartRequired(t *testing.T) {
 		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
 		{name: "postgres url requires restart", next: withField(base, Config{PostgresURL: "postgres://b@db/aerial"}), want: true},
 		{name: "discord token requires restart", next: withField(base, Config{DiscordToken: "tok2"}), want: true},
-		{name: "bot id requires restart", next: withField(base, Config{BotID: "marida"}), want: true},
+		{name: "bot id requires restart", next: withField(base, Config{BotID: "agent-gamma"}), want: true},
 		{name: "eri url requires restart", next: withField(base, Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), want: true},
 		{name: "flux receiver url requires restart", next: withField(base, Config{FluxReceiverURL: "http://flux2/hook"}), want: true},
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
