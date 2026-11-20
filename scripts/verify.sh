@@ -737,6 +737,9 @@ if [ "$MODE" = "staged" ]; then
         fi
         if [ "$svc_staged" -eq 1 ]; then
             pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            if [ -n "$pkgs" ]; then
+                run_deadcode "$svc"
+            fi
             for p in $pkgs; do
                 if [ ! -d "$svc/$p" ]; then
                     continue
