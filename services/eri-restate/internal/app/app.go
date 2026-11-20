@@ -102,6 +102,51 @@ func NewEriRestateServer(pool *queue.WorkerPool, agentName string) *server.Resta
 
 var defaultTimeoutPayload = []byte(`{"inactivity_timeout":"1h","abort_timeout":"1h"}`)
 
+func startDiscoveryTimeoutReconciler(
+	ctx context.Context,
+	adminURL, agent string,
+	httpClient *http.Client,
+	maxAttempts int,
+	retryDelay time.Duration,
+) *ReloadTrigger {
+	reconcileFn := func(source string) {
+		log.Printf("[eri-restate] Service timeout reconciliation triggered via %s", source)
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			recCtx, recCancel := context.WithTimeout(ctx, 30*time.Second)
+			err := ReconcileRestateServiceTimeouts(recCtx, adminURL, agent, httpClient)
+			recCancel()
+			if err == nil {
+				log.Printf("[eri-restate] Successfully reconciled service timeouts for agent %q", agent)
+				return
+			}
+			log.Printf("[eri-restate] Service timeout reconciliation attempt %d/%d failed: %v", attempt, maxAttempts, err)
+			if attempt == maxAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryDelay):
+			}
+		}
+	}
+
+	trigger := NewReloadTrigger(ctx, reconcileFn)
+	return trigger
+}
+
+func wrapDiscoveryTimeoutReconciler(next http.Handler, triggerFn func()) http.Handler {
+	if triggerFn == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL != nil && strings.HasPrefix(r.URL.Path, "/discover") {
+			triggerFn()
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ReconcileRestateServiceTimeouts sets 1h timeouts on Eri services via the Restate admin API.
 func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent string, httpClient ...*http.Client) error {
 	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
@@ -350,9 +395,11 @@ func defaultReloadLogger(source string) {
 }
 
 var (
-	openDefaultDB      = db.New
-	onServerReady      func(restateAddr, healthAddr string)
-	startUsagePollerFn = metrics.StartUsagePoller
+	openDefaultDB        = db.New
+	onServerReady        func(restateAddr, healthAddr string)
+	startUsagePollerFn   = metrics.StartUsagePoller
+	reconcileRetryDelay  = 2 * time.Second
+	reconcileMaxAttempts = 3
 )
 
 func initDatabaseAndStores(_ context.Context, appCfg *config.Config, cur *config.ConfigData) (*sql.DB, db.Store, db.TranscriptStore, error) {
@@ -562,15 +609,10 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		ReloadTrigger: reloadTrigger,
 	})
 
-	go func() {
-		recCtx, recCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer recCancel()
-		if rErr := ReconcileRestateServiceTimeouts(recCtx, cfg.AdminURL, cfg.AgentName, appOpts.httpClient); rErr != nil {
-			log.Printf("[eri-restate] Warning: failed to reconcile service timeouts: %v", rErr)
-		}
-	}()
+	reconcileTrigger := startDiscoveryTimeoutReconciler(ctx, cfg.AdminURL, cfg.AgentName, appOpts.httpClient, reconcileMaxAttempts, reconcileRetryDelay)
+	reconcileTrigger.Trigger()
 
-	return runServers(ctx, cfg, restateHandler, healthMux)
+	return runServers(ctx, cfg, wrapDiscoveryTimeoutReconciler(restateHandler, reconcileTrigger.Trigger), healthMux)
 }
 
 func runServers(ctx context.Context, cfg Config, restateHandler http.Handler, healthMux http.Handler) error {
@@ -601,8 +643,13 @@ func runServers(ctx context.Context, cfg Config, restateHandler http.Handler, he
 
 	g, gCtx := errgroup.WithContext(ctx)
 
+	var restateProtocols http.Protocols
+	restateProtocols.SetHTTP1(true)
+	restateProtocols.SetUnencryptedHTTP2(true)
+
 	restateServer := &http.Server{
 		Handler:           restateHandler,
+		Protocols:         &restateProtocols,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	g.Go(func() error {
