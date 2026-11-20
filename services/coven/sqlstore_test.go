@@ -707,7 +707,7 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			]}`,
 			wantCount:    1,
 			wantRowIDs:   []int64{12},
-			wantPatterns: []string{"FROM extraction_watermarks WHERE stack = $1 AND thread_id = $2"},
+			wantPatterns: []string{"FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2"},
 			wantURLSub:   "after_row_id=10&order=asc&limit=50",
 		},
 		{
@@ -720,7 +720,7 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			]}`,
 			wantCount:    2,
 			wantRowIDs:   []int64{10, 25},
-			wantPatterns: []string{"FROM extraction_watermarks WHERE stack = $1 AND thread_id = $2"},
+			wantPatterns: []string{"FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2"},
 			wantURLSub:   "after_row_id=0&order=asc&limit=50",
 		},
 	}
@@ -842,7 +842,7 @@ func TestSQLStore_UpdateConversationFactWatermark(t *testing.T) {
 			name:         "Success",
 			threadID:     "th-1",
 			maxRowID:     99,
-			wantPatterns: []string{"INSERT INTO extraction_watermarks (stack, thread_id", "ON CONFLICT (stack, thread_id) DO UPDATE"},
+			wantPatterns: []string{"INSERT INTO extraction_watermarks (agent, thread_id", "ON CONFLICT (agent, thread_id) DO UPDATE"},
 		},
 	}
 

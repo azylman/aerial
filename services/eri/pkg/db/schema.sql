@@ -97,11 +97,11 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_session_row_id ON dispatches(session_i
 -- Extraction Watermarks Table
 CREATE TABLE IF NOT EXISTS extraction_watermarks (
     thread_id TEXT NOT NULL,
-    stack TEXT NOT NULL DEFAULT 'aerial',
+    agent TEXT NOT NULL DEFAULT 'aerial',
     last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
     fact_extracted_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (stack, thread_id)
+    PRIMARY KEY (agent, thread_id)
 );
 
 -- One-Shot Schedules Table
@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS facts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     reinforce_count INTEGER NOT NULL DEFAULT 1,
+    source_agent TEXT NOT NULL DEFAULT 'aerial',
     fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', fact_text)) STORED
 );
 
@@ -191,7 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens);
 
 -- Session Summaries Table
 CREATE TABLE IF NOT EXISTS session_summaries (
-    stack TEXT NOT NULL,
+    agent TEXT NOT NULL,
     session_id TEXT NOT NULL,
     engine TEXT NOT NULL DEFAULT '',
     thread_id TEXT NOT NULL DEFAULT '',
@@ -204,10 +205,10 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     is_settled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (stack, session_id)
+    PRIMARY KEY (agent, session_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_session_summaries_stack_mtime ON session_summaries(stack, last_mtime);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_agent_mtime ON session_summaries(agent, last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_fts ON session_summaries USING GIN(fts_tokens);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
@@ -215,7 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_session_summaries_embedding ON session_summaries 
 
 -- Transcript Steps Table
 CREATE TABLE IF NOT EXISTS transcript_steps (
-    stack TEXT NOT NULL,
+    agent TEXT NOT NULL,
     session_id TEXT NOT NULL,
     step_index INT NOT NULL,
     step_type TEXT NOT NULL DEFAULT '',
@@ -225,8 +226,8 @@ CREATE TABLE IF NOT EXISTS transcript_steps (
     content TEXT NOT NULL DEFAULT '',
     fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', LEFT(content, 50000))) STORED,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (stack, session_id, step_index),
-    FOREIGN KEY (stack, session_id) REFERENCES session_summaries(stack, session_id) ON DELETE CASCADE
+    PRIMARY KEY (agent, session_id, step_index),
+    FOREIGN KEY (agent, session_id) REFERENCES session_summaries(agent, session_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GIN(fts_tokens);
@@ -325,6 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_repo_pr ON vanadis_chunks (repo, p
 -- Procedural Skill Candidates Staging Table
 CREATE TABLE IF NOT EXISTS procedural_candidates (
     id BIGSERIAL PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     thread_id TEXT NOT NULL DEFAULT '',
     domain TEXT NOT NULL DEFAULT 'discord',
     loaded_skill TEXT NOT NULL DEFAULT '',
@@ -340,6 +342,7 @@ CREATE TABLE IF NOT EXISTS procedural_candidates (
 
 CREATE INDEX IF NOT EXISTS idx_procedural_candidates_status ON procedural_candidates (status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_procedural_candidates_loaded_skill ON procedural_candidates (status, loaded_skill);
+CREATE INDEX IF NOT EXISTS idx_procedural_candidates_agent_thread ON procedural_candidates(agent, thread_id);
 
 
 -- Event Triggers Table

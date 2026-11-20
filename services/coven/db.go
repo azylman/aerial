@@ -69,6 +69,7 @@ type ProceduralCandidate struct {
 	Status      string    `json:"status"`
 	PRNumber    int       `json:"pr_number,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	Agent       string    `json:"agent,omitempty"`
 }
 
 // BlockedCoreSkills defines immutable core aerial and superpower skill names blocked from dynamic mutation.
@@ -347,7 +348,7 @@ func (ft *FactTime) Scan(src any) error {
 }
 
 // InsertFact persists a new fact into the database.
-func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []float32, _ ...string) (int64, error) {
+func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []float32, sourceAgent ...string) (int64, error) {
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
@@ -358,17 +359,17 @@ func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []
 	if len(embedding) != ExpectedEmbeddingDim {
 		return 0, fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
-	// Note: Store.InsertFact accepts sourceAgent in Chunk c02b to dark-launch the interface contract
-	// and in-memory mock store validation. Persistence into the PostgreSQL facts table is intentionally
-	// deferred to chunk c03-phase1-schema-agent-rename, which executes the declarative Atlas schema migration
-	// adding the facts.source_agent column and updates the SQL queries atomically.
+	agent := s.effectiveStack()
+	if len(sourceAgent) > 0 && strings.TrimSpace(sourceAgent[0]) != "" {
+		agent = strings.TrimSpace(sourceAgent[0])
+	}
 	now := time.Now().UTC()
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO facts (fact_text, embedding, created_at, last_reinforced_at, reinforce_count) VALUES ($1, $2, $3, $3, 1) RETURNING id`
+	query := `INSERT INTO facts (fact_text, embedding, created_at, last_reinforced_at, reinforce_count, source_agent) VALUES ($1, $2, $3, $3, 1, $4) RETURNING id`
 	var id int64
-	err := s.db.QueryRowContext(queryCtx, query, factText, pgvector.NewVector(embedding), now).Scan(&id)
+	err := s.db.QueryRowContext(queryCtx, query, factText, pgvector.NewVector(embedding), now, agent).Scan(&id)
 	return id, err
 }
 

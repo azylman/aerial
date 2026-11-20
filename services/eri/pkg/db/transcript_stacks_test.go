@@ -292,11 +292,11 @@ func TestSharedTranscripts_BackfillToolKindsScopedToStack(t *testing.T) {
 			if err != nil || updated != tc.wantUpdated {
 				t.Fatalf("updated=%d err=%v, want %d", updated, err, tc.wantUpdated)
 			}
-			got := readStackKeyed(t, shared, "SELECT stack, session_id, tool_kind || '|' || tool_call_id FROM transcript_steps WHERE step_index = 1")
+			got := readStackKeyed(t, shared, "SELECT agent, session_id, tool_kind || '|' || tool_call_id FROM transcript_steps WHERE step_index = 1")
 			if fmt.Sprint(got) != fmt.Sprint(tc.wantKinds) {
 				t.Errorf("kinds = %v, want %v", got, tc.wantKinds)
 			}
-			unmapped := readStackKeyed(t, shared, "SELECT stack, 'unmapped', COUNT(*) FROM transcript_steps WHERE tool_kind = '' AND tool_name <> '' GROUP BY stack")
+			unmapped := readStackKeyed(t, shared, "SELECT agent, 'unmapped', COUNT(*) FROM transcript_steps WHERE tool_kind = '' AND tool_name <> '' GROUP BY agent")
 			if fmt.Sprint(unmapped) != fmt.Sprint(tc.wantUnmapped) {
 				t.Errorf("unmapped = %v, want %v", unmapped, tc.wantUnmapped)
 			}
@@ -326,7 +326,7 @@ func TestSharedTranscripts_BackfillSessionEnginesScopedToStack(t *testing.T) {
 			if err != nil || updated != tc.wantUpdated {
 				t.Fatalf("updated=%d err=%v, want %d", updated, err, tc.wantUpdated)
 			}
-			got := readStackKeyed(t, shared, "SELECT stack, session_id, engine FROM session_summaries")
+			got := readStackKeyed(t, shared, "SELECT agent, session_id, engine FROM session_summaries")
 			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
 				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
 			}
@@ -361,7 +361,7 @@ func TestSQLTranscriptStore_SetSessionEngine(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SetSessionEngine: %v", err)
 			}
-			got := readStackKeyed(t, shared, "SELECT stack, session_id, engine FROM session_summaries")
+			got := readStackKeyed(t, shared, "SELECT agent, session_id, engine FROM session_summaries")
 			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
 				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
 			}

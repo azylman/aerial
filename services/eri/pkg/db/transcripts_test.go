@@ -376,7 +376,7 @@ func runGetSessionSyncStatesMockDBCase(t *testing.T, dbMem *sql.DB, tc mockSyncS
 		t.Fatalf("unexpected states: %+v, err: %v", states, err)
 	}
 	if tc.wantErr == "" {
-		h.assertCapturedPatterns(t, []string{"SELECT session_id, engine, last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE stack = $1"})
+		h.assertCapturedPatterns(t, []string{"SELECT session_id, engine, last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE agent = $1"})
 	}
 }
 
@@ -494,7 +494,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 	for _, tc := range []mockSearchSummariesCase{
 		{name: "hybrid", emb: emb, query: "query text", scanSQL: mockScanQuery, wantPatterns: []string{"vector_hits", "text_hits", "FULL OUTER JOIN"}, wantLen: 1},
 		{name: "dense", emb: emb, scanSQL: mockScanQuery, wantPatterns: []string{"WITH candidates AS", "similarity AS score"}, wantLen: 1},
-		{name: "dense stack filtered on non-postgres skips exact-scan tx", stack: "stack-b", emb: emb, scanSQL: mockScanQuery, wantPatterns: []string{"($1 = '' OR ss.stack = $1)", "WITH candidates AS"}, wantLen: 1},
+		{name: "dense stack filtered on non-postgres skips exact-scan tx", stack: "stack-b", emb: emb, scanSQL: mockScanQuery, wantPatterns: []string{"($1 = '' OR ss.agent = $1)", "WITH candidates AS"}, wantLen: 1},
 		{name: "sparse", query: "only text", scanSQL: mockScanQuery, wantPatterns: []string{"WITH text_hits AS", "ts_rank_cd(ss.fts_tokens"}, wantLen: 1},
 		{name: "query error", emb: emb, query: "test", queryErr: errors.New("simulated pg search summaries failure"), wantErrMsg: "search session summaries query failed"},
 		{name: "scan error", emb: emb, query: "test", scanSQL: "SELECT 's-pg-1' AS session_id", wantErrMsg: "scan session summary result"},
@@ -532,7 +532,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 	for _, tc := range []mockSearchStepsCase{
 		{name: "with text", query: "build command", sess: "sess-1", tool: "run_command", limit: 15, scanSQL: mockScanQuery, wantPatterns: []string{"t.fts_tokens @@ websearch_to_tsquery", "rank_score"}, wantLen: 1},
 		{name: "filters only", sess: "sess-1", tool: "run_command", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"1.0 AS rank_score"}, wantLen: 1},
-		{name: "stack filter", stack: "stack-b", sess: "sess-1", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"t.stack = $1", "t.session_id = $2"}, wantLen: 1},
+		{name: "stack filter", stack: "stack-b", sess: "sess-1", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"t.agent = $1", "t.session_id = $2"}, wantLen: 1},
 		{name: "bare mcp family filter", tool: " mcp ", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"t.tool_kind LIKE $1", "LIMIT $2"}, wantLen: 1},
 		{name: "mcp server filter", tool: "mcp:github", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"(t.tool_kind = $1 OR t.tool_name = $1)"}, wantLen: 1},
 		{name: "query error", query: "test", limit: 10, queryErr: errors.New("simulated transcript steps query failure"), wantErrMsg: "search transcript steps query failed"},

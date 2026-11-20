@@ -454,8 +454,8 @@ func TestSQLStore_ProceduralCandidates(t *testing.T) {
 		{
 			name:   "GetPendingSuccessParsing",
 			action: "get_pending",
-			rowsSQL: "SELECT 1, 't-1', 'discord', 'ha-operations', 'motion detected', '[\"step 1\"]', '[\"avoid 1\"]', '[0.1,0.2]', 'pending', 0, '2026-10-01 12:00:00' " +
-				"UNION ALL SELECT 2, 't-2', 'discord', '', 'unloaded skill trigger', '', '', '[0.3,0.4]', 'pending', 5, '2026-10-01 13:00:00'",
+			rowsSQL: "SELECT 1, 't-1', 'discord', 'ha-operations', 'motion detected', '[\"step 1\"]', '[\"avoid 1\"]', '[0.1,0.2]', 'pending', 0, '2026-10-01 12:00:00', 'aerial' " +
+				"UNION ALL SELECT 2, 't-2', 'discord', '', 'unloaded skill trigger', '', '', '[0.3,0.4]', 'pending', 5, '2026-10-01 13:00:00', 'agent-beta'",
 			wantErr:   false,
 			wantCount: 2,
 		},

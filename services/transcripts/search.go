@@ -159,8 +159,8 @@ func (s *Store) SearchSessions(ctx context.Context, stack, queryText string, lim
 		limit = 20
 	}
 	return collectReadRows(ctx, s, "search sessions query failed",
-		`SELECT stack, session_id, engine, thread_id, last_indexed_step, last_mtime, is_settled
-		 FROM session_summaries WHERE ($1 = '' OR stack = $1) AND summary <> '' AND summary LIKE '%' || $2 || '%'
+		`SELECT agent, session_id, engine, thread_id, last_indexed_step, last_mtime, is_settled
+		 FROM session_summaries WHERE ($1 = '' OR agent = $1) AND summary <> '' AND summary LIKE '%' || $2 || '%'
 		 ORDER BY updated_at DESC LIMIT $3`, scanSessionResult, stack, queryText, limit)
 }
 
@@ -183,8 +183,8 @@ func (s *Store) SearchSteps(ctx context.Context, stack, queryText, sessionFilter
 	return collectReadRows(ctx, s, "search steps query failed", query, scanStepResult, args...)
 }
 
-const stepsSelectClause = `SELECT t.stack, t.session_id, s.engine, t.step_index, t.step_type, t.tool_name, t.tool_kind, t.content, t.created_at
-	FROM transcript_steps t JOIN session_summaries s ON s.stack = t.stack AND s.session_id = t.session_id`
+const stepsSelectClause = `SELECT t.agent, t.session_id, s.engine, t.step_index, t.step_type, t.tool_name, t.tool_kind, t.content, t.created_at
+	FROM transcript_steps t JOIN session_summaries s ON s.agent = t.agent AND s.session_id = t.session_id`
 
 // buildStepsQuery renders the filtered steps query; the empty stack matches
 // every stack while a set stack narrows to that stack's rows. PostgreSQL
@@ -204,7 +204,7 @@ func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit i
 	}
 	if stack != "" {
 		args = append(args, stack)
-		clauses = append(clauses, fmt.Sprintf("t.stack = $%d", len(args)))
+		clauses = append(clauses, fmt.Sprintf("t.agent = $%d", len(args)))
 	}
 	if sessionFilter != "" {
 		var sessions []string
@@ -308,8 +308,8 @@ func (s *Store) GetThreadTrajectory(ctx context.Context, stack, threadID string,
 	rows, err := s.db.QueryContext(queryCtx,
 		`SELECT t.step_type, t.tool_name, t.content
 		 FROM transcript_steps t
-		 JOIN session_summaries s ON s.stack = t.stack AND s.session_id = t.session_id
-		 WHERE s.thread_id = $1 AND ($2 = '' OR t.stack = $2)
+		 JOIN session_summaries s ON s.agent = t.agent AND s.session_id = t.session_id
+		 WHERE s.thread_id = $1 AND ($2 = '' OR t.agent = $2)
 		 ORDER BY t.created_at DESC LIMIT $3`,
 		threadID, stack, limit)
 	if err != nil {
@@ -353,7 +353,7 @@ func (s *Store) GetWatermark(ctx context.Context, stack, sessionID string) (int,
 	defer cancel()
 	var lastStep int
 	err := s.db.QueryRowContext(queryCtx,
-		`SELECT last_indexed_step FROM session_summaries WHERE ($1 = '' OR stack = $1) AND session_id = $2`,
+		`SELECT last_indexed_step FROM session_summaries WHERE ($1 = '' OR agent = $1) AND session_id = $2`,
 		stack, sessionID).Scan(&lastStep)
 	if errors.Is(err, sql.ErrNoRows) {
 		return -1, nil
@@ -378,17 +378,17 @@ func (s *Store) GetSteps(ctx context.Context, stack, sessionID string, startStep
 		endStep = startStep
 	}
 	return collectReadRows(ctx, s, "get steps query failed", stepsSelectClause+`
-		WHERE t.session_id = $1 AND t.step_index BETWEEN $2 AND $3 AND ($4 = '' OR t.stack = $4)
-		ORDER BY t.stack ASC, t.step_index ASC`, scanStepResult, sessionID, startStep, endStep, stack)
+		WHERE t.session_id = $1 AND t.step_index BETWEEN $2 AND $3 AND ($4 = '' OR t.agent = $4)
+		ORDER BY t.agent ASC, t.step_index ASC`, scanStepResult, sessionID, startStep, endStep, stack)
 }
 
 // GetStats counts indexed sessions and steps per stack. An empty stack covers
 // every stack in the shared index.
 func (s *Store) GetStats(ctx context.Context, stack string) ([]StackStats, error) {
 	return collectReadRows(ctx, s, "query transcript stats",
-		`WITH ss AS (SELECT stack, COUNT(*) AS sessions FROM session_summaries WHERE $1 = '' OR stack = $1 GROUP BY stack),
-		 ts AS (SELECT stack, COUNT(*) AS steps FROM transcript_steps WHERE $1 = '' OR stack = $1 GROUP BY stack)
-		 SELECT ss.stack, ss.sessions, COALESCE(ts.steps, 0) FROM ss LEFT JOIN ts ON ts.stack = ss.stack ORDER BY ss.stack`,
+		`WITH ss AS (SELECT agent, COUNT(*) AS sessions FROM session_summaries WHERE $1 = '' OR agent = $1 GROUP BY agent),
+		 ts AS (SELECT agent, COUNT(*) AS steps FROM transcript_steps WHERE $1 = '' OR agent = $1 GROUP BY agent)
+		 SELECT ss.agent, ss.sessions, COALESCE(ts.steps, 0) FROM ss LEFT JOIN ts ON ts.agent = ss.agent ORDER BY ss.agent`,
 		scanStackStat, strings.TrimSpace(stack))
 }
 
@@ -396,7 +396,7 @@ func (s *Store) GetStats(ctx context.Context, stack string) ([]StackStats, error
 // stack in the shared index; extractors resume from these cursors.
 func (s *Store) GetWatermarks(ctx context.Context, stack string) ([]SessionWatermark, error) {
 	return collectReadRows(ctx, s, "query watermarks",
-		`SELECT stack, session_id, last_indexed_step, last_mtime FROM session_summaries
-		 WHERE $1 = '' OR stack = $1 ORDER BY stack ASC, session_id ASC`,
+		`SELECT agent, session_id, last_indexed_step, last_mtime FROM session_summaries
+		 WHERE $1 = '' OR agent = $1 ORDER BY agent ASC, session_id ASC`,
 		scanSessionWatermark, strings.TrimSpace(stack))
 }
