@@ -329,10 +329,10 @@ func TestClientScopedNames(t *testing.T) {
 	tests := []scopedNameCase{
 		{name: "empty defaults to legacy", agent: "", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
 		{name: "aerial defaults to legacy", agent: "aerial", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "suletta scoped", agent: "suletta", buildID: "b1", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
-		{name: "miorine scoped", agent: "miorine", buildID: "b1", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Create", wantRouterPath: "/BuildRouter-miorine/RouteFailChunk"},
-		{name: "mixed case scoped normalized", agent: "Suletta", buildID: "b1", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
-		{name: "special characters in buildID are escaped", agent: "suletta", buildID: "build/1#test:special", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+		{name: "agent-beta scoped", agent: "agent-beta", buildID: "b1", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter-agent-beta/RouteFailChunk"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", buildID: "b1", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantObjectPath: "/Build-agent-alpha/b1/Create", wantRouterPath: "/BuildRouter-agent-alpha/RouteFailChunk"},
+		{name: "mixed case scoped normalized", agent: "Agent-Beta", buildID: "b1", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter-agent-beta/RouteFailChunk"},
+		{name: "special characters in buildID are escaped", agent: "agent-beta", buildID: "build/1#test:special", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter-agent-beta/RouteFailChunk"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -268,8 +268,8 @@ func TestLoadRestateConfig(t *testing.T) {
 		},
 		{
 			name:        "agent name from env",
-			env:         map[string]string{"AGENT_NAME": "  Suletta  "},
-			wantEnabled: false, wantAgent: "Suletta",
+			env:         map[string]string{"AGENT_NAME": "  Agent-Beta  "},
+			wantEnabled: false, wantAgent: "Agent-Beta",
 		},
 		{
 			name: "config path yaml loaded", restateMode: "file",
@@ -315,9 +315,9 @@ func TestRestateScopedNames(t *testing.T) {
 	}{
 		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantAgent: ""},
 		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantAgent: "aerial"},
-		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantAgent: "suletta"},
-		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantAgent: "miorine"},
-		{name: "mixed case normalized", agent: "  Suletta  ", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantAgent: "suletta"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantAgent: "agent-beta"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantAgent: "agent-alpha"},
+		{name: "mixed case normalized", agent: "  Agent-Beta  ", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantAgent: "agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
