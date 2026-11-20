@@ -35,29 +35,13 @@ import (
 
 // Frozen Restate service names. They match the synapse ingress invoker
 // defaults (DefaultPRService/DefaultRepoService) exactly; any rename is a
-// cross-module breaking change caught by TestRegisterPRStateServices.
+// cross-module breaking change caught by TestRegisterPRStateServices. Every
+// agent's PRs live in these single objects: the owning agent is PRState
+// data, never part of the service name.
 const (
 	PRObjectServiceName   = "PRObject"
 	RepoObjectServiceName = "RepoObject"
 )
-
-// PRObjectServiceNameForAgent derives the Restate PRObject Virtual Object name for an agent.
-func PRObjectServiceNameForAgent(agent string) string {
-	norm := strings.ToLower(strings.TrimSpace(agent))
-	if norm == "" || norm == DefaultAgent {
-		return PRObjectServiceName
-	}
-	return PRObjectServiceName + "-" + norm
-}
-
-// RepoObjectServiceNameForAgent derives the Restate RepoObject Virtual Object name for an agent.
-func RepoObjectServiceNameForAgent(agent string) string {
-	norm := strings.ToLower(strings.TrimSpace(agent))
-	if norm == "" || norm == DefaultAgent {
-		return RepoObjectServiceName
-	}
-	return RepoObjectServiceName + "-" + norm
-}
 
 // Restate K/V state keys. One slot per object key; the object key itself
 // (repo#prNumber, repo) is the slot the ingress invocation addresses.
@@ -69,30 +53,18 @@ const (
 // PRObjectService is the dark PRObject Virtual Object. Handlers persist
 // first-touch and applied state to Restate K/V and fire nothing.
 type PRObjectService struct {
-	stateKey  string
-	agentName string
+	stateKey string
 }
 
-// NewPRObjectService builds the dark PRObject service with the default agent.
+// NewPRObjectService builds the single dark PRObject service.
 func NewPRObjectService() *PRObjectService {
-	return NewPRObjectServiceWithAgent("")
+	return &PRObjectService{stateKey: prObjectStateKey}
 }
 
-// NewPRObjectServiceWithAgent builds the dark PRObject service scoped to agent.
-func NewPRObjectServiceWithAgent(agent string) *PRObjectService {
-	return &PRObjectService{
-		stateKey:  prObjectStateKey,
-		agentName: agent,
-	}
-}
-
-// ServiceName returns the agent-scoped PRObject service name. Nil-safe so the
-// registrar never panics on a zero service.
-func (s *PRObjectService) ServiceName() string {
-	if s == nil {
-		return PRObjectServiceName
-	}
-	return PRObjectServiceNameForAgent(s.agentName)
+// ServiceName returns the single PRObject service name for every agent.
+// Nil-safe so the registrar never panics on a zero service.
+func (*PRObjectService) ServiceName() string {
+	return PRObjectServiceName
 }
 
 func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, ev PREvent) (*PRState, error) {
@@ -103,11 +75,10 @@ func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, e
 	if st == nil {
 		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
-	if agent := strings.TrimSpace(ev.Agent); agent != "" {
-		st.Agent = agent
-	} else if strings.TrimSpace(st.Agent) == "" {
-		st.Agent = DefaultAgent
-	}
+	// Lifecycle events carry the agent only as a hint: it fills an empty
+	// owner slot but never overwrites a stored owner. Register, Hydrate, and
+	// PR-body metadata on opened claim ownership via ClaimOwner instead.
+	st.ApplyAgentHint(ev.Agent)
 	return st, nil
 }
 
@@ -313,30 +284,18 @@ func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext
 // RepoObjectService is the dark RepoObject Virtual Object. Handlers persist
 // main-push and tombstone state to Restate K/V and fire nothing.
 type RepoObjectService struct {
-	stateKey  string
-	agentName string
+	stateKey string
 }
 
-// NewRepoObjectService builds the dark RepoObject service with the default agent.
+// NewRepoObjectService builds the single dark RepoObject service.
 func NewRepoObjectService() *RepoObjectService {
-	return NewRepoObjectServiceWithAgent("")
+	return &RepoObjectService{stateKey: repoObjectStateKey}
 }
 
-// NewRepoObjectServiceWithAgent builds the dark RepoObject service scoped to agent.
-func NewRepoObjectServiceWithAgent(agent string) *RepoObjectService {
-	return &RepoObjectService{
-		stateKey:  repoObjectStateKey,
-		agentName: agent,
-	}
-}
-
-// ServiceName returns the agent-scoped RepoObject service name. Nil-safe so the
-// registrar never panics on a zero service.
-func (s *RepoObjectService) ServiceName() string {
-	if s == nil {
-		return RepoObjectServiceName
-	}
-	return RepoObjectServiceNameForAgent(s.agentName)
+// ServiceName returns the single RepoObject service name for every agent.
+// Nil-safe so the registrar never panics on a zero service.
+func (*RepoObjectService) ServiceName() string {
+	return RepoObjectServiceName
 }
 
 // HandleMainPush records one main push SHA into the bounded index dark.

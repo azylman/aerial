@@ -52,7 +52,6 @@ func NewPRState(repo string, prNumber int) *PRState {
 	return &PRState{
 		Repo:     NormalizeRepo(repo),
 		PRNumber: prNumber,
-		Agent:    DefaultAgent,
 		Checks: FailedCheckState{
 			EverFailed:   make(map[string]bool),
 			ActiveFailed: make(map[string]bool),
@@ -60,6 +59,37 @@ func NewPRState(repo string, prNumber int) *PRState {
 		DispatchedEffects: make(map[string]bool),
 		DeploySHAJob:      make(map[string]bool),
 	}
+}
+
+// ClaimOwner sets the owning agent from an authoritative source: register,
+// Hydrate from the registry row, or PR-body bot metadata on opened. A blank
+// agent never clears a stored owner. Returns true when the owner changed.
+func (s *PRState) ClaimOwner(agent string) bool {
+	agent = strings.TrimSpace(agent)
+	if s == nil || agent == "" || s.Agent == agent {
+		return false
+	}
+	s.Agent = agent
+	return true
+}
+
+// ApplyAgentHint fills the owner from a lifecycle event's agent hint only
+// when no owner is stored; a hint never overwrites an existing owner.
+// Returns true when the hint was adopted.
+func (s *PRState) ApplyAgentHint(agent string) bool {
+	if s == nil || strings.TrimSpace(s.Agent) != "" {
+		return false
+	}
+	return s.ClaimOwner(agent)
+}
+
+// OwnerAgent returns the stored owner, falling back to DefaultAgent when no
+// owner has been claimed or hinted yet.
+func (s *PRState) OwnerAgent() string {
+	if s == nil || strings.TrimSpace(s.Agent) == "" {
+		return DefaultAgent
+	}
+	return s.Agent
 }
 
 // RecordFailedCISHA records the failed CI head SHA. Returns true when the SHA

@@ -65,46 +65,6 @@ func sortedHandlerNames(def restate.ServiceDefinition) string {
 	return strings.Join(names, ",")
 }
 
-// TestServiceNameForAgent_Derivation pins the agent-scoped service name derivation.
-func TestServiceNameForAgent_Derivation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		agent    string
-		wantPR   string
-		wantRepo string
-	}{
-		{name: "empty agent", agent: "", wantPR: "PRObject", wantRepo: "RepoObject"},
-		{name: "aerial agent", agent: "aerial", wantPR: "PRObject", wantRepo: "RepoObject"},
-		{name: "aerial uppercase with spaces", agent: "  AERIAL  ", wantPR: "PRObject", wantRepo: "RepoObject"},
-		{name: "marida agent", agent: "marida", wantPR: "PRObject-marida", wantRepo: "RepoObject-marida"},
-		{name: "miorine mixed case with spaces", agent: "  Miorine  ", wantPR: "PRObject-miorine", wantRepo: "RepoObject-miorine"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotPR := PRObjectServiceNameForAgent(tc.agent)
-			gotRepo := RepoObjectServiceNameForAgent(tc.agent)
-			if gotPR != tc.wantPR {
-				t.Fatalf("PRObjectServiceNameForAgent(%q) = %q, want %q", tc.agent, gotPR, tc.wantPR)
-			}
-			if gotRepo != tc.wantRepo {
-				t.Fatalf("RepoObjectServiceNameForAgent(%q) = %q, want %q", tc.agent, gotRepo, tc.wantRepo)
-			}
-			prSvc := NewPRObjectServiceWithAgent(tc.agent)
-			repoSvc := NewRepoObjectServiceWithAgent(tc.agent)
-			if prSvc.ServiceName() != tc.wantPR {
-				t.Fatalf("prSvc.ServiceName() = %q, want %q", prSvc.ServiceName(), tc.wantPR)
-			}
-			if repoSvc.ServiceName() != tc.wantRepo {
-				t.Fatalf("repoSvc.ServiceName() = %q, want %q", repoSvc.ServiceName(), tc.wantRepo)
-			}
-		})
-	}
-	assert.Equal(t, "PRObject", (*PRObjectService)(nil).ServiceName())
-	assert.Equal(t, "RepoObject", (*RepoObjectService)(nil).ServiceName())
-}
-
 // TestRegisterPRStateServices pins dark registration: frozen service names
 // matching the synapse ingress invoker defaults, the exact 13-handler PR
 // surface and 4-handler repo surface, and nil-safe dark defaults.
@@ -112,7 +72,6 @@ func TestRegisterPRStateServices(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name            string
-		agent           string
 		prNil           bool
 		repoNil         bool
 		wantPRName      string
@@ -129,14 +88,6 @@ func TestRegisterPRStateServices(t *testing.T) {
 			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
 			wantRepoHandler: "HandleFanout,HandleKustomizationStatus,HandleMainPush,ResolvePRBySHA",
 		},
-		{
-			name:            "agent scoped services",
-			agent:           "marida",
-			wantPRName:      "PRObject-marida",
-			wantRepoName:    "RepoObject-marida",
-			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
-			wantRepoHandler: "HandleFanout,HandleKustomizationStatus,HandleMainPush,ResolvePRBySHA",
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,10 +95,10 @@ func TestRegisterPRStateServices(t *testing.T) {
 			var pr *PRObjectService
 			var repo *RepoObjectService
 			if !tc.prNil {
-				pr = NewPRObjectServiceWithAgent(tc.agent)
+				pr = NewPRObjectService()
 			}
 			if !tc.repoNil {
-				repo = NewRepoObjectServiceWithAgent(tc.agent)
+				repo = NewRepoObjectService()
 			}
 			srv := server.NewRestate()
 			gotPR, gotRepo := RegisterPRStateServices(srv, pr, repo)
@@ -760,4 +711,32 @@ func TestRepoObjectService_FanoutAndResolve(t *testing.T) {
 	resp, rErr := repoSvc.ResolvePRBySHA(restate.WithMockContext(mc), ResolveSHARequest{Repo: "aerial", SHA: "abc123"})
 	require.NoError(t, rErr)
 	require.False(t, resp.Found)
+}
+
+// TestPRObjectService_OwnerPreserved proves lifecycle events never clobber a
+// stored owner: an event agent is only a hint that fills an empty slot.
+func TestPRObjectService_OwnerPreserved(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		existing  *PRState
+		evAgent   string
+		wantAgent string
+	}{
+		{name: "stored owner survives a different event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "miorine"}, evAgent: "aerial", wantAgent: "miorine"},
+		{name: "stored owner survives an empty event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "miorine"}, evAgent: "", wantAgent: "miorine"},
+		{name: "hint fills an empty stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7}, evAgent: " suletta ", wantAgent: "suletta"},
+		{name: "first touch adopts the hint", existing: nil, evAgent: "suletta", wantAgent: "suletta"},
+		{name: "first touch without hint leaves owner unset", existing: nil, evAgent: "", wantAgent: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := newStateMock[*PRState](t, tc.existing)
+			ev := PREvent{Repo: "aerial", PRNumber: 7, HeadSHA: "abc123", Agent: tc.evAgent, Event: "check_failed"}
+			require.NoError(t, NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), ev))
+			require.True(t, rec.setCalled)
+			assert.Equal(t, tc.wantAgent, rec.saved.Agent)
+		})
+	}
 }

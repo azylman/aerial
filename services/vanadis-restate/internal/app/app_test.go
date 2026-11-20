@@ -253,12 +253,12 @@ func TestBindRestateServices(t *testing.T) {
 			wantRepo:   "RepoObject",
 		},
 		{
-			name:       "scoped agent binds dark services",
+			name:       "scoped agent keeps single pr state services",
 			agent:      "marida",
 			wantBuild:  "Build-marida",
 			wantRouter: "BuildRouter-marida",
-			wantPR:     "PRObject-marida",
-			wantRepo:   "RepoObject-marida",
+			wantPR:     "PRObject",
+			wantRepo:   "RepoObject",
 		},
 	}
 	for _, tc := range tests {
@@ -266,7 +266,7 @@ func TestBindRestateServices(t *testing.T) {
 			t.Parallel()
 			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
 			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
-			srv := bindRestateServices(restateObj, routerSvc, tc.agent)
+			srv := bindRestateServices(restateObj, routerSvc)
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)

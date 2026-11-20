@@ -275,7 +275,7 @@ func TestPayloadJSONShape(t *testing.T) {
 	}
 }
 
-func TestAgentScopedServiceRouting(t *testing.T) {
+func TestSingleObjectServiceRouting(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name         string
@@ -285,7 +285,7 @@ func TestAgentScopedServiceRouting(t *testing.T) {
 	}{
 		{name: "empty agent defaults to standard services", agent: "", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
 		{name: "aerial agent defaults to standard services", agent: "aerial", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
-		{name: "agent-alpha agent scopes service names", agent: "agent-alpha", wantPRPath: "/PRObject-agent-alpha/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject-agent-alpha/azylman%2Faerial/HandleMainPush"},
+		{name: "agent-alpha agent still targets the single services", agent: "agent-alpha", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

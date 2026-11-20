@@ -1015,3 +1015,79 @@ func TestRepoStateResolvePRBySHA(t *testing.T) {
 		})
 	}
 }
+
+func TestPRState_ClaimOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		state     *PRState
+		agent     string
+		want      bool
+		wantAgent string
+	}{
+		{name: "claims empty owner", state: &PRState{}, agent: "miorine", want: true, wantAgent: "miorine"},
+		{name: "overwrites stored owner", state: &PRState{Agent: "aerial"}, agent: " miorine ", want: true, wantAgent: "miorine"},
+		{name: "same owner is a no-op", state: &PRState{Agent: "miorine"}, agent: "miorine", want: false, wantAgent: "miorine"},
+		{name: "blank agent never clears owner", state: &PRState{Agent: "miorine"}, agent: "  ", want: false, wantAgent: "miorine"},
+		{name: "nil state is a no-op", state: nil, agent: "miorine", want: false, wantAgent: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.state.ClaimOwner(tc.agent); got != tc.want {
+				t.Fatalf("ClaimOwner(%q) = %v, want %v", tc.agent, got, tc.want)
+			}
+			if tc.state != nil && tc.state.Agent != tc.wantAgent {
+				t.Fatalf("Agent = %q, want %q", tc.state.Agent, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestPRState_ApplyAgentHint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		state     *PRState
+		agent     string
+		want      bool
+		wantAgent string
+	}{
+		{name: "fills empty owner", state: &PRState{}, agent: "suletta", want: true, wantAgent: "suletta"},
+		{name: "never overwrites stored owner", state: &PRState{Agent: "miorine"}, agent: "aerial", want: false, wantAgent: "miorine"},
+		{name: "blank hint leaves owner empty", state: &PRState{}, agent: "", want: false, wantAgent: ""},
+		{name: "nil state is a no-op", state: nil, agent: "suletta", want: false, wantAgent: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.state.ApplyAgentHint(tc.agent); got != tc.want {
+				t.Fatalf("ApplyAgentHint(%q) = %v, want %v", tc.agent, got, tc.want)
+			}
+			if tc.state != nil && tc.state.Agent != tc.wantAgent {
+				t.Fatalf("Agent = %q, want %q", tc.state.Agent, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestPRState_OwnerAgent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state *PRState
+		want  string
+	}{
+		{name: "stored owner", state: &PRState{Agent: "miorine"}, want: "miorine"},
+		{name: "empty owner falls back to aerial", state: &PRState{}, want: "aerial"},
+		{name: "nil state falls back to aerial", state: nil, want: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.state.OwnerAgent(); got != tc.want {
+				t.Fatalf("OwnerAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

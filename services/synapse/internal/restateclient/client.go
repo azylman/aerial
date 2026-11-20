@@ -185,31 +185,11 @@ func NewClient(baseURL, prService, repoService string, httpClient *http.Client) 
 	}
 }
 
-func (c *Client) prServiceForAgent(agent string) string {
-	if c.prService != DefaultPRService && c.prService != "" {
-		return c.prService
-	}
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" || clean == "aerial" {
-		return DefaultPRService
-	}
-	return "PRObject-" + clean
-}
-
-func (c *Client) repoServiceForAgent(agent string) string {
-	if c.repoService != DefaultRepoService && c.repoService != "" {
-		return c.repoService
-	}
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" || clean == "aerial" {
-		return DefaultRepoService
-	}
-	return "RepoObject-" + clean
-}
-
 // SendPREvent delivers ev to one frozen PRObject handler for repo#prNumber.
 // Unmanaged collaborator events and owned events alike address PRObject
 // only; the client never resolves a build ID and never signals BuildRouter.
+// Every agent's events address the same single PRObject service: ev.Agent is
+// an ownership hint carried in the payload, never a routing input.
 func (c *Client) SendPREvent(ctx context.Context, handler string, ev PREvent) error {
 	if !prHandlers[handler] {
 		return fmt.Errorf("unknown pr handler %q", handler)
@@ -224,7 +204,7 @@ func (c *Client) SendPREvent(ctx context.Context, handler string, ev PREvent) er
 	if ev.PRNumber <= 0 {
 		return errors.New("pr_number is required")
 	}
-	return c.send(ctx, c.prServiceForAgent(ev.Agent), PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	return c.send(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 }
 
 // SendRepoEvent delivers ev to one frozen RepoObject handler for repo.
@@ -239,7 +219,7 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent
 	if ev.Repo == "" {
 		return errors.New("repo is required")
 	}
-	return c.send(ctx, c.repoServiceForAgent(ev.Agent), RepoObjectKey(ev.Repo), handler, ev)
+	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
 }
 
 // InvokePREvent delivers ev to one frozen PRObject handler and decodes the
@@ -264,7 +244,7 @@ func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, 
 	if out == nil {
 		return errors.New("output is required")
 	}
-	body, err := c.post(ctx, c.prServiceForAgent(ev.Agent), PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	body, err := c.post(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 	if err != nil {
 		return err
 	}

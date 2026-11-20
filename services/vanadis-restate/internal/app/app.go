@@ -99,15 +99,15 @@ func LoadConfigFromEnv() Config {
 // BuildRouter, and the dark PRObject/RepoObject state services. The synapse
 // ingress invoker addresses PRObject/RepoObject, but all synapse consumers
 // stay on legacy trackers: nothing routes here until the cutover chunk.
-func bindRestateServices(restateObj *build.BuildObject, routerSvc *router.BuildRouterService, agentName ...string) *server.Restate {
-	agent := ""
-	if len(agentName) > 0 {
-		agent = agentName[0]
-	}
+//
+// Build and BuildRouter stay agent-scoped (their names come from restateObj
+// and routerSvc), while PRObject/RepoObject are the single objects every
+// agent's PRs route to.
+func bindRestateServices(restateObj *build.BuildObject, routerSvc *router.BuildRouterService) *server.Restate {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))
-	prstate.RegisterPRStateServices(srv, prstate.NewPRObjectServiceWithAgent(agent), prstate.NewRepoObjectServiceWithAgent(agent))
+	prstate.RegisterPRStateServices(srv, prstate.NewPRObjectService(), prstate.NewRepoObjectService())
 	return srv
 }
 
@@ -183,7 +183,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
-	restateServer := bindRestateServices(restateObj, routerSvc, cfg.AgentName)
+	restateServer := bindRestateServices(restateObj, routerSvc)
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)
