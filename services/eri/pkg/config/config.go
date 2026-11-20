@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -899,6 +900,13 @@ func ResolveConfigSearchPaths(lookup func(string) string, defaultPaths ...string
 }
 
 func New() (*Config, error) {
+	if testing.Testing() {
+		p := strings.TrimSpace(os.Getenv("CONFIG_PATH"))
+		if p == "" {
+			return nil, fmt.Errorf("no configuration file found in search paths: []")
+		}
+		return LoadConfigFromPaths(p)
+	}
 	return LoadConfigFromPaths(ResolveConfigSearchPaths(os.Getenv, ConfigSearchPaths...)...)
 }
 
@@ -1139,11 +1147,16 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 }
 
 func LoadConfigFromPaths(paths ...string) (*Config, error) {
-	if isContainerColdBoot(paths...) {
+	secretsPath := SharedSecretsPath
+	if testing.Testing() {
+		if secretsPath == "/secrets" {
+			secretsPath = ""
+		}
+	} else if isContainerColdBoot(paths...) {
 		waitForColdBootConfig(paths, 5*time.Second)
 	}
 
-	lookup := WithSharedSecretsLookup(os.Getenv, SharedSecretsPath)
+	lookup := WithSharedSecretsLookup(os.Getenv, secretsPath)
 	fresh, err := LoadConfigFromLookup(lookup, paths...)
 	if err != nil {
 		return nil, err

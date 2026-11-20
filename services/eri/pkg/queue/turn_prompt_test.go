@@ -464,7 +464,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 				{name: spanPromptScopeInstr, parent: spanPrompt},
 				{name: spanPromptAmbientContext, parent: spanPrompt},
 			},
-			wantAbsent: []string{spanPromptThreadSummary, spanPromptHistoryFetch, spanPromptPrevSessionID},
+			wantAbsent: []string{spanPromptThreadSummary, spanPromptPrevSessionID},
 		},
 		{
 			name: "UnconfiguredChannel_Bypass", resolverText: "<ambient_context>should not appear</ambient_context>",
@@ -520,7 +520,21 @@ func TestBuildTurnPrompt(t *testing.T) {
 		{
 			name: "WarmThreadMarksSummarizeThread", threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
 			wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>", "ship it"},
-			wantAbsent: []string{spanPromptThreadSummary, spanPromptHistoryFetch},
+			wantAbsent: []string{spanPromptThreadSummary},
+		},
+		{
+			name: "WarmThreadInjectsWidgetLookback", threadSnapshot: true,
+			histMsgs: []HistoryMessage{
+				{ID: "h-user", AuthorName: "Alex", Content: "regular thread message", CreatedAt: now.Add(-time.Hour)},
+				{ID: "h-widget", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: "Build #42 passed", CreatedAt: now.Add(-time.Minute)},
+			},
+			cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			wantPromptContains: []string{"Build #42 passed", "<CHANNEL_HISTORY>"},
+			wantPromptExcludes: []string{"regular thread message", "<THREAD_SUMMARY>"},
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptHistoryFetch, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(10), attrPromptHistoryCount.Int(2)}},
+			},
+			wantAbsent: []string{spanPromptThreadSummary},
 		},
 		{
 			name: "ChannelModeThreadDoesNotSummarize", isCold: true, threadSnapshot: true, mode: "channel", histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2",

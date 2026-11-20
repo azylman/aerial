@@ -633,11 +633,20 @@ func newestHistoryMessageIDs(msgs []HistoryMessage, n int) []string {
 }
 
 func (te *turnExecution) resolveColdStartLookbackMessages(ctx context.Context, isColdStart, isChannelMode bool, getTurnHistory func(context.Context, int) []HistoryMessage) []HistoryMessage {
-	if !te.isEphemeral && (isColdStart || isChannelMode) {
-		lookbackMsgs := getTurnHistory(ctx, coldStartLookbackLimit)
-		if len(lookbackMsgs) > 0 {
-			te.logCtxf(ctx, "[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
+	if te.isEphemeral {
+		return nil
+	}
+	lookbackMsgs := getTurnHistory(ctx, coldStartLookbackLimit)
+	if !isColdStart && !isChannelMode {
+		lookbackMsgs = slices.DeleteFunc(slices.Clone(lookbackMsgs), func(m HistoryMessage) bool {
+			return !m.IsWidget
+		})
+		if len(lookbackMsgs) == 0 {
+			return nil
 		}
+	}
+	if len(lookbackMsgs) > 0 {
+		te.logCtxf(ctx, "[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		return lookbackMsgs
 	}
 	return nil
