@@ -709,14 +709,14 @@ func TestRestateIngressClient_AskVoice(t *testing.T) {
 			wantPathSub: "/VoiceSession/kiosk-1/Ask",
 		},
 		{
-			name:        "successful voice ask on miorine stack",
-			agentName:   "miorine",
+			name:        "successful voice ask on agent-alpha stack",
+			agentName:   "agent-alpha",
 			deviceKey:   "kiosk-2",
 			req:         queue.VoiceSessionRequest{Prompt: "status", DeviceKey: "kiosk-2"},
 			serverResp:  `{"reply":"all good","conversation_id":"conv-2","device_key":"kiosk-2"}`,
 			statusCode:  http.StatusOK,
 			wantReply:   "all good",
-			wantPathSub: "/VoiceSession-miorine/kiosk-2/Ask",
+			wantPathSub: "/VoiceSession-agent-alpha/kiosk-2/Ask",
 		},
 		{
 			name:         "voice ask backend failure returns error",
