@@ -418,11 +418,19 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discord widget deliverer is nil")
 
+	errDeliverMsg := nilDeliverer.DeliverDirectMessage(context.Background(), "c1", "alert")
+	require.Error(t, errDeliverMsg)
+	assert.Contains(t, errDeliverMsg.Error(), "discord widget deliverer is nil")
+
 	d, nErr := NewDiscordWidgetDeliverer("")
 	require.NoError(t, nErr)
 	_, dErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
 	require.Error(t, dErr)
 	assert.Contains(t, dErr.Error(), "discord widget sender is nil")
+
+	dErrDeliverMsg := d.DeliverDirectMessage(context.Background(), "c1", "alert")
+	require.Error(t, dErrDeliverMsg)
+	assert.Contains(t, dErrDeliverMsg.Error(), "discord widget sender is nil")
 
 	assert.Equal(t, "", d.redirectChannelIfNoBuildUpdates(""))
 	assert.Equal(t, "fallback", d.resolveChannelID("", "fallback"))
@@ -437,6 +445,131 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	_, sErr := dWithSession.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{})
 	require.Error(t, sErr)
 	assert.Contains(t, sErr.Error(), "channel_id is required")
+
+	assert.NoError(t, dWithSession.DeliverDirectMessage(context.Background(), "", ""))
+}
+
+func TestDeliverDirectMessage(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name            string
+		nilDeliverer    bool
+		nilSender       bool
+		channelID       string
+		content         string
+		noBuildUpdates  bool
+		sysChannel      string
+		sendErr         error
+		wantErr         bool
+		errContain      string
+		expectSent      bool
+		expectChannelID string
+		expectContent   string
+	}{
+		{
+			name:         "nil deliverer returns error",
+			nilDeliverer: true,
+			channelID:    "123456",
+			content:      "alert",
+			wantErr:      true,
+			errContain:   "discord widget deliverer is nil",
+		},
+		{
+			name:       "nil sender returns error",
+			nilSender:  true,
+			channelID:  "123456",
+			content:    "alert",
+			wantErr:    true,
+			errContain: "discord widget sender is nil",
+		},
+		{
+			name:       "empty channel is no-op",
+			channelID:  "   ",
+			content:    "alert",
+			expectSent: false,
+		},
+		{
+			name:       "empty content is no-op",
+			channelID:  "123456",
+			content:    "   ",
+			expectSent: false,
+		},
+		{
+			name:            "channel policy redirect when no_build_updates",
+			channelID:       "123456",
+			content:         "alert msg",
+			noBuildUpdates:  true,
+			sysChannel:      "999888",
+			expectSent:      true,
+			expectChannelID: "999888",
+			expectContent:   "alert msg",
+		},
+		{
+			name:            "successful send suppresses allowed mentions",
+			channelID:       "123456",
+			content:         "hello world",
+			expectSent:      true,
+			expectChannelID: "123456",
+			expectContent:   "hello world",
+		},
+		{
+			name:       "send error propagates",
+			channelID:  "123456",
+			content:    "hello world",
+			sendErr:    errors.New("discord rate limited"),
+			wantErr:    true,
+			errContain: "failed to send direct discord message: discord rate limited",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var d *DiscordWidgetDeliverer
+			var mock *mockWidgetSender
+			var sender DiscordWidgetSender
+
+			if !tc.nilDeliverer {
+				if !tc.nilSender {
+					mock = &mockWidgetSender{sendErr: tc.sendErr}
+					sender = mock
+				}
+				d = &DiscordWidgetDeliverer{
+					sender: sender,
+					nowFn:  func() time.Time { return now },
+					channelPolicyResolver: func(channelID string) (bool, string) {
+						return tc.noBuildUpdates, tc.sysChannel
+					},
+					resolvedChannels: make(map[string]cachedResolvedChannel),
+					channelMetaCache: make(map[string]cachedChannelMeta),
+				}
+			}
+
+			err := d.DeliverDirectMessage(context.Background(), tc.channelID, tc.content)
+			if tc.wantErr {
+				require.Error(t, err)
+				if tc.errContain != "" {
+					assert.Contains(t, err.Error(), tc.errContain)
+				}
+				return
+			}
+			require.NoError(t, err)
+			if !tc.expectSent {
+				if mock != nil {
+					assert.Nil(t, mock.lastSendData)
+				}
+				return
+			}
+			require.NotNil(t, mock)
+			require.NotNil(t, mock.lastSendData)
+			assert.Equal(t, tc.expectChannelID, mock.lastSendChannelID)
+			assert.Equal(t, tc.expectContent, mock.lastSendData.Content)
+			require.NotNil(t, mock.lastSendData.AllowedMentions)
+			assert.Empty(t, mock.lastSendData.AllowedMentions.Parse)
+		})
+	}
 }
 
 func TestFormatChunkDurationTable(t *testing.T) {

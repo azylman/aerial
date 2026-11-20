@@ -117,6 +117,11 @@ type StatusWidgetDeliverer interface {
 	DeliverStatusWidget(ctx context.Context, req StatusWidgetRequest) (string, error)
 }
 
+// DirectMessageDeliverer abstracts direct message delivery to decouple from concrete discord sender.
+type DirectMessageDeliverer interface {
+	DeliverDirectMessage(ctx context.Context, channelID, content string) error
+}
+
 // RestateEriClient implements EriClient against Restate Virtual Objects, falling back to HTTP Eri when unconfigured.
 type RestateEriClient struct {
 	restateURL   string
@@ -430,8 +435,20 @@ func (c *RestateEriClient) Message(ctx context.Context, channelID, content strin
 	if cleanChannelID == "" || cleanContent == "" {
 		return nil
 	}
+
+	c.widgetMu.RLock()
+	deliverer := c.widgetDeliverer
+	hasDiscordAuth := c.hasDiscordAuth
+	c.widgetMu.RUnlock()
+
+	if c.restateURL != "" && hasDiscordAuth {
+		if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {
+			return md.DeliverDirectMessage(ctx, cleanChannelID, cleanContent)
+		}
+	}
+
 	if c.httpFallback != nil {
 		return c.httpFallback.Message(ctx, cleanChannelID, cleanContent)
 	}
-	return errors.New("http fallback not configured for message delivery")
+	return errors.New("neither direct message deliverer nor http fallback configured for message delivery")
 }
