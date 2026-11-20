@@ -343,7 +343,7 @@ func (s *RouterServer) consumerStatsQuerier() ConsumerStatsQuerier {
 
 func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if q := s.consumerStatsQuerier(); q != nil {
-		if err := collectJetStreamQueueMetrics(r.Context(), q); err != nil {
+		if err := collectJetStreamQueueMetrics(r.Context(), q, s.discordRouting()); err != nil {
 			slog.ErrorContext(r.Context(), "[synapse] [metrics] error collecting jetstream queue metrics", "error", err)
 		}
 	}
@@ -1213,7 +1213,7 @@ func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error 
 	if s == nil || s.bus == nil {
 		return errors.New("event bus not configured")
 	}
-	subject, msgID := resolveJetStreamJobCoords(args)
+	subject, msgID := resolveJetStreamJobCoords(args, s.discordRouting())
 	if subject == "" {
 		return fmt.Errorf("unsupported job args type %T", args)
 	}
