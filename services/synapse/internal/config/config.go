@@ -356,25 +356,13 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 	return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 }
 
-// PRObjectServiceName returns the Restate PR Virtual Object name for botID.
-// Empty or "aerial" defaults to "PRObject"; any other name is lowercased and formatted as "PRObject-<name>".
-func PRObjectServiceName(botID string) string {
-	name := strings.ToLower(strings.TrimSpace(botID))
-	if name == "" || name == defaultAgentName {
-		return "PRObject"
-	}
-	return "PRObject-" + name
-}
-
-// RepoObjectServiceName returns the Restate Repo Virtual Object name for botID.
-// Empty or "aerial" defaults to "RepoObject"; any other name is lowercased and formatted as "RepoObject-<name>".
-func RepoObjectServiceName(botID string) string {
-	name := strings.ToLower(strings.TrimSpace(botID))
-	if name == "" || name == defaultAgentName {
-		return "RepoObject"
-	}
-	return "RepoObject-" + name
-}
+// Single Restate PR lifecycle Virtual Objects. Every bot's events address
+// these one services; restate_pr_service/restate_repo_service override them
+// explicitly and are never derived from the bot ID.
+const (
+	defaultRestatePRService   = "PRObject"
+	defaultRestateRepoService = "RepoObject"
+)
 
 func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, defaultOwner bool) map[string]BotConfig {
 	bots := make(map[string]BotConfig)
@@ -517,8 +505,8 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		EriURL:               eriURL,
 		NATSURL:              model.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
 		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
-		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), PRObjectServiceName(botID)),
-		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), RepoObjectServiceName(botID)),
+		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
+		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
 		RestateAuthoritative: fileCfg.RestateAuthoritative,
 		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:         discordToken,
