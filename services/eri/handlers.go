@@ -27,7 +27,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
-	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -663,37 +662,6 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "sent", jsonKeyChannelID: targetID})
-	}
-}
-
-func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requirePostWithPool(w, r, pool) {
-			return
-		}
-
-		var req discord.StatusWidgetRequest
-		if !readPostJSON(w, r, &req) {
-			return
-		}
-
-		targetID := strings.TrimSpace(req.ChannelID)
-		if !validateSnowflakeID(w, targetID, jsonKeyChannelID) {
-			return
-		}
-
-		if len(req.Chunks) == 0 {
-			writeErr(w, http.StatusBadRequest, "Invalid payload: 'chunks' field is required and cannot be empty")
-			return
-		}
-
-		msgID, err := pool.DeliverStatusWidgetWithContext(r.Context(), req)
-		if err != nil {
-			writeDiscordDeliveryError(w, err, "Failed to deliver widget")
-			return
-		}
-
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", jsonKeyMessageID: msgID})
 	}
 }
 
@@ -1396,7 +1364,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux.HandleFunc("/dispatch", handleDispatch(store, pool))
 	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store, pool))
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
-	mux.HandleFunc("/discord/widget", handleStatusWidget(pool))
 	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))
 	mux.HandleFunc("/internal/discord/interaction", handleInternalDiscordInteraction(store, pool))
 	mux.HandleFunc("/internal/guard/scan", handleInternalGuardScan())

@@ -161,11 +161,10 @@ func extractVanadisBuildID(chunkID, sessionID, targetID, prompt string) string {
 	return ""
 }
 
-func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkIdx int) {
+func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string) {
 	if d == nil {
-		return "", "", -1
+		return "", ""
 	}
-	chunkIdx = -1
 	if chunk := strings.TrimSpace(d.VanadisChunkID); chunk != "" {
 		chunkID = chunk
 	}
@@ -183,8 +182,8 @@ func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkI
 	if chunkID == "" {
 		if repo, prNum, ok := extractPRRemediationTarget(d.Prompt); ok {
 			prID := fmt.Sprintf("pr-%s-%d", repo, prNum)
-			return prID, prID, 0
+			return prID, prID
 		}
 	}
-	return chunkID, buildID, chunkIdx
+	return chunkID, buildID
 }

@@ -28,7 +28,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
-	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -974,10 +973,8 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	nilPool.HoldUntilLeader()
 	_ = nilPool.ReleaseLeaderHold()
 	_ = nilPool.DeliverDirect("c", "t")
-	_, _ = nilPool.DeliverStatusWidget(discord.StatusWidgetRequest{})
 	pEmpty := &WorkerPool{}
 	_ = pEmpty.DeliverDirect("c", "t")
-	_, _ = pEmpty.DeliverStatusWidget(discord.StatusWidgetRequest{})
 
 	getRec, onRot := makeSessionCallbacks(fake)
 	_, _ = getRec(ctx, "t1")
