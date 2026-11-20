@@ -703,6 +703,17 @@ spec:
             severity: critical
           annotations:
             summary: vanadis-restate reconcile or handler errors detected (Restate invocation backing off)
+    - name: eri_session_health
+      interval: 30s
+      rules:
+        - alert: BrainUnrotatedSessionTurns
+          expr: |
+            sum(increase(aerial_brain_unrotated_session_turns_total[15m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Eri processed turns on a session exceeding the unrotated turn threshold without rotation
 ---
 apiVersion: v1
 kind: ServiceAccount

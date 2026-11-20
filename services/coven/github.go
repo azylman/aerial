@@ -41,6 +41,7 @@ type GitHubSkillPublisherConfig struct {
 	HTTPClient      *http.Client
 	Now             func() time.Time
 	Bus             pubsub.Bus
+	EriURL          string
 }
 
 // GitHubSkillPublisher publishes procedural skill changes directly via GitHub HTTP API without git subprocesses.
@@ -55,6 +56,7 @@ type GitHubSkillPublisher struct {
 	now             func() time.Time
 	busMu           sync.RWMutex
 	bus             pubsub.Bus
+	eriURL          string
 }
 
 // SetEventBus updates the pubsub bus used for notifications.
@@ -108,6 +110,7 @@ func NewGitHubSkillPublisher(cfg GitHubSkillPublisherConfig) *GitHubSkillPublish
 		httpClient:      httpClient,
 		now:             now,
 		bus:             cfg.Bus,
+		eriURL:          strings.TrimRight(strings.TrimSpace(cfg.EriURL), "/"),
 	}
 }
 
@@ -452,6 +455,36 @@ func (p *GitHubSkillPublisher) enableAutoMerge(ctx context.Context, nodeID strin
 	return err
 }
 
+func (p *GitHubSkillPublisher) postJSON(ctx context.Context, targetURL, operationName string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal %s payload: %w", operationName, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create %s request: %w", operationName, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s request failed: %w", operationName, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		limited := io.LimitReader(resp.Body, 2<<20)
+		body, readErr := io.ReadAll(limited)
+		if readErr != nil {
+			return fmt.Errorf("%s returned status %d (failed to read body: %w)", operationName, resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("%s returned status %d: %s", operationName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	return nil
+}
+
 func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum int, branch, headSHA, title string) error {
 	payload := map[string]any{
 		"repo":             p.repo,
@@ -463,40 +496,25 @@ func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum in
 		"metadata":         "{}",
 		"vanadis_chunk_id": "",
 	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal registration payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.prRegisterURL, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("failed to create registration request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("brain registration request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		limited := io.LimitReader(resp.Body, 2<<20)
-		body, err := io.ReadAll(limited)
-		if err != nil {
-			return fmt.Errorf("brain registration returned status %d (failed to read body: %w)", resp.StatusCode, err)
-		}
-		return fmt.Errorf("brain registration returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	return nil
+	return p.postJSON(ctx, p.prRegisterURL, "brain registration", payload)
 }
 
-// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via JetStream.
+// notifyShortFrictionHTTP posts a short-friction alert via Eri's POST /discord/message HTTP endpoint.
+func (p *GitHubSkillPublisher) notifyShortFrictionHTTP(ctx context.Context, content string) error {
+	payload := map[string]string{
+		"channel_id": p.systemChannelID,
+		"content":    content,
+	}
+	return p.postJSON(ctx, p.eriURL+"/discord/message", "discord message", payload)
+}
+
+// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via Eri HTTP or fallback JetStream.
 func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content string) error {
 	if p.systemChannelID == "" || strings.TrimSpace(content) == "" {
 		return nil
+	}
+	if p.eriURL != "" {
+		return p.notifyShortFrictionHTTP(ctx, content)
 	}
 	bus := p.getBus()
 	if bus == nil {
