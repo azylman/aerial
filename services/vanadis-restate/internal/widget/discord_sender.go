@@ -738,29 +738,37 @@ func buildWidgetHeaderText(req ericlient.StatusWidgetRequest) string {
 	return fmt.Sprintf("### 🛠️ Pull Request · `%s`\n%s", repoTag, strings.TrimSpace(req.Title))
 }
 
+// collapseCompletedWidgetChunks folds all but the 2 most recently completed done
+// chunks into a summary line. Input must already be ordered by orderWidgetChunks.
 func collapseCompletedWidgetChunks(chunks []ericlient.StatusWidgetChunk) ([]ericlient.StatusWidgetChunk, string) {
+	const visibleDone = 2
 	if len(chunks) <= 10 {
 		return chunks, ""
 	}
 
-	var activeChunks []ericlient.StatusWidgetChunk
-	var collapsedMerged []ericlient.StatusWidgetChunk
-
-	for i, c := range chunks {
-		norm := strings.ToLower(strings.TrimSpace(c.Status))
-		isCompleted := (norm == statusMerged || norm == statusDeployed || norm == statusCompleted || norm == dispatchStatusSuccess)
-		if isCompleted && i < len(chunks)-5 {
-			collapsedMerged = append(collapsedMerged, c)
-		} else {
-			activeChunks = append(activeChunks, c)
+	doneTotal := 0
+	for _, c := range chunks {
+		if isWidgetChunkDone(c.Status) {
+			doneTotal++
 		}
 	}
-
-	if len(collapsedMerged) > 0 {
-		summaryText := fmt.Sprintf("✅ ***%d/%d** earlier chunks completed and merged*", len(collapsedMerged), len(chunks))
-		return activeChunks, summaryText
+	collapseCount := doneTotal - visibleDone
+	if collapseCount <= 0 {
+		return chunks, ""
 	}
-	return chunks, ""
+
+	activeChunks := make([]ericlient.StatusWidgetChunk, 0, len(chunks)-collapseCount)
+	collapsed := 0
+	for _, c := range chunks {
+		if collapsed < collapseCount && isWidgetChunkDone(c.Status) {
+			collapsed++
+			continue
+		}
+		activeChunks = append(activeChunks, c)
+	}
+
+	summaryText := fmt.Sprintf("✅ ***%d/%d** earlier chunks completed and merged*", collapsed, len(chunks))
+	return activeChunks, summaryText
 }
 
 func formatChunkActiveStepLines(activeStep string) string {

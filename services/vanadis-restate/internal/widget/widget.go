@@ -2,10 +2,13 @@
 package widget
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -33,8 +36,9 @@ const (
 func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChunk, deployUIURL ...string) ericlient.StatusWidgetRequest {
 	widgetStatus := store.FirstNonEmpty(NormalizeWidgetStatus(build.Status), statusRunning)
 	baseURL := store.FirstNonEmpty(deployUIURL...)
-	wChunks := make([]ericlient.StatusWidgetChunk, len(chunks))
-	for i, c := range chunks {
+	ordered := orderWidgetChunks(chunks)
+	wChunks := make([]ericlient.StatusWidgetChunk, len(ordered))
+	for i, c := range ordered {
 		wChunks[i] = BuildStatusWidgetChunk(c, baseURL)
 	}
 	return ericlient.StatusWidgetRequest{
@@ -49,6 +53,116 @@ func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChun
 		Chunks:    wChunks,
 		StartedAt: build.CreatedAt,
 	}
+}
+
+// Widget lifecycle stages, in top-to-bottom render order.
+const (
+	widgetStageDone = iota
+	widgetStageInProgress
+	widgetStagePending
+)
+
+// isWidgetChunkDone reports whether a chunk status belongs to the widget's done stage.
+func isWidgetChunkDone(status string) bool {
+	switch NormalizeWidgetStatus(status) {
+	case statusMerged, statusSynced, statusDeployed, statusCompleted, dispatchStatusSuccess, statusCancelled, statusClosed:
+		return true
+	default:
+		return false
+	}
+}
+
+// widgetChunkStage ranks a chunk status as done, in-progress, or pending.
+// Failed-type statuses stay in-progress so they remain visible in the live area.
+func widgetChunkStage(status string) int {
+	switch norm := NormalizeWidgetStatus(status); {
+	case isWidgetChunkDone(norm):
+		return widgetStageDone
+	case norm == "" || norm == statusPending:
+		return widgetStagePending
+	default:
+		return widgetStageInProgress
+	}
+}
+
+// compareWidgetTimes orders non-zero times ascending, with zero times last.
+func compareWidgetTimes(a, b time.Time) int {
+	switch {
+	case a.IsZero() && b.IsZero():
+		return 0
+	case a.IsZero():
+		return 1
+	case b.IsZero():
+		return -1
+	default:
+		return a.Compare(b)
+	}
+}
+
+// widgetChunkDepths returns each chunk's longest DependsOn path from a root.
+// Unknown dependency IDs are ignored; cycles resolve the revisited node to depth 0.
+func widgetChunkDepths(chunks []model.VanadisChunk) map[string]int {
+	byID := make(map[string]model.VanadisChunk, len(chunks))
+	for _, c := range chunks {
+		byID[c.ID] = c
+	}
+	depths := make(map[string]int, len(chunks))
+	visiting := make(map[string]bool, len(chunks))
+	var depthOf func(id string) int
+	depthOf = func(id string) int {
+		if d, ok := depths[id]; ok {
+			return d
+		}
+		if visiting[id] {
+			return 0
+		}
+		visiting[id] = true
+		depth := 0
+		for _, dep := range byID[id].DependsOn {
+			if _, ok := byID[dep]; !ok {
+				continue
+			}
+			depth = max(depth, depthOf(dep)+1)
+		}
+		visiting[id] = false
+		depths[id] = depth
+		return depth
+	}
+	for _, c := range chunks {
+		depthOf(c.ID)
+	}
+	return depths
+}
+
+// orderWidgetChunks returns a copy of chunks ordered done -> in-progress -> pending.
+// Done chunks sort by CompletedAt, in-progress by StartedAt, pending by DAG depth;
+// ChunkIndex then ID break every tie. The input slice is never mutated.
+func orderWidgetChunks(chunks []model.VanadisChunk) []model.VanadisChunk {
+	ordered := slices.Clone(chunks)
+	depths := widgetChunkDepths(chunks)
+	slices.SortStableFunc(ordered, func(a, b model.VanadisChunk) int {
+		stageA, stageB := widgetChunkStage(a.Status), widgetChunkStage(b.Status)
+		if c := cmp.Compare(stageA, stageB); c != 0 {
+			return c
+		}
+		var c int
+		switch stageA {
+		case widgetStageDone:
+			c = compareWidgetTimes(a.CompletedAt, b.CompletedAt)
+		case widgetStageInProgress:
+			c = compareWidgetTimes(a.StartedAt, b.StartedAt)
+		default:
+			c = cmp.Compare(depths[a.ID], depths[b.ID])
+		}
+		if c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.ChunkIndex, b.ChunkIndex); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+	return ordered
 }
 
 // BuildStatusWidgetChunk formats a single chunk for the Discord tracker widget.

@@ -652,24 +652,10 @@ func TestBuildStatusWidgetComponentsTable(t *testing.T) {
 				Title:     "Mega Build",
 				Status:    "running",
 				StartedAt: started,
-				Chunks: func() []ericlient.StatusWidgetChunk {
-					res := make([]ericlient.StatusWidgetChunk, 0, 15)
-					for i := range 15 {
-						st := "running"
-						if i < 9 {
-							st = "merged"
-						}
-						res = append(res, ericlient.StatusWidgetChunk{
-							ID:     "chunk-" + string(rune('a'+i)),
-							Title:  "Chunk " + string(rune('a'+i)),
-							Status: st,
-						})
-					}
-					return res
-				}(),
+				Chunks:    collapseFixture(15, 9, "merged"),
 			},
 			expectBanner:  false,
-			expectSummary: "earlier chunks completed and merged",
+			expectSummary: "✅ ***7/15** earlier chunks completed and merged*",
 		},
 	}
 
@@ -771,24 +757,26 @@ func TestFormatChunkRuntimeSuffix(t *testing.T) {
 	}
 }
 
+// collapseFixture builds total chunks whose first done entries carry doneStatus and the rest run.
+func collapseFixture(total, done int, doneStatus string) []ericlient.StatusWidgetChunk {
+	chunks := make([]ericlient.StatusWidgetChunk, 0, total)
+	for i := range total {
+		st := "running"
+		if i < done {
+			st = doneStatus
+		}
+		chunks = append(chunks, ericlient.StatusWidgetChunk{ID: fmt.Sprintf("c%02d", i), Title: fmt.Sprintf("Chunk %02d", i), Status: st})
+	}
+	return chunks
+}
+
 func TestCollapseCompletedWidgetChunks(t *testing.T) {
 	t.Parallel()
-	twelveChunks := make([]ericlient.StatusWidgetChunk, 0, 12)
-	for i := range 12 {
-		st := "running"
-		if i < 7 {
-			st = "merged"
-		}
-		twelveChunks = append(twelveChunks, ericlient.StatusWidgetChunk{
-			ID:     "c" + string(rune('0'+i)),
-			Status: st,
-		})
-	}
-
 	tests := []struct {
-		name              string
-		chunks            []ericlient.StatusWidgetChunk
-		expectSummaryText bool
+		name        string
+		chunks      []ericlient.StatusWidgetChunk
+		wantIDs     []string
+		wantSummary string
 	}{
 		{
 			name: "ten or fewer chunks does not collapse",
@@ -796,12 +784,35 @@ func TestCollapseCompletedWidgetChunks(t *testing.T) {
 				{ID: "c1", Status: "merged"},
 				{ID: "c2", Status: "running"},
 			},
-			expectSummaryText: false,
+			wantIDs: []string{"c1", "c2"},
 		},
 		{
-			name:              "more than ten chunks with completed earlier chunks collapses",
-			chunks:            twelveChunks,
-			expectSummaryText: true,
+			name:        "twelve chunks with seven merged keeps last two done",
+			chunks:      collapseFixture(12, 7, "merged"),
+			wantIDs:     []string{"c05", "c06", "c07", "c08", "c09", "c10", "c11"},
+			wantSummary: "✅ ***5/12** earlier chunks completed and merged*",
+		},
+		{
+			name:        "twenty two chunks with nineteen done collapses seventeen",
+			chunks:      collapseFixture(22, 19, "completed"),
+			wantIDs:     []string{"c17", "c18", "c19", "c20", "c21"},
+			wantSummary: "✅ ***17/22** earlier chunks completed and merged*",
+		},
+		{
+			name:        "cancelled chunks count as done",
+			chunks:      collapseFixture(11, 4, "cancelled"),
+			wantIDs:     []string{"c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10"},
+			wantSummary: "✅ ***2/11** earlier chunks completed and merged*",
+		},
+		{
+			name:    "more than ten chunks with only two done does not collapse",
+			chunks:  collapseFixture(11, 2, "synced"),
+			wantIDs: []string{"c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10"},
+		},
+		{
+			name:    "more than ten chunks with failed chunks keeps them visible",
+			chunks:  collapseFixture(11, 9, "failed"),
+			wantIDs: []string{"c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10"},
 		},
 	}
 
@@ -809,13 +820,12 @@ func TestCollapseCompletedWidgetChunks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			active, summary := collapseCompletedWidgetChunks(tc.chunks)
-			if tc.expectSummaryText {
-				assert.NotEmpty(t, summary)
-				assert.Less(t, len(active), len(tc.chunks))
-			} else {
-				assert.Empty(t, summary)
-				assert.Len(t, active, len(tc.chunks))
+			ids := make([]string, 0, len(active))
+			for _, c := range active {
+				ids = append(ids, c.ID)
 			}
+			assert.Equal(t, tc.wantIDs, ids)
+			assert.Equal(t, tc.wantSummary, summary)
 		})
 	}
 }
