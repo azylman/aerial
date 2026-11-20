@@ -195,6 +195,48 @@ func isFailureNotificationEligible(chk *model.VanadisChunk, failed bool, reason 
 	return failed || (chk != nil && chk.Status == statusFailed && strings.HasSuffix(strings.TrimSpace(chk.Banner), ": "+reason))
 }
 
+func (f *Flow) resumeCapReachedNotificationIfEligible(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent) (bool, error) {
+	if f.Store == nil || f.Exec == nil {
+		return false, nil
+	}
+	_, chunk, err := f.LookupBuildChunk(ctx, buildID, chunkID)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrPRTransitionSkipped, err)
+	}
+	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
+		return false, nil
+	}
+	if !isFailureNotificationEligible(&chunk, false, "ci_remediation_cap_reached") {
+		return false, nil
+	}
+	return true, f.HandleCIRemediationCapReached(ctx, chunkID, chunk.CIFailCount, ev)
+}
+
+func (f *Flow) handleSkippedCheckTransition(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent, err error) error {
+	if errors.Is(err, ErrPRTransitionSkipped) {
+		if handled, rErr := f.resumeCapReachedNotificationIfEligible(ctx, buildID, chunkID, ev); handled || rErr != nil {
+			return rErr
+		}
+	}
+	return err
+}
+
+func (f *Flow) handleCIFailureAtCap(ctx context.Context, buildID, chunkID, banner, cleanHead string, chunk model.VanadisChunk, ev pubsub.PRLifecycleEvent) error {
+	if chunk.CIFailCount == executor.MaxCIRemediationAttempts && cleanHead != "" && strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead) {
+		f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
+		return nil
+	}
+	failCount := chunk.CIFailCount
+	if f.Store != nil && chunk.CIFailCount == executor.MaxCIRemediationAttempts {
+		var err error
+		failCount, err = f.Store.IncrementChunkCIFailCount(ctx, chunkID, banner)
+		if err != nil {
+			return err
+		}
+	}
+	return f.HandleCIRemediationCapReached(ctx, chunkID, failCount, ev)
+}
+
 // HandleCIRemediationCapReached fails the chunk once CI remediation attempts
 // are exhausted and fans out the human-review alert.
 func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
@@ -293,12 +335,12 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 		return nil
 	}
 	if err := f.HandlePRCheckEvent(ctx, chunkID, event, ev); err != nil {
-		return err
+		return f.handleSkippedCheckTransition(ctx, buildID, chunkID, ev, err)
 	}
 	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
 	if f.Store != nil {
 		if err := f.Store.UpdateChunkBannerAndStatus(ctx, chunkID, statusCIFailed, banner); err != nil {
-			return err
+			return f.handleSkippedCheckTransition(ctx, buildID, chunkID, ev, err)
 		}
 	}
 	if f.Exec == nil {
@@ -310,18 +352,7 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	}
 	cleanHead := strings.TrimSpace(ev.HeadSHA)
 	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
-		if cleanHead != "" && strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead) {
-			f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
-			return nil
-		}
-		var failCount int
-		if f.Store != nil {
-			failCount, err = f.Store.IncrementChunkCIFailCount(ctx, chunkID, banner, cleanHead)
-			if err != nil {
-				return err
-			}
-		}
-		return f.HandleCIRemediationCapReached(ctx, chunkID, failCount, ev)
+		return f.handleCIFailureAtCap(ctx, buildID, chunkID, banner, cleanHead, chunk, ev)
 	}
 	details, err := f.Exec.ResolveCIFailureDetailsChecked(ctx, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 	if err != nil {
