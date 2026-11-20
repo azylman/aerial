@@ -163,46 +163,26 @@ func IsGateAggregatorCheck(checkName string) bool {
 	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
 }
 
-func appendDiscriminatorSuffix(baseID string, discriminators []string) string {
-	var nonEmpties []string
-	for _, d := range discriminators {
-		if trimmed := strings.TrimSpace(d); trimmed != "" {
-			nonEmpties = append(nonEmpties, trimmed)
-		}
-	}
-	if len(nonEmpties) == 0 {
-		return baseID
-	}
-	digest := sha256.Sum256([]byte(strings.Join(nonEmpties, "\x00")))
-	return fmt.Sprintf("%s-%s", baseID, hex.EncodeToString(digest[:8]))
-}
-
-func CIRemediationDispatchID(chunkID, headSHA string, failCount int, discriminators ...string) string {
+func CIRemediationDispatchID(chunkID, headSHA string, failCount int) string {
 	cleanChunk := strings.TrimSpace(chunkID)
 	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
-	var base string
 	if cleanSHA != "" {
-		base = fmt.Sprintf("vanadis-%s-cifail-%s-%d", cleanChunk, cleanSHA, failCount)
-	} else {
-		base = fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
+		return fmt.Sprintf("vanadis-%s-cifail-%s-%d", cleanChunk, cleanSHA, failCount)
 	}
-	return appendDiscriminatorSuffix(base, discriminators)
+	return fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
 }
 
-func ConflictRemediationDispatchID(chunkID, headSHA string, discriminators ...string) string {
+func ConflictRemediationDispatchID(chunkID, headSHA string) string {
 	cleanChunk := strings.TrimSpace(chunkID)
 	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
-	var base string
 	if cleanSHA != "" {
 		shortSHA := cleanSHA
 		if len(shortSHA) > 7 {
 			shortSHA = shortSHA[:7]
 		}
-		base = fmt.Sprintf("vanadis-conflict-%s-%s", cleanChunk, shortSHA)
-	} else {
-		base = "vanadis-conflict-" + cleanChunk
+		return fmt.Sprintf("vanadis-conflict-%s-%s", cleanChunk, shortSHA)
 	}
-	return appendDiscriminatorSuffix(base, discriminators)
+	return "vanadis-conflict-" + cleanChunk
 }
 
 // DispatchChunkRemediation delegates to Eri's POST /dispatch endpoint for PR failure remediation.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -256,11 +255,7 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 	if f.Exec == nil {
 		return nil
 	}
-	var occurrence string
-	if !ev.OccurredAt.IsZero() {
-		occurrence = ev.OccurredAt.UTC().Format(time.RFC3339Nano)
-	}
-	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA, occurrence)
+	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA)
 	err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatConflictPrompt(ev))
 	if errors.Is(err, executor.ErrDispatchActive) {
 		f.syncBuildWidget(ctx, buildID, "Merge conflict detected — remediation in progress")
@@ -332,11 +327,7 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	if err != nil {
 		return err
 	}
-	var occurrence string
-	if !ev.OccurredAt.IsZero() {
-		occurrence = ev.OccurredAt.UTC().Format(time.RFC3339Nano)
-	}
-	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1, ev.CheckName, ev.CheckURL, occurrence)
+	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
 	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
 		if errors.Is(err, executor.ErrDispatchActive) {
@@ -380,11 +371,7 @@ func (f *Flow) HandleDeployFailureEvent(ctx context.Context, buildID, chunkID st
 		}
 	}
 	if f.Exec != nil {
-		occurrence := ""
-		if !ev.OccurredAt.IsZero() {
-			occurrence = ev.OccurredAt.UTC().Format(time.RFC3339Nano)
-		}
-		if err := f.dispatchSilentThreadWakePrompt(ctx, buildID, chunkID, executor.FormatDeployFailurePrompt(ev), occurrence); err != nil {
+		if err := f.dispatchSilentThreadWakePrompt(ctx, buildID, chunkID, executor.FormatDeployFailurePrompt(ev), ""); err != nil {
 			return err
 		}
 	}
