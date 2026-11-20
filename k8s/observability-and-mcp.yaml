@@ -140,6 +140,9 @@ data:
     infisical_host_url: "http://infisical.aerial"
     auth_method: "universal-auth"
     mask_secret_values: false
+  kubernetes-mcp.toml: |
+    port = "8080"
+    require_oauth = true
   kernel-mcp.yaml: |
     cdp_host: "browser.aerial"
     cdp_port: "9222"
@@ -1732,6 +1735,8 @@ subjects:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: kubernetes-mcp
   name: kubernetes-mcp
@@ -1769,7 +1774,17 @@ spec:
             requests:
               cpu: 25m
               memory: 64Mi
+          volumeMounts:
+            - mountPath: /etc/kubernetes-mcp-server/config.toml
+              name: config
+              subPath: kubernetes-mcp.toml
+              readOnly: true
       serviceAccountName: kubernetes-mcp-sa
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: mcp-configs
+          name: config
 ---
 apiVersion: v1
 kind: Service

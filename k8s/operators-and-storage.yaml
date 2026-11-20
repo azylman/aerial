@@ -32,20 +32,6 @@ spec:
       - connectionLimit: -1
         ensure: present
         inherit: true
-        login: false
-        name: transcripts
-      - connectionLimit: -1
-        ensure: present
-        inherit: true
-        inRoles:
-          - transcripts
-        login: true
-        name: transcripts_aerial
-        passwordSecret:
-          name: postgres-transcripts-aerial-role
-      - connectionLimit: -1
-        ensure: present
-        inherit: true
         login: true
         name: eri
         passwordSecret:
@@ -680,45 +666,6 @@ spec:
 apiVersion: generators.external-secrets.io/v1alpha1
 kind: Password
 metadata:
-  name: postgres-transcripts-aerial-password-generator
-  namespace: default
-spec:
-  allowRepeat: true
-  digits: 16
-  length: 32
-  noUpper: true
-  secretKeys:
-    - password
-  symbols: 0
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: postgres-transcripts-aerial-role
-  namespace: default
-spec:
-  dataFrom:
-    - sourceRef:
-        generatorRef:
-          apiVersion: generators.external-secrets.io/v1alpha1
-          kind: Password
-          name: postgres-transcripts-aerial-password-generator
-  refreshInterval: "0"
-  refreshPolicy: CreatedOnce
-  target:
-    creationPolicy: CreateOrMerge
-    deletionPolicy: Retain
-    immutable: true
-    name: postgres-transcripts-aerial-role
-    template:
-      data:
-        username: transcripts_aerial
-      mergePolicy: Merge
-      type: kubernetes.io/basic-auth
----
-apiVersion: generators.external-secrets.io/v1alpha1
-kind: Password
-metadata:
   name: postgres-eri-password-generator
   namespace: default
 spec:
@@ -1037,27 +984,6 @@ spec:
   selector:
     secret:
       name: postgres-aerial-role
-  updatePolicy: IfNotExists
----
-apiVersion: external-secrets.io/v1alpha1
-kind: PushSecret
-metadata:
-  name: postgres-transcripts-aerial-role-push
-  namespace: default
-spec:
-  data:
-    - match:
-        remoteRef:
-          remoteKey: POSTGRES_TRANSCRIPTS_AERIAL_PASSWORD
-        secretKey: password
-  deletionPolicy: None
-  refreshInterval: 1h
-  secretStoreRefs:
-    - kind: SecretStore
-      name: infisical
-  selector:
-    secret:
-      name: postgres-transcripts-aerial-role
   updatePolicy: IfNotExists
 ---
 apiVersion: external-secrets.io/v1alpha1
