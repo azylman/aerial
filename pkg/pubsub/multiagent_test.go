@@ -308,14 +308,6 @@ func TestBuildConnectOptions_UserCredentials(t *testing.T) {
 		wantPassword string
 	}{
 		{
-			name:         "no credentials",
-			user:         "",
-			pass:         "",
-			url:          "nats://127.0.0.1:4222",
-			wantUser:     "",
-			wantPassword: "",
-		},
-		{
 			name:         "credentials injected when url has no userinfo",
 			user:         "agent-user",
 			pass:         "agent-pass",

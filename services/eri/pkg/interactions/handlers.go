@@ -14,7 +14,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 
-	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -113,9 +112,9 @@ func (r *Router) fetchMemoryFactStatus(ctx context.Context) (int, string) {
 	if err != nil {
 		return factCount, latestFactStr
 	}
-	client := &http.Client{
-		Timeout:   2 * time.Second,
-		Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, ""),
+	client := r.memoryClient
+	if client == nil {
+		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {

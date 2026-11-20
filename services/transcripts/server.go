@@ -94,7 +94,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, requestedAgen
 			writeError(w, http.StatusUnauthorized, unauth.Error())
 			return "", false
 		}
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return "", false
 	}
 	return resolved, true
