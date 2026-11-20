@@ -333,6 +333,8 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			Event:        "rollout_updated",
 			Repo:         pr.Repo,
 			PRNumber:     pr.PRNumber,
+			HeadSHA:      pr.HeadSHA,
+			MergeSHA:     pr.MergeSHA,
 			JobName:      name,
 			Status:       statusDeploying,
 			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
@@ -341,6 +343,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		}); err != nil {
 			return err
 		}
+		s.shadowRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name)
 		return nil
 	}
 	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
@@ -371,6 +374,8 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			return err
 		}
 		s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
+		s.shadowDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber)
+		s.shadowRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name)
 	}
 	if s.registry != nil {
 		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, "deployed", map[string]any{"deploy_success_pending": false}); err != nil {
@@ -439,10 +444,13 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 		return false, fmt.Errorf("transition pr %s#%d deploying: %w", repo, prNum, err)
 	}
 	if tID != "" {
+		deferHeadSHA, deferMergeSHA := s.shadowDeployStartedSHAs(ctx, repo, prNum)
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        eventDeployStarted,
 			Repo:         repo,
 			PRNumber:     prNum,
+			HeadSHA:      deferHeadSHA,
+			MergeSHA:     deferMergeSHA,
 			TargetID:     tID,
 			Status:       statusDeploying,
 			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),

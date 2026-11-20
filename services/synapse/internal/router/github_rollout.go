@@ -13,6 +13,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/github"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 const (
@@ -385,6 +386,7 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 		PRNumber:     res.PRNumber,
 		Branch:       res.Branch,
 		HeadSHA:      res.HeadSHA,
+		MergeSHA:     res.MergeSHA,
 		TargetID:     res.TargetID,
 		Status:       prCIFailed,
 		CheckName:    res.CheckName,
@@ -558,6 +560,10 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 		s.ghState.ClearCollaboratorConflict(repo, prNum, sha)
 		return err
 	}
+	s.shadowPREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
+		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
+		Title: resolvedPR.Title, Unmanaged: true,
+	})
 	return nil
 }
 
@@ -582,6 +588,10 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 		s.ghState.ClearCollaboratorAlerted(res.Repo, resolvedPR.Number, sha)
 		return err
 	}
+	s.shadowPREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
+		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
+	})
 	return nil
 }
 

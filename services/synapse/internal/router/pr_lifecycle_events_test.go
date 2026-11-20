@@ -313,7 +313,7 @@ func TestCompleteKustomizationRequest(t *testing.T) {
 			name:          "kustomization ready before transition publishes rollout_updated",
 			kustomization: "aerial-root",
 			transitioned:  false,
-			want:          []wantPREvent{{Event: "rollout_updated", PRNumber: 42, Status: "deploying"}},
+			want:          []wantPREvent{{Event: "rollout_updated", PRNumber: 42, MergeSHA: "sha-merge", Status: "deploying"}},
 		},
 		{
 			name:          "last kustomization ready publishes deploy_success",
