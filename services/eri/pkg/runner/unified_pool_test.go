@@ -206,7 +206,8 @@ func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
 
 func TestUnifiedProcessPool_Defaults(t *testing.T) {
 	pool := NewUnifiedProcessPool(PoolConfig{}, nil)
-	if pool.spawner == nil || pool.cfg.MaxIdle != 24*time.Hour {
+	defer pool.Close()
+	if pool.spawner == nil || pool.cfg.MaxIdle != 15*time.Minute {
 		t.Errorf("unexpected defaults: spawner=%v MaxIdle=%v", pool.spawner, pool.cfg.MaxIdle)
 	}
 }
@@ -1309,5 +1310,132 @@ func TestUnifiedProcessPool_RegisterSpawnedDaemon_StateLifecycle(t *testing.T) {
 	d3 := &StreamingDaemon{state: StateReady}
 	if err := pool.registerSpawnedDaemon("target", d3); err == nil {
 		t.Errorf("expected error registering daemon on closed pool")
+	}
+}
+
+type idleReapingTestCase struct {
+	name           string
+	isLocked       bool
+	closeBeforeRun bool
+	inflightCount  int
+	turnCount      int
+	maxTurns       int
+	cancelRotation bool
+	idleDuration   time.Duration
+	maxIdle        time.Duration
+	wantEvicted    bool
+	wantRotate     bool
+}
+
+func TestUnifiedProcessPool_ReapIdlePrewarmedDaemons(t *testing.T) {
+	t.Parallel()
+
+	tests := []idleReapingTestCase{
+		{
+			name:         "idle unleased daemon exceeding MaxIdle is reaped",
+			idleDuration: 20 * time.Minute,
+			maxIdle:      15 * time.Minute,
+			turnCount:    5,
+			maxTurns:     3,
+			wantEvicted:  true,
+			wantRotate:   true,
+		},
+		{
+			name:           "recent unleased daemon below MaxIdle with cancelled rotation over limit",
+			idleDuration:   5 * time.Minute,
+			maxIdle:        15 * time.Minute,
+			turnCount:      5,
+			maxTurns:       3,
+			cancelRotation: true,
+			wantEvicted:    false,
+			wantRotate:     false,
+		},
+		{
+			name:         "locked daemon exceeding MaxIdle is kept untouched",
+			isLocked:     true,
+			idleDuration: 20 * time.Minute,
+			maxIdle:      15 * time.Minute,
+			turnCount:    1,
+			maxTurns:     3,
+			wantEvicted:  false,
+			wantRotate:   false,
+		},
+		{
+			name:          "active turn daemon exceeding MaxIdle is kept untouched",
+			inflightCount: 1,
+			idleDuration:  20 * time.Minute,
+			maxIdle:       15 * time.Minute,
+			turnCount:     1,
+			maxTurns:      3,
+			wantEvicted:   false,
+			wantRotate:    false,
+		},
+		{
+			name:           "closed pool reap is a safe no-op",
+			closeBeforeRun: true,
+			idleDuration:   20 * time.Minute,
+			maxIdle:        15 * time.Minute,
+			turnCount:      1,
+			maxTurns:       3,
+			wantEvicted:    false,
+			wantRotate:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := NewUnifiedProcessPool(PoolConfig{MaxIdle: tc.maxIdle, MaxSessionTurns: tc.maxTurns}, &MockDaemonSpawner{})
+			defer pool.Close()
+
+			d := &StreamingDaemon{
+				state:    StateReady,
+				lastUsed: time.Now().Add(-tc.idleDuration),
+			}
+			if tc.inflightCount > 0 {
+				d.inflight = []*TurnContext{{}}
+			}
+
+			lease := &unifiedSessionLease{
+				pool:           pool,
+				targetKey:      "target-test",
+				daemon:         d,
+				turnCount:      tc.turnCount,
+				cancelRotation: tc.cancelRotation,
+			}
+			if gotRotate := lease.ShouldRotate(); gotRotate != tc.wantRotate {
+				t.Errorf("ShouldRotate() = %v, want %v", gotRotate, tc.wantRotate)
+			}
+
+			target := "target-test"
+			pool.mu.Lock()
+			pool.daemons[target] = d
+			pool.mu.Unlock()
+
+			if tc.isLocked {
+				tl, acquired := pool.tryAcquireTargetLock(target)
+				if !acquired {
+					t.Fatalf("failed to acquire target lock for test")
+				}
+				defer pool.releaseTargetLock(target, tl)
+			}
+			if tc.closeBeforeRun {
+				_ = pool.Close()
+			}
+
+			pool.reapIdlePrewarmedDaemons()
+			pool.WaitBackground()
+
+			pool.mu.RLock()
+			_, exists := pool.daemons[target]
+			pool.mu.RUnlock()
+
+			if tc.wantEvicted && exists {
+				t.Errorf("expected daemon %q to be evicted from pool", target)
+			}
+			if !tc.wantEvicted && !exists && !tc.closeBeforeRun {
+				t.Errorf("expected daemon %q to remain in pool", target)
+			}
+		})
 	}
 }
