@@ -159,6 +159,8 @@ type ghEventCase struct {
 	systemChannelID         string
 	autoUpdateAuthors       []string
 	nonDefaultOwner         bool
+	botID                   string
+	wantNoCommitSHACache    bool
 	wantErr                 bool
 	wantRepo                string
 	wantAction              string
@@ -450,6 +452,43 @@ var prAndPushTestCases = []ghEventCase{
 		systemChannelID: "100000000000000004", nonDefaultOwner: true, reg: &mockPRRegistry{},
 		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 609, wantBranch: "dependabot/go_modules/qux-1.0.0", wantHeadSHA: "depsha609", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
 	},
+	{
+		name: "pull_request opened foreign bot_id skips registration and lifecycle events", event: "pull_request", delivery: "del-pr-foreign-open",
+		payload:  `{"action":"opened","number":2165,"pull_request":{"number":2165,"title":"feat: foreign bot work","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		botID:    "aerial",
+		reg:      &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/suletta"},
+		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165", wantSource: "pull_request_payload",
+		wantEnsureCalls:      0,
+		wantNoCommitSHACache: true,
+	},
+	{
+		name: "pull_request synchronize foreign bot_id skips sync update and commit sha caching", event: "pull_request", delivery: "del-pr-foreign-sync",
+		payload:  `{"action":"synchronize","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165sync"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		botID:    "aerial",
+		reg:      &mockPRRegistry{syncTargetID: "100000000000000002", resolveTargetID: "100000000000000002", resolveBranch: "feat/suletta"},
+		wantRepo: "azylman/aerial", wantAction: "synchronize", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165sync", wantSource: "pull_request_payload",
+		wantSyncCalls:        0,
+		wantSyncEvents:       0,
+		wantNoCommitSHACache: true,
+	},
+	{
+		name: "pull_request closed unmerged foreign bot_id skips closed transition", event: "pull_request", delivery: "del-pr-foreign-closed",
+		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165closed"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		botID:    "aerial",
+		reg:      &mockPRRegistry{closedTargetID: "100000000000000002"},
+		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165closed", wantSource: "pull_request_payload",
+		wantClosedCalls:      0,
+		wantNoCommitSHACache: true,
+	},
+	{
+		name: "pull_request closed merged foreign bot_id skips merged transition", event: "pull_request", delivery: "del-pr-foreign-merged",
+		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165merged"},"merged":true,"merge_commit_sha":"foreignmergesha2165"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		botID:    "aerial",
+		reg:      &mockPRRegistry{mergedTargetID: "100000000000000002"},
+		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165merged", wantMergeSHA: "foreignmergesha2165", wantSource: "pull_request_payload",
+		wantMergedCalls:      0,
+		wantNoCommitSHACache: true,
+	},
 }
 
 func TestProcessGitHubEvent_PullRequestAndPush(t *testing.T) {
@@ -643,7 +682,7 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	if tc.disp != nil {
 		disp = tc.disp
 	}
-	cfg := legacyFixtureConfig(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner})
+	cfg := legacyFixtureConfig(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner, BotID: tc.botID})
 	srv := newTestRouter(cfg, legacyFixtureClient(mockServer.Client()), reg, disp, inserters...)
 	srv.onProcessed = func(string, string) {}
 	if tc.priorEvent != nil {
@@ -670,6 +709,11 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	}
 	assertEventResult(t, tc, res, &ghPaths)
 	assertEventBusCalls(t, tc, activeBus)
+	if tc.wantNoCommitSHACache && tc.wantHeadSHA != "" {
+		if _, _, ok := srv.lookupCommitSHAPR(tc.wantRepo, tc.wantHeadSHA); ok {
+			t.Errorf("commit SHA %q unexpectedly cached in ghState", tc.wantHeadSHA)
+		}
+	}
 }
 
 func assertDeployFailedEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {

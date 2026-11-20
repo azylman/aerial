@@ -93,6 +93,14 @@ func ParseAerialPRMetadata(body string) AerialPRMetadata {
 	}
 }
 
+// isForeignBotPR reports whether meta specifies a non-empty BotID that differs
+// from the local synapse instance's configured BotID.
+func isForeignBotPR(meta AerialPRMetadata, cfgBotID string) bool {
+	metaBotID := strings.TrimSpace(meta.BotID)
+	cfgBotID = strings.TrimSpace(cfgBotID)
+	return metaBotID != "" && cfgBotID != "" && !strings.EqualFold(metaBotID, cfgBotID)
+}
+
 func (s *RouterServer) isPROwnedLocally(ctx context.Context, repo string, prNum int) bool {
 	if s == nil || s.registry == nil || prNum <= 0 {
 		return false

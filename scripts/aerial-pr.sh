@@ -393,7 +393,7 @@ attach_pr_in_vanadis() {
     local attach_resp=""
 
     while [ "$attempt" -le "$max_attempts" ]; do
-        attach_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+        attach_resp=$(curl -s --connect-timeout 2 -m 15 -X POST \
             -H "Content-Type: application/json" \
             -d "$attach_payload" \
             "${vanadis_url%/}/chunks/attach-pr" 2>/dev/null || true)
@@ -563,7 +563,7 @@ register_pr_in_brain() {
     local reg_resp=""
 
     while [ "$attempt" -le "$max_attempts" ]; do
-        reg_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+        reg_resp=$(curl -s --connect-timeout 2 -m 15 -X POST \
             -H "Content-Type: application/json" \
             -d "$reg_payload" \
             "$brain_reg_url" 2>/dev/null || true)
@@ -1178,15 +1178,30 @@ submit_scratch() {
     local brain_reg_url
     brain_reg_url=$(resolve_pr_register_url 2>/dev/null || true)
 
+    local bot_id
+    bot_id="${AERIAL_BOT_ID:-$(read_config_yaml_val bot_id)}"
+
     local reg_payload
-    reg_payload=$(jq -n \
-        --arg repo "${REPO_NAME}" \
-        --argjson pr_num "$pr_num" \
-        --arg branch "$branch" \
-        --arg head_sha "$commit_sha" \
-        --arg target_id "$target_id" \
-        --arg title "$clean_title" \
-        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: "{}"}')
+    if [ -n "$bot_id" ]; then
+        reg_payload=$(jq -n \
+            --arg repo "${REPO_NAME}" \
+            --argjson pr_num "$pr_num" \
+            --arg branch "$branch" \
+            --arg head_sha "$commit_sha" \
+            --arg target_id "$target_id" \
+            --arg title "$clean_title" \
+            --arg bot_id "$bot_id" \
+            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, bot_id: $bot_id, metadata: "{}"}')
+    else
+        reg_payload=$(jq -n \
+            --arg repo "${REPO_NAME}" \
+            --argjson pr_num "$pr_num" \
+            --arg branch "$branch" \
+            --arg head_sha "$commit_sha" \
+            --arg target_id "$target_id" \
+            --arg title "$clean_title" \
+            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: "{}"}')
+    fi
 
     if [ -n "$brain_reg_url" ]; then
         if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then

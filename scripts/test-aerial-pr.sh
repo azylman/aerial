@@ -400,10 +400,11 @@ REGISTER_PR_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
     ATTEMPT_FILE=\"${TMP_TEST_DIR}/reg_attempts\"
+    ARGS_FILE=\"${TMP_TEST_DIR}/reg_args\"
 
-    curl() { echo '{\"status\":\"registered\"}'; }
+    curl() { echo \"\$*\" > \"\$ARGS_FILE\"; echo '{\"status\":\"registered\"}'; }
     export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 101 '1560698400780062884' 2>/dev/null && echo 'reg1:ok'
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 101 '1560698400780062884' 2>/dev/null && grep -q -- '-m 15' \"\$ARGS_FILE\" && echo 'reg1:ok'
 
     echo 0 > \"\$ATTEMPT_FILE\"
     curl() {
@@ -1678,14 +1679,16 @@ VANADIS_ATTACH_CHECK=$(bash -c "
 
     # Subtest 4: attach_pr_in_vanadis succeeds on attempt 1
     ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
+    ARGS_FILE=\$(mktemp /tmp/vanadis-args.XXXXXX)
     curl() {
+        echo \"\$*\" > \"\$ARGS_FILE\"
         echo 'hit' >> \"\$ATTEMPT_FILE\"
         printf '{\"status\":\"attached\",\"build_id\":\"b-1\",\"chunk_id\":\"c-1\",\"thread_id\":\"th-12345\"}'
     }
     export -f curl
     out4=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-1\"}' 101 2>/dev/null)
-    [ \"\$(echo \"\$out4\" | jq -r '.thread_id')\" = \"th-12345\" ] && echo 'att1:ok'
-    rm -f \"\$ATTEMPT_FILE\"
+    [ \"\$(echo \"\$out4\" | jq -r '.thread_id')\" = \"th-12345\" ] && grep -q -- '-m 15' \"\$ARGS_FILE\" && echo 'att1:ok'
+    rm -f \"\$ATTEMPT_FILE\" \"\$ARGS_FILE\"
 
     # Subtest 5: attach_pr_in_vanadis retries transient error
     ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
@@ -1753,6 +1756,8 @@ EOF
     export VANADIS_URL='http://vanadis.aerial:8080'
     export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
     export AERIAL_TARGET_ID='100000000000000001'
+    export CONFIG_PATH='/dev/null'
+    unset AERIAL_BOT_ID
 
     out=\$(
         REPO_TEST_MODE=1
@@ -1789,13 +1794,106 @@ EOF
        [ \"\$(echo \"\$attach_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
        [ \"\$(echo \"\$reg_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
        [ \"\$(echo \"\$reg_pl\" | jq -r '.target_id')\" = '199999999999999999' ] && \
-       [ -z \"\$(echo \"\$reg_pl\" | jq -r '.vanadis_chunk_id // empty')\" ]; then
+       [ -z \"\$(echo \"\$reg_pl\" | jq -r '.vanadis_chunk_id // empty')\" ] && \
+       [ -z \"\$(echo \"\$reg_pl\" | jq -r '.bot_id // empty')\" ]; then
         echo 'submit_vanadis_attach:ok'
     else
         echo \"submit_vanadis_attach:fail:attach=\$attach_pl:reg=\$reg_pl\"
     fi
+
+    # Subtest 7b: submit_scratch includes bot_id in /internal/pr/register from AERIAL_BOT_ID env
+    WORK_DIR_BOT=\$(mktemp -d /tmp/aerial-pr-van-bot.XXXXXX)
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_BOT\"
+    git -C \"\$WORK_DIR_BOT\" config user.name 'Tester'
+    git -C \"\$WORK_DIR_BOT\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR_BOT\" checkout -q -b feat/bot-branch
+    echo 'Summary' > \"\$WORK_DIR_BOT/PR_DESCRIPTION.md\"
+    echo 'content' > \"\$WORK_DIR_BOT/file.txt\"
+
+    PAYLOAD_LOG_BOT=\$(mktemp /tmp/aerial-payloads-bot.XXXXXX)
+    out_bot=\$(
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":89,\"html_url\":\"https://github.com/azylman/aerial/pull/89\",\"node_id\":\"PR_kwDO89\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-89\",\"chunk_id\":\"chunk-89\",\"thread_id\":\"199999999999999999\"}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                for arg in \"\$@\"; do
+                    if [[ \"\$arg\" =~ ^\{.*\"repo\".* ]]; then
+                        echo \"REG_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG_BOT\"
+                    fi
+                done
+                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
+            fi
+        }
+        export -f curl
+        AERIAL_BOT_ID='suletta' submit_scratch \"\$WORK_DIR_BOT\" 'feat: bot test' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
+    )
+
+    reg_pl_bot=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG_BOT\" | sed 's/^REG_PAYLOAD://')
+    rm -rf \"\$WORK_DIR_BOT\" \"\$PAYLOAD_LOG_BOT\"
+
+    if [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.pr_number')\" -eq 89 ] && \
+       [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.bot_id')\" = 'suletta' ]; then
+        echo 'submit_bot_id_env:ok'
+    else
+        echo \"submit_bot_id_env:fail:reg=\$reg_pl_bot\"
+    fi
+
+    # Subtest 7c: submit_scratch includes bot_id from config.yaml when AERIAL_BOT_ID is unset
+    WORK_DIR_CFG=\$(mktemp -d /tmp/aerial-pr-van-cfg.XXXXXX)
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_CFG\"
+    git -C \"\$WORK_DIR_CFG\" config user.name 'Tester'
+    git -C \"\$WORK_DIR_CFG\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR_CFG\" checkout -q -b feat/cfg-branch
+    echo 'Summary' > \"\$WORK_DIR_CFG/PR_DESCRIPTION.md\"
+    echo 'content' > \"\$WORK_DIR_CFG/file.txt\"
+
+    PAYLOAD_LOG_CFG=\$(mktemp /tmp/aerial-payloads-cfg.XXXXXX)
+    TEST_BOT_CFG=\$(mktemp /tmp/test-bot-cfg.XXXXXX)
+    echo 'bot_id: \"aerial-cfg\"' > \"\$TEST_BOT_CFG\"
+
+    out_cfg=\$(
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":90,\"html_url\":\"https://github.com/azylman/aerial/pull/90\",\"node_id\":\"PR_kwDO90\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-90\",\"chunk_id\":\"chunk-90\",\"thread_id\":\"199999999999999999\"}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                for arg in \"\$@\"; do
+                    if [[ \"\$arg\" =~ ^\{.*\"repo\".* ]]; then
+                        echo \"REG_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG_CFG\"
+                    fi
+                done
+                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
+            fi
+        }
+        export -f curl
+        unset AERIAL_BOT_ID
+        CONFIG_PATH=\"\$TEST_BOT_CFG\" submit_scratch \"\$WORK_DIR_CFG\" 'feat: cfg bot test' --vanadis-chunk 'chunk-90' >/dev/null 2>&1
+    )
+
+    reg_pl_cfg=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG_CFG\" | sed 's/^REG_PAYLOAD://')
+    rm -rf \"\$WORK_DIR_CFG\" \"\$PAYLOAD_LOG_CFG\" \"\$TEST_BOT_CFG\"
+
+    if [ \"\$(echo \"\$reg_pl_cfg\" | jq -r '.pr_number')\" -eq 90 ] && \
+       [ \"\$(echo \"\$reg_pl_cfg\" | jq -r '.bot_id')\" = 'aerial-cfg' ]; then
+        echo 'submit_bot_id_cfg:ok'
+    else
+        echo \"submit_bot_id_cfg:fail:reg=\$reg_pl_cfg\"
+    fi
 ")
 assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_vanadis_attach:ok' && echo true || echo false)" "submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id"
+assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_bot_id_env:ok' && echo true || echo false)" "submit_scratch sends bot_id in /internal/pr/register from AERIAL_BOT_ID env"
+assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_bot_id_cfg:ok' && echo true || echo false)" "submit_scratch sends bot_id in /internal/pr/register from config.yaml"
 
 # Subtest 8 & 9: submit_scratch fails closed on attach-pr or pr/register failure
 SUBMIT_FAIL_CLOSED_CHECK=$(bash -c "
