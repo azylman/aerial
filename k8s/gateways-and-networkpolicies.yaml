@@ -767,9 +767,6 @@ spec:
                   - eri
                   - eri-miorine
                   - eri-suletta
-                  - eri-restate
-                  - eri-miorine-restate
-                  - eri-suletta-restate
                   - console
                   - vmsingle
                   - victoriametrics

@@ -416,6 +416,8 @@ spec:
               value: http://restate.aerial:8080
             - name: RESTATE_ADMIN_URL
               value: http://restate.aerial:9070
+            - name: VANADIS_URL
+              value: http://vanadis.aerial:4025
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: DISCORD_BOT_TOKEN
@@ -777,6 +779,8 @@ spec:
               value: http://restate.aerial:8080
             - name: AGENT_NAME
               value: aerial
+            - name: K8S_AUTH_ENABLED
+              value: "true"
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1633,6 +1637,8 @@ spec:
               value: "4005"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/haro/haro.yaml
+            - name: K8S_AUTH_ENABLED
+              value: "true"
             - name: ERI_URL
               value: http://eri.aerial
             - name: VANADIS_URL
@@ -2723,6 +2729,18 @@ spec:
                 secretKeyRef:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
+                  optional: true
+            - name: DISCORD_TOKEN_MIORINE
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_TOKEN
+                  name: miorine-secrets
+                  optional: true
+            - name: DISCORD_TOKEN_SULETTA
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_TOKEN
+                  name: suletta-secrets
                   optional: true
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
