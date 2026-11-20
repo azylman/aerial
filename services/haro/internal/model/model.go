@@ -55,6 +55,17 @@ const (
 	FieldError   = "error"
 )
 
+// DefaultAgent is the fallback agent tenancy identifier across haro schedules.
+const DefaultAgent = "aerial"
+
+// NormalizeAgent trims agent and defaults empty strings to DefaultAgent.
+func NormalizeAgent(agent string) string {
+	if trimmed := strings.TrimSpace(agent); trimmed != "" {
+		return trimmed
+	}
+	return DefaultAgent
+}
+
 // ScheduleSummaryMetrics aggregates active-schedule counts for /schedules.
 type ScheduleSummaryMetrics struct {
 	TotalActive    int        `json:"total_active"`
@@ -69,6 +80,7 @@ type ScheduleSummaryMetrics struct {
 // ScheduleRunJSON is the serialized form of a single schedule run record.
 type ScheduleRunJSON struct {
 	ID           string     `json:"id"`
+	Agent        string     `json:"agent,omitempty"`
 	ScheduleID   string     `json:"schedule_id"`
 	ScheduleType string     `json:"schedule_type"`
 	MessageID    string     `json:"message_id,omitempty"`
@@ -86,6 +98,7 @@ type ScheduleRunJSON struct {
 // CronSchedule is a recurring cron schedule row.
 type CronSchedule struct {
 	ID              string     `json:"id"`
+	Agent           string     `json:"agent"`
 	TargetID        string     `json:"channel_id"`
 	TitlePrefix     string     `json:"title_prefix"`
 	CronExpr        string     `json:"cron_expression"`
@@ -101,6 +114,7 @@ type CronSchedule struct {
 // OneShotSchedule is a one-time delayed schedule row.
 type OneShotSchedule struct {
 	ID        string    `json:"id"`
+	Agent     string    `json:"agent"`
 	ThreadID  string    `json:"thread_id"`
 	Prompt    string    `json:"prompt,omitempty"`
 	RunAt     time.Time `json:"run_at"`
@@ -114,6 +128,7 @@ type HeartbeatSchedule = CronSchedule
 // EventTrigger is an event-watch trigger row.
 type EventTrigger struct {
 	ID         string    `json:"id"`
+	Agent      string    `json:"agent"`
 	ChannelID  string    `json:"channel_id"`
 	Source     string    `json:"source"`
 	Target     string    `json:"target"`
@@ -127,6 +142,7 @@ type EventTrigger struct {
 // ScheduleRun is a schedule execution record row.
 type ScheduleRun struct {
 	ID           string     `json:"id"`
+	Agent        string     `json:"agent"`
 	ScheduleID   string     `json:"schedule_id"`
 	ScheduleType string     `json:"schedule_type"`
 	MessageID    string     `json:"message_id"`

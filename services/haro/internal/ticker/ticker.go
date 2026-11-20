@@ -123,6 +123,7 @@ func (t *Ticker) processDueCron(ctx context.Context, c model.CronSchedule, now t
 			DurationMs:   0,
 			Error:        "stale schedule (>24h overdue)",
 			Effort:       c.Effort,
+			Agent:        c.Agent,
 		}
 		if createErr := store.CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating stale schedule run for cron %s: %v", c.ID, createErr)
@@ -142,6 +143,7 @@ func (t *Ticker) processDueCron(ctx context.Context, c model.CronSchedule, now t
 		Title:     c.TitlePrefix,
 		MessageID: runID,
 		Effort:    c.Effort,
+		Agent:     c.Agent,
 	}
 	dispatchStart := time.Now()
 	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeCron, c.ID, func(ctx context.Context) (dispatch.PromptDispatchResponse, error) {
@@ -181,6 +183,7 @@ func (t *Ticker) processDueCron(ctx context.Context, c model.CronSchedule, now t
 		DurationMs:   durationMs,
 		Error:        errMsg,
 		Effort:       c.Effort,
+		Agent:        c.Agent,
 	}
 	if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
 		log.Printf("[Haro Ticker] Error creating schedule run for cron %s: %v", c.ID, createErr)
@@ -231,6 +234,7 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s model.OneShotSchedule,
 			DurationMs:   0,
 			Error:        "stale schedule (>24h overdue)",
 			Effort:       s.Effort,
+			Agent:        s.Agent,
 		}
 		if createErr := store.CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating stale schedule run for one-shot %s: %v", s.ID, createErr)
@@ -244,6 +248,7 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s model.OneShotSchedule,
 		ChannelID: s.ThreadID,
 		MessageID: runID,
 		Effort:    s.Effort,
+		Agent:     s.Agent,
 	}
 	dispatchStart := time.Now()
 	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeOneShot, s.ID, func(ctx context.Context) (dispatch.PromptDispatchResponse, error) {
@@ -282,6 +287,7 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s model.OneShotSchedule,
 		DurationMs:   durationMs,
 		Error:        errMsg,
 		Effort:       s.Effort,
+		Agent:        s.Agent,
 	}
 	if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
 		log.Printf("[Haro Ticker] Error creating schedule run for one-shot %s: %v", s.ID, createErr)
@@ -334,6 +340,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 			DurationMs:   0,
 			Error:        "stale heartbeat (>24h overdue)",
 			Effort:       hb.Effort,
+			Agent:        hb.Agent,
 		}
 		if createErr := store.CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating stale schedule run for heartbeat %s: %v", hb.ID, createErr)
@@ -363,6 +370,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 		Prompt:       wrappedPrompt,
 		Effort:       hb.Effort,
 		SkipIfActive: true,
+		Agent:        hb.Agent,
 	}
 
 	dispatchStart := time.Now()
@@ -395,6 +403,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 			DurationMs:   durationMs,
 			Error:        dispatchErr.Error(),
 			Effort:       hb.Effort,
+			Agent:        hb.Agent,
 		}
 		if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)
@@ -418,6 +427,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 		DurationMs:   0,
 		Error:        "",
 		Effort:       hb.Effort,
+		Agent:        hb.Agent,
 	}
 	if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
 		log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)

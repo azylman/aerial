@@ -124,27 +124,44 @@ func InsertEventTrigger(ctx context.Context, database *sql.DB, t model.EventTrig
 	if err != nil {
 		effort = model.EffortMedium
 	}
-	query := `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	_, err = database.ExecContext(ctx, query, t.ID, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt, t.Persistent)
+	t.Agent = model.NormalizeAgent(t.Agent)
+	query := `INSERT INTO event_triggers (id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err = database.ExecContext(ctx, query, t.ID, t.Agent, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt, t.Persistent)
 	return err
 }
 
-// ListEventTriggers retrieves event triggers, optionally filtered by channel_id.
-func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string) ([]model.EventTrigger, error) {
+// ListEventTriggers retrieves event triggers, optionally filtered by channel_id and agent.
+func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string, agent ...string) ([]model.EventTrigger, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return nil, err
 	}
 	channelID = strings.TrimSpace(channelID)
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = strings.TrimSpace(agent[0])
+	}
+
 	var query string
 	var rows *sql.Rows
+	var args []any
+	base := `SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers`
+	whereParts := make([]string, 0, 2)
 	if channelID != "" {
-		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE channel_id = $1 ORDER BY created_at ASC`
-		rows, err = database.QueryContext(ctx, query, channelID)
-	} else {
-		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers ORDER BY created_at ASC`
-		rows, err = database.QueryContext(ctx, query)
+		args = append(args, channelID)
+		whereParts = append(whereParts, fmt.Sprintf("channel_id = $%d", len(args)))
 	}
+	if agentFilter != "" && agentFilter != "*" {
+		args = append(args, agentFilter)
+		whereParts = append(whereParts, fmt.Sprintf("agent = $%d", len(args)))
+	}
+	if len(whereParts) > 0 {
+		query = fmt.Sprintf("%s WHERE %s ORDER BY created_at ASC", base, strings.Join(whereParts, " AND "))
+	} else {
+		query = base + " ORDER BY created_at ASC"
+	}
+
+	rows, err = database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -156,9 +173,10 @@ func scanEventTriggerRows(rows *sql.Rows) ([]model.EventTrigger, error) {
 	results := []model.EventTrigger{}
 	for rows.Next() {
 		var t model.EventTrigger
-		if err := rows.Scan(&t.ID, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt, &t.Persistent); err != nil {
+		if err := rows.Scan(&t.ID, &t.Agent, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt, &t.Persistent); err != nil {
 			return nil, err
 		}
+		t.Agent = model.NormalizeAgent(t.Agent)
 		results = append(results, t)
 	}
 	return results, rows.Err()
@@ -204,7 +222,7 @@ func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholder
 		}
 	}()
 
-	selectQuery := fmt.Sprintf(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < datetime('now', '-5 seconds'))) ORDER BY created_at ASC`, placeholders)
+	selectQuery := fmt.Sprintf(`SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < datetime('now', '-5 seconds'))) ORDER BY created_at ASC`, placeholders)
 	rows, qErr := tx.QueryContext(ctx, selectQuery, args...)
 	if qErr != nil {
 		return nil, qErr
@@ -246,15 +264,38 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	}
 
 	rawQuery := fmt.Sprintf(`WITH deleted AS (
-		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
 	), updated_persistent AS (
-		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
-	) SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
+		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	) SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err
 	}
 	return scanEventTriggerRows(rows)
+}
+
+// GetEventTrigger fetches an event trigger by id.
+func GetEventTrigger(ctx context.Context, database *sql.DB, id string) (*model.EventTrigger, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("id cannot be empty")
+	}
+	query := `SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE id = $1`
+	var t model.EventTrigger
+	err = database.QueryRowContext(ctx, query, id).Scan(&t.ID, &t.Agent, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt, &t.Persistent)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("event watch %q not found: %w", id, sql.ErrNoRows)
+		}
+		return nil, err
+	}
+	t.Agent = model.NormalizeAgent(t.Agent)
+	return &t, nil
 }
 
 // DeleteEventTrigger removes an event trigger by id.

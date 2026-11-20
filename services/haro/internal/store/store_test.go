@@ -1048,3 +1048,120 @@ func TestDeleteSchedule(t *testing.T) {
 		})
 	}
 }
+
+func TestGetScheduleAgent(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name      string
+		id        string
+		seedKind  string
+		seedAgent string
+		nilDB     bool
+		wantAgent string
+		wantErr   string
+	}{
+		{name: "cron schedule agent", id: "c-agent-1", seedKind: "cron", seedAgent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "oneshot schedule agent", id: "s-agent-1", seedKind: "oneshot", seedAgent: "agent-beta", wantAgent: "agent-beta"},
+		{name: "heartbeat schedule agent", id: "h-agent-1", seedKind: "heartbeat", seedAgent: "agent-gamma", wantAgent: "agent-gamma"},
+		{name: "event trigger agent", id: "et-agent-1", seedKind: "event", seedAgent: "agent-delta", wantAgent: "agent-delta"},
+		{name: "empty id errors", id: "   ", wantErr: "schedule_id cannot be empty"},
+		{name: "nil db errors", id: "c-1", nilDB: true, wantErr: "database is nil"},
+		{name: "not found errors", id: "missing-id", wantErr: `schedule "missing-id" not found`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			switch tc.seedKind {
+			case "cron":
+				mustInsertCron(ctx, t, db, model.CronSchedule{ID: tc.id, TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true, Agent: tc.seedAgent})
+			case "oneshot":
+				mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: tc.id, ThreadID: "th", Prompt: "p", RunAt: now, Agent: tc.seedAgent})
+			case "heartbeat":
+				mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: tc.id, TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", NextRunAt: now, Enabled: true, Agent: tc.seedAgent})
+			case "event":
+				if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: tc.id, ChannelID: "ch", Source: "flux", Target: "t", EventType: "ev", Prompt: "p", Agent: tc.seedAgent}); err != nil {
+					t.Fatalf("InsertEventTrigger err = %v", err)
+				}
+			}
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			got, err := GetScheduleAgent(ctx, database, tc.id)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("GetScheduleAgent err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetScheduleAgent err = %v", err)
+			}
+			if got != tc.wantAgent {
+				t.Errorf("GetScheduleAgent(%q) = %q, want %q", tc.id, got, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestMultiAgentScheduleFiltering(t *testing.T) {
+	now := time.Now().UTC()
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+
+	mustInsertCron(ctx, t, db, model.CronSchedule{ID: "c-alpha", TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p1", NextRunAt: now, Enabled: true, Agent: "agent-alpha"})
+	mustInsertCron(ctx, t, db, model.CronSchedule{ID: "c-beta", TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p2", NextRunAt: now, Enabled: true, Agent: "agent-beta"})
+
+	mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-alpha", ThreadID: "th", Prompt: "p1", RunAt: now, Agent: "agent-alpha"})
+	mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-beta", ThreadID: "th", Prompt: "p2", RunAt: now, Agent: "agent-beta"})
+
+	mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: "h-alpha", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p1", NextRunAt: now, Enabled: true, Agent: "agent-alpha"})
+	mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: "h-beta", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p2", NextRunAt: now, Enabled: true, Agent: "agent-beta"})
+
+	tests := []struct {
+		name        string
+		agentFilter string
+		wantCrons   int
+		wantOneshot int
+		wantHB      int
+	}{
+		{"filter agent-alpha", "agent-alpha", 1, 1, 1},
+		{"filter agent-beta", "agent-beta", 1, 1, 1},
+		{"wildcard filter all", "*", 2, 2, 2},
+		{"empty filter all", "", 2, 2, 2},
+		{"non-existent agent", "agent-none", 0, 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			crons, err := ListCronSchedules(ctx, db, "", tc.agentFilter)
+			if err != nil {
+				t.Fatalf("ListCronSchedules err = %v", err)
+			}
+			if len(crons) != tc.wantCrons {
+				t.Errorf("ListCronSchedules count = %d, want %d", len(crons), tc.wantCrons)
+			}
+			oneshots, err := ListOneShotSchedules(ctx, db, "", tc.agentFilter)
+			if err != nil {
+				t.Fatalf("ListOneShotSchedules err = %v", err)
+			}
+			if len(oneshots) != tc.wantOneshot {
+				t.Errorf("ListOneShotSchedules count = %d, want %d", len(oneshots), tc.wantOneshot)
+			}
+			hbs, err := ListHeartbeatSchedules(ctx, db, "", tc.agentFilter)
+			if err != nil {
+				t.Fatalf("ListHeartbeatSchedules err = %v", err)
+			}
+			if len(hbs) != tc.wantHB {
+				t.Errorf("ListHeartbeatSchedules count = %d, want %d", len(hbs), tc.wantHB)
+			}
+			metrics, err := GetScheduleSummaryMetrics(ctx, db, tc.agentFilter)
+			if err != nil {
+				t.Fatalf("GetScheduleSummaryMetrics err = %v", err)
+			}
+			if metrics.CronCount != tc.wantCrons || metrics.OneShotCount != tc.wantOneshot || metrics.HeartbeatCount != tc.wantHB {
+				t.Errorf("summary metrics %+v, want crons=%d oneshot=%d hb=%d", metrics, tc.wantCrons, tc.wantOneshot, tc.wantHB)
+			}
+		})
+	}
+}

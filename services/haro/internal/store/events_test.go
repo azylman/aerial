@@ -414,3 +414,81 @@ func TestVanadisURL_Precedence(t *testing.T) {
 		})
 	}
 }
+
+func TestGetEventTrigger(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name      string
+		id        string
+		seed      bool
+		seedAgent string
+		nilDB     bool
+		wantAgent string
+		wantErr   string
+	}{
+		{name: "found trigger", id: "et-found", seed: true, seedAgent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "empty id errors", id: "   ", wantErr: "id cannot be empty"},
+		{name: "nil db errors", id: "et-1", nilDB: true, wantErr: "database is nil"},
+		{name: "not found trigger", id: "et-missing", wantErr: `event watch "et-missing" not found`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			if tc.seed {
+				if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: tc.id, ChannelID: "ch", Source: "flux", Target: "t", EventType: "ev", Prompt: "p", CreatedAt: now, Agent: tc.seedAgent}); err != nil {
+					t.Fatalf("InsertEventTrigger err = %v", err)
+				}
+			}
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			trig, err := GetEventTrigger(ctx, database, tc.id)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("GetEventTrigger err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetEventTrigger err = %v", err)
+			}
+			if trig.Agent != tc.wantAgent {
+				t.Errorf("trig.Agent = %q, want %q", trig.Agent, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestListEventTriggers_MultiAgent(t *testing.T) {
+	now := time.Now().UTC()
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+
+	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-a", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "ev", Prompt: "p1", CreatedAt: now, Agent: "agent-alpha"})
+	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-b", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "ev", Prompt: "p2", CreatedAt: now, Agent: "agent-beta"})
+
+	tests := []struct {
+		name        string
+		agentFilter string
+		wantCount   int
+	}{
+		{"filter agent-alpha", "agent-alpha", 1},
+		{"filter agent-beta", "agent-beta", 1},
+		{"wildcard all", "*", 2},
+		{"empty all", "", 2},
+		{"non-existent", "agent-none", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ListEventTriggers(ctx, db, "ch", tc.agentFilter)
+			if err != nil {
+				t.Fatalf("ListEventTriggers err = %v", err)
+			}
+			if len(got) != tc.wantCount {
+				t.Errorf("ListEventTriggers count = %d, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}

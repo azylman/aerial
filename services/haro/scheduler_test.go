@@ -28,6 +28,7 @@ func setupTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	schema := `
 	CREATE TABLE IF NOT EXISTS schedule_runs (
 		id TEXT PRIMARY KEY,
+		agent TEXT NOT NULL DEFAULT 'aerial',
 		schedule_id TEXT NOT NULL,
 		schedule_type TEXT NOT NULL,
 		message_id TEXT NOT NULL DEFAULT '',

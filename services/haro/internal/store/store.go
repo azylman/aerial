@@ -134,8 +134,9 @@ func InsertCronSchedule(ctx context.Context, database *sql.DB, c model.CronSched
 	if c.Timezone == "" {
 		c.Timezone = config.DefaultTimezone
 	}
-	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err = database.ExecContext(ctx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, NormalizeScheduleEffort(c.Effort))
+	c.Agent = model.NormalizeAgent(c.Agent)
+	query := `INSERT INTO cron_schedules (id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	_, err = database.ExecContext(ctx, query, c.ID, c.Agent, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, NormalizeScheduleEffort(c.Effort))
 	return err
 }
 
@@ -148,8 +149,9 @@ func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s model.OneSho
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
-	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING`
-	_, err = database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, NormalizeScheduleEffort(s.Effort))
+	s.Agent = model.NormalizeAgent(s.Agent)
+	query := `INSERT INTO one_shot_schedules (id, agent, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING`
+	_, err = database.ExecContext(ctx, query, s.ID, s.Agent, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, NormalizeScheduleEffort(s.Effort))
 	return err
 }
 
@@ -169,8 +171,9 @@ func InsertHeartbeatSchedule(ctx context.Context, database *sql.DB, h model.Hear
 	if err != nil {
 		effort = model.EffortLow
 	}
-	query := `INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err = database.ExecContext(ctx, query, h.ID, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.CreatedAt)
+	h.Agent = model.NormalizeAgent(h.Agent)
+	query := `INSERT INTO heartbeat_schedules (id, agent, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	_, err = database.ExecContext(ctx, query, h.ID, h.Agent, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.CreatedAt)
 	return err
 }
 
@@ -180,23 +183,26 @@ type rowScanner interface {
 
 func scanCronSchedule(r rowScanner) (model.CronSchedule, error) {
 	var c model.CronSchedule
-	err := r.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort)
+	err := r.Scan(&c.ID, &c.Agent, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort)
+	c.Agent = model.NormalizeAgent(c.Agent)
 	return c, err
 }
 
 func scanOneShotSchedule(r rowScanner) (model.OneShotSchedule, error) {
 	var s model.OneShotSchedule
-	err := r.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort)
+	err := r.Scan(&s.ID, &s.Agent, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort)
+	s.Agent = model.NormalizeAgent(s.Agent)
 	return s, err
 }
 
 func scanHeartbeatSchedule(r rowScanner) (model.HeartbeatSchedule, error) {
 	var h model.HeartbeatSchedule
 	var lastCompletedAt sql.NullTime
-	err := r.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort, &lastCompletedAt)
+	err := r.Scan(&h.ID, &h.Agent, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort, &lastCompletedAt)
 	if err != nil {
 		return h, err
 	}
+	h.Agent = model.NormalizeAgent(h.Agent)
 	if lastCompletedAt.Valid {
 		t := lastCompletedAt.Time
 		h.LastCompletedAt = &t
@@ -204,28 +210,32 @@ func scanHeartbeatSchedule(r rowScanner) (model.HeartbeatSchedule, error) {
 	return h, nil
 }
 
-func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, filterCol, targetID, orderCol string, scanFn func(rowScanner) (T, error)) ([]T, error) {
+func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, filterCol, targetID, agentFilter, orderCol string, scanFn func(rowScanner) (T, error)) ([]T, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return nil, err
 	}
 	query := baseQuery
-	var rows *sql.Rows
-	if targetID != "" {
-		sep := " WHERE "
-		if strings.Contains(query, "WHERE") {
-			sep = " AND "
-		}
-		query = fmt.Sprintf("%s%s%s = $1 ORDER BY %s ASC", query, sep, filterCol, orderCol)
-		rows, err = database.QueryContext(ctx, query, targetID)
-	} else {
-		query = fmt.Sprintf("%s ORDER BY %s ASC", query, orderCol)
-		rows, err = database.QueryContext(ctx, query)
+	var args []any
+	sep := " WHERE "
+	if strings.Contains(query, "WHERE") {
+		sep = " AND "
 	}
+	if targetID = strings.TrimSpace(targetID); targetID != "" {
+		args = append(args, targetID)
+		query = fmt.Sprintf("%s%s%s = $%d", query, sep, filterCol, len(args))
+		sep = " AND "
+	}
+	if agentFilter = strings.TrimSpace(agentFilter); agentFilter != "" && agentFilter != "*" {
+		args = append(args, agentFilter)
+		query = fmt.Sprintf("%s%sagent = $%d", query, sep, len(args))
+	}
+	query = fmt.Sprintf("%s ORDER BY %s ASC", query, orderCol)
+	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer httpkit.CloseWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []T
 	for rows.Next() {
@@ -238,22 +248,34 @@ func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, fil
 	return results, rows.Err()
 }
 
-// ListCronSchedules lists enabled cron schedules, optionally filtered by target.
-func ListCronSchedules(ctx context.Context, database *sql.DB, targetID string) ([]model.CronSchedule, error) {
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE`
-	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", scanCronSchedule)
+// ListCronSchedules lists enabled cron schedules, optionally filtered by target and agent.
+func ListCronSchedules(ctx context.Context, database *sql.DB, targetID string, agent ...string) ([]model.CronSchedule, error) {
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = agent[0]
+	}
+	baseQuery := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE`
+	return querySchedules(ctx, database, baseQuery, "target_id", targetID, agentFilter, "created_at", scanCronSchedule)
 }
 
-// ListOneShotSchedules lists one-shot schedules, optionally filtered by thread.
-func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string) ([]model.OneShotSchedule, error) {
-	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules`
-	return querySchedules(ctx, database, baseQuery, "thread_id", targetID, "run_at", scanOneShotSchedule)
+// ListOneShotSchedules lists one-shot schedules, optionally filtered by thread and agent.
+func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string, agent ...string) ([]model.OneShotSchedule, error) {
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = agent[0]
+	}
+	baseQuery := `SELECT id, agent, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules`
+	return querySchedules(ctx, database, baseQuery, "thread_id", targetID, agentFilter, "run_at", scanOneShotSchedule)
 }
 
-// ListHeartbeatSchedules lists enabled heartbeat schedules, optionally filtered by target.
-func ListHeartbeatSchedules(ctx context.Context, database *sql.DB, targetID string) ([]model.HeartbeatSchedule, error) {
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE enabled = TRUE`
-	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", scanHeartbeatSchedule)
+// ListHeartbeatSchedules lists enabled heartbeat schedules, optionally filtered by target and agent.
+func ListHeartbeatSchedules(ctx context.Context, database *sql.DB, targetID string, agent ...string) ([]model.HeartbeatSchedule, error) {
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = agent[0]
+	}
+	baseQuery := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE enabled = TRUE`
+	return querySchedules(ctx, database, baseQuery, "target_id", targetID, agentFilter, "created_at", scanHeartbeatSchedule)
 }
 
 func getScheduleByID[T any](ctx context.Context, database *sql.DB, id, label, query string, scanFn func(rowScanner) (T, error)) (*T, error) {
@@ -278,19 +300,19 @@ func getScheduleByID[T any](ctx context.Context, database *sql.DB, id, label, qu
 
 // GetCronSchedule fetches a cron schedule by id.
 func GetCronSchedule(ctx context.Context, database *sql.DB, id string) (*model.CronSchedule, error) {
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE id = $1`
+	query := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE id = $1`
 	return getScheduleByID(ctx, database, id, model.ScheduleTypeCron, query, scanCronSchedule)
 }
 
 // GetOneShotSchedule fetches a one-shot schedule by id.
 func GetOneShotSchedule(ctx context.Context, database *sql.DB, id string) (*model.OneShotSchedule, error) {
-	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE id = $1`
+	query := `SELECT id, agent, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE id = $1`
 	return getScheduleByID(ctx, database, id, "one-shot", query, scanOneShotSchedule)
 }
 
 // GetHeartbeatSchedule fetches a heartbeat schedule by id.
 func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*model.HeartbeatSchedule, error) {
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE id = $1`
+	query := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE id = $1`
 	return getScheduleByID(ctx, database, id, model.ScheduleTypeHeartbeat, query, scanHeartbeatSchedule)
 }
 
@@ -432,7 +454,7 @@ func advanceScheduleNextRun(ctx context.Context, database *sql.DB, table, label,
 
 // GetDueCronSchedules lists enabled cron schedules whose next run is due.
 func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]model.CronSchedule, error) {
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
+	baseQuery := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
 	return queryDueSchedules(ctx, database, baseQuery, now, scanCronSchedule)
 }
 
@@ -443,7 +465,7 @@ func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRu
 
 // GetDueHeartbeatSchedules lists enabled heartbeat schedules whose next run is due.
 func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]model.HeartbeatSchedule, error) {
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
+	baseQuery := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
 	return queryDueSchedules(ctx, database, baseQuery, now, scanHeartbeatSchedule)
 }
 
@@ -471,7 +493,7 @@ func AdvanceHeartbeatLastCompletedAt(ctx context.Context, database *sql.DB, id s
 
 // GetDueOneShotSchedules lists one-shot schedules whose run time is due.
 func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]model.OneShotSchedule, error) {
-	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1 ORDER BY run_at ASC`
+	baseQuery := `SELECT id, agent, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1 ORDER BY run_at ASC`
 	return queryDueSchedules(ctx, database, baseQuery, now, scanOneShotSchedule)
 }
 
@@ -512,9 +534,10 @@ func CreateScheduleRun(ctx context.Context, database *sql.DB, r model.ScheduleRu
 	if r.StartedAt.IsZero() {
 		r.StartedAt = time.Now().UTC()
 	}
-	query := `INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+	query := `INSERT INTO schedule_runs (id, agent, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
 	_, err = database.ExecContext(ctx, query,
 		r.ID,
+		model.NormalizeAgent(r.Agent),
 		r.ScheduleID,
 		r.ScheduleType,
 		r.MessageID,
@@ -562,22 +585,47 @@ func GetScheduleRun(ctx context.Context, database *sql.DB, id string) (*model.Sc
 	if id == "" {
 		return nil, fmt.Errorf("run id cannot be empty")
 	}
-	query := `SELECT id, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), status, started_at, completed_at, COALESCE(duration_ms, 0), COALESCE(error, ''), COALESCE(effort, 'medium'), COALESCE(model, '') FROM schedule_runs WHERE id = $1`
+	query := `SELECT id, agent, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), status, started_at, completed_at, COALESCE(duration_ms, 0), COALESCE(error, ''), COALESCE(effort, 'medium'), COALESCE(model, '') FROM schedule_runs WHERE id = $1`
 	var r model.ScheduleRun
 	var completedAt sql.NullTime
 	row := database.QueryRowContext(ctx, query, id)
-	err = row.Scan(&r.ID, &r.ScheduleID, &r.ScheduleType, &r.MessageID, &r.TargetID, &r.ThreadID, &r.Title, &r.Prompt, &r.Status, &r.StartedAt, &completedAt, &r.DurationMs, &r.Error, &r.Effort, &r.Model)
+	err = row.Scan(&r.ID, &r.Agent, &r.ScheduleID, &r.ScheduleType, &r.MessageID, &r.TargetID, &r.ThreadID, &r.Title, &r.Prompt, &r.Status, &r.StartedAt, &completedAt, &r.DurationMs, &r.Error, &r.Effort, &r.Model)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("schedule run %q not found: %w", id, sql.ErrNoRows)
 		}
 		return nil, err
 	}
+	r.Agent = model.NormalizeAgent(r.Agent)
 	if completedAt.Valid {
 		t := completedAt.Time
 		r.CompletedAt = &t
 	}
 	return &r, nil
+}
+
+// GetScheduleAgent finds the owning agent of a schedule across cron, one-shot, heartbeat, and event trigger tables.
+func GetScheduleAgent(ctx context.Context, database *sql.DB, id string) (string, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return "", err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("schedule_id cannot be empty")
+	}
+	for _, tbl := range []string{"cron_schedules", "one_shot_schedules", "heartbeat_schedules", "event_triggers"} {
+		query := fmt.Sprintf("SELECT agent FROM %s WHERE id = $1", tbl)
+		var agent string
+		err := database.QueryRowContext(ctx, query, id).Scan(&agent)
+		if err == nil {
+			return model.NormalizeAgent(agent), nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("schedule %q not found: %w", id, sql.ErrNoRows)
 }
 
 // UpdateScheduleRunOutcome records the terminal outcome of a schedule run.
@@ -633,10 +681,22 @@ func findEarliestNextRun(crons []model.CronSchedule, heartbeats []model.Heartbea
 	return earliest
 }
 
-func compute24hRunMetrics(ctx context.Context, database *sql.DB) (int, float64, error) {
+func compute24hRunMetrics(ctx context.Context, database *sql.DB, agent ...string) (int, float64, error) {
 	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = strings.TrimSpace(agent[0])
+	}
+
 	query := `SELECT status FROM schedule_runs WHERE started_at >= $1`
-	rows, err := database.QueryContext(ctx, query, cutoff)
+	var rows *sql.Rows
+	var err error
+	if agentFilter != "" && agentFilter != "*" {
+		query += ` AND agent = $2`
+		rows, err = database.QueryContext(ctx, query, cutoff, agentFilter)
+	} else {
+		rows, err = database.QueryContext(ctx, query, cutoff)
+	}
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query schedule runs for 24h metrics: %w", err)
 	}
@@ -667,26 +727,31 @@ func compute24hRunMetrics(ctx context.Context, database *sql.DB) (int, float64, 
 }
 
 // GetScheduleSummaryMetrics computes summary metrics across all schedules and runs in the last 24 hours.
-func GetScheduleSummaryMetrics(ctx context.Context, database *sql.DB) (model.ScheduleSummaryMetrics, error) {
+func GetScheduleSummaryMetrics(ctx context.Context, database *sql.DB, agent ...string) (model.ScheduleSummaryMetrics, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return model.ScheduleSummaryMetrics{}, err
 	}
 
-	crons, err := ListCronSchedules(ctx, database, "")
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = strings.TrimSpace(agent[0])
+	}
+
+	crons, err := ListCronSchedules(ctx, database, "", agentFilter)
 	if err != nil {
 		return model.ScheduleSummaryMetrics{}, fmt.Errorf("failed to list cron schedules: %w", err)
 	}
-	heartbeats, err := ListHeartbeatSchedules(ctx, database, "")
+	heartbeats, err := ListHeartbeatSchedules(ctx, database, "", agentFilter)
 	if err != nil {
 		return model.ScheduleSummaryMetrics{}, fmt.Errorf("failed to list heartbeat schedules: %w", err)
 	}
-	oneshots, err := ListOneShotSchedules(ctx, database, "")
+	oneshots, err := ListOneShotSchedules(ctx, database, "", agentFilter)
 	if err != nil {
 		return model.ScheduleSummaryMetrics{}, fmt.Errorf("failed to list one-shot schedules: %w", err)
 	}
 
-	totalRuns, successRate, err := compute24hRunMetrics(ctx, database)
+	totalRuns, successRate, err := compute24hRunMetrics(ctx, database, agentFilter)
 	if err != nil {
 		return model.ScheduleSummaryMetrics{}, err
 	}
@@ -703,7 +768,7 @@ func GetScheduleSummaryMetrics(ctx context.Context, database *sql.DB) (model.Sch
 }
 
 // GetScheduleRunsPaginated fetches a paginated, filtered slice of schedule runs and the total count.
-func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offset int, scheduleID, status string) ([]model.ScheduleRunJSON, int, error) {
+func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offset int, scheduleID, status string, agent ...string) ([]model.ScheduleRunJSON, int, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return nil, 0, err
@@ -718,6 +783,11 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 		offset = 0
 	}
 
+	agentFilter := ""
+	if len(agent) > 0 {
+		agentFilter = strings.TrimSpace(agent[0])
+	}
+
 	whereClause := " WHERE 1=1"
 	var filterArgs []any
 	if trimmedID := strings.TrimSpace(scheduleID); trimmedID != "" {
@@ -727,6 +797,10 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 	if trimmedStatus := strings.TrimSpace(status); trimmedStatus != "" {
 		filterArgs = append(filterArgs, trimmedStatus)
 		whereClause += fmt.Sprintf(" AND LOWER(status) = LOWER($%d)", len(filterArgs))
+	}
+	if agentFilter != "" && agentFilter != "*" {
+		filterArgs = append(filterArgs, agentFilter)
+		whereClause += fmt.Sprintf(" AND agent = $%d", len(filterArgs))
 	}
 
 	countQuery := "SELECT COUNT(*) FROM schedule_runs" + whereClause
@@ -741,7 +815,7 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 	limitParam := len(selectArgs) - 1
 	offsetParam := len(selectArgs)
 
-	selectQuery := fmt.Sprintf("SELECT id, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), started_at, completed_at, COALESCE(duration_ms, 0), status, COALESCE(error, '') FROM schedule_runs%s ORDER BY started_at DESC LIMIT $%d OFFSET $%d", whereClause, limitParam, offsetParam)
+	selectQuery := fmt.Sprintf("SELECT id, agent, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), started_at, completed_at, COALESCE(duration_ms, 0), status, COALESCE(error, '') FROM schedule_runs%s ORDER BY started_at DESC LIMIT $%d OFFSET $%d", whereClause, limitParam, offsetParam)
 
 	rows, err := database.QueryContext(ctx, selectQuery, selectArgs...)
 	if err != nil {
@@ -755,6 +829,7 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 		var completedAt sql.NullTime
 		if err := rows.Scan(
 			&r.ID,
+			&r.Agent,
 			&r.ScheduleID,
 			&r.ScheduleType,
 			&r.MessageID,
@@ -770,6 +845,7 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan schedule run: %w", err)
 		}
+		r.Agent = model.NormalizeAgent(r.Agent)
 		if completedAt.Valid {
 			t := completedAt.Time
 			r.CompletedAt = &t

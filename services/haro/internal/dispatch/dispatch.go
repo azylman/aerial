@@ -62,6 +62,7 @@ func DispatchSessionServiceName(agent string) string {
 }
 
 type PromptDispatchRequest struct {
+	Agent        string `json:"agent,omitempty"`
 	Prompt       string `json:"prompt"`
 	ChannelID    string `json:"channel_id,omitempty"`
 	SessionID    string `json:"session_id,omitempty"`
@@ -82,6 +83,7 @@ type PromptDispatchResponse struct {
 
 type DispatchRequest struct {
 	ID           string `json:"id,omitempty"`
+	Agent        string `json:"agent,omitempty"`
 	Source       string `json:"source"`
 	SessionID    string `json:"session_id,omitempty"`
 	TargetID     string `json:"target_id,omitempty"`
@@ -326,7 +328,14 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 		msgID = uuid.New().String()
 	}
 
-	svc := ThreadSessionServiceName(d.agentName)
+	agent := req.Agent
+	if strings.TrimSpace(agent) == "" {
+		agent = d.agentName
+	}
+	if strings.TrimSpace(agent) == "" {
+		agent = defaultAgentName
+	}
+	svc := ThreadSessionServiceName(agent)
 	endpoint := d.restateURL + "/" + svc + "/" + url.PathEscape(channelID) + "/Enqueue"
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
 
@@ -376,10 +385,19 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req Dispatch
 		sessionKey = "dispatch-" + dispatchID
 	}
 
-	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", d.restateURL, DispatchSessionServiceName(d.agentName), url.PathEscape(sessionKey))
+	agent := req.Agent
+	if strings.TrimSpace(agent) == "" {
+		agent = d.agentName
+	}
+	if strings.TrimSpace(agent) == "" {
+		agent = defaultAgentName
+	}
+	svc := DispatchSessionServiceName(agent)
+	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", d.restateURL, svc, url.PathEscape(sessionKey))
 
 	raw := map[string]any{
 		"id":             dispatchID,
+		"agent":          agent,
 		"source":         req.Source,
 		"session_id":     req.SessionID,
 		"target_id":      req.TargetID,

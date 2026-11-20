@@ -34,6 +34,7 @@ type ScheduleHeartbeatArgs struct {
 	Prompt         string `json:"prompt"                    jsonschema:"Silent evaluation instructions or edge-triggered condition check."`
 	Timezone       string `json:"timezone,omitempty"        jsonschema:"Timezone for cron evaluation (e.g. 'America/Los_Angeles' or 'UTC'). Defaults to configured server timezone."`
 	Effort         string `json:"effort,omitempty"          jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
+	Agent          string `json:"agent,omitempty"           jsonschema:"Target agent namespace (defaults to caller agent)."`
 }
 
 // ToMap converts typed heartbeat args to the untyped map the handler accepts.
@@ -62,6 +63,9 @@ func (a ScheduleHeartbeatArgs) ToMap() map[string]any {
 	}
 	if a.Effort != "" {
 		m[model.FieldEffort] = a.Effort
+	}
+	if a.Agent != "" {
+		m["agent"] = a.Agent
 	}
 	return m
 }
@@ -131,6 +135,7 @@ type WatchEventArgs struct {
 	Prompt     string `json:"prompt"               jsonschema:"Instructions to execute when the event triggers."`
 	Effort     string `json:"effort,omitempty"     jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
 	Persistent *bool  `json:"persistent,omitempty" jsonschema:"Whether the event watch trigger remains active after firing (default false)."`
+	Agent      string `json:"agent,omitempty"      jsonschema:"Target agent namespace (defaults to caller agent)."`
 }
 
 // ToMap converts typed watch args to the untyped map the handler accepts.
@@ -163,6 +168,9 @@ func (a WatchEventArgs) ToMap() map[string]any {
 	if a.Persistent != nil {
 		m["persistent"] = *a.Persistent
 	}
+	if a.Agent != "" {
+		m["agent"] = a.Agent
+	}
 	return m
 }
 
@@ -170,6 +178,7 @@ func (a WatchEventArgs) ToMap() map[string]any {
 type ListEventWatchesArgs struct {
 	ChannelID string `json:"channel_id,omitempty" jsonschema:"Optional Discord channel ID filter."`
 	TargetID  string `json:"target_id,omitempty"  jsonschema:"Alias for channel_id filter."`
+	Agent     string `json:"agent,omitempty"      jsonschema:"Optional agent filter."`
 }
 
 // ToMap converts typed list-watches args to the untyped map the handler accepts.
@@ -180,6 +189,9 @@ func (a ListEventWatchesArgs) ToMap() map[string]any {
 	}
 	if a.TargetID != "" {
 		m["target_id"] = a.TargetID
+	}
+	if a.Agent != "" {
+		m["agent"] = a.Agent
 	}
 	return m
 }
@@ -231,6 +243,8 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 	tz := getMapString(args, "timezone")
 	tz = resolveTimezone(tz, defaultTZ)
 
+	agent := getMapString(args, "agent")
+
 	effortTier := getMapString(args, "effort")
 	effort, err := model.NormalizeEffort(effortTier)
 	if err != nil {
@@ -255,6 +269,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 		NextRunAt:   nextRun,
 		Enabled:     true,
 		CreatedAt:   now,
+		Agent:       model.NormalizeAgent(agent),
 	}
 
 	if err = store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
@@ -426,6 +441,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 	}
 
 	id := uuid.New().String()
+	agent := getMapString(args, "agent")
 	trigger := model.EventTrigger{
 		ID:         id,
 		ChannelID:  channelID,
@@ -436,6 +452,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 		Effort:     effort,
 		CreatedAt:  time.Now().UTC(),
 		Persistent: persistent,
+		Agent:      model.NormalizeAgent(agent),
 	}
 
 	if err = store.InsertEventTrigger(ctx, db, trigger); err != nil {
@@ -478,7 +495,8 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 // HandleListEventWatches returns active deterministic event watches.
 func HandleListEventWatches(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id")
-	triggers, err := store.ListEventTriggers(ctx, db, channelID)
+	agent := getMapString(args, "agent")
+	triggers, err := store.ListEventTriggers(ctx, db, channelID, agent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list event watches: %w", err)
 	}

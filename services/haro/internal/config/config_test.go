@@ -63,21 +63,25 @@ func TestLoadConfigFile(t *testing.T) {
 		path        string
 		dbURL       string
 		envPassword string
+		envAuth     string
 		wantErr     bool
 		wantPort    string
 		wantTZ      string
 		wantDB      string
 		wantSources int
+		wantAuth    bool
 	}{
-		{"valid config", validPath, "postgres://user:pass@host:5432/db", "", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 0},
-		{"valid config with extra_event_sources", extraPath, "postgres://user:pass@host:5432/db", "", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 1},
-		{"empty dbURL falls back to decomposed POSTGRES_PASSWORD", validPath, "", "secretpass", false, "4005", "America/Chicago", "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable", 0},
-		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", "", true, "", "", "", 0},
-		{"malformed yaml", malformedPath, "postgres://localhost/db", "", true, "", "", "", 0},
-		{"missing port", noPortPath, "postgres://localhost/db", "", true, "", "", "", 0},
-		{"missing timezone", noTZPath, "postgres://localhost/db", "", true, "", "", "", 0},
-		{"empty dbURL", validPath, "", "", true, "", "", "", 0},
-		{"empty path", "", "postgres://localhost/db", "", true, "", "", "", 0},
+		{"valid config", validPath, "postgres://user:pass@host:5432/db", "", "", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 0, false},
+		{"valid config with extra_event_sources", extraPath, "postgres://user:pass@host:5432/db", "", "", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 1, false},
+		{"empty dbURL falls back to decomposed POSTGRES_PASSWORD", validPath, "", "secretpass", "", false, "4005", "America/Chicago", "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable", 0, false},
+		{"valid K8S_AUTH_ENABLED true overrides yaml", validPath, "postgres://user:pass@host:5432/db", "", "true", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 0, true},
+		{"invalid K8S_AUTH_ENABLED returns error", validPath, "postgres://user:pass@host:5432/db", "", "not-a-bool", true, "", "", "", 0, false},
+		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", "", "", true, "", "", "", 0, false},
+		{"malformed yaml", malformedPath, "postgres://localhost/db", "", "", true, "", "", "", 0, false},
+		{"missing port", noPortPath, "postgres://localhost/db", "", "", true, "", "", "", 0, false},
+		{"missing timezone", noTZPath, "postgres://localhost/db", "", "", true, "", "", "", 0, false},
+		{"empty dbURL", validPath, "", "", "", true, "", "", "", 0, false},
+		{"empty path", "", "postgres://localhost/db", "", "", true, "", "", "", 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,12 +94,13 @@ func TestLoadConfigFile(t *testing.T) {
 			t.Setenv("POSTGRES_USER", "")
 			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
 			t.Setenv("POSTGRES_DB", "")
+			t.Setenv("K8S_AUTH_ENABLED", tc.envAuth)
 
 			cfg, err := LoadConfigFile(tc.path, tc.dbURL)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.wantDB || len(cfg.ExtraEventSources) != tc.wantSources) {
+			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.wantDB || len(cfg.ExtraEventSources) != tc.wantSources || cfg.Auth.Enabled != tc.wantAuth) {
 				t.Fatalf("unexpected config: %+v", cfg)
 			}
 		})
