@@ -487,11 +487,14 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		failCountErr       error
 		getBuildErr        error
 		bannerErr          error
+		checkErr           error
 		failErr            error
 		dispatchErr        error
 		notifyErr          error
 		skipFailApply      bool
 		failBanner         string
+		chunkStatus        string
+		chunkBanner        string
 		headSHA            string
 		remediatedSHA      string
 		wantErr            bool
@@ -516,6 +519,12 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "ci_failed increment count error after accepted dispatch propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantSkipIfActive: &falseVal},
 		{name: "ci_failed increment count error at cap propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
 		{name: "ci_failed exceeding cap marks chunk failed and sends alert message", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed tripping cap increments fail count without overwriting RemediatedSHA", event: "ci_failed", prEvent: ciFailEv("unit-tests", "new-failing-sha"), failCount: 5, remediatedSHA: "attempt5-active-sha", wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantRemediatedSHA: "attempt5-active-sha", wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed retry with failCount 6 skips increment and completes cap reached", event: "ci_failed", prEvent: ciFailEv("unit-tests", "new-failing-sha"), failCount: 6, remediatedSHA: "attempt5-active-sha", wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantRemediatedSHA: "attempt5-active-sha", wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed record check skipped on already failed chunk resumes cap reached notifications", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), checkErr: ErrPRTransitionSkipped, headSHA: "abcdef1234", chunkStatus: "failed", chunkBanner: "Chunk 1 failed: ci_remediation_cap_reached", skipFailApply: true, failBanner: "Chunk 1 failed: ci_remediation_cap_reached", wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed update banner skipped on already failed chunk resumes cap reached notifications", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), bannerErr: ErrPRTransitionSkipped, headSHA: "abcdef1234", chunkStatus: "failed", chunkBanner: "Chunk 1 failed: ci_remediation_cap_reached", skipFailApply: true, failBanner: "Chunk 1 failed: ci_remediation_cap_reached", wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed record check skipped with stale head does not re-notify", event: "ci_failed", prEvent: ciFailEv("unit-tests", "stale-sha"), checkErr: ErrPRTransitionSkipped, headSHA: "current-sha", chunkStatus: "failed", chunkBanner: "Chunk 1 failed: ci_remediation_cap_reached", wantErr: true},
+		{name: "ci_failed record check skipped with lookup error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), checkErr: ErrPRTransitionSkipped, getBuildErr: dbErr, wantErr: true},
 		{name: "ci_failed exceeding cap preserves chunk failure and propagates notification error", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
 		{name: "ci_failed exceeding cap retry with matching banner completes notifications", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, skipFailApply: true, failBanner: "Chunk 1 failed: ci_remediation_cap_reached", wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
 		{name: "ci_failed exceeding cap fail chunk error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
@@ -541,6 +550,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 				failCountErr:  tc.failCountErr,
 				skipFailApply: tc.skipFailApply,
 				failBanner:    tc.failBanner,
+				err:           tc.checkErr,
 			}
 			if tc.headSHA != "" {
 				c := spy.chunk("c1")
@@ -549,6 +559,14 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 			if tc.remediatedSHA != "" {
 				c := spy.chunk("c1")
 				c.RemediatedSHA = tc.remediatedSHA
+			}
+			if tc.chunkStatus != "" {
+				c := spy.chunk("c1")
+				c.Status = tc.chunkStatus
+			}
+			if tc.chunkBanner != "" {
+				c := spy.chunk("c1")
+				c.Banner = tc.chunkBanner
 			}
 			f, eri := newRemediationTestHarness(t, spy, tc.dispatchErr, tc.notifyErr)
 
@@ -605,6 +623,23 @@ func TestFlow_TrailingSameSHAFailureAtCapDoesNotCancelActiveRemediation(t *testi
 	assert.Equal(t, 1, len(spy.failCountCalls), "trailing same-SHA failure must not increment ci_fail_count to 6")
 	assert.Empty(t, spy.failed, "trailing same-SHA failure must not trip the remediation cap")
 	assert.Empty(t, eri.lastCancel, "trailing same-SHA failure must not cancel the active remediation turn")
+
+	newHead := ciFailEv("unit-tests", "feeedd9876")
+	require.NoError(t, f.HandlePREventType(ctx, "b1", "c1", "ci_failed", newHead))
+
+	assert.Equal(t, 2, len(spy.failCountCalls), "tripping cap must increment fail count to 6")
+	assert.Equal(t, 6, spy.chunk("c1").CIFailCount)
+	assert.Equal(t, "abcdef1234", spy.chunk("c1").RemediatedSHA, "tripping cap must not overwrite RemediatedSHA with failing head")
+	assert.Equal(t, []string{"c1:ci_remediation_cap_reached"}, spy.failed)
+	assert.Equal(t, "c1", eri.lastCancel)
+
+	// Restate retry when failCount is already 6 (> MaxCIRemediationAttempts)
+	retryEv := ciFailEv("unit-tests", "feeedd9876")
+	require.NoError(t, f.HandlePREventType(ctx, "b1", "c1", "ci_failed", retryEv))
+
+	assert.Equal(t, 2, len(spy.failCountCalls), "retry when failCount > cap must not call IncrementChunkCIFailCount again")
+	assert.Equal(t, []string{"c1:ci_remediation_cap_reached", "c1:ci_remediation_cap_reached"}, spy.failed)
+	assert.Equal(t, "c1", eri.lastCancel)
 }
 
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
