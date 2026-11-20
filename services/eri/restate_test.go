@@ -1337,3 +1337,123 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		skipIfActive       bool
+		channelID          string
+		msgID              string
+		wantIdempotencyKey string
+	}{
+		{
+			name:               "idempotency key populated when skip-if-active is false",
+			skipIfActive:       false,
+			channelID:          "ch-100",
+			msgID:              "msg-200",
+			wantIdempotencyKey: "prompt:ch-100:msg-200",
+		},
+		{
+			name:               "idempotency key omitted when skip-if-active is true",
+			skipIfActive:       true,
+			channelID:          "ch-100",
+			msgID:              "msg-200",
+			wantIdempotencyKey: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var capturedKey string
+			var headerPresent bool
+			httpClient := &http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					capturedKey = r.Header.Get("Idempotency-Key")
+					_, headerPresent = r.Header["Idempotency-Key"]
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"status":"accepted"}`)),
+						Header:     make(http.Header),
+					}, nil
+				}),
+			}
+
+			client := NewRestateIngressClient("http://restate.test", "aerial", httpClient)
+			status, err := handlePromptViaRestate(context.Background(), client, PromptRequest{
+				Prompt:       "hello world",
+				SkipIfActive: tc.skipIfActive,
+			}, tc.channelID, tc.msgID)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted", status)
+			if tc.wantIdempotencyKey == "" {
+				assert.False(t, headerPresent)
+				assert.Empty(t, capturedKey)
+			} else {
+				assert.True(t, headerPresent)
+				assert.Equal(t, tc.wantIdempotencyKey, capturedKey)
+			}
+		})
+	}
+}
+
+func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		skipIfActive       bool
+		sessionKey         string
+		dispatchID         string
+		wantIdempotencyKey string
+	}{
+		{
+			name:               "idempotency key populated with dispatch id when skip-if-active is false",
+			skipIfActive:       false,
+			sessionKey:         "sess-100",
+			dispatchID:         "disp-200",
+			wantIdempotencyKey: "disp-200",
+		},
+		{
+			name:               "idempotency key omitted when skip-if-active is true",
+			skipIfActive:       true,
+			sessionKey:         "sess-100",
+			dispatchID:         "disp-200",
+			wantIdempotencyKey: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var receivedKey string
+			var hasHeader bool
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedKey = r.Header.Get("Idempotency-Key")
+				_, hasHeader = r.Header["Idempotency-Key"]
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"status":"accepted"}`))
+			}))
+			defer ts.Close()
+
+			ingress := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			res, err := handleDispatchViaRestate(context.Background(), ingress, DispatchRequest{
+				Prompt:       "run task",
+				SkipIfActive: tc.skipIfActive,
+			}, tc.sessionKey, tc.dispatchID)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted", res)
+			if tc.wantIdempotencyKey == "" {
+				assert.False(t, hasHeader)
+				assert.Empty(t, receivedKey)
+			} else {
+				assert.True(t, hasHeader)
+				assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
+			}
+		})
+	}
+}

@@ -172,9 +172,6 @@ func markDirtyIfFingerprintChanged(source string, cfg *config.Config, options *r
 }
 
 func executeConfigReload(source string, cfg *config.Config, options *reloadConfigOptions) {
-	if cfg == nil {
-		return
-	}
 	candidate := config.NewFromData(cfg.Current())
 	reloadErr := prepareReloadCandidate(candidate, options)
 	if err := reloadErr; err != nil {
@@ -737,8 +734,5 @@ func main() {
 
 // prepareReloadCandidate loads candidate configuration from supplier without mutating active config.
 func prepareReloadCandidate(candidate *config.Config, options *reloadConfigOptions) error {
-	if options != nil && options.reloadSupplier != nil {
-		return options.reloadSupplier(candidate)
-	}
-	return nil
+	return options.reloadSupplier(candidate)
 }

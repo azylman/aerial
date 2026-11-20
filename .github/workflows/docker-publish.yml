@@ -312,6 +312,8 @@ jobs:
               if [ -n "$MAIN_PKGS" ]; then
                 FILTER_FLAG=""
                 if [ "$svc" = "services/eri" ]; then
+                  # Scope deadcode to services/eri root package during the Restate transition while
+                  # shared packages are consumed by eri-restate and legacy queue fallbacks await chunk c09f.
                   FILTER_FLAG="-filter=^github\.com/azylman/aerial/services/eri$"
                 fi
                 DEAD_PROD=$(deadcode $FILTER_FLAG $MAIN_PKGS)

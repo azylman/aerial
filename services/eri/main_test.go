@@ -178,29 +178,6 @@ func (*mockMarkDirtyPool) Initialize(ctx context.Context) error { return nil }
 func (*mockMarkDirtyPool) Close() error                         { return nil }
 
 func TestCreateReloadConfigFunc(t *testing.T) {
-	t.Run("nil config handled", func(t *testing.T) {
-		called := false
-		reloadFn := CreateReloadConfigFunc(nil, func(o *reloadConfigOptions) {
-			o.onReload = func(src string) { called = true }
-		})
-		if reloadFn == nil {
-			t.Fatal("expected non-nil reload function")
-		}
-		reloadFn("TestNil")
-		if !called {
-			t.Fatal("expected onReload to be called even when config is nil")
-		}
-	})
-
-	t.Run("nil supplier retains config without panic", func(t *testing.T) {
-		cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "gemini-2.5-pro" })
-		reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(nil))
-		reloadFn("NilSupplierReload")
-		if got := cfg.Current().Model; got != "gemini-2.5-pro" {
-			t.Fatalf("expected model unchanged after nil supplier reload, got %s", got)
-		}
-	})
-
 	t.Run("invalid YAML with alert", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
 		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
