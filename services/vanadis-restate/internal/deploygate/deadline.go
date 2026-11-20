@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -153,7 +154,7 @@ func ValidateRetry(state *model.BuildObjectState, attempts map[string]Attempt, r
 			}
 		}
 		if !valid {
-			return restate.TerminalErrorf("deployment retry attempt no longer current")
+			return restate.ToTerminalError(errors.New("deployment retry attempt no longer current"), restate.WithErrorCode(http.StatusConflict))
 		}
 	}
 	return nil
