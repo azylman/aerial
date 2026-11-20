@@ -434,7 +434,7 @@ func TestHandleCancelDispatch(t *testing.T) {
 		{"store error", http.MethodPost, seedStore("CancelPendingDispatches"), nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Failed to fetch cancelling dispatches"},
 		{"cancel by build_id", http.MethodPost, seedStore(""), nil, `{"build_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
 		{"cancel by chunk_id", http.MethodPost, seedStore(""), nil, `{"chunk_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
-		{"cancel by dispatch_id", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+		{"cancel by dispatch_id", http.MethodPost, seedStore(""), newTestWorkerPool(seedStore("")), `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
 		{"cancel by dispatch_id custom reason", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single","reason":"superseded"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
 		{"cancel by message_id alias", http.MethodPost, seedStore(""), nil, `{"message_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
 	} {

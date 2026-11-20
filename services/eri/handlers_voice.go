@@ -8,13 +8,43 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
+
+var activeVoiceBus atomic.Pointer[pubsub.Bus]
+
+const (
+	sseEventReply          = "reply"
+	sseFieldConversationID = "conversation_id"
+)
+
+// SetVoiceEventBus sets the global event bus used for streaming voice turns.
+func SetVoiceEventBus(bus pubsub.Bus) {
+	if bus == nil {
+		activeVoiceBus.Store(nil)
+		return
+	}
+	activeVoiceBus.Store(&bus)
+}
+
+func resolveVoiceEventBus(pool *queue.WorkerPool) pubsub.Bus {
+	if pool != nil && pool.EventBus() != nil {
+		return pool.EventBus()
+	}
+	if b := activeVoiceBus.Load(); b != nil {
+		return *b
+	}
+	return nil
+}
 
 type VoiceAskRequest struct {
 	Prompt         string `json:"prompt"`
@@ -59,6 +89,100 @@ func persistVoiceConversationID(ctx context.Context, pool *queue.WorkerPool, ses
 	}
 }
 
+func drainVoiceEvents(events <-chan queue.VoiceStreamEvent, processEvent func(queue.VoiceStreamEvent)) {
+	for {
+		select {
+		case ev := <-events:
+			processEvent(ev)
+		default:
+			return
+		}
+	}
+}
+
+func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, client *RestateIngressClient, bus pubsub.Bus, req VoiceAskRequest, sessionID string, onStatus, onSentence func(string), emitSSE func(string, any)) {
+	turnID := uuid.New().String()
+	subject := "voice.stream." + turnID
+	replyReceived := false
+
+	events := make(chan queue.VoiceStreamEvent, 64)
+	sub, err := bus.Subscribe(ctx, subject, "", func(msgCtx context.Context, msg pubsub.Message) error {
+		var ev queue.VoiceStreamEvent
+		if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr == nil {
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+			default:
+			}
+		}
+		return nil
+	})
+	if err == nil && sub != nil {
+		defer func() {
+			if uErr := sub.Unsubscribe(); uErr != nil {
+				log.Printf("[VoiceAsk] Failed to unsubscribe voice stream: %v", uErr)
+			}
+		}()
+	}
+
+	type askResult struct {
+		res queue.VoiceSessionResult
+		err error
+	}
+	askDone := make(chan askResult, 1)
+	go func() {
+		res, askErr := client.AskVoice(ctx, sessionID, queue.VoiceSessionRequest{
+			TurnID:         turnID,
+			Prompt:         req.Prompt,
+			DeviceKey:      sessionID,
+			ConversationID: req.ConversationID,
+			Effort:         req.Effort,
+		})
+		askDone <- askResult{res: res, err: askErr}
+	}()
+
+	processEvent := func(ev queue.VoiceStreamEvent) {
+		switch ev.Event {
+		case "status":
+			onStatus(ev.Status)
+		case "sentence":
+			onSentence(ev.Text)
+		case sseEventReply:
+			replyReceived = true
+			emitSSE(sseEventReply, map[string]string{sseEventReply: ev.Reply, sseFieldConversationID: ev.ConversationID})
+			emitSSE("done", map[string]any{sseFieldConversationID: ev.ConversationID})
+		case "error":
+			replyReceived = true
+			emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizer.SanitizeString(ev.Error)})
+			emitSSE("done", map[string]any{})
+		}
+	}
+
+	for {
+		select {
+		case ev := <-events:
+			processEvent(ev)
+		case askRes := <-askDone:
+			drainVoiceEvents(events, processEvent)
+			if askRes.err != nil {
+				if !replyReceived {
+					emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizer.SanitizeString(askRes.err.Error())})
+					emitSSE("done", map[string]any{})
+				}
+				return
+			}
+			if !replyReceived {
+				emitSSE(sseEventReply, map[string]string{sseEventReply: askRes.res.Reply, sseFieldConversationID: askRes.res.ConversationID})
+				emitSSE("done", map[string]any{sseFieldConversationID: askRes.res.ConversationID})
+			}
+			persistVoiceConversationID(ctx, pool, sessionID, askRes.res.ConversationID)
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.WorkerPool, req VoiceAskRequest, sessionID string, reqStart time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -99,7 +223,7 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		flusher.Flush()
 
 		switch event {
-		case "reply", "delta", "sentence":
+		case sseEventReply, "delta", "sentence":
 			recordTTFR("success")
 		case sseEventError:
 			recordTTFR(outcomeError)
@@ -112,6 +236,30 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 
 	onSentence := func(sentence string) {
 		emitSSE("sentence", map[string]string{"text": sentence})
+	}
+
+	if client := resolveRestateClient(); client != nil {
+		if bus := resolveVoiceEventBus(pool); bus != nil {
+			streamRestateVoiceEvents(r.Context(), pool, client, bus, req, sessionID, onStatus, onSentence, emitSSE)
+			return
+		}
+		res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
+			TurnID:         uuid.New().String(),
+			Prompt:         req.Prompt,
+			DeviceKey:      sessionID,
+			ConversationID: req.ConversationID,
+			Effort:         req.Effort,
+		})
+		if err != nil {
+			sanitizedErr := sanitizer.SanitizeString(err.Error())
+			emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizedErr})
+			emitSSE("done", map[string]any{})
+			return
+		}
+		emitSSE(sseEventReply, map[string]string{sseEventReply: res.Reply, sseFieldConversationID: res.ConversationID})
+		emitSSE("done", map[string]any{sseFieldConversationID: res.ConversationID})
+		persistVoiceConversationID(r.Context(), pool, sessionID, res.ConversationID)
+		return
 	}
 
 	if pool == nil {
@@ -130,8 +278,8 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		return
 	}
 
-	emitSSE("reply", map[string]string{"reply": reply, "conversation_id": convID})
-	emitSSE("done", map[string]any{"conversation_id": convID})
+	emitSSE(sseEventReply, map[string]string{sseEventReply: reply, sseFieldConversationID: convID})
+	emitSSE("done", map[string]any{sseFieldConversationID: convID})
 	persistVoiceConversationID(r.Context(), pool, sessionID, convID)
 }
 
@@ -166,6 +314,31 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
 		if isSSE {
 			handleVoiceAskSSE(w, r, pool, req, sessionID, reqStart)
+			return
+		}
+
+		if client := resolveRestateClient(); client != nil {
+			res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
+				TurnID:         uuid.New().String(),
+				Prompt:         req.Prompt,
+				DeviceKey:      sessionID,
+				ConversationID: req.ConversationID,
+				Effort:         req.Effort,
+			})
+			if err != nil {
+				metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
+				sanitizedErr := sanitizer.SanitizeString(err.Error())
+				httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: sanitizedErr})
+				return
+			}
+			metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))
+			httpkit.WriteJSON(w, http.StatusOK, VoiceAskResponse{
+				Reply:          res.Reply,
+				ConversationID: res.ConversationID,
+				SessionID:      res.ConversationID,
+				NodeID:         req.NodeID,
+			})
+			persistVoiceConversationID(r.Context(), pool, sessionID, res.ConversationID)
 			return
 		}
 

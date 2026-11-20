@@ -239,3 +239,59 @@ func TestComputeVoiceConfigFingerprint_TableDriven(t *testing.T) {
 		t.Errorf("expected fingerprints for different models to differ")
 	}
 }
+
+func TestValidateDispatchRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     *DispatchRequest
+		wantErr bool
+	}{
+		{
+			name:    "invalid source",
+			req:     &DispatchRequest{Source: "INVALID!SOURCE", Prompt: "test"},
+			wantErr: true,
+		},
+		{
+			name:    "empty prompt",
+			req:     &DispatchRequest{Source: "heartbeat", Prompt: ""},
+			wantErr: true,
+		},
+		{
+			name:    "valid request",
+			req:     &DispatchRequest{Source: "heartbeat", Prompt: "test prompt"},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDispatchRequest(tc.req)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateDispatchRequest() error = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePromptEffort(t *testing.T) {
+	tests := []struct {
+		name    string
+		effort  string
+		wantErr bool
+	}{
+		{name: "empty effort", effort: "", wantErr: false},
+		{name: "low effort", effort: "low", wantErr: false},
+		{name: "medium effort", effort: "medium", wantErr: false},
+		{name: "high effort", effort: "high", wantErr: false},
+		{name: "invalid effort", effort: "extreme", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePromptEffort(tc.effort)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validatePromptEffort(%q) error = %v, wantErr = %v", tc.effort, err, tc.wantErr)
+			}
+		})
+	}
+}

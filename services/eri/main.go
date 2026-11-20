@@ -354,6 +354,14 @@ type brainAppOptions struct {
 	agentName      string
 	tracingEnabled bool
 	traceContent   bool // record prompt/response text on agent spans (capture_content)
+	restateClient  *RestateIngressClient
+}
+
+// WithRestateIngressClient sets a custom RestateIngressClient for RunBrainApp.
+func WithRestateIngressClient(client *RestateIngressClient) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.restateClient = client
+	}
 }
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
@@ -1244,6 +1252,30 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	cls := classifier.New(cfg, classifier.WithProcessPool(pools.ephemeral))
 	ambientResolver := newAmbientContextResolver(cfg)
 
+	restateClient := appOpts.restateClient
+	if restateClient == nil {
+		if ingressURL := strings.TrimSpace(os.Getenv("RESTATE_INGRESS_URL")); ingressURL != "" {
+			restateClient = NewRestateIngressClient(ingressURL, appOpts.agentName)
+		}
+	}
+	var remoteLLMFn runner.LLMFunc
+	if restateClient != nil {
+		origRestate := activeRestateIngressClient.Swap(restateClient)
+		defer activeRestateIngressClient.Store(origRestate)
+		eriRestateURL := os.Getenv("ERI_RESTATE_URL")
+		remoteLLMFn = NewRemoteEphemeralLLMFunc(eriRestateURL)
+		remoteQuotaProvider := NewRemoteQuotaProvider(eriRestateURL)
+		cls.LLMFunc = remoteLLMFn
+		cls.TitleLLMFunc = remoteLLMFn
+		SetFunnelQuotaProvider(remoteQuotaProvider.ProviderFunc())
+		defer SetFunnelQuotaProvider(nil)
+	}
+
+	llmFn := pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer")
+	if remoteLLMFn != nil {
+		llmFn = remoteLLMFn
+	}
+
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		ParentContext:          ctx,
 		Store:                  store,
@@ -1253,7 +1285,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		SessionManager:         sessionMgr,
 		Pools:                  pools.discord,
 		VoiceProcessPool:       pools.voice,
-		LLMFunc:                pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer"),
+		LLMFunc:                llmFn,
 		AmbientResolver:        ambientResolver,
 		NATSURL:                cur.NATSURL,
 		AgentName:              appOpts.agentName,
