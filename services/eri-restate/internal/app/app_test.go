@@ -74,6 +74,65 @@ func TestNewEriRestateServer(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "SessionManager")
 }
 
+func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	reconcileCount := 0
+	adminServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reconcileCount++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer adminServer.Close()
+
+	var h2cProtocols http.Protocols
+	h2cProtocols.SetHTTP1(true)
+	h2cProtocols.SetUnencryptedHTTP2(true)
+
+	srv := NewEriRestateServer(nil, "aerial")
+	rawHandler, err := srv.Handler()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	trigger := startDiscoveryTimeoutReconciler(ctx, adminServer.URL, "aerial", adminServer.Client(), 3, 50*time.Millisecond)
+	wrappedHandler := wrapDiscoveryTimeoutReconciler(rawHandler, trigger.Trigger)
+
+	server := httptest.NewUnstartedServer(wrappedHandler)
+	server.Config.Protocols = &h2cProtocols
+	server.Start()
+	defer server.Close()
+
+	h2cClient := server.Client()
+	if tr, ok := h2cClient.Transport.(*http.Transport); ok {
+		var clientProtocols http.Protocols
+		clientProtocols.SetUnencryptedHTTP2(true)
+		tr.Protocols = &clientProtocols
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/discover", http.NoBody)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
+
+	resp, err := h2cClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "HTTP/2.0", resp.Proto)
+
+	// Verify that the /discover request triggered timeout reconciliation against adminServer
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return reconcileCount >= 3 // 3 services reconciled
+	}, 3*time.Second, 50*time.Millisecond)
+}
+
 type errRoundTripper struct {
 	err error
 }
