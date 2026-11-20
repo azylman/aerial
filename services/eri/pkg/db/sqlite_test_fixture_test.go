@@ -14,8 +14,9 @@ import (
 )
 
 const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
+    id TEXT,
     row_id INTEGER,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     thread_id TEXT NOT NULL DEFAULT '',
     guild_id TEXT NOT NULL DEFAULT '',
     author_id TEXT NOT NULL DEFAULT '',
@@ -50,25 +51,32 @@ const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages (
     total_tokens INTEGER NOT NULL DEFAULT 0,
     traceparent TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent, id),
+    CONSTRAINT uq_messages_agent_row_id UNIQUE (agent, row_id)
 );
-CREATE TRIGGER IF NOT EXISTS trg_messages_row_id AFTER INSERT ON messages WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN UPDATE messages SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM messages) WHERE id = new.id; END;
+CREATE TRIGGER IF NOT EXISTS trg_messages_row_id AFTER INSERT ON messages WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN UPDATE messages SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM messages WHERE agent = new.agent) WHERE agent = new.agent AND id = new.id; END;
+CREATE INDEX IF NOT EXISTS idx_messages_agent_status_created_at ON messages(agent, status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_messages_agent_thread_row_id ON messages(agent, thread_id, row_id);
+CREATE INDEX IF NOT EXISTS idx_messages_agent_row_id ON messages(agent, row_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
-CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_messages_admin_completed ON messages(status, is_admin, updated_at);
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
+    session_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL DEFAULT '',
     previous_conversation_id TEXT NOT NULL DEFAULT '',
     turn_count INTEGER NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
     last_summarized_message_id TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS dispatches (
     id TEXT PRIMARY KEY,
     row_id INTEGER,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     source TEXT NOT NULL DEFAULT '',
     session_id TEXT NOT NULL DEFAULT '',
     conversation_id TEXT NOT NULL DEFAULT '',
@@ -91,12 +99,13 @@ CREATE TABLE IF NOT EXISTS dispatches (
     total_tokens INTEGER NOT NULL DEFAULT 0,
     traceparent TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_dispatches_agent_row_id UNIQUE (agent, row_id)
 );
-CREATE TRIGGER IF NOT EXISTS trg_dispatches_row_id AFTER INSERT ON dispatches WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN UPDATE dispatches SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM dispatches) WHERE id = new.id; END;
-CREATE INDEX IF NOT EXISTS idx_dispatches_status_created_at ON dispatches(status, created_at ASC);
+CREATE TRIGGER IF NOT EXISTS trg_dispatches_row_id AFTER INSERT ON dispatches WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN UPDATE dispatches SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM dispatches WHERE agent = new.agent) WHERE id = new.id; END;
+CREATE INDEX IF NOT EXISTS idx_dispatches_agent_status_created_at ON dispatches(agent, status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_dispatches_session_status ON dispatches(session_id, status);
-CREATE INDEX IF NOT EXISTS idx_dispatches_session_row_id ON dispatches(session_id, row_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_agent_session_row_id ON dispatches(agent, session_id, row_id);
 CREATE TABLE IF NOT EXISTS session_summaries (
     agent TEXT NOT NULL,
     session_id TEXT NOT NULL,

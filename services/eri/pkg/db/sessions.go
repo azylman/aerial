@@ -35,7 +35,7 @@ func (s *SQLStore) querySessionString(ctx context.Context, key, query string) (s
 	defer cancel()
 
 	var val sql.NullString
-	err := s.db.QueryRowContext(queryCtx, query, key).Scan(&val)
+	err := s.db.QueryRowContext(queryCtx, query, s.effectiveAgent(), key).Scan(&val)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -44,12 +44,12 @@ func (s *SQLStore) querySessionString(ctx context.Context, key, query string) (s
 
 // GetSessionID retrieves the active session ID for a thread.
 func (s *SQLStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
-	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT conversation_id FROM sessions WHERE session_id = $1")
+	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT conversation_id FROM sessions WHERE agent = $1 AND session_id = $2")
 }
 
 // GetPreviousSessionID retrieves the previous session ID for a thread.
 func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
-	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT previous_conversation_id FROM sessions WHERE session_id = $1")
+	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT previous_conversation_id FROM sessions WHERE agent = $1 AND session_id = $2")
 }
 
 var dbTimeLayouts = []string{
@@ -108,8 +108,9 @@ func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string
 	if threadID == "" || sessionID == "" {
 		return nil
 	}
-	query := `INSERT INTO sessions (session_id, conversation_id, created_at, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT(session_id) DO UPDATE SET created_at = CASE WHEN sessions.conversation_id != EXCLUDED.conversation_id THEN EXCLUDED.created_at ELSE sessions.created_at END, conversation_id = EXCLUDED.conversation_id, updated_at = EXCLUDED.updated_at`
-	return s.execWithTimeout(ctx, query, threadID, sessionID, time.Now().UTC(), time.Now().UTC())
+	agent := s.effectiveAgent()
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET created_at = CASE WHEN sessions.conversation_id != EXCLUDED.conversation_id THEN EXCLUDED.created_at ELSE sessions.created_at END, conversation_id = EXCLUDED.conversation_id, updated_at = EXCLUDED.updated_at`
+	return s.execWithTimeout(ctx, query, agent, threadID, sessionID, time.Now().UTC(), time.Now().UTC())
 }
 
 // IncrementSessionTurnCount atomically increments and returns the turn count for a session key.
@@ -124,9 +125,10 @@ func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey str
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO sessions (session_id, conversation_id, turn_count, created_at, updated_at) VALUES ($1, '', 1, $2, $3) ON CONFLICT(session_id) DO UPDATE SET turn_count = sessions.turn_count + 1, updated_at = EXCLUDED.updated_at RETURNING turn_count;`
+	agent := s.effectiveAgent()
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, '', 1, $3, $4) ON CONFLICT(agent, session_id) DO UPDATE SET turn_count = sessions.turn_count + 1, updated_at = EXCLUDED.updated_at RETURNING turn_count;`
 	var turnCount int
-	err := s.db.QueryRowContext(queryCtx, query, sessionKey, time.Now().UTC(), time.Now().UTC()).Scan(&turnCount)
+	err := s.db.QueryRowContext(queryCtx, query, agent, sessionKey, time.Now().UTC(), time.Now().UTC()).Scan(&turnCount)
 	return turnCount, err
 }
 
@@ -136,8 +138,9 @@ func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID
 	if sessionKey == "" {
 		return fmt.Errorf("session key cannot be empty")
 	}
-	query := `INSERT INTO sessions (session_id, conversation_id, previous_conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, '', 0, $3, $4) ON CONFLICT(session_id) DO UPDATE SET previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END, conversation_id = EXCLUDED.conversation_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at;`
-	return s.execWithTimeout(ctx, query, sessionKey, newSessionID, time.Now().UTC(), time.Now().UTC())
+	agent := s.effectiveAgent()
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, previous_conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, $3, '', 0, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END, conversation_id = EXCLUDED.conversation_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at;`
+	return s.execWithTimeout(ctx, query, agent, sessionKey, newSessionID, time.Now().UTC(), time.Now().UTC())
 }
 
 // GetSessionTurnCount returns the current turn count for a session.
@@ -153,7 +156,7 @@ func (s *SQLStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (
 	defer cancel()
 
 	var count int
-	err := s.db.QueryRowContext(queryCtx, "SELECT turn_count FROM sessions WHERE session_id = $1", sessionKey).Scan(&count)
+	err := s.db.QueryRowContext(queryCtx, "SELECT turn_count FROM sessions WHERE agent = $1 AND session_id = $2", s.effectiveAgent(), sessionKey).Scan(&count)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -166,8 +169,9 @@ func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, las
 	if threadID == "" {
 		return nil
 	}
-	query := `INSERT INTO sessions (session_id, summary, last_summarized_message_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) ON CONFLICT(session_id) DO UPDATE SET summary = EXCLUDED.summary, last_summarized_message_id = EXCLUDED.last_summarized_message_id, updated_at = EXCLUDED.updated_at`
-	return s.execWithTimeout(ctx, query, threadID, summary, lastSummarizedMsgID, time.Now().UTC())
+	agent := s.effectiveAgent()
+	query := `INSERT INTO sessions (agent, session_id, summary, last_summarized_message_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $5) ON CONFLICT(agent, session_id) DO UPDATE SET summary = EXCLUDED.summary, last_summarized_message_id = EXCLUDED.last_summarized_message_id, updated_at = EXCLUDED.updated_at`
+	return s.execWithTimeout(ctx, query, agent, threadID, summary, lastSummarizedMsgID, time.Now().UTC())
 }
 
 // GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
@@ -183,7 +187,7 @@ func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (strin
 	defer cancel()
 
 	var sum, lastMsgID sql.NullString
-	err := s.db.QueryRowContext(queryCtx, "SELECT summary, last_summarized_message_id FROM sessions WHERE session_id = $1", threadID).Scan(&sum, &lastMsgID)
+	err := s.db.QueryRowContext(queryCtx, "SELECT summary, last_summarized_message_id FROM sessions WHERE agent = $1 AND session_id = $2", s.effectiveAgent(), threadID).Scan(&sum, &lastMsgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
@@ -201,6 +205,7 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	agent := s.effectiveAgent()
 	sessKey := DiscordSessionID(threadID)
 	rawMsgThreadID := strings.TrimPrefix(strings.TrimSpace(threadID), "discord-")
 
@@ -211,10 +216,10 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 		completedCount               int64
 		rawMsgUpdated, rawMsgCreated any
 	)
-	if err := s.db.QueryRowContext(queryCtx, `SELECT conversation_id, turn_count, updated_at FROM sessions WHERE session_id = $1`, sessKey).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := s.db.QueryRowContext(queryCtx, `SELECT conversation_id, turn_count, updated_at FROM sessions WHERE agent = $1 AND session_id = $2`, agent, sessKey).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("querying session for thread %s: %w", threadID, err)
 	}
-	if err := s.db.QueryRowContext(queryCtx, `SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED' AND response_text NOT LIKE '[EXPIRED_STALE]%' AND response_text NOT LIKE '[AMBIENT%' AND response_text NOT LIKE '[IGNORED%'`, rawMsgThreadID).Scan(&completedCount, &rawMsgUpdated, &rawMsgCreated); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := s.db.QueryRowContext(queryCtx, `SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages WHERE agent = $1 AND thread_id = $2 AND status = 'COMPLETED' AND response_text NOT LIKE '[EXPIRED_STALE]%' AND response_text NOT LIKE '[AMBIENT%' AND response_text NOT LIKE '[IGNORED%'`, agent, rawMsgThreadID).Scan(&completedCount, &rawMsgUpdated, &rawMsgCreated); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("querying completed messages for thread %s: %w", threadID, err)
 	}
 

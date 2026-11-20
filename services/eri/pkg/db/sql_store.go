@@ -6,18 +6,52 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 )
 
+// DefaultAgent is the fallback agent tenant identifier when none is explicitly specified.
+const DefaultAgent = "aerial"
+
+// ResolveAgentName returns candidate if non-empty (trimmed), else checks the AGENT_NAME
+// environment variable, defaulting to DefaultAgent ("aerial") if neither is set.
+func ResolveAgentName(candidate string) string {
+	if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+		return trimmed
+	}
+	if env := strings.TrimSpace(os.Getenv("AGENT_NAME")); env != "" {
+		return env
+	}
+	return DefaultAgent
+}
+
 // EriLeaderLockID is the PostgreSQL session-level advisory lock key ("AERIAL_E")
 // used to serialize active queue leadership across canary deployments.
 const EriLeaderLockID int64 = 0x41455249414C5F45
 
 type SQLStore struct {
-	db DBTX
+	db    DBTX
+	agent string
+}
+
+// WithAgent sets the tenant agent slug for SQLStore queries.
+func (s *SQLStore) WithAgent(agent string) *SQLStore {
+	if s == nil {
+		return nil
+	}
+	s.agent = strings.TrimSpace(agent)
+	return s
+}
+
+// effectiveAgent returns the configured agent slug or defaults to DefaultAgent.
+func (s *SQLStore) effectiveAgent() string {
+	if s == nil {
+		return DefaultAgent
+	}
+	return ResolveAgentName(s.agent)
 }
 
 var ErrNilDatabase = errors.New("database is nil")
@@ -78,11 +112,16 @@ func scanNonEmptyStrings(rows *sql.Rows) ([]string, error) {
 	return res, rows.Err()
 }
 
-func NewSQLStore(database *sql.DB) Store {
+func NewSQLStore(database *sql.DB) *SQLStore {
 	if database == nil {
 		return nil
 	}
 	return &SQLStore{db: database}
+}
+
+// NewStore is an alias for NewSQLStore.
+func NewStore(database *sql.DB) *SQLStore {
+	return NewSQLStore(database)
 }
 
 func isPostgresDriver(d driver.Driver) bool {

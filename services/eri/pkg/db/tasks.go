@@ -98,15 +98,16 @@ func InferTriggerType(authorID string) string {
 	return "discord"
 }
 
-func buildActiveTasksQuery(flt TasksFilter, hasFilter bool) (string, []any) {
-	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0) AS row_id, m.thread_id, COALESCE(NULLIF(m.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, m.author_name, m.author_id, m.content AS prompt, COALESCE(m.summary, '') AS summary, COALESCE(m.response_text, '') AS response_text, m.is_admin, m.status, m.retry_count, COALESCE(m.duration_ms, 0) AS duration_ms, COALESCE(m.input_tokens, 0) AS input_tokens, COALESCE(m.output_tokens, 0) AS output_tokens, COALESCE(m.thinking_tokens, 0) AS thinking_tokens, COALESCE(m.cache_read_tokens, 0) AS cache_read_tokens, COALESCE(m.total_tokens, 0) AS total_tokens, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON s.session_id = 'discord-' || m.thread_id`
+func buildActiveTasksQuery(agent string, flt TasksFilter, hasFilter bool) (string, []any) {
+	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0) AS row_id, m.thread_id, COALESCE(NULLIF(m.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, m.author_name, m.author_id, m.content AS prompt, COALESCE(m.summary, '') AS summary, COALESCE(m.response_text, '') AS response_text, m.is_admin, m.status, m.retry_count, COALESCE(m.duration_ms, 0) AS duration_ms, COALESCE(m.input_tokens, 0) AS input_tokens, COALESCE(m.output_tokens, 0) AS output_tokens, COALESCE(m.thinking_tokens, 0) AS thinking_tokens, COALESCE(m.cache_read_tokens, 0) AS cache_read_tokens, COALESCE(m.total_tokens, 0) AS total_tokens, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON s.agent = m.agent AND s.session_id = 'discord-' || m.thread_id`
 	if !hasFilter {
-		dispatchesQuery := `SELECT d.id, COALESCE(d.row_id, 0) AS row_id, COALESCE(NULLIF(d.session_id, ''), 'dispatch-' || d.id) AS thread_id, CASE WHEN d.session_id = '' THEN '' ELSE COALESCE(NULLIF(d.conversation_id, ''), COALESCE(s.conversation_id, '')) END AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, d.source AS author_name, 'dispatch:' || d.source AS author_id, d.prompt, COALESCE(d.summary, '') AS summary, COALESCE(d.response_text, '') AS response_text, true AS is_admin, d.status, d.retry_count, COALESCE(d.duration_ms, 0) AS duration_ms, COALESCE(d.input_tokens, 0) AS input_tokens, COALESCE(d.output_tokens, 0) AS output_tokens, COALESCE(d.thinking_tokens, 0) AS thinking_tokens, COALESCE(d.cache_read_tokens, 0) AS cache_read_tokens, COALESCE(d.total_tokens, 0) AS total_tokens, d.created_at, d.updated_at FROM dispatches d LEFT JOIN sessions s ON d.session_id != '' AND s.session_id = d.session_id WHERE d.status IN ('PENDING', 'PROCESSING')`
-		return `SELECT id, row_id, thread_id, session_id, previous_session_id, thread_summary, author_name, author_id, prompt, summary, response_text, is_admin, status, retry_count, duration_ms, input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens, created_at, updated_at FROM (` + baseQuery + ` WHERE m.status IN ('PENDING', 'PROCESSING') UNION ALL ` + dispatchesQuery + `) combined ORDER BY created_at ASC LIMIT 50;`, nil
+		dispatchesQuery := `SELECT d.id, COALESCE(d.row_id, 0) AS row_id, COALESCE(NULLIF(d.session_id, ''), 'dispatch-' || d.id) AS thread_id, CASE WHEN d.session_id = '' THEN '' ELSE COALESCE(NULLIF(d.conversation_id, ''), COALESCE(s.conversation_id, '')) END AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, d.source AS author_name, 'dispatch:' || d.source AS author_id, d.prompt, COALESCE(d.summary, '') AS summary, COALESCE(d.response_text, '') AS response_text, true AS is_admin, d.status, d.retry_count, COALESCE(d.duration_ms, 0) AS duration_ms, COALESCE(d.input_tokens, 0) AS input_tokens, COALESCE(d.output_tokens, 0) AS output_tokens, COALESCE(d.thinking_tokens, 0) AS thinking_tokens, COALESCE(d.cache_read_tokens, 0) AS cache_read_tokens, COALESCE(d.total_tokens, 0) AS total_tokens, d.created_at, d.updated_at FROM dispatches d LEFT JOIN sessions s ON d.session_id != '' AND s.agent = d.agent AND s.session_id = d.session_id WHERE d.agent = $2 AND d.status IN ('PENDING', 'PROCESSING')`
+		return `SELECT id, row_id, thread_id, session_id, previous_session_id, thread_summary, author_name, author_id, prompt, summary, response_text, is_admin, status, retry_count, duration_ms, input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens, created_at, updated_at FROM (` + baseQuery + ` WHERE m.agent = $1 AND m.status IN ('PENDING', 'PROCESSING') UNION ALL ` + dispatchesQuery + `) combined ORDER BY created_at ASC LIMIT 50;`, []any{agent, agent}
 	}
 
 	var whereClauses []string
-	var args []any
+	args := []any{agent}
+	whereClauses = append(whereClauses, "m.agent = $1")
 
 	if len(flt.Statuses) > 0 {
 		var valid []string
@@ -228,7 +229,7 @@ func (s *SQLStore) GetActiveTasks(ctx context.Context, filter ...TasksFilter) ([
 	if hasFilter {
 		flt = filter[0]
 	}
-	query, args := buildActiveTasksQuery(flt, hasFilter)
+	query, args := buildActiveTasksQuery(s.effectiveAgent(), flt, hasFilter)
 
 	rows, err := s.db.QueryContext(queryCtx, query, args...)
 	if err != nil {
