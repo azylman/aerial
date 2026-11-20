@@ -45,6 +45,13 @@ func kustomizationRequestAction(recorded kustomizationRequest, obs kustomization
 // startKustomizationWatcher runs the Kustomization rollout watchers when PR state is durable and the kube
 // API is configured. The returned stop function cancels them and waits for them to exit; it is idempotent.
 func (s *RouterServer) startKustomizationWatcher(ctx context.Context, kube *DefaultOutboundDispatcher) func() {
+	if s == nil || s.registry == nil {
+		// Without a registry there are no tracked rollouts to reconcile:
+		// trackedRollouts is empty so every apply iterates nothing and
+		// every recheck is a no-op. Skip the watchers instead of burning
+		// kube list calls that can never match a rollout.
+		return func() {}
+	}
 	return flux.StartWatcher(ctx, kube, s)
 }
 
@@ -357,35 +364,35 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			targetID = resolved
 		}
 	}
-	// Journal before the suppress check: the journal is the ordered record
-	// and Restate dedups the repeat; the guard below still skips duplicate
-	// publishes and prompts via the deployed projection.
+	// The transitioned return value above plus the deploy_success_pending
+	// flag are the exactly-once guard for this path, so the publish below
+	// must not be vetoed by re-reading the deployed projection: the flip
+	// just recorded above always reads back as deployed. Publish errors
+	// return before pending is cleared so the watcher retries.
 	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber); err != nil {
 		return err
 	}
 	if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
 		return err
 	}
-	if !s.shouldSuppressDuplicateDeploySuccess(ctx, pr.Repo, name, commitSHA, pr.PRNumber) {
-		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        eventDeploySuccess,
-			Repo:         pr.Repo,
-			PRNumber:     pr.PRNumber,
-			HeadSHA:      pr.HeadSHA,
-			MergeSHA:     pr.MergeSHA,
-			TargetID:     targetID,
-			Status:       "deployed",
-			JobName:      name,
-			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
-			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
-			OccurredAt:   time.Now().UTC(),
-		}); err != nil {
-			return err
-		}
-		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
-			return err
-		}
+	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        eventDeploySuccess,
+		Repo:         pr.Repo,
+		PRNumber:     pr.PRNumber,
+		HeadSHA:      pr.HeadSHA,
+		MergeSHA:     pr.MergeSHA,
+		TargetID:     targetID,
+		Status:       "deployed",
+		JobName:      name,
+		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
+		slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+		return err
 	}
 	if s.registry != nil {
 		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, "deployed", map[string]any{"deploy_success_pending": false}); err != nil {

@@ -1124,13 +1124,21 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 			wantClearCalls: 1,
 		},
 		{
-			name:           "deployed projection suppresses duplicate deploy_success but clears pending",
+			name:           "pending retry publishes deploy_success despite deployed projection",
 			meta:           map[string]any{"deploy_success_pending": true},
 			prNumber:       42,
 			presetDeployed: true,
 			transitioned:   false,
-			wantNoEvents:   true,
+			wantDispatched: true,
 			wantMarkCalls:  0,
+			wantClearCalls: 1,
+		},
+		{
+			name:           "transitioned completion publishes deploy_success despite deployed projection",
+			prNumber:       42,
+			presetDeployed: true,
+			transitioned:   true,
+			wantDispatched: true,
 			wantClearCalls: 1,
 		},
 		{
