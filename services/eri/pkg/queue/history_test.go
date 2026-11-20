@@ -256,20 +256,14 @@ func TestFormatSummaryTranscript(t *testing.T) {
 	now := time.Now().UTC()
 	longUser := strings.Repeat("u", 2500) + strings.Repeat("x", 200)
 	longReply := strings.Repeat("a", 2500) + strings.Repeat("y", 200)
-	shortWidget := strings.Repeat("s", 400)
+	oversizedWidget := strings.Repeat("w", 3000)
 
 	tests := []historyTestCase{
 		{
-			name:         "long widget keeps head and tail",
-			msgs:         []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: longWidgetCard, CreatedAt: now}},
+			name:         "oversized widget preserved in full without truncation",
+			msgs:         []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: oversizedWidget, CreatedAt: now}},
 			wantPrefix:   "<CHANNEL_HISTORY>\nPrior messages from this thread for context:\n",
-			wantContains: []string{strings.Repeat("h", 250) + truncationMarker + strings.Repeat("t", 150)},
-			wantExcludes: []string{"mmmm"},
-		},
-		{
-			name:         "widget at 400 runes is not trimmed",
-			msgs:         []HistoryMessage{{ID: "w-2", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: shortWidget, CreatedAt: now}},
-			wantContains: []string{shortWidget + "\n"},
+			wantContains: []string{oversizedWidget + "\n"},
 			wantExcludes: []string{truncationMarker},
 		},
 		{
@@ -550,11 +544,11 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 			wantPromptExcludes: []string{"body-3\n", "body-4\n"},
 		},
 		{
-			name:   "widget card trimmed in summarizer transcript",
+			name:   "widget card preserved untruncated in summarizer transcript",
 			msgs:   []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: longWidgetCard, CreatedAt: now}},
 			llmOut: "<THREAD_SUMMARY>Build shipped</THREAD_SUMMARY>", wantSub: "Build shipped", wantSpans: oneDelta,
-			wantPromptContains: []string{strings.Repeat("h", 250) + truncationMarker + strings.Repeat("t", 150)},
-			wantPromptExcludes: []string{"mmmm"},
+			wantPromptContains: []string{longWidgetCard},
+			wantPromptExcludes: []string{truncationMarker},
 		},
 	}
 
