@@ -5,11 +5,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
+
+var validAgentSlugRegex = regexp.MustCompile("^[a-z0-9-]+$")
+
+// IsValidAgentSlug reports whether an agent slug is a valid non-empty DNS-compatible slug.
+func IsValidAgentSlug(slug string) bool {
+	return validAgentSlugRegex.MatchString(strings.TrimSpace(slug))
+}
+
+// ParseCovenExtractSubject extracts agent and threadID from a 5-token NATS subject:
+// aerial.coalesced.coven_extract.<agent>.<thread_id>.
+func ParseCovenExtractSubject(subject string) (agent, threadID string, ok bool) {
+	tokens := strings.Split(strings.TrimSpace(subject), ".")
+	if len(tokens) != 5 || tokens[0] != "aerial" || tokens[1] != "coalesced" || tokens[2] != "coven_extract" {
+		return "", "", false
+	}
+	agent = strings.TrimSpace(tokens[3])
+	threadID = strings.TrimSpace(tokens[4])
+	if !IsValidAgentSlug(agent) || threadID == "" {
+		return "", "", false
+	}
+	return agent, threadID, true
+}
 
 // covenMaxNakDelay caps the retry-forever backoff for indexed events.
 const covenMaxNakDelay = 1 * time.Hour
@@ -28,11 +51,10 @@ func covenNakDelay(numDelivered uint64) time.Duration {
 	return covenMaxNakDelay
 }
 
-// handleTranscriptsIndexedEvent routes one TranscriptsIndexedEvent to extraction.
-// It Terms only undecodable messages, skips foreign stacks and empty threads,
-// and Naks every extraction failure with covenNakDelay so delivery retries
-// forever. It is dark: no subscription calls it until the indexed cutover.
-func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stack string, extract func(ctx context.Context, threadID string) error) error {
+// HandleTranscriptsIndexed routes one TranscriptsIndexedEvent to extraction or job publishing.
+// When role is "all", it accepts events for any valid agent slug. When role is not "all",
+// it filters strictly for ev.EffectiveAgent() == NormalizeStack(stack).
+func HandleTranscriptsIndexed(ctx context.Context, msg pubsub.Message, stack, role string, extract func(ctx context.Context, agent, threadID string) error) error {
 	var ev pubsub.TranscriptsIndexedEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
 		slog.ErrorContext(ctx, "[Coven] error unmarshaling transcripts indexed event", "error", err)
@@ -45,10 +67,15 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 	if threadID == "" {
 		return nil
 	}
-	if ev.EffectiveAgent() != NormalizeStack(stack) {
+	agent := ev.EffectiveAgent()
+	if !IsValidAgentSlug(agent) {
 		return nil
 	}
-	if err := extract(ctx, threadID); err != nil {
+	isAll := strings.EqualFold(strings.TrimSpace(role), "all")
+	if !isAll && agent != NormalizeStack(stack) {
+		return nil
+	}
+	if err := extract(ctx, agent, threadID); err != nil {
 		if nakErr := msg.NakWithDelay(covenNakDelay(msg.NumDelivered())); nakErr != nil {
 			slog.WarnContext(ctx, "[Coven] error naking transcripts indexed event", "error", nakErr)
 		}
@@ -57,25 +84,28 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 	return nil
 }
 
-// newTranscriptsIndexedHandler returns a pubsub.Handler that filters for ev.EffectiveAgent() == stack
-// and publishes a coalesced extraction job to pubsub.SubjectCovenExtractCoalescedForAgent.
-func newTranscriptsIndexedHandler(b pubsub.Bus, stack string) pubsub.Handler {
+// newTranscriptsIndexedHandler returns a pubsub.Handler that publishes a coalesced extraction job to
+// pubsub.SubjectCovenExtractCoalescedForAgent. When role is "all", events for all valid agents are accepted.
+func newTranscriptsIndexedHandler(b pubsub.Bus, stack string, role ...string) pubsub.Handler {
 	normalizedStack := NormalizeStack(stack)
+	userRole := ""
+	if len(role) > 0 {
+		userRole = strings.TrimSpace(role[0])
+	}
 	return func(ctx context.Context, msg pubsub.Message) error {
-		return handleTranscriptsIndexedEvent(ctx, msg, normalizedStack, func(extractCtx context.Context, threadID string) error {
-			msgID := fmt.Sprintf("coven:extract:%s:%s:%d", normalizedStack, threadID, time.Now().UnixNano())
+		return HandleTranscriptsIndexed(ctx, msg, normalizedStack, userRole, func(extractCtx context.Context, agent, threadID string) error {
+			msgID := fmt.Sprintf("coven:extract:%s:%s:%d", agent, threadID, time.Now().UnixNano())
 			args := pubsub.CovenExtractJobArgs{
-				Agent:    normalizedStack,
-				Stack:    normalizedStack,
+				Agent:    agent,
+				Stack:    agent,
 				ThreadID: threadID,
 			}
-			return b.Publish(extractCtx, pubsub.SubjectCovenExtractCoalescedForAgent(normalizedStack, threadID), msgID, args)
+			return b.Publish(extractCtx, pubsub.SubjectCovenExtractCoalescedForAgent(agent, threadID), msgID, args)
 		})
 	}
 }
 
-// darkCovenAnchor keeps deferred watermark symbols reachable
-// in the production call graph until wired in spl2-c16-watermark-pk.
+// darkCovenAnchor keeps deferred watermark symbols reachable in the production call graph.
 var _ = func() bool {
 	_ = ScopedThreadKey("", "")
 	return true

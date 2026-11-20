@@ -391,6 +391,13 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 		LLMClient: llm,
 	})
 
+	workerRoleAll := NewWorker(WorkerConfig{
+		Role:      "all",
+		Store:     memStore,
+		Ollama:    client,
+		LLMClient: llm,
+	})
+
 	tests := []handleCovenExtractJobTestCase{
 		{
 			name:      "UnmarshalErrorTermsMessageAndReturnsNil",
@@ -411,6 +418,14 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 			msgData:   `{"thread_id":"th-ext-1","agent":"agent-alpha"}`,
 			delivered: 1,
 			worker:    worker,
+		},
+		{
+			name:       "RoleAllAcceptsAnyValidAgent",
+			msgData:    `{"thread_id":"th-ext-1","agent":"agent-alpha"}`,
+			delivered:  1,
+			worker:     workerRoleAll,
+			checkWater: true,
+			wantWater:  35,
 		},
 		{
 			name:       "WorkerSuccessAdvancesWatermark",

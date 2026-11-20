@@ -26,23 +26,24 @@ import (
 // --- Test Fixtures & Mocks ---
 
 type TestMemStore struct {
-	mu                   sync.Mutex
-	facts                map[int64]*Fact
-	embeddings           map[int64][]float32
-	nextID               int64
-	failOp               string
-	failErr              error
-	unextractedTurns     map[string][]Message
-	activeThreads        []string
-	watermarks           map[string]int64
-	watermarkTimes       map[string]time.Time
-	maxRowIDs            map[string]int64
-	threadSummaries      map[string]string
-	threadPriorTurns     map[string][]Message
-	threadRetrievedFacts map[string][]string
-	threadToolCalls      map[string][]string
-	proceduralCandidates map[int64]*ProceduralCandidate
-	nextCandID           int64
+	mu                        sync.Mutex
+	facts                     map[int64]*Fact
+	embeddings                map[int64][]float32
+	nextID                    int64
+	failOp                    string
+	failErr                   error
+	unextractedTurns          map[string][]Message
+	activeThreads             []string
+	watermarks                map[string]int64
+	watermarkTimes            map[string]time.Time
+	maxRowIDs                 map[string]int64
+	threadSummaries           map[string]string
+	threadPriorTurns          map[string][]Message
+	threadRetrievedFacts      map[string][]string
+	threadToolCalls           map[string][]string
+	proceduralCandidates      map[int64]*ProceduralCandidate
+	nextCandID                int64
+	lastUpdatedWatermarkAgent string
 }
 
 func newTestMemStore() *TestMemStore {
@@ -309,7 +310,7 @@ func (m *TestMemStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredF
 	return res, nil
 }
 
-func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error) {
+func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit int, agent ...string) ([]Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "GetUnextractedAdminTurns" {
@@ -323,13 +324,13 @@ func (m *TestMemStore) GetUnextractedAdminTurns(ctx context.Context, threadID st
 			unextracted = append(unextracted, t)
 		}
 	}
-	if len(limit) > 0 && limit[0] > 0 && len(unextracted) > limit[0] {
-		unextracted = unextracted[:limit[0]]
+	if limit > 0 && len(unextracted) > limit {
+		unextracted = unextracted[:limit]
 	}
 	return append([]Message(nil), unextracted...), nil
 }
 
-func (m *TestMemStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
+func (m *TestMemStore) GetMaxMessageRowID(ctx context.Context, threadID string, agent ...string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "GetMaxMessageRowID" {
@@ -338,7 +339,7 @@ func (m *TestMemStore) GetMaxMessageRowID(ctx context.Context, threadID string) 
 	return m.maxRowIDs[threadID], nil
 }
 
-func (m *TestMemStore) GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error) {
+func (m *TestMemStore) GetConversationFactWatermark(ctx context.Context, threadID string, agent ...string) (int64, *time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "GetConversationFactWatermark" {
@@ -355,7 +356,7 @@ func (m *TestMemStore) GetConversationFactWatermark(ctx context.Context, threadI
 	return rowID, ts, nil
 }
 
-func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64, agent ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "UpdateConversationFactWatermark" {
@@ -364,6 +365,9 @@ func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, thre
 	if maxRowID >= m.watermarks[threadID] {
 		m.watermarks[threadID] = maxRowID
 	}
+	if len(agent) > 0 {
+		m.lastUpdatedWatermarkAgent = agent[0]
+	}
 	if m.watermarkTimes == nil {
 		m.watermarkTimes = make(map[string]time.Time)
 	}
@@ -371,7 +375,7 @@ func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, thre
 	return nil
 }
 
-func (m *TestMemStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error) {
+func (m *TestMemStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int, agent ...string) (string, []Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "GetThreadContextBeforeWatermark" {
@@ -385,7 +389,7 @@ func (m *TestMemStore) GetThreadContextBeforeWatermark(ctx context.Context, thre
 	return summary, append([]Message(nil), turns...), nil
 }
 
-func (m *TestMemStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
+func (m *TestMemStore) GetThreadTrajectoryContext(ctx context.Context, threadID string, agent ...string) (retrievedFacts []string, toolCalls []string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "GetThreadTrajectoryContext" {

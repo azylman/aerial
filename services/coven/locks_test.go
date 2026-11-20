@@ -14,6 +14,7 @@ import (
 type lockFakeDB struct {
 	mu           sync.Mutex
 	queries      []string
+	args         [][]any
 	dbMem        *sql.DB
 	xactAcquired bool
 	failOn       string
@@ -53,6 +54,7 @@ func (f *lockFakeDB) ExecContext(ctx context.Context, query string, args ...any)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queries = append(f.queries, query)
+	f.args = append(f.args, args)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -72,6 +74,7 @@ func (f *lockFakeDB) QueryContext(_ context.Context, query string, _ ...any) (*s
 func (f *lockFakeDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	f.mu.Lock()
 	f.queries = append(f.queries, query)
+	f.args = append(f.args, args)
 	acquired := f.xactAcquired
 	failLock := f.failOn == "XACTLOCK"
 	f.mu.Unlock()
@@ -90,6 +93,12 @@ func (f *lockFakeDB) recorded() []string {
 	return append([]string(nil), f.queries...)
 }
 
+func (f *lockFakeDB) recordedArgs() [][]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]any(nil), f.args...)
+}
+
 func lockQueriesContain(queries []string, substr string) bool {
 	for _, q := range queries {
 		if strings.Contains(q, substr) {
@@ -103,15 +112,18 @@ func TestThreadLocker_Lock(t *testing.T) {
 	tests := []struct {
 		name             string
 		threadID         string
+		agent            string
 		nilDB            bool
 		cancelBeforeLock bool
 		wantLockErr      bool
 		wantRelease      bool
+		wantLockKey      string
 	}{
 		{
 			name:        "valid thread acquires with release",
 			threadID:    "th-1",
 			wantRelease: true,
+			wantLockKey: "th-1",
 		},
 		{
 			name:        "empty thread refuses lock",
@@ -130,6 +142,13 @@ func TestThreadLocker_Lock(t *testing.T) {
 			cancelBeforeLock: true,
 			wantLockErr:      true,
 		},
+		{
+			name:        "scoped agent acquires lock with scoped key",
+			threadID:    "th-1",
+			agent:       "agent-alpha",
+			wantRelease: true,
+			wantLockKey: "agent-alpha/th-1",
+		},
 	}
 
 	for _, tc := range tests {
@@ -145,12 +164,24 @@ func TestThreadLocker_Lock(t *testing.T) {
 			if tc.cancelBeforeLock {
 				cancelLock()
 			}
-			release, err := locker.Lock(lockCtx, tc.threadID)
+			var release func() error
+			var err error
+			if tc.agent != "" {
+				release, err = locker.Lock(lockCtx, tc.threadID, tc.agent)
+			} else {
+				release, err = locker.Lock(lockCtx, tc.threadID)
+			}
 			if (err != nil) != tc.wantLockErr {
 				t.Fatalf("Lock() err = %v, wantLockErr = %v", err, tc.wantLockErr)
 			}
 			if (release != nil) != tc.wantRelease {
 				t.Errorf("Lock() release non-nil = %v, want %v", release != nil, tc.wantRelease)
+			}
+			if tc.wantLockKey != "" {
+				args := fake.recordedArgs()
+				if len(args) == 0 || len(args[0]) == 0 || args[0][0] != tc.wantLockKey {
+					t.Errorf("locked key = %v, want %q", args, tc.wantLockKey)
+				}
 			}
 		})
 	}
