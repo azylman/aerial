@@ -234,14 +234,14 @@ func TestReconcileRestateServiceTimeouts(t *testing.T) {
 		},
 		{
 			name:          "successful timeout reconciliation with namespaced agent",
-			agent:         "miorine",
+			agent:         "agent-alpha",
 			statusCode:    http.StatusOK,
 			returnBody:    `{"status":"ok"}`,
 			wantCallCount: 3,
 			wantPaths: []string{
-				"/services/ThreadSession-miorine",
-				"/services/DispatchSession-miorine",
-				"/services/VoiceSession-miorine",
+				"/services/ThreadSession-agent-alpha",
+				"/services/DispatchSession-agent-alpha",
+				"/services/VoiceSession-agent-alpha",
 			},
 		},
 		{
@@ -301,19 +301,19 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		},
 		{
 			name:            "PORT fallback for restate port",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "RESTATE_ADMIN_URL": "http://admin:9070/", "AGENT_NAME": "miorine"},
+			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "RESTATE_ADMIN_URL": "http://admin:9070/", "AGENT_NAME": "agent-alpha"},
 			wantRestatePort: "9081",
 			wantHealthPort:  "4029",
 			wantAdminURL:    "http://admin:9070",
-			wantAgentName:   "miorine",
+			wantAgentName:   "agent-alpha",
 		},
 		{
 			name:            "explicit environment overrides",
-			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "RESTATE_ADMIN_URL": "http://restate-custom:9070", "AGENT_NAME": "suletta"},
+			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "RESTATE_ADMIN_URL": "http://restate-custom:9070", "AGENT_NAME": "agent-beta"},
 			wantRestatePort: "9090",
 			wantHealthPort:  "4030",
 			wantAdminURL:    "http://restate-custom:9070",
-			wantAgentName:   "suletta",
+			wantAgentName:   "agent-beta",
 		},
 	}
 
