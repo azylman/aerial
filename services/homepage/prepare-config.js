@@ -109,12 +109,56 @@ function escapeShellValue(val) {
   return `'${String(val).replace(/'/g, "'\\''")}'`;
 }
 
-function copyFallback(srcDir, dstDir) {
+// Theme assets merged into Homepage's officially supported custom.css / custom.js hooks.
+// Each composed file is: shared Aerial source + core file + optional user file, in that order.
+const THEME_ASSETS = [
+  { name: 'custom.css', shared: 'aerial-tokens.css', separator: '\n' },
+  { name: 'custom.js', shared: 'aerial-theme.js', separator: '\n;\n' }
+];
+
+// Files that are composed (or are composition inputs) and must never be raw-copied.
+function isComposedAsset(file) {
+  return file.startsWith('aerial-') || THEME_ASSETS.some(a => a.name === file);
+}
+
+// Shared theme sources ship next to the core configs (ConfigMap mount); when running from a repo
+// checkout they live in web/theme at the repository root instead.
+function resolveThemeAsset(coreDir, filename, existsFn = fs.existsSync) {
+  const candidates = [
+    path.join(coreDir, filename),
+    path.resolve(coreDir, '..', '..', '..', 'web', 'theme', filename)
+  ];
+  return candidates.find(p => existsFn(p)) || null;
+}
+
+function composeParts(parts, separator) {
+  const present = parts.filter(p => typeof p === 'string' && p.trim() !== '');
+  if (present.length === 0) return '';
+  return present.map(p => p.replace(/\s+$/, '')).join(separator) + '\n';
+}
+
+// Returns [{ name, content }] for custom.css and custom.js. Missing parts are skipped.
+function composeThemeAssets(coreDir, userDir) {
+  return THEME_ASSETS.map(asset => {
+    const sharedPath = resolveThemeAsset(coreDir, asset.shared);
+    if (!sharedPath) {
+      console.error(`[prepare-config] Warning: ${asset.shared} not found; ${asset.name} omits the shared theme.`);
+    }
+    const parts = [
+      sharedPath ? safeRead(sharedPath) : null,
+      safeRead(path.join(coreDir, asset.name)),
+      userDir ? safeRead(path.join(userDir, asset.name)) : null
+    ];
+    return { name: asset.name, content: composeParts(parts, asset.separator) };
+  });
+}
+
+function copyFallback(srcDir, dstDir, userDir) {
   try {
     if (!fs.existsSync(srcDir)) return;
     const entries = fs.readdirSync(srcDir);
     for (const entry of entries) {
-      if (entry === 'custom.css') continue;
+      if (isComposedAsset(entry)) continue;
       const srcPath = path.join(srcDir, entry);
       const dstPath = path.join(dstDir, entry);
       try {
@@ -124,6 +168,9 @@ function copyFallback(srcDir, dstDir) {
           fs.writeFileSync(dstPath, content, { mode: 0o644 });
         }
       } catch (_) {}
+    }
+    for (const asset of composeThemeAssets(srcDir, userDir)) {
+      writeAtomic(dstDir, asset.name, asset.content);
     }
   } catch (err) {
     console.error(`[prepare-config] Fallback copy error: ${err.message}`);
@@ -156,17 +203,11 @@ function run(dirs = {}) {
     }
   };
 
-  for (const dir of targetDirs) {
-    try {
-      fs.unlinkSync(path.join(dir, 'custom.css'));
-    } catch (_) {}
-  }
-
   const yaml = dirs.yaml || resolveYamlParser();
   if (!yaml) {
     console.error(`[prepare-config] js-yaml not found in container environment. Falling back to raw core copy.`);
     for (const dir of targetDirs) {
-      copyFallback(coreDir, dir);
+      copyFallback(coreDir, dir, userDir);
     }
     return;
   }
@@ -180,6 +221,15 @@ function run(dirs = {}) {
   ];
 
   const logEntries = [];
+
+  for (const asset of composeThemeAssets(coreDir, userDir)) {
+    try {
+      writeTargets(asset.name, asset.content);
+      logEntries.push(`${asset.name}: composed from shared theme, core and user files`);
+    } catch (err) {
+      logEntries.push(`${asset.name}: failed (${err.message})`);
+    }
+  }
 
   for (const cfg of configFiles) {
     try {
@@ -226,7 +276,7 @@ function run(dirs = {}) {
     if (fs.existsSync(coreDir)) {
       const coreFiles = fs.readdirSync(coreDir);
       for (const file of coreFiles) {
-        if (file !== 'custom.css' && !configFiles.some(c => c.name === file)) {
+        if (!isComposedAsset(file) && !configFiles.some(c => c.name === file)) {
           const src = path.join(coreDir, file);
           if (fs.statSync(src).isFile()) {
             const data = fs.readFileSync(src);
@@ -316,10 +366,10 @@ if (require.main === module) {
   } catch (fatalErr) {
     console.error(`[prepare-config] Fatal error during config preparation: ${fatalErr.message}`);
     console.error(`[prepare-config] Copying raw core configs to prevent container crash loop.`);
-    copyFallback(CORE_DIR, TARGET_DIR);
+    copyFallback(CORE_DIR, TARGET_DIR, USER_DIR);
     const appCfg = resolveDefaultAppConfigDir();
     if (appCfg && appCfg !== TARGET_DIR) {
-      copyFallback(CORE_DIR, appCfg);
+      copyFallback(CORE_DIR, appCfg, USER_DIR);
     }
     process.exit(0);
   }
@@ -335,5 +385,8 @@ module.exports = {
   safeRead,
   writeAtomic,
   copyFallback,
+  composeParts,
+  composeThemeAssets,
+  resolveThemeAsset,
   escapeShellValue
 };
