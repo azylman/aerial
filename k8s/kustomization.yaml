@@ -28,4 +28,8 @@ configMapGenerator:
       - ../services/homepage/config/services.yaml
       - ../services/homepage/config/settings.yaml
       - ../services/homepage/config/widgets.yaml
+      - ../services/homepage/config/custom.css
+      - ../services/homepage/config/custom.js
+      - ../web/theme/aerial-tokens.css
+      - ../web/theme/aerial-theme.js
 

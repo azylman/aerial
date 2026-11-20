@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const prepareConfig = require('../prepare-config');
-const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback, escapeShellValue } = prepareConfig;
+const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback, composeParts, resolveThemeAsset, escapeShellValue } = prepareConfig;
 
 test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof run, 'function');
@@ -18,6 +18,8 @@ test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof safeRead, 'function');
   assert.equal(typeof writeAtomic, 'function');
   assert.equal(typeof copyFallback, 'function');
+  assert.equal(typeof composeParts, 'function');
+  assert.equal(typeof resolveThemeAsset, 'function');
   assert.equal(typeof escapeShellValue, 'function');
   assert.equal(prepareConfig.startWatcher, undefined);
 });
@@ -52,7 +54,7 @@ test('prepare-config: resolveDefaultAppConfigDir returns /app/config when presen
   assert.equal(resolveDefaultAppConfigDir(() => false), null);
 });
 
-test('prepare-config: run mirrors configs to appConfigDir and removes stale custom.css', () => {
+test('prepare-config: run mirrors configs and composed custom.css to appConfigDir', () => {
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-appcfg-'));
   const userDir = path.join(tmpBase, 'user');
   const coreDir = path.join(tmpBase, 'core');
@@ -78,8 +80,8 @@ test('prepare-config: run mirrors configs to appConfigDir and removes stale cust
     };
     run({ coreDir, userDir, targetDir, appConfigDir, yaml: stubYaml, candidatePaths: [] });
 
-    assert.equal(fs.existsSync(path.join(appConfigDir, 'custom.css')), false);
-    assert.equal(fs.existsSync(path.join(targetDir, 'custom.css')), false);
+    assert.equal(fs.readFileSync(path.join(appConfigDir, 'custom.css'), 'utf8'), '/* stale theme */\nbody { background: #000; }\n');
+    assert.equal(fs.readFileSync(path.join(targetDir, 'custom.css'), 'utf8'), '/* stale theme */\nbody { background: #000; }\n');
     const appSettings = JSON.parse(fs.readFileSync(path.join(appConfigDir, 'settings.yaml'), 'utf8'));
     assert.equal(appSettings.theme, 'dark');
     assert.equal(appSettings.showStats, true);
@@ -105,7 +107,7 @@ test('prepare-config: run executes clean one-shot merge', () => {
 
     run({ coreDir, userDir, targetDir });
 
-    assert.equal(fs.existsSync(path.join(targetDir, 'custom.css')), false);
+    assert.equal(fs.readFileSync(path.join(targetDir, 'custom.css'), 'utf8'), '/* core css */\n/* user css */\n');
     if (resolveYamlParser()) {
       const summaryLogPath = path.join(targetDir, 'merge-summary.log');
       assert.ok(fs.existsSync(summaryLogPath));
@@ -280,5 +282,129 @@ test('prepare-config: loads cleanly and merges core and user configs when /local
     assert.equal(mergedSettings.showStats, true);
   } finally {
     fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('prepare-config: composeParts joins present parts and skips missing ones', async (t) => {
+  const tests = [
+    { name: 'css parts trimmed and newline-joined', parts: ['a {}\n', 'b {}', 'c {}\n\n'], separator: '\n', want: 'a {}\nb {}\nc {}\n' },
+    { name: 'js parts semicolon-separated', parts: ['x();\n', 'y();'], separator: '\n;\n', want: 'x();\n;\ny();\n' },
+    { name: 'missing and empty parts skipped', parts: [null, 'b', ''], separator: '\n', want: 'b\n' },
+    { name: 'nothing present', parts: [null, undefined, '  \n'], separator: '\n', want: '' }
+  ];
+  for (const tc of tests) {
+    await t.test(tc.name, () => {
+      assert.equal(composeParts(tc.parts, tc.separator), tc.want);
+    });
+  }
+});
+
+test('prepare-config: resolveThemeAsset prefers the core mount, then the repo web/theme dir', async (t) => {
+  const coreDir = '/srv/repo/services/homepage/config';
+  const tests = [
+    { name: 'core mount', present: ['/srv/repo/services/homepage/config/aerial-tokens.css'], want: '/srv/repo/services/homepage/config/aerial-tokens.css' },
+    { name: 'repo layout', present: ['/srv/repo/web/theme/aerial-tokens.css'], want: '/srv/repo/web/theme/aerial-tokens.css' },
+    { name: 'both present, core wins', present: ['/srv/repo/web/theme/aerial-tokens.css', '/srv/repo/services/homepage/config/aerial-tokens.css'], want: '/srv/repo/services/homepage/config/aerial-tokens.css' },
+    { name: 'absent', present: [], want: null }
+  ];
+  for (const tc of tests) {
+    await t.test(tc.name, () => {
+      assert.equal(resolveThemeAsset(coreDir, 'aerial-tokens.css', (p) => tc.present.includes(p)), tc.want);
+    });
+  }
+});
+
+const CORE_REL = 'repo/services/homepage/config';
+const stubJsonYaml = { load: (str) => JSON.parse(str), dump: (obj) => JSON.stringify(obj) };
+
+function writeFixtureTree(base, files) {
+  for (const [rel, content] of Object.entries(files)) {
+    const full = path.join(base, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content, 'utf8');
+  }
+}
+
+const composeCases = [
+  {
+    name: 'no user files',
+    files: { [`${CORE_REL}/aerial-tokens.css`]: ':root{--ae:1}\n', [`${CORE_REL}/aerial-theme.js`]: 'window.T=1;\n', [`${CORE_REL}/custom.css`]: 'html.dark{}\n', [`${CORE_REL}/custom.js`]: 'core();\n' },
+    wantCss: ':root{--ae:1}\nhtml.dark{}\n',
+    wantJs: 'window.T=1;\n;\ncore();\n'
+  },
+  {
+    name: 'user files appended after core',
+    files: { [`${CORE_REL}/aerial-tokens.css`]: ':root{--ae:1}\n', [`${CORE_REL}/aerial-theme.js`]: 'window.T=1;\n', [`${CORE_REL}/custom.css`]: 'html.dark{}\n', [`${CORE_REL}/custom.js`]: 'core();\n', 'user/custom.css': 'body{}\n', 'user/custom.js': 'user();\n' },
+    wantCss: ':root{--ae:1}\nhtml.dark{}\nbody{}\n',
+    wantJs: 'window.T=1;\n;\ncore();\n;\nuser();\n'
+  },
+  {
+    name: 'shared sources from repo web/theme',
+    files: { 'repo/web/theme/aerial-tokens.css': ':root{--ae:2}\n', 'repo/web/theme/aerial-theme.js': 'window.T=2;\n', [`${CORE_REL}/custom.css`]: 'html.dark{}\n', [`${CORE_REL}/custom.js`]: 'core();\n' },
+    wantCss: ':root{--ae:2}\nhtml.dark{}\n',
+    wantJs: 'window.T=2;\n;\ncore();\n'
+  },
+  {
+    name: 'shared sources absent',
+    files: { [`${CORE_REL}/custom.css`]: 'html.dark{}\n', 'user/custom.js': 'user();\n' },
+    wantCss: 'html.dark{}\n',
+    wantJs: 'user();\n'
+  },
+  {
+    name: 'nothing present',
+    files: {},
+    wantCss: '',
+    wantJs: ''
+  }
+];
+
+test('prepare-config: run writes composed custom.css and custom.js to every target', async (t) => {
+  for (const tc of composeCases) {
+    await t.test(tc.name, () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-compose-'));
+      try {
+        writeFixtureTree(base, tc.files);
+        const coreDir = path.join(base, CORE_REL);
+        const userDir = path.join(base, 'user');
+        const targetDir = path.join(base, 'target');
+        const appConfigDir = path.join(base, 'app-config');
+        fs.mkdirSync(coreDir, { recursive: true });
+        fs.mkdirSync(userDir, { recursive: true });
+
+        run({ coreDir, userDir, targetDir, appConfigDir, yaml: stubJsonYaml, candidatePaths: [] });
+
+        for (const dir of [targetDir, appConfigDir]) {
+          assert.equal(fs.readFileSync(path.join(dir, 'custom.css'), 'utf8'), tc.wantCss, `${tc.name}: custom.css in ${path.basename(dir)}`);
+          assert.equal(fs.readFileSync(path.join(dir, 'custom.js'), 'utf8'), tc.wantJs, `${tc.name}: custom.js in ${path.basename(dir)}`);
+          assert.equal(fs.existsSync(path.join(dir, 'aerial-tokens.css')), false, `${tc.name}: aerial-tokens.css not raw-copied`);
+          assert.equal(fs.existsSync(path.join(dir, 'aerial-theme.js')), false, `${tc.name}: aerial-theme.js not raw-copied`);
+        }
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('prepare-config: copyFallback copies raw configs and writes composed custom.css and custom.js', async (t) => {
+  for (const tc of composeCases) {
+    await t.test(tc.name, () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-fallback-'));
+      try {
+        writeFixtureTree(base, { ...tc.files, [`${CORE_REL}/settings.yaml`]: 'color: slate\n' });
+        const dstDir = path.join(base, 'dst');
+        fs.mkdirSync(dstDir, { recursive: true });
+
+        copyFallback(path.join(base, CORE_REL), dstDir, path.join(base, 'user'));
+
+        assert.equal(fs.readFileSync(path.join(dstDir, 'settings.yaml'), 'utf8'), 'color: slate\n', `${tc.name}: settings.yaml`);
+        assert.equal(fs.readFileSync(path.join(dstDir, 'custom.css'), 'utf8'), tc.wantCss, `${tc.name}: custom.css`);
+        assert.equal(fs.readFileSync(path.join(dstDir, 'custom.js'), 'utf8'), tc.wantJs, `${tc.name}: custom.js`);
+        assert.equal(fs.existsSync(path.join(dstDir, 'aerial-tokens.css')), false, `${tc.name}: aerial-tokens.css not raw-copied`);
+        assert.equal(fs.existsSync(path.join(dstDir, 'aerial-theme.js')), false, `${tc.name}: aerial-theme.js not raw-copied`);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    });
   }
 });

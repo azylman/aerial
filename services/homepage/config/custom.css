@@ -1,0 +1,37 @@
+/*
+ * Homepage theme overrides, loaded through Homepage's supported custom.css hook.
+ *
+ * prepare-config.js prepends web/theme/aerial-tokens.css, so the --ae-* palette is defined above
+ * this file. Homepage loads custom.css BEFORE its own stylesheet, so every rule here wins on
+ * specificity (html.<mode>.theme-slate beats Homepage's .theme-slate, .dark and .light), never
+ * !important.
+ *
+ * Homepage consumes its palette as rgb(var(--color-N)), so these map to the --ae-*-rgb triplets.
+ * Dark text uses theme-200/300, cards use white/5 over --bg-color, borders use theme-200/x.
+ */
+html.dark.theme-slate {
+    --color-50: var(--ae-dark-ink-rgb);
+    --color-100: var(--ae-dark-ink-rgb);
+    --color-200: var(--ae-dark-ink-rgb);
+    --color-300: var(--ae-dark-ink-muted-rgb);
+    --color-400: var(--ae-dark-ink-muted-rgb);
+    --color-500: var(--ae-dark-ink-muted-rgb);
+    --color-600: var(--ae-dark-border-rgb);
+    --color-700: var(--ae-dark-surface-elevated-rgb);
+    --color-800: var(--ae-dark-surface-rgb);
+    --color-900: var(--ae-dark-canvas-rgb);
+    --color-logo-start: var(--ae-dark-accent-rgb);
+    --color-logo-stop: var(--ae-dark-info-rgb);
+    --bg-color: var(--ae-dark-canvas-rgb);
+}
+
+/*
+ * Tailwind slate already equals Polar Slate (canvas 50, border 200, muted ink 600, ink 900), so
+ * light only pins those stops to the shared tokens.
+ */
+html.light.theme-slate {
+    --color-50: var(--ae-light-canvas-rgb);
+    --color-200: var(--ae-light-border-rgb);
+    --color-600: var(--ae-light-ink-muted-rgb);
+    --color-900: var(--ae-light-ink-rgb);
+}
