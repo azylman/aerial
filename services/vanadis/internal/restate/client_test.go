@@ -317,6 +317,7 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 type scopedNameCase struct {
 	name           string
 	agent          string
+	buildID        string
 	wantBuild      string
 	wantRouter     string
 	wantObjectPath string
@@ -326,11 +327,12 @@ type scopedNameCase struct {
 func TestClientScopedNames(t *testing.T) {
 	t.Parallel()
 	tests := []scopedNameCase{
-		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
-		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Create", wantRouterPath: "/BuildRouter-miorine/RouteFailChunk"},
-		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+		{name: "empty defaults to legacy", agent: "", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "aerial defaults to legacy", agent: "aerial", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "suletta scoped", agent: "suletta", buildID: "b1", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+		{name: "miorine scoped", agent: "miorine", buildID: "b1", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Create", wantRouterPath: "/BuildRouter-miorine/RouteFailChunk"},
+		{name: "mixed case scoped normalized", agent: "Suletta", buildID: "b1", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+		{name: "special characters in buildID are escaped", agent: "suletta", buildID: "build/1#test:special", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -342,7 +344,11 @@ func TestClientScopedNames(t *testing.T) {
 			if got := c.BuildRouterServiceName(); got != tc.wantRouter {
 				t.Errorf("BuildRouterServiceName() = %q, want %q", got, tc.wantRouter)
 			}
-			if got := c.ObjectPath("b1", "Create"); got != tc.wantObjectPath {
+			bid := tc.buildID
+			if bid == "" {
+				bid = "b1"
+			}
+			if got := c.ObjectPath(bid, "Create"); got != tc.wantObjectPath {
 				t.Errorf("ObjectPath() = %q, want %q", got, tc.wantObjectPath)
 			}
 			if got := c.RouterPath("RouteFailChunk"); got != tc.wantRouterPath {
