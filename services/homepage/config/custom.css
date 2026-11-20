@@ -27,11 +27,16 @@ html.dark.theme-slate {
 
 /*
  * Tailwind slate already equals Polar Slate (canvas 50, border 200, muted ink 600, ink 900), so
- * light only pins those stops to the shared tokens.
+ * light pins those stops to the shared tokens. Light text uses theme-500/700/800 (descriptions,
+ * card text, headings), so those also map to muted ink and ink; their only light backgrounds are
+ * faint tints (theme-500/10, theme-800/30) where the shift is negligible.
  */
 html.light.theme-slate {
     --color-50: var(--ae-light-canvas-rgb);
     --color-200: var(--ae-light-border-rgb);
+    --color-500: var(--ae-light-ink-muted-rgb);
     --color-600: var(--ae-light-ink-muted-rgb);
+    --color-700: var(--ae-light-ink-rgb);
+    --color-800: var(--ae-light-ink-rgb);
     --color-900: var(--ae-light-ink-rgb);
 }
