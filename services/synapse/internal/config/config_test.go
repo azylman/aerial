@@ -168,7 +168,6 @@ type loadConfigCase struct {
 	wantAuthors            []string
 	wantBotID              string
 	wantDefaultOwner       bool
-	wantForwardURLs        map[string]string
 	wantCollaboratorAlerts []CollaboratorCIAlertRule
 	wantStrictErr          bool
 }
@@ -238,16 +237,6 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 	}
 	if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
 		t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
-	}
-	if tc.wantForwardURLs != nil {
-		if len(cfg.WebhookForwardURLs) != len(tc.wantForwardURLs) {
-			t.Errorf("WebhookForwardURLs len = %d, want %d", len(cfg.WebhookForwardURLs), len(tc.wantForwardURLs))
-		}
-		for k, v := range tc.wantForwardURLs {
-			if cfg.WebhookForwardURLs[k] != v {
-				t.Errorf("WebhookForwardURLs[%q] = %q, want %q", k, cfg.WebhookForwardURLs[k], v)
-			}
-		}
 	}
 	if tc.wantAuthors != nil {
 		if len(cfg.AutoUpdatePRAuthors) != len(tc.wantAuthors) {
@@ -392,7 +381,7 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 		},
 		{
 			name:          "type-mismatched yaml keeps decoded fields, strict load errors",
-			localYAML:     "port: \"4099\"\nwebhook_forward_urls: [\"not-a-map\"]\n",
+			localYAML:     "port: \"4099\"\nbots: [\"not-a-map\"]\n",
 			wantPort:      "4099",
 			wantStrictErr: true,
 		},
@@ -415,13 +404,6 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 			aerialYAML:       "bot_id: \"aerial-fallback\"\n",
 			wantBotID:        "aerial-fallback",
 			wantDefaultOwner: false,
-		},
-		{
-			name:      "webhook_forward_urls normalized from yaml",
-			localYAML: "webhook_forward_urls:\n  \" eri-sub \": \" http://eri-sub:4020/ \"\n  \"\": \"http://empty-key:4020/\"\n  \"empty-val\": \"   \"\n",
-			wantForwardURLs: map[string]string{
-				"eri-sub": "http://eri-sub:4020",
-			},
 		},
 		{
 			name:             "env overrides for bot_id and default_owner",
@@ -475,66 +457,6 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 	}
 }
 
-func TestNormalizeWebhookForwardURLs(t *testing.T) {
-	t.Parallel()
-
-	paddedKey := " bot1 "
-	whitespaceKey := "   "
-
-	tests := []struct {
-		name string
-		raw  map[string]string
-		want map[string]string
-	}{
-		{
-			name: "nil input returns nil",
-			raw:  nil,
-			want: nil,
-		},
-		{
-			name: "empty input returns nil",
-			raw:  map[string]string{},
-			want: nil,
-		},
-		{
-			name: "all empty keys or values returns nil",
-			raw: map[string]string{
-				"":            "http://example.com",
-				whitespaceKey: "http://example.com",
-				"bot1":        "",
-				"bot2":        "   ",
-			},
-			want: nil,
-		},
-		{
-			name: "trims whitespace and trailing slashes",
-			raw: map[string]string{
-				paddedKey: " http://example.com/api/ ",
-				"bot2":    "http://example.org///",
-			},
-			want: map[string]string{
-				"bot1": "http://example.com/api",
-				"bot2": "http://example.org",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := NormalizeWebhookForwardURLs(tc.raw)
-			if len(got) != len(tc.want) {
-				t.Fatalf("len(got) = %d, want %d: %v", len(got), len(tc.want), got)
-			}
-			for k, wantVal := range tc.want {
-				if gotVal, ok := got[k]; !ok || gotVal != wantVal {
-					t.Errorf("got[%q] = %q (ok=%v), want %q", k, gotVal, ok, wantVal)
-				}
-			}
-		})
-	}
-}
-
 func withField(base, overlay Config) Config {
 	dst := reflect.ValueOf(&base).Elem()
 	src := reflect.ValueOf(overlay)
@@ -560,7 +482,9 @@ func TestRestartRequired(t *testing.T) {
 		KubeToken:           "kube",
 		SystemChannelID:     "111",
 		AutoUpdatePRAuthors: []string{"a"},
-		WebhookForwardURLs:  map[string]string{"marida": "http://marida:4020"},
+		Bots: map[string]BotConfig{
+			"aerial": {DiscordToken: "tok", EriURL: "http://eri:8080", SystemChannelID: "111", DefaultOwner: true},
+		},
 	}
 	tests := []struct {
 		name string
@@ -570,7 +494,6 @@ func TestRestartRequired(t *testing.T) {
 		{name: "identical config", next: base, want: false},
 		{name: "system channel changes live", next: withField(base, Config{SystemChannelID: "222"}), want: false},
 		{name: "auto-update authors change live", next: withField(base, Config{AutoUpdatePRAuthors: []string{"b"}}), want: false},
-		{name: "webhook forward urls change live", next: withField(base, Config{WebhookForwardURLs: map[string]string{"x": "http://x"}}), want: false},
 		{name: "default owner changes live", next: withField(base, Config{DefaultOwner: true}), want: false},
 		{name: "collaborator alerts change live", next: withField(base, Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/aerial", ChannelID: "111", Authors: map[string]string{"dev": "<@1>"}}}}), want: false},
 		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
@@ -582,6 +505,10 @@ func TestRestartRequired(t *testing.T) {
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
+		{name: "k8s auth enabled requires restart", next: withField(base, Config{K8sAuthEnabled: true}), want: true},
+		{name: "bots count mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": base.Bots["aerial"], "agent-alpha": {DefaultOwner: true}}}), want: true},
+		{name: "bots value mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": {DiscordToken: "different"}}}), want: true},
+		{name: "bots key mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"agent-alpha": base.Bots["aerial"]}}), want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -596,6 +523,228 @@ func TestRestartRequired(t *testing.T) {
 
 	if !RestartRequired(nil, &base) || !RestartRequired(&base, nil) {
 		t.Fatal("expected RestartRequired to return true for nil configs")
+	}
+}
+
+func TestLoadConfig_MultiBot(t *testing.T) {
+	tests := []struct {
+		name               string
+		yaml               string
+		env                map[string]string
+		wantBots           map[string]BotConfig
+		wantDefaultOwner   string
+		wantK8sAuthEnabled bool
+		wantAPIServerURL   string
+	}{
+		{
+			name: "multi-bot yaml parsing and token env resolution",
+			yaml: `bots:
+  aerial:
+    token_env: "CUSTOM_DISCORD_TOKEN"
+    eri_url: "http://eri-aerial:8088"
+    system_channel_id: "111222"
+    default_owner: true
+  agent-alpha:
+    eri_url: "http://eri-agent-alpha:8088"
+`,
+			env: map[string]string{
+				"CUSTOM_DISCORD_TOKEN":      "tok-aerial",
+				"DISCORD_TOKEN_AGENT-ALPHA": "tok-agent-alpha",
+			},
+			wantBots: map[string]BotConfig{
+				"aerial": {
+					TokenEnv:        "CUSTOM_DISCORD_TOKEN",
+					DiscordToken:    "tok-aerial",
+					EriURL:          "http://eri-aerial:8088",
+					SystemChannelID: "111222",
+					DefaultOwner:    true,
+				},
+				"agent-alpha": {
+					TokenEnv:        "DISCORD_TOKEN_AGENT-ALPHA",
+					DiscordToken:    "tok-agent-alpha",
+					EriURL:          "http://eri-agent-alpha:8088",
+					SystemChannelID: "",
+					DefaultOwner:    false,
+				},
+			},
+			wantDefaultOwner: "aerial",
+		},
+		{
+			name: "fallback synthesis when bots omitted",
+			yaml: `bot_id: "agent-beta"
+default_owner: true
+eri_url: "http://eri-agent-beta:8088"
+system_channel_id: "333444"
+`,
+			env: map[string]string{
+				"DISCORD_TOKEN_AGENT-BETA": "tok-agent-beta",
+			},
+			wantBots: map[string]BotConfig{
+				"agent-beta": {
+					TokenEnv:        "DISCORD_TOKEN_AGENT-BETA",
+					DiscordToken:    "tok-agent-beta",
+					EriURL:          "http://eri-agent-beta:8088",
+					SystemChannelID: "333444",
+					DefaultOwner:    true,
+				},
+			},
+			wantDefaultOwner: "agent-beta",
+		},
+		{
+			name: "fallback synthesis for aerial default and k8s auth enabled",
+			yaml: `default_owner: true
+k8s_auth:
+  api_server_url: "https://k8s.local"
+`,
+			env: map[string]string{
+				"DISCORD_TOKEN":    "aerial-token",
+				"K8S_AUTH_ENABLED": "1",
+			},
+			wantBots: map[string]BotConfig{
+				"aerial": {
+					TokenEnv:        "DISCORD_TOKEN",
+					DiscordToken:    "aerial-token",
+					EriURL:          "http://127.0.0.1:8088",
+					SystemChannelID: "",
+					DefaultOwner:    true,
+				},
+			},
+			wantDefaultOwner:   "aerial",
+			wantK8sAuthEnabled: true,
+			wantAPIServerURL:   "https://k8s.local",
+		},
+		{
+			name: "multi-bot with empty key and implicit aerial default owner",
+			yaml: `bot_id: "nonexistent"
+default_owner: true
+legacy_build_workflows:
+  - repository: "bad"
+bots:
+  "":
+    eri_url: "http://ignore"
+  aerial:
+    system_channel_id: "chan1"
+`,
+			env: map[string]string{
+				"DISCORD_TOKEN": "token-for-aerial",
+			},
+			wantBots: map[string]BotConfig{
+				"aerial": {
+					TokenEnv:        "DISCORD_TOKEN",
+					DiscordToken:    "token-for-aerial",
+					EriURL:          "http://127.0.0.1:8088",
+					SystemChannelID: "chan1",
+					DefaultOwner:    true,
+				},
+			},
+			wantDefaultOwner: "aerial",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			oldAerial := SynapseAerialConfigPath
+			SynapseAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
+			t.Cleanup(func() { SynapseAerialConfigPath = oldAerial })
+
+			cfgPath := filepath.Join(tmpDir, "synapse.yaml")
+			if err := os.WriteFile(cfgPath, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+			for _, k := range synapseConfigKeysToClear {
+				t.Setenv(k, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg := LoadConfig(cfgPath)
+			assertLoadedMultiBotConfig(t, cfg, tc.wantBots, tc.wantDefaultOwner, tc.wantK8sAuthEnabled, tc.wantAPIServerURL)
+		})
+	}
+}
+
+func assertLoadedMultiBotConfig(t *testing.T, cfg Config, wantBots map[string]BotConfig, wantOwner string, wantK8sAuth bool, wantAPIServerURL string) {
+	t.Helper()
+	if len(cfg.Bots) != len(wantBots) {
+		t.Fatalf("len(cfg.Bots) = %d, want %d: %+v", len(cfg.Bots), len(wantBots), cfg.Bots)
+	}
+	for botID, wantBot := range wantBots {
+		gotBot, ok := cfg.Bots[botID]
+		if !ok {
+			t.Errorf("missing bot %q in cfg.Bots", botID)
+			continue
+		}
+		assertBotConfig(t, botID, gotBot, wantBot)
+	}
+	if gotOwner := cfg.DefaultOwnerAgent(); gotOwner != wantOwner {
+		t.Errorf("DefaultOwnerAgent() = %q, want %q", gotOwner, wantOwner)
+	}
+	if wantK8sAuth != cfg.K8sAuthEnabled {
+		t.Errorf("K8sAuthEnabled = %v, want %v", cfg.K8sAuthEnabled, wantK8sAuth)
+	}
+	if wantAPIServerURL != "" && cfg.K8sAuthConfig.APIServerURL != wantAPIServerURL {
+		t.Errorf("APIServerURL = %q, want %q", cfg.K8sAuthConfig.APIServerURL, wantAPIServerURL)
+	}
+}
+
+func TestDefaultOwnerAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{
+			name: "nil config returns aerial",
+			cfg:  nil,
+			want: "aerial",
+		},
+		{
+			name: "empty bots returns aerial",
+			cfg:  &Config{Bots: nil},
+			want: "aerial",
+		},
+		{
+			name: "explicit default owner found",
+			cfg: &Config{
+				Bots: map[string]BotConfig{
+					"aerial":      {DefaultOwner: false},
+					"agent-alpha": {DefaultOwner: true},
+				},
+			},
+			want: "agent-alpha",
+		},
+		{
+			name: "no explicit default owner falls back to aerial",
+			cfg: &Config{
+				Bots: map[string]BotConfig{
+					"aerial":      {DefaultOwner: false},
+					"agent-alpha": {DefaultOwner: false},
+				},
+			},
+			want: "aerial",
+		},
+		{
+			name: "no explicit default owner without aerial falls back to first sorted",
+			cfg: &Config{
+				Bots: map[string]BotConfig{
+					"agent-beta":  {DefaultOwner: false},
+					"agent-alpha": {DefaultOwner: false},
+				},
+			},
+			want: "agent-alpha",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.cfg.DefaultOwnerAgent(); got != tc.want {
+				t.Errorf("cfg.DefaultOwnerAgent() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -786,6 +935,25 @@ func TestLookupCollaboratorCIAlert(t *testing.T) {
 	}
 	if HasCollaboratorCIAlertsForRepo(nil, "mirrormere") {
 		t.Errorf("expected HasCollaboratorCIAlertsForRepo on nil config to be false")
+	}
+}
+
+func assertBotConfig(t *testing.T, botID string, got, want BotConfig) {
+	t.Helper()
+	if got.TokenEnv != want.TokenEnv {
+		t.Errorf("bot %q TokenEnv = %q, want %q", botID, got.TokenEnv, want.TokenEnv)
+	}
+	if got.DiscordToken != want.DiscordToken {
+		t.Errorf("bot %q DiscordToken = %q, want %q", botID, got.DiscordToken, want.DiscordToken)
+	}
+	if got.EriURL != want.EriURL {
+		t.Errorf("bot %q EriURL = %q, want %q", botID, got.EriURL, want.EriURL)
+	}
+	if got.SystemChannelID != want.SystemChannelID {
+		t.Errorf("bot %q SystemChannelID = %q, want %q", botID, got.SystemChannelID, want.SystemChannelID)
+	}
+	if got.DefaultOwner != want.DefaultOwner {
+		t.Errorf("bot %q DefaultOwner = %v, want %v", botID, got.DefaultOwner, want.DefaultOwner)
 	}
 }
 

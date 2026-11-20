@@ -747,24 +747,26 @@ func newMockStatusPool(dbErr error, status string) *mockSynapsePgxPool {
 func TestPostgresPRRegistry_LoadRawPRMetadata(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		repo     string
-		prNumber int
-		nilPool  bool
-		rawJSON  string
-		dbErr    error
-		wantErr  bool
-		wantNil  bool
-		wantVal  string
+		name       string
+		repo       string
+		prNumber   int
+		nilPool    bool
+		rawJSON    string
+		dbErr      error
+		wantErr    bool
+		wantNil    bool
+		wantExists bool
+		wantVal    string
 	}{
-		{name: "success", repo: "azylman/aerial", prNumber: 42, rawJSON: `{"custom":"value"}`, wantVal: "value"},
-		{name: "not found", repo: "azylman/aerial", prNumber: 42, dbErr: pgx.ErrNoRows, wantNil: true},
-		{name: "db error", repo: "azylman/aerial", prNumber: 42, dbErr: errors.New("db down"), wantErr: true},
-		{name: "invalid json", repo: "azylman/aerial", prNumber: 42, rawJSON: `{bad json`, wantErr: true},
-		{name: "empty repo", repo: "", prNumber: 42, wantNil: true},
-		{name: "zero pr", repo: "azylman/aerial", prNumber: 0, wantNil: true},
-		{name: "nil pool", repo: "azylman/aerial", prNumber: 42, nilPool: true, wantNil: true},
-		{name: "nil receiver", repo: "azylman/aerial", prNumber: 42, wantNil: true},
+		{name: "success", repo: "azylman/aerial", prNumber: 42, rawJSON: `{"custom":"value"}`, wantExists: true, wantVal: "value"},
+		{name: "empty json row exists", repo: "azylman/aerial", prNumber: 42, rawJSON: `{}`, wantExists: true, wantNil: true},
+		{name: "not found", repo: "azylman/aerial", prNumber: 42, dbErr: pgx.ErrNoRows, wantNil: true, wantExists: false},
+		{name: "db error", repo: "azylman/aerial", prNumber: 42, dbErr: errors.New("db down"), wantErr: true, wantExists: false},
+		{name: "invalid json", repo: "azylman/aerial", prNumber: 42, rawJSON: `{bad json`, wantErr: true, wantExists: true},
+		{name: "empty repo", repo: "", prNumber: 42, wantNil: true, wantExists: false},
+		{name: "zero pr", repo: "azylman/aerial", prNumber: 0, wantNil: true, wantExists: false},
+		{name: "nil pool", repo: "azylman/aerial", prNumber: 42, nilPool: true, wantNil: true, wantExists: false},
+		{name: "nil receiver", repo: "azylman/aerial", prNumber: 42, wantNil: true, wantExists: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -777,9 +779,12 @@ func TestPostgresPRRegistry_LoadRawPRMetadata(t *testing.T) {
 			if tc.name == "nil receiver" {
 				reg = nil
 			}
-			got, err := reg.LoadRawPRMetadata(context.Background(), tc.repo, tc.prNumber)
+			got, exists, err := reg.LoadRawPRMetadata(context.Background(), tc.repo, tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadRawPRMetadata() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if exists != tc.wantExists {
+				t.Fatalf("LoadRawPRMetadata() exists = %v, wantExists = %v", exists, tc.wantExists)
 			}
 			if tc.wantNil && len(got) != 0 {
 				t.Fatalf("LoadRawPRMetadata() got = %v, want empty", got)

@@ -5,13 +5,24 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
+
+// BotConfig holds configuration for one Discord bot managed by synapse.
+type BotConfig struct {
+	TokenEnv        string `yaml:"token_env"`
+	DiscordToken    string `yaml:"-"`
+	EriURL          string `yaml:"eri_url"`
+	SystemChannelID string `yaml:"system_channel_id"`
+	DefaultOwner    bool   `yaml:"default_owner"`
+}
 
 // Config holds runtime configuration for synapse.
 type Config struct {
@@ -36,7 +47,9 @@ type Config struct {
 	AutoUpdatePRAuthors  []string
 	BotID                string
 	DefaultOwner         bool
-	WebhookForwardURLs   map[string]string
+	Bots                 map[string]BotConfig
+	K8sAuthEnabled       bool
+	K8sAuthConfig        k8sauth.Config
 	CollaboratorCIAlerts []CollaboratorCIAlertRule
 }
 
@@ -71,7 +84,9 @@ type RouterYAMLConfig struct {
 	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
 	BotID                string                    `yaml:"bot_id"`
 	DefaultOwner         bool                      `yaml:"default_owner"`
-	WebhookForwardURLs   map[string]string         `yaml:"webhook_forward_urls"`
+	Bots                 map[string]BotConfig      `yaml:"bots"`
+	K8sAuthEnabled       bool                      `yaml:"k8s_auth_enabled"`
+	K8sAuthConfig        k8sauth.Config            `yaml:"k8s_auth"`
 	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
 }
 
@@ -132,6 +147,45 @@ func LoadConfigFromEnvStrict() (*Config, error) {
 	return &cfg, nil
 }
 
+const defaultAgentName = "aerial"
+
+// DefaultOwnerAgent returns the agent with DefaultOwner == true, falling back to "aerial".
+func (c *Config) DefaultOwnerAgent() string {
+	if c == nil || len(c.Bots) == 0 {
+		return defaultAgentName
+	}
+	for agent, bot := range c.Bots {
+		if bot.DefaultOwner {
+			return agent
+		}
+	}
+	if _, ok := c.Bots[defaultAgentName]; ok {
+		return defaultAgentName
+	}
+	var keys []string
+	for k := range c.Bots {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return defaultAgentName
+}
+
+func botsEqual(a, b map[string]BotConfig) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || va != vb {
+			return false
+		}
+	}
+	return true
+}
+
 // RestartRequired reports whether moving from old to next changes a
 // field that is bound once at startup (listener, database pool, Discord
 // gateway session, outbound dispatcher and registry clients) and therefore
@@ -153,7 +207,9 @@ func RestartRequired(old, next *Config) bool {
 		old.NATSURL != next.NATSURL ||
 		old.RestateURL != next.RestateURL ||
 		old.RestatePRService != next.RestatePRService ||
-		old.RestateRepoService != next.RestateRepoService
+		old.RestateRepoService != next.RestateRepoService ||
+		old.K8sAuthEnabled != next.K8sAuthEnabled ||
+		!botsEqual(old.Bots, next.Bots)
 }
 
 // HasCollaboratorCIAlertsForRepo reports whether any collaborator alert rules are configured for repo.
@@ -191,24 +247,6 @@ func LookupCollaboratorCIAlert(cfg *Config, repo, author string) (channelID, men
 		}
 	}
 	return "", "", false
-}
-
-func NormalizeWebhookForwardURLs(raw map[string]string) map[string]string {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make(map[string]string)
-	for k, v := range raw {
-		key := strings.TrimSpace(k)
-		val := strings.TrimRight(strings.TrimSpace(v), "/")
-		if key != "" && val != "" {
-			out[key] = val
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func NormalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
@@ -322,7 +360,7 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 // Empty or "aerial" defaults to "PRObject"; any other name is lowercased and formatted as "PRObject-<name>".
 func PRObjectServiceName(botID string) string {
 	name := strings.ToLower(strings.TrimSpace(botID))
-	if name == "" || name == "aerial" {
+	if name == "" || name == defaultAgentName {
 		return "PRObject"
 	}
 	return "PRObject-" + name
@@ -332,10 +370,85 @@ func PRObjectServiceName(botID string) string {
 // Empty or "aerial" defaults to "RepoObject"; any other name is lowercased and formatted as "RepoObject-<name>".
 func RepoObjectServiceName(botID string) string {
 	name := strings.ToLower(strings.TrimSpace(botID))
-	if name == "" || name == "aerial" {
+	if name == "" || name == defaultAgentName {
 		return "RepoObject"
 	}
 	return "RepoObject-" + name
+}
+
+func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, defaultOwner bool) map[string]BotConfig {
+	bots := make(map[string]BotConfig)
+	if len(fileCfg.Bots) == 0 {
+		tokenEnv := "DISCORD_TOKEN"
+		if botID != defaultAgentName && botID != "" {
+			tokenEnv = "DISCORD_TOKEN_" + strings.ToUpper(botID)
+		}
+		discordToken := strings.TrimSpace(os.Getenv(tokenEnv))
+		if discordToken == "" {
+			discordToken = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
+		}
+		bots[botID] = BotConfig{
+			TokenEnv:        tokenEnv,
+			DiscordToken:    discordToken,
+			EriURL:          eriURL,
+			SystemChannelID: sysChan,
+			DefaultOwner:    defaultOwner,
+		}
+		return bots
+	}
+
+	hasExplicitDefault := false
+	for k, bot := range fileCfg.Bots {
+		agent := strings.ToLower(strings.TrimSpace(k))
+		if agent == "" {
+			continue
+		}
+		tokenEnv := strings.TrimSpace(bot.TokenEnv)
+		if tokenEnv == "" {
+			if agent == defaultAgentName {
+				tokenEnv = "DISCORD_TOKEN"
+			} else {
+				tokenEnv = "DISCORD_TOKEN_" + strings.ToUpper(agent)
+			}
+		}
+		bot.TokenEnv = tokenEnv
+		bot.DiscordToken = strings.TrimSpace(os.Getenv(tokenEnv))
+		if agent == defaultAgentName && bot.DiscordToken == "" {
+			bot.DiscordToken = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
+		}
+		if bot.EriURL == "" {
+			bot.EriURL = eriURL
+		} else {
+			bot.EriURL = strings.TrimRight(bot.EriURL, "/")
+		}
+		if bot.DefaultOwner {
+			hasExplicitDefault = true
+		}
+		bots[agent] = bot
+	}
+	if !hasExplicitDefault && defaultOwner {
+		if targetBot, ok := bots[botID]; ok {
+			targetBot.DefaultOwner = true
+			bots[botID] = targetBot
+		} else if targetBot, ok := bots[defaultAgentName]; ok {
+			targetBot.DefaultOwner = true
+			bots[defaultAgentName] = targetBot
+		}
+	}
+	return bots
+}
+
+func resolveK8sAuthConfig(fileCfg RouterYAMLConfig, kubeServer string) (bool, k8sauth.Config) {
+	k8sAuthEnabled := fileCfg.K8sAuthEnabled
+	if envVal := os.Getenv("K8S_AUTH_ENABLED"); envVal != "" {
+		k8sAuthEnabled = strings.EqualFold(envVal, "true") || envVal == "1"
+	}
+	k8sCfg := fileCfg.K8sAuthConfig
+	k8sCfg.Enabled = k8sAuthEnabled
+	if k8sCfg.APIServerURL == "" && kubeServer != "" {
+		k8sCfg.APIServerURL = strings.TrimRight(kubeServer, "/")
+	}
+	return k8sAuthEnabled, k8sCfg
 }
 
 func buildConfig(fileCfg RouterYAMLConfig) Config {
@@ -351,7 +464,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
 	}
 
-	botID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, "aerial"))
+	botID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentName))
 	defaultOwner := fileCfg.DefaultOwner
 	if envVal := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
 		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
@@ -360,13 +473,13 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 	// Delegate local fallback DSN synthesis to httpkit.BuildPostgresDSN so config.go
 	// embeds zero plaintext default password literals (enforced by commit-safety-guard).
 	pgURL := model.FirstNonEmpty(
-		httpkit.BuildPostgresDSN(os.Getenv, "aerial"),
+		httpkit.BuildPostgresDSN(os.Getenv, defaultAgentName),
 		httpkit.BuildPostgresDSN(func(k string) string {
 			if k == "POSTGRES_HOST" {
 				return "127.0.0.1"
 			}
 			return ""
-		}, "aerial"),
+		}, defaultAgentName),
 	)
 
 	kubeServer := os.Getenv("KUBE_API_SERVER")
@@ -377,6 +490,18 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		}
 	}
 	kubeToken := os.Getenv("KUBE_TOKEN")
+	eriURL := strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
+
+	bots := parseBotsConfig(fileCfg, botID, eriURL, sysChan, defaultOwner)
+
+	discordToken := os.Getenv("DISCORD_TOKEN")
+	if b, ok := bots[botID]; ok && b.DiscordToken != "" {
+		discordToken = b.DiscordToken
+	} else if b, ok := bots["aerial"]; ok && b.DiscordToken != "" {
+		discordToken = b.DiscordToken
+	}
+
+	k8sAuthEnabled, k8sCfg := resolveK8sAuthConfig(fileCfg, kubeServer)
 
 	return Config{
 		LegacyBuildWorkflows: legacy,
@@ -388,19 +513,21 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
 		PostgresURL:          pgURL,
 		FluxReceiverURL:      strings.TrimRight(model.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
-		BrainURL:             strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		EriURL:               strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
+		BrainURL:             eriURL,
+		EriURL:               eriURL,
 		NATSURL:              model.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
 		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
 		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), PRObjectServiceName(botID)),
 		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), RepoObjectServiceName(botID)),
 		RestateAuthoritative: fileCfg.RestateAuthoritative,
 		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
-		DiscordToken:         os.Getenv("DISCORD_TOKEN"),
+		DiscordToken:         discordToken,
 		AutoUpdatePRAuthors:  autoUpdateAuthors,
 		BotID:                botID,
 		DefaultOwner:         defaultOwner,
-		WebhookForwardURLs:   NormalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
+		Bots:                 bots,
+		K8sAuthEnabled:       k8sAuthEnabled,
+		K8sAuthConfig:        k8sCfg,
 		CollaboratorCIAlerts: collaboratorAlerts,
 	}
 }

@@ -126,7 +126,7 @@ func TestBuildMetadataEventIngestion(t *testing.T) {
 				reg.resolveTargetID = "100000000000000001"
 			}
 			bus := &mockEventBus{err: tc.busErr}
-			srv := newTestRouter(Config{GitHubAPIURL: server.URL, DefaultOwner: tc.owner, WebhookForwardURLs: forwardURLsUnlessOwner(tc.owner)}, server.Client(), reg, nil, bus)
+			srv := newTestRouter(Config{GitHubAPIURL: server.URL, DefaultOwner: tc.owner}, server.Client(), reg, nil, bus)
 			_, err := srv.ProcessGitHubEvent(context.Background(), tc.event, "delivery", []byte(strings.ReplaceAll(tc.payload, "BRANCH", tc.branch)))
 			if (err != nil) != tc.wantErr || len(reg.recordedBuildMetadata) != tc.wantWrites {
 				t.Fatalf("err=%v writes=%d, want err=%v writes=%d", err, len(reg.recordedBuildMetadata), tc.wantErr, tc.wantWrites)
@@ -142,11 +142,4 @@ func TestBuildMetadataEventIngestion(t *testing.T) {
 			}
 		})
 	}
-}
-
-func forwardURLsUnlessOwner(owner bool) map[string]string {
-	if owner {
-		return nil
-	}
-	return map[string]string{"other": "http://127.0.0.1:1/forward"}
 }

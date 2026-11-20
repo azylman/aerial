@@ -630,21 +630,7 @@ func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *Reso
 	if res.HeadSHA != "" && fetchedModel.Head.SHA != "" && !strings.EqualFold(fetchedModel.Head.SHA, strings.TrimSpace(res.HeadSHA)) {
 		return pr, false, nil
 	}
-	fetched := GitHubPullRequest{
-		NodeID:         fetchedModel.NodeID,
-		Number:         fetchedModel.Number,
-		State:          fetchedModel.State,
-		Title:          fetchedModel.Title,
-		Body:           fetchedModel.Body,
-		Head:           GitHubPRRef(fetchedModel.Head),
-		Base:           GitHubPRRef(fetchedModel.Base),
-		Draft:          fetchedModel.Draft,
-		Merged:         fetchedModel.Merged,
-		MergeCommitSHA: fetchedModel.MergeCommitSHA,
-		Mergeable:      fetchedModel.Mergeable,
-		MergeableState: fetchedModel.MergeableState,
-		User:           fetchedModel.User,
-	}
+	fetched := fetchedModel
 	return syncPRFallbackFields(res, fetched), true, nil
 }
 

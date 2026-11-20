@@ -161,16 +161,20 @@ func (c *Client) DispatchBackground(ctx context.Context, req model.DispatchReque
 	return c.PostBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", c.maxAttempts, 1500*time.Millisecond, true, req)
 }
 
-// PostDiscordInternalJSON executes an HTTP POST to an Eri internal Discord webhook.
-func (c *Client) PostDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
-	if strings.TrimSpace(c.brainURL) == "" {
+// PostDiscordInternalJSONToURL executes an HTTP POST to an arbitrary Eri base URL.
+func (c *Client) PostDiscordInternalJSONToURL(ctx context.Context, eriBaseURL string, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
+	baseURL := strings.TrimRight(strings.TrimSpace(eriBaseURL), "/")
+	if baseURL == "" {
+		baseURL = c.brainURL
+	}
+	if baseURL == "" {
 		return errors.New("brain URL is not configured")
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal %s request: %w", reqLabel, err)
 	}
-	endpoint := c.brainURL + path
+	endpoint := baseURL + path
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -200,6 +204,11 @@ func (c *Client) PostDiscordInternalJSON(ctx context.Context, client *http.Clien
 	return nil
 }
 
+// PostDiscordInternalJSON executes an HTTP POST to an Eri internal Discord webhook.
+func (c *Client) PostDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
+	return c.PostDiscordInternalJSONToURL(ctx, c.brainURL, client, timeout, path, reqLabel, statusLabel, payload)
+}
+
 func (c *Client) postDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
 	return c.PostDiscordInternalJSON(ctx, client, timeout, path, reqLabel, statusLabel, payload)
 }
@@ -209,7 +218,17 @@ func (c *Client) DispatchDiscordMessage(ctx context.Context, req model.DiscordMe
 	return c.postDiscordInternalJSON(ctx, c.discordMsgClient, 20*time.Second, "/internal/discord/message", "discord message ingress", "discord ingress", req)
 }
 
+// DispatchDiscordMessageToURL sends an inbound Discord message payload to a specific Eri base URL.
+func (c *Client) DispatchDiscordMessageToURL(ctx context.Context, eriURL string, req model.DiscordMessageIngressRequest) error {
+	return c.PostDiscordInternalJSONToURL(ctx, eriURL, c.discordMsgClient, 20*time.Second, "/internal/discord/message", "discord message ingress", "discord ingress", req)
+}
+
 // DispatchDiscordInteraction sends an inbound Discord interaction event payload to Eri's internal webhook.
 func (c *Client) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
 	return c.postDiscordInternalJSON(ctx, c.discordInteractionClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
+}
+
+// DispatchDiscordInteractionToURL sends an inbound Discord interaction event payload to a specific Eri base URL.
+func (c *Client) DispatchDiscordInteractionToURL(ctx context.Context, eriURL string, interaction *discordgo.Interaction) error {
+	return c.PostDiscordInternalJSONToURL(ctx, eriURL, c.discordInteractionClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
 }

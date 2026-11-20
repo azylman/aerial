@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -171,10 +172,16 @@ func TestStartDiscordGateway(t *testing.T) {
 			})
 			t.Cleanup(cleanup)
 
-			srv := &testIngressServer{}
-			stopFn, err := StartGateway(ctx, srv, tc.token)
+			srv := &testIngressServer{
+				cfg: &config.Config{
+					Bots: map[string]config.BotConfig{
+						"aerial": {DiscordToken: tc.token},
+					},
+				},
+			}
+			stopFn, err := StartDiscordGateway(ctx, srv)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("StartGateway() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("StartDiscordGateway() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
@@ -272,7 +279,7 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 	}
 
 	mc := buildGatewayMessage(tc)
-	HandleGatewayMessageCreate(ctx, srv, session, mc)
+	HandleGatewayMessageCreateForAgent(ctx, srv, session, mc, "")
 
 	if tc.hasBus {
 		if len(bus.insertedJobs) != tc.wantEnqueued {
@@ -405,7 +412,7 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 		}
 	}
 
-	HandleGatewayInteractionCreate(ctx, srv, ic)
+	HandleGatewayInteractionCreateForAgent(ctx, srv, ic, "")
 
 	if tc.hasBus {
 		if len(bus.insertedJobs) != tc.wantEnqueued {
@@ -508,7 +515,7 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 					t.Fatalf("discordgo.New() err = %v", err)
 				}
 				session.Client = &http.Client{Transport: &mockDiscordTransport{}}
-				h := NewDiscordGatewayReadyHandler(canceledCtx, srv, nil)
+				h := NewDiscordGatewayReadyHandlerForAgent(canceledCtx, srv, nil, "")
 				h(session, &discordgo.Ready{
 					User: &discordgo.User{ID: "bot-ready-1"},
 				})
@@ -516,7 +523,7 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 					t.Errorf("User = %v, want bot-ready-1", session.State.User)
 				}
 			case tc.isInteraction:
-				h := NewDiscordGatewayInteractionCreateHandler(ctx, srv)
+				h := NewDiscordGatewayInteractionCreateHandlerForAgent(ctx, srv, "")
 				h(nil, &discordgo.InteractionCreate{
 					Interaction: &discordgo.Interaction{
 						ID:   "inter-closure-1",
@@ -527,7 +534,7 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 					t.Errorf("expected 1 interaction call, got %d", len(srv.processedInteractions))
 				}
 			default:
-				h := NewDiscordGatewayMessageCreateHandler(ctx, srv)
+				h := NewDiscordGatewayMessageCreateHandlerForAgent(ctx, srv, "")
 				h(nil, &discordgo.MessageCreate{
 					Message: &discordgo.Message{
 						ID:      "msg-closure-1",
@@ -743,7 +750,7 @@ func TestHandleGatewayReadyWithWG(t *testing.T) {
 	srv := &testIngressServer{}
 
 	var wg sync.WaitGroup
-	HandleGatewayReady(ctx, srv, sess, &discordgo.Ready{User: &discordgo.User{ID: "bot-wg-1"}}, &wg)
+	HandleGatewayReadyForAgent(ctx, srv, sess, &discordgo.Ready{User: &discordgo.User{ID: "bot-wg-1"}}, &wg, "")
 	wg.Wait()
 
 	if sess.State.User == nil || sess.State.User.ID != "bot-wg-1" {
@@ -751,21 +758,93 @@ func TestHandleGatewayReadyWithWG(t *testing.T) {
 	}
 }
 
-func TestStartGateway_StopFnCancelsSweepContext(t *testing.T) {
+func TestStartDiscordGateway_MultiBot(t *testing.T) {
 	ctx := context.Background()
 
-	var capturedReadyHandler func(*discordgo.Session, *discordgo.Ready)
-	cleanup := SetGatewayOpenerForTest(func(dg *discordgo.Session) error {
-		// Mock opener succeeds
-		return nil
-	})
-	t.Cleanup(cleanup)
-
-	srv := &testIngressServer{}
-	stopFn, err := StartGateway(ctx, srv, "Bot token-sweep-test")
-	if err != nil {
-		t.Fatalf("StartGateway err = %v", err)
+	tests := []struct {
+		name       string
+		nilServer  bool
+		nilConfig  bool
+		bots       map[string]config.BotConfig
+		openerErr  error
+		wantErr    bool
+		wantSubstr string
+		wantTokens []string
+	}{
+		{
+			name:      "nil server returns no-op",
+			nilServer: true,
+		},
+		{
+			name:      "nil config returns no-op",
+			nilConfig: true,
+		},
+		{
+			name: "empty bots returns no-op",
+			bots: map[string]config.BotConfig{},
+		},
+		{
+			name: "empty token in bot skipped",
+			bots: map[string]config.BotConfig{
+				"empty": {TokenEnv: "EMPTY_TOKEN", DiscordToken: "   "},
+			},
+		},
+		{
+			name: "opener error returns error",
+			bots: map[string]config.BotConfig{
+				"aerial": {DiscordToken: "aerial-tok", DefaultOwner: true},
+			},
+			openerErr:  errors.New("gateway conn refused"),
+			wantErr:    true,
+			wantSubstr: "open discord gateway for agent",
+			wantTokens: []string{"Bot aerial-tok"},
+		},
+		{
+			name: "multiple bots started in sorted order and cleaned up idempotently",
+			bots: map[string]config.BotConfig{
+				"aerial":      {DiscordToken: "Bot aerial-token", DefaultOwner: true},
+				"agent-alpha": {DiscordToken: "agent-alpha-token", DefaultOwner: false},
+			},
+			wantTokens: []string{"Bot aerial-token", "Bot agent-alpha-token"},
+		},
 	}
-	_ = capturedReadyHandler
-	stopFn()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var openedTokens []string
+			cleanup := SetGatewayOpenerForTest(func(dg *discordgo.Session) error {
+				openedTokens = append(openedTokens, dg.Token)
+				if tc.openerErr != nil {
+					return tc.openerErr
+				}
+				return nil
+			})
+			t.Cleanup(cleanup)
+
+			var srv *testIngressServer
+			if !tc.nilServer {
+				srv = &testIngressServer{}
+				if !tc.nilConfig {
+					srv.cfg = &config.Config{
+						Bots: tc.bots,
+					}
+				}
+			}
+
+			stopFn, err := StartDiscordGateway(ctx, srv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("StartDiscordGateway() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+			if !slices.Equal(openedTokens, tc.wantTokens) {
+				t.Errorf("openedTokens = %v, want %v", openedTokens, tc.wantTokens)
+			}
+			if stopFn != nil {
+				stopFn()
+				stopFn() // idempotent
+			}
+		})
+	}
 }

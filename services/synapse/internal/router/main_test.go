@@ -236,6 +236,10 @@ type mockPRRegistry struct {
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
 
+	rawMetadata      map[string]any
+	rawMetadataFound bool
+	rawMetadataErr   error
+
 	deployedRes bool
 	deployedErr error
 
@@ -1113,127 +1117,6 @@ func assertDeployEventDispResults(t *testing.T, tc processDeployEventCase) {
 	}
 }
 
-func TestHandlePRRegister(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		cfgBotID   string
-		useNilReg  bool
-		regErr     error
-		body       string
-		wantStatus int
-	}{
-		{
-			name:       "nil registry returns 500",
-			useNilReg:  true,
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "invalid json returns 400",
-			body:       `{malformed`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "empty repo returns 400",
-			body:       `{"repo":"","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "zero pr_number returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "empty branch returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "empty head_sha returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "invalid target_id returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"bad"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "headless session key resolves system channel fallback and succeeds",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"dispatch-uuid-1"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "valid request succeeds",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "registry register error returns 500",
-			regErr:     errors.New("db insert fail"),
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "foreign bot_id returns 409 conflict",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"suletta"}`,
-			wantStatus: http.StatusConflict,
-		},
-		{
-			name:       "matching bot_id succeeds",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"aerial"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "case-insensitive matching bot_id succeeds",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"AERIAL"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "empty bot_id in request succeeds when config has bot_id",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":""}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "bot_id in request succeeds when config has empty bot_id",
-			cfgBotID:   "",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"suletta"}`,
-			wantStatus: http.StatusOK,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var reg PRRegistryUpdater
-			var mockReg *mockPRRegistry
-			if !tc.useNilReg {
-				mockReg = &mockPRRegistry{registerErr: tc.regErr}
-				reg = mockReg
-			}
-			srv := newTestRouter(Config{SystemChannelID: "100000000000000001", BotID: tc.cfgBotID}, nil, reg, &mockOutboundDispatcher{})
-			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
-			if rec.Code != tc.wantStatus {
-				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantStatus == http.StatusConflict {
-				if !strings.Contains(rec.Body.String(), "bot_id mismatch for local pr_registry") {
-					t.Errorf("body = %s, want substr 'bot_id mismatch for local pr_registry'", rec.Body.String())
-				}
-				if mockReg != nil && len(mockReg.registerCalls) > 0 {
-					t.Errorf("registerCalls = %d, want 0 when bot_id mismatches", len(mockReg.registerCalls))
-				}
-			}
-		})
-	}
-}
-
 func TestSetupPostgres(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1286,8 +1169,23 @@ func (m *mockPRRegistry) LoadPRBuildLifecycle(context.Context, string, int) (PRB
 	return m.buildLifecycle, m.buildLifecycleErr
 }
 
-func (*mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[string]any, error) {
-	return map[string]any{}, nil
+func (m *mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[string]any, bool, error) {
+	if m == nil {
+		return map[string]any{}, false, nil
+	}
+	if m.rawMetadataErr != nil {
+		return nil, false, m.rawMetadataErr
+	}
+	if m.rawMetadataFound {
+		if m.rawMetadata != nil {
+			return m.rawMetadata, true, nil
+		}
+		return map[string]any{}, true, nil
+	}
+	if m.rawMetadata != nil {
+		return m.rawMetadata, true, nil
+	}
+	return map[string]any{}, false, nil
 }
 
 func (m *mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error) {
@@ -1295,4 +1193,29 @@ func (m *mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error
 		return false, nil
 	}
 	return m.deployedRes, m.deployedErr
+}
+
+func TestRouterServer_AuthAccessors(t *testing.T) {
+	t.Parallel()
+	srv := &RouterServer{}
+	if srv.k8sAuthEnabled() {
+		t.Error("expected k8sAuthEnabled to be false for empty srv")
+	}
+	if srv.getAuthenticator() != nil {
+		t.Error("expected getAuthenticator to be nil")
+	}
+	authCfg := newTestK8sAuthConfig(t, &staticAuthRoundTripper{})
+	srvLazy := &RouterServer{cfgSrc: fixedConfig(Config{K8sAuthEnabled: true, K8sAuthConfig: authCfg})}
+	if srvLazy.authenticator != nil {
+		t.Error("expected authenticator to be uninitialized initially")
+	}
+	if !srvLazy.k8sAuthEnabled() {
+		t.Error("expected k8sAuthEnabled to be true with K8sAuthEnabled in config")
+	}
+	if srvLazy.getAuthenticator() == nil {
+		t.Error("expected getAuthenticator to lazily initialize authenticator")
+	}
+	if srvLazy.authenticator == nil {
+		t.Error("expected authenticator to be set after getAuthenticator")
+	}
 }

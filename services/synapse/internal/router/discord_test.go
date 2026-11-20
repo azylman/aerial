@@ -9,20 +9,24 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-func TestProcessDiscordIngress_And_Interaction(t *testing.T) {
+func TestProcessDiscordIngress(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	tests := []struct {
 		name          string
-		isInteraction bool
 		nilDispatcher bool
 		dispatchErr   bool
+		agent         string
 		wantErr       bool
 		wantSubstr    string
 	}{
 		{
 			name: "ProcessDiscordIngress success",
+		},
+		{
+			name:  "ProcessDiscordIngress with agent success",
+			agent: "agent-alpha",
 		},
 		{
 			name:          "ProcessDiscordIngress nil dispatcher",
@@ -36,24 +40,6 @@ func TestProcessDiscordIngress_And_Interaction(t *testing.T) {
 			wantErr:     true,
 			wantSubstr:  "downstream error",
 		},
-		{
-			name:          "ProcessDiscordInteraction success",
-			isInteraction: true,
-		},
-		{
-			name:          "ProcessDiscordInteraction nil dispatcher",
-			isInteraction: true,
-			nilDispatcher: true,
-			wantErr:       true,
-			wantSubstr:    "dispatcher not configured",
-		},
-		{
-			name:          "ProcessDiscordInteraction dispatch error",
-			isInteraction: true,
-			dispatchErr:   true,
-			wantErr:       true,
-			wantSubstr:    "downstream error",
-		},
 	}
 
 	for _, tc := range tests {
@@ -62,6 +48,76 @@ func TestProcessDiscordIngress_And_Interaction(t *testing.T) {
 			disp := &mockOutboundDispatcher{}
 			if tc.dispatchErr {
 				disp.discordMessageErr = errors.New("downstream error")
+			}
+			srv := newTestRouter(Config{}, nil, nil, disp)
+			if tc.nilDispatcher {
+				srv.SetDispatcher(nil)
+			}
+
+			err := srv.ProcessDiscordIngress(ctx, DiscordIngressArgs{
+				MessageID: "msg-1",
+				BotUserID: "bot-1",
+				Message:   &discordgo.Message{ID: "msg-1", Content: "hello"},
+				Agent:     tc.agent,
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+			if tc.wantErr {
+				return
+			}
+			msgCalls := disp.DiscordMessageCalls()
+			if len(msgCalls) != 1 {
+				t.Fatalf("DiscordMessageCalls() len = %d, want 1", len(msgCalls))
+			}
+			if msgCalls[0].Agent != tc.agent {
+				t.Errorf("DiscordMessageCalls()[0].Agent = %q, want %q", msgCalls[0].Agent, tc.agent)
+			}
+		})
+	}
+}
+
+func TestProcessDiscordInteraction(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		nilDispatcher bool
+		dispatchErr   bool
+		agent         string
+		wantErr       bool
+		wantSubstr    string
+	}{
+		{
+			name: "ProcessDiscordInteraction success",
+		},
+		{
+			name:  "ProcessDiscordInteraction with agent success",
+			agent: "agent-alpha",
+		},
+		{
+			name:          "ProcessDiscordInteraction nil dispatcher",
+			nilDispatcher: true,
+			wantErr:       true,
+			wantSubstr:    "dispatcher not configured",
+		},
+		{
+			name:        "ProcessDiscordInteraction dispatch error",
+			dispatchErr: true,
+			wantErr:     true,
+			wantSubstr:  "downstream error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disp := &mockOutboundDispatcher{}
+			if tc.dispatchErr {
 				disp.discordInteractionErr = errors.New("downstream error")
 			}
 			srv := newTestRouter(Config{}, nil, nil, disp)
@@ -69,25 +125,30 @@ func TestProcessDiscordIngress_And_Interaction(t *testing.T) {
 				srv.SetDispatcher(nil)
 			}
 
-			var err error
-			if tc.isInteraction {
-				err = srv.ProcessDiscordInteraction(ctx, DiscordInteractionArgs{
-					InteractionID: "inter-1",
-					Interaction:   &discordgo.Interaction{ID: "inter-1", Type: discordgo.InteractionApplicationCommand},
-				})
-			} else {
-				err = srv.ProcessDiscordIngress(ctx, DiscordIngressArgs{
-					MessageID: "msg-1",
-					BotUserID: "bot-1",
-					Message:   &discordgo.Message{ID: "msg-1", Content: "hello"},
-				})
-			}
-
+			err := srv.ProcessDiscordInteraction(ctx, DiscordInteractionArgs{
+				InteractionID: "inter-1",
+				Interaction:   &discordgo.Interaction{ID: "inter-1", Type: discordgo.InteractionApplicationCommand},
+				Agent:         tc.agent,
+			})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if len(disp.DiscordInteractionCalls()) != 1 {
+				t.Errorf("DiscordInteractionCalls() len = %d, want 1", len(disp.DiscordInteractionCalls()))
+			}
+			agentCalls := disp.DiscordInteractionAgentCalls()
+			if tc.agent != "" {
+				if len(agentCalls) != 1 || agentCalls[0] != tc.agent {
+					t.Errorf("DiscordInteractionAgentCalls() = %v, want [%q]", agentCalls, tc.agent)
+				}
+			} else if len(agentCalls) != 0 {
+				t.Errorf("DiscordInteractionAgentCalls() = %v, want empty", agentCalls)
 			}
 		})
 	}

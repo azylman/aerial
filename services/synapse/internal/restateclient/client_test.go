@@ -262,14 +262,51 @@ func TestPayloadJSONShape(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
-		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `generation,head_sha,main_sha,pr_number,repo`},
+		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `agent,branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
+		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `agent,generation,head_sha,main_sha,pr_number,repo`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if tc.got != tc.want {
 				t.Errorf("json keys = %q, want %q", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAgentScopedServiceRouting(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		agent        string
+		wantPRPath   string
+		wantRepoPath string
+	}{
+		{name: "empty agent defaults to standard services", agent: "", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
+		{name: "aerial agent defaults to standard services", agent: "aerial", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
+		{name: "agent-alpha agent scopes service names", agent: "agent-alpha", wantPRPath: "/PRObject-agent-alpha/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject-agent-alpha/azylman%2Faerial/HandleMainPush"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var recs []recordedRequest
+			srv := newRecordedServer(t, 200, false, &recs)
+			defer srv.Close()
+			c := NewClient(srv.URL, "", "", nil)
+
+			if err := c.SendPREvent(t.Context(), "HandleCheckPassed", PREvent{Repo: "aerial", PRNumber: 1, Agent: tc.agent}); err != nil {
+				t.Fatalf("SendPREvent failed: %v", err)
+			}
+			if recs[0].path != tc.wantPRPath {
+				t.Errorf("PR path = %q, want %q", recs[0].path, tc.wantPRPath)
+			}
+
+			if err := c.SendRepoEvent(t.Context(), "HandleMainPush", RepoEvent{Repo: "aerial", Agent: tc.agent}); err != nil {
+				t.Fatalf("SendRepoEvent failed: %v", err)
+			}
+			if recs[1].path != tc.wantRepoPath {
+				t.Errorf("Repo path = %q, want %q", recs[1].path, tc.wantRepoPath)
 			}
 		})
 	}

@@ -82,6 +82,7 @@ type PREvent struct {
 	ReopenEpoch    uint64 `json:"reopen_epoch"`
 	Unmanaged      bool   `json:"unmanaged"`
 	BuildID        string `json:"build_id"`
+	Agent          string `json:"agent"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
@@ -93,6 +94,7 @@ type RepoEvent struct {
 	Generation uint64 `json:"generation"`
 	PRNumber   int    `json:"pr_number"`
 	HeadSHA    string `json:"head_sha"`
+	Agent      string `json:"agent"`
 }
 
 // PRObjectKey returns the Restate key for a PR object: repo#prNumber.
@@ -183,6 +185,28 @@ func NewClient(baseURL, prService, repoService string, httpClient *http.Client) 
 	}
 }
 
+func (c *Client) prServiceForAgent(agent string) string {
+	if c.prService != DefaultPRService && c.prService != "" {
+		return c.prService
+	}
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" || clean == "aerial" {
+		return DefaultPRService
+	}
+	return "PRObject-" + clean
+}
+
+func (c *Client) repoServiceForAgent(agent string) string {
+	if c.repoService != DefaultRepoService && c.repoService != "" {
+		return c.repoService
+	}
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" || clean == "aerial" {
+		return DefaultRepoService
+	}
+	return "RepoObject-" + clean
+}
+
 // SendPREvent delivers ev to one frozen PRObject handler for repo#prNumber.
 // Unmanaged collaborator events and owned events alike address PRObject
 // only; the client never resolves a build ID and never signals BuildRouter.
@@ -200,7 +224,7 @@ func (c *Client) SendPREvent(ctx context.Context, handler string, ev PREvent) er
 	if ev.PRNumber <= 0 {
 		return errors.New("pr_number is required")
 	}
-	return c.send(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	return c.send(ctx, c.prServiceForAgent(ev.Agent), PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 }
 
 // SendRepoEvent delivers ev to one frozen RepoObject handler for repo.
@@ -215,7 +239,7 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent
 	if ev.Repo == "" {
 		return errors.New("repo is required")
 	}
-	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
+	return c.send(ctx, c.repoServiceForAgent(ev.Agent), RepoObjectKey(ev.Repo), handler, ev)
 }
 
 // InvokePREvent delivers ev to one frozen PRObject handler and decodes the
@@ -240,7 +264,7 @@ func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, 
 	if out == nil {
 		return errors.New("output is required")
 	}
-	body, err := c.post(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	body, err := c.post(ctx, c.prServiceForAgent(ev.Agent), PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 	if err != nil {
 		return err
 	}
@@ -260,7 +284,7 @@ func (c *Client) post(ctx context.Context, service, key, handler string, payload
 	if err != nil {
 		return nil, fmt.Errorf("marshal restate payload: %w", err)
 	}
-	endpoint := c.baseURL + "/" + service + "/" + url.PathEscape(key) + "/" + handler
+	endpoint := c.baseURL + "/" + url.PathEscape(service) + "/" + url.PathEscape(key) + "/" + handler
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create restate request: %w", err)

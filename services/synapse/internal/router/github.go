@@ -15,6 +15,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/github"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -60,8 +61,8 @@ func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNu
 	if s == nil || s.registry == nil || prNum <= 0 || strings.TrimSpace(repo) == "" {
 		return nil
 	}
-	meta, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
-	if err != nil || len(meta) == 0 {
+	meta, exists, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
+	if err != nil || !exists || len(meta) == 0 {
 		return nil
 	}
 	// Only the identity-validated snapshot for the PR's current revision renders.
@@ -119,6 +120,98 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 }
 
 // GitHub Webhook Payloads and Resolution Types
+
+type (
+	GitHubPRRef       = model.GitHubPRRef
+	GitHubPullRequest = model.GitHubPullRequest
+	AerialPRMetadata  = model.AerialPRMetadata
+)
+
+func isPRMergeConflict(pr GitHubPullRequest) bool {
+	reason := github.ExtractAutoMergeBlockReason(pr.MergeableState, pr.Mergeable)
+	return github.IsActionableAutoMergeBlock(reason)
+}
+
+func isPRMergeabilityUnknown(pr GitHubPullRequest) bool {
+	if pr.Mergeable != nil {
+		return false
+	}
+	trimmedState := strings.TrimSpace(pr.MergeableState)
+	return trimmedState == "" || strings.EqualFold(trimmedState, "unknown")
+}
+
+const aerialPRMetadataPrefix = "<!-- aerial-pr:"
+
+// ParseAerialPRMetadata extracts the Aerial PR metadata JSON payload from a markdown body.
+func ParseAerialPRMetadata(body string) AerialPRMetadata {
+	_, after0, ok0 := strings.CutLast(body, aerialPRMetadataPrefix)
+	if !ok0 {
+		return AerialPRMetadata{}
+	}
+	rest := after0
+	before, _, ok := strings.Cut(rest, "-->")
+	if !ok {
+		return AerialPRMetadata{}
+	}
+	var trailer AerialPRMetadata
+	if err := json.Unmarshal([]byte(strings.TrimSpace(before)), &trailer); err != nil {
+		return AerialPRMetadata{}
+	}
+	targetID := NormalizeDiscordTargetID(trailer.TargetID)
+	if !IsValidDiscordSnowflake(targetID) && !IsHeadlessSessionKey(targetID) {
+		targetID = ""
+	}
+	return AerialPRMetadata{
+		TargetID: targetID,
+		BotID:    strings.TrimSpace(trailer.BotID),
+		Agent:    strings.TrimSpace(trailer.Agent),
+	}
+}
+
+// isForeignBotPR reports whether meta specifies a non-empty BotID/Agent that differs
+// from the local synapse instance's configured BotID.
+func isForeignBotPR(meta AerialPRMetadata, cfgBotID string) bool {
+	metaBotID := strings.TrimSpace(meta.OwningAgent())
+	cfgBotID = strings.TrimSpace(cfgBotID)
+	return metaBotID != "" && cfgBotID != "" && !strings.EqualFold(metaBotID, cfgBotID)
+}
+
+func (s *RouterServer) isPROwnedLocally(ctx context.Context, repo string, prNum int) bool {
+	if s == nil || s.registry == nil || prNum <= 0 {
+		return false
+	}
+	targetID, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(targetID) != "" || strings.TrimSpace(branch) != ""
+}
+
+func (s *RouterServer) resolveOwningAgent(ctx context.Context, repo string, prNum int, prBody string) string {
+	defaultOwner := defaultOwnerAgent
+	if s != nil && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
+		defaultOwner = s.cfgSrc.Current().DefaultOwnerAgent()
+	}
+	if prBody != "" {
+		if agent := ParseAerialPRMetadata(prBody).OwningAgent(); agent != "" {
+			return agent
+		}
+	}
+	if s == nil || s.registry == nil || prNum <= 0 || repo == "" {
+		return defaultOwner
+	}
+	meta, _, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
+	if err != nil || len(meta) == 0 {
+		return defaultOwner
+	}
+	if a, ok := meta["agent"].(string); ok && strings.TrimSpace(a) != "" {
+		return strings.TrimSpace(a)
+	}
+	if b, ok := meta["bot_id"].(string); ok && strings.TrimSpace(b) != "" {
+		return strings.TrimSpace(b)
+	}
+	return defaultOwner
+}
 
 type GitHubPingPayload struct {
 	Zen    string `json:"zen"`
@@ -258,13 +351,6 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		httpkit.WriteJSON(w, http.StatusUnauthorized, map[string]string{fieldError: "invalid github webhook signature"})
 		return
 	}
-	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.teeGitHubWebhook(r.Context(), reqPath, r, event, body)
-	}
 	if s.bus == nil {
 		slog.ErrorContext(r.Context(), "[synapse] [github] event bus not initialized")
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
@@ -389,12 +475,24 @@ func populatePullRequestEvent(p *GitHubPullRequestPayload, res *ResolvedGitHubEv
 }
 
 func (s *RouterServer) isForeignBotEvent(meta AerialPRMetadata) bool {
-	if s == nil || s.cfgSrc == nil {
+	if s.cfgSrc == nil {
 		return false
 	}
 	cfg := s.cfgSrc.Current()
 	if cfg == nil {
 		return false
+	}
+	agent := meta.OwningAgent()
+	if agent == "" {
+		return false
+	}
+	if len(cfg.Bots) > 0 {
+		for b := range cfg.Bots {
+			if strings.EqualFold(b, agent) {
+				return false
+			}
+		}
+		return true
 	}
 	return isForeignBotPR(meta, cfg.BotID)
 }

@@ -19,15 +19,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/alerts"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/discord"
-	"github.com/azylman/aerial/services/synapse/internal/ericlient"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/registry"
@@ -39,6 +38,8 @@ var (
 	_ buildmeta.GitHubGetter   = (*RouterServer)(nil)
 	_ model.OutboundDispatcher = (*DefaultOutboundDispatcher)(nil)
 )
+
+type BotConfig = config.BotConfig
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
@@ -57,6 +58,8 @@ type RouterServer struct {
 	alertTracker             alerts.Tracker
 	shadowMu                 sync.Mutex
 	shadowRestate            *shadowRestateReporter
+	authMu                   sync.Mutex
+	authenticator            *k8sauth.Authenticator
 }
 
 func (s *RouterServer) GetGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -134,22 +137,94 @@ func NewRouterServer(cfgSrc ConfigSource, client *http.Client) *RouterServer {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &RouterServer{
+	srv := &RouterServer{
 		cfgSrc:       cfgSrc,
 		httpClient:   tracing.Client(client),
 		githubClient: tracing.ExternalClient(client),
 	}
+	if cfgSrc != nil {
+		if cfg := cfgSrc.Current(); cfg != nil && cfg.K8sAuthEnabled {
+			srv.authenticator = k8sauth.NewAuthenticator(cfg.K8sAuthConfig)
+		}
+	}
+	return srv
 }
 
-func (s *RouterServer) SetEventBus(b pubsub.Bus)                       { s.bus = b }
-func (s *RouterServer) EventBus() pubsub.Bus                           { return s.bus }
-func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)              { s.registry = reg }
-func (s *RouterServer) Registry() PRRegistryUpdater                    { return s.registry }
-func (s *RouterServer) SetDispatcher(d OutboundDispatcher)             { s.dispatcher = d }
-func (s *RouterServer) Dispatcher() OutboundDispatcher                 { return s.dispatcher }
-func (s *RouterServer) SetQueueStats(q ConsumerStatsQuerier)           { s.queueStats = q }
-func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration)    { s.gatewayLatencyFn = fn }
-func (s *RouterServer) SetOnProcessed(fn func(event, delivery string)) { s.onProcessed = fn }
+func (s *RouterServer) SetEventBus(b pubsub.Bus)                    { s.bus = b }
+func (s *RouterServer) EventBus() pubsub.Bus                        { return s.bus }
+func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)           { s.registry = reg }
+func (s *RouterServer) SetDispatcher(d OutboundDispatcher)          { s.dispatcher = d }
+func (s *RouterServer) SetQueueStats(q ConsumerStatsQuerier)        { s.queueStats = q }
+func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration) { s.gatewayLatencyFn = fn }
+
+func (s *RouterServer) k8sAuthEnabled() bool {
+	s.authMu.Lock()
+	auth := s.authenticator
+	s.authMu.Unlock()
+	if auth != nil && auth.Enabled() {
+		return true
+	}
+	if s.cfgSrc != nil {
+		if cfg := s.cfgSrc.Current(); cfg != nil && cfg.K8sAuthEnabled {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *RouterServer) getAuthenticator() *k8sauth.Authenticator {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if s.authenticator != nil {
+		return s.authenticator
+	}
+	if s.cfgSrc != nil {
+		if cfg := s.cfgSrc.Current(); cfg != nil && cfg.K8sAuthEnabled {
+			s.authenticator = k8sauth.NewAuthenticator(cfg.K8sAuthConfig)
+			return s.authenticator
+		}
+	}
+	return nil
+}
+
+func (s *RouterServer) isKnownBot(botID string) bool {
+	if s.cfgSrc == nil || botID == "" {
+		return false
+	}
+	cfg := s.cfgSrc.Current()
+	if cfg == nil {
+		return false
+	}
+	if cfg.BotID == "" && len(cfg.Bots) == 0 {
+		return true
+	}
+	if cfg.BotID != "" && strings.EqualFold(strings.TrimSpace(cfg.BotID), botID) {
+		return true
+	}
+	for b := range cfg.Bots {
+		if strings.EqualFold(b, botID) {
+			return true
+		}
+	}
+	return false
+}
+
+func writeK8sAuthError(w http.ResponseWriter, err error) {
+	if valErr, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
+		httpkit.WriteJSON(w, valErr.StatusCode(), map[string]string{fieldError: valErr.Error()})
+		return
+	}
+	if unauthErr, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
+		httpkit.WriteJSON(w, unauthErr.StatusCode(), map[string]string{fieldError: unauthErr.Error()})
+		return
+	}
+	if forbErr, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
+		httpkit.WriteJSON(w, forbErr.StatusCode(), map[string]string{fieldError: forbErr.Error()})
+		return
+	}
+	slog.Error("k8sauth internal error", "err", err)
+	httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "internal error"})
+}
 
 // SetRestateShadow injects the dark shadow reporter (tests and wiring only;
 // production lazily builds one from YAML config on first use).
@@ -184,6 +259,7 @@ func (s *RouterServer) ProcessDiscordIngress(ctx context.Context, args DiscordIn
 		BotUserID: args.BotUserID,
 		RoleNames: args.RoleNames,
 		Message:   args.Message,
+		Agent:     args.Agent,
 	}
 	return s.dispatcher.DispatchDiscordMessage(ctx, req)
 }
@@ -193,12 +269,19 @@ func (s *RouterServer) ProcessDiscordInteraction(ctx context.Context, args Disco
 	if s.dispatcher == nil {
 		return errors.New("dispatcher not configured on server")
 	}
+	if args.Agent != "" {
+		if ad, ok := s.dispatcher.(interface {
+			DispatchDiscordInteractionForAgent(ctx context.Context, agent string, interaction *discordgo.Interaction) error
+		}); ok {
+			return ad.DispatchDiscordInteractionForAgent(ctx, args.Agent, args.Interaction)
+		}
+	}
 	return s.dispatcher.DispatchDiscordInteraction(ctx, args.Interaction)
 }
 
 // startDiscordGateway delegates gateway startup to the internal discord subpackage.
-func startDiscordGateway(ctx context.Context, server *RouterServer, token string) (func(), error) {
-	return discord.StartGateway(ctx, server, token)
+func startDiscordGateway(ctx context.Context, server *RouterServer, _ ...string) (func(), error) {
+	return discord.StartDiscordGateway(ctx, server)
 }
 
 func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
@@ -302,37 +385,23 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	req.TargetID = model.NormalizeDiscordTargetID(rawTargetID)
 	req.Title = strings.TrimSpace(req.Title)
 	req.BotID = strings.TrimSpace(req.BotID)
+	req.Agent = strings.TrimSpace(req.Agent)
 
-	if req.BotID != "" && s.cfgSrc != nil {
-		if cfg := s.cfgSrc.Current(); cfg != nil && strings.TrimSpace(cfg.BotID) != "" && !strings.EqualFold(req.BotID, strings.TrimSpace(cfg.BotID)) {
+	if err := s.resolvePRAgent(r.Context(), r, &req); err != nil {
+		if errors.Is(err, errBotMismatch) {
 			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{fieldError: "bot_id mismatch for local pr_registry"})
 			return
 		}
+		writeK8sAuthError(w, err)
+		return
 	}
 
-	if req.Repo == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "repo cannot be empty"})
+	if valErr := s.validatePRRegisterRequest(r.Context(), &req, rawTargetID); valErr != "" {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: valErr})
 		return
 	}
-	if req.PRNumber <= 0 {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "pr_number must be greater than 0"})
-		return
-	}
-	if req.Branch == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "branch cannot be empty"})
-		return
-	}
-	if req.HeadSHA == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "head_sha cannot be empty"})
-		return
-	}
-	if rawTargetID == "" || (!isValidDiscordSnowflake(req.TargetID) && isHeadlessSessionKey(rawTargetID)) {
-		req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
-	}
-	if !isValidDiscordSnowflake(req.TargetID) {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "target_id must be a valid Discord snowflake (17-20 digits)"})
-		return
-	}
+
+	req.Metadata = injectAgentPRMetadata(req.Metadata, req.Agent)
 
 	targetID, err := s.registry.RegisterPR(r.Context(), req)
 	if err != nil {
@@ -350,6 +419,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		"repo":        req.Repo,
 		fieldPRNumber: req.PRNumber,
 		"target_id":   targetID,
+		"agent":       req.Agent,
 	})
 }
 
@@ -947,13 +1017,6 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
-	}
 
 	var alert FluxAlertEvent
 	if err := json.Unmarshal(body, &alert); err != nil {
@@ -993,13 +1056,6 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	body, ok := readWebhookBody(w, r, 1<<20)
 	if !ok {
 		return
-	}
-	if s != nil && s.cfgSrc != nil && len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
 	}
 
 	var req EventWebhookRequest
@@ -1170,190 +1226,6 @@ func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error 
 	return nil
 }
 
-type DefaultOutboundDispatcher struct {
-	fluxReceiverURL          string
-	brainURL                 string
-	kubeAPIServer            string
-	kubeToken                string
-	httpClient               *http.Client
-	discordMsgClient         *http.Client
-	discordInteractionClient *http.Client
-	retryDelay               time.Duration
-	maxAttempts              int
-
-	kubeClient *kube.Client
-	eriClient  *ericlient.Client
-}
-
-func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *DefaultOutboundDispatcher {
-	discordMsgClient := client
-	discordInteractionClient := client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
-		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
-	}
-	d := &DefaultOutboundDispatcher{
-		brainURL:                 strings.TrimRight(brainURL, "/"),
-		httpClient:               tracing.Client(client),
-		discordMsgClient:         tracing.Client(discordMsgClient),
-		discordInteractionClient: tracing.Client(discordInteractionClient),
-		retryDelay:               1500 * time.Millisecond,
-		maxAttempts:              6,
-	}
-	d.ensureClients()
-	return d
-}
-
-func (d *DefaultOutboundDispatcher) ensureClients() {
-	if d.kubeClient == nil {
-		d.kubeClient = kube.NewClient(d.httpClient)
-		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
-		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
-		d.kubeClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
-	}
-	if d.eriClient == nil {
-		d.eriClient = ericlient.NewClient(d.brainURL, d.httpClient)
-		d.eriClient.SetDiscordMsgClient(d.discordMsgClient)
-		d.eriClient.SetDiscordInteractionClient(d.discordInteractionClient)
-		d.eriClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
-	}
-}
-
-func isFluxEventServerRootURL(rawURL string) bool {
-	_, rest, ok := strings.Cut(strings.ToLower(strings.TrimSpace(rawURL)), "://")
-	if !ok {
-		return false
-	}
-	hostPort, path, _ := strings.Cut(rest, "/")
-	host, _, _ := strings.Cut(hostPort, ":")
-	return (host == "notification-controller" || strings.HasPrefix(host, "notification-controller.")) && strings.Trim(path, "/") == ""
-}
-
-func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(receiverURL string) {
-	trimmed := strings.TrimRight(strings.TrimSpace(receiverURL), "/")
-	if isFluxEventServerRootURL(trimmed) {
-		d.fluxReceiverURL = ""
-	} else {
-		d.fluxReceiverURL = trimmed
-	}
-	if d.kubeClient != nil {
-		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
-	}
-}
-
-func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {
-	d.kubeAPIServer = strings.TrimRight(apiServer, "/")
-	d.kubeToken = strings.TrimSpace(token)
-	if d.kubeClient != nil {
-		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
-	}
-}
-
-func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
-	d.retryDelay = delay
-	d.maxAttempts = maxAttempts
-	if d.kubeClient != nil {
-		d.kubeClient.SetRetryConfig(delay, maxAttempts)
-	}
-	if d.eriClient != nil {
-		d.eriClient.SetRetryConfig(delay, maxAttempts)
-	}
-}
-
-func (d *DefaultOutboundDispatcher) APIServer() string {
-	return d.kubeAPIServer
-}
-
-func (d *DefaultOutboundDispatcher) RetryDelay() time.Duration {
-	return d.retryDelay
-}
-
-func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	d.ensureClients()
-	return d.kubeClient.DispatchGitPush(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.PromoteImageTag(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error) {
-	d.ensureClients()
-	return d.kubeClient.ListKustomizationConfigMaps(ctx, ref)
-}
-
-func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref FluxKustomizationRef) ([]WorkloadRollout, error) {
-	d.ensureClients()
-	return d.kubeClient.ListKustomizationWorkloads(ctx, ref)
-}
-
-func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.ListFluxWorkloadsVersion(ctx, path)
-}
-
-func (d *DefaultOutboundDispatcher) WatchFluxWorkloads(ctx context.Context, path, resourceVersion string) (io.ReadCloser, error) {
-	d.ensureClients()
-	return d.kubeClient.WatchFluxWorkloads(ctx, path, resourceVersion)
-}
-
-func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]FluxKustomizationRef, error) {
-	d.ensureClients()
-	return d.kubeClient.DiscoverImageKustomizations(ctx, imageNames)
-}
-
-func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref FluxKustomizationRef, requestedAt string) error {
-	d.ensureClients()
-	return d.kubeClient.ReconcileKustomization(ctx, ref, requestedAt)
-}
-
-func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.ResolveFluxSourceRepo(ctx, obj)
-}
-
-func (d *DefaultOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]FluxKustomizationRef, error) {
-	d.ensureClients()
-	return d.kubeClient.DiscoverRepoKustomizations(ctx, repo)
-}
-
-func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, namespace string) ([]KustomizationObservation, string, error) {
-	d.ensureClients()
-	return d.kubeClient.ListKustomizations(ctx, namespace)
-}
-
-func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, namespace, resourceVersion string) (io.ReadCloser, error) {
-	d.ensureClients()
-	return d.kubeClient.WatchKustomizations(ctx, namespace, resourceVersion)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchPrompt(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchDirectMessage(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchBackground(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchDiscordMessage(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
-	d.ensureClients()
-	return d.eriClient.DispatchDiscordInteraction(ctx, interaction)
-}
-
 func setupPostgres(ctx context.Context, server *RouterServer, postgresURL string) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(postgresURL)
 	if err != nil {
@@ -1387,6 +1259,7 @@ func RunServer(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config], o
 	cfg := cfgSrc.Current()
 	server := NewRouterServer(cfgSrc, nil)
 	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)
+	dispatcher.SetConfigSource(cfgSrc)
 	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
 	dispatcher.SetKubeConfig(cfg.KubeAPIServer, cfg.KubeToken)
 	server.SetDispatcher(dispatcher)

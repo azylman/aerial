@@ -75,7 +75,6 @@ func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
 		name           string
 		prNum          int
 		defaultOwner   bool
-		forwardURLs    map[string]string
 		nilReg         bool
 		ownedLocally   bool
 		wantDispatched int
@@ -88,20 +87,11 @@ func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
 			wantDispatched: 1,
 		},
 		{
-			name:           "prNum > 0, unowned locally, default owner with empty forward URLs -> promotes",
+			name:           "prNum > 0, unowned locally, default owner -> promotes",
 			prNum:          102,
 			defaultOwner:   true,
-			forwardURLs:    nil,
 			ownedLocally:   false,
 			wantDispatched: 1,
-		},
-		{
-			name:           "prNum > 0, unowned locally, default owner with peer forward URLs -> skipped",
-			prNum:          103,
-			defaultOwner:   true,
-			forwardURLs:    map[string]string{"coven": "http://coven.local"},
-			ownedLocally:   false,
-			wantDispatched: 0,
 		},
 		{
 			name:           "prNum > 0, unowned locally, not default owner -> skipped",
@@ -167,9 +157,8 @@ func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
 				kustomizationsByImage: map[string][]fluxKustomizationRef{"aerial-eri": {{Namespace: "flux-system", Name: "aerial-core"}}},
 			}
 			cfg := Config{
-				GitHubAPIURL:       mockServer.URL,
-				DefaultOwner:       tc.defaultOwner,
-				WebhookForwardURLs: tc.forwardURLs,
+				GitHubAPIURL: mockServer.URL,
+				DefaultOwner: tc.defaultOwner,
 			}
 			srv := newTestRouter(legacyFixtureConfig(cfg), legacyFixtureClient(mockServer.Client()), reg, disp)
 

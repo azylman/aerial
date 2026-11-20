@@ -10,36 +10,37 @@ import (
 )
 
 type mockOutboundDispatcher struct {
-	mu                      sync.Mutex
-	gitPushCalls            []GitPushEventRequest
-	promoteCalls            []ImageReadyEventRequest
-	reconcileCalls          []fluxKustomizationRef
-	reconcileRequestedAts   []string
-	promptCalls             []PromptRequest
-	dispatchCalls           []DispatchRequest
-	directMessageCalls      []DirectMessageRequest
-	discordMessageCalls     []DiscordMessageIngressRequest
-	discordInteractionCalls []*discordgo.Interaction
-	gitPushErr              error
-	promoteErr              error
-	discoverErr             error
-	reconcileErrs           map[string]error
-	sourceRepo              string
-	sourceRepoErr           error
-	promptErr               error
-	dispatchErr             error
-	directMessageErr        error
-	discordMessageErr       error
-	discordMessageFailCount int
-	discordMessageAttempts  int
-	discordInteractionErr   error
-	kustomizationsByImage   map[string][]fluxKustomizationRef
-	workloads               []workloadRollout
-	workloadsErr            error
-	configMaps              []configMapChange
-	configMapsErr           error
-	repoKustomizations      map[string][]fluxKustomizationRef
-	repoDiscoverErr         error
+	mu                           sync.Mutex
+	gitPushCalls                 []GitPushEventRequest
+	promoteCalls                 []ImageReadyEventRequest
+	reconcileCalls               []fluxKustomizationRef
+	reconcileRequestedAts        []string
+	promptCalls                  []PromptRequest
+	dispatchCalls                []DispatchRequest
+	directMessageCalls           []DirectMessageRequest
+	discordMessageCalls          []DiscordMessageIngressRequest
+	discordInteractionCalls      []*discordgo.Interaction
+	discordInteractionAgentCalls []string
+	gitPushErr                   error
+	promoteErr                   error
+	discoverErr                  error
+	reconcileErrs                map[string]error
+	sourceRepo                   string
+	sourceRepoErr                error
+	promptErr                    error
+	dispatchErr                  error
+	directMessageErr             error
+	discordMessageErr            error
+	discordMessageFailCount      int
+	discordMessageAttempts       int
+	discordInteractionErr        error
+	kustomizationsByImage        map[string][]fluxKustomizationRef
+	workloads                    []workloadRollout
+	workloadsErr                 error
+	configMaps                   []configMapChange
+	configMapsErr                error
+	repoKustomizations           map[string][]fluxKustomizationRef
+	repoDiscoverErr              error
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
@@ -171,6 +172,20 @@ func (m *mockOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context,
 	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
 	m.mu.Unlock()
 	return m.discordInteractionErr
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordInteractionForAgent(ctx context.Context, agent string, interaction *discordgo.Interaction) error {
+	m.mu.Lock()
+	m.discordInteractionAgentCalls = append(m.discordInteractionAgentCalls, agent)
+	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
+	m.mu.Unlock()
+	return m.discordInteractionErr
+}
+
+func (m *mockOutboundDispatcher) DiscordInteractionAgentCalls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.discordInteractionAgentCalls...)
 }
 
 func (m *mockOutboundDispatcher) DiscordMessageCalls() []DiscordMessageIngressRequest {
