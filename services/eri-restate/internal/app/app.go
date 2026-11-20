@@ -17,13 +17,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -372,6 +375,46 @@ type appOptions struct {
 	llmFn          runner.LLMFunc
 	httpClient     *http.Client
 	appConfig      *config.Config
+	discordSession *discordgo.Session
+	eventBus       pubsub.Bus
+}
+
+// WithDiscordSession sets an explicit Discord session for testing or dependency injection.
+func WithDiscordSession(s *discordgo.Session) AppOption {
+	return func(o *appOptions) {
+		o.discordSession = s
+	}
+}
+
+// WithEventBus sets an explicit pubsub.Bus for testing or dependency injection.
+func WithEventBus(bus pubsub.Bus) AppOption {
+	return func(o *appOptions) {
+		o.eventBus = bus
+	}
+}
+
+func createReloadFunc(ctx context.Context, appCfg *config.Config, provisioner *env.Provisioner, ephemeralPool *runner.InterchangeablePool, workerPool *queue.WorkerPool) func(string) {
+	return func(source string) {
+		log.Printf("[eri-restate] Config reload triggered via %s", source)
+		if appCfg != nil {
+			if err := config.ReloadWithSupplier(appCfg, config.New); err != nil {
+				log.Printf("[eri-restate] Error reloading config: %v", err)
+				return
+			}
+			config.RegisterConfigTokens(appCfg)
+		}
+		if provisioner != nil {
+			if pErr := provisioner.Sync(ctx, appCfg); pErr != nil {
+				log.Printf("[eri-restate] Warning: env sync error on reload: %v", pErr)
+			}
+		}
+		if ephemeralPool != nil {
+			ephemeralPool.MarkDirty()
+		}
+		if workerPool != nil {
+			workerPool.MarkDirty()
+		}
+	}
 }
 
 func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome string, envVars []string) {
@@ -504,6 +547,35 @@ func initializeAgentPools(cur *config.ConfigData, cfg Config, sessionMgr *sessio
 	}
 }
 
+func wireOutboundIntegrations(ctx context.Context, cur *config.ConfigData, workerPool *queue.WorkerPool, appOpts appOptions) func() {
+	if appOpts.discordSession != nil {
+		workerPool.SetDiscordSession(appOpts.discordSession)
+	} else if token := strings.TrimSpace(cur.DiscordToken); token != "" {
+		if dg, err := discordgo.New("Bot " + token); err == nil {
+			workerPool.SetDiscordSession(dg)
+		}
+	}
+
+	if appOpts.eventBus != nil {
+		workerPool.SetEventBus(appOpts.eventBus)
+		return nil
+	}
+	if natsURL := strings.TrimSpace(cur.NATSURL); natsURL != "" {
+		bus, err := pubsub.NewJetStreamBus(ctx, natsURL)
+		if err != nil {
+			log.Printf("[eri-restate] Warning connecting to NATS event bus: %v", err)
+			return nil
+		}
+		workerPool.SetEventBus(bus)
+		return func() {
+			if cErr := bus.Close(); cErr != nil {
+				log.Printf("[eri-restate] Warning closing event bus: %v", cErr)
+			}
+		}
+	}
+	return nil
+}
+
 // RunApp runs both the Restate worker server and the health/metrics server.
 func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	var appOpts appOptions
@@ -574,6 +646,8 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		llmFn = pools.ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
 	}
 
+	ambientResolver := ambient.NewResolver(appCfg)
+
 	workerPool := queue.New(appCfg, queue.WorkerPoolConfig{
 		ParentContext:          ctx,
 		Store:                  store,
@@ -587,12 +661,18 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		AgentName:              cfg.AgentName,
 		ActiveTurns:            activeTurns,
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
+		AmbientResolver:        ambientResolver.Resolve,
+		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
 	})
-	workerPool.HoldUntilLeader()
+
+	if closeBus := wireOutboundIntegrations(ctx, cur, workerPool, appOpts); closeBus != nil {
+		defer closeBus()
+	}
+
 	workerPool.Start()
 	defer workerPool.Stop()
 
-	reloadTrigger := NewReloadTrigger(ctx, defaultReloadLogger)
+	reloadTrigger := NewReloadTrigger(ctx, createReloadFunc(ctx, appCfg, provisioner, pools.ephemeralPool, workerPool))
 
 	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName)
 	restateHandler, err := restateSrv.Handler()

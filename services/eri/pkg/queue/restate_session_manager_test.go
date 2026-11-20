@@ -14,216 +14,369 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
-func TestSessionManagerService_ThreadControls(t *testing.T) {
+func TestSessionManagerService_ServiceName(t *testing.T) {
 	t.Parallel()
 
-	t.Run("service naming", func(t *testing.T) {
-		t.Parallel()
-		mgr := NewSessionManagerService(nil, "aerial")
-		assert.Equal(t, "SessionManager", mgr.ServiceName())
-		mgrMio := NewSessionManagerService(nil, "miorine")
-		assert.Equal(t, "SessionManager-miorine", mgrMio.ServiceName())
-	})
+	tests := []struct {
+		name      string
+		agentName string
+		wantName  string
+	}{
+		{
+			name:      "default aerial",
+			agentName: "aerial",
+			wantName:  "SessionManager",
+		},
+		{
+			name:      "miorine stack",
+			agentName: "miorine",
+			wantName:  "SessionManager-miorine",
+		},
+		{
+			name:      "suletta stack",
+			agentName: "suletta",
+			wantName:  "SessionManager-suletta",
+		},
+	}
 
-	t.Run("cancel thread preempts active turn and cancels pending messages", func(t *testing.T) {
-		t.Parallel()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mgr := NewSessionManagerService(nil, tc.agentName)
+			assert.Equal(t, tc.wantName, mgr.ServiceName())
+		})
+	}
+}
+
+type cancelThreadTestCase struct {
+	name                string
+	threadID            string
+	reason              string
+	nilPool             bool
+	pendingMessages     int
+	activeInvocationID  string
+	storeFail           bool
+	wantErrSub          string
+	wantTerminal        bool
+	wantCancelledCount  int
+	wantCancelledActive bool
+}
+
+func runCancelThreadCase(t *testing.T, tc cancelThreadTestCase) {
+	t.Helper()
+	var pool *WorkerPool
+	if !tc.nilPool {
 		store := dbtest.NewFakeStore()
-		for i := range 2 {
+		for i := range tc.pendingMessages {
 			_ = store.InsertMessage(context.Background(), db.Message{
-				ID:       fmt.Sprintf("th-ctrl-m%d", i),
-				ThreadID: "th-ctrl-1",
+				ID:       fmt.Sprintf("%s-m%d", tc.threadID, i),
+				ThreadID: tc.threadID,
 				Status:   db.StatusPending,
 			})
 		}
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
+		if tc.storeFail {
+			store.FailNext("GetPendingOrProcessingMessages", errors.New("read fail"))
+		}
+		pool = NewWorkerPool(WorkerPoolConfig{Store: store})
+	}
 
-		registerActiveInvocation("th-ctrl-1", "inv-ctrl-active")
-		defer unregisterActiveInvocation("th-ctrl-1", "inv-ctrl-active")
+	mgr := NewSessionManagerService(pool, "aerial")
+	if tc.activeInvocationID != "" && tc.threadID != "" {
+		registerActiveInvocation(tc.threadID, tc.activeInvocationID)
+		t.Cleanup(func() { unregisterActiveInvocation(tc.threadID, tc.activeInvocationID) })
+	}
 
-		mc, _ := setupActorMockContext(t, "th-ctrl-1", "")
-		resp, err := mgr.CancelThread(restate.WithMockContext(mc), CancelThreadControlRequest{
-			ThreadID: "th-ctrl-1",
-			Reason:   "operator cancel",
-		})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-		assert.Equal(t, 2, resp.CancelledCount)
-		assert.True(t, resp.CancelledActiveTurn)
+	mc, _ := setupActorMockContext(t, tc.threadID, "")
+	resp, err := mgr.CancelThread(restate.WithMockContext(mc), CancelThreadControlRequest{
+		ThreadID: tc.threadID,
+		Reason:   tc.reason,
 	})
 
-	t.Run("cancel thread rejects empty thread id", func(t *testing.T) {
-		t.Parallel()
-		mgr := NewSessionManagerService(nil, "aerial")
-		mc, _ := setupActorMockContext(t, "", "")
-		_, err := mgr.CancelThread(restate.WithMockContext(mc), CancelThreadControlRequest{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "thread_id is required")
-	})
+	if tc.wantErrSub != "" {
+		assertTerminalOrRetriableError(t, err, tc.wantErrSub, tc.wantTerminal)
+		return
+	}
 
-	t.Run("rotate thread preempts active turn and rotates session", func(t *testing.T) {
-		t.Parallel()
-		store := dbtest.NewFakeStore()
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
-
-		registerActiveInvocation("th-ctrl-rot", "inv-ctrl-rot")
-		defer unregisterActiveInvocation("th-ctrl-rot", "inv-ctrl-rot")
-
-		mc, _ := setupActorMockContext(t, "th-ctrl-rot", "")
-		resp, err := mgr.RotateThread(restate.WithMockContext(mc), RotateThreadControlRequest{
-			ThreadID: "th-ctrl-rot",
-		})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-		assert.NotEmpty(t, resp.NewSessionID)
-	})
-
-	t.Run("rotate thread rejects empty thread id", func(t *testing.T) {
-		t.Parallel()
-		mgr := NewSessionManagerService(nil, "aerial")
-		mc, _ := setupActorMockContext(t, "", "")
-		_, err := mgr.RotateThread(restate.WithMockContext(mc), RotateThreadControlRequest{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "thread_id is required")
-	})
-
-	t.Run("nil service receiver", func(t *testing.T) {
-		t.Parallel()
-		var nilMgr *SessionManagerService
-		assert.Equal(t, "SessionManager", nilMgr.ServiceName())
-	})
-
-	t.Run("cancel thread with default reason and nil pool", func(t *testing.T) {
-		t.Parallel()
-		mgr := NewSessionManagerService(nil, "aerial")
-		mc, _ := setupActorMockContext(t, "th-nil-pool", "")
-		resp, err := mgr.CancelThread(restate.WithMockContext(mc), CancelThreadControlRequest{ThreadID: "th-nil-pool"})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-		assert.Equal(t, 0, resp.CancelledCount)
-	})
-
-	t.Run("cancel thread with store error", func(t *testing.T) {
-		t.Parallel()
-		store := dbtest.NewFakeStore()
-		store.FailNext("GetPendingOrProcessingMessages", errors.New("read fail"))
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
-		mc, _ := setupActorMockContext(t, "th-err", "")
-		resp, err := mgr.CancelThread(restate.WithMockContext(mc), CancelThreadControlRequest{ThreadID: "th-err"})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-		assert.Equal(t, 0, resp.CancelledCount)
-	})
-
-	t.Run("rotate thread with store error handles gracefully", func(t *testing.T) {
-		t.Parallel()
-		store := dbtest.NewFakeStore()
-		store.FailNext("RotateSessionID", errors.New("rotate fail"))
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
-		mc, _ := setupActorMockContext(t, "th-rot-err", "")
-		resp, err := mgr.RotateThread(restate.WithMockContext(mc), RotateThreadControlRequest{ThreadID: "th-rot-err"})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-		assert.NotEmpty(t, resp.NewSessionID)
-	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Status)
+	assert.Equal(t, tc.wantCancelledCount, resp.CancelledCount)
+	assert.Equal(t, tc.wantCancelledActive, resp.CancelledActiveTurn)
 }
 
-func TestSessionManagerService_DispatchControls(t *testing.T) {
+func TestSessionManagerService_CancelThread(t *testing.T) {
 	t.Parallel()
 
-	t.Run("cancel dispatch preempts active dispatch and cancels pending rows", func(t *testing.T) {
-		t.Parallel()
+	tests := []cancelThreadTestCase{
+		{
+			name:                "preempts active turn and cancels pending messages",
+			threadID:            "th-ctrl-1",
+			reason:              "operator cancel",
+			pendingMessages:     2,
+			activeInvocationID:  "inv-ctrl-active",
+			wantCancelledCount:  2,
+			wantCancelledActive: true,
+		},
+		{
+			name:         "rejects empty thread id as terminal 400",
+			threadID:     "",
+			wantErrSub:   "thread_id is required",
+			wantTerminal: true,
+		},
+		{
+			name:               "default reason and nil pool",
+			threadID:           "th-nil-pool",
+			nilPool:            true,
+			wantCancelledCount: 0,
+		},
+		{
+			name:       "store error propagates as retriable non-terminal",
+			threadID:   "th-err",
+			storeFail:  true,
+			wantErrSub: "read fail",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runCancelThreadCase(t, tc)
+		})
+	}
+}
+
+type rotateThreadTestCase struct {
+	name               string
+	threadID           string
+	nilPool            bool
+	activeInvocationID string
+	storeFail          bool
+	wantErrSub         string
+	wantTerminal       bool
+	wantStatus         string
+}
+
+func runRotateThreadCase(t *testing.T, tc rotateThreadTestCase) {
+	t.Helper()
+	var pool *WorkerPool
+	if !tc.nilPool {
 		store := dbtest.NewFakeStore()
-		for i := range 2 {
-			_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
-				ID:             fmt.Sprintf("disp-ctrl-%d", i),
-				SessionID:      "vanadis-chunk-ctrl",
-				VanadisChunkID: "chunk-ctrl",
-				Status:         db.StatusPending,
-			})
+		if tc.storeFail {
+			store.FailNext("RotateSessionID", errors.New("rotate fail"))
 		}
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
+		pool = NewWorkerPool(WorkerPoolConfig{Store: store})
+	}
 
-		registerActiveInvocation("vanadis-chunk-ctrl", "inv-disp-ctrl")
-		defer unregisterActiveInvocation("vanadis-chunk-ctrl", "inv-disp-ctrl")
+	mgr := NewSessionManagerService(pool, "aerial")
+	if tc.activeInvocationID != "" && tc.threadID != "" {
+		registerActiveInvocation(tc.threadID, tc.activeInvocationID)
+		t.Cleanup(func() { unregisterActiveInvocation(tc.threadID, tc.activeInvocationID) })
+	}
 
-		mc, _ := setupActorMockContext(t, "vanadis-chunk-ctrl", "")
-		resp, err := mgr.CancelDispatch(restate.WithMockContext(mc), CancelDispatchControlRequest{
-			SessionKey: "vanadis-chunk-ctrl",
-			ChunkID:    "chunk-ctrl",
-		})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-		assert.Equal(t, 2, resp.CancelledCount)
+	mc, _ := setupActorMockContext(t, tc.threadID, "")
+	resp, err := mgr.RotateThread(restate.WithMockContext(mc), RotateThreadControlRequest{
+		ThreadID: tc.threadID,
 	})
 
-	t.Run("cancel dispatch with prefix inference and fallback invocations", func(t *testing.T) {
-		t.Parallel()
+	if tc.wantErrSub != "" {
+		assertTerminalOrRetriableError(t, err, tc.wantErrSub, tc.wantTerminal)
+		return
+	}
+
+	require.NoError(t, err)
+	assert.Equal(t, tc.wantStatus, resp.Status)
+	assert.NotEmpty(t, resp.NewSessionID)
+}
+
+func TestSessionManagerService_RotateThread(t *testing.T) {
+	t.Parallel()
+
+	tests := []rotateThreadTestCase{
+		{
+			name:               "preempts active turn and rotates session",
+			threadID:           "th-ctrl-rot",
+			activeInvocationID: "inv-ctrl-rot",
+			wantStatus:         "ok",
+		},
+		{
+			name:         "rejects empty thread id as terminal 400",
+			threadID:     "",
+			wantErrSub:   "thread_id is required",
+			wantTerminal: true,
+		},
+		{
+			name:       "store error propagates as retriable non-terminal",
+			threadID:   "th-rot-err",
+			storeFail:  true,
+			wantErrSub: "rotate fail",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runRotateThreadCase(t, tc)
+		})
+	}
+}
+
+type sessionManagerCancelDispatchTestCase struct {
+	name               string
+	req                CancelDispatchControlRequest
+	nilPool            bool
+	pendingRows        []db.Dispatch
+	activeInvocations  map[string]string
+	storeFail          bool
+	wantErrSub         string
+	wantCancelledCount int
+	wantStatus         string
+}
+
+func runSessionManagerCancelDispatchCase(t *testing.T, tc sessionManagerCancelDispatchTestCase) {
+	t.Helper()
+	var pool *WorkerPool
+	if !tc.nilPool {
 		store := dbtest.NewFakeStore()
-		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
-			ID:        "d-infer",
-			SessionID: "dispatch-d-infer",
-			Status:    db.StatusPending,
+		for _, row := range tc.pendingRows {
+			_, _ = store.InsertDispatch(context.Background(), row)
+		}
+		if tc.storeFail {
+			store.FailNext("CancelPendingDispatches", errors.New("cancel dispatch fail"))
+		}
+		pool = NewWorkerPool(WorkerPoolConfig{Store: store})
+	}
+
+	mgr := NewSessionManagerService(pool, "aerial")
+	for k, inv := range tc.activeInvocations {
+		registerActiveInvocation(k, inv)
+		cleanupKey := k
+		cleanupInv := inv
+		t.Cleanup(func() { unregisterActiveInvocation(cleanupKey, cleanupInv) })
+	}
+
+	mc, _ := setupActorMockContext(t, tc.req.SessionKey, "")
+	resp, err := mgr.CancelDispatch(restate.WithMockContext(mc), tc.req)
+
+	if tc.wantErrSub != "" {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tc.wantErrSub)
+		return
+	}
+
+	require.NoError(t, err)
+	assert.Equal(t, tc.wantStatus, resp.Status)
+	assert.Equal(t, tc.wantCancelledCount, resp.CancelledCount)
+}
+
+func TestSessionManagerService_CancelDispatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []sessionManagerCancelDispatchTestCase{
+		{
+			name: "preempts active dispatch and cancels pending rows",
+			req: CancelDispatchControlRequest{
+				SessionKey: "vanadis-chunk-ctrl",
+				ChunkID:    "chunk-ctrl",
+			},
+			pendingRows: []db.Dispatch{
+				{
+					ID:             "disp-ctrl-0",
+					SessionID:      "vanadis-chunk-ctrl",
+					VanadisChunkID: "chunk-ctrl",
+					Status:         db.StatusPending,
+				},
+				{
+					ID:             "disp-ctrl-1",
+					SessionID:      "vanadis-chunk-ctrl",
+					VanadisChunkID: "chunk-ctrl",
+					Status:         db.StatusPending,
+				},
+			},
+			activeInvocations: map[string]string{
+				"vanadis-chunk-ctrl": "inv-disp-ctrl",
+			},
+			wantCancelledCount: 2,
+			wantStatus:         "ok",
+		},
+		{
+			name: "prefix inference for dispatch session",
+			req: CancelDispatchControlRequest{
+				SessionKey: "dispatch-d-infer",
+			},
+			pendingRows: []db.Dispatch{
+				{
+					ID:        "d-infer",
+					SessionID: "dispatch-d-infer",
+					Status:    db.StatusPending,
+				},
+			},
+			activeInvocations: map[string]string{
+				"dispatch-d-infer": "inv-disp-infer",
+			},
+			wantCancelledCount: 1,
+			wantStatus:         "ok",
+		},
+		{
+			name: "prefix inference for vanadis session",
+			req: CancelDispatchControlRequest{
+				SessionKey: "vanadis-chunk-infer",
+			},
+			pendingRows: []db.Dispatch{
+				{
+					ID:             "d-vanadis-infer",
+					VanadisChunkID: "chunk-infer",
+					SessionID:      "vanadis-chunk-infer",
+					Status:         db.StatusPending,
+				},
+			},
+			activeInvocations: map[string]string{
+				"vanadis-chunk-infer": "inv-van-infer",
+			},
+			wantCancelledCount: 1,
+			wantStatus:         "ok",
+		},
+		{
+			name: "lookup active invocation by dispatch id",
+			req: CancelDispatchControlRequest{
+				DispatchID: "d-lookup",
+			},
+			nilPool: true,
+			activeInvocations: map[string]string{
+				"dispatch-d-lookup": "inv-disp-lookup",
+			},
+			wantStatus: "ok",
+		},
+		{
+			name: "lookup active invocation by build id",
+			req: CancelDispatchControlRequest{
+				BuildID: "b-lookup",
+			},
+			nilPool: true,
+			activeInvocations: map[string]string{
+				"vanadis-b-lookup": "inv-van-lookup",
+			},
+			wantStatus: "ok",
+		},
+		{
+			name: "pool active processes cancellation",
+			req: CancelDispatchControlRequest{
+				SessionKey: "sess-1",
+			},
+			wantStatus: "ok",
+		},
+		{
+			name: "store error propagates as retriable non-terminal",
+			req: CancelDispatchControlRequest{
+				DispatchID: "d-fail",
+			},
+			storeFail:  true,
+			wantErrSub: "cancel dispatch fail",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSessionManagerCancelDispatchCase(t, tc)
 		})
-		_, _ = store.InsertDispatch(context.Background(), db.Dispatch{
-			ID:             "d-vanadis-infer",
-			VanadisChunkID: "chunk-infer",
-			SessionID:      "vanadis-chunk-infer",
-			Status:         db.StatusPending,
-		})
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
-
-		registerActiveInvocation("dispatch-d-infer", "inv-disp-infer")
-		defer unregisterActiveInvocation("dispatch-d-infer", "inv-disp-infer")
-		registerActiveInvocation("vanadis-chunk-infer", "inv-van-infer")
-		defer unregisterActiveInvocation("vanadis-chunk-infer", "inv-van-infer")
-
-		mc1, _ := setupActorMockContext(t, "dispatch-d-infer", "")
-		resp1, err1 := mgr.CancelDispatch(restate.WithMockContext(mc1), CancelDispatchControlRequest{SessionKey: "dispatch-d-infer"})
-		require.NoError(t, err1)
-		assert.Equal(t, "ok", resp1.Status)
-		assert.Equal(t, 1, resp1.CancelledCount)
-
-		mc2, _ := setupActorMockContext(t, "vanadis-chunk-infer", "")
-		resp2, err2 := mgr.CancelDispatch(restate.WithMockContext(mc2), CancelDispatchControlRequest{SessionKey: "vanadis-chunk-infer"})
-		require.NoError(t, err2)
-		assert.Equal(t, "ok", resp2.Status)
-		assert.Equal(t, 1, resp2.CancelledCount)
-	})
-
-	t.Run("cancel dispatch with dispatchID and buildID active invocation lookup", func(t *testing.T) {
-		t.Parallel()
-		mgr := NewSessionManagerService(nil, "aerial")
-
-		registerActiveInvocation("dispatch-d-lookup", "inv-disp-lookup")
-		defer unregisterActiveInvocation("dispatch-d-lookup", "inv-disp-lookup")
-		registerActiveInvocation("vanadis-b-lookup", "inv-van-lookup")
-		defer unregisterActiveInvocation("vanadis-b-lookup", "inv-van-lookup")
-
-		mc1, _ := setupActorMockContext(t, "", "")
-		resp1, err1 := mgr.CancelDispatch(restate.WithMockContext(mc1), CancelDispatchControlRequest{DispatchID: "d-lookup"})
-		require.NoError(t, err1)
-		assert.Equal(t, "ok", resp1.Status)
-
-		mc2, _ := setupActorMockContext(t, "", "")
-		resp2, err2 := mgr.CancelDispatch(restate.WithMockContext(mc2), CancelDispatchControlRequest{BuildID: "b-lookup"})
-		require.NoError(t, err2)
-		assert.Equal(t, "ok", resp2.Status)
-	})
-
-	t.Run("cancel dispatch with pool active processes", func(t *testing.T) {
-		t.Parallel()
-		store := dbtest.NewFakeStore()
-		pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-		mgr := NewSessionManagerService(pool, "aerial")
-		mc, _ := setupActorMockContext(t, "sess-1", "")
-		resp, err := mgr.CancelDispatch(restate.WithMockContext(mc), CancelDispatchControlRequest{SessionKey: "sess-1"})
-		require.NoError(t, err)
-		assert.Equal(t, "ok", resp.Status)
-	})
+	}
 }

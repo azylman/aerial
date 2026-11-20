@@ -217,8 +217,8 @@ func resolveActorPromptEffort(model, effort string) string {
 	return ""
 }
 
-func (t *ThreadSessionObject) shouldSkipActive(ctx restate.ObjectSharedContext, targetThreadID string) (bool, error) {
-	if restate.Key(ctx) == targetThreadID {
+func (t *ThreadSessionObject) shouldSkipActive(ctx restate.ObjectSharedContext, targetThreadID string, req ThreadEnqueueRequest) (bool, error) {
+	if (req.Message != nil || !IsBuildCompletionPrompt(req.Prompt)) && restate.Key(ctx) == targetThreadID {
 		activeInvID, _ := restate.Get[string](ctx, "active_invocation_id")
 		if activeInvID != "" {
 			return true, nil
@@ -231,7 +231,11 @@ func (t *ThreadSessionObject) shouldSkipActive(ctx restate.ObjectSharedContext, 
 		Active bool `json:"active"`
 	}
 	res, err := restate.Run(ctx, func(rc restate.RunContext) (activeTurnResult, error) {
-		active, hErr := t.pool.cfg.Store.HasActiveThreadTurn(rc, targetThreadID)
+		checkID := targetThreadID
+		if req.Message == nil && t.pool != nil {
+			checkID = t.pool.RedirectBuildPrompt(checkID, req.Prompt)
+		}
+		active, hErr := t.pool.cfg.Store.HasActiveThreadTurn(rc, checkID)
 		if hErr != nil {
 			return activeTurnResult{}, hErr
 		}
@@ -269,16 +273,12 @@ func (t *ThreadSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Threa
 
 	targetThreadID := strings.TrimSpace(threadID)
 	if targetThreadID == "" {
-		return ThreadEnqueueResponse{}, errors.New("thread_id or channel_id is required")
-	}
-
-	if req.Message == nil && t.pool != nil {
-		targetThreadID = t.pool.RedirectBuildPrompt(targetThreadID, req.Prompt)
+		return ThreadEnqueueResponse{}, restate.ToTerminalError(errors.New("thread_id or channel_id is required"), restate.WithErrorCode(400))
 	}
 
 	// 1. Check SkipIfActive synchronously without inserting a DB row.
 	if req.SkipIfActive {
-		skip, sErr := t.shouldSkipActive(ctx, targetThreadID)
+		skip, sErr := t.shouldSkipActive(ctx, targetThreadID, req)
 		if sErr != nil {
 			return ThreadEnqueueResponse{}, sErr
 		}
@@ -290,72 +290,74 @@ func (t *ThreadSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Threa
 		}
 	}
 
-	// 2. Prepare db.Message record.
-	var msg db.Message
-	if req.Message != nil {
-		msg = *req.Message
-		if strings.TrimSpace(msg.ThreadID) != "" {
-			targetThreadID = strings.TrimSpace(msg.ThreadID)
-		}
-	} else {
-		channelID := targetThreadID
-		if t.pool != nil {
-			channelID = t.pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
-		}
-		targetThreadID = channelID
-
-		msgID := strings.TrimSpace(req.MessageID)
-		effort := resolveActorPromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort))
-		msg = db.Message{
-			ID:         msgID,
-			ThreadID:   targetThreadID,
-			AuthorID:   httpClientAuthorID,
-			AuthorName: "HTTP Client",
-			IsAdmin:    true,
-			Content:    req.Prompt,
-			Summary:    db.CleanTaskSummary(req.Prompt),
-			Status:     db.StatusPending,
-			Effort:     effort,
-			ChannelID:  targetThreadID,
-			Model:      strings.TrimSpace(req.Model),
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
-		}
-	}
-
-	if msg.ID == "" {
-		msg.ID = deriveDeterministicMessageID(ctx, targetThreadID)
-	}
-	if msg.ThreadID == "" {
-		msg.ThreadID = targetThreadID
-	}
-	msg.Status = db.StatusPending
-
-	// 3. Insert PENDING db.Message row in Postgres inside restate.Run.
+	// 2. Insert PENDING db.Message row in Postgres inside restate.Run.
 	type messageInsertResult struct {
+		ThreadID  string `json:"thread_id"`
 		MessageID string `json:"message_id"`
 	}
 
 	insertRes, rErr := restate.Run(ctx, func(rc restate.RunContext) (messageInsertResult, error) {
+		effThreadID := targetThreadID
+		var msg db.Message
+		if req.Message != nil {
+			msg = *req.Message
+			if strings.TrimSpace(msg.ThreadID) != "" {
+				effThreadID = strings.TrimSpace(msg.ThreadID)
+			}
+		} else {
+			channelID := effThreadID
+			if t.pool != nil {
+				channelID = t.pool.RedirectBuildPrompt(channelID, req.Prompt)
+				channelID = t.pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
+			}
+			effThreadID = channelID
+
+			msgID := strings.TrimSpace(req.MessageID)
+			effort := resolveActorPromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort))
+			msg = db.Message{
+				ID:         msgID,
+				ThreadID:   effThreadID,
+				AuthorID:   httpClientAuthorID,
+				AuthorName: "HTTP Client",
+				IsAdmin:    true,
+				Content:    req.Prompt,
+				Summary:    db.CleanTaskSummary(req.Prompt),
+				Status:     db.StatusPending,
+				Effort:     effort,
+				ChannelID:  effThreadID,
+				Model:      strings.TrimSpace(req.Model),
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+		}
+
+		if msg.ID == "" {
+			msg.ID = deriveDeterministicMessageID(ctx, effThreadID)
+		}
+		if msg.ThreadID == "" {
+			msg.ThreadID = effThreadID
+		}
+		msg.Status = db.StatusPending
+
 		if t.pool != nil && t.pool.cfg.Store != nil {
 			if err := t.pool.cfg.Store.InsertMessage(rc, msg); err != nil {
 				log.Printf("[ThreadSession] Warning inserting message %s: %v", msg.ID, err)
 				return messageInsertResult{}, err
 			}
 		}
-		return messageInsertResult{MessageID: msg.ID}, nil
+		return messageInsertResult{ThreadID: effThreadID, MessageID: msg.ID}, nil
 	}, restate.WithName("insert-pending-message"))
 	if rErr != nil {
 		return ThreadEnqueueResponse{}, rErr
 	}
 
-	// 4. Fire one-way RunTurn notification to serialize burst execution.
+	// 3. Fire one-way RunTurn notification to serialize burst execution.
 	svcName := t.ServiceName()
-	_ = restate.ObjectSend(ctx, svcName, targetThreadID, "RunTurn").Send(ThreadTurnRequest{Trigger: req.Trigger})
+	_ = restate.ObjectSend(ctx, svcName, insertRes.ThreadID, "RunTurn").Send(ThreadTurnRequest{Trigger: req.Trigger})
 
 	return ThreadEnqueueResponse{
 		Status:    statusAccepted,
-		ThreadID:  targetThreadID,
+		ThreadID:  insertRes.ThreadID,
 		MessageID: insertRes.MessageID,
 	}, nil
 }
@@ -462,38 +464,40 @@ func (t *ThreadSessionObject) RunTurn(ctx restate.ObjectContext, req ThreadTurnR
 	return result, nil
 }
 
-func cancelPendingMessagesInStore(ctx context.Context, pool *WorkerPool, threadID, reason string) int {
+func cancelPendingMessagesInStore(ctx context.Context, pool *WorkerPool, threadID, reason string) (int, error) {
 	if pool == nil || pool.cfg.Store == nil {
-		return 0
+		return 0, nil
 	}
 	msgs, err := pool.cfg.Store.GetPendingOrProcessingMessages(ctx, 0)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	cancelledCount := 0
 	for _, m := range msgs {
 		if m.ThreadID == threadID && m.Status == db.StatusPending {
-			if uErr := pool.cfg.Store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason); uErr == nil {
-				cancelledCount++
+			if uErr := pool.cfg.Store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason); uErr != nil {
+				return cancelledCount, uErr
 			}
+			cancelledCount++
 		}
 	}
-	return cancelledCount
+	return cancelledCount, nil
 }
 
 type rotateSessionResult struct {
-	Rotated bool `json:"rotated"`
+	Rotated      bool   `json:"rotated"`
+	NewSessionID string `json:"new_session_id"`
 }
 
 func rotateSessionInStore(pool *WorkerPool, ctx restate.RunContext, threadID, newSessionID, caller string) (rotateSessionResult, error) {
 	if pool == nil || pool.cfg.Store == nil {
-		return rotateSessionResult{}, nil
+		return rotateSessionResult{Rotated: false, NewSessionID: newSessionID}, nil
 	}
 	if rErr := pool.cfg.Store.RotateSessionID(ctx, threadID, newSessionID); rErr != nil {
 		log.Printf("[%s] Warning rotating session in DB for %s: %v", caller, threadID, rErr)
 		return rotateSessionResult{}, rErr
 	}
-	return rotateSessionResult{Rotated: true}, nil
+	return rotateSessionResult{Rotated: true, NewSessionID: newSessionID}, nil
 }
 
 // CancelTurn cancels pending messages, records active invocation cancellation, and terminates daemon processes.
@@ -508,7 +512,10 @@ func (t *ThreadSessionObject) CancelTurn(ctx restate.ObjectSharedContext, req Ca
 		CancelledCount int `json:"cancelled_count"`
 	}
 	res, rErr := restate.Run(ctx, func(rc restate.RunContext) (cancelMessagesResult, error) {
-		count := cancelPendingMessagesInStore(rc, t.pool, threadID, reason)
+		count, err := cancelPendingMessagesInStore(rc, t.pool, threadID, reason)
+		if err != nil {
+			return cancelMessagesResult{}, err
+		}
 		return cancelMessagesResult{CancelledCount: count}, nil
 	}, restate.WithName("cancel-pending-thread-messages"))
 	if rErr != nil {
@@ -541,13 +548,31 @@ func performThreadSessionRotate(ctx restate.Context, pool *WorkerPool, threadID,
 		restate.CancelInvocation(ctx, activeInvID)
 	}
 
-	newSessionID := uuid.New().String()
+	var newSessionID string
+	if ctx != nil && ctx.Request() != nil && strings.TrimSpace(ctx.Request().ID) != "" {
+		newSessionID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("aerial:rotate:"+threadID+":"+strings.TrimSpace(ctx.Request().ID))).String()
+	} else {
+		newSessionID = uuid.New().String()
+	}
+
 	if pool != nil && pool.cfg.Store != nil {
-		_, err := restate.Run(ctx, func(rc restate.RunContext) (rotateSessionResult, error) {
-			return rotateSessionInStore(pool, rc, threadID, newSessionID, caller)
+		res, err := restate.Run(ctx, func(rc restate.RunContext) (rotateSessionResult, error) {
+			sid := newSessionID
+			if sid == "" {
+				sid = uuid.New().String()
+			}
+			out, rErr := rotateSessionInStore(pool, rc, threadID, sid, caller)
+			if rErr != nil {
+				return rotateSessionResult{}, rErr
+			}
+			out.NewSessionID = sid
+			return out, nil
 		}, restate.WithName("rotate-thread-session"))
 		if err != nil {
-			log.Printf("[%s] Error in rotate session step: %v", caller, err)
+			return RotateSessionResponse{}, err
+		}
+		if res.NewSessionID != "" {
+			newSessionID = res.NewSessionID
 		}
 	}
 
@@ -707,22 +732,21 @@ func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Bra
 		Inserted bool `json:"inserted"`
 	}
 
-	dispRecord := db.Dispatch{
-		ID:             dispID,
-		Source:         strings.ToLower(strings.TrimSpace(req.Source)),
-		SessionID:      sessionKey,
-		TargetID:       session.NormalizeEnvTargetID(req.TargetID),
-		VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
-		Prompt:         req.Prompt,
-		Summary:        db.CleanTaskSummary(req.Prompt),
-		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
-		Model:          strings.TrimSpace(req.Model),
-		Status:         db.StatusPending,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
-	}
-
 	insertRes, rErr := restate.Run(ctx, func(rc restate.RunContext) (dispatchInsertResult, error) {
+		dispRecord := db.Dispatch{
+			ID:             dispID,
+			Source:         strings.ToLower(strings.TrimSpace(req.Source)),
+			SessionID:      sessionKey,
+			TargetID:       session.NormalizeEnvTargetID(req.TargetID),
+			VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
+			Prompt:         req.Prompt,
+			Summary:        db.CleanTaskSummary(req.Prompt),
+			Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
+			Model:          strings.TrimSpace(req.Model),
+			Status:         db.StatusPending,
+			CreatedAt:      time.Now().UTC(),
+			UpdatedAt:      time.Now().UTC(),
+		}
 		if d.pool != nil && d.pool.cfg.Store != nil {
 			inserted, err := d.pool.cfg.Store.InsertDispatch(rc, dispRecord)
 			if err != nil {
@@ -808,12 +832,10 @@ func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDisp
 	invID := ctx.Request().ID
 	restate.Set(ctx, "active_invocation_id", invID)
 	registerActiveInvocation(sessionKey, invID)
-	defer func() {
-		unregisterActiveInvocation(sessionKey, invID)
-		restate.Clear(ctx, "active_invocation_id")
-	}()
+	defer unregisterActiveInvocation(sessionKey, invID)
 
 	if d.pool == nil || d.pool.cfg.Store == nil {
+		restate.ClearAll(ctx)
 		return DispatchTurnResult{Status: statusCompleted}, nil
 	}
 
@@ -846,6 +868,7 @@ func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDisp
 		executedCount += step.ClaimedCount
 	}
 
+	restate.ClearAll(ctx)
 	return DispatchTurnResult{
 		Status:             statusCompleted,
 		DispatchesExecuted: executedCount,
@@ -873,6 +896,7 @@ func cancelDispatchSession(ctx restate.Context, pool *WorkerPool, sessionKey, di
 			cIDs, err := pool.cfg.Store.CancelPendingDispatches(rc, dispatchID, buildID, reason)
 			if err != nil {
 				log.Printf("[%s] Error cancelling dispatches in store: %v", caller, err)
+				return cancelDispatchesResult{}, err
 			}
 			return cancelDispatchesResult{CancelledIDs: cIDs}, nil
 		}, restate.WithName("cancel-pending-dispatches"))
@@ -1032,7 +1056,7 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 				Event: "error",
 				Error: turnErr.Error(),
 			})
-			return VoiceSessionResult{}, restate.ToTerminalError(turnErr)
+			return VoiceSessionResult{}, turnErr
 		}
 
 		publishEvent(VoiceStreamEvent{
@@ -1061,7 +1085,7 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 		}, nil
 	}, restate.WithName("execute-voice"))
 	if err != nil {
-		return VoiceSessionResult{}, restate.ToTerminalError(err)
+		return VoiceSessionResult{}, err
 	}
 
 	return res, nil
@@ -1307,7 +1331,7 @@ func (s *SessionManagerService) ServiceName() string {
 func (s *SessionManagerService) CancelThread(ctx restate.Context, req CancelThreadControlRequest) (CancelTurnResponse, error) {
 	threadID := strings.TrimSpace(req.ThreadID)
 	if threadID == "" {
-		return CancelTurnResponse{}, errors.New("thread_id is required")
+		return CancelTurnResponse{}, restate.ToTerminalError(errors.New("thread_id is required"), restate.WithErrorCode(400))
 	}
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
@@ -1318,7 +1342,10 @@ func (s *SessionManagerService) CancelThread(ctx restate.Context, req CancelThre
 		CancelledCount int `json:"cancelled_count"`
 	}
 	res, rErr := restate.Run(ctx, func(rc restate.RunContext) (cancelMessagesResult, error) {
-		count := cancelPendingMessagesInStore(rc, s.pool, threadID, reason)
+		count, err := cancelPendingMessagesInStore(rc, s.pool, threadID, reason)
+		if err != nil {
+			return cancelMessagesResult{}, err
+		}
 		return cancelMessagesResult{CancelledCount: count}, nil
 	}, restate.WithName("cancel-pending-thread-messages"))
 	if rErr != nil {
@@ -1347,7 +1374,7 @@ func (s *SessionManagerService) CancelThread(ctx restate.Context, req CancelThre
 func (s *SessionManagerService) RotateThread(ctx restate.Context, req RotateThreadControlRequest) (RotateSessionResponse, error) {
 	threadID := strings.TrimSpace(req.ThreadID)
 	if threadID == "" {
-		return RotateSessionResponse{}, errors.New("thread_id is required")
+		return RotateSessionResponse{}, restate.ToTerminalError(errors.New("thread_id is required"), restate.WithErrorCode(400))
 	}
 	activeInvID := getActiveInvocation(threadID)
 	return performThreadSessionRotate(ctx, s.pool, threadID, activeInvID, "SessionManager")
