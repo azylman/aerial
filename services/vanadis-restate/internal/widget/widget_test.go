@@ -237,6 +237,17 @@ func TestChunkActiveStepBranches(t *testing.T) {
 	}
 }
 
+func TestBuildStatusWidgetChunkCIFailedStaysLive(t *testing.T) {
+	t.Parallel()
+	got := BuildStatusWidgetChunk(model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`})
+	assert.Contains(t, got.ActiveStep, "remediation")
+	assert.False(t, isChunkTerminal(got.Status), "ci_failed is recoverable: remediation runs and the next head flips it back to pr_opened")
+	got = BuildStatusWidgetChunk(model.VanadisChunk{ID: "c2", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected"})
+	assert.Contains(t, got.ActiveStep, "remediation")
+	assert.False(t, isChunkTerminal(got.Status))
+	assert.True(t, isChunkTerminal("failed"))
+}
+
 func TestBuildStatusWidgetChunk(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -198,9 +198,9 @@ func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
 	}
 	norm := strings.ToLower(strings.TrimSpace(c.Status))
 	switch norm {
-	case statusRunning, statusCoding, statusPROpened, statusOpen, statusMerged, statusSynced, statusDeploying:
+	case statusRunning, statusCoding, statusPROpened, statusOpen, statusMerged, statusSynced, statusDeploying, statusCIFailed, statusConflict:
 		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
-	case statusDeployed, statusCompleted, statusSuccess, statusFailed, statusCIFailed, statusDeployFailed, statusConflict, statusClosed, statusError, statusCancelled:
+	case statusDeployed, statusCompleted, statusSuccess, statusFailed, statusDeployFailed, statusClosed, statusError, statusCancelled:
 		end := c.CompletedAt
 		if end.IsZero() {
 			end = c.UpdatedAt
