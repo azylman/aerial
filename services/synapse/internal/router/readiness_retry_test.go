@@ -29,9 +29,11 @@ func TestRetryPRReadiness(t *testing.T) {
 		name, body        string
 		accepted          bool
 		dbErr, errorPatch error
+		authoritative     bool
 		want              int
 	}{
 		{name: "original request retried", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"abc"}`, accepted: true, want: 202},
+		{name: "authoritative journal failure surfaces 503", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"abc"}`, accepted: true, authoritative: true, want: 503},
 		{name: "stale identity rejected", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"old"}`, want: 409},
 		{name: "missing identity", body: `{"repo":"owner/config","pr_number":42}`, want: 400},
 		{name: "invalid number", body: `{"repo":"owner/config","pr_number":0,"expected_merge_sha":"abc"}`, want: 400},
@@ -47,6 +49,9 @@ func TestRetryPRReadiness(t *testing.T) {
 			disp := &mockOutboundDispatcher{reconcileErrs: map[string]error{"config": tc.errorPatch}}
 			bus := &mockEventBus{}
 			srv := &RouterServer{registry: reg, dispatcher: disp, bus: bus}
+			if tc.authoritative {
+				srv.cfgSrc = fixedConfig(Config{RestateAuthoritative: true})
+			}
 			w := httptest.NewRecorder()
 			srv.Routes().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/internal/pr/retry-readiness", strings.NewReader(tc.body)))
 			if w.Code != tc.want {

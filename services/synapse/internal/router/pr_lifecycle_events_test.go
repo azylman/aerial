@@ -100,12 +100,14 @@ func TestTransitionRegisteredConflict(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		reg     *mockPRRegistry
-		prNum   int
-		branch  string
-		headSHA string
-		want    []wantPREvent
+		name          string
+		reg           *mockPRRegistry
+		prNum         int
+		branch        string
+		headSHA       string
+		want          []wantPREvent
+		authoritative bool
+		wantErr       bool
 	}{
 		{
 			name:    "registered conflict publishes conflict without dispatching a prompt",
@@ -115,6 +117,16 @@ func TestTransitionRegisteredConflict(t *testing.T) {
 			headSHA: "sha-conflict",
 			want:    []wantPREvent{{Event: "conflict", PRNumber: 42, HeadSHA: "sha-conflict", Status: "conflict"}},
 		},
+		{
+			name:          "authoritative journal failure surfaces before the legacy publish",
+			reg:           &mockPRRegistry{conflictTargetID: lifecycleTargetID, conflictUpdated: true},
+			prNum:         42,
+			branch:        "feat/branch",
+			headSHA:       "sha-conflict",
+			want:          nil,
+			authoritative: true,
+			wantErr:       true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -122,8 +134,19 @@ func TestTransitionRegisteredConflict(t *testing.T) {
 			t.Parallel()
 			bus := &mockEventBus{}
 			disp := &mockOutboundDispatcher{}
-			srv := newLifecycleServer(lifecycleCfg(), bus, tc.reg, disp)
+			cfg := lifecycleCfg()
+			if tc.authoritative {
+				cfg.RestateAuthoritative = true
+			}
+			srv := newLifecycleServer(cfg, bus, tc.reg, disp)
 			handled, err := srv.transitionRegisteredConflict(context.Background(), "azylman/aerial", tc.prNum, tc.branch, tc.headSHA)
+			if tc.wantErr {
+				if err == nil || handled {
+					t.Fatalf("transitionRegisteredConflict() handled = %v, err = %v, want failure", handled, err)
+				}
+				assertPREvents(t, bus, tc.want)
+				return
+			}
 			if err != nil || !handled {
 				t.Fatalf("transitionRegisteredConflict() handled = %v, err = %v", handled, err)
 			}
@@ -139,14 +162,22 @@ func TestProcessGitHubPullRequestEvent(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		body string
-		want []wantPREvent
+		name          string
+		body          string
+		want          []wantPREvent
+		authoritative bool
+		wantErr       bool
 	}{
 		{
 			name: "opened payload publishes opened event",
 			body: `{"action":"opened","number":42,"pull_request":{"number":42,"title":"test pr","head":{"ref":"feat/test","sha":"head123"},"user":{"login":"tester"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"tester"}}`,
 			want: []wantPREvent{{Event: "opened", PRNumber: 42, HeadSHA: "head123", Status: "open", Title: "test pr"}},
+		},
+		{
+			name:          "authoritative reopened journal failure surfaces",
+			body:          `{"action":"reopened","number":42,"pull_request":{"number":42,"title":"test pr","head":{"ref":"feat/test","sha":"head123"},"user":{"login":"tester"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"tester"}}`,
+			authoritative: true,
+			wantErr:       true,
 		},
 	}
 
@@ -154,8 +185,19 @@ func TestProcessGitHubPullRequestEvent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bus := &mockEventBus{}
-			srv := newLifecycleServer(lifecycleCfg(), bus, nil, &mockOutboundDispatcher{})
-			if _, err := srv.processGitHubPullRequestEvent(context.Background(), "del-open", []byte(tc.body), &ResolvedGitHubEvent{}); err != nil {
+			cfg := lifecycleCfg()
+			if tc.authoritative {
+				cfg.RestateAuthoritative = true
+			}
+			srv := newLifecycleServer(cfg, bus, nil, &mockOutboundDispatcher{})
+			_, err := srv.processGitHubPullRequestEvent(context.Background(), "del-open", []byte(tc.body), &ResolvedGitHubEvent{})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("processGitHubPullRequestEvent() err = nil, want journal failure")
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("processGitHubPullRequestEvent() err = %v", err)
 			}
 			assertPREvents(t, bus, tc.want)
@@ -167,10 +209,12 @@ func TestHandlePRClosedAction(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		mergeSHA string
-		merged   bool
-		want     []wantPREvent
+		name          string
+		mergeSHA      string
+		merged        bool
+		want          []wantPREvent
+		authoritative bool
+		wantErr       bool
 	}{
 		{
 			name:     "merged publishes merged event with merge sha",
@@ -183,6 +227,21 @@ func TestHandlePRClosedAction(t *testing.T) {
 			merged: false,
 			want:   []wantPREvent{{Event: "closed_unmerged", PRNumber: 42, HeadSHA: "head123", Status: "closed_unmerged"}},
 		},
+		{
+			name:          "authoritative merged journal failure surfaces before the legacy publish",
+			mergeSHA:      "mergesha789",
+			merged:        true,
+			want:          nil,
+			authoritative: true,
+			wantErr:       true,
+		},
+		{
+			name:          "authoritative close journal failure surfaces before the legacy publish",
+			merged:        false,
+			want:          nil,
+			authoritative: true,
+			wantErr:       true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -190,9 +249,21 @@ func TestHandlePRClosedAction(t *testing.T) {
 			t.Parallel()
 			bus := &mockEventBus{}
 			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
-			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			cfg := lifecycleCfg()
+			if tc.authoritative {
+				cfg.RestateAuthoritative = true
+			}
+			srv := newLifecycleServer(cfg, bus, reg, &mockOutboundDispatcher{})
 			res := &ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/test", HeadSHA: "head123", MergeSHA: tc.mergeSHA}
-			if err := srv.handlePRClosedAction(context.Background(), res, tc.merged); err != nil {
+			err := srv.handlePRClosedAction(context.Background(), res, tc.merged)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("handlePRClosedAction(merged=%v) err = nil, want journal failure", tc.merged)
+				}
+				assertPREvents(t, bus, tc.want)
+				return
+			}
+			if err != nil {
 				t.Fatalf("handlePRClosedAction(merged=%v) err = %v", tc.merged, err)
 			}
 			assertPREvents(t, bus, tc.want)
@@ -271,9 +342,11 @@ func TestHandleDeploySyncSuccess(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		hasExpected bool
-		want        []wantPREvent
+		name          string
+		hasExpected   bool
+		want          []wantPREvent
+		authoritative bool
+		wantErr       bool
 	}{
 		{
 			name:        "sync with expected jobs publishes sync_success",
@@ -285,6 +358,13 @@ func TestHandleDeploySyncSuccess(t *testing.T) {
 			hasExpected: false,
 			want:        []wantPREvent{{Event: "deploy_success", PRNumber: 42, MergeSHA: "sha-sync", Status: "deployed"}},
 		},
+		{
+			name:          "authoritative deploy journal failure surfaces before the legacy publish",
+			hasExpected:   false,
+			want:          nil,
+			authoritative: true,
+			wantErr:       true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -292,9 +372,23 @@ func TestHandleDeploySyncSuccess(t *testing.T) {
 			t.Parallel()
 			bus := &mockEventBus{}
 			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
-			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			cfg := lifecycleCfg()
+			if tc.authoritative {
+				cfg.RestateAuthoritative = true
+			}
+			srv := newLifecycleServer(cfg, bus, reg, &mockOutboundDispatcher{})
 			evt := DeployEvent{Event: "sync_success", Repo: "azylman/aerial", PRNumber: 42, CommitSHA: "sha-sync", TargetID: lifecycleTargetID, Timestamp: time.Now().UTC()}
-			_ = srv.handleDeploySyncSuccess(context.Background(), evt, tc.hasExpected)
+			err := srv.handleDeploySyncSuccess(context.Background(), evt, tc.hasExpected)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("handleDeploySyncSuccess() err = nil, want journal failure")
+				}
+				assertPREvents(t, bus, tc.want)
+				return
+			}
+			if err != nil {
+				t.Fatalf("handleDeploySyncSuccess() err = %v", err)
+			}
 			assertPREvents(t, bus, tc.want)
 		})
 	}

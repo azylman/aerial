@@ -833,6 +833,15 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 			return &evt, nil
 		}
 
+		if evt.PRNumber > 0 {
+			// Journal even on a suppress hit: marks prove legacy handled
+			// the deploy, not that Restate journaled it — pre-flip marks
+			// predate any journal. Restate dedups the repeat; the suppress
+			// check below still skips the duplicate legacy publish.
+			if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
+				return &evt, err
+			}
+		}
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
 			slog.InfoContext(ctx, "[synapse] [deploy] suppressing duplicate deploy_success", "repo", evt.Repo, "job", evt.JobName, "pr", evt.PRNumber, "commit", evt.CommitSHA)
 			return &evt, nil
@@ -842,14 +851,14 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 		}
 		if evt.PRNumber > 0 {
 			s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-			s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 			return &evt, nil
 		}
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err
 		}
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-		s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
+		// No Restate route: non-PR dispatches have no PRObject key in either
+		// mode, and the prompt above is the only effect.
 		return &evt, nil
 	case eventDeployRollback, eventDeployFailed:
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
@@ -896,11 +905,15 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 	if syncHasExpected {
 		return s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
 	}
+	// Journal before the legacy publish and dedup mark so a journal failure
+	// leaves nothing recorded and the redelivery retries the journal.
+	if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
+		return err
+	}
 	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed"); err != nil {
 		return err
 	}
 	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-	s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 	return nil
 }
 

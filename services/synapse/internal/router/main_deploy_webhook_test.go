@@ -579,11 +579,12 @@ func TestProcessDeployEvent_LifecycleErrors(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		evt        DeployEvent
-		busErr     error
-		promptErr  error
-		wantErrSub string
+		name          string
+		evt           DeployEvent
+		busErr        error
+		promptErr     error
+		authoritative bool
+		wantErrSub    string
 	}{
 		{
 			name: "deploy_started publish error propagates",
@@ -632,6 +633,19 @@ func TestProcessDeployEvent_LifecycleErrors(t *testing.T) {
 			busErr:     errors.New("bus sync fail"),
 			wantErrSub: "bus sync fail",
 		},
+		{
+			name: "authoritative deploy_success journal failure surfaces",
+			evt: DeployEvent{
+				Event:     eventDeploySuccess,
+				Repo:      "azylman/aerial",
+				PRNumber:  42,
+				TargetID:  "100000000000000001",
+				JobName:   "brain",
+				CommitSHA: "sha123",
+			},
+			authoritative: true,
+			wantErrSub:    "restate authoritative",
+		},
 	}
 
 	for _, tc := range tests {
@@ -640,7 +654,7 @@ func TestProcessDeployEvent_LifecycleErrors(t *testing.T) {
 			bus := &mockEventBus{err: tc.busErr}
 			reg := &mockPRRegistry{resolveTargetID: "100000000000000001"}
 			disp := &mockOutboundDispatcher{promptErr: tc.promptErr}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
+			srv := NewRouterServer(fixedConfig(Config{RestateAuthoritative: tc.authoritative}), nil)
 			srv.bus = bus
 			srv.registry = reg
 			srv.dispatcher = disp
