@@ -8,15 +8,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -563,6 +566,39 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
+	// Test DiscordSession and EventBus injection in RunApp
+	bus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = bus.Close() })
+	err = RunApp(ctx, cfg,
+		WithStore(fakeStore, nil),
+		WithAppConfig(appCfg),
+		WithDaemonSpawner(&dummySpawner{}),
+		WithDiscordSession(&discordgo.Session{}),
+		WithEventBus(bus),
+	)
+	assert.NoError(t, err)
+
+	// Test config DiscordToken and NATSURL in RunApp
+	appCfgWithTokens := config.NewFromData(&config.ConfigData{
+		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		GeminiHomeDir: tmpDir + "/home",
+		DataDir:       tmpDir + "/data",
+		Port:          "4028",
+		DiscordToken:  "test-discord-token",
+		NATSURL:       "nats://127.0.0.1:65530",
+		CredentialSources: config.CredentialSources{
+			OAuth: config.CredentialSource{Disabled: true},
+			Codex: config.CredentialSource{Disabled: true},
+			Muse:  config.CredentialSource{Disabled: true},
+		},
+	})
+	err = RunApp(ctx, cfg,
+		WithStore(fakeStore, nil),
+		WithAppConfig(appCfgWithTokens),
+		WithDaemonSpawner(&dummySpawner{}),
+	)
+	assert.NoError(t, err)
+
 	// Test database error branch when store is not injected
 	cfgBadDB := Config{
 		RestatePort: "19080",
@@ -948,6 +984,197 @@ func TestReloadTrigger_ContextCanceledEarly(t *testing.T) {
 	trigger := NewReloadTrigger(ctx, func(string) {})
 	cancel()
 	trigger.Trigger()
+	select {
+	case <-trigger.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for trigger.Done()")
+	}
+}
+
+func TestAppOptions_DiscordAndEventBus(t *testing.T) {
+	t.Parallel()
+	var opts appOptions
+	s := &discordgo.Session{}
+	bus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = bus.Close() })
+
+	WithDiscordSession(s)(&opts)
+	assert.Equal(t, s, opts.discordSession)
+
+	WithEventBus(bus)(&opts)
+	assert.Equal(t, bus, opts.eventBus)
+}
+
+func TestWrapDiscoveryTimeoutReconciler_NonDiscoverPath(t *testing.T) {
+	t.Parallel()
+	called := false
+	trigger := func() { called = true }
+	handler := wrapDiscoveryTimeoutReconciler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), trigger)
+
+	req := httptest.NewRequest(http.MethodGet, "/other", http.NoBody)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, called)
+
+	nilWrapped := wrapDiscoveryTimeoutReconciler(handler, nil)
+	assert.NotNil(t, nilWrapped)
+}
+
+func TestWireOutboundIntegrations(t *testing.T) {
+	t.Parallel()
+
+	pool := queue.New(nil, queue.WorkerPoolConfig{})
+	cur := &config.ConfigData{
+		DiscordToken: "token-1",
+		NATSURL:      "nats://127.0.0.1:65530",
+	}
+
+	// 1. With explicit discord session and bus
+	s := &discordgo.Session{}
+	bus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = bus.Close() })
+	closeFn := wireOutboundIntegrations(context.Background(), cur, pool, appOptions{
+		discordSession: s,
+		eventBus:       bus,
+	})
+	assert.Nil(t, closeFn)
+
+	// 2. With token and NATS URL
+	closeFn2 := wireOutboundIntegrations(context.Background(), cur, pool, appOptions{})
+	if closeFn2 != nil {
+		closeFn2()
+	}
+}
+
+type reloadFuncTestCase struct {
+	name          string
+	withAppCfg    bool
+	corruptConfig bool
+	withProv      bool
+	provSyncError bool
+	withEphem     bool
+	withWorker    bool
+}
+
+func TestCreateReloadFunc(t *testing.T) {
+	tests := []reloadFuncTestCase{
+		{
+			name: "all nil components is safe no-op",
+		},
+		{
+			name:          "corrupt config fails and returns early",
+			withAppCfg:    true,
+			corruptConfig: true,
+			withEphem:     true,
+			withWorker:    true,
+		},
+		{
+			name:       "successful reload marks pools dirty",
+			withAppCfg: true,
+			withProv:   true,
+			withEphem:  true,
+			withWorker: true,
+		},
+		{
+			name:          "provisioner sync error logs warning and continues",
+			withAppCfg:    true,
+			withProv:      true,
+			provSyncError: true,
+			withEphem:     true,
+			withWorker:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			tmpDir := t.TempDir()
+
+			var appCfg *config.Config
+			if tc.withAppCfg {
+				cfgPath := filepath.Join(tmpDir, "config.yaml")
+				switch {
+				case tc.corruptConfig:
+					_ = os.WriteFile(cfgPath, []byte("invalid: yaml: ["), 0o644)
+				case tc.provSyncError:
+					invalidCredYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    path: /fake/oauth\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
+					_ = os.WriteFile(cfgPath, []byte(invalidCredYAML), 0o644)
+				default:
+					validYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
+					_ = os.WriteFile(cfgPath, []byte(validYAML), 0o644)
+				}
+				t.Setenv("CONFIG_PATH", cfgPath)
+
+				appCfg = config.NewFromData(&config.ConfigData{
+					DataDir:       tmpDir,
+					GeminiHomeDir: tmpDir,
+					CredentialSources: config.CredentialSources{
+						OAuth: config.CredentialSource{Disabled: true},
+						Codex: config.CredentialSource{Disabled: true},
+						Muse:  config.CredentialSource{Disabled: true},
+					},
+				})
+			}
+
+			var prov *env.Provisioner
+			if tc.withProv && appCfg != nil {
+				prov, _ = env.NewFromConfig(appCfg)
+			}
+
+			var ephemPool *runner.InterchangeablePool
+			if tc.withEphem {
+				underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+					GeminiHomeDir: tmpDir,
+					Cwd:           tmpDir,
+				}, &dummySpawner{})
+				ephemPool = runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
+					WorkerCount: 1,
+					KeyPrefix:   "ephem:test",
+				})
+				t.Cleanup(func() { _ = ephemPool.Close() })
+			}
+
+			var workerPool *queue.WorkerPool
+			if tc.withWorker {
+				workerPool = queue.New(appCfg, queue.WorkerPoolConfig{
+					ParentContext: ctx,
+					Store:         dbtest.NewFakeStore(),
+				})
+			}
+
+			fn := createReloadFunc(ctx, appCfg, prov, ephemPool, workerPool)
+			require.NotNil(t, fn)
+			fn("test-source")
+
+			if tc.withAppCfg && !tc.corruptConfig {
+				assert.Equal(t, "test-model", appCfg.Current().Model)
+			}
+		})
+	}
+}
+
+func TestStartDiscoveryTimeoutReconciler_ContextCanceledDuringRetry(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	called := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		select {
+		case <-called:
+		default:
+			close(called)
+		}
+	}))
+	defer ts.Close()
+
+	trigger := startDiscoveryTimeoutReconciler(ctx, ts.URL, "aerial", ts.Client(), 3, 500*time.Millisecond)
+	trigger.Trigger()
+	<-called
+	cancel() // cancel during retry delay
 	select {
 	case <-trigger.Done():
 	case <-time.After(time.Second):

@@ -47,6 +47,7 @@ func setupActorMockContext(t *testing.T, key, activeInvID string) (*mocks.MockCo
 
 	mc.On("Set", "active_invocation_id", mock.Anything).Return().Maybe()
 	mc.On("Clear", "active_invocation_id").Return().Maybe()
+	mc.On("ClearAll").Return().Maybe()
 	mc.On("CancelInvocation", mock.Anything).Return().Maybe()
 
 	runHandler := func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
@@ -234,6 +235,20 @@ type threadEnqueueTestCase struct {
 	wantInsert     bool
 	isAliasCall    bool
 	wantErrorSub   string
+	wantTerminal   bool
+}
+
+func assertTerminalOrRetriableError(t *testing.T, err error, wantErrorSub string, wantTerminal bool) {
+	t.Helper()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), wantErrorSub)
+	require.True(t, restate.IsTerminalError(err))
+	termErr := restate.AsTerminalError(err)
+	if wantTerminal {
+		assert.Equal(t, restate.Code(400), termErr.Code(), "expected 400 terminal error")
+	} else {
+		assert.Equal(t, restate.Code(500), termErr.Code(), "expected non-terminal retriable error")
+	}
 }
 
 func runThreadSessionEnqueueCase(t *testing.T, tc threadEnqueueTestCase) {
@@ -286,6 +301,11 @@ func runThreadSessionEnqueueCase(t *testing.T, tc threadEnqueueTestCase) {
 	if tc.wantErrorSub != "" {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), tc.wantErrorSub)
+		if tc.wantTerminal {
+			require.True(t, restate.IsTerminalError(err), "expected restate.TerminalError")
+			termErr := restate.AsTerminalError(err)
+			assert.Equal(t, restate.Code(400), termErr.Code())
+		}
 		return
 	}
 
@@ -333,6 +353,7 @@ func TestThreadSessionObject_Enqueue(t *testing.T) {
 			threadID:     "",
 			req:          ThreadEnqueueRequest{Prompt: "no thread or channel"},
 			wantErrorSub: "thread_id or channel_id is required",
+			wantTerminal: true,
 		},
 		{
 			name:        "alias enqueue prompt accepted",
@@ -430,6 +451,7 @@ func TestThreadSessionObject_CancelTurn(t *testing.T) {
 		storeFail           bool
 		wantCancelledCount  int
 		wantCancelledActive bool
+		wantErrorSub        string
 	}{
 		{
 			name:                "cancel with pending messages and active invocation",
@@ -458,12 +480,11 @@ func TestThreadSessionObject_CancelTurn(t *testing.T) {
 			wantCancelledActive: false,
 		},
 		{
-			name:                "cancel with store failure",
-			threadID:            "th-cancel-fail",
-			pendingCount:        0,
-			storeFail:           true,
-			wantCancelledCount:  0,
-			wantCancelledActive: false,
+			name:         "cancel with store failure returns non-terminal error",
+			threadID:     "th-cancel-fail",
+			pendingCount: 0,
+			storeFail:    true,
+			wantErrorSub: "get msgs fail",
 		},
 	}
 
@@ -490,6 +511,12 @@ func TestThreadSessionObject_CancelTurn(t *testing.T) {
 
 			mc, _ := setupActorMockContext(t, tc.threadID, tc.activeInvID)
 			resp, err := obj.CancelTurn(restate.WithMockContext(mc), tc.req)
+			if tc.wantErrorSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrorSub)
+				assert.Equal(t, restate.Code(500), restate.AsTerminalError(err).Code(), "expected non-terminal retriable error")
+				return
+			}
 			require.NoError(t, err)
 			assert.Equal(t, "ok", resp.Status)
 			assert.Equal(t, tc.wantCancelledCount, resp.CancelledCount)
@@ -511,12 +538,13 @@ func TestThreadSessionObject_RotateSession(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		threadID    string
-		activeInvID string
-		req         RotateSessionRequest
-		storeFail   bool
-		nilPool     bool
+		name         string
+		threadID     string
+		activeInvID  string
+		req          RotateSessionRequest
+		storeFail    bool
+		nilPool      bool
+		wantErrorSub string
 	}{
 		{
 			name:        "rotate session with active invocation",
@@ -531,11 +559,12 @@ func TestThreadSessionObject_RotateSession(t *testing.T) {
 			req:         RotateSessionRequest{Bare: true},
 		},
 		{
-			name:        "rotate session handles db store failure gracefully",
-			threadID:    "th-rotate-3",
-			activeInvID: "",
-			req:         RotateSessionRequest{},
-			storeFail:   true,
+			name:         "rotate session handles db store failure returning non-terminal error",
+			threadID:     "th-rotate-3",
+			activeInvID:  "",
+			req:          RotateSessionRequest{},
+			storeFail:    true,
+			wantErrorSub: "db rotate err",
 		},
 		{
 			name:        "rotate session with nil pool",
@@ -562,6 +591,12 @@ func TestThreadSessionObject_RotateSession(t *testing.T) {
 
 			mc, _ := setupActorMockContext(t, tc.threadID, tc.activeInvID)
 			resp, err := obj.RotateSession(restate.WithMockContext(mc), tc.req)
+			if tc.wantErrorSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrorSub)
+				assert.Equal(t, restate.Code(500), restate.AsTerminalError(err).Code(), "expected non-terminal retriable error")
+				return
+			}
 			require.NoError(t, err)
 			assert.Equal(t, "ok", resp.Status)
 			assert.NotEmpty(t, resp.NewSessionID)
@@ -952,6 +987,7 @@ func TestDispatchSessionObject_Cancel(t *testing.T) {
 		storeFail          bool
 		nilPool            bool
 		wantCancelledCount int
+		wantErrorSub       string
 	}{
 		{
 			name:               "cancel pending dispatches by chunk id and cancel active invocation",
@@ -986,11 +1022,11 @@ func TestDispatchSessionObject_Cancel(t *testing.T) {
 			wantCancelledCount: 0,
 		},
 		{
-			name:               "cancel with store failure handles gracefully",
-			sessionKey:         "vanadis-fail",
-			req:                CancelDispatchRequest{},
-			storeFail:          true,
-			wantCancelledCount: 0,
+			name:         "cancel with store failure returns non-terminal error",
+			sessionKey:   "vanadis-fail",
+			req:          CancelDispatchRequest{},
+			storeFail:    true,
+			wantErrorSub: "cancel err",
 		},
 		{
 			name:               "cancel with nil pool handles gracefully",
@@ -1031,6 +1067,12 @@ func TestDispatchSessionObject_Cancel(t *testing.T) {
 
 			mc, _ := setupActorMockContext(t, tc.sessionKey, tc.activeInvID)
 			resp, err := obj.Cancel(restate.WithMockContext(mc), tc.req)
+			if tc.wantErrorSub != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrorSub)
+				assert.Equal(t, restate.Code(500), restate.AsTerminalError(err).Code(), "expected non-terminal retriable error")
+				return
+			}
 			require.NoError(t, err)
 			assert.Equal(t, "ok", resp.Status)
 			assert.Equal(t, tc.wantCancelledCount, resp.CancelledCount)

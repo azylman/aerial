@@ -75,11 +75,7 @@ func runVoiceSessionAskCase(t *testing.T, tc voiceAskTestCase) {
 
 	res, err := obj.Ask(restate.WithMockContext(mc), tc.req)
 	if tc.wantErrorSub != "" {
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), tc.wantErrorSub)
-		if tc.wantTerminal {
-			assert.NotNil(t, restate.AsTerminalError(err), "expected restate.TerminalError")
-		}
+		assertTerminalOrRetriableError(t, err, tc.wantErrorSub, tc.wantTerminal)
 		return
 	}
 
@@ -113,7 +109,7 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			req:          VoiceSessionRequest{DeviceKey: "dev-2", Prompt: "hello"},
 			nilPool:      true,
 			wantErrorSub: "worker pool is nil",
-			wantTerminal: true,
+			wantTerminal: false,
 		},
 		{
 			name:         "fallback from empty key to session id",
@@ -149,12 +145,12 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			wantReply:    "done",
 		},
 		{
-			name:         "runner failure streams error event and returns terminal error",
+			name:         "runner failure streams error event and returns non-terminal error",
 			deviceKey:    "kiosk-kitchen",
 			req:          VoiceSessionRequest{DeviceKey: "kiosk-kitchen", Prompt: "bad turn", TurnID: "turn-voice-2"},
 			runnerErr:    errors.New("voice backend failure"),
 			wantErrorSub: "voice backend failure",
-			wantTerminal: true,
+			wantTerminal: false,
 		},
 	}
 
