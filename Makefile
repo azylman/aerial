@@ -23,6 +23,7 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid.js" ]; then \
 		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
 		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid.js || exit 1; \
+		node --check services/docs-service/app/assets/js/plugins/docsify-theme.js || exit 1; \
 	fi
 	@if command -v node >/dev/null 2>&1; then \
 		echo "=== Linting Shared Theme Script Syntax ==="; \
