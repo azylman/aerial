@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -292,13 +293,38 @@ var (
 	newHTTPClient         = func(timeout time.Duration) *http.Client {
 		return &http.Client{Timeout: timeout}
 	}
+	defaultSATokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
-const defaultSATokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+func isReadableFile(p string) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			return
+		}
+	}()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return true
+}
 
 func resolveSATokenPath() string {
 	if p := os.Getenv("AERIAL_SA_TOKEN_PATH"); p != "" {
 		return p
+	}
+	if isReadableFile(defaultSATokenPath) {
+		return defaultSATokenPath
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		candidate := filepath.Join(home, ".gemini", "turn_env", "sa-token")
+		if isReadableFile(candidate) {
+			return candidate
+		}
 	}
 	return defaultSATokenPath
 }

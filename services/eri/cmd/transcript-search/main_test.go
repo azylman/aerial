@@ -1109,3 +1109,75 @@ func TestClient_GetJSON(t *testing.T) {
 		})
 	}
 }
+
+func writeTestToken(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte("tok"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestResolveSATokenPath(t *testing.T) {
+	tests := []struct {
+		name         string
+		envTokenPath string
+		hasDefault   bool
+		hasHome      bool
+		wantHome     bool
+		wantExact    string
+	}{
+		{
+			name:         "returns explicit AERIAL_SA_TOKEN_PATH when set",
+			envTokenPath: "/custom/sa/token",
+			wantExact:    "/custom/sa/token",
+		},
+		{
+			name:       "prefers readable default path when both default and home token exist",
+			hasDefault: true,
+			hasHome:    true,
+		},
+		{
+			name:     "falls back to HOME turn_env sa-token when default unreadable",
+			hasHome:  true,
+			wantHome: true,
+		},
+		{
+			name: "falls back to defaultSATokenPath when neither readable",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origDefault := defaultSATokenPath
+			defer func() { defaultSATokenPath = origDefault }()
+
+			t.Setenv("AERIAL_SA_TOKEN_PATH", tc.envTokenPath)
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+
+			defaultSATokenPath = filepath.Join(t.TempDir(), "default-token")
+			if tc.hasDefault {
+				writeTestToken(t, defaultSATokenPath)
+			}
+
+			homeTokPath := filepath.Join(homeDir, ".gemini", "turn_env", "sa-token")
+			if tc.hasHome {
+				writeTestToken(t, homeTokPath)
+			}
+
+			got := resolveSATokenPath()
+			want := defaultSATokenPath
+			switch {
+			case tc.wantExact != "":
+				want = tc.wantExact
+			case tc.wantHome:
+				want = homeTokPath
+			}
+			if got != want {
+				t.Errorf("resolveSATokenPath() = %q, want %q", got, want)
+			}
+		})
+	}
+}
