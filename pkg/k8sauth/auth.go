@@ -177,6 +177,19 @@ func NewAuthenticator(cfg Config) *Authenticator {
 	}
 }
 
+// Enabled reports whether the Authenticator is enabled.
+func (a *Authenticator) Enabled() bool {
+	return a != nil && a.cfg.Enabled
+}
+
+// Config returns a copy of the Authenticator's configuration.
+func (a *Authenticator) Config() Config {
+	if a == nil {
+		return Config{}
+	}
+	return a.cfg
+}
+
 func defaultK8sHTTPClient(tokenPath string) *http.Client {
 	certPath := "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	if dir := filepath.Dir(tokenPath); dir != "." && dir != "/" {

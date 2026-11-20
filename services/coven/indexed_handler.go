@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -44,7 +45,7 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 	if threadID == "" {
 		return nil
 	}
-	if es := strings.TrimSpace(ev.Stack); es != "" && es != NormalizeStack(stack) {
+	if ev.EffectiveAgent() != NormalizeStack(stack) {
 		return nil
 	}
 	if err := extract(ctx, threadID); err != nil {
@@ -54,6 +55,23 @@ func handleTranscriptsIndexedEvent(ctx context.Context, msg pubsub.Message, stac
 		return err
 	}
 	return nil
+}
+
+// newTranscriptsIndexedHandler returns a pubsub.Handler that filters for ev.EffectiveAgent() == stack
+// and publishes a coalesced extraction job to pubsub.SubjectCovenExtractCoalescedForAgent.
+func newTranscriptsIndexedHandler(b pubsub.Bus, stack string) pubsub.Handler {
+	normalizedStack := NormalizeStack(stack)
+	return func(ctx context.Context, msg pubsub.Message) error {
+		return handleTranscriptsIndexedEvent(ctx, msg, normalizedStack, func(extractCtx context.Context, threadID string) error {
+			msgID := fmt.Sprintf("coven:extract:%s:%s:%d", normalizedStack, threadID, time.Now().UnixNano())
+			args := pubsub.CovenExtractJobArgs{
+				Agent:    normalizedStack,
+				Stack:    normalizedStack,
+				ThreadID: threadID,
+			}
+			return b.Publish(extractCtx, pubsub.SubjectCovenExtractCoalescedForAgent(normalizedStack, threadID), msgID, args)
+		})
+	}
 }
 
 // darkCovenAnchor keeps deferred watermark symbols reachable

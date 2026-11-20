@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -69,25 +70,26 @@ const DefaultExtractMaxSteps = 50
 
 // Config represents runtime configuration for the memory MCP server.
 type Config struct {
-	Port                  string       `yaml:"port"`
-	DatabaseURL           string       `yaml:"database_url"`
-	EriURL                string       `yaml:"eri_url"`
-	EriLLMURL             string       `yaml:"eri_llm_url"`
-	Ollama                OllamaConfig `yaml:"ollama"`
-	CustomSkillsDir       string       `yaml:"custom_skills_dir"`
-	RulesDir              string       `yaml:"rules_dir"`
-	GitHubPAT             string       `yaml:"github_pat"`
-	ConfigRepoOwner       string       `yaml:"config_repo_owner"`
-	ConfigRepoName        string       `yaml:"config_repo_name"`
-	PRRegisterURL         string       `yaml:"pr_register_url"`
-	SystemChannelID       string       `yaml:"system_channel_id"`
-	NATSURL               string       `yaml:"nats_url"`
-	Stack                 string       `yaml:"stack"`
-	Role                  string       `yaml:"role"`
-	TranscriptsURL        string       `yaml:"transcripts_url"`
-	LLMEffort             string       `yaml:"llm_effort"`
-	ExtractTimeoutSeconds int          `yaml:"extract_timeout_seconds"`
-	ExtractMaxSteps       int          `yaml:"extract_max_steps"`
+	Port                  string         `yaml:"port"`
+	DatabaseURL           string         `yaml:"database_url"`
+	EriURL                string         `yaml:"eri_url"`
+	EriLLMURL             string         `yaml:"eri_llm_url"`
+	Ollama                OllamaConfig   `yaml:"ollama"`
+	CustomSkillsDir       string         `yaml:"custom_skills_dir"`
+	RulesDir              string         `yaml:"rules_dir"`
+	GitHubPAT             string         `yaml:"github_pat"`
+	ConfigRepoOwner       string         `yaml:"config_repo_owner"`
+	ConfigRepoName        string         `yaml:"config_repo_name"`
+	PRRegisterURL         string         `yaml:"pr_register_url"`
+	SystemChannelID       string         `yaml:"system_channel_id"`
+	NATSURL               string         `yaml:"nats_url"`
+	Stack                 string         `yaml:"stack"`
+	Role                  string         `yaml:"role"`
+	TranscriptsURL        string         `yaml:"transcripts_url"`
+	LLMEffort             string         `yaml:"llm_effort"`
+	ExtractTimeoutSeconds int            `yaml:"extract_timeout_seconds"`
+	ExtractMaxSteps       int            `yaml:"extract_max_steps"`
+	Auth                  k8sauth.Config `yaml:"auth"`
 }
 
 // NormalizeStack trims s and defaults empty stacks to DefaultStack.
@@ -158,27 +160,28 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 
 	var ycfg struct {
-		Port             string       `yaml:"port"`
-		DatabaseURL      string       `yaml:"database_url"`
-		EriURL           string       `yaml:"eri_url"`
-		EriLLMURL        string       `yaml:"eri_llm_url"`
-		Ollama           OllamaConfig `yaml:"ollama"`
-		CustomSkillsDir  string       `yaml:"custom_skills_dir"`
-		RulesDir         string       `yaml:"rules_dir"`
-		GitHubPAT        string       `yaml:"github_pat"`
-		ConfigRepoOwner  string       `yaml:"config_repo_owner"`
-		ConfigRepoName   string       `yaml:"config_repo_name"`
-		PRRegisterURL    string       `yaml:"pr_register_url"`
-		EriPRRegisterURL string       `yaml:"eri_pr_register_url"`
-		SystemChannelID  string       `yaml:"system_channel_id"`
-		NATSURL          string       `yaml:"nats_url"`
-		Stack            string       `yaml:"stack"`
-		Role             string       `yaml:"role"`
-		TranscriptsURL   string       `yaml:"transcripts_url"`
-		IndexerURL       string       `yaml:"indexer_url"`
-		LLMEffort        string       `yaml:"llm_effort"`
-		ExtractTimeout   int          `yaml:"extract_timeout_seconds"`
-		ExtractMaxSteps  int          `yaml:"extract_max_steps"`
+		Port             string         `yaml:"port"`
+		DatabaseURL      string         `yaml:"database_url"`
+		EriURL           string         `yaml:"eri_url"`
+		EriLLMURL        string         `yaml:"eri_llm_url"`
+		Ollama           OllamaConfig   `yaml:"ollama"`
+		CustomSkillsDir  string         `yaml:"custom_skills_dir"`
+		RulesDir         string         `yaml:"rules_dir"`
+		GitHubPAT        string         `yaml:"github_pat"`
+		ConfigRepoOwner  string         `yaml:"config_repo_owner"`
+		ConfigRepoName   string         `yaml:"config_repo_name"`
+		PRRegisterURL    string         `yaml:"pr_register_url"`
+		EriPRRegisterURL string         `yaml:"eri_pr_register_url"`
+		SystemChannelID  string         `yaml:"system_channel_id"`
+		NATSURL          string         `yaml:"nats_url"`
+		Stack            string         `yaml:"stack"`
+		Role             string         `yaml:"role"`
+		TranscriptsURL   string         `yaml:"transcripts_url"`
+		IndexerURL       string         `yaml:"indexer_url"`
+		LLMEffort        string         `yaml:"llm_effort"`
+		ExtractTimeout   int            `yaml:"extract_timeout_seconds"`
+		ExtractMaxSteps  int            `yaml:"extract_max_steps"`
+		Auth             k8sauth.Config `yaml:"auth"`
 	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
@@ -237,6 +240,13 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	llmEffort := resolveFirstNonEmpty(os.Getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
+	authCfg := ycfg.Auth
+	if envVal := strings.TrimSpace(os.Getenv("K8S_AUTH_ENABLED")); envVal != "" {
+		if enabled, err := strconv.ParseBool(envVal); err == nil {
+			authCfg.Enabled = enabled
+		}
+	}
+
 	return &Config{
 		Port:                  port,
 		DatabaseURL:           databaseURL,
@@ -262,6 +272,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 			QueryPrefix: ycfg.Ollama.QueryPrefix,
 			NumCtx:      ycfg.Ollama.NumCtx,
 		},
+		Auth: authCfg,
 	}, nil
 }
 
