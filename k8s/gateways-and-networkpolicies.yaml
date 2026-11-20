@@ -461,6 +461,7 @@ spec:
                   - scratch-service
                   - mirrormere-core
                   - eri
+                  - eri-restate
                   - transcripts
     - from:
         - podSelector:
@@ -489,6 +490,7 @@ spec:
                 operator: In
                 values:
                   - eri
+                  - eri-restate
                   - coven
       ports:
         - port: 4030
@@ -513,6 +515,7 @@ spec:
                 operator: In
                 values:
                   - eri
+                  - eri-restate
                   - synapse
                   - haro
                   - vanadis-restate
@@ -541,6 +544,7 @@ spec:
                 operator: In
                 values:
                   - eri
+                  - eri-restate
                   - synapse
                   - console
                   - vision
@@ -567,6 +571,7 @@ spec:
                 operator: In
                 values:
                   - eri
+                  - eri-restate
                   - eri-miorine
                   - eri-suletta
                   - synapse
@@ -578,6 +583,45 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: prospera
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eri-restate-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - restate-green
+                  - restate
+                  - restate-operator
+      ports:
+        - port: 9080
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - eri
+                  - victoriametrics
+                  - vmsingle
+                  - gatus
+                  - coverage-ingest
+      ports:
+        - port: 4028
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eri-restate
   policyTypes:
     - Ingress
 ---
