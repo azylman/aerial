@@ -54,7 +54,10 @@ func assertProxiedRequest(t *testing.T, tc proxyTestCase, captured []capturedPro
 		if req.headers.Get("X-Custom-Header") != "proxy-test-val" {
 			t.Errorf("expected X-Custom-Header to be forwarded, got %q", req.headers.Get("X-Custom-Header"))
 		}
-		for _, stripped := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key"} {
+		if gotAuth := req.headers.Get("Authorization"); gotAuth == "Bearer secret-token" || gotAuth == "" {
+			t.Errorf("expected caller Authorization header to be replaced with SA bearer token, got %q", gotAuth)
+		}
+		for _, stripped := range []string{"Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key"} {
 			if req.headers.Get(stripped) != "" {
 				t.Errorf("expected %s header to be stripped, got %q", stripped, req.headers.Get(stripped))
 			}

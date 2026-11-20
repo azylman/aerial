@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 const (
@@ -18,14 +22,20 @@ const (
 // Server exposes the transcripts read API: search, steps, stats, watermarks.
 type Server struct {
 	store *Store
+	auth  *k8sauth.Authenticator
 	mux   *http.ServeMux
 }
 
 // NewServer wires the read API with constructor injection.
-func NewServer(store *Store) *Server {
-	s := &Server{store: store, mux: http.NewServeMux()}
+func NewServer(store *Store, auth ...*k8sauth.Authenticator) *Server {
+	var a *k8sauth.Authenticator
+	if len(auth) > 0 {
+		a = auth[0]
+	}
+	s := &Server{store: store, auth: a, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("transcripts"))
 
 	s.mux.HandleFunc("/watermark", s.handleWatermarks)
 	s.mux.HandleFunc("/watermarks", s.handleWatermarks)
@@ -49,7 +59,45 @@ func NewServer(store *Store) *Server {
 
 // Handler serves the read API routes.
 func (s *Server) Handler() http.Handler {
+	if s.auth != nil && s.auth.Enabled() {
+		return s.auth.Middleware("/health", "/healthz", "/debug/coverage/flush")(s.mux)
+	}
 	return s.mux
+}
+
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, requestedAgent string) (effectiveAgent string, ok bool) {
+	target := strings.TrimSpace(requestedAgent)
+	if s.auth == nil || !s.auth.Enabled() {
+		return target, true
+	}
+	caller, okCaller := k8sauth.CallerFromContext(r.Context())
+	if !okCaller {
+		writeError(w, http.StatusUnauthorized, "unauthorized: missing caller identity")
+		return "", false
+	}
+	resolved, err := s.auth.AuthorizeTarget(r.Context(), caller, "transcripts", "get", target)
+	if err != nil && target == "" && caller.CallerAgent != "" {
+		if _, isForbidden := errors.AsType[*k8sauth.ForbiddenError](err); isForbidden {
+			resolved, err = s.auth.AuthorizeTarget(r.Context(), caller, "transcripts", "get", caller.CallerAgent)
+		}
+	}
+	if err != nil {
+		if validation, okErr := errors.AsType[*k8sauth.ValidationError](err); okErr {
+			writeError(w, http.StatusBadRequest, validation.Error())
+			return "", false
+		}
+		if forbidden, okErr := errors.AsType[*k8sauth.ForbiddenError](err); okErr {
+			writeError(w, http.StatusForbidden, forbidden.Error())
+			return "", false
+		}
+		if unauth, okErr := errors.AsType[*k8sauth.UnauthorizedError](err); okErr {
+			writeError(w, http.StatusUnauthorized, unauth.Error())
+			return "", false
+		}
+		writeError(w, http.StatusForbidden, err.Error())
+		return "", false
+	}
+	return resolved, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -89,17 +137,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	requestedStack := resolveFirstNonEmpty(q.Get("agent"), q.Get("stack"))
+	stack, ok := s.authorize(w, r, requestedStack)
+	if !ok {
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
 	}
-	q := r.URL.Query()
 	queryText := resolveFirstNonEmpty(q.Get("q"), q.Get("query"))
 	mode := strings.ToLower(strings.TrimSpace(q.Get("mode")))
 	if mode == "" {
 		mode = searchModeAuto
 	}
-	stack := strings.TrimSpace(q.Get("stack"))
 	session := strings.TrimSpace(q.Get("session"))
 	tool := strings.TrimSpace(q.Get("tool"))
 	limit := queryInt(r, "limit", 20)
@@ -148,7 +200,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleStepWindow(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleStepWindow(w http.ResponseWriter, r *http.Request, stack string) {
 	q := r.URL.Query()
 	session := strings.TrimSpace(q.Get("session"))
 	if session == "" {
@@ -182,7 +234,7 @@ func (s *Server) handleStepWindow(w http.ResponseWriter, r *http.Request) {
 	startStep := max(0, step-contextVal)
 	endStep := step + contextVal
 
-	steps, err := s.store.GetSteps(r.Context(), q.Get("stack"), session, startStep, endStep)
+	steps, err := s.store.GetSteps(r.Context(), stack, session, startStep, endStep)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get steps failed")
 		return
@@ -199,16 +251,21 @@ func (s *Server) handleStepWindow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	requestedStack := resolveFirstNonEmpty(q.Get("agent"), q.Get("stack"))
+	stack, ok := s.authorize(w, r, requestedStack)
+	if !ok {
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
 	}
 	if r.URL.Query().Has("step") {
-		s.handleStepWindow(w, r)
+		s.handleStepWindow(w, r, stack)
 		return
 	}
-	q := r.URL.Query()
-	steps, err := s.store.GetSteps(r.Context(), q.Get("stack"), q.Get("session"), queryInt(r, "start", 0), queryInt(r, "end", 1<<30))
+	steps, err := s.store.GetSteps(r.Context(), stack, q.Get("session"), queryInt(r, "start", 0), queryInt(r, "end", 1<<30))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get steps failed")
 		return
@@ -220,11 +277,16 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	requestedStack := resolveFirstNonEmpty(r.URL.Query().Get("agent"), r.URL.Query().Get("stack"))
+	stack, ok := s.authorize(w, r, requestedStack)
+	if !ok {
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
 	}
-	stats, err := s.store.GetStats(r.Context(), r.URL.Query().Get("stack"))
+	stats, err := s.store.GetStats(r.Context(), stack)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get stats failed")
 		return
@@ -243,19 +305,25 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"total_steps":    totalSteps,
 		"stacks":         stats,
 		"stats":          stats,
+		"agents":         stats,
 		"status":         "ok",
 	})
 }
 
 func (s *Server) handleWatermarks(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	requestedStack := resolveFirstNonEmpty(q.Get("agent"), q.Get("stack"))
+	stack, ok := s.authorize(w, r, requestedStack)
+	if !ok {
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
 	}
-	q := r.URL.Query()
 	sessionID := resolveFirstNonEmpty(q.Get("session_id"), q.Get("session"))
 	if sessionID != "" {
-		step, err := s.store.GetWatermark(r.Context(), q.Get("stack"), sessionID)
+		step, err := s.store.GetWatermark(r.Context(), stack, sessionID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "get watermark failed")
 			return
@@ -263,7 +331,7 @@ func (s *Server) handleWatermarks(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"last_indexed_step": step})
 		return
 	}
-	marks, err := s.store.GetWatermarks(r.Context(), q.Get("stack"))
+	marks, err := s.store.GetWatermarks(r.Context(), stack)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get watermarks failed")
 		return
@@ -282,6 +350,11 @@ func (s *Server) handleWatermarks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleThreadTrajectory(w http.ResponseWriter, r *http.Request) {
+	requestedStack := resolveFirstNonEmpty(r.URL.Query().Get("agent"), r.URL.Query().Get("stack"))
+	stack, ok := s.authorize(w, r, requestedStack)
+	if !ok {
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
@@ -302,7 +375,6 @@ func (s *Server) handleThreadTrajectory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	limit := queryInt(r, "limit", 50)
-	stack := strings.TrimSpace(r.URL.Query().Get("stack"))
 	facts, tools, err := s.store.GetThreadTrajectory(r.Context(), stack, threadID, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get thread trajectory failed")

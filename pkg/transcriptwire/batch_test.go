@@ -326,3 +326,100 @@ func TestMsgID(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		batch     TranscriptStepBatch
+		wantAgent string
+	}{
+		{
+			name: "agent specified wins over stack",
+			batch: TranscriptStepBatch{
+				Agent: "agent-alpha",
+				Stack: "aerial",
+			},
+			wantAgent: "agent-alpha",
+		},
+		{
+			name: "agent empty falls back to stack",
+			batch: TranscriptStepBatch{
+				Agent: "",
+				Stack: "agent-beta",
+			},
+			wantAgent: "agent-beta",
+		},
+		{
+			name: "both empty returns empty",
+			batch: TranscriptStepBatch{
+				Agent: "",
+				Stack: "",
+			},
+			wantAgent: "",
+		},
+		{
+			name: "whitespace trimmed correctly",
+			batch: TranscriptStepBatch{
+				Agent: "  agent-beta  ",
+				Stack: "aerial",
+			},
+			wantAgent: "agent-beta",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.batch.EffectiveAgent(); got != tc.wantAgent {
+				t.Errorf("EffectiveAgent() = %q, want %q", got, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestMsgID_MultiAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	epoch := time.Unix(1234567890, 123).UTC()
+
+	tests := []struct {
+		name   string
+		batch  TranscriptStepBatch
+		wantID string
+	}{
+		{
+			name: "agent populated uses agent in msg id",
+			batch: TranscriptStepBatch{
+				Agent:     "agent-alpha",
+				Stack:     "aerial",
+				SessionID: "sess-1",
+				FirstStep: 0,
+				LastStep:  5,
+				FileMtime: epoch,
+			},
+			wantID: "transcript-batch:agent-alpha:sess-1:0:5:1234567890000000123",
+		},
+		{
+			name: "agent empty falls back to stack in msg id",
+			batch: TranscriptStepBatch{
+				Stack:     "agent-beta",
+				SessionID: "sess-2",
+				FirstStep: 10,
+				LastStep:  15,
+				FileMtime: epoch,
+			},
+			wantID: "transcript-batch:agent-beta:sess-2:10:15:1234567890000000123",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := MsgID(tc.batch); got != tc.wantID {
+				t.Errorf("MsgID() = %q, want %q", got, tc.wantID)
+			}
+		})
+	}
+}

@@ -574,3 +574,51 @@ func TestEmbedderGenerate(t *testing.T) {
 		})
 	}
 }
+
+func TestSummarizerMultiAgentSweep(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	// Seed session 1 for aerial
+	seedSummarizerSession(t, store, "sess-aerial", "th-1", 0, 2, false)
+
+	// Seed session 2 for agent-alpha
+	batchAlpha := testBatch("sess-alpha", epoch, 0, 2, false, false)
+	batchAlpha.Agent = "agent-alpha"
+	batchAlpha.Stack = "agent-alpha"
+	if _, err := store.ApplyBatch(context.Background(), batchAlpha); err != nil {
+		t.Fatalf("seed agent-alpha batch: %v", err)
+	}
+
+	llm := &fakeSummaryLLM{response: "multi-agent summary"}
+	embedder := &fakeSummaryEmbedder{vector: []float32{0.5}}
+	sum := NewSummarizer(store, llm, embedder, SummarizerConfig{Enabled: true, BatchLimit: 10})
+	testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
+	sum.now = func() time.Time { return testNow }
+
+	done, err := sum.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce() err = %v", err)
+	}
+	if done != 2 {
+		t.Errorf("RunOnce() summarized %d, want 2", done)
+	}
+
+	// Verify aerial summary
+	sumAerial, markAerial, _ := readSummaryRow(t, store, "sess-aerial")
+	if markAerial != 2 || sumAerial != "multi-agent summary" {
+		t.Errorf("aerial session: watermark = %d, summary = %q", markAerial, sumAerial)
+	}
+
+	// Verify agent-alpha summary
+	var sumAlpha string
+	var markAlpha int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT summary, summary_step_watermark FROM session_summaries WHERE stack = 'agent-alpha' AND session_id = 'sess-alpha'`).Scan(&sumAlpha, &markAlpha); err != nil {
+		t.Fatalf("read agent-alpha summary: %v", err)
+	}
+	if markAlpha != 2 || sumAlpha != "multi-agent summary" {
+		t.Errorf("agent-alpha session: watermark = %d, summary = %q", markAlpha, sumAlpha)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -23,6 +24,7 @@ const DefaultStack = "aerial"
 type Config struct {
 	Port        string           `yaml:"port"`
 	Stack       string           `yaml:"stack"`
+	Auth        k8sauth.Config   `yaml:"auth"`
 	DatabaseURL string           `yaml:"database_url"`
 	NATSURL     string           `yaml:"nats_url"`
 	Summarizer  SummarizerConfig `yaml:"summarizer"`
@@ -64,11 +66,12 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 	var ycfg struct {
-		Port        string `yaml:"port"`
-		Stack       string `yaml:"stack"`
-		DatabaseURL string `yaml:"database_url"`
-		NATSURL     string `yaml:"nats_url"`
-		EriLLMURL   string `yaml:"eri_llm_url"`
+		Port        string         `yaml:"port"`
+		Stack       string         `yaml:"stack"`
+		Auth        k8sauth.Config `yaml:"auth"`
+		DatabaseURL string         `yaml:"database_url"`
+		NATSURL     string         `yaml:"nats_url"`
+		EriLLMURL   string         `yaml:"eri_llm_url"`
 		Ollama      struct {
 			BaseURL string `yaml:"base_url"`
 			Model   string `yaml:"model"`
@@ -90,6 +93,10 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if stack == "" {
 		stack = DefaultStack
 	}
+	auth := ycfg.Auth
+	if strings.EqualFold(os.Getenv("K8S_AUTH_ENABLED"), "true") {
+		auth.Enabled = true
+	}
 	databaseURL := resolveFirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(os.Getenv, "aerial"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
@@ -108,6 +115,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	return &Config{
 		Port:        port,
 		Stack:       stack,
+		Auth:        auth,
 		DatabaseURL: databaseURL,
 		NATSURL:     natsURL,
 		Summarizer:  summarizer,

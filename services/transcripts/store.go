@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
@@ -83,9 +84,11 @@ func decideBatch(cur sessionCursor, batch transcriptwire.TranscriptStepBatch) Ba
 	return DecisionAppend
 }
 
-// Store persists transcript step batches into the shared stack-labelled index.
-// Writes are always scoped to the store's own stack; reads take an explicit
-// stack filter where empty means all stacks.
+// Store persists multi-agent transcript step batches into the unified index.
+// When a batch specifies a valid RFC-1123 agent slug (authenticated upstream
+// via NATS per-agent subject publish ACLs in Ingester), rows are written under
+// that agent; otherwise writes default to s.stack. Reads take an explicit
+// agent/stack filter where empty means all agents.
 type Store struct {
 	db    *sql.DB
 	stack string
@@ -138,7 +141,7 @@ func isPostgresDriver(d driver.Driver) bool {
 // Stale batches commit nothing. Callers publish TranscriptsIndexedEvent after
 // a non-stale outcome and must return publish errors so the batch naks.
 func (s *Store) ApplyBatch(ctx context.Context, batch transcriptwire.TranscriptStepBatch) (outcome BatchOutcome, err error) {
-	sessionID, checkErr := s.validatedBatchSession(batch)
+	sessionID, agent, checkErr := s.validatedBatchSession(batch)
 	if checkErr != nil {
 		return BatchOutcome{}, checkErr
 	}
@@ -156,7 +159,7 @@ func (s *Store) ApplyBatch(ctx context.Context, batch transcriptwire.TranscriptS
 		}
 	}()
 
-	cur, lockErr := lockSessionCursor(queryCtx, tx, s.db, s.stack, sessionID)
+	cur, lockErr := lockSessionCursor(queryCtx, tx, s.db, agent, sessionID)
 	if lockErr != nil {
 		return BatchOutcome{}, lockErr
 	}
@@ -165,7 +168,7 @@ func (s *Store) ApplyBatch(ctx context.Context, batch transcriptwire.TranscriptS
 	if decision == DecisionStale {
 		return BatchOutcome{Decision: DecisionStale, Stale: true}, nil
 	}
-	indexed, applyErr := applyBatchDecision(queryCtx, tx, s.stack, sessionID, cur, batch, decision)
+	indexed, applyErr := applyBatchDecision(queryCtx, tx, agent, sessionID, cur, batch, decision)
 	if applyErr != nil {
 		return BatchOutcome{}, applyErr
 	}
@@ -177,22 +180,22 @@ func (s *Store) ApplyBatch(ctx context.Context, batch transcriptwire.TranscriptS
 }
 
 // validatedBatchSession enforces writer and stack/session scoping for a batch.
-func (s *Store) validatedBatchSession(batch transcriptwire.TranscriptStepBatch) (string, error) {
+func (s *Store) validatedBatchSession(batch transcriptwire.TranscriptStepBatch) (string, string, error) {
 	if checkErr := s.checkWriter(); checkErr != nil {
-		return "", checkErr
-	}
-	stack := strings.TrimSpace(batch.Stack)
-	if stack == "" {
-		stack = s.stack
-	}
-	if stack != s.stack {
-		return "", fmt.Errorf("transcript batch stack %q does not match store stack %q", stack, s.stack)
+		return "", "", checkErr
 	}
 	sessionID := strings.TrimSpace(batch.SessionID)
 	if sessionID == "" {
-		return "", fmt.Errorf("transcript batch session id cannot be empty")
+		return "", "", fmt.Errorf("transcript batch session id cannot be empty")
 	}
-	return sessionID, nil
+	agent := batch.EffectiveAgent()
+	if agent == "" {
+		agent = s.stack
+	}
+	if !k8sauth.IsValidAgentSlug(agent) {
+		return "", "", fmt.Errorf("invalid transcript batch agent slug %q", agent)
+	}
+	return sessionID, agent, nil
 }
 
 // lockSessionCursor reads the indexed cursor for a session under a row lock.

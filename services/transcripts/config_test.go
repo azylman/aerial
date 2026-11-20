@@ -55,7 +55,7 @@ func TestLoadConfigFile(t *testing.T) {
 		return p
 	}
 	fullPath := writeCfg("full.yaml", "port: '4017'\nstack: 'aerial'\nnats_url: 'nats://nats:4222'\n")
-	minimalPath := writeCfg("minimal.yaml", "stack: 'miorine'\n")
+	minimalPath := writeCfg("minimal.yaml", "stack: 'agent-alpha'\n")
 	malformedPath := writeCfg("malformed.yaml", "port: [unclosed")
 	deployedPath := writeCfg("deployed.yaml", "port: '4030'\nstack: 'aerial'\neri_llm_url: 'http://eri.aerial/internal/llm'\nollama:\n  base_url: 'http://senses.aerial'\n  model: 'bge-small-en-v1.5'\n")
 	embedderPath := writeCfg("embedder.yaml", "port: '4030'\nstack: 'aerial'\nembedder:\n  base_url: 'http://embedder.aerial'\n  model: 'bge-custom'\n")
@@ -74,7 +74,7 @@ func TestLoadConfigFile(t *testing.T) {
 		wantSensesModel string
 	}{
 		{"full config", fullPath, "postgres://user:pass@host:5432/db", false, "4017", "aerial", "postgres://user:pass@host:5432/db", "nats://nats:4222", "", "", ""},
-		{"defaults fill port stack and nats", minimalPath, "postgres://user:pass@host:5432/db", false, DefaultPort, "miorine", "postgres://user:pass@host:5432/db", "", "", "", ""},
+		{"defaults fill port stack and nats", minimalPath, "postgres://user:pass@host:5432/db", false, DefaultPort, "agent-alpha", "postgres://user:pass@host:5432/db", "", "", "", ""},
 		{"deployed format with ollama", deployedPath, "postgres://user:pass@host:5432/db", false, "4030", "aerial", "postgres://user:pass@host:5432/db", "", "http://eri.aerial/internal/llm", "http://senses.aerial", "bge-small-en-v1.5"},
 		{"embedder format populated", embedderPath, "postgres://user:pass@host:5432/db", false, "4030", "aerial", "postgres://user:pass@host:5432/db", "", "", "http://embedder.aerial", "bge-custom"},
 		{"yaml database url wins when arg empty", minimalPath, "", true, "", "", "", "", "", "", ""},
@@ -233,6 +233,67 @@ func TestLoadConfigFileSummarizer(t *testing.T) {
 			}
 			if cfg.Summarizer.EriLLMURL != tc.wantLLMURL {
 				t.Errorf("EriLLMURL = %q, want %q", cfg.Summarizer.EriLLMURL, tc.wantLLMURL)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFileAuth(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeCfg := func(name, body string) string {
+		p := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		return p
+	}
+	defaultAuthPath := writeCfg("default_auth.yaml", "port: '4017'\nstack: 'aerial'\ndatabase_url: 'postgres://x'\n")
+	enabledAuthPath := writeCfg("enabled_auth.yaml", "port: '4017'\nstack: 'aerial'\ndatabase_url: 'postgres://x'\nauth:\n  enabled: true\n")
+
+	tests := []struct {
+		name        string
+		path        string
+		k8sAuthEnv  string
+		wantEnabled bool
+	}{
+		{
+			name:        "auth disabled by default",
+			path:        defaultAuthPath,
+			k8sAuthEnv:  "",
+			wantEnabled: false,
+		},
+		{
+			name:        "k8s auth enabled via env override",
+			path:        defaultAuthPath,
+			k8sAuthEnv:  "true",
+			wantEnabled: true,
+		},
+		{
+			name:        "auth enabled in yaml",
+			path:        enabledAuthPath,
+			k8sAuthEnv:  "",
+			wantEnabled: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "")
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", "")
+			t.Setenv("POSTGRES_DB", "")
+			t.Setenv("NATS_URL", "")
+			t.Setenv("K8S_AUTH_ENABLED", tc.k8sAuthEnv)
+
+			cfg, err := LoadConfigFile(tc.path, "")
+			if err != nil {
+				t.Fatalf("LoadConfigFile() err = %v", err)
+			}
+			if cfg.Auth.Enabled != tc.wantEnabled {
+				t.Errorf("Auth.Enabled = %v, want %v", cfg.Auth.Enabled, tc.wantEnabled)
 			}
 		})
 	}

@@ -375,21 +375,27 @@ func TestGetWatermark(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		nilDB     bool
 		stack     string
 		sessionID string
 		wantStep  int
 		wantErr   bool
 	}{
-		{"existing session matching stack", "aerial", "sess-a", 5, false},
-		{"existing session empty stack", "", "sess-a", 5, false},
-		{"wrong stack returns not found", "other", "sess-a", -1, false},
-		{"missing session returns not found", "aerial", "missing", -1, false},
-		{"empty session returns not found", "aerial", "", -1, false},
+		{"existing session matching stack", false, "aerial", "sess-a", 5, false},
+		{"existing session empty stack", false, "", "sess-a", 5, false},
+		{"wrong stack returns not found", false, "other", "sess-a", -1, false},
+		{"missing session returns not found", false, "aerial", "missing", -1, false},
+		{"empty session returns not found", false, "aerial", "", -1, false},
+		{"nil db returns error", true, "aerial", "sess-a", -1, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := store.GetWatermark(ctx, tc.stack, tc.sessionID)
+			target := store
+			if tc.nilDB {
+				target = NewStore(nil, "aerial")
+			}
+			got, err := target.GetWatermark(ctx, tc.stack, tc.sessionID)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetWatermark() err = %v, wantErr = %v", err, tc.wantErr)
 			}

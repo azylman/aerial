@@ -75,7 +75,7 @@ func newTranscriptFixture(t *testing.T, delay time.Duration, watermark int) *tra
 	if watermark >= 0 {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintf(w, `{"last_indexed_step":%d}`, watermark) }))
 		t.Cleanup(srv.Close)
-		f.pool.TranscriptIndexerClient = transcript.NewIndexerClient(srv.URL, nil)
+		f.pool.TranscriptIndexerClient = transcript.NewIndexerClient(srv.URL, srv.Client())
 	}
 	return f
 }
@@ -166,8 +166,8 @@ func TestWorkerPool_TranscriptPublishAuxiliary(t *testing.T) {
 	t.Parallel()
 	f := newTranscriptFixture(t, 5*time.Millisecond, -1)
 	defer f.pool.Stop()
-	f.pool.appCfg = config.NewFromData(&config.ConfigData{Transcripts: config.TranscriptsConfig{Stack: "miorine"}, McpServers: config.TargetMcpConfig{Common: map[string]json.RawMessage{"a": []byte(`{}`)}}})
-	if f.pool.stackName() != "miorine" || !slices.Equal(f.pool.mcpServerNames(), []string{"a"}) || f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{}) {
+	f.pool.appCfg = config.NewFromData(&config.ConfigData{Transcripts: config.TranscriptsConfig{Stack: "agent-alpha"}, McpServers: config.TargetMcpConfig{Common: map[string]json.RawMessage{"a": []byte(`{}`)}}})
+	if f.pool.stackName() != "agent-alpha" || !slices.Equal(f.pool.mcpServerNames(), []string{"a"}) || f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{}) {
 		t.Errorf("config or empty enqueue mismatch")
 	}
 	f.pool.transcriptPublishCh = make(chan TranscriptPublishJob, 1)
@@ -352,6 +352,130 @@ func TestWorkerPool_ExecuteVoiceTurn_TranscriptPublish(t *testing.T) {
 			j := <-pool.transcriptPublishCh
 			if j.SessionID != tc.wantJob || j.ThreadID != tc.wantThread {
 				t.Fatalf("job mismatch: got %+v, want SessionID=%s ThreadID=%s", j, tc.wantJob, tc.wantThread)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_StackName_Resolution_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		cfgStack      string
+		cfgBotID      string
+		poolAgentName string
+		wantStack     string
+	}{
+		{
+			name:          "transcripts stack takes highest priority",
+			cfgStack:      "stack-override",
+			cfgBotID:      "bot-id",
+			poolAgentName: "agent-beta",
+			wantStack:     "stack-override",
+		},
+		{
+			name:          "botID used when transcripts stack empty",
+			cfgStack:      "",
+			cfgBotID:      "agent-alpha",
+			poolAgentName: "agent-beta",
+			wantStack:     "agent-alpha",
+		},
+		{
+			name:          "pool agentName used when config empty",
+			cfgStack:      "",
+			cfgBotID:      "",
+			poolAgentName: "agent-beta",
+			wantStack:     "agent-beta",
+		},
+		{
+			name:          "default aerial when all empty",
+			cfgStack:      "",
+			cfgBotID:      "",
+			poolAgentName: "",
+			wantStack:     "aerial",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			appCfg := config.NewFromData(&config.ConfigData{
+				BotID: tc.cfgBotID,
+				Transcripts: config.TranscriptsConfig{
+					Stack: tc.cfgStack,
+				},
+			})
+			p := New(appCfg, WorkerPoolConfig{
+				AgentName: tc.poolAgentName,
+			})
+			if got := p.stackName(); got != tc.wantStack {
+				t.Errorf("stackName() = %q, want %q", got, tc.wantStack)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_InitTranscriptPublisher_MultiAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		agentName   string
+		sessionID   string
+		wantSubject string
+	}{
+		{
+			name:        "publishes with agent name agent-alpha",
+			agentName:   "agent-alpha",
+			sessionID:   "sess-m1",
+			wantSubject: "aerial.transcripts.steps.agent-alpha.sess-m1",
+		},
+		{
+			name:        "publishes with agent name agent-beta",
+			agentName:   "agent-beta",
+			sessionID:   "sess-s1",
+			wantSubject: "aerial.transcripts.steps.agent-beta.sess-s1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var publishedSubject string
+			var publishedBatch transcriptwire.TranscriptStepBatch
+			bus := &fakeBus{fn: func(_ context.Context, subject, _ string, data any) error {
+				publishedSubject = subject
+				if b, ok := data.(transcriptwire.TranscriptStepBatch); ok {
+					publishedBatch = b
+				}
+				return nil
+			}}
+			pool := New(nil, WorkerPoolConfig{AgentName: tc.agentName})
+			pool.SetEventBus(bus)
+
+			pub, _ := pool.initTranscriptPublisher()
+			if pub == nil {
+				t.Fatal("expected non-nil transcript publisher")
+			}
+			batch := transcriptwire.TranscriptStepBatch{
+				SessionID: tc.sessionID,
+				FirstStep: 0,
+				LastStep:  1,
+				FileMtime: time.Now(),
+			}
+			pub.Enqueue(batch)
+			if err := pub.Drain(context.Background()); err != nil {
+				t.Fatalf("pub.Drain failed: %v", err)
+			}
+			if publishedSubject != tc.wantSubject {
+				t.Errorf("published subject = %q, want %q", publishedSubject, tc.wantSubject)
+			}
+			if publishedBatch.Agent != tc.agentName {
+				t.Errorf("publishedBatch.Agent = %q, want %q", publishedBatch.Agent, tc.agentName)
+			}
+			if publishedBatch.Stack != tc.agentName {
+				t.Errorf("publishedBatch.Stack = %q, want %q", publishedBatch.Stack, tc.agentName)
 			}
 		})
 	}

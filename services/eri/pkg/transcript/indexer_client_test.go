@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +64,7 @@ func TestIndexerClientWatermarkRoundTrip(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			c := NewIndexerClient(srv.URL, nil)
+			c := NewIndexerClient(srv.URL, srv.Client())
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			got, err := c.Watermark(ctx, tc.stack, tc.session)
@@ -112,7 +114,7 @@ func TestIndexerClientWatermarksRoundTrip(t *testing.T) {
 			name:    "negative steps omitted",
 			status:  http.StatusOK,
 			body:    `{"watermarks":[{"session_id":"s1","last_indexed_step":-1},{"session_id":"s2","last_indexed_step":4}]}`,
-			stack:   "miorine",
+			stack:   "agent-alpha",
 			wantMap: map[string]int{"s2": 4},
 		},
 		{
@@ -141,7 +143,7 @@ func TestIndexerClientWatermarksRoundTrip(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			c := NewIndexerClient(srv.URL, nil)
+			c := NewIndexerClient(srv.URL, srv.Client())
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			got, err := c.Watermarks(ctx, tc.stack)
@@ -163,5 +165,33 @@ func TestIndexerClientWatermarksRoundTrip(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNewIndexerClient_DefaultClientBearerAuth(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("sa-jwt-token-val"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Setenv("AERIAL_SA_TOKEN_PATH", tokenFile)
+
+	var capturedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"last_indexed_step":42}`))
+	}))
+	defer srv.Close()
+
+	c := NewIndexerClient(srv.URL, nil)
+	got, err := c.Watermark(context.Background(), "aerial", "s1")
+	if err != nil {
+		t.Fatalf("Watermark() err = %v", err)
+	}
+	if got != 42 {
+		t.Errorf("Watermark() = %d, want 42", got)
+	}
+	if capturedAuth != "Bearer sa-jwt-token-val" {
+		t.Errorf("Authorization header = %q, want Bearer sa-jwt-token-val", capturedAuth)
 	}
 }

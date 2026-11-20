@@ -17,7 +17,6 @@ type TokenSource struct {
 	tokenPath string
 	reloadTTL time.Duration
 	now       func() time.Time
-	isDefault bool
 
 	mu       sync.RWMutex
 	token    string
@@ -26,10 +25,12 @@ type TokenSource struct {
 
 // NewTokenSource creates a TokenSource for the token file at tokenPath with a 60s reload TTL.
 func NewTokenSource(tokenPath string, now func() time.Time) *TokenSource {
-	isDefault := false
 	if tokenPath == "" {
-		tokenPath = DefaultTokenPath
-		isDefault = true
+		if envPath := os.Getenv("AERIAL_SA_TOKEN_PATH"); envPath != "" {
+			tokenPath = envPath
+		} else {
+			tokenPath = DefaultTokenPath
+		}
 	}
 	if now == nil {
 		now = time.Now
@@ -38,7 +39,6 @@ func NewTokenSource(tokenPath string, now func() time.Time) *TokenSource {
 		tokenPath: tokenPath,
 		reloadTTL: 60 * time.Second,
 		now:       now,
-		isDefault: isDefault,
 	}
 }
 
@@ -101,9 +101,6 @@ func NewServiceAccountTransportWithSource(base http.RoundTripper, ts *TokenSourc
 func (t *ServiceAccountTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tok, err := t.tokenSource.Token()
 	if err != nil {
-		if t.tokenSource != nil && t.tokenSource.isDefault {
-			return t.base.RoundTrip(req)
-		}
 		return nil, fmt.Errorf("k8sauth: obtain serviceaccount token: %w", err)
 	}
 	r := req.Clone(req.Context())

@@ -1107,19 +1107,19 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 		},
 		{
 			name:         "InsertWithTargetAgentAndStack",
-			args:         MemoryStoreArgs{FactText: "Target agent fact", TargetAgent: "miorine"},
+			args:         MemoryStoreArgs{FactText: "Target agent fact", TargetAgent: "agent-alpha"},
 			emb:          testEmbeddingAt(4, 1.0),
-			handlerStack: "suletta",
+			handlerStack: "agent-beta",
 			wantAction:   "inserted",
-			wantAgent:    "miorine",
+			wantAgent:    "agent-alpha",
 		},
 		{
 			name:         "InsertWithStackFallback",
 			args:         MemoryStoreArgs{FactText: "Stack fallback fact"},
 			emb:          testEmbeddingAt(5, 1.0),
-			handlerStack: "suletta",
+			handlerStack: "agent-beta",
 			wantAction:   "inserted",
-			wantAgent:    "suletta",
+			wantAgent:    "agent-beta",
 		},
 		{
 			name:      "InsertWithOllamaErrorFails",
@@ -1207,9 +1207,9 @@ func TestToolHandler_MemoryStoreWithInput(t *testing.T) {
 			name: "stamps custom source agent",
 			input: FactInput{
 				FactText:    "Durable fact preference for tea",
-				SourceAgent: "miorine",
+				SourceAgent: "agent-alpha",
 			},
-			wantAgent:  "miorine",
+			wantAgent:  "agent-alpha",
 			wantAction: "inserted",
 		},
 		{
@@ -1225,7 +1225,7 @@ func TestToolHandler_MemoryStoreWithInput(t *testing.T) {
 			name: "empty fact text returns error",
 			input: FactInput{
 				FactText:    "   ",
-				SourceAgent: "suletta",
+				SourceAgent: "agent-beta",
 			},
 			wantErr: true,
 		},
@@ -1235,7 +1235,7 @@ func TestToolHandler_MemoryStoreWithInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestMemStore()
 			ollama := &MockOllamaClient{embedding: testEmbedding(1.0)}
-			handler := NewToolHandler(&Config{Stack: "suletta"}, store, ollama)
+			handler := NewToolHandler(&Config{Stack: "agent-beta"}, store, ollama)
 			out, err := handler.MemoryStoreWithInput(context.Background(), tc.input)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MemoryStoreWithInput() err = %v, wantErr = %v", err, tc.wantErr)

@@ -227,7 +227,7 @@ database_url: 'postgres://localhost/coven_test'
 eri_url: 'http://eri.aerial'
 eri_llm_url: 'http://eri.aerial/internal/llm'
 role: 'extractor'
-stack: 'miorine'
+stack: 'agent-alpha'
 ollama:
   base_url: 'http://ollama:11434'
   model: 'all-minilm'

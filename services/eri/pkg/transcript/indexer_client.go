@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 // watermarkResponse decodes the indexer watermark endpoint payload.
@@ -37,7 +39,10 @@ type IndexerClient struct {
 // hermetic.
 func NewIndexerClient(baseURL string, httpClient *http.Client) *IndexerClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 5 * time.Second}
+		httpClient = &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, ""),
+		}
 	}
 	return &IndexerClient{baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"), httpClient: httpClient}
 }

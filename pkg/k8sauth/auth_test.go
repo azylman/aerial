@@ -10,7 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -445,8 +445,8 @@ func TestContextHelpers(t *testing.T) {
 			name:   "found in context",
 			setCtx: true,
 			identity: CallerIdentity{
-				Username:    "system:serviceaccount:default:eri-miorine",
-				CallerAgent: "miorine",
+				Username:    "system:serviceaccount:default:eri-agent-alpha",
+				CallerAgent: "agent-alpha",
 				IsService:   false,
 			},
 			wantFound: true,
@@ -501,10 +501,10 @@ func TestAuthenticate_Success(t *testing.T) {
 		{
 			name:        "authenticated agent via prefix",
 			bearerToken: "prefix-token",
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine","groups":["system:authenticated"]}}}`,
+			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha","groups":["system:authenticated"]}}}`,
 			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:default:eri-miorine",
-				CallerAgent: "miorine",
+				Username:    "system:serviceaccount:default:eri-agent-alpha",
+				CallerAgent: "agent-alpha",
 				Groups:      []string{"system:authenticated"},
 				IsService:   false,
 			},
@@ -579,10 +579,10 @@ func TestAuthenticate_CustomConfig(t *testing.T) {
 			name:        "authenticated agent via saName prefix",
 			bearerToken: "saname-prefix-token",
 			prefix:      "eri-",
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:custom:eri-suletta"}}}`,
+			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:custom:eri-agent-beta"}}}`,
 			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:custom:eri-suletta",
-				CallerAgent: "suletta",
+				Username:    "system:serviceaccount:custom:eri-agent-beta",
+				CallerAgent: "agent-beta",
 				IsService:   false,
 			},
 		},
@@ -632,7 +632,7 @@ func TestAuthenticate_CacheHit(t *testing.T) {
 
 	rt := &staticRoundTripper{
 		status: http.StatusOK,
-		body:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-suletta"}}}`,
+		body:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-beta"}}}`,
 	}
 	auth := NewAuthenticator(Config{
 		Enabled:      true,
@@ -645,8 +645,8 @@ func TestAuthenticate_CacheHit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate() unexpected error = %v", err)
 	}
-	if id.CallerAgent != "suletta" {
-		t.Fatalf("CallerAgent = %q, want %q", id.CallerAgent, "suletta")
+	if id.CallerAgent != "agent-beta" {
+		t.Fatalf("CallerAgent = %q, want %q", id.CallerAgent, "agent-beta")
 	}
 
 	rt.err = errors.New("transport should not be called on cache hit")
@@ -654,8 +654,8 @@ func TestAuthenticate_CacheHit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate() repeat cache hit error = %v", err)
 	}
-	if cachedID.CallerAgent != "suletta" {
-		t.Fatalf("cached CallerAgent = %q, want %q", cachedID.CallerAgent, "suletta")
+	if cachedID.CallerAgent != "agent-beta" {
+		t.Fatalf("cached CallerAgent = %q, want %q", cachedID.CallerAgent, "agent-beta")
 	}
 }
 
@@ -820,7 +820,7 @@ func TestAuthorize_Denied(t *testing.T) {
 		HTTPClient:   &http.Client{Transport: rt},
 	})
 
-	caller := CallerIdentity{Username: "system:serviceaccount:default:eri-miorine", CallerAgent: "miorine"}
+	caller := CallerIdentity{Username: "system:serviceaccount:default:eri-agent-alpha", CallerAgent: "agent-alpha"}
 	err := auth.Authorize(context.Background(), caller, "builds/all", "create", "aerial")
 	if err == nil {
 		t.Fatalf("expected ForbiddenError, got nil")
@@ -899,6 +899,37 @@ func TestAuthorize_Errors(t *testing.T) {
 	}
 }
 
+func TestIsValidAgentSlug(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		slug string
+		want bool
+	}{
+		{name: "single letter", slug: "a", want: true},
+		{name: "single digit", slug: "9", want: true},
+		{name: "hyphenated slug", slug: "agent-alpha-1", want: true},
+		{name: "max 63 chars", slug: strings.Repeat("a", 63), want: true},
+		{name: "empty slug", slug: "", want: false},
+		{name: "64 chars too long", slug: strings.Repeat("a", 64), want: false},
+		{name: "leading hyphen", slug: "-agent", want: false},
+		{name: "trailing hyphen", slug: "agent-", want: false},
+		{name: "uppercase rejected", slug: "Agent", want: false},
+		{name: "underscore rejected", slug: "agent_alpha", want: false},
+		{name: "dot rejected", slug: "agent.alpha", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsValidAgentSlug(tc.slug); got != tc.want {
+				t.Errorf("IsValidAgentSlug(%q) = %v, want %v", tc.slug, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveTargetAgent_Read(t *testing.T) {
 	t.Parallel()
 
@@ -911,10 +942,10 @@ func TestResolveTargetAgent_Read(t *testing.T) {
 		wantErr         bool
 	}{
 		{
-			name:            "valid configured target",
-			requestedTarget: "miorine",
+			name:            "valid agent slug target",
+			requestedTarget: "agent-alpha",
 			baseResource:    "builds",
-			wantTarget:      "miorine",
+			wantTarget:      "agent-alpha",
 			wantResource:    "builds",
 		},
 		{
@@ -932,8 +963,8 @@ func TestResolveTargetAgent_Read(t *testing.T) {
 			wantResource:    "prs",
 		},
 		{
-			name:            "unknown target fails validation",
-			requestedTarget: "unknown-agent",
+			name:            "invalid slug target fails validation",
+			requestedTarget: "Invalid_Agent",
 			baseResource:    "memories",
 			wantErr:         true,
 		},
@@ -980,14 +1011,14 @@ func TestResolveTargetAgent_WriteService(t *testing.T) {
 			wantErr:         true,
 		},
 		{
-			name:            "unknown target fails validation",
-			requestedTarget: "rogue-agent",
+			name:            "invalid slug target fails validation",
+			requestedTarget: "rogue_agent!",
 			wantErr:         true,
 		},
 		{
 			name:            "valid target escalates to all",
-			requestedTarget: "miorine",
-			wantTarget:      "miorine",
+			requestedTarget: "agent-alpha",
+			wantTarget:      "agent-alpha",
 			wantResource:    "prs/all",
 		},
 	}
@@ -1047,10 +1078,10 @@ func TestResolveTargetAgent_WriteAgent(t *testing.T) {
 		},
 		{
 			name:            "cross agent target escalates to all",
-			requestedTarget: "suletta",
+			requestedTarget: "agent-beta",
 			baseResource:    "builds",
 			verb:            "patch",
-			wantTarget:      "suletta",
+			wantTarget:      "agent-beta",
 			wantResource:    "builds/all",
 		},
 		{
@@ -1062,8 +1093,8 @@ func TestResolveTargetAgent_WriteAgent(t *testing.T) {
 			wantResource:    "memories/all",
 		},
 		{
-			name:            "unknown target fails validation",
-			requestedTarget: "non-existent-agent",
+			name:            "invalid slug target fails validation",
+			requestedTarget: "non_existent_agent",
 			baseResource:    "schedules",
 			verb:            "delete",
 			wantErr:         true,
@@ -1128,13 +1159,13 @@ func TestAuthorizeTarget(t *testing.T) {
 		{
 			name: "cross agent write forbidden",
 			caller: CallerIdentity{
-				Username:    "system:serviceaccount:default:eri-miorine",
-				CallerAgent: "miorine",
+				Username:    "system:serviceaccount:default:eri-agent-alpha",
+				CallerAgent: "agent-alpha",
 				IsService:   false,
 			},
 			baseResource:    "builds",
 			verb:            "create",
-			requestedTarget: "suletta",
+			requestedTarget: "agent-beta",
 			sarAllowed:      false,
 			sarStatus:       http.StatusOK,
 			wantErr:         true,
@@ -1282,9 +1313,9 @@ func TestMiddleware(t *testing.T) {
 			reqPath:    "/api/secure",
 			authHeader: "Bearer valid-token",
 			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
 			wantStatus: http.StatusOK,
-			wantAgent:  "miorine",
+			wantAgent:  "agent-alpha",
 		},
 	}
 
@@ -1391,9 +1422,6 @@ func TestNewAuthenticator_Defaults(t *testing.T) {
 	if auth.cfg.AgentSAPrefix == "" {
 		t.Fatalf("expected non-empty default AgentSAPrefix")
 	}
-	if len(auth.cfg.ConfiguredAgents) == 0 {
-		t.Fatalf("expected non-empty default ConfiguredAgents")
-	}
 	if auth.cfg.TokenPath == "" {
 		t.Fatalf("expected non-empty default TokenPath")
 	}
@@ -1403,12 +1431,11 @@ func TestNewAuthenticator_CustomConfig(t *testing.T) {
 	t.Parallel()
 
 	cfg := Config{
-		TokenPath:        "/custom/token",
-		AgentSAPrefix:    "custom-prefix-",
-		SAAgentAliases:   map[string]string{"custom": "aerial"},
-		ConfiguredAgents: []string{"aerial", "suletta"},
-		CacheTTL:         10 * time.Second,
-		CacheMaxEntries:  500,
+		TokenPath:       "/custom/token",
+		AgentSAPrefix:   "custom-prefix-",
+		SAAgentAliases:  map[string]string{"custom": "aerial"},
+		CacheTTL:        10 * time.Second,
+		CacheMaxEntries: 500,
 	}
 	auth := NewAuthenticator(cfg)
 
@@ -1423,8 +1450,5 @@ func TestNewAuthenticator_CustomConfig(t *testing.T) {
 	}
 	if auth.cfg.CacheMaxEntries != cfg.CacheMaxEntries {
 		t.Fatalf("CacheMaxEntries = %d, want %d", auth.cfg.CacheMaxEntries, cfg.CacheMaxEntries)
-	}
-	if !slices.Equal(auth.cfg.ConfiguredAgents, cfg.ConfiguredAgents) {
-		t.Fatalf("ConfiguredAgents = %v, want %v", auth.cfg.ConfiguredAgents, cfg.ConfiguredAgents)
 	}
 }

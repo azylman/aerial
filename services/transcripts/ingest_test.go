@@ -15,14 +15,20 @@ import (
 )
 
 type fakeBatchMessage struct {
+	subject   string
 	data      []byte
 	delivered uint64
 	termed    bool
 	termErr   error
 }
 
-func (m *fakeBatchMessage) Data() []byte                     { return m.data }
-func (*fakeBatchMessage) Subject() string                    { return "aerial.transcripts.steps.sess-1" }
+func (m *fakeBatchMessage) Data() []byte { return m.data }
+func (m *fakeBatchMessage) Subject() string {
+	if m.subject != "" {
+		return m.subject
+	}
+	return "aerial.transcripts.steps.sess-1"
+}
 func (*fakeBatchMessage) Header() nats.Header                { return nil }
 func (m *fakeBatchMessage) NumDelivered() uint64             { return m.delivered }
 func (*fakeBatchMessage) Ack() error                         { return nil }
@@ -50,6 +56,9 @@ func TestHandleBatchMessage(t *testing.T) {
 	finalSeed := finalSeedBatch("sess-1", epoch)
 	emptySession := testBatch("sess-1", epoch.Add(time.Hour), 5, 6, false, false)
 	emptySession.SessionID = "  "
+	emptyAgentBatch := testBatch("sess-1", epoch.Add(time.Hour), 5, 6, true, false)
+	emptyAgentBatch.Agent = ""
+	emptyAgentBatch.Stack = ""
 	tests := []struct {
 		name          string
 		seed          []transcriptwire.TranscriptStepBatch
@@ -61,6 +70,7 @@ func TestHandleBatchMessage(t *testing.T) {
 		wantIndexed   int
 	}{
 		{"append publishes indexed event", []transcriptwire.TranscriptStepBatch{seedBatch}, marshalBatch(t, testBatch("sess-1", epoch.Add(time.Hour), 5, 6, true, false)), nil, false, false, true, 2},
+		{"legacy subject with empty agent defaults", []transcriptwire.TranscriptStepBatch{seedBatch}, marshalBatch(t, emptyAgentBatch), nil, false, false, true, 2},
 		{"stale gap batch acks silently", []transcriptwire.TranscriptStepBatch{seedBatch}, marshalBatch(t, testBatch("sess-1", epoch.Add(-time.Hour), 5, 6, false, false)), nil, false, false, false, 0},
 		{"duplicate final re-publishes", []transcriptwire.TranscriptStepBatch{finalSeed}, marshalBatch(t, testBatch("sess-1", epoch, 0, 4, true, false)), nil, false, false, true, 0},
 		{"publish error naks", []transcriptwire.TranscriptStepBatch{seedBatch}, marshalBatch(t, testBatch("sess-1", epoch.Add(time.Hour), 5, 6, false, false)), errors.New("nats down"), true, false, false, 0},
@@ -212,5 +222,67 @@ func TestHandleBatchMessageApplyError(t *testing.T) {
 	msg := &fakeBatchMessage{data: marshalBatch(t, testBatch("sess-err", epoch, 0, 1, false, false))}
 	if err := ingester.HandleBatchMessage(context.Background(), msg); err == nil {
 		t.Errorf("expected apply error")
+	}
+}
+
+func TestHandleBatchMessageMultiAgentAndInvalidSlug(t *testing.T) {
+	t.Parallel()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		subject   string
+		agent     string
+		termErr   error
+		wantErr   string
+		wantTerm  bool
+		wantAgent string
+	}{
+		{"valid 5-token subject", "aerial.transcripts.steps.agent-alpha.sess-m", "agent-alpha", nil, "", false, "agent-alpha"},
+		{"mismatched payload agent on 5-token subject", "aerial.transcripts.steps.agent-alpha.sess-mismatch", "agent-beta", nil, "does not match subject agent", true, ""},
+		{"mismatched payload agent term error", "aerial.transcripts.steps.agent-alpha.sess-mismatch", "agent-beta", errors.New("mismatch term failed"), "mismatch term failed", true, ""},
+		{"cross-agent payload on legacy 4-token subject", "aerial.transcripts.steps.sess-cross-legacy", "agent-alpha", nil, "legacy 4-token subject cannot write agent", true, ""},
+		{"cross-agent legacy subject term error", "aerial.transcripts.steps.sess-cross-legacy", "agent-alpha", errors.New("legacy cross term failed"), "legacy cross term failed", true, ""},
+		{"invalid agent slug in 5-token subject", "aerial.transcripts.steps.rogue_agent.sess-x", "aerial", nil, "invalid agent", true, ""},
+		{"invalid agent slug in 5-token subject term error", "aerial.transcripts.steps.rogue_agent.sess-x", "aerial", errors.New("term failed"), "term failed", true, ""},
+		{"invalid agent slug in 4-token legacy payload", "aerial.transcripts.steps.sess-legacy", "invalid_slug!", nil, "invalid agent", true, ""},
+		{"invalid agent slug in 4-token legacy payload term error", "aerial.transcripts.steps.sess-legacy", "invalid_slug!", errors.New("payload term failed"), "payload term failed", true, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newTestStore(t, "aerial")
+			var published []pubsub.TranscriptsIndexedEvent
+			ingester := NewIngester(store, func(_ context.Context, _ string, _ string, data any) error {
+				if ev, ok := data.(pubsub.TranscriptsIndexedEvent); ok {
+					published = append(published, ev)
+				}
+				return nil
+			})
+			b := testBatch("sess-m", epoch, 0, 1, false, false)
+			b.Agent = tc.agent
+			b.Stack = tc.agent
+			msg := &fakeBatchMessage{
+				subject: tc.subject,
+				data:    marshalBatch(t, b),
+				termErr: tc.termErr,
+			}
+			err := ingester.HandleBatchMessage(context.Background(), msg)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+			}
+			if msg.termed != tc.wantTerm {
+				t.Errorf("termed = %v, want %v", msg.termed, tc.wantTerm)
+			}
+			if tc.wantAgent != "" {
+				if len(published) != 1 || published[0].Agent != tc.wantAgent || published[0].Stack != tc.wantAgent {
+					t.Errorf("published = %+v, want agent %q", published, tc.wantAgent)
+				}
+			}
+		})
 	}
 }

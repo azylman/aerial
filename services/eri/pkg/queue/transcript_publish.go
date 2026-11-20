@@ -32,7 +32,10 @@ func (p *WorkerPool) initTranscriptPublisher() (*transcript.Publisher, *transcri
 	if p.TranscriptPublisher == nil {
 		p.TranscriptPublisher = transcript.NewPublisher(p.stackName(), func(ctx context.Context, b transcriptwire.TranscriptStepBatch) error {
 			if bus := p.EventBus(); bus != nil {
-				return bus.Publish(ctx, pubsub.SubjectTranscriptsSteps(b.SessionID), transcriptwire.MsgID(b), b)
+				agent := p.stackName()
+				b.Agent = agent
+				b.Stack = agent
+				return bus.Publish(ctx, pubsub.SubjectTranscriptsStepsForAgent(agent, b.SessionID), transcriptwire.MsgID(b), b)
 			}
 			return fmt.Errorf("transcript publisher: event bus not configured")
 		})
@@ -44,8 +47,22 @@ func (p *WorkerPool) initTranscriptPublisher() (*transcript.Publisher, *transcri
 }
 
 func (p *WorkerPool) stackName() string {
-	if p != nil && p.appCfg != nil && p.appCfg.Current() != nil && p.appCfg.Current().Transcripts.Stack != "" {
-		return strings.TrimSpace(p.appCfg.Current().Transcripts.Stack)
+	if p != nil && p.appCfg != nil && p.appCfg.Current() != nil {
+		cfg := p.appCfg.Current()
+		if s := strings.TrimSpace(cfg.Transcripts.Stack); s != "" {
+			return s
+		}
+		if b := strings.TrimSpace(cfg.BotID); b != "" {
+			return b
+		}
+	}
+	if p != nil {
+		if a := strings.TrimSpace(p.agentName); a != "" {
+			return a
+		}
+		if a := strings.TrimSpace(p.cfg.AgentName); a != "" {
+			return a
+		}
 	}
 	return defaultStackName
 }

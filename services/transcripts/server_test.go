@@ -5,10 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
+
+func init() {
+	httpkit.WriteCountersDirFn = func(string) error { return nil }
+	httpkit.WriteMetaDirFn = func(string) error { return nil }
+}
 
 func newSeededServer(t *testing.T) *Server {
 	t.Helper()
@@ -22,6 +31,7 @@ func newSeededServer(t *testing.T) *Server {
 
 func TestServerRoutes(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name       string
 		path       string
@@ -30,7 +40,9 @@ func TestServerRoutes(t *testing.T) {
 	}{
 		{"health ok", "/health", http.StatusOK, `"ok"`},
 		{"healthz ok", "/healthz", http.StatusOK, `"ok"`},
+		{"debug coverage flush", "/debug/coverage/flush", http.StatusOK, ""},
 		{"search finds session steps", "/search?q=content", http.StatusOK, "sess-a"},
+		{"search non-matching agent empty result", "/search?agent=missing-agent&q=content", http.StatusOK, `"steps":[]`},
 		{"search query alias", "/search?query=content", http.StatusOK, `"query":"content"`},
 		{"transcripts search", "/transcripts/search?q=content", http.StatusOK, `"mode":"auto"`},
 		{"api transcripts search", "/api/transcripts/search?q=content&mode=steps", http.StatusOK, `"mode":"steps"`},
@@ -58,11 +70,13 @@ func TestServerRoutes(t *testing.T) {
 		{"thread trajectory missing thread id", "/transcripts/threads/trajectory", http.StatusBadRequest, "thread_id is required"},
 		{"thread trajectory whitespace thread id", "/transcripts/threads/%20/trajectory", http.StatusBadRequest, "thread_id is required"},
 		{"thread trajectory ok", "/transcripts/threads/th-test/trajectory", http.StatusOK, `"retrieved_facts":[]`},
-		{"search since param", "/search?q=content&since=2026-11-18T12:00:00Z", http.StatusOK, `"total":`},
 		{"search invalid since ignored", "/search?q=content&since=bad", http.StatusOK, `"total":`},
 		{"steps context negative clamped", "/steps?session=sess-a&step=1&context=-5", http.StatusOK, `"context":0`},
 		{"steps context over 20 clamped", "/steps?session=sess-a&step=1&context=50", http.StatusOK, `"context":20`},
 		{"steps empty step param", "/steps?session=sess-a&step=", http.StatusBadRequest, "step is required"},
+		{"search since rfc3339nano", "/search?q=content&since=2026-11-18T12:00:00.123456789Z", http.StatusOK, `"total":`},
+		{"stats empty result", "/stats?agent=missing-agent", http.StatusOK, `"total_sessions":0`},
+		{"watermarks empty result", "/watermarks?agent=missing-agent", http.StatusOK, `"watermarks":[]`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,5 +255,139 @@ func TestWriteJSONEncodeError(t *testing.T) {
 	writeJSON(rec, http.StatusOK, func() {})
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func newK8sAuthMock(t *testing.T) *httptest.Server {
+	t.Helper()
+	k8sMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "tokenreviews") {
+			var tr struct {
+				Spec struct {
+					Token string `json:"token"`
+				} `json:"spec"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&tr)
+			switch tr.Spec.Token {
+			case "valid-token":
+				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`))
+			case "scoped-token":
+				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`))
+			case "denied-token":
+				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-denied"}}}`))
+			case "error-token":
+				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-error"}}}`))
+			default:
+				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`))
+			}
+			return
+		}
+		if strings.Contains(r.URL.Path, "subjectaccessreviews") {
+			var sar struct {
+				Spec struct {
+					User               string `json:"user"`
+					ResourceAttributes struct {
+						Name string `json:"name"`
+					} `json:"resourceAttributes"`
+				} `json:"spec"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&sar)
+			switch sar.Spec.User {
+			case "system:serviceaccount:default:eri-error":
+				http.Error(w, "internal sar error", http.StatusInternalServerError)
+			case "system:serviceaccount:default:eri-aerial":
+				_, _ = w.Write([]byte(`{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`))
+			case "system:serviceaccount:default:eri-agent-alpha":
+				if sar.Spec.ResourceAttributes.Name == "agent-alpha" {
+					_, _ = w.Write([]byte(`{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`))
+				} else {
+					_, _ = w.Write([]byte(`{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"scoped to agent-alpha"}}`))
+				}
+			default:
+				_, _ = w.Write([]byte(`{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"access denied by test"}}`))
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(k8sMock.Close)
+	return k8sMock
+}
+
+func TestServerAuth_RBAC(t *testing.T) {
+	t.Parallel()
+
+	tokenFile := t.TempDir() + "/token"
+	_ = os.WriteFile(tokenFile, []byte("host-token"), 0o600)
+
+	k8sMock := newK8sAuthMock(t)
+
+	auth := k8sauth.NewAuthenticator(k8sauth.Config{
+		Enabled:      true,
+		TokenPath:    tokenFile,
+		APIServerURL: k8sMock.URL,
+		HTTPClient:   k8sMock.Client(),
+	})
+
+	store := newTestStore(t, "aerial")
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	if _, err := store.ApplyBatch(context.Background(), testBatch("sess-a", epoch, 0, 2, false, false)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	srv := NewServer(store, auth)
+
+	tests := []struct {
+		name       string
+		path       string
+		authHeader string
+		directMux  bool
+		wantStatus int
+	}{
+		{"health exempt without auth", "/health", "", false, http.StatusOK},
+		{"healthz exempt without auth", "/healthz", "", false, http.StatusOK},
+		{"debug coverage flush exempt without auth", "/debug/coverage/flush", "", false, http.StatusOK},
+		{"search missing auth 401", "/search?q=content", "", false, http.StatusUnauthorized},
+		{"steps missing auth 401", "/steps?session=sess-a", "", false, http.StatusUnauthorized},
+		{"stats missing auth 401", "/stats", "", false, http.StatusUnauthorized},
+		{"watermarks missing auth 401", "/watermarks", "", false, http.StatusUnauthorized},
+		{"trajectory missing auth 401", "/transcripts/threads/th-1/trajectory", "", false, http.StatusUnauthorized},
+		{"search invalid bearer 401", "/search?q=content", "Bearer bad-token", false, http.StatusUnauthorized},
+		{"search denied SAR 403", "/search?q=content", "Bearer denied-token", false, http.StatusForbidden},
+		{"steps denied SAR 403", "/steps?session=sess-a", "Bearer denied-token", false, http.StatusForbidden},
+		{"stats denied SAR 403", "/stats", "Bearer denied-token", false, http.StatusForbidden},
+		{"watermark denied SAR 403", "/watermarks", "Bearer denied-token", false, http.StatusForbidden},
+		{"trajectory denied SAR 403", "/transcripts/threads/th-1/trajectory", "Bearer denied-token", false, http.StatusForbidden},
+		{"search sar error 403", "/search?q=content", "Bearer error-token", false, http.StatusForbidden},
+		{"search invalid agent slug 400", "/search?agent=invalid_slug!&q=content", "Bearer valid-token", false, http.StatusBadRequest},
+		{"search scoped agent fallback 200", "/search?q=content", "Bearer scoped-token", false, http.StatusOK},
+		{"search scoped agent cross-target denied 403", "/search?agent=aerial&q=content", "Bearer scoped-token", false, http.StatusForbidden},
+		{"direct mux missing caller 401", "/search?q=content", "", true, http.StatusUnauthorized},
+		{"search allowed 200", "/search?q=content", "Bearer valid-token", false, http.StatusOK},
+		{"steps allowed 200", "/steps?session=sess-a", "Bearer valid-token", false, http.StatusOK},
+		{"stats allowed 200", "/stats", "Bearer valid-token", false, http.StatusOK},
+		{"watermark allowed 200", "/watermark?session_id=sess-a", "Bearer valid-token", false, http.StatusOK},
+		{"watermarks allowed 200", "/watermarks", "Bearer valid-token", false, http.StatusOK},
+		{"trajectory allowed 200", "/transcripts/threads/th-1/trajectory", "Bearer valid-token", false, http.StatusOK},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			rec := httptest.NewRecorder()
+			if tc.directMux {
+				srv.mux.ServeHTTP(rec, req)
+			} else {
+				srv.Handler().ServeHTTP(rec, req)
+			}
+			if rec.Code != tc.wantStatus {
+				t.Errorf("GET %s status = %d, want %d (body: %s)", tc.path, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
 	}
 }
