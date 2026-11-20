@@ -29,6 +29,12 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	}
 	normHeadSHA := strings.TrimSpace(headSHA)
 	if updated {
+		// Authoritative: the Restate PRObject decides the republish and the
+		// Postgres projection is never consulted. The atomic transition
+		// above stays the guard; only the publish verdict moves to Restate.
+		if s.restateAuthoritative() {
+			return s.publishConflictAuthoritative(ctx, repo, prNumber, branch, headSHA, targetID)
+		}
 		// Journal before the legacy publish and conflict mark: a journal
 		// failure leaves nothing recorded, so the redelivery retries the
 		// journal instead of returning early via WasConflictPublished.
@@ -62,6 +68,11 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	if tid == "" {
 		return false, nil
 	}
+	// Authoritative: the Restate PRObject dedupes the repeat by recorded
+	// conflict SHA and the projection is never consulted.
+	if s.restateAuthoritative() {
+		return s.publishConflictAuthoritative(ctx, repo, prNumber, branch, headSHA, tid)
+	}
 	// Journal before the publish check: the journal is the ordered record
 	// and Restate dedups the repeat.
 	if err := s.routePREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
@@ -69,8 +80,9 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	}); err != nil {
 		return false, err
 	}
-	// Suppress the duplicate legacy publish when the projection already
-	// carries this head SHA; a new SHA still publishes.
+	// Projection-safe (legacy fallback only): suppresses the duplicate
+	// legacy publish when the projection already carries this head SHA; a
+	// new SHA still publishes. Never runs when authoritative.
 	if normHeadSHA != "" {
 		if lc, lcErr := s.registry.LoadPRBuildLifecycle(ctx, repo, prNumber); lcErr == nil && strings.EqualFold(strings.TrimSpace(lc.HeadSHA), normHeadSHA) {
 			return true, nil

@@ -394,6 +394,9 @@ func TestAuthoritativeDeployJournalSurvivesRetry(t *testing.T) {
 func TestAuthoritativeConflictJournalSurvivesRetry(t *testing.T) {
 	t.Parallel()
 
+	// The flap 500 commits nothing, so the retry must re-resolve and re-ack;
+	// Restate dedups only committed effects: the failed resolve plus the
+	// retry's resolve and publish-recorded ack.
 	tests := []struct {
 		name            string
 		conflictUpdated bool
@@ -422,8 +425,8 @@ func TestAuthoritativeConflictJournalSurvivesRetry(t *testing.T) {
 			if err != nil || !handled {
 				t.Fatalf("second transitionRegisteredConflict() handled = %v, err = %v, want success", handled, err)
 			}
-			if got := calls.Load(); got != 2 {
-				t.Fatalf("journal calls = %d, want 2", got)
+			if got := calls.Load(); got != 3 {
+				t.Fatalf("journal calls = %d, want 3", got)
 			}
 			assertPREvents(t, bus, []wantPREvent{{Event: "conflict", PRNumber: 42, HeadSHA: "sha-conflict", Status: "conflict"}})
 		})
@@ -654,29 +657,38 @@ func TestAuthoritativeDeploySuppressHitStillJournals(t *testing.T) {
 	}
 }
 
+// The Restate PRObject verdict is the sole authority for the authoritative
+// conflict republish: a deduped verdict suppresses the republish, and the
+// conflict projection never suppresses it.
 func TestAuthoritativeConflictSuppressHitStillJournals(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		seeded bool
-		want   []wantPREvent
+		name          string
+		seeded        bool
+		decisionBody  string
+		wantDecision  int64
+		wantAck       int64
+		wantPublishes int
 	}{
-		{name: "fresh conflict journals and publishes", seeded: false, want: []wantPREvent{{Event: "conflict", PRNumber: 42, HeadSHA: "sha-conflict", Status: "conflict"}}},
-		{name: "projection-known conflict journals without republish", seeded: true, want: nil},
+		{name: "fresh conflict resolves, publishes, and acks", decisionBody: conflictPublishBody, wantDecision: 1, wantAck: 1, wantPublishes: 1},
+		{name: "deduped verdict suppresses republish", decisionBody: conflictDedupedBody, wantDecision: 1},
+		{name: "projection-known conflict still publishes on publish verdict", seeded: true, decisionBody: conflictPublishBody, wantDecision: 1, wantAck: 1, wantPublishes: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calls atomic.Int64
-			capture := cutoverTestServer(t, 202, &calls)
+			var decisionCalls atomic.Int64
+			var ackCalls atomic.Int64
+			var recoveryCalls atomic.Int64
+			capture := conflictRecoveryServer(t, &decisionCalls, &ackCalls, &recoveryCalls, 202, tc.decisionBody, 202, 0, ciCleanBody)
 			t.Cleanup(capture.Close)
 			cfg := lifecycleCfg()
 			cfg.RestateAuthoritative = true
 			cfg.RestateURL = capture.URL
 			bus := &mockEventBus{}
-			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
+			reg := &mockPRRegistry{conflictTargetID: lifecycleTargetID, resolveTargetID: lifecycleTargetID}
 			srv := newLifecycleServer(cfg, bus, reg, &mockOutboundDispatcher{})
 			if tc.seeded {
 				reg.buildLifecycle = PRBuildLifecycle{Status: prConflict, HeadSHA: "sha-conflict"}
@@ -685,10 +697,15 @@ func TestAuthoritativeConflictSuppressHitStillJournals(t *testing.T) {
 			if err != nil || !handled {
 				t.Fatalf("transitionRegisteredConflict() handled = %v, err = %v, want success", handled, err)
 			}
-			if got := calls.Load(); got != 1 {
-				t.Fatalf("journal calls = %d, want 1", got)
+			if got := decisionCalls.Load(); got != tc.wantDecision {
+				t.Fatalf("decision calls = %d, want %d", got, tc.wantDecision)
 			}
-			assertPREvents(t, bus, tc.want)
+			if got := ackCalls.Load(); got != tc.wantAck {
+				t.Fatalf("ack calls = %d, want %d", got, tc.wantAck)
+			}
+			if got := countConflictPublishes(bus); got != tc.wantPublishes {
+				t.Fatalf("conflict publishes = %d, want %d", got, tc.wantPublishes)
+			}
 		})
 	}
 }

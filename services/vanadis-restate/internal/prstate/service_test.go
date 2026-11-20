@@ -84,7 +84,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
+			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
 			wantRepoHandler: "HandleFanout,HandleKustomizationStatus,HandleMainPush,ResolvePRBySHA",
 		},
 	}
@@ -209,6 +209,166 @@ func TestPRObjectService_DarkDispositions(t *testing.T) {
 			}
 			if rec.setCalled != tc.wantSet {
 				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
+			}
+		})
+	}
+}
+
+// TestPRObjectService_ConflictResolve pins the conflict-republish verdict
+// wiring: fresh and new SHAs publish, recorded SHAs dedupe, terminal
+// states absorb, and the resolve never persists. K/V failures surface.
+func TestPRObjectService_ConflictResolve(t *testing.T) {
+	t.Parallel()
+	recordedState := NewPRState("aerial", 101)
+	recordedState.MarkConflictPublished("abc123")
+	terminalState := NewPRState("aerial", 101)
+	terminalState.MarkTerminal(TerminalMerged)
+	tests := []struct {
+		name              string
+		existing          *PRState
+		evHead            string
+		failGet           bool
+		wantShouldPublish bool
+		wantDeduped       bool
+		wantErr           bool
+	}{
+		{name: "fresh state publishes", evHead: "abc123", wantShouldPublish: true},
+		{name: "new sha publishes after recorded publish", existing: recordedState, evHead: "def456", wantShouldPublish: true},
+		{name: "recorded sha dedupes", existing: recordedState, evHead: "abc123", wantDeduped: true},
+		{name: "terminal absorbs without publish", existing: terminalState, evHead: "abc123"},
+		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mc *mocks.MockContext
+			rec := &stateCapture[*PRState]{}
+			if tc.failGet {
+				mc = newStateErrorMock(t)
+			} else {
+				mc, rec = newStateMock(t, tc.existing)
+			}
+			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "conflict_detected"}
+			got, err := NewPRObjectService().HandleConflictDetected(restate.WithMockContext(mc), ev)
+			if tc.wantErr && err == nil {
+				t.Fatal("HandleConflictDetected err = nil, want kv error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("HandleConflictDetected err = %v, want nil", err)
+			}
+			if !tc.wantErr && (got.ShouldPublish != tc.wantShouldPublish || got.Deduped != tc.wantDeduped) {
+				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/%v", got.ShouldPublish, got.Deduped, tc.wantShouldPublish, tc.wantDeduped)
+			}
+			if rec.setCalled {
+				t.Fatal("resolve persisted state, want no record")
+			}
+		})
+	}
+}
+
+// TestPRObjectService_ConflictPublishedAck pins the publish-recorded ack
+// wiring: fresh publishes record and persist, recorded SHAs re-ack
+// idempotently, terminal states absorb without persisting. K/V failures
+// surface.
+func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
+	t.Parallel()
+	recordedSame := NewPRState("aerial", 101)
+	recordedSame.MarkConflictPublished("abc123")
+	recordedNew := NewPRState("aerial", 101)
+	recordedNew.MarkConflictPublished("abc123")
+	terminalState := NewPRState("aerial", 101)
+	terminalState.MarkTerminal(TerminalMerged)
+	tests := []struct {
+		name          string
+		existing      *PRState
+		evHead        string
+		failGet       bool
+		wantRecorded  bool
+		wantDeduped   bool
+		wantSet       bool
+		wantErr       bool
+		wantPublished string
+	}{
+		{name: "fresh publish records and persists", evHead: "abc123", wantRecorded: true, wantSet: true, wantPublished: "abc123"},
+		{name: "recorded publish re-acks idempotent", existing: recordedSame, evHead: "abc123", wantRecorded: true, wantDeduped: true, wantSet: true, wantPublished: "abc123"},
+		{name: "new sha overwrites and persists", existing: recordedNew, evHead: "def456", wantRecorded: true, wantSet: true, wantPublished: "def456"},
+		{name: "terminal absorbs without persisting", existing: terminalState, evHead: "abc123"},
+		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mc *mocks.MockContext
+			rec := &stateCapture[*PRState]{}
+			if tc.failGet {
+				mc = newStateErrorMock(t)
+			} else {
+				mc, rec = newStateMock(t, tc.existing)
+			}
+			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "conflict_detected"}
+			got, err := NewPRObjectService().HandleConflictPublished(restate.WithMockContext(mc), ev)
+			if tc.wantErr && err == nil {
+				t.Fatal("HandleConflictPublished err = nil, want kv error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("HandleConflictPublished err = %v, want nil", err)
+			}
+			if !tc.wantErr && (got.Recorded != tc.wantRecorded || got.Deduped != tc.wantDeduped) {
+				t.Fatalf("Recorded/Deduped = %v/%v, want %v/%v", got.Recorded, got.Deduped, tc.wantRecorded, tc.wantDeduped)
+			}
+			if rec.setCalled != tc.wantSet {
+				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
+			}
+			if tc.wantSet && rec.saved.ConflictPublished != tc.wantPublished {
+				t.Fatalf("saved ConflictPublished = %q, want %q", rec.saved.ConflictPublished, tc.wantPublished)
+			}
+		})
+	}
+}
+
+// TestPRObjectService_CIRecoveryResolve pins the CI-recovery verdict wiring:
+// recorded failures recover, clean states stay clean, and the resolve never
+// persists. K/V failures surface.
+func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
+	t.Parallel()
+	failedState := NewPRState("aerial", 101)
+	failedState.RecordFailedCISHA("abc123")
+	tests := []struct {
+		name       string
+		existing   *PRState
+		evHead     string
+		failGet    bool
+		wantFailed bool
+		wantErr    bool
+	}{
+		{name: "recorded failure recovers", existing: failedState, evHead: "abc123", wantFailed: true},
+		{name: "sha mismatch stays clean", existing: failedState, evHead: "def456"},
+		{name: "clean state stays clean", evHead: "abc123"},
+		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mc *mocks.MockContext
+			rec := &stateCapture[*PRState]{}
+			if tc.failGet {
+				mc = newStateErrorMock(t)
+			} else {
+				mc, rec = newStateMock(t, tc.existing)
+			}
+			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "check_success"}
+			got, err := NewPRObjectService().HandleCIRecovery(restate.WithMockContext(mc), ev)
+			if tc.wantErr && err == nil {
+				t.Fatal("HandleCIRecovery err = nil, want kv error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("HandleCIRecovery err = %v, want nil", err)
+			}
+			if !tc.wantErr && got.CIFailed != tc.wantFailed {
+				t.Fatalf("CIFailed = %v, want %v", got.CIFailed, tc.wantFailed)
+			}
+			if rec.setCalled {
+				t.Fatal("resolve persisted state, want no record")
 			}
 		})
 	}

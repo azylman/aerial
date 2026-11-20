@@ -95,6 +95,27 @@ func (s *PRState) GetFailedCISHA() (string, bool) {
 	return s.FailedCISHA, true
 }
 
+// IsCIFailedForSHA reports whether the PR is CI-failed for the given head
+// SHA from the Restate-owned failure slots. It mirrors the projection's
+// ci_failed status: a recorded failed-CI SHA or any active failed check run
+// on the queried head. An empty query matches any recorded failure; a zero
+// SHA never matches.
+func (s *PRState) IsCIFailedForSHA(headSHA string) bool {
+	if s == nil || s.PRNumber <= 0 {
+		return false
+	}
+	if clean := strings.TrimSpace(headSHA); clean != "" {
+		if IsZeroSHA(clean) {
+			return false
+		}
+		if s.HasFailedCISHA(clean) {
+			return true
+		}
+		return s.HasActiveFailedCheckRuns(clean)
+	}
+	return s.HasFailedCISHA("") || s.HasActiveFailedCheckRuns(s.Checks.HeadSHA)
+}
+
 // ClearFailedCISHA clears all failure, alert, and conflict tracking for the
 // PR: failed, non-roborev, cancelled, granular check runs, collaborator
 // alerted/conflict, and conflict-published SHAs. UpdatedForMain survives,

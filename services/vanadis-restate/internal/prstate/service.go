@@ -106,9 +106,56 @@ func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev 
 	return s.applyPREvent(ctx, ev)
 }
 
-// HandleConflictDetected applies one conflict-detected event dark.
-func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectContext, ev PREvent) error {
-	return s.applyPREvent(ctx, ev)
+// HandleConflictDetected resolves the conflict-republish verdict without
+// recording anything, so a publish failure leaves the next invocation
+// returning ShouldPublish again. The verdict is the sole authority for the
+// synapse republish; only HandleConflictPublished completes the dispatch.
+func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectContext, ev PREvent) (ConflictDispatchDecision, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return ConflictDispatchDecision{}, err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	return ResolveConflictDispatchDecision(st, ev)
+}
+
+// HandleConflictPublished records one confirmed conflict publish for the
+// event head SHA. The ack is idempotent and the commit point for the
+// dispatch; an ack failure surfaces so redelivery re-resolves and
+// republishes instead of losing the signal.
+func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev PREvent) (ConflictPublishedOutcome, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return ConflictPublishedOutcome{}, err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	out, recErr := RecordConflictPublished(st, ev)
+	if recErr != nil {
+		return out, recErr
+	}
+	if out.Disposition == DispositionApply {
+		restate.Set(ctx, s.stateKey, st)
+	}
+	return out, nil
+}
+
+// HandleCIRecovery resolves whether the PR is CI-failed for the event head
+// SHA from the Restate-owned failure slots. The resolve is a pure read and
+// records nothing, so it never disturbs the failure state a later success
+// event clears.
+func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectContext, ev PREvent) (CIRecoveryDecision, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return CIRecoveryDecision{}, err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	return ResolveCIRecovery(st, ev)
 }
 
 // HandleConflictResolved applies one conflict-resolved event dark.

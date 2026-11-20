@@ -41,8 +41,10 @@ var prHandlers = map[string]bool{
 	"HandleCheckFailed":            true,
 	"HandleCheckPassed":            true,
 	"HandleCheckRerunRequested":    true,
+	"HandleCIRecovery":             true,
 	"HandleCollaboratorAlert":      true,
 	"HandleConflictDetected":       true,
+	"HandleConflictPublished":      true,
 	"HandleConflictResolved":       true,
 	"HandleMerged":                 true,
 	"HandleClosed":                 true,
@@ -108,6 +110,25 @@ type DeployDispatchDecision struct {
 	ShouldPublish bool   `json:"should_publish"`
 	Deduped       bool   `json:"deduped"`
 	EffectKey     string `json:"effect_key"`
+}
+
+// ConflictDispatchDecision mirrors the Restate PRObject conflict verdict:
+// the sole authority for whether synapse publishes a conflict republish
+// when restate_authoritative is on. JSON tags match the PRObject handler
+// wire format exactly; a decode failure surfaces so the caller retries.
+type ConflictDispatchDecision struct {
+	Disposition   string `json:"disposition"`
+	ShouldPublish bool   `json:"should_publish"`
+	Deduped       bool   `json:"deduped"`
+}
+
+// CIRecoveryDecision mirrors the Restate PRObject CI-recovery verdict: the
+// sole authority for whether the PR is CI-failed for the event head SHA
+// when restate_authoritative is on. JSON tags match the PRObject handler
+// wire format exactly; a decode failure surfaces so the caller retries.
+type CIRecoveryDecision struct {
+	Disposition string `json:"disposition"`
+	CIFailed    bool   `json:"cifailed"`
 }
 
 // RepoObjectKey returns the Restate key for a repo object: repo.

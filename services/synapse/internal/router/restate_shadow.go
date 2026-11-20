@@ -243,6 +243,7 @@ func mismatchSHA(projected, live string) bool {
 // shadowDeployStartedSHAs best-effort resolves SHAs for the deferred
 // deploy_started event. The read is gated on shadow mode so the disabled
 // path keeps its prior zero-extra-read cost; a miss leaves SHAs empty.
+// Projection-safe: SHA lookup index for event addressing, never a decision.
 func (s *RouterServer) shadowDeployStartedSHAs(ctx context.Context, repo string, prNumber int) (headSHA, mergeSHA string) {
 	if r := s.restateShadow(); !r.Enabled() {
 		return "", ""
@@ -260,7 +261,8 @@ func (s *RouterServer) shadowDeployStartedSHAs(ctx context.Context, repo string,
 // shadowPreSyncConflict snapshots whether the projection still shows a PR in
 // conflict before the legacy synchronize transition clears it. The read is
 // gated on the shadow reporter: when shadow mode is off it returns false
-// without touching the registry.
+// without touching the registry. Projection-safe: shadow-mode divergence
+// observation only, never gates a publish or transition.
 func (s *RouterServer) shadowPreSyncConflict(ctx context.Context, repo string, prNumber int) bool {
 	if r := s.restateShadow(); !r.Enabled() || s == nil || s.registry == nil || prNumber <= 0 {
 		return false

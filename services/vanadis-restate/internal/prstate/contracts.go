@@ -229,7 +229,9 @@ type PRObject interface {
 	HandleCheckPassed(ctx context.Context, ev PREvent) error
 	HandleCheckRerunRequested(ctx context.Context, ev PREvent) error
 	HandleCollaboratorAlert(ctx context.Context, ev PREvent) error
-	HandleConflictDetected(ctx context.Context, ev PREvent) error
+	HandleConflictDetected(ctx context.Context, ev PREvent) (ConflictDispatchDecision, error)
+	HandleConflictPublished(ctx context.Context, ev PREvent) (ConflictPublishedOutcome, error)
+	HandleCIRecovery(ctx context.Context, ev PREvent) (CIRecoveryDecision, error)
 	HandleConflictResolved(ctx context.Context, ev PREvent) error
 	HandleMerged(ctx context.Context, ev PREvent) error
 	HandleClosed(ctx context.Context, ev PREvent) error
@@ -261,13 +263,23 @@ func (PRObjectStub) HandleCheckFailed(context.Context, PREvent) error         { 
 func (PRObjectStub) HandleCheckPassed(context.Context, PREvent) error         { return nil }
 func (PRObjectStub) HandleCheckRerunRequested(context.Context, PREvent) error { return nil }
 func (PRObjectStub) HandleCollaboratorAlert(context.Context, PREvent) error   { return nil }
-func (PRObjectStub) HandleConflictDetected(context.Context, PREvent) error    { return nil }
-func (PRObjectStub) HandleConflictResolved(context.Context, PREvent) error    { return nil }
-func (PRObjectStub) HandleMerged(context.Context, PREvent) error              { return nil }
-func (PRObjectStub) HandleClosed(context.Context, PREvent) error              { return nil }
-func (PRObjectStub) HandleReopened(context.Context, PREvent) error            { return nil }
-func (PRObjectStub) HandleReadinessRetry(context.Context, PREvent) error      { return nil }
-func (PRObjectStub) HandleRolloutProgress(context.Context, PREvent) error     { return nil }
+func (PRObjectStub) HandleConflictDetected(context.Context, PREvent) (ConflictDispatchDecision, error) {
+	return ConflictDispatchDecision{}, nil
+}
+
+func (PRObjectStub) HandleConflictPublished(context.Context, PREvent) (ConflictPublishedOutcome, error) {
+	return ConflictPublishedOutcome{}, nil
+}
+
+func (PRObjectStub) HandleCIRecovery(context.Context, PREvent) (CIRecoveryDecision, error) {
+	return CIRecoveryDecision{}, nil
+}
+func (PRObjectStub) HandleConflictResolved(context.Context, PREvent) error { return nil }
+func (PRObjectStub) HandleMerged(context.Context, PREvent) error           { return nil }
+func (PRObjectStub) HandleClosed(context.Context, PREvent) error           { return nil }
+func (PRObjectStub) HandleReopened(context.Context, PREvent) error         { return nil }
+func (PRObjectStub) HandleReadinessRetry(context.Context, PREvent) error   { return nil }
+func (PRObjectStub) HandleRolloutProgress(context.Context, PREvent) error  { return nil }
 func (PRObjectStub) HandleDeployDispatched(context.Context, PREvent) (DeployDispatchDecision, error) {
 	return DeployDispatchDecision{}, nil
 }
