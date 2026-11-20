@@ -233,6 +233,9 @@ type mockPRRegistry struct {
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
 
+	deployedRes bool
+	deployedErr error
+
 	err error
 }
 
@@ -299,6 +302,8 @@ func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber
 		return "", m.err
 	}
 	m.syncCalls = append(m.syncCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA})
+	// Mirror the projection: a successful sync leaves the PR open on this head SHA.
+	m.buildLifecycle = PRBuildLifecycle{Status: prOpen, HeadSHA: headSHA}
 	return m.syncTargetID, nil
 }
 
@@ -315,7 +320,14 @@ func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo stri
 		return "", false, err
 	}
 	m.ciFailedCalls = append(m.ciFailedCalls, prCall{repo: repo, prNumber: prNumber})
-	return m.ciFailedTargetID, popBoolResult(&m.ciFailedResults, m.ciFailedUpdated), nil
+	updated := popBoolResult(&m.ciFailedResults, m.ciFailedUpdated)
+	if !updated {
+		// Mirror the projection: a non-matching UPDATE returns no row, so
+		// no target. Callers fall back to registry/headless resolution.
+		return "", false, nil
+	}
+	m.buildLifecycle.Status = prCIFailed
+	return m.ciFailedTargetID, true, nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
@@ -323,6 +335,9 @@ func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, 
 		return "", 0, false, err
 	}
 	m.ciFailedBySHACalls = append(m.ciFailedBySHACalls, prCall{repo: repo, headSHA: headSHA})
+	if m.ciFailedBySHAUpdated {
+		m.buildLifecycle = PRBuildLifecycle{Status: prCIFailed, HeadSHA: headSHA}
+	}
 	return m.ciFailedBySHATarget, m.ciFailedBySHAPRNum, m.ciFailedBySHAUpdated, nil
 }
 
@@ -1264,6 +1279,9 @@ func (*mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[stri
 	return map[string]any{}, nil
 }
 
-func (*mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error) {
-	return false, nil
+func (m *mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	return m.deployedRes, m.deployedErr
 }

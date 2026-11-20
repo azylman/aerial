@@ -1082,7 +1082,7 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 		prNumber       int
 		targetID       string
 		transitioned   bool
-		preDispatched  bool
+		presetDeployed bool
 		busErr         error
 		promptErr      error
 		updateErr      error
@@ -1100,7 +1100,7 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 			wantErrSub:   "bus rollout_updated fail",
 		},
 		{
-			name:         "deploy_success publish error propagates and does not record dispatch",
+			name:         "deploy_success publish error propagates",
 			prNumber:     42,
 			transitioned: true,
 			busErr:       errors.New("bus deploy_success fail"),
@@ -1124,10 +1124,10 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 			wantClearCalls: 1,
 		},
 		{
-			name:           "already dispatched deploy_success skips publish and prompt but clears pending",
+			name:           "deployed projection suppresses duplicate deploy_success but clears pending",
 			meta:           map[string]any{"deploy_success_pending": true},
 			prNumber:       42,
-			preDispatched:  true,
+			presetDeployed: true,
 			transitioned:   false,
 			wantNoEvents:   true,
 			wantMarkCalls:  0,
@@ -1151,6 +1151,7 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 				resolveTargetID:       "100000000000000001",
 				markKustomizationsRes: tc.transitioned,
 				updatePRStatusErr:     tc.updateErr,
+				deployedRes:           tc.presetDeployed,
 			}
 			disp := &mockOutboundDispatcher{promptErr: tc.promptErr}
 			srv := newTestRouter(Config{}, nil, reg, disp, bus)
@@ -1161,9 +1162,6 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 				HeadSHA:  "sha123",
 				TargetID: tc.targetID,
 				Metadata: tc.meta,
-			}
-			if tc.preDispatched {
-				srv.recordDeploySuccessDispatched(pr.Repo, "aerial-core", pr.HeadSHA, pr.PRNumber)
 			}
 			err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-core")
 			assertExpectedErrorSubstring(t, err, tc.wantErrSub)
@@ -1179,8 +1177,8 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 				assertNoPublishedOrPromptCalls(t, bus, disp)
 			}
 			if tc.wantDispatched {
-				if !srv.deployDedup.WasDispatched("azylman/aerial", "", "", 42) {
-					t.Errorf("expected deploy success recorded in dispatch map")
+				if len(bus.publishedPREvents) == 0 && len(disp.PromptCalls()) == 0 && len(disp.DirectMessageCalls()) == 0 {
+					t.Errorf("expected deploy success publish or prompt, got none")
 				}
 			}
 		})

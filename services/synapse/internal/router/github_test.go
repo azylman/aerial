@@ -160,7 +160,6 @@ type ghEventCase struct {
 	autoUpdateAuthors       []string
 	nonDefaultOwner         bool
 	botID                   string
-	wantNoCommitSHACache    bool
 	wantErr                 bool
 	authoritative           bool
 	wantRepo                string
@@ -205,14 +204,20 @@ func newProcessGitHubEventMockServer(ghPaths *sync.Map) *httptest.Server {
 		ghPaths.Store(r.URL.Path, true)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case strings.Contains(r.URL.Path, "/commits/commit-fallback/pulls"):
-			_, _ = w.Write([]byte(`[{"number": 777, "state": "open", "head": {"ref": "feat/fallback", "sha": "commit-fallback"}}]`))
-		case strings.Contains(r.URL.Path, "/commits/wf-fallback/pulls"):
-			_, _ = w.Write([]byte(`[{"number": 888, "state": "open", "head": {"ref": "feat/wf-branch", "sha": "wf-fallback"}}]`))
-		case strings.Contains(r.URL.Path, "/commits/squash123/pulls"):
-			_, _ = w.Write([]byte(`[{"number": 999, "state": "closed", "head": {"ref": "feat/squash", "sha": "squash123"}}]`))
-		case strings.Contains(r.URL.Path, "/commits/pushsha999/pulls"):
-			_, _ = w.Write([]byte(`[{"number": 522, "state": "closed"}]`))
+		case strings.Contains(r.URL.Path, "/commits/") && strings.HasSuffix(r.URL.Path, "/pulls"):
+			bodies := map[string]string{
+				"commit-fallback": `[{"number": 777, "state": "open", "head": {"ref": "feat/fallback", "sha": "commit-fallback"}}]`,
+				"wf-fallback":     `[{"number": 888, "state": "open", "head": {"ref": "feat/wf-branch", "sha": "wf-fallback"}}]`,
+				"squash123":       `[{"number": 999, "state": "closed", "head": {"ref": "feat/squash", "sha": "squash123"}}]`,
+				"pushsha999":      `[{"number": 522, "state": "closed"}]`,
+				"forksha711":      `[{"number": 711, "state": "open", "head": {"ref": "fork/patch-1", "sha": "forksha711"}}]`,
+			}
+			sha := strings.TrimSuffix(r.URL.Path[strings.LastIndex(r.URL.Path, "/commits/")+len("/commits/"):], "/pulls")
+			if body, ok := bodies[sha]; ok {
+				_, _ = w.Write([]byte(body))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case strings.Contains(r.URL.Path, "/pulls/543/update-branch"):
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			_, _ = w.Write([]byte(`{"message": "merge conflict between base and head"}`))
@@ -464,8 +469,7 @@ var prAndPushTestCases = []ghEventCase{
 		botID:    "aerial",
 		reg:      &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/suletta"},
 		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165", wantSource: "pull_request_payload",
-		wantEnsureCalls:      0,
-		wantNoCommitSHACache: true,
+		wantEnsureCalls: 0,
 	},
 	{
 		name: "pull_request synchronize foreign bot_id skips sync update and commit sha caching", event: "pull_request", delivery: "del-pr-foreign-sync",
@@ -473,9 +477,8 @@ var prAndPushTestCases = []ghEventCase{
 		botID:    "aerial",
 		reg:      &mockPRRegistry{syncTargetID: "100000000000000002", resolveTargetID: "100000000000000002", resolveBranch: "feat/suletta"},
 		wantRepo: "azylman/aerial", wantAction: "synchronize", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165sync", wantSource: "pull_request_payload",
-		wantSyncCalls:        0,
-		wantSyncEvents:       0,
-		wantNoCommitSHACache: true,
+		wantSyncCalls:  0,
+		wantSyncEvents: 0,
 	},
 	{
 		name: "pull_request closed unmerged foreign bot_id skips closed transition", event: "pull_request", delivery: "del-pr-foreign-closed",
@@ -483,8 +486,7 @@ var prAndPushTestCases = []ghEventCase{
 		botID:    "aerial",
 		reg:      &mockPRRegistry{closedTargetID: "100000000000000002"},
 		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165closed", wantSource: "pull_request_payload",
-		wantClosedCalls:      0,
-		wantNoCommitSHACache: true,
+		wantClosedCalls: 0,
 	},
 	{
 		name: "pull_request closed merged foreign bot_id skips merged transition", event: "pull_request", delivery: "del-pr-foreign-merged",
@@ -492,8 +494,7 @@ var prAndPushTestCases = []ghEventCase{
 		botID:    "aerial",
 		reg:      &mockPRRegistry{mergedTargetID: "100000000000000002"},
 		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165merged", wantMergeSHA: "foreignmergesha2165", wantSource: "pull_request_payload",
-		wantMergedCalls:      0,
-		wantNoCommitSHACache: true,
+		wantMergedCalls: 0,
 	},
 }
 
@@ -715,11 +716,6 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	}
 	assertEventResult(t, tc, res, &ghPaths)
 	assertEventBusCalls(t, tc, activeBus)
-	if tc.wantNoCommitSHACache && tc.wantHeadSHA != "" {
-		if _, _, ok := srv.lookupCommitSHAPR(tc.wantRepo, tc.wantHeadSHA); ok {
-			t.Errorf("commit SHA %q unexpectedly cached in ghState", tc.wantHeadSHA)
-		}
-	}
 }
 
 func assertDeployFailedEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {

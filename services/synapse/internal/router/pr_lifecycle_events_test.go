@@ -670,7 +670,6 @@ type prAutoMergeDisabledTestCase struct {
 	registryTargetID      string
 	wantConflictPublished int
 	wantErr               bool
-	wantFailedNonRoboRev  string
 }
 
 func newAutoMergeDisabledMockServer(tc prAutoMergeDisabledTestCase) *httptest.Server {
@@ -744,14 +743,6 @@ func runPRAutoMergeDisabledCase(ctx context.Context, t *testing.T, tc prAutoMerg
 	if conflictCount != tc.wantConflictPublished {
 		t.Fatalf("published conflict events = %d, want %d", conflictCount, tc.wantConflictPublished)
 	}
-	if tc.wantFailedNonRoboRev != "" {
-		val, ok := srv.GHState().GetNonRoboRevFailedSHA(tc.resRepo, tc.resPRNum)
-		if !ok || val != tc.wantFailedNonRoboRev {
-			t.Errorf("nonRoboRevFailedSHAs[%s#%d] = %v (ok=%v), want %q", tc.resRepo, tc.resPRNum, val, ok, tc.wantFailedNonRoboRev)
-		}
-	} else if val, ok := srv.GHState().GetNonRoboRevFailedSHA(tc.resRepo, tc.resPRNum); ok {
-		t.Errorf("unexpected nonRoboRevFailedSHAs entry: %v", val)
-	}
 }
 
 func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
@@ -775,7 +766,6 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			registryUpdated:       true,
 			registryTargetID:      "100000000000000001",
 			wantConflictPublished: 1,
-			wantFailedNonRoboRev:  "sha102",
 		},
 		{
 			name:                  "payload mergeable false with empty state is merge conflict without API lookup",
@@ -788,7 +778,6 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			registryUpdated:       true,
 			registryTargetID:      "100000000000000001",
 			wantConflictPublished: 1,
-			wantFailedNonRoboRev:  "sha103",
 		},
 		{
 			name:                  "payload mergeable true with empty state is clean and ignored",
@@ -866,7 +855,6 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			payloadMergeableState: "dirty",
 			registryUpdated:       false,
 			wantConflictPublished: 0,
-			wantFailedNonRoboRev:  "sha115",
 		},
 	}
 

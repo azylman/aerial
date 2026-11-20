@@ -51,9 +51,6 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		}); err != nil {
 			return false, err
 		}
-		if normHeadSHA != "" {
-			s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
-		}
 		return true, nil
 	}
 	tid := targetID
@@ -65,17 +62,19 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	if tid == "" {
 		return false, nil
 	}
-	// Journal even on a WasConflictPublished hit: a pre-flip mark proves
-	// the legacy publish happened, not that Restate journaled it.
-	// Restate dedups the repeat; the check below still skips the
-	// duplicate legacy publish.
+	// Journal before the publish check: the journal is the ordered record
+	// and Restate dedups the repeat.
 	if err := s.routePREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
 		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
 	}); err != nil {
 		return false, err
 	}
-	if s.ghState.WasConflictPublished(repo, prNumber, normHeadSHA) {
-		return true, nil
+	// Suppress the duplicate legacy publish when the projection already
+	// carries this head SHA; a new SHA still publishes.
+	if normHeadSHA != "" {
+		if lc, lcErr := s.registry.LoadPRBuildLifecycle(ctx, repo, prNumber); lcErr == nil && strings.EqualFold(strings.TrimSpace(lc.HeadSHA), normHeadSHA) {
+			return true, nil
+		}
 	}
 	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        prConflict,
@@ -91,9 +90,6 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	}); err != nil {
 		return false, err
 	}
-	if normHeadSHA != "" {
-		s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
-	}
 	return true, nil
 }
 
@@ -103,10 +99,6 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 		slog.ErrorContext(ctx, "[synapse] [registry] error transitioning PR to conflict", "pr", pr.Number, "error", err)
 		return
 	}
-	if pr.Head.SHA != "" {
-		s.ghState.RecordNonRoboRevFailedSHA(repo, pr.Number, pr.Head.SHA)
-	}
-	s.recordFailedCISHA(repo, pr.Number, pr.Head.SHA)
 	if !handled {
 		if alertErr := s.notifyCollaboratorConflict(ctx, repo, pr); alertErr != nil {
 			slog.ErrorContext(ctx, "[synapse] [github] error notifying collaborator conflict", "repo", repo, "pr", pr.Number, "error", alertErr)
@@ -119,8 +111,6 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 }
 
 func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNumber int) {
-	s.clearFailedCISHA(repo, prNumber)
-	s.ghState.ClearUpdatedForMain(repo, prNumber)
 	if s.registry == nil {
 		return
 	}
@@ -191,16 +181,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		if !s.isEligibleAutoUpdatePR(ctx, normRepo, pr) {
 			continue
 		}
-		hasFailedOrPending := s.hasFailedCIForSHA(ctx, normRepo, pr.Number, pr.Head.SHA)
-		if s.wasUpdatedForCurrentMain(normRepo, pr.Number) {
-			// If the in-flight PR updated for current main actually failed CI, continue to update the next clean PR.
-			// Otherwise (checks are still pending, passed, or initializing), break to prevent concurrent branch updates.
-			if hasFailedOrPending && s.isCachedFailedCISHA(normRepo, pr.Number, pr.Head.SHA) {
-				continue
-			}
-			break
-		}
-		if hasFailedOrPending {
+		if s.hasFailedCIForSHA(ctx, normRepo, pr.Number, pr.Head.SHA) {
 			continue
 		}
 		conflict, err := s.updatePRBranch(ctx, normRepo, pr.Number)
@@ -220,7 +201,6 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 			s.handleDirtyPRConflict(ctx, normRepo, pr)
 			continue
 		}
-		s.markUpdatedForCurrentMain(normRepo, pr.Number)
 		break
 	}
 	return nil
@@ -240,8 +220,6 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 }
 
 func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGitHubEvent, merged bool) error {
-	s.clearFailedCISHA(res.Repo, res.PRNumber)
-	s.ghState.ClearUpdatedForMain(res.Repo, res.PRNumber)
 	if merged {
 		targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
 		if err != nil {
@@ -319,10 +297,6 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 	if err != nil {
 		return err
 	}
-	if res.HeadSHA != "" {
-		s.ghState.RecordNonRoboRevFailedSHA(res.Repo, res.PRNumber, res.HeadSHA)
-	}
-	s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA)
 	if handled {
 		return nil
 	}
@@ -363,7 +337,6 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		if err != nil {
 			return err
 		}
-		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        ghActionSynchronize,

@@ -10,183 +10,6 @@ import (
 	"testing"
 )
 
-func TestCommitSHAPRCacheHelpers(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		nilServer  bool
-		repo       string
-		sha        string
-		prNumber   int
-		branch     string
-		corruptKey string
-		corruptVal any
-		wantLookup bool
-		wantPR     int
-		wantBranch string
-	}{
-		{
-			name:       "nil receiver returns false on lookup and no-ops on record",
-			nilServer:  true,
-			repo:       "azylman/aerial",
-			sha:        "abcdef123456",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "empty repo is no-op",
-			repo:       "",
-			sha:        "abcdef123456",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "empty sha is no-op",
-			repo:       "azylman/aerial",
-			sha:        "",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "zero sha is no-op",
-			repo:       "azylman/aerial",
-			sha:        "0000000000000000000000000000000000000000",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "invalid prNumber <= 0 is no-op",
-			repo:       "azylman/aerial",
-			sha:        "abcdef123456",
-			prNumber:   0,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "valid record and lookup with trimming and case normalization",
-			repo:       " Azylman/Aerial ",
-			sha:        " ABCDEF123456 ",
-			prNumber:   100,
-			branch:     " feat/normalized ",
-			wantLookup: true,
-			wantPR:     100,
-			wantBranch: "feat/normalized",
-		},
-		{
-			name:       "corrupt cache entry type returns false",
-			repo:       "azylman/aerial",
-			sha:        "corrupttype",
-			corruptKey: "azylman/aerial@corrupttype",
-			corruptVal: "not-a-GitHubCheckRunPR",
-			wantLookup: false,
-		},
-		{
-			name:       "corrupt cache entry zero PR number returns false",
-			repo:       "azylman/aerial",
-			sha:        "corruptpr",
-			corruptKey: "azylman/aerial@corruptpr",
-			corruptVal: GitHubCheckRunPR{Number: 0},
-			wantLookup: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{}
-			}
-			if tc.corruptKey != "" && srv != nil {
-				srv.GHState().StoreRawCommitSHAPRForTest(tc.corruptKey, tc.corruptVal)
-			} else {
-				srv.recordCommitSHAPR(tc.repo, tc.sha, tc.prNumber, tc.branch)
-			}
-			prNum, branch, ok := srv.lookupCommitSHAPR(tc.repo, tc.sha)
-			if ok != tc.wantLookup {
-				t.Fatalf("lookupCommitSHAPR() ok = %v, want %v", ok, tc.wantLookup)
-			}
-			if prNum != tc.wantPR {
-				t.Errorf("lookupCommitSHAPR() prNum = %d, want %d", prNum, tc.wantPR)
-			}
-			if branch != tc.wantBranch {
-				t.Errorf("lookupCommitSHAPR() branch = %q, want %q", branch, tc.wantBranch)
-			}
-		})
-	}
-}
-
-func TestUpdatedForCurrentMainHelpers(t *testing.T) {
-	t.Parallel()
-
-	var nilSrv *RouterServer
-	nilSrv.markUpdatedForCurrentMain("azylman/aerial", 123)
-	if nilSrv.wasUpdatedForCurrentMain("azylman/aerial", 123) {
-		t.Errorf("expected false for nil server")
-	}
-	nilSrv.GHState().ClearUpdatedPRsForRepo("azylman/aerial")
-
-	srv := &RouterServer{}
-	srv.markUpdatedForCurrentMain("azylman/aerial", 0)
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 0) {
-		t.Errorf("expected false for pr <= 0")
-	}
-
-	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
-	srv.markUpdatedForCurrentMain("azylman/aerial", 43)
-	srv.markUpdatedForCurrentMain("azylman/other", 99)
-
-	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected true for PR 42")
-	}
-	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 43) {
-		t.Errorf("expected true for PR 43")
-	}
-	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
-		t.Errorf("expected true for PR 99")
-	}
-
-	srv.GHState().ClearUpdatedPRsForRepo("azylman/aerial")
-
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected false for cleared PR 42")
-	}
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 43) {
-		t.Errorf("expected false for cleared PR 43")
-	}
-	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
-		t.Errorf("expected true for remaining PR 99")
-	}
-
-	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
-	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha1")
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected false after new main commit mainsha1")
-	}
-
-	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
-	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha1")
-	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected true on duplicate redelivery of same main commit mainsha1")
-	}
-
-	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha2")
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected false after advancing to mainsha2")
-	}
-
-	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
-	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha1")
-	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected true on stale redelivery of earlier main commit mainsha1 after mainsha2")
-	}
-}
-
 type ownedMapRegistry struct {
 	mockPRRegistry
 
@@ -534,10 +357,6 @@ type resolvePRFromCommitSHATestCase struct {
 	statusCode    int
 	responseBody  string
 	openPRsBody   string
-	preCacheRepo  string
-	preCacheSHA   string
-	preCachePR    int
-	preCacheBr    string
 	wantErr       bool
 	wantErrSubstr string
 	wantPRNum     int
@@ -575,9 +394,6 @@ func runResolvePRFromCommitSHACase(ctx context.Context, t *testing.T, tc resolve
 		apiURL = tc.apiURL
 	}
 	srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: apiURL, GitHubToken: "secret"}), ts.Client())
-	if tc.preCacheRepo != "" && tc.preCacheSHA != "" {
-		srv.recordCommitSHAPR(tc.preCacheRepo, tc.preCacheSHA, tc.preCachePR, tc.preCacheBr)
-	}
 	prNum, branch, err := srv.resolvePRFromCommitSHA(ctx, tc.repo, tc.sha)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("resolvePRFromCommitSHA() err = %v, wantErr = %v", err, tc.wantErr)
@@ -698,18 +514,6 @@ func resolvePRFromCommitSHATestCases() []resolvePRFromCommitSHATestCase {
 			wantBranch:   "fork-feature",
 		},
 		{
-			name:         "in-memory commitSHAPRs cache hit avoids hitting GitHub API",
-			repo:         "azylman/aerial",
-			sha:          "cachedsha999",
-			apiURL:       "::bad-url::",
-			preCacheRepo: "azylman/aerial",
-			preCacheSHA:  "cachedsha999",
-			preCachePR:   999,
-			preCacheBr:   "feat/cached-branch",
-			wantPRNum:    999,
-			wantBranch:   "feat/cached-branch",
-		},
-		{
 			name:          "invalid commit sha characters return error",
 			repo:          "azylman/aerial",
 			sha:           "0000",
@@ -717,7 +521,7 @@ func resolvePRFromCommitSHATestCases() []resolvePRFromCommitSHATestCase {
 			wantErrSubstr: "invalid repo or sha",
 		},
 		{
-			name:          "lookupCommitSHAPR empty or zero sha returns false",
+			name:          "empty repo and sha returns invalid error",
 			repo:          "",
 			sha:           "",
 			wantErr:       true,

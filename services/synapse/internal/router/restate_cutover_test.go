@@ -349,7 +349,9 @@ func TestAuthoritativeDeployJournalSurvivesRetry(t *testing.T) {
 		wantPublishes int
 	}{
 		{name: "deploy success journals on retry after flap", prNumber: 42, wantFirstErr: true, wantSecondErr: false, wantCalls: 2, wantPublishes: 1},
-		{name: "non-pr dispatch stays legacy-only without error", prNumber: 0, wantFirstErr: false, wantSecondErr: false, wantCalls: 0, wantPublishes: 1},
+		// Non-PR dispatches have no PRObject key and no registry row, so a
+		// redelivery republishes: at-least-once without the deleted map.
+		{name: "non-pr dispatch republishes on redelivery at-least-once", prNumber: 0, wantFirstErr: false, wantSecondErr: false, wantCalls: 0, wantPublishes: 2},
 	}
 
 	for _, tc := range tests {
@@ -602,7 +604,7 @@ func TestAuthoritativeDeploySuppressHitStillJournals(t *testing.T) {
 		wantPublishes int
 	}{
 		{name: "fresh dispatch journals and publishes", seeded: false, wantJournals: 1, wantPublishes: 1},
-		{name: "pre-marked dispatch journals without republish", seeded: true, wantJournals: 1, wantPublishes: 0},
+		{name: "deployed projection suppresses republish and still journals", seeded: true, wantJournals: 1, wantPublishes: 0},
 	}
 
 	for _, tc := range tests {
@@ -621,7 +623,7 @@ func TestAuthoritativeDeploySuppressHitStillJournals(t *testing.T) {
 			srv.registry = reg
 			srv.dispatcher = &mockOutboundDispatcher{}
 			if tc.seeded {
-				srv.recordDeploySuccessDispatched("azylman/aerial", "brain", "sha123", 42)
+				reg.deployedRes = true
 			}
 			evt := DeployEvent{Event: eventDeploySuccess, Repo: "azylman/aerial", PRNumber: 42, JobName: "brain", CommitSHA: "sha123", TargetID: lifecycleTargetID, Timestamp: time.Now().UTC()}
 			if _, err := srv.publishUnownedDeployEvent(context.Background(), evt, false); err != nil {
@@ -646,7 +648,7 @@ func TestAuthoritativeConflictSuppressHitStillJournals(t *testing.T) {
 		want   []wantPREvent
 	}{
 		{name: "fresh conflict journals and publishes", seeded: false, want: []wantPREvent{{Event: "conflict", PRNumber: 42, HeadSHA: "sha-conflict", Status: "conflict"}}},
-		{name: "pre-marked conflict journals without republish", seeded: true, want: nil},
+		{name: "projection-known conflict journals without republish", seeded: true, want: nil},
 	}
 
 	for _, tc := range tests {
@@ -662,7 +664,7 @@ func TestAuthoritativeConflictSuppressHitStillJournals(t *testing.T) {
 			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
 			srv := newLifecycleServer(cfg, bus, reg, &mockOutboundDispatcher{})
 			if tc.seeded {
-				srv.ghState.MarkConflictPublished("azylman/aerial", 42, "sha-conflict")
+				reg.buildLifecycle = PRBuildLifecycle{Status: prConflict, HeadSHA: "sha-conflict"}
 			}
 			handled, err := srv.transitionRegisteredConflict(context.Background(), "azylman/aerial", 42, "feat/branch", "sha-conflict")
 			if err != nil || !handled {
@@ -701,13 +703,13 @@ func TestAuthoritativeCollaboratorSuppressHitStillJournals(t *testing.T) {
 		},
 	}
 
+	// No per-SHA DM mark survives the purge: every delivery journals and
+	// dispatches, and the journaled Restate effect key owns dedup.
 	tests := []struct {
 		name    string
-		seeded  bool
 		wantDMs int
 	}{
-		{name: "fresh collaborator conflict journals and dispatches", seeded: false, wantDMs: 1},
-		{name: "pre-marked collaborator conflict journals without redispatch", seeded: true, wantDMs: 0},
+		{name: "collaborator conflict journals and dispatches", wantDMs: 1},
 	}
 
 	for _, tc := range tests {
@@ -722,9 +724,6 @@ func TestAuthoritativeCollaboratorSuppressHitStillJournals(t *testing.T) {
 			cfg.CollaboratorCIAlerts = rules
 			disp := &mockOutboundDispatcher{}
 			srv := newLifecycleServer(cfg, &mockEventBus{}, nil, disp)
-			if tc.seeded {
-				srv.ghState.MarkCollaboratorConflict("azylman/aerial", 42, "sha-conflict-9")
-			}
 			if err := srv.notifyCollaboratorConflict(context.Background(), "azylman/aerial", pr); err != nil {
 				t.Fatalf("notifyCollaboratorConflict() err = %v, want nil", err)
 			}

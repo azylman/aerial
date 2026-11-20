@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/azylman/aerial/services/synapse/internal/github"
@@ -245,12 +244,13 @@ func runCollaboratorCIFailureCase(ctx context.Context, t *testing.T, tc collabor
 			t.Errorf("content = %q, want contains %q", calls[0].Content, tc.wantContains)
 		}
 
-		// Verify duplicate call is deduplicated
+		// Without the deleted per-SHA mark, a duplicate redelivery resends
+		// (at-least-once); the journaled Restate effect key owns dedup.
 		if err := srv.notifyCollaboratorCIFailure(ctx, res, tc.checkURL); err != nil {
 			t.Fatalf("second notifyCollaboratorCIFailure() err = %v", err)
 		}
-		if len(disp.DirectMessageCalls()) != tc.wantDMCalls {
-			t.Errorf("DirectMessageCalls() after duplicate = %d, want %d", len(disp.DirectMessageCalls()), tc.wantDMCalls)
+		if got := len(disp.DirectMessageCalls()); got != 2*tc.wantDMCalls {
+			t.Errorf("DirectMessageCalls() after duplicate = %d, want %d", got, 2*tc.wantDMCalls)
 		}
 	}
 }
@@ -271,7 +271,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 
 	tests := []collaboratorCIFailureTestCase{
 		{
-			name:          "unregistered collaborator pr failure dispatches dm and dedups",
+			name:          "unregistered collaborator pr failure dispatches dm and resends on duplicate",
 			resRepo:       "azylman/aerial",
 			resPRNum:      42,
 			resBranch:     "feat/collab",
@@ -423,12 +423,13 @@ func runCollaboratorConflictCase(ctx context.Context, t *testing.T, tc collabora
 			t.Errorf("content = %q, want contains %q", calls[0].Content, tc.wantContains)
 		}
 
-		// Verify duplicate call is deduplicated
+		// Without the deleted per-SHA mark, a duplicate redelivery resends
+		// (at-least-once); the journaled Restate effect key owns dedup.
 		if err := srv.notifyCollaboratorConflict(ctx, tc.resRepo, tc.pr); err != nil {
 			t.Fatalf("second notifyCollaboratorConflict() err = %v", err)
 		}
-		if len(disp.DirectMessageCalls()) != tc.wantDMCalls {
-			t.Errorf("DirectMessageCalls() after duplicate = %d, want %d", len(disp.DirectMessageCalls()), tc.wantDMCalls)
+		if got := len(disp.DirectMessageCalls()); got != 2*tc.wantDMCalls {
+			t.Errorf("DirectMessageCalls() after duplicate = %d, want %d", got, 2*tc.wantDMCalls)
 		}
 	}
 }
@@ -449,7 +450,7 @@ func TestNotifyCollaboratorConflict(t *testing.T) {
 
 	tests := []collaboratorConflictTestCase{
 		{
-			name:       "unregistered collaborator conflict dispatches dm and dedups",
+			name:       "unregistered collaborator conflict dispatches dm and resends on duplicate",
 			resRepo:    "azylman/aerial",
 			resPRNum:   50,
 			resBranch:  "feat/conflict",
@@ -638,7 +639,7 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 			wantDispatch: false,
 		},
 		{
-			name:         "successful dispatch records dedup",
+			name:         "successful dispatch sends DM",
 			channelID:    "111111111111111111",
 			sha:          "abcdef1",
 			wantDispatch: true,
@@ -659,7 +660,7 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 			if tc.nilDispatcher {
 				srv = &RouterServer{}
 			}
-			if err := srv.dispatchCollaboratorDM(ctx, &sync.Map{}, "repo", 1, tc.sha, tc.channelID, "msg"); err != nil {
+			if err := srv.dispatchCollaboratorDM(ctx, "repo", 1, tc.sha, tc.channelID, "msg"); err != nil {
 				t.Errorf("dispatchCollaboratorDM error = %v, want nil", err)
 			}
 			want := 0
@@ -674,22 +675,22 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 
 	dupDisp := &mockOutboundDispatcher{}
 	dupSrv := &RouterServer{dispatcher: dupDisp}
-	customDedup := &sync.Map{}
-	if err := dupSrv.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+	// Without the deleted per-SHA dedup map, repeat deliveries resend
+	// (at-least-once); the Restate journal owns dedup.
+	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	beforeCalls := len(dupDisp.DirectMessageCalls())
-	if err := dupSrv.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
 		t.Fatalf("unexpected error on duplicate: %v", err)
 	}
-	if len(dupDisp.DirectMessageCalls()) != beforeCalls {
-		t.Errorf("expected duplicate dispatch to be suppressed by dedup")
+	if len(dupDisp.DirectMessageCalls()) != beforeCalls+1 {
+		t.Errorf("expected duplicate dispatch to resend without dedup")
 	}
 
 	failDisp := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
 	srvFail := &RouterServer{dispatcher: failDisp}
-	errDedup := &sync.Map{}
-	if err := srvFail.dispatchCollaboratorDM(ctx, errDedup, "repo", 1, "sha2", "111111111111111111", "msg"); err == nil {
+	if err := srvFail.dispatchCollaboratorDM(ctx, "repo", 1, "sha2", "111111111111111111", "msg"); err == nil {
 		t.Fatalf("expected error from failed dispatch")
 	}
 }

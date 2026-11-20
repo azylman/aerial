@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -181,109 +180,25 @@ func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt Depl
 	})
 }
 
-func prCheckKey(repo string, prNumber int) string {
-	return github.PRCheckKey(repo, prNumber)
-}
-
-func (s *RouterServer) recordFailedCISHA(repo string, prNumber int, headSHA string) bool {
-	if s == nil {
-		return false
-	}
-	return s.ghState.RecordFailedCISHA(repo, prNumber, headSHA)
-}
-
-func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
-	if s == nil {
-		return
-	}
-	s.ghState.ClearFailedCISHA(repo, prNumber)
-}
-
-func (s *RouterServer) recordFailedCheckRunDetailed(repo string, prNumber int, headSHA, checkName string) (emitAdditional bool, wasActive bool, hadPriorEverFailed bool) {
-	if s == nil {
-		return false, false, false
-	}
-	return s.ghState.RecordFailedCheckRunDetailed(repo, prNumber, headSHA, checkName)
-}
-
-func (s *RouterServer) rollbackFailedCheckRun(repo string, prNumber int, headSHA, checkName string, wasActive, hadPriorEverFailed bool) {
-	if s == nil {
-		return
-	}
-	s.ghState.RollbackFailedCheckRun(repo, prNumber, headSHA, checkName, wasActive, hadPriorEverFailed)
-}
-
-func (s *RouterServer) clearActiveFailedCheckRun(repo string, prNumber int, headSHA, checkName string) {
-	if s == nil {
-		return
-	}
-	s.ghState.ClearActiveFailedCheckRun(repo, prNumber, headSHA, checkName)
-}
-
-func (s *RouterServer) hasActiveRoboRevFailure(repo string, prNumber int, headSHA string) bool {
-	if s == nil {
-		return false
-	}
-	return s.ghState.HasActiveRoboRevFailure(repo, prNumber, headSHA)
-}
-
-func (s *RouterServer) canRecoverNonGateCheckSuccess(repo string, prNumber int, checkName, headSHA string) bool {
-	if s == nil {
-		return false
-	}
-	return s.ghState.CanRecoverNonGateCheckSuccess(repo, prNumber, checkName, headSHA)
-}
-
-func (s *RouterServer) markUpdatedForCurrentMain(repo string, prNumber int) {
-	if s == nil {
-		return
-	}
-	s.ghState.MarkUpdatedForMain(repo, prNumber)
-}
-
-func (s *RouterServer) wasUpdatedForCurrentMain(repo string, prNumber int) bool {
-	if s == nil {
-		return false
-	}
-	return s.ghState.WasUpdatedForMain(repo, prNumber)
-}
-
-func (s *RouterServer) clearUpdatedPRsForMainCommit(repo, headSHA string) {
-	if s == nil {
-		return
-	}
-	s.ghState.ClearUpdatedPRsForMainCommit(repo, headSHA)
-}
-
-func (s *RouterServer) isCachedFailedCISHA(repo string, prNumber int, headSHA string) bool {
-	if s == nil {
-		return false
-	}
-	return s.ghState.IsCachedFailedCISHA(repo, prNumber, headSHA)
+// recordFailedCheckRunDetailed reports granular per-check failure state.
+// The in-memory failedCheckRuns index is deleted: Restate PRObject and the
+// pr_registry projection own failure memory, so every call reports no active
+// failure and lets the registry atomic transition decide.
+func (*RouterServer) recordFailedCheckRunDetailed(_repo string, _prNumber int, _headSHA, _checkName string) (emitAdditional bool, wasActive bool, hadPriorEverFailed bool) {
+	return false, false, false
 }
 
 func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNumber int, headSHA string) bool {
-	return github.HasPendingOrFailedChecksForSHA(ctx, s.ghClient(), &s.ghState, repo, prNumber, headSHA)
+	return github.HasPendingOrFailedChecksForSHA(ctx, s.ghClient(), repo, prNumber, headSHA)
 }
 
-func (s *RouterServer) hasCancelledCheckForSHA(repo string, prNumber int, headSHA string) bool {
-	if s == nil {
-		return false
-	}
-	return s.ghState.HasCancelledCheckSHA(repo, prNumber, headSHA)
-}
-
+// canRecoverRoboRevSuccess reports whether a roborev success recovers the PR.
+// Per-check active-failure memory is deleted with the tracker; the
+// pr_registry ci_failed projection and the live roborev comment decide.
 func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	if s == nil || prNumber <= 0 || headSHA == "" {
 		return false
-	}
-	s.clearActiveFailedCheckRun(repo, prNumber, headSHA, "roborev")
-	if s.ghState.HasNonRoboRevFailedSHA(repo, prNumber, headSHA) {
-		return false
-	}
-	if s.ghState.HasEverFailedCheckRun(repo, prNumber, headSHA, "roborev") {
-		return true
 	}
 	if s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA) {
 		return true
@@ -298,28 +213,21 @@ func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, 
 		return false
 	}
 	if isGateAggregatorCheck(checkName) {
-		if s.hasActiveRoboRevFailure(repo, prNumber, headSHA) {
-			return false
-		}
-		if s.ghState.HasNonRoboRevFailedSHA(repo, prNumber, headSHA) {
-			return true
-		}
-		if s.hasCancelledCheckForSHA(repo, prNumber, headSHA) {
-			return true
-		}
 		return headSHA != "" && s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA)
 	}
 	if isRoboRevCheck(checkName) {
 		return s.canRecoverRoboRevSuccess(ctx, repo, prNumber, headSHA)
 	}
-	return s.canRecoverNonGateCheckSuccess(repo, prNumber, checkName, headSHA)
+	return headSHA != "" && s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA)
 }
 
 func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
 	if s.registry == nil || (res.Conclusion != conclusionFailure && res.Conclusion != conclusionTimedOut) {
 		return true
 	}
-	if isGateAggregatorCheck(res.CheckName) && !s.hasCancelledCheckForSHA(res.Repo, res.PRNumber, res.HeadSHA) {
+	// Gate-aggregator failures stay ignored. The legacy cancelled-check
+	// exception died with the tracker; Restate owns rerun decisions.
+	if isGateAggregatorCheck(res.CheckName) {
 		return true
 	}
 	if res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
@@ -502,34 +410,19 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 	return pr, channelID, mention, true, nil
 }
 
-func recordCollaboratorSHAAlert(m *sync.Map, repo string, prNumber int, headSHA string) bool {
-	headSHA = strings.TrimSpace(headSHA)
-	if m == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
-		return false
-	}
-	prev, loaded := m.Swap(prCheckKey(repo, prNumber), headSHA)
-	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
-}
-
-func (s *RouterServer) dispatchCollaboratorDM(ctx context.Context, dedup *sync.Map, repo string, prNumber int, sha, channelID, msg string) error {
+// dispatchCollaboratorDM sends one collaborator DM. Per-SHA dispatch dedup
+// died with the tracker; redeliveries may resend (accepted at-least-once:
+// the Restate journal and effect keys own dedup, delivery retries the send).
+func (s *RouterServer) dispatchCollaboratorDM(ctx context.Context, _repo string, _prNumber int, sha, channelID, msg string) error {
 	normSHA := strings.TrimSpace(sha)
 	if s == nil || s.dispatcher == nil || channelID == "" || normSHA == "" || isZeroSHA(normSHA) {
-		return nil
-	}
-	if dedup != nil && !recordCollaboratorSHAAlert(dedup, repo, prNumber, normSHA) {
 		return nil
 	}
 	req := DirectMessageRequest{
 		ChannelID: channelID,
 		Content:   msg,
 	}
-	if err := s.dispatcher.DispatchDirectMessage(ctx, req); err != nil {
-		if dedup != nil {
-			dedup.CompareAndDelete(prCheckKey(repo, prNumber), normSHA)
-		}
-		return err
-	}
-	return nil
+	return s.dispatcher.DispatchDirectMessage(ctx, req)
 }
 
 func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo string, pr GitHubPullRequest) error {
@@ -552,26 +445,16 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 	if resolvedPR.Head.Ref != "" {
 		branch = resolvedPR.Head.Ref
 	}
-	// Journal first, even on a dedup hit: marks prove legacy sent the DM,
-	// not that Restate journaled the event — pre-flip marks predate any
-	// journal. Restate dedups the repeat via stale-drop, the per-SHA mark,
-	// and the journaled effect key. The mark check below still suppresses
-	// the duplicate DM.
+	// Journal before the DM: the Restate journal is the ordered record and
+	// owns alert dedup; the DM below is at-least-once on redelivery.
 	if err := s.routePREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
 		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
 		Title: resolvedPR.Title, Unmanaged: true,
 	}); err != nil {
 		return err
 	}
-	if !s.ghState.MarkCollaboratorConflict(repo, prNum, sha) {
-		return nil
-	}
 	msg := formatCollaboratorConflictMessage(mention, repo, prNum, resolvedPR.Title, branch, sha)
-	if err := s.dispatchCollaboratorDM(ctx, nil, repo, prNum, sha, channelID, msg); err != nil {
-		s.ghState.ClearCollaboratorConflict(repo, prNum, sha)
-		return err
-	}
-	return nil
+	return s.dispatchCollaboratorDM(ctx, repo, prNum, sha, channelID, msg)
 }
 
 func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, checkURL string) error {
@@ -587,23 +470,15 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 	}
 	branch := firstNonEmpty(resolvedPR.Head.Ref, res.Branch)
 	sha := firstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
-	// Journal first, matching the conflict notifier above: dedup hits skip
-	// the DM below, never the journal.
+	// Journal before the DM, matching the conflict notifier above.
 	if err := s.routePREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
 		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
 		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
 	}); err != nil {
 		return err
 	}
-	if !s.ghState.MarkCollaboratorAlerted(res.Repo, resolvedPR.Number, sha) {
-		return nil
-	}
 	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
-	if err := s.dispatchCollaboratorDM(ctx, nil, res.Repo, resolvedPR.Number, sha, channelID, msg); err != nil {
-		s.ghState.ClearCollaboratorAlerted(res.Repo, resolvedPR.Number, sha)
-		return err
-	}
-	return nil
+	return s.dispatchCollaboratorDM(ctx, res.Repo, resolvedPR.Number, sha, channelID, msg)
 }
 
 func (s *RouterServer) handleMergeOrPromotionFailure(ctx context.Context, res *ResolvedGitHubEvent, details string) (bool, error) {
@@ -621,16 +496,10 @@ func (s *RouterServer) recordNonGateCheckFailureDetailed(res *ResolvedGitHubEven
 		return false, false, false
 	}
 	if res.Event == ghEventWorkflowRun {
-		if s.ghState.HasActiveFailedCheckRuns(res.Repo, res.PRNumber, res.HeadSHA) {
-			return false, true, true
-		}
 		return false, false, false
 	}
 	if res.Event != ghEventCheckRun || isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName) {
 		return false, false, false
-	}
-	if !isRoboRevCheck(res.CheckName) {
-		s.ghState.RecordNonRoboRevFailedSHA(res.Repo, res.PRNumber, res.HeadSHA)
 	}
 	return s.recordFailedCheckRunDetailed(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 }
@@ -669,9 +538,6 @@ func (s *RouterServer) shouldRetryCIFailureCompletion(ctx context.Context, res *
 }
 
 func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional, wasActive bool) (bool, error) {
-	if !wasActive && res.Event == ghEventWorkflowRun && res.HeadSHA != "" && s.ghState.HasActiveFailedCheckRuns(res.Repo, res.PRNumber, res.HeadSHA) {
-		wasActive = true
-	}
 	s.healDependabotPR(ctx, res)
 	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 	if err != nil {
@@ -694,29 +560,18 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 		return false, err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
-	emitAdditional := false
-	wasActive := false
-	hadPriorEverFailed := false
 	if prNum > 0 && res.PRNumber == 0 {
 		res.PRNumber = prNum
-		if res.Event == ghEventCheckRun && !isGateAggregatorCheck(res.CheckName) && !isBuildMetadataCheck(res.CheckName) {
-			if !isRoboRevCheck(res.CheckName) {
-				s.ghState.RecordNonRoboRevFailedSHA(res.Repo, res.PRNumber, res.HeadSHA)
-			}
-			emitAdditional, wasActive, hadPriorEverFailed = s.recordFailedCheckRunDetailed(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
-		}
 	}
-	shouldComplete := updated || (emitAdditional && res.TargetID != "")
-	if !shouldComplete && !wasActive && s.shouldRetryCIFailureCompletion(ctx, res) {
+	shouldComplete := updated
+	if !shouldComplete && s.shouldRetryCIFailureCompletion(ctx, res) {
 		shouldComplete = true
 	}
 	if !shouldComplete {
 		return false, nil
 	}
-	cErr := s.completeCIFailureTransition(ctx, res, details, checkURL)
-	if cErr != nil {
-		s.rollbackFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, wasActive, hadPriorEverFailed)
-		return false, cErr
+	if err := s.completeCIFailureTransition(ctx, res, details, checkURL); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -769,23 +624,9 @@ func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *Reso
 	return syncPRFallbackFields(res, fetched), true, nil
 }
 
-func (s *RouterServer) recordCommitSHAPR(repo, sha string, prNumber int, branch string) {
-	if s == nil {
-		return
-	}
-	s.ghState.RecordCommitSHAPR(repo, sha, prNumber, branch)
-}
-
-func (s *RouterServer) lookupCommitSHAPR(repo, sha string) (int, string, bool) {
-	if s == nil {
-		return 0, "", false
-	}
-	return s.ghState.LookupCommitSHAPR(repo, sha)
-}
-
+// resolvePRFromCommitSHA discovers the PR for a commit SHA via the GitHub
+// API. The in-memory commitSHAPRs index is deleted; durable ResolvePRBySHA
+// in pr_registry (checked first by ResolveSHA) is the lookup index.
 func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha string) (int, string, error) {
-	if prNum, branch, ok := s.lookupCommitSHAPR(repo, sha); ok {
-		return prNum, branch, nil
-	}
-	return github.ResolvePRFromCommitSHA(ctx, s.ghClient(), &s.ghState, repo, sha)
+	return github.ResolvePRFromCommitSHA(ctx, s.ghClient(), repo, sha)
 }

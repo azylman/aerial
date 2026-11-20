@@ -10,42 +10,29 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
-// Consumer cutover: Restate PRObject/RepoObject are the ordered authority for
-// every github/deploy entrypoint while StateTracker and DeployDedupTracker
-// stay compiled in as inert fallback for one deploy soak.
+// Consumer cutover: Restate PRObject/RepoObject are the sole ordered authority
+// for every github/deploy entrypoint. The legacy in-memory trackers were
+// deleted in chunk 12 after a clean soak; pr_registry is a read-only
+// projection and SHA lookup index, never a decision authority.
 //
 // What flips: with restate_authoritative: true in YAML, each entrypoint
 // routes its frozen PRObject/RepoObject event to Restate first via the
 // route* helpers below. A Restate send failure returns an error (webhook
 // 5xx for GitHub redelivery, watcher tick retry, readiness 503) so no
 // event is silently lost: Restate journaled effect keys deduplicate the
-// redelivery, and the legacy in-memory guards below make the legacy
-// re-run idempotent. Shadow (fail-closed) sends only run when the flag is
+// redelivery. Shadow (fail-closed) sends only run when the flag is
 // off; authoritative and shadow sends never double-fire.
 //
-// What stays live: the whole legacy pipeline (StateTracker and
-// DeployDedupTracker reads, writes, registry transitions, publishes,
-// dispatches) runs unchanged. The trackers are "inert" only in the
-// authority sense: Restate's journal is the ordered record every later
-// chunk builds on, while the trackers execute byte-identical behavior as
-// the soak fallback. Reads and writes stay because the legacy guards are
-// load-bearing for redelivery idempotency: active-failure state
-// suppresses repeat completion on webhook redelivery, collaborator and
-// conflict marks dedup DMs, and deploy dedup suppresses repeat prompts.
-// Gating those writes would trade a clean journal for duplicate
-// user-visible effects, which the soak gate forbids. In-flight builds and
-// PRs therefore complete exactly as before; post-cutover facts accumulate
-// in both the journal and the legacy trackers until chunk 12 deletes the
-// trackers after a clean soak.
+// What stays live: the registry-backed pipeline (registry transitions,
+// publishes, dispatches) runs unchanged. Per-SHA conflict republish
+// suppression reads the projection lifecycle head SHA; deploy_success
+// suppression reads the deployed projection; recovery reads the ci_failed
+// projection. Collaborator DMs are at-least-once: redelivery may resend
+// because the per-SHA DM marks died with the trackers.
 //
 // Rollback: consumer rebind via YAML config (restate_authoritative: false),
-// hot-reloaded without restart or code revert. Time-boxed window: one
-// deploy soak (about 48h) after the flip. The rebind is valid only before
-// the first Restate-committed external effect; after that point of no
-// return, rollback is forward-fix only because the journal owns effects
-// legacy state cannot replay. No Restate handlers fire external effects
-// in this build (state and projection only; effect wiring lands in later
-// chunks), so the rebind window stays open for the whole soak.
+// hot-reloaded without restart or code revert. Forward-fix only: the journal
+// owns effects that deleted in-memory state cannot replay.
 //
 // Precondition: chunk-05 first-touch hydration must show zero divergence
 // (RestateShadowDivergenceTotal stays zero) before the flag flips;
@@ -55,15 +42,11 @@ import (
 // generation-scoped effect keys on the Restate side. Journaling precedes
 // every external effect, and any failure after journaling returns an
 // error (webhook 5xx) so redelivery re-journals idempotently and retries
-// the effect; no ack or dedup mark lands until the effect succeeds.
+// the effect.
 //
-// Dedup guards suppress only legacy effects, never the journal: a mark
-// proves legacy already published/dispatched the event, not that Restate
-// journaled it — pre-flip marks predate any journal because the flag
-// hot-reloads without restarting the process. Every suppress hit still
-// journals when authoritative; Restate absorbs the repeat via stale-drop,
-// the per-SHA mark, and the journaled effect key. Skipping the journal on
-// a hit would lose pre-flip events forever, while re-journaling is free.
+// Projection guards suppress only legacy effects, never the journal: every
+// suppress check still journals when authoritative; Restate absorbs the
+// repeat via stale-drop and the journaled effect key.
 
 // restateAuthoritative reports whether the Restate PRObject/RepoObject
 // journal owns github/deploy consumer decisions. Nil-safe: a server without

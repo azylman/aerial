@@ -100,12 +100,10 @@ func dedupeLatestCheckRuns(runs []model.GitHubMetadataCheck) []model.GitHubMetad
 	return out
 }
 
-// HasPendingOrFailedChecksForSHA queries check runs for a commit SHA and records any failures in tracker.
+// HasPendingOrFailedChecksForSHA queries check runs for a commit SHA.
 // Returns true if there are pending or failed checks for the commit.
-func HasPendingOrFailedChecksForSHA(ctx context.Context, client *Client, tracker *StateTracker, repo string, prNumber int, headSHA string) bool {
-	if tracker != nil && tracker.IsCachedFailedCISHA(repo, prNumber, headSHA) {
-		return true
-	}
+// Restate PRObject owns failure memory; this helper performs a live read only.
+func HasPendingOrFailedChecksForSHA(ctx context.Context, client *Client, repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	normRepo := model.NormalizeRepo(repo)
 	if normRepo == "" || prNumber <= 0 || headSHA == "" || model.IsZeroSHA(headSHA) || client == nil {
@@ -120,9 +118,6 @@ func HasPendingOrFailedChecksForSHA(ctx context.Context, client *Client, tracker
 	for _, cr := range dedupeLatestCheckRuns(checkRuns.CheckRuns) {
 		state := ClassifyCheckState(cr.Status, cr.Conclusion)
 		if !IsGateAggregatorCheck(cr.Name) && state == StatusFailed {
-			if tracker != nil {
-				tracker.RecordFailedCISHA(normRepo, prNumber, headSHA)
-			}
 			return true
 		}
 		if state == StatusPending {
@@ -192,15 +187,11 @@ type commitPRItem struct {
 }
 
 // ResolvePRFromCommitSHA discovers the pull request number and head branch ref associated with a commit SHA.
-func ResolvePRFromCommitSHA(ctx context.Context, client *Client, tracker *StateTracker, repo, sha string) (int, string, error) {
+// The in-memory commitSHAPRs index is deleted; durable ResolvePRBySHA in pr_registry is the lookup index.
+func ResolvePRFromCommitSHA(ctx context.Context, client *Client, repo, sha string) (int, string, error) {
 	repo = model.NormalizeRepo(repo)
 	if repo == "" || sha == "" || model.IsZeroSHA(sha) {
 		return 0, "", fmt.Errorf("invalid repo or sha for pr resolution")
-	}
-	if tracker != nil {
-		if prNum, branch, ok := tracker.LookupCommitSHAPR(repo, sha); ok {
-			return prNum, branch, nil
-		}
 	}
 	if client == nil {
 		return 0, "", fmt.Errorf("github client required for resolving pr from commit")
@@ -228,9 +219,6 @@ func ResolvePRFromCommitSHA(ctx context.Context, client *Client, tracker *StateT
 		if (selected.State != "closed" && item.State == "closed") || (selected.State == item.State && item.Number > selected.Number) {
 			selected = item
 		}
-	}
-	if tracker != nil {
-		tracker.RecordCommitSHAPR(repo, sha, selected.Number, selected.Head.Ref)
 	}
 	return selected.Number, selected.Head.Ref, nil
 }

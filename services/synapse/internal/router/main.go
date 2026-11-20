@@ -27,7 +27,6 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/discord"
 	"github.com/azylman/aerial/services/synapse/internal/ericlient"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
-	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -50,23 +49,14 @@ type RouterServer struct {
 	registry                 PRRegistryUpdater
 	dispatcher               OutboundDispatcher
 	onProcessed              func(event, delivery string)
-	deployDedup              flux.DeployDedupTracker
 	queueStats               ConsumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration
 	gitHistory               flux.GitHistoryCache
 	discordIngressRetryDelay time.Duration
 	discordIngressMaxAge     time.Duration
 	alertTracker             alerts.Tracker
-	ghState                  github.StateTracker
 	shadowMu                 sync.Mutex
 	shadowRestate            *shadowRestateReporter
-}
-
-func (s *RouterServer) GHState() *github.StateTracker {
-	if s == nil {
-		return nil
-	}
-	return &s.ghState
 }
 
 func (s *RouterServer) GetGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -834,10 +824,9 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 		}
 
 		if evt.PRNumber > 0 {
-			// Journal even on a suppress hit: marks prove legacy handled
-			// the deploy, not that Restate journaled it — pre-flip marks
-			// predate any journal. Restate dedups the repeat; the suppress
-			// check below still skips the duplicate legacy publish.
+			// Journal before the suppress check: the journal is the ordered
+			// record and Restate dedups the repeat; the suppress check below
+			// still skips the duplicate legacy publish.
 			if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
 				return &evt, err
 			}
@@ -850,13 +839,11 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 			return &evt, err
 		}
 		if evt.PRNumber > 0 {
-			s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 			return &evt, nil
 		}
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err
 		}
-		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 		// No Restate route: non-PR dispatches have no PRObject key in either
 		// mode, and the prompt above is the only effect.
 		return &evt, nil
@@ -873,24 +860,19 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 	return &evt, nil
 }
 
-func (s *RouterServer) recordDeploySuccessDispatched(repo, jobName, commitSHA string, prNum int) {
-	s.deployDedup.RecordDispatched(repo, jobName, commitSHA, prNum)
-}
-
-func (s *RouterServer) wasDeploySuccessDispatched(repo, jobName, commitSHA string, prNum int) bool {
-	return s.deployDedup.WasDispatched(repo, jobName, commitSHA, prNum)
-}
-
-func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context, repo, jobName, commitSHA string, prNum int) bool {
-	if s.wasDeploySuccessDispatched(repo, jobName, commitSHA, prNum) {
-		return true
+// shouldSuppressDuplicateDeploySuccess reports whether a deploy_success
+// dispatch is a duplicate. Restate journaled effect keys and the pr_registry
+// deployed projection are the sole authority; the in-memory dedup maps are
+// deleted.
+func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context, repo, _jobName, _commitSHA string, prNum int) bool {
+	if s == nil {
+		return false
 	}
 	normRepo := normalizeRepo(repo)
 
 	if prNum > 0 && s.registry != nil {
 		deployed, err := s.registry.IsPRDeployed(ctx, normRepo, prNum)
 		if err == nil && deployed {
-			s.recordDeploySuccessDispatched(repo, jobName, commitSHA, prNum)
 			return true
 		}
 	}
@@ -913,7 +895,6 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed"); err != nil {
 		return err
 	}
-	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 	return nil
 }
 

@@ -316,22 +316,25 @@ func assertResolveThreadDispatcher(t *testing.T, mockDisp *mockOutboundDispatche
 func TestDeployRolloutSuppressionAndState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	srv := &RouterServer{}
+	srv := &RouterServer{registry: &mockPRRegistry{deployedRes: true}}
 
-	// deploy success suppression memory branches
-	srv.recordDeploySuccessDispatched("azylman/aerial", "test-job", "sha-deploy-1", 101)
+	// deploy success suppression reads the deployed projection
 	if !srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "test-job", "sha-deploy-1", 101) {
-		t.Errorf("expected suppression by PR number")
+		t.Errorf("expected suppression for deployed PR")
 	}
-	if !srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "test-job", "sha-deploy-1", 0) {
-		t.Errorf("expected suppression by SHA")
+	srv.registry = &mockPRRegistry{}
+	if srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "test-job", "sha-deploy-1", 101) {
+		t.Errorf("unexpected suppression for non-deployed PR")
 	}
 	if srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "diff-job", "diff-sha", 0) {
-		t.Errorf("unexpected suppression for unknown job/sha")
+		t.Errorf("unexpected suppression for PR-less dispatch")
+	}
+	var nilSrv *RouterServer
+	if nilSrv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "job", "sha", 1) {
+		t.Errorf("expected false for nil server")
 	}
 
 	// loadPRRolloutState branches
-	var nilSrv *RouterServer
 	if nilSrv.loadPRRolloutState(ctx, "azylman/aerial", 1) != nil {
 		t.Errorf("expected nil for nil server")
 	}
@@ -936,7 +939,16 @@ func assertWatcherAuthorityOutcome(t *testing.T, srv *RouterServer, reg *mockPRR
 	if got := len(disp.ReconcileCalls()); got != tc.wantReconciles {
 		t.Errorf("reconcile calls = %d, want %d", got, tc.wantReconciles)
 	}
-	if got := srv.wasDeploySuccessDispatched(tc.repo, tc.kustomization, tc.mergeSHA, tc.pr); got != tc.wantDispatched {
-		t.Errorf("wasDeploySuccessDispatched = %v, want %v", got, tc.wantDispatched)
+	// Dispatch is observed through the published deploy_success lifecycle
+	// event: the deleted in-memory dedup map no longer records it.
+	gotDispatched := false
+	for _, evt := range bus.publishedPREvents {
+		if evt.Event == eventDeploySuccess && evt.PRNumber == tc.pr {
+			gotDispatched = true
+			break
+		}
+	}
+	if gotDispatched != tc.wantDispatched {
+		t.Errorf("deploy_success published = %v, want %v", gotDispatched, tc.wantDispatched)
 	}
 }

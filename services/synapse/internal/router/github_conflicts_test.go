@@ -593,7 +593,6 @@ func TestTransitionRegisteredConflict_DedupAndRetry(t *testing.T) {
 		firstCallUpdated    bool
 		firstSHA            string
 		secondSHA           string
-		callClearFailedCI   bool
 		wantFirstHandled    bool
 		wantSecondHandled   bool
 		wantPublishedCount  int
@@ -628,17 +627,6 @@ func TestTransitionRegisteredConflict_DedupAndRetry(t *testing.T) {
 			wantSecondHandled:   true,
 			wantPublishedCount:  2,
 		},
-		{
-			name:                "clearing failed CI SHA resets dedup map allowing re-publish",
-			initialConflictInDB: true,
-			firstCallUpdated:    false,
-			firstSHA:            "sha-conflict-1",
-			secondSHA:           "sha-conflict-1",
-			callClearFailedCI:   true,
-			wantFirstHandled:    true,
-			wantSecondHandled:   true,
-			wantPublishedCount:  2,
-		},
 	}
 
 	for _, tc := range tests {
@@ -662,10 +650,10 @@ func TestTransitionRegisteredConflict_DedupAndRetry(t *testing.T) {
 				t.Errorf("first handled = %v, want %v", handled1, tc.wantFirstHandled)
 			}
 
-			if tc.callClearFailedCI {
-				srv.clearFailedCISHA("azylman/aerial", 42)
-			}
-
+			// The projection catches up with the first conflict head SHA, so the
+			// second call suppresses its duplicate legacy publish when the SHA
+			// is unchanged and republishes when it advanced.
+			reg.buildLifecycle = PRBuildLifecycle{Status: prConflict, HeadSHA: tc.firstSHA}
 			reg.conflictUpdated = false
 			reg.resolveTargetID = "100000000000000001"
 
@@ -691,7 +679,7 @@ func TestCIFailureTransition_RollbackAndRetry(t *testing.T) {
 		name string
 	}{
 		{
-			name: "publish error rolls back check state and retry succeeds when already ci_failed",
+			name: "publish error surfaces and retry succeeds when already ci_failed",
 		},
 	}
 
@@ -702,6 +690,7 @@ func TestCIFailureTransition_RollbackAndRetry(t *testing.T) {
 			reg := &mockPRRegistry{
 				ciFailedTargetID: "100000000000000001",
 				ciFailedUpdated:  false,
+				resolveTargetID:  "100000000000000001",
 				resolveHeadSHA:   "sha-ci-fail",
 				buildLifecycle:   PRBuildLifecycle{Status: prCIFailed},
 			}
@@ -719,10 +708,6 @@ func TestCIFailureTransition_RollbackAndRetry(t *testing.T) {
 			err1 := srv.handleCIFailureTransition(context.Background(), res, "test failure", "https://ci/1")
 			if err1 == nil {
 				t.Fatalf("first handleCIFailureTransition err = nil, want error")
-			}
-
-			if srv.GHState().HasActiveCheckRun(res.Repo, res.PRNumber, res.HeadSHA, "unit-tests") {
-				t.Fatalf("expected active failure for unit-tests to be rolled back")
 			}
 
 			bus.err = nil
