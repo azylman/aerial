@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
@@ -28,6 +29,8 @@ const (
 	statusRunning   = "running"
 	statusPending   = "pending"
 	statusCompleted = "completed"
+
+	defaultAgent = "aerial"
 )
 
 // ServerInstructions is sent on initialize so clients that defer tool schemas
@@ -253,11 +256,20 @@ type Handler struct {
 	// Restate-backed call reports ErrRetryIngressUnavailable-style failure
 	// through the same paths as a missing ingress URL.
 	RestateEnabled bool
+	Auth           *k8sauth.Authenticator
 }
 
 // NewHandler constructs a Handler backed by the given store and Restate client.
-func NewHandler(st store.VanadisStore, rc *restate.Client, restateEnabled bool) *Handler {
-	return &Handler{Store: st, Restate: rc, RestateEnabled: restateEnabled}
+func NewHandler(st store.VanadisStore, rc *restate.Client, restateEnabled bool, auth ...*k8sauth.Authenticator) *Handler {
+	var a *k8sauth.Authenticator
+	if len(auth) > 0 {
+		a = auth[0]
+	}
+	return &Handler{Store: st, Restate: rc, RestateEnabled: restateEnabled, Auth: a}
+}
+
+func (h *Handler) authEnabled() bool {
+	return h != nil && h.Auth != nil && h.Auth.Enabled()
 }
 
 func normalizeDiscordThreadID(s string) string {
@@ -279,9 +291,17 @@ func storeErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, model.ErrBuildConflict):
 		return http.StatusConflict
-	default:
-		return http.StatusInternalServerError
 	}
+	if _, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
+		return http.StatusBadRequest
+	}
+	if _, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
+		return http.StatusUnauthorized
+	}
+	if _, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
+		return http.StatusForbidden
+	}
+	return http.StatusInternalServerError
 }
 
 // writeStoreError maps a store or Restate error onto its HTTP status and writes
@@ -354,6 +374,15 @@ func (h *Handler) handleMCPGetBuild(ctx context.Context, args MCPGetBuildArgs) (
 	if h.Store == nil {
 		return MCPGetBuildOutput{}, errors.New("vanadis store not configured")
 	}
+	if h.authEnabled() {
+		caller, ok := k8sauth.CallerFromContext(ctx)
+		if !ok {
+			return MCPGetBuildOutput{}, errors.New("unauthorized: missing caller identity")
+		}
+		if err := h.Auth.Authorize(ctx, caller, "builds", "get", "*"); err != nil {
+			return MCPGetBuildOutput{}, err
+		}
+	}
 	buildID := strings.TrimSpace(args.BuildID)
 	threadID := normalizeDiscordThreadID(args.ThreadID)
 	if buildID == "" && threadID == "" {
@@ -392,6 +421,15 @@ func (h *Handler) handleMCPGetBuild(ctx context.Context, args MCPGetBuildArgs) (
 func (h *Handler) handleMCPGetChunk(ctx context.Context, args MCPGetChunkArgs) (MCPGetChunkOutput, error) {
 	if h.Store == nil {
 		return MCPGetChunkOutput{}, errors.New("vanadis store not configured")
+	}
+	if h.authEnabled() {
+		caller, ok := k8sauth.CallerFromContext(ctx)
+		if !ok {
+			return MCPGetChunkOutput{}, errors.New("unauthorized: missing caller identity")
+		}
+		if err := h.Auth.Authorize(ctx, caller, "builds", "get", "*"); err != nil {
+			return MCPGetChunkOutput{}, err
+		}
 	}
 	chunkID := strings.TrimSpace(args.ChunkID)
 	if chunkID != "" {
@@ -443,9 +481,34 @@ func (h *Handler) requireStoreAndBuildID(buildID string) (string, error) {
 	return trimmed, nil
 }
 
+func (h *Handler) authorizeBuildMutation(ctx context.Context, buildID string) error {
+	if !h.authEnabled() {
+		return nil
+	}
+	caller, ok := k8sauth.CallerFromContext(ctx)
+	if !ok {
+		return errors.New("unauthorized: missing caller identity")
+	}
+	if h.Store == nil {
+		return errors.New("vanadis store not configured")
+	}
+	targetBuild, _, err := h.Store.GetBuild(ctx, buildID)
+	if err != nil {
+		return err
+	}
+	agent := targetBuild.Agent
+	if agent == "" {
+		agent = defaultAgent
+	}
+	return h.Auth.Authorize(ctx, caller, "builds", "update", agent)
+}
+
 func (h *Handler) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildArgs) (MCPUpdateBuildOutput, error) {
 	buildID, err := h.requireStoreAndBuildID(args.BuildID)
 	if err != nil {
+		return MCPUpdateBuildOutput{}, err
+	}
+	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
 		return MCPUpdateBuildOutput{}, err
 	}
 
@@ -481,6 +544,9 @@ func (h *Handler) handleMCPUpdateChunk(ctx context.Context, args MCPUpdateChunkA
 	if err != nil {
 		return MCPUpdateChunkOutput{}, err
 	}
+	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
+		return MCPUpdateChunkOutput{}, err
+	}
 
 	var modePtr *string
 	if args.Mode != nil && strings.TrimSpace(*args.Mode) != "" {
@@ -514,6 +580,9 @@ func (h *Handler) handleMCPUpdateChunk(ctx context.Context, args MCPUpdateChunkA
 func (h *Handler) handleMCPAppendChunk(ctx context.Context, args MCPAppendChunkArgs) (MCPAppendChunkOutput, error) {
 	buildID, err := h.requireStoreAndBuildID(args.BuildID)
 	if err != nil {
+		return MCPAppendChunkOutput{}, err
+	}
+	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
 		return MCPAppendChunkOutput{}, err
 	}
 	if len(args.Chunks) == 0 {
@@ -553,6 +622,9 @@ func (h *Handler) handleMCPRemoveChunk(ctx context.Context, args MCPRemoveChunkA
 	if err != nil {
 		return MCPRemoveChunkOutput{}, err
 	}
+	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
+		return MCPRemoveChunkOutput{}, err
+	}
 
 	removedID := chunkRef
 	if _, chs, err := h.Store.GetBuild(ctx, buildID); err == nil {
@@ -590,6 +662,23 @@ func (h *Handler) handleMCPFailChunk(ctx context.Context, args MCPFailChunkArgs)
 	reason := strings.TrimSpace(args.Reason)
 	if chunkID == "" || reason == "" {
 		return MCPFailChunkOutput{}, fmt.Errorf("%w: chunk_id and reason are required", model.ErrInvalidBuildInput)
+	}
+	if h.authEnabled() {
+		caller, ok := k8sauth.CallerFromContext(ctx)
+		if !ok {
+			return MCPFailChunkOutput{}, errors.New("unauthorized: missing caller identity")
+		}
+		_, targetBuild, err := h.Store.GetChunk(ctx, chunkID)
+		if err != nil {
+			return MCPFailChunkOutput{}, err
+		}
+		agent := defaultAgent
+		if targetBuild != nil && targetBuild.Agent != "" {
+			agent = targetBuild.Agent
+		}
+		if err := h.Auth.Authorize(ctx, caller, "builds", "update", agent); err != nil {
+			return MCPFailChunkOutput{}, err
+		}
 	}
 	req := failChunkPayload{
 		DispatchID: args.DispatchID,

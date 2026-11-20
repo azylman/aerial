@@ -143,8 +143,13 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 		return fmt.Errorf("format chunk prompt: %w", err)
 	}
 
+	agent := strings.TrimSpace(build.Agent)
+	if agent == "" {
+		agent = "aerial"
+	}
 	req := BrainDispatchRequest{
 		ID:             model.ActionDispatchID(chunk),
+		Agent:          agent,
 		Source:         "vanadis-restate",
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(build.ThreadID),

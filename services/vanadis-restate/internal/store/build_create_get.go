@@ -76,10 +76,14 @@ func (s *Store) CreateBuild(ctx context.Context, build model.VanadisBuild, chunk
 			log.Printf("[vanadis] tx rollback error: %v", rbErr)
 		}
 	}()
-	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING;`
+	bQ := `INSERT INTO vanadis_builds (id, agent, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING;`
 	now := time.Now().UTC()
 	bTitle := FirstNonEmpty(strings.TrimSpace(build.Title), objective)
-	tag, err := tx.Exec(ctx, bQ, buildID, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), FirstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now)
+	agent := strings.TrimSpace(build.Agent)
+	if agent == "" {
+		agent = defaultAgent
+	}
+	tag, err := tx.Exec(ctx, bQ, buildID, agent, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), FirstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now)
 	if err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
@@ -216,8 +220,12 @@ func knownCreationConflict(err error, constraints ...string) bool {
 // after a successful commit whose acknowledgement was lost.
 func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.VanadisBuild, bc []model.VanadisChunk) bool {
 	buildKey := func(v model.VanadisBuild) model.VanadisBuild {
+		agent := strings.TrimSpace(v.Agent)
+		if agent == "" {
+			agent = "aerial"
+		}
 		return model.VanadisBuild{
-			ID: strings.TrimSpace(v.ID), ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
+			ID: strings.TrimSpace(v.ID), Agent: agent, ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
 			Title:     FirstNonEmpty(strings.TrimSpace(v.Title), strings.TrimSpace(v.Objective)),
 			Objective: strings.TrimSpace(v.Objective), SharedContext: strings.TrimSpace(v.SharedContext), Quiet: v.Quiet,
 		}

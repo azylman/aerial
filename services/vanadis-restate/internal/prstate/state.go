@@ -29,6 +29,7 @@ type FailedCheckState struct {
 type PRState struct {
 	Repo                 string
 	PRNumber             int
+	Agent                string
 	HeadSHA              string
 	GateGeneration       uint64
 	ReopenEpoch          uint64
@@ -51,6 +52,7 @@ func NewPRState(repo string, prNumber int) *PRState {
 	return &PRState{
 		Repo:     NormalizeRepo(repo),
 		PRNumber: prNumber,
+		Agent:    DefaultAgent,
 		Checks: FailedCheckState{
 			EverFailed:   make(map[string]bool),
 			ActiveFailed: make(map[string]bool),

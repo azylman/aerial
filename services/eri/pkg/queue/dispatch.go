@@ -118,10 +118,7 @@ func (p *WorkerPool) requeueDispatchOnClaimError(d db.Dispatch, claimErr error) 
 	})
 }
 
-var (
-	standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
-	vanadisPromptBuildIDRegex    = regexp.MustCompile(`(?m)^Build ID:\s*([A-Za-z0-9_.-]+)\s*$`)
-)
+var standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
 
 func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool) {
 	m := standalonePRRemediationRegex.FindStringSubmatch(prompt)
@@ -136,12 +133,7 @@ func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool)
 	return repo, prNum, err == nil && prNum > 0
 }
 
-func extractVanadisBuildID(chunkID, sessionID, targetID, prompt string) string {
-	if strings.TrimSpace(prompt) != "" {
-		if m := vanadisPromptBuildIDRegex.FindStringSubmatch(prompt); len(m) >= 2 {
-			return strings.TrimSpace(m[1])
-		}
-	}
+func extractVanadisBuildID(chunkID, sessionID, targetID string) string {
 	if strings.HasPrefix(chunkID, "build-") {
 		if idx := strings.LastIndex(chunkID, "-chunk-"); idx > 0 {
 			return chunkID[:idx]
@@ -178,7 +170,7 @@ func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string) {
 			chunkID = strings.TrimSpace(after)
 		}
 	}
-	buildID = extractVanadisBuildID(chunkID, d.SessionID, d.TargetID, d.Prompt)
+	buildID = extractVanadisBuildID(chunkID, d.SessionID, d.TargetID)
 	if chunkID == "" {
 		if repo, prNum, ok := extractPRRemediationTarget(d.Prompt); ok {
 			prID := fmt.Sprintf("pr-%s-%d", repo, prNum)

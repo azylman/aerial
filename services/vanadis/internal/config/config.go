@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 // FallbackConfigPath is the default YAML config path when CONFIG_PATH is unset.
@@ -25,17 +26,19 @@ type Config struct {
 	GitHubToken  string
 	ConfigPath   string
 	DeployUIURL  string
+	Auth         k8sauth.Config
 }
 
 // VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
 type VanadisYAMLConfig struct {
-	Port         string `yaml:"port"`
-	PostgresURL  string `yaml:"postgres_url"`
-	EriURL       string `yaml:"eri_url"`
-	NATSURL      string `yaml:"nats_url"`
-	GitHubAPIURL string `yaml:"github_api_url"`
-	GitHubToken  string `yaml:"github_token"`
-	DeployUIURL  string `yaml:"deploy_ui_url"`
+	Port         string         `yaml:"port"`
+	PostgresURL  string         `yaml:"postgres_url"`
+	EriURL       string         `yaml:"eri_url"`
+	NATSURL      string         `yaml:"nats_url"`
+	GitHubAPIURL string         `yaml:"github_api_url"`
+	GitHubToken  string         `yaml:"github_token"`
+	DeployUIURL  string         `yaml:"deploy_ui_url"`
+	Auth         k8sauth.Config `yaml:"auth"`
 }
 
 // RestateConfig holds Restate durable workflow runtime configuration for Vanadis.
@@ -73,6 +76,9 @@ func LoadConfig(configPath string) Config {
 	}
 	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), strings.TrimSpace(fileCfg.PostgresURL))
 	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL)), "/")
+	authEnabled := fileCfg.Auth.Enabled || strings.EqualFold(os.Getenv("K8S_AUTH_ENABLED"), "true") || strings.EqualFold(os.Getenv("AUTH_ENABLED"), "true")
+	authCfg := fileCfg.Auth
+	authCfg.Enabled = authEnabled
 	return Config{
 		Port:         firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
 		PostgresURL:  pgURL,
@@ -83,6 +89,7 @@ func LoadConfig(configPath string) Config {
 		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
 		ConfigPath:   strings.TrimSpace(configPath),
 		DeployUIURL:  strings.TrimRight(strings.TrimSpace(fileCfg.DeployUIURL), "/"),
+		Auth:         authCfg,
 	}
 }
 

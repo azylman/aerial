@@ -30,6 +30,7 @@ var ErrChunkNotFound = store.ErrChunkNotFound
 
 type CreateBuildRequest struct {
 	ID            string                   `json:"id"`
+	Agent         string                   `json:"agent,omitempty"`
 	ThreadID      string                   `json:"thread_id"`
 	Tier          int                      `json:"tier"`
 	Title         string                   `json:"title"`

@@ -85,6 +85,7 @@ func NormalizeChunkEffort(effort string) (string, error) {
 // VanadisBuild represents a multi-chunk autonomous engineering build run.
 type VanadisBuild struct {
 	ID              string    `json:"id"`
+	Agent           string    `json:"agent,omitempty"`
 	ThreadID        string    `json:"thread_id"`
 	Tier            int       `json:"tier"`
 	Title           string    `json:"title"`
@@ -255,6 +256,7 @@ type CreateChunkInput struct {
 // CreateBuildRequest defines the JSON request body for POST /builds.
 type CreateBuildRequest struct {
 	ID            string             `json:"id"`
+	Agent         string             `json:"agent,omitempty"`
 	ThreadID      string             `json:"thread_id"`
 	Tier          int                `json:"tier"`
 	Title         string             `json:"title"`
@@ -262,6 +264,13 @@ type CreateBuildRequest struct {
 	SharedContext string             `json:"shared_context,omitempty"`
 	Quiet         bool               `json:"quiet"`
 	Chunks        []CreateChunkInput `json:"chunks"`
+}
+
+// UpdateActiveStepRequest carries the target chunk and active step description.
+type UpdateActiveStepRequest struct {
+	ChunkID    string `json:"chunk_id"`
+	ActiveStep string `json:"active_step,omitempty"`
+	Step       string `json:"step,omitempty"`
 }
 
 // GenerateBuildID generates a unique build identifier.

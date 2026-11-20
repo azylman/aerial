@@ -19,6 +19,7 @@ import (
 // Status vocabulary mirrored from the executor frozen copies; values stay byte-identical.
 const (
 	chunkModeAction       = "action"
+	defaultAgent          = "aerial"
 	statusRunning         = "running"
 	statusOpen            = "open"
 	statusPROpened        = "pr_opened"
@@ -41,7 +42,12 @@ func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChun
 	for i, c := range ordered {
 		wChunks[i] = BuildStatusWidgetChunk(c, baseURL)
 	}
+	agent := strings.TrimSpace(build.Agent)
+	if agent == "" {
+		agent = defaultAgent
+	}
 	return ericlient.StatusWidgetRequest{
+		Agent:     agent,
 		ChannelID: build.ThreadID,
 		MessageID: build.StatusMessageID,
 		ID:        build.ID,

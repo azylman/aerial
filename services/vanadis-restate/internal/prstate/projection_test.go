@@ -254,15 +254,15 @@ func TestBuildProjection(t *testing.T) {
 		wantChecks  int
 		wantKeyPrep string
 	}{
-		{name: "open normalizes bare repo", pr: 101, headSHA: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen0:epoch0:projection:"},
-		{name: "failed ci maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantKeyPrep: "azylman/aerial#101@abc123:gen1:epoch0:projection:"},
-		{name: "roborev failure maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "roborev", gen: 2, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantKeyPrep: "azylman/aerial#101@abc123:gen2:epoch0:projection:"},
-		{name: "conflict maps conflict", pr: 101, headSHA: "abc123", conflict: "abc123", gen: 1, wantStatus: "conflict", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen1:epoch0:projection:"},
-		{name: "superseded failure projects open", pr: 101, headSHA: "def456", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@def456:gen1:epoch0:projection:"},
-		{name: "superseded conflict projects open", pr: 101, headSHA: "def456", conflict: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@def456:gen0:epoch0:projection:"},
-		{name: "reopened projects open on new epoch", pr: 101, headSHA: "abc123", terminal: TerminalMerged, reopened: true, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen0:epoch1:projection:"},
-		{name: "merged maps merged", pr: 101, headSHA: "abc123", terminal: TerminalMerged, mergeSHA: "def456", gen: 3, wantStatus: "merged", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen3:epoch0:projection:"},
-		{name: "closed maps closed", pr: 101, headSHA: "abc123", terminal: TerminalClosed, wantStatus: "closed", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "azylman/aerial#101@abc123:gen0:epoch0:projection:"},
+		{name: "open normalizes bare repo", pr: 101, headSHA: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen0:epoch0:"},
+		{name: "failed ci maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen1:epoch0:"},
+		{name: "roborev failure maps ci_failed", pr: 101, headSHA: "abc123", failedSHA: "abc123", check: "roborev", gen: 2, wantStatus: "ci_failed", wantRepo: "azylman/aerial", wantChecks: 1, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen2:epoch0:"},
+		{name: "conflict maps conflict", pr: 101, headSHA: "abc123", conflict: "abc123", gen: 1, wantStatus: "conflict", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen1:epoch0:"},
+		{name: "superseded failure projects open", pr: 101, headSHA: "def456", failedSHA: "abc123", check: "lint", gen: 1, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@def456:gen1:epoch0:"},
+		{name: "superseded conflict projects open", pr: 101, headSHA: "def456", conflict: "abc123", wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@def456:gen0:epoch0:"},
+		{name: "reopened projects open on new epoch", pr: 101, headSHA: "abc123", terminal: TerminalMerged, reopened: true, wantStatus: "open", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen0:epoch1:"},
+		{name: "merged maps merged", pr: 101, headSHA: "abc123", terminal: TerminalMerged, mergeSHA: "def456", gen: 3, wantStatus: "merged", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen3:epoch0:"},
+		{name: "closed maps closed", pr: 101, headSHA: "abc123", terminal: TerminalClosed, wantStatus: "closed", wantRepo: "azylman/aerial", wantChecks: 0, wantKeyPrep: "projection:aerial:azylman/aerial:101@abc123:gen0:epoch0:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -314,7 +314,7 @@ func TestBuildProjectionNilState(t *testing.T) {
 		wantStatus  string
 		wantKeyPrep string
 	}{
-		{name: "nil state maps open empty", wantStatus: "open", wantKeyPrep: "#0@:gen0:epoch0:projection:"},
+		{name: "nil state maps open empty", wantStatus: "open", wantKeyPrep: "projection:aerial::0@:gen0:epoch0:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -415,11 +415,11 @@ func TestProjectionUpsertQueryBranches(t *testing.T) {
 		part       string
 		wantSubstr string
 	}{
-		{name: "insert defaults missing checks to empty", part: "insert", wantSubstr: "COALESCE($9::jsonb->'ci_checks', '{}'::jsonb)"},
+		{name: "insert defaults missing checks to empty", part: "insert", wantSubstr: "COALESCE($10::jsonb->'ci_checks', '{}'::jsonb)"},
 		{name: "conflict target", part: "all", wantSubstr: "ON CONFLICT (repo, pr_number)"},
 		{name: "update removes banner", part: "update", wantSubstr: "- 'banner'"},
 		{name: "update coalesces null metadata", part: "update", wantSubstr: "COALESCE(metadata, '{}'::jsonb)"},
-		{name: "update defaults missing checks to empty", part: "update", wantSubstr: "COALESCE($9::jsonb->'ci_checks', '{}'::jsonb)"},
+		{name: "update defaults missing checks to empty", part: "update", wantSubstr: "COALESCE($10::jsonb->'ci_checks', '{}'::jsonb)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -455,12 +455,12 @@ func TestProjectionUpsertQueryArgs(t *testing.T) {
 		{
 			name: "full snapshot binds in order",
 			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", MergeSHA: "def456", Title: "t", TargetID: "123", Status: "merged", Generation: 1, Metadata: map[string]any{"ci_checks": map[string]any{"lint": "failed"}}},
-			want: []any{"azylman/aerial", 101, "feat/x", "abc123", "def456", "123", "t", "merged", `{"ci_checks":{"lint":"failed"}}`},
+			want: []any{"azylman/aerial", 101, "aerial", "feat/x", "abc123", "def456", "123", "t", "merged", `{"ci_checks":{"lint":"failed"}}`},
 		},
 		{
 			name: "nil metadata binds empty object",
 			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "t", TargetID: "123", Status: "open", Generation: 1},
-			want: []any{"azylman/aerial", 101, "feat/x", "abc123", "", "123", "t", "open", "{}"},
+			want: []any{"azylman/aerial", 101, "aerial", "feat/x", "abc123", "", "123", "t", "open", "{}"},
 		},
 	}
 	for _, tc := range tests {
@@ -476,7 +476,7 @@ func TestProjectionUpsertQueryArgs(t *testing.T) {
 
 // TestProjectionUpsertQueryGuardsBadMetadata freezes the marshal-failure
 // fallback: an unmarshalable metadata value still binds '{}' instead of
-// propagating garbage to $9.
+// propagating garbage to $10.
 func TestProjectionUpsertQueryGuardsBadMetadata(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -490,11 +490,11 @@ func TestProjectionUpsertQueryGuardsBadMetadata(t *testing.T) {
 			t.Parallel()
 			snap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "t", TargetID: "123", Status: "open", Metadata: map[string]any{"ci_checks": func() {}}}
 			_, args := ProjectionUpsertQuery(snap)
-			if len(args) != 9 {
-				t.Fatalf("args = %d, want 9", len(args))
+			if len(args) != 10 {
+				t.Fatalf("args = %d, want 10", len(args))
 			}
-			if !reflect.DeepEqual(args[8], tc.want) {
-				t.Fatalf("args[8] = %#v, want %#v", args[8], tc.want)
+			if !reflect.DeepEqual(args[9], tc.want) {
+				t.Fatalf("args[9] = %#v, want %#v", args[9], tc.want)
 			}
 		})
 	}

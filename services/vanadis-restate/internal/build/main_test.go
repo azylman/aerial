@@ -354,7 +354,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 	// Create with chunk with empty ID (generates auto ID)
 	ctxAuto := makeObjectMockContext(t, "b-auto")
 	storeCreate, _ := dbScript{routes: []sqlRoute{
-		{match: "SELECT id, thread_id", row: &mockRow{b: &model.VanadisBuild{ID: "b-auto", Status: "running"}}},
+		{match: "FROM vanadis_builds WHERE id = $1", row: &mockRow{b: &model.VanadisBuild{ID: "b-auto", Status: "running"}}},
 	}}.open()
 	boCreate := NewBuildObject("", nil).WithAuthority(storeCreate, nil)
 	validNoChunkIDReq := CreateBuildRequest{

@@ -1396,3 +1396,65 @@ func TestIsNotFoundError(t *testing.T) {
 		})
 	}
 }
+
+func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
+	t.Parallel()
+
+	mockAerial := &mockWidgetSender{}
+	mockAlpha := &mockWidgetSender{}
+
+	d := &DiscordWidgetDeliverer{
+		agentSenders: map[string]DiscordWidgetSender{
+			"aerial":      mockAerial,
+			"agent-alpha": mockAlpha,
+		},
+	}
+
+	tests := []struct {
+		name       string
+		deliverer  *DiscordWidgetDeliverer
+		agent      string
+		wantSender DiscordWidgetSender
+	}{
+		{name: "nil deliverer returns nil", deliverer: nil, agent: "aerial", wantSender: nil},
+		{name: "empty agent resolves aerial", deliverer: d, agent: "", wantSender: mockAerial},
+		{name: "aerial agent resolves aerial", deliverer: d, agent: "aerial", wantSender: mockAerial},
+		{name: "agent-alpha resolves alpha", deliverer: d, agent: "agent-alpha", wantSender: mockAlpha},
+		{name: "unknown agent falls back to aerial", deliverer: d, agent: "agent-unknown", wantSender: mockAerial},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.deliverer.senderForAgent(tc.agent)
+			if got != tc.wantSender {
+				t.Fatalf("senderForAgent(%q) = %v, want %v", tc.agent, got, tc.wantSender)
+			}
+		})
+	}
+
+	var nilDeliverer *DiscordWidgetDeliverer
+	nilDeliverer.SetAgentSender("agent-beta", mockAlpha)
+
+	newD := &DiscordWidgetDeliverer{}
+	newD.SetAgentSender("", mockAerial)
+	if got := newD.senderForAgent("aerial"); got != mockAerial {
+		t.Fatalf("expected aerial sender after SetAgentSender, got %v", got)
+	}
+
+	newD.SetAgentSender("agent-beta", mockAlpha)
+	if got := newD.senderForAgent("agent-beta"); got != mockAlpha {
+		t.Fatalf("expected agent-beta sender after SetAgentSender, got %v", got)
+	}
+}
+
+func TestDiscoverAgentTokens(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN_AGENT_ALPHA", "token-alpha")
+	t.Setenv("DISCORD_TOKEN", "token-aerial")
+	tokens := discoverAgentTokens()
+	if tokens["agent-alpha"] != "token-alpha" {
+		t.Errorf("expected token-alpha, got %q", tokens["agent-alpha"])
+	}
+	if tokens["aerial"] != "token-aerial" {
+		t.Errorf("expected token-aerial, got %q", tokens["aerial"])
+	}
+}

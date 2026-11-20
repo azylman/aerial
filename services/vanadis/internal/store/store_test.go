@@ -98,7 +98,7 @@ func (r *mockRows) Scan(dest ...any) error {
 	}
 	if len(r.builds) > 0 {
 		b := r.builds[r.idx-1]
-		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
+		return scanValues(dest, b.ID, b.Agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
 	}
 	if len(r.items) > 0 {
 		c := r.items[r.idx-1]
@@ -346,7 +346,7 @@ func mkChunk(id, buildID string, idx int, title, instr, effort, status string) m
 }
 
 func buildVals(b model.VanadisBuild) []any {
-	return []any{b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt}
+	return []any{b.ID, b.Agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt}
 }
 
 type getBuildCase struct {

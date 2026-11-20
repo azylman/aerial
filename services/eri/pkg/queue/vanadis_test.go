@@ -544,25 +544,25 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 	},
 	{
 		name:           "successful step update custom agent via restate fallback",
-		agentName:      "miorine",
+		agentName:      "agent-alpha",
 		buildID:        "build-202",
 		chunkID:        "chunk-live-2",
 		step:           "Compiling binaries...",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build-miorine/build-202/UpdateActiveStep/send",
+		wantURI:        "/Build-agent-alpha/build-202/UpdateActiveStep/send",
 		wantChunkID:    "chunk-live-2",
 		wantActiveStep: "Compiling binaries...",
 	},
 	{
 		name:           "step text trimming and special characters in buildID via restate fallback",
-		agentName:      "suletta",
+		agentName:      "agent-beta",
 		buildID:        "build/special:1",
 		chunkID:        "chunk-trim",
 		step:           "   Running tests...   \n",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build-suletta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
+		wantURI:        "/Build-agent-beta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
 		wantChunkID:    "chunk-trim",
 		wantActiveStep: "Running tests...",
 	},
@@ -580,13 +580,27 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 	},
 	{
 		name:       "empty chunkID is a no-op",
+		restateURL: "http://restate.test:8080",
 		buildID:    "build-noop",
 		chunkID:    "",
 		step:       "anything",
 		skipServer: true,
 	},
 	{
-		name:            "missing buildID with non-empty chunkID fails loud",
+		name:           "successful step update via vanadis API with empty buildID routes to chunks endpoint",
+		vanadisURL:     "USE_SERVER",
+		buildID:        "",
+		chunkID:        "chunk-nobuild-1",
+		step:           "Running custom chunk...",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/chunks/active-step",
+		wantChunkID:    "chunk-nobuild-1",
+		wantActiveStep: "Running custom chunk...",
+	},
+	{
+		name:            "missing buildID with non-empty chunkID fails loud on direct restate fallback",
+		restateURL:      "http://restate.test:8080",
 		buildID:         "",
 		chunkID:         "chunk-missing-build",
 		step:            "anything",
@@ -639,6 +653,7 @@ type setupDispatchActiveStepCase struct {
 	name             string
 	source           string
 	chunkID          string
+	targetID         string
 	prompt           string
 	dispatchStatus   string
 	serverStatus     int
@@ -710,6 +725,7 @@ func runSetupDispatchActiveStepCase(t *testing.T, tc setupDispatchActiveStepCase
 		ID:             "disp-" + strings.ReplaceAll(tc.name, " ", "-"),
 		Source:         tc.source,
 		SessionID:      tc.source + "-sess",
+		TargetID:       tc.targetID,
 		VanadisChunkID: tc.chunkID,
 		Prompt:         tc.prompt,
 		Status:         tc.dispatchStatus,
@@ -760,8 +776,8 @@ func TestWorkerPool_SetupDispatchTurn_ActiveStepLifecycle(t *testing.T) {
 		{
 			name:            "live step forwarding and turn cleanup clearing",
 			source:          "vanadis",
-			chunkID:         "chunk-step-1",
-			prompt:          "Build ID: build-lifecycle\nChunk ID: chunk-step-1",
+			chunkID:         "build-lifecycle-chunk-1",
+			prompt:          "Build ID: build-lifecycle\nChunk ID: build-lifecycle-chunk-1",
 			dispatchStatus:  db.StatusPending,
 			emitToolCommand: "git commit -m tweak",
 			expectUpdater:   true,
@@ -771,7 +787,8 @@ func TestWorkerPool_SetupDispatchTurn_ActiveStepLifecycle(t *testing.T) {
 			name:            "resumed dispatch turn extracts chunk info and forwards steps",
 			source:          "vanadis",
 			chunkID:         "",
-			prompt:          "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-resumed-99\nChunk ID: chunk-resumed-99\nResume turn",
+			targetID:        "build-resumed-99-chunk-1",
+			prompt:          "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-resumed-99\nChunk ID: build-resumed-99-chunk-1\nResume turn",
 			dispatchStatus:  db.StatusProcessing,
 			emitToolCommand: "go test -v ./...",
 			expectUpdater:   true,
@@ -780,8 +797,8 @@ func TestWorkerPool_SetupDispatchTurn_ActiveStepLifecycle(t *testing.T) {
 		{
 			name:             "http error on live step logs and marks dirty for retry",
 			source:           "vanadis",
-			chunkID:          "chunk-err-retry",
-			prompt:           "Build ID: build-retry\nChunk ID: chunk-err-retry",
+			chunkID:          "build-retry-chunk-err",
+			prompt:           "Build ID: build-retry\nChunk ID: build-retry-chunk-err",
 			dispatchStatus:   db.StatusPending,
 			serverStatus:     http.StatusInternalServerError,
 			emitToolCommand:  "verify.sh",

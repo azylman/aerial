@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	vanadismcp "github.com/azylman/aerial/services/vanadis/internal/mcp"
@@ -75,6 +76,8 @@ type (
 	CreateChunkInput = model.CreateChunkInput
 	// CreateBuildRequest defines the JSON request body for POST /builds.
 	CreateBuildRequest = model.CreateBuildRequest
+	// UpdateActiveStepRequest carries the target chunk and active step description.
+	UpdateActiveStepRequest = model.UpdateActiveStepRequest
 )
 
 var (
@@ -134,26 +137,43 @@ type VanadisServer struct {
 	httpClient *http.Client
 	store      VanadisStore
 	queueStats consumerStatsQuerier
+	auth       *k8sauth.Authenticator
 }
 
 // NewVanadisServer constructs a new VanadisServer instance.
-func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client) *VanadisServer {
+func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client, auth ...*k8sauth.Authenticator) *VanadisServer {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
+	var a *k8sauth.Authenticator
+	if len(auth) > 0 {
+		a = auth[0]
+	} else if cfg.Auth.Enabled {
+		a = k8sauth.NewAuthenticator(cfg.Auth)
+	}
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
-	return &VanadisServer{cfg: cfg, restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")), httpClient: tracing.Client(httpClient), store: st}
+	return &VanadisServer{
+		cfg:        cfg,
+		restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")),
+		httpClient: tracing.Client(httpClient),
+		store:      st,
+		auth:       a,
+	}
 }
 
 // SetStore updates the VanadisStore backing the server.
 func (s *VanadisServer) SetStore(st VanadisStore) { s.store = st }
+
+func (s *VanadisServer) authEnabled() bool {
+	return s != nil && s.auth != nil && s.auth.Enabled()
+}
 
 // mcpHandler builds the L2 MCP handler from live server dependencies.
 func (s *VanadisServer) mcpHandler() *vanadismcp.Handler {
 	if s == nil {
 		return vanadismcp.NewHandler(nil, NewClient(RestateConfig{}, nil), false)
 	}
-	return vanadismcp.NewHandler(s.store, s.restateClient(), s.restateCfg.Enabled)
+	return vanadismcp.NewHandler(s.store, s.restateClient(), s.restateCfg.Enabled, s.auth)
 }
 
 // newMCPHandler constructs and returns the Streamable HTTP MCP server handler.
@@ -197,6 +217,27 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
+func mapAuthOrStoreStatus(err error) int {
+	if _, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
+		return http.StatusBadRequest
+	}
+	if _, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
+		return http.StatusUnauthorized
+	}
+	if _, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
+		return http.StatusForbidden
+	}
+	return 0
+}
+
+func writeAuthErr(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if s := mapAuthOrStoreStatus(err); s != 0 {
+		status = s
+	}
+	writeErr(w, status, err.Error())
+}
+
 // writeStoreErr maps a store or Restate error onto its HTTP status and writes it. Server-side
 // failures (5xx) are logged with ctx so the line carries the request's trace_id and span_id.
 func writeStoreErr(ctx context.Context, w http.ResponseWriter, err error) {
@@ -210,6 +251,10 @@ func writeStoreErr(ctx context.Context, w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, ErrBuildConflict):
 		status = http.StatusConflict
+	default:
+		if s := mapAuthOrStoreStatus(err); s != 0 {
+			status = s
+		}
 	}
 	if status >= http.StatusInternalServerError {
 		slog.ErrorContext(ctx, "[vanadis] store request failed", "status", status, "error", err)
@@ -237,6 +282,7 @@ func SetupMux(server *VanadisServer) http.Handler {
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
+		"POST /chunks/active-step":       server.handleChunksActiveStep,
 		"/chunks/attach-pr":              server.handleAttachChunkPR,
 		"/chunks/":                       server.handleChunkByID,
 		"POST /builds/{id}/retry-action": server.handleRetryActionChunk,
@@ -245,7 +291,16 @@ func SetupMux(server *VanadisServer) http.Handler {
 	} {
 		mux.HandleFunc(p, h)
 	}
-	return tracing.Middleware("vanadis", mux)
+	authMiddleware := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if server != nil && server.authEnabled() {
+				server.auth.Middleware("/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush")(next).ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	return tracing.Middleware("vanadis", authMiddleware(mux))
 }
 
 // Routes returns the HTTP handler for the server.
@@ -253,6 +308,17 @@ func (s *VanadisServer) Routes() http.Handler { return SetupMux(s) }
 
 func (*VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
+}
+
+func (s *VanadisServer) authorizeBuildRead(ctx context.Context, action string) error {
+	if !s.authEnabled() {
+		return nil
+	}
+	caller, ok := k8sauth.CallerFromContext(ctx)
+	if !ok {
+		return &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity}
+	}
+	return s.auth.Authorize(ctx, caller, "builds", action, "*")
 }
 
 func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
@@ -302,6 +368,27 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	var targetAgent string
+	if s.authEnabled() {
+		caller, ok := k8sauth.CallerFromContext(r.Context())
+		if !ok {
+			writeAuthErr(w, &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity})
+			return
+		}
+		resolved, err := s.auth.AuthorizeTarget(r.Context(), caller, "builds", "create", req.Agent)
+		if err != nil {
+			writeAuthErr(w, err)
+			return
+		}
+		targetAgent = resolved
+	} else {
+		targetAgent = strings.TrimSpace(req.Agent)
+		if targetAgent == "" {
+			targetAgent = "aerial"
+		}
+	}
+	req.Agent = targetAgent
+
 	var created VanadisBuild
 	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "Create"), req, &created); err != nil {
 		writeStoreErr(r.Context(), w, err)
@@ -321,6 +408,21 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if s.authEnabled() {
+		if s.store == nil {
+			writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+			return
+		}
+		build, _, err := s.store.GetBuild(r.Context(), id)
+		if err != nil {
+			writeStoreErr(r.Context(), w, err)
+			return
+		}
+		if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
+			writeAuthErr(w, err)
+			return
+		}
+	}
 	var cancelled VanadisBuild
 	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(id, "Cancel"), CancelBuildRequest{}, &cancelled); err != nil {
 		writeStoreErr(r.Context(), w, err)
@@ -333,6 +435,10 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, id string) {
 	switch r.Method {
 	case http.MethodGet:
+		if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
+			writeAuthErr(w, err)
+			return
+		}
 		build, chunks, err := s.store.GetBuild(r.Context(), id)
 		if err != nil {
 			writeStoreErr(r.Context(), w, err)
@@ -384,6 +490,8 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 		switch parts[1] {
 		case "cancel":
 			s.handleBuildCancel(w, r, id)
+		case "active-step":
+			s.handleBuildActiveStep(w, r, id)
 		case fieldChunks:
 			if hasTrailingSlash && (r.Method == http.MethodGet || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
 				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
@@ -420,6 +528,10 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 	}
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if err := s.authorizeBuildRead(r.Context(), "list"); err != nil {
+		writeAuthErr(w, err)
 		return
 	}
 	limit := 50

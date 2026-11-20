@@ -14,7 +14,7 @@ import (
 )
 
 func buildRow(id, status string) pgx.Row {
-	return valuesRow(id, "thread", 3, "title", "objective", "", status, "", false, time.Time{}, time.Time{})
+	return valuesRow(id, "aerial", "thread", 3, "title", "objective", "", status, "", false, time.Time{}, time.Time{})
 }
 
 // lifecycleStampFake simulates the completed_at CASE of the lifecycle status

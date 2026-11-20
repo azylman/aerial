@@ -35,6 +35,15 @@ func NormalizeAgentName(agent string) string {
 	return clean
 }
 
+// SessionManagerServiceName returns the Restate service name for SessionManager Virtual Objects.
+func SessionManagerServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == defaultAgentName {
+		return "SessionManager"
+	}
+	return "SessionManager-" + name
+}
+
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
 func ThreadSessionServiceName(agent string) string {
 	name := NormalizeAgentName(agent)
@@ -75,6 +84,7 @@ func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL, agent string
 	}
 
 	services := []string{
+		SessionManagerServiceName(agent),
 		ThreadSessionServiceName(agent),
 		DispatchSessionServiceName(agent),
 		VoiceSessionServiceName(agent),
@@ -286,9 +296,17 @@ func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req Brain
 	if c.restateURL == "" {
 		return restateDispatchResult{}, errors.New("restate url not configured")
 	}
+	dispatchAgent := strings.TrimSpace(req.Agent)
+	if dispatchAgent == "" {
+		dispatchAgent = c.agentName
+	}
+	if dispatchAgent == "" {
+		dispatchAgent = defaultAgentName
+	}
+	req.Agent = dispatchAgent
 	dispatchID := strings.TrimSpace(req.ID)
 	sessionKey := resolveSessionKey(req)
-	svc := DispatchSessionServiceName(c.agentName)
+	svc := DispatchSessionServiceName(dispatchAgent)
 	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, svc, url.PathEscape(sessionKey))
 
 	respBytes, err := c.postRestateJSON(ctx, endpoint, dispatchID, "dispatch", req)
@@ -442,6 +460,11 @@ func (c *RestateEriClient) Message(ctx context.Context, channelID, content strin
 	c.widgetMu.RUnlock()
 
 	if c.restateURL != "" && hasDiscordAuth {
+		if mda, ok := deliverer.(interface {
+			DeliverDirectMessageWithAgent(ctx context.Context, agent, channelID, content string) error
+		}); ok && mda != nil {
+			return mda.DeliverDirectMessageWithAgent(ctx, c.agentName, cleanChannelID, cleanContent)
+		}
 		if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {
 			return md.DeliverDirectMessage(ctx, cleanChannelID, cleanContent)
 		}

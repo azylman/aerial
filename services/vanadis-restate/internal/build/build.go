@@ -453,8 +453,16 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	if title == "" {
 		title = objective
 	}
+	agent := strings.TrimSpace(req.Agent)
+	if agent == "" && b != nil {
+		agent = strings.TrimSpace(b.agentName)
+	}
+	if agent == "" {
+		agent = "aerial"
+	}
 	build := model.VanadisBuild{
 		ID:            buildID,
+		Agent:         agent,
 		ThreadID:      threadID,
 		Tier:          req.Tier,
 		Title:         title,
