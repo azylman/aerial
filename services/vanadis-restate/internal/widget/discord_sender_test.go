@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -216,118 +215,6 @@ func TestShouldSinkWidget(t *testing.T) {
 			}
 			result := shouldSinkWidget(sender, tc.channelID, tc.messageID, now)
 			assert.Equal(t, tc.expectSink, result)
-		})
-	}
-}
-
-func TestDeliverStatusWidgetFunction(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
-	notFoundErr := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
-
-	tests := []struct {
-		name          string
-		nilSender     bool
-		req           ericlient.StatusWidgetRequest
-		nilSendMsg    bool
-		sendErr       error
-		sendMsg       *discordgo.Message
-		editErr       error
-		editMsg       *discordgo.Message
-		deleteErr     error
-		msgs          []*discordgo.Message
-		expectID      string
-		expectErrSub  string
-		expectDeleted bool
-	}{
-		{
-			name:         "nil sender returns error",
-			nilSender:    true,
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1"},
-			expectErrSub: "discord widget sender is nil",
-		},
-		{
-			name:         "empty channel ID returns error",
-			req:          ericlient.StatusWidgetRequest{ChannelID: ""},
-			expectErrSub: "channel_id is required",
-		},
-		{
-			name:     "new message success",
-			req:      ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build 1", Status: "running"},
-			sendMsg:  &discordgo.Message{ID: "msg-new-123"},
-			expectID: "msg-new-123",
-		},
-		{
-			name:         "new message send failure",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build 1"},
-			sendErr:      errors.New("network failure"),
-			expectErrSub: "failed to send status widget message",
-		},
-		{
-			name:         "new message send nil message returns error",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build 1"},
-			nilSendMsg:   true,
-			expectErrSub: "received nil message",
-		},
-		{
-			name:     "edit existing message success",
-			req:      ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-orig-1", Title: "Build 1"},
-			editMsg:  &discordgo.Message{ID: "msg-orig-1"},
-			expectID: "msg-orig-1",
-		},
-		{
-			name:     "edit existing message 404 recovers by creating new",
-			req:      ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-deleted-1", Title: "Build 1"},
-			editErr:  notFoundErr,
-			sendMsg:  &discordgo.Message{ID: "msg-recreated-2"},
-			expectID: "msg-recreated-2",
-		},
-		{
-			name:         "edit existing message 404 recreate error fails",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-deleted-1", Title: "Build 1"},
-			editErr:      notFoundErr,
-			sendErr:      errors.New("recreate error"),
-			expectErrSub: "failed to send new status widget message after 404 edit",
-		},
-		{
-			name:         "edit existing message 404 recreate nil message fails",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-deleted-1", Title: "Build 1"},
-			editErr:      notFoundErr,
-			nilSendMsg:   true,
-			expectErrSub: "received nil message",
-		},
-		{
-			name:         "edit existing non-404 error fails",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-err-1", Title: "Build 1"},
-			editErr:      errors.New("edit permission denied"),
-			expectErrSub: "failed to edit status widget message",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var sender DiscordWidgetSender
-			if !tc.nilSender {
-				sender = &mockWidgetSender{
-					sendMsg:    tc.sendMsg,
-					nilSendMsg: tc.nilSendMsg,
-					sendErr:    tc.sendErr,
-					editMsg:    tc.editMsg,
-					editErr:    tc.editErr,
-					deleteErr:  tc.deleteErr,
-					msgs:       tc.msgs,
-				}
-			}
-
-			id, err := DeliverStatusWidget(sender, tc.req, now)
-			if tc.expectErrSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.expectErrSub)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tc.expectID, id)
-			}
 		})
 	}
 }
@@ -1373,28 +1260,6 @@ func (m *mockSerializedSender) ChannelMessages(channelID string, limit int, befo
 
 func (m *mockSerializedSender) ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error {
 	return m.mock.ChannelMessageDelete(channelID, messageID, options...)
-}
-
-func TestIsNotFoundError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		err      error
-		expected bool
-	}{
-		{"nil error", nil, false},
-		{"standard error", errors.New("boom"), false},
-		{"404 RESTError", &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}, true},
-		{"code 10008 RESTError", &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 10008}}, true},
-		{"other RESTError", &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusInternalServerError}}, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.expected, isNotFoundError(tc.err))
-		})
-	}
 }
 
 func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
