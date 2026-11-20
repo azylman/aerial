@@ -448,9 +448,6 @@ spec:
                 operator: In
                 values:
                   - synapse
-                  - vanadis
-                  - vanadis-restate
-                  - haro
                   - coven
                   - console
                   - prospera
@@ -491,13 +488,80 @@ spec:
                 values:
                   - eri
                   - eri-restate
+                  - eri-miorine
+                  - eri-miorine-restate
+                  - eri-suletta
+                  - eri-suletta-restate
                   - coven
+                  - coven-miorine
+                  - coven-suletta
+                  - vmsingle
+                  - victoriametrics
+                  - gatus
+                  - coverage-ingest
+        - podSelector:
+            matchLabels:
+              app: coverage-ingest
       ports:
         - port: 4030
           protocol: TCP
   podSelector:
     matchLabels:
       app.kubernetes.io/name: transcripts
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infisical-mcp-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - eri
+                  - eri-restate
+                  - vmsingle
+                  - victoriametrics
+                  - gatus
+      ports:
+        - port: 8080
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: infisical-mcp
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: discord-mcp-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - eri
+                  - eri-restate
+                  - vmsingle
+                  - victoriametrics
+                  - gatus
+      ports:
+        - port: 8080
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: discord-mcp
   policyTypes:
     - Ingress
 ---
@@ -638,3 +702,63 @@ spec:
   to:
     - group: ""
       kind: Service
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: restate-ingress-netpol
+  namespace: restate-green
+spec:
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: restate-operator
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - vanadis
+                  - vanadis-nats
+                  - vanadis-restate
+                  - vanadis-miorine
+                  - vanadis-miorine-nats
+                  - vanadis-miorine-restate
+                  - vanadis-suletta
+                  - vanadis-suletta-nats
+                  - vanadis-suletta-restate
+                  - haro
+                  - haro-miorine
+                  - haro-suletta
+                  - synapse
+                  - synapse-miorine
+                  - synapse-suletta
+                  - eri
+                  - eri-miorine
+                  - eri-suletta
+                  - eri-restate
+                  - eri-miorine-restate
+                  - eri-suletta-restate
+                  - console
+                  - vmsingle
+                  - victoriametrics
+                  - gatus
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: lan-gateway
+      ports:
+        - port: 8080
+          protocol: TCP
+        - port: 9070
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  policyTypes:
+    - Ingress

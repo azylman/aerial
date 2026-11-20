@@ -80,6 +80,7 @@ spec:
       labels:
         app.kubernetes.io/name: eri
     spec:
+      serviceAccountName: eri-aerial
       containers:
         - env:
             - name: POD_NAME
@@ -172,6 +173,9 @@ spec:
               cpu: 500m
               memory: 2Gi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /share
               name: share
             - mountPath: /local/antigravity-oauth-token
@@ -285,6 +289,24 @@ spec:
         fsGroup: 65533
       shareProcessNamespace: true
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - emptyDir: {}
           name: share
         - name: oauth-token
@@ -380,6 +402,7 @@ spec:
       labels:
         app.kubernetes.io/name: eri-restate
     spec:
+      serviceAccountName: eri-aerial
       nodeSelector:
         compute-tier: performance
       containers:
@@ -481,6 +504,9 @@ spec:
               cpu: 500m
               memory: 2Gi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /share
               name: share
             - mountPath: /data
@@ -659,6 +685,24 @@ spec:
         fsGroup: 65533
       shareProcessNamespace: true
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - emptyDir: {}
           name: share
         - hostPath:
@@ -742,6 +786,7 @@ spec:
       labels:
         app.kubernetes.io/name: vanadis
     spec:
+      serviceAccountName: vanadis
       containers:
         - env:
             - name: POD_NAME
@@ -784,10 +829,31 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /config/tracing
               name: tracing-config
               readOnly: true
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - configMap:
             name: tracing-config
             optional: true
@@ -818,6 +884,7 @@ spec:
       labels:
         app.kubernetes.io/name: vanadis-nats
     spec:
+      serviceAccountName: vanadis-nats
       containers:
         - env:
             - name: POD_NAME
@@ -868,10 +935,31 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /config/tracing
               name: tracing-config
               readOnly: true
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - configMap:
             name: tracing-config
             optional: true
@@ -986,6 +1074,7 @@ spec:
       labels:
         app.kubernetes.io/name: coven
     spec:
+      serviceAccountName: coven
       containers:
         - env:
             - name: POD_NAME
@@ -1036,6 +1125,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /config/tracing
               name: tracing-config
               readOnly: true
@@ -1089,6 +1181,24 @@ spec:
       securityContext:
         fsGroup: 65533
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - configMap:
             name: tracing-config
             optional: true
@@ -1143,6 +1253,7 @@ spec:
       labels:
         app.kubernetes.io/name: transcripts
     spec:
+      serviceAccountName: transcripts
       containers:
         - env:
             - name: POD_NAME
@@ -1198,6 +1309,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /share
               name: share
               readOnly: true
@@ -1251,6 +1365,24 @@ spec:
       securityContext:
         fsGroup: 65533
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - emptyDir: {}
           name: share
         - configMap:
@@ -1508,6 +1640,7 @@ spec:
       labels:
         app.kubernetes.io/name: haro
     spec:
+      serviceAccountName: haro
       containers:
         - env:
             - name: POD_NAME
@@ -1559,6 +1692,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /share
               name: share
               readOnly: true
@@ -1615,6 +1751,24 @@ spec:
       securityContext:
         fsGroup: 65533
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - emptyDir: {}
           name: share
         - name: shared-secrets
@@ -1848,6 +2002,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /share
               name: share
               readOnly: true
@@ -1902,6 +2059,24 @@ spec:
       securityContext:
         fsGroup: 65533
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - emptyDir: {}
           name: share
         - configMap:
@@ -2010,6 +2185,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /config/console.yaml
               name: config
               subPath: console.yaml
@@ -2018,6 +2196,24 @@ spec:
               readOnly: true
       serviceAccountName: console-sa
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - configMap:
             defaultMode: 420
             name: console-config
@@ -2521,6 +2717,7 @@ spec:
       labels:
         app.kubernetes.io/name: vanadis-restate
     spec:
+      serviceAccountName: vanadis-restate
       containers:
         - env:
             - name: POD_NAME
@@ -2596,6 +2793,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
             - mountPath: /share
               name: share
               readOnly: true
@@ -2692,6 +2892,24 @@ spec:
       securityContext:
         fsGroup: 65533
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                  name: kube-root-ca.crt
+              - downwardAPI:
+                  items:
+                    - fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+                      path: namespace
         - emptyDir: {}
           name: share
         - configMap:
