@@ -4,6 +4,10 @@ metadata:
   name: default
   namespace: default
 automountServiceAccountToken: false
+# Workloads without a dedicated ServiceAccount (sidecars, CronJobs) still pull
+# private GHCR images; without this they only run while the image is cached.
+imagePullSecrets:
+  - name: ghcr-creds
 ---
 apiVersion: v1
 imagePullSecrets:
