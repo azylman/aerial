@@ -10,6 +10,7 @@ Universal coding, testing, scratch workspace (`scripts/aerial-pr.sh init/submit`
 ## Specialized Reference Runbooks (Load Only When Needed)
 - **Vanadis Build Plans (`scripts/aerial-build.sh enqueue`)**: Read [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md) before authoring a single-chunk or multi-chunk build JSON.
 - **Declarative Database Schema Migrations (`schema.sql` / Ariga Atlas)**: Read [`references/atlas-migrations.md`](references/atlas-migrations.md) whenever modifying database schemas.
+- **Restate Services, Virtual Objects & Durable Workflows (`github.com/restatedev/sdk-go`)**: Read [`references/restate-workflows.md`](references/restate-workflows.md) whenever designing, authoring, or modifying Restate services, Virtual Objects, or workflows.
 
 ---
 
@@ -43,7 +44,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
   - **Execution**: Once approved, enqueue multi-PR/multi-chunk plans via `scripts/aerial-build.sh enqueue <plan.json>` (default), or execute single-PR changes with a full 4-discipline Girl Gang diff audit before `scripts/aerial-pr.sh submit`.
 
 ### Review Panel Composition & Subagent Execution Invariants
-- **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate.
+- **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate. For plans or diffs touching Restate services, Virtual Objects, or durable workflows (`github.com/restatedev/sdk-go`), the Systems/Concurrency and Devil's Advocate reviewers must audit against [`references/restate-workflows.md`](references/restate-workflows.md) (RunContext isolation, replay determinism, non-blocking exclusive lock hygiene, and recoverable pause state invariants).
 - **DAG Disjointness, Non-Mutating Pre-Cutover Action Gate & Control-Plane Continuity Checks**:
   During Tier 2/3 plan audits, the Devil's Advocate and Architecture reviewers MUST explicitly verify the following invariants across any proposed Vanadis build plan:
   1. **Parallel-First DAG Decomposition & Same-Repo PR Disjointness**: The Devil's Advocate and Architecture reviewers must:
