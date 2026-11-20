@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -65,4 +66,10 @@ func TestWorkerPool_InterruptThread_FinalizedTurnLatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLogInterruptWarning(t *testing.T) {
+	t.Parallel()
+	logInterruptWarning("test-op-nil", nil)
+	logInterruptWarning("test-op-err", errors.New("simulated interrupt warning"))
 }

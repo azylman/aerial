@@ -429,3 +429,27 @@ func TestIsDirectedAtOther(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchAndCacheRESTChannel_Errors(t *testing.T) {
+	t.Parallel()
+
+	sess, err := discordgo.New("Bot faketoken")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+
+	snap, ok := fetchAndCacheRESTChannel(sess, "abc")
+	if ok || snap.ID != "" {
+		t.Errorf("expected false, got %v", ok)
+	}
+
+	snap, ok = fetchAndCacheRESTChannel(&discordgo.Session{}, "12345")
+	if ok || snap.ID != "" {
+		t.Errorf("expected false, got %v", ok)
+	}
+
+	snap, ok = fetchAndCacheRESTChannel(sess, "999888777")
+	if ok || snap.ID != "" {
+		t.Errorf("expected false, got %v", ok)
+	}
+}
