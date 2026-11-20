@@ -1,4 +1,4 @@
-.PHONY: all test lint tidy build help console-ui
+.PHONY: all test lint tidy build help console-ui web-theme
 .DEFAULT_GOAL := help
 
 SERVICES := services/eri services/haro mcp/kernel-mcp services/console services/coven services/vanadis services/synapse services/prospera services/transcripts pkg
@@ -12,6 +12,7 @@ test: ## Run unit tests across all Go microservices and Frontend
 		echo "=== Testing $$svc ==="; \
 		(cd $$svc && go test -v ./...) || exit 1; \
 	done
+	@$(MAKE) --no-print-directory web-theme
 	@$(MAKE) --no-print-directory console-ui
 
 lint: ## Run golangci-lint across all Go microservices and Frontend
@@ -22,6 +23,16 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid.js" ]; then \
 		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
 		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid.js || exit 1; \
+	fi
+	@if command -v node >/dev/null 2>&1; then \
+		echo "=== Linting Shared Theme Script Syntax ==="; \
+		node --check web/theme/aerial-theme.js || exit 1; \
+	fi
+
+web-theme: ## Unit-test the shared dual-theme script (web/theme)
+	@if command -v node >/dev/null 2>&1; then \
+		echo "=== Testing Shared Web Theme ==="; \
+		node --test web/theme/aerial-theme.test.js || exit 1; \
 	fi
 
 CONSOLE_UI := services/console/ui

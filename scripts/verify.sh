@@ -768,6 +768,15 @@ if [ "$MODE" = "staged" ]; then
         run_console_e2e
     fi
 
+    # Shared dual-theme script: syntax and unit tests; Console bundles it, so rerun its UI gates
+    if echo "$CHANGED_FILES" | grep -q -E "^web/theme/"; then
+        run_node_syntax "web/theme/aerial-theme.js"
+        run_node_test "web/theme" "aerial-theme.test.js"
+        if ! echo "$CHANGED_FILES" | grep -q -E "^services/console/ui/"; then
+            run_console_ui
+        fi
+    fi
+
     # Check docs service JS syntax
     if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
         run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
@@ -820,6 +829,7 @@ check_code_health
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
+run_node_syntax "web/theme/aerial-theme.js"
 run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
@@ -837,6 +847,7 @@ done
 if [ -d "services/homepage/test" ]; then
     run_node_test "services/homepage" "test/*.test.js"
 fi
+run_node_test "web/theme" "aerial-theme.test.js"
 
 echo "=== 4. Test Coverage Gating ==="
 if [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then

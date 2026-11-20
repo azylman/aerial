@@ -5,6 +5,8 @@ WORKDIR /src/services/console/ui
 COPY services/console/ui/package.json services/console/ui/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY services/console/ui/ ./
+# Shared dual-theme source, at the same path relative to the UI as in the repo (Vite alias).
+COPY web/theme/ /src/web/theme/
 RUN npm run build
 
 FROM golang:1.27.3-alpine AS builder
@@ -26,6 +28,8 @@ WORKDIR /app
 COPY --from=builder --link /app/aerial-console .
 COPY services/console/static /app/static
 COPY --from=ui --link /src/services/console/ui/dist /app/static
+# Served at /console/aerial-tokens.css for apps that import the shared palette (Gatus custom CSS).
+COPY web/theme/aerial-tokens.css /app/static/aerial-tokens.css
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
   CMD wget -q --spider http://127.0.0.1:8080/health || exit 1

@@ -1,21 +1,26 @@
-/* App shell styles: Warm Stone & Ink tokens, page background, header, tab bar,
+/* App shell styles: theme tokens, page background, header, tab bar,
    quick-launch dock and view panels. Class names and DOM structure are preserved. */
+
+/* Shared dual-theme palette (web/theme/aerial-tokens.css): Console's colour tokens alias its
+   --ae-* semantic vars where the values match, so both themes resolve to the same colours. */
+@import '@aerial-theme/aerial-tokens.css';
+
 :root,
 :root[data-theme="dark"] {
     color-scheme: dark;
 
     /* Surfaces */
-    --bg-base: #181825;
-    --bg-dark: #181825;
-    --bg-surface: #1e1e2e;
-    --bg-elevated: #27273a;
-    --card-bg: #1e1e2e;
+    --bg-base: var(--ae-canvas);
+    --bg-dark: var(--ae-canvas);
+    --bg-surface: var(--ae-surface);
+    --bg-elevated: var(--ae-surface-elevated);
+    --card-bg: var(--ae-surface);
     --card-elevated: #232334;
 
     /* Borders & Shadows */
-    --card-border: #313244;
+    --card-border: var(--ae-border);
     --card-border-hover: #45475a;
-    --border-glow: #313244;
+    --border-glow: var(--ae-border);
     --border-glow-bright: #cba6f7;
     --accent-glow: 0 2px 8px rgba(17, 17, 27, 0.45);
     --card-radius: 12px;
@@ -24,17 +29,17 @@
     --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-heading: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
-    --text-primary: #cdd6f4;
-    --text-secondary: #a6adc8;
-    --text-muted: #a6adc8;
+    --text-primary: var(--ae-ink);
+    --text-secondary: var(--ae-ink-muted);
+    --text-muted: var(--ae-ink-muted);
     --text-dim: #9399b2;
 
     /* Canonical Semantic Accents */
-    --accent-primary: #cba6f7;
-    --accent-emerald: #a6e3a1;
-    --accent-amber: #f9e2af;
-    --accent-crimson: #f38ba8;
-    --accent-indigo: #89b4fa;
+    --accent-primary: var(--ae-accent);
+    --accent-emerald: var(--ae-ok);
+    --accent-amber: var(--ae-warn);
+    --accent-crimson: var(--ae-danger);
+    --accent-indigo: var(--ae-info);
 
     /* Semantic Surface & Component Tokens */
     --brand-bg: #cba6f7;
@@ -67,19 +72,14 @@
 
 :root[data-theme="light"] {
     color-scheme: light;
+    /* Tokens aliased to --ae-* above switch with the shared palette; only Console-specific
+       light values are listed here. --accent-indigo keeps its own indigo in light. */
 
     /* Surfaces */
-    --bg-base: #f8fafc;
-    --bg-dark: #f8fafc;
-    --bg-surface: #ffffff;
-    --bg-elevated: #f1f5f9;
-    --card-bg: #ffffff;
     --card-elevated: #f8fafc;
 
     /* Borders & Shadows */
-    --card-border: #e2e8f0;
     --card-border-hover: #cbd5e1;
-    --border-glow: #e2e8f0;
     --border-glow-bright: #0f172a;
     --accent-glow: 0 1px 3px rgba(15, 23, 42, 0.05);
     --card-radius: 12px;
@@ -88,16 +88,9 @@
     --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-heading: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
-    --text-primary: #0f172a;
-    --text-secondary: #475569;
-    --text-muted: #475569;
     --text-dim: #64748b;
 
     /* Canonical Semantic Accents */
-    --accent-primary: #2563eb;
-    --accent-emerald: #047857;
-    --accent-amber: #b45309;
-    --accent-crimson: #b91c1c;
     --accent-indigo: #4f46e5;
 
     /* Semantic Surface & Component Tokens */

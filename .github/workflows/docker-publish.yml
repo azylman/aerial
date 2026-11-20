@@ -86,6 +86,7 @@ jobs:
               - 'mcp/infisical-mcp/**'
             console:
               - 'services/console/**'
+              - 'web/theme/**'
               - 'pkg/**'
             docs:
               - 'services/docs-service/**'
@@ -118,6 +119,9 @@ jobs:
 
       - name: Test Build Metadata Publisher
         run: node --test scripts/build-metadata.test.cjs
+
+      - name: Test Shared Web Theme
+        run: node --test web/theme/aerial-theme.test.js
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
@@ -384,6 +388,9 @@ jobs:
             "mcr.microsoft.com/playwright:v${PW_VERSION}-noble" \
             sh -c 'npm ci --no-audit --no-fund && npm run build && npm run e2e')
           docker cp services/console/. "$CID:/work/"
+          # The UI imports the shared theme from ../../../web/theme (repo layout); from /work/ui
+          # that resolves to /web/theme.
+          docker cp web/. "$CID:/web"
           docker cp "$RUNNER_TEMP/aerial-console-e2e" "$CID:/work/aerial-console-e2e"
           STATUS=0
           docker start -a "$CID" || STATUS=$?
