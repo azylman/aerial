@@ -1,10 +1,12 @@
-// Package restateclient is the dark synapse-side Restate ingress invoker.
+// Package restateclient is the synapse-side Restate ingress invoker.
 //
 // It carries the frozen chunk-01 payloads (PREvent for PRObject keyed
 // repo#prNumber, RepoEvent for RepoObject keyed repo) as JSON over the
-// Restate HTTP ingress API. The client is constructed but called by no
-// production path yet; Restate-side handler implementations and consumer
-// wiring land in later chunks.
+// Restate HTTP ingress API. Lifecycle events are one-way sends
+// (POST .../<handler>/send) carrying a deterministic Idempotency-Key, so
+// synapse never waits behind a handler holding the exclusive object lock
+// while it runs effects. Request-response invocations remain only for the
+// verdict calls the legacy path still consumes.
 //
 // Unmanaged-PR guard: this package has no BuildRouter send path and
 // performs no build-ID resolution. Every event, owned or unmanaged,
@@ -16,6 +18,8 @@ package restateclient
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,18 +87,75 @@ type PREvent struct {
 	Unmanaged      bool   `json:"unmanaged"`
 	BuildID        string `json:"build_id"`
 	Agent          string `json:"agent"`
+	EffectsOwner   string `json:"effects_owner"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
 // dispatched-SHA tombstones, and fan-out sends only. JSON tags mirror
 // the frozen chunk-01 contract exactly.
 type RepoEvent struct {
-	Repo       string `json:"repo"`
-	MainSHA    string `json:"main_sha"`
-	Generation uint64 `json:"generation"`
-	PRNumber   int    `json:"pr_number"`
-	HeadSHA    string `json:"head_sha"`
-	Agent      string `json:"agent"`
+	Repo         string `json:"repo"`
+	MainSHA      string `json:"main_sha"`
+	Generation   uint64 `json:"generation"`
+	PRNumber     int    `json:"pr_number"`
+	HeadSHA      string `json:"head_sha"`
+	Agent        string `json:"agent"`
+	EffectsOwner string `json:"effects_owner"`
+}
+
+// Effect ownership values carried in PREvent/RepoEvent.EffectsOwner. Each
+// event is stamped exactly once when synapse first accepts it: legacy means
+// synapse performed the side effects and prstate only records intent;
+// restate means prstate executes them. A missing value means legacy.
+const (
+	EffectsOwnerLegacy  = "legacy"
+	EffectsOwnerRestate = "restate"
+)
+
+// NormalizeEffectsOwner maps any stamp to legacy or restate. Only an exact
+// (case-insensitive) restate stamp hands effects to Restate; anything else,
+// including an empty or unknown stamp, stays legacy so a malformed value can
+// never silently move effects off the legacy pipeline.
+func NormalizeEffectsOwner(owner string) string {
+	if strings.EqualFold(strings.TrimSpace(owner), EffectsOwnerRestate) {
+		return EffectsOwnerRestate
+	}
+	return EffectsOwnerLegacy
+}
+
+// ErrInvalidEvent marks a payload rejected before any request: unknown
+// handlers and missing keys. No retry can fix it, so IsTerminal reports it.
+var ErrInvalidEvent = errors.New("invalid restate event")
+
+// StatusError is a non-2xx Restate ingress response.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("restate ingress returned status %d", e.Code)
+	}
+	return fmt.Sprintf("restate ingress returned status %d: %s", e.Code, e.Body)
+}
+
+// IsTerminal reports whether err can never succeed on retry: an invalid
+// payload or a 4xx ingress rejection other than 408 Request Timeout and 429
+// Too Many Requests. Transport failures, 5xx, and an unconfigured client are
+// retryable.
+func IsTerminal(err error) bool {
+	if errors.Is(err, ErrInvalidEvent) {
+		return true
+	}
+	var se *StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	if se.Code == http.StatusRequestTimeout || se.Code == http.StatusTooManyRequests {
+		return false
+	}
+	return se.Code >= 400 && se.Code < 500
 }
 
 // PRObjectKey returns the Restate key for a PR object: repo#prNumber.
@@ -142,22 +203,40 @@ func RepoObjectKey(repo string) string {
 type contextKey int
 
 const (
-	idempotencyKeyCtx contextKey = iota
+	eventIdentityCtx contextKey = iota
 )
 
-// WithIdempotencyKey binds an explicit Restate idempotency key into ctx.
-func WithIdempotencyKey(ctx context.Context, key string) context.Context {
-	return context.WithValue(ctx, idempotencyKeyCtx, strings.TrimSpace(key))
+// WithEventIdentity binds the identity of the inbound event (GitHub
+// delivery ID, deploy idempotency key, kustomization observation) into ctx.
+// One-way sends derive their Idempotency-Key from it.
+func WithEventIdentity(ctx context.Context, identity string) context.Context {
+	return context.WithValue(ctx, eventIdentityCtx, strings.TrimSpace(identity))
 }
 
-func idempotencyKeyFromContext(ctx context.Context) string {
+// EventIdentityFromContext returns the identity bound by WithEventIdentity.
+func EventIdentityFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	if val, ok := ctx.Value(idempotencyKeyCtx).(string); ok {
+	if val, ok := ctx.Value(eventIdentityCtx).(string); ok {
 		return strings.TrimSpace(val)
 	}
 	return ""
+}
+
+// SendIdempotencyKey derives the deterministic Idempotency-Key for one
+// one-way send: handler, event identity, and a digest of the exact payload.
+// A redelivery of the same event re-sends the same payload and dedups at
+// the Restate ingress; two distinct payloads from one event never collide.
+// Without an identity the key falls back to handler plus payload digest.
+func SendIdempotencyKey(identity, handler string, payload []byte) string {
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:8])
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return handler + ":" + digest
+	}
+	return handler + ":" + identity + ":" + digest
 }
 
 // Client invokes Restate Virtual Object handlers over the ingress HTTP API.
@@ -185,40 +264,45 @@ func NewClient(baseURL, prService, repoService string, httpClient *http.Client) 
 	}
 }
 
-// SendPREvent delivers ev to one frozen PRObject handler for repo#prNumber.
+// SendPREvent enqueues ev at one frozen PRObject handler for repo#prNumber
+// as a one-way send: Restate acknowledges once the invocation is durably
+// accepted, never after the handler runs.
 // Unmanaged collaborator events and owned events alike address PRObject
 // only; the client never resolves a build ID and never signals BuildRouter.
 // Every agent's events address the same single PRObject service: ev.Agent is
 // an ownership hint carried in the payload, never a routing input.
 func (c *Client) SendPREvent(ctx context.Context, handler string, ev PREvent) error {
 	if !prHandlers[handler] {
-		return fmt.Errorf("unknown pr handler %q", handler)
+		return fmt.Errorf("%w: unknown pr handler %q", ErrInvalidEvent, handler)
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
 	ev.Repo = model.NormalizeRepo(ev.Repo)
 	if ev.Repo == "" {
-		return errors.New("repo is required")
+		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
 	}
 	if ev.PRNumber <= 0 {
-		return errors.New("pr_number is required")
+		return fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
+	ev.EffectsOwner = NormalizeEffectsOwner(ev.EffectsOwner)
 	return c.send(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 }
 
-// SendRepoEvent delivers ev to one frozen RepoObject handler for repo.
+// SendRepoEvent enqueues ev at one frozen RepoObject handler for repo as a
+// one-way send.
 func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent) error {
 	if !repoHandlers[handler] {
-		return fmt.Errorf("unknown repo handler %q", handler)
+		return fmt.Errorf("%w: unknown repo handler %q", ErrInvalidEvent, handler)
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
 	ev.Repo = model.NormalizeRepo(ev.Repo)
 	if ev.Repo == "" {
-		return errors.New("repo is required")
+		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
 	}
+	ev.EffectsOwner = NormalizeEffectsOwner(ev.EffectsOwner)
 	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
 }
 
@@ -226,25 +310,31 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent
 // JSON verdict into out. Unknown handlers, unconfigured clients, and invalid
 // payloads fail closed without emitting a request; transport failures and
 // undecodable bodies surface so the caller retries instead of losing the
-// signal.
+// signal. Verdicts are request-response reads of current state, so they
+// carry no Idempotency-Key: a cached verdict would go stale.
 func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, out any) error {
 	if !prHandlers[handler] {
-		return fmt.Errorf("unknown pr handler %q", handler)
+		return fmt.Errorf("%w: unknown pr handler %q", ErrInvalidEvent, handler)
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
 	ev.Repo = model.NormalizeRepo(ev.Repo)
 	if ev.Repo == "" {
-		return errors.New("repo is required")
+		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
 	}
 	if ev.PRNumber <= 0 {
-		return errors.New("pr_number is required")
+		return fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
 	if out == nil {
-		return errors.New("output is required")
+		return fmt.Errorf("%w: output is required", ErrInvalidEvent)
 	}
-	body, err := c.post(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	ev.EffectsOwner = NormalizeEffectsOwner(ev.EffectsOwner)
+	bodyBytes, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("marshal restate payload: %w", err)
+	}
+	body, err := c.post(ctx, c.ingressURL(c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler), bodyBytes, "")
 	if err != nil {
 		return err
 	}
@@ -255,22 +345,26 @@ func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, 
 }
 
 func (c *Client) send(ctx context.Context, service, key, handler string, payload any) error {
-	_, err := c.post(ctx, service, key, handler, payload)
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal restate payload: %w", err)
+	}
+	idKey := SendIdempotencyKey(EventIdentityFromContext(ctx), handler, bodyBytes)
+	_, err = c.post(ctx, c.ingressURL(service, key, handler)+"/send", bodyBytes, idKey)
 	return err
 }
 
-func (c *Client) post(ctx context.Context, service, key, handler string, payload any) ([]byte, error) {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal restate payload: %w", err)
-	}
-	endpoint := c.baseURL + "/" + url.PathEscape(service) + "/" + url.PathEscape(key) + "/" + handler
+func (c *Client) ingressURL(service, key, handler string) string {
+	return c.baseURL + "/" + url.PathEscape(service) + "/" + url.PathEscape(key) + "/" + handler
+}
+
+func (c *Client) post(ctx context.Context, endpoint string, bodyBytes []byte, idKey string) ([]byte, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create restate request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if idKey := idempotencyKeyFromContext(ctx); idKey != "" {
+	if idKey != "" {
 		httpReq.Header.Set("Idempotency-Key", idKey)
 	}
 	resp, err := c.httpClient.Do(httpReq)
@@ -278,16 +372,15 @@ func (c *Client) post(ctx context.Context, service, key, handler string, payload
 		return nil, fmt.Errorf("restate ingress request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		if readErr != nil {
 			return nil, fmt.Errorf("drain restate response: %w", readErr)
 		}
 		return respBody, nil
 	}
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if readErr != nil {
-		return nil, fmt.Errorf("restate ingress returned status %d", resp.StatusCode)
+		return nil, &StatusError{Code: resp.StatusCode}
 	}
-	return nil, fmt.Errorf("restate ingress returned status %d: %s", resp.StatusCode, string(respBody))
+	return nil, &StatusError{Code: resp.StatusCode, Body: string(respBody)}
 }

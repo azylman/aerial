@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func resolveJetStreamJobCoords(args any, routing metrics.DiscordRouting) (string, string) {
@@ -69,6 +71,25 @@ const (
 	maxDeliverDiscordInteraction uint64 = 1
 )
 
+// Restate-owned retry budget: once prstate owns an event's effects, a
+// Restate outage must not lose it. 45 deliveries on a backoff capped at one
+// minute span about 40 minutes (1+2+4+8+16+32 s, then 39 x 60 s), outlasting
+// a 30-minute outage. Legacy jobs keep the short budget above, so legacy
+// retries and the final-attempt deploy_failed timing never change.
+const (
+	maxDeliverRestateOwned  uint64 = 45
+	maxRestateOwnedBackoff         = time.Minute
+	restateOwnedJobDropKind        = "restate_terminal"
+)
+
+func restateOwnedBackoffDelay(numDelivered uint64) time.Duration {
+	if numDelivered <= 1 {
+		return 1 * time.Second
+	}
+	shift := min(numDelivered-1, 6)
+	return min(time.Duration(1<<shift)*time.Second, maxRestateOwnedBackoff)
+}
+
 func nakBackoffDelay(numDelivered uint64) time.Duration {
 	if numDelivered <= 1 {
 		return 1 * time.Second
@@ -98,10 +119,23 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	}
 	if err := process(args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error processing job", "job", jobName, "error", err)
+		delay := nakBackoffDelay(msg.NumDelivered())
+		switch restateOwned, terminal := restateOwnedSendFailure(err); {
+		case terminal:
+			RecordJobDropped(queueDefault, jobName+"_webhook", restateOwnedJobDropKind)
+			slog.ErrorContext(ctx, "[synapse] [jetstream] dropping job after terminal restate rejection", "job", jobName, "error", err)
+			if termErr := msg.Term(); termErr != nil {
+				slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
+			}
+			return nil
+		case restateOwned:
+			maxDeliver = maxDeliverRestateOwned
+			delay = restateOwnedBackoffDelay(msg.NumDelivered())
+		}
 		if termJobIfExhausted(ctx, msg, maxDeliver, jobName) {
 			return nil
 		}
-		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+		if nakErr := msg.NakWithDelay(delay); nakErr != nil {
 			slog.WarnContext(ctx, "[synapse] [jetstream] error naking job", "job", jobName, "error", nakErr)
 		}
 		return err
@@ -120,12 +154,26 @@ func isFinalAttemptFromContext(ctx context.Context) bool {
 	return ok && v
 }
 
+// githubJobFinalAttempt reports whether this delivery is the legacy final
+// attempt. Restate-owned jobs never mark it: their final-attempt
+// deploy_failed decision belongs to prstate, and their longer restate retry
+// budget must not move when legacy deploy_failed fires.
+func githubJobFinalAttempt(owner string, numDelivered uint64) bool {
+	return restateclient.NormalizeEffectsOwner(owner) == restateclient.EffectsOwnerLegacy && numDelivered >= maxDeliverGitHubWebhook
+}
+
+// jobContext binds one job's publish-time effect-owner stamp and its event
+// identity (the source of every Restate send's Idempotency-Key) into ctx.
+func jobContext(ctx context.Context, owner, identity string) context.Context {
+	return restateclient.WithEventIdentity(withEffectsOwner(ctx, owner), identity)
+}
+
 // HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream,
 // marking final delivery attempts so terminal image promotion failures transition PRs to deploy_failed.
 func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
-	isFinal := msg.NumDelivered() >= maxDeliverGitHubWebhook
-	jobCtx := withFinalAttempt(ctx, isFinal)
 	return handleJetStreamJob(ctx, msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
+		isFinal := githubJobFinalAttempt(args.EffectsOwner, msg.NumDelivered())
+		jobCtx := withFinalAttempt(jobContext(ctx, args.EffectsOwner, eventIdentity("github", args.Delivery)), isFinal)
 		slog.InfoContext(ctx, "[synapse] [jetstream] processing github job", "event", args.Event, "delivery", args.Delivery, "final", isFinal)
 		_, err := s.ProcessGitHubEvent(jobCtx, args.Event, args.Delivery, args.Body)
 		return err
@@ -136,9 +184,19 @@ func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) 
 func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) error {
 	return handleJetStreamJob(ctx, msg, maxDeliverDeployWebhook, "deploy", func(args DeployWebhookArgs) error {
 		slog.InfoContext(ctx, "[synapse] [jetstream] processing deploy job", "event", args.Event.Event, "job_name", args.Event.JobName)
-		_, err := s.ProcessDeployEvent(ctx, args.Event)
+		_, err := s.ProcessDeployEvent(jobContext(ctx, args.EffectsOwner, eventIdentity("deploy", args.IdempotencyKey)), args.Event)
 		return err
 	})
+}
+
+// eventIdentity scopes Restate idempotency keys to one inbound event of a
+// source (a GitHub delivery ID or a deploy idempotency key). An empty id
+// yields no identity, so sends fall back to payload-digest keys.
+func eventIdentity(source, id string) string {
+	if id = strings.TrimSpace(id); id == "" {
+		return ""
+	}
+	return source + ":" + id
 }
 
 // HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress[.<agent>] job message from JetStream.

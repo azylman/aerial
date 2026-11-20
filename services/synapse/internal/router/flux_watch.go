@@ -15,6 +15,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/model"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // kustomizationObservation is the live state of one Flux Kustomization as seen by a LIST or WATCH.
@@ -94,18 +95,19 @@ func (s *RouterServer) trackedRollouts(ctx context.Context) ([]trackedRollout, e
 }
 
 // ApplyKustomizationList satisfies flux.RolloutSink.
+// Each sink call snapshots the effect owner once for everything it applies.
 func (s *RouterServer) ApplyKustomizationList(ctx context.Context, namespace string, observations []model.KustomizationObservation) error {
-	return s.applyKustomizationList(ctx, namespace, observations)
+	return s.applyKustomizationList(stampEffectsOwner(ctx), namespace, observations)
 }
 
 // ApplyKustomizationStatus satisfies flux.RolloutSink.
 func (s *RouterServer) ApplyKustomizationStatus(ctx context.Context, obs model.KustomizationObservation) error {
-	return s.applyKustomizationStatus(ctx, obs)
+	return s.applyKustomizationStatus(stampEffectsOwner(ctx), obs)
 }
 
 // ApplyKustomizationDeleted satisfies flux.RolloutSink.
 func (s *RouterServer) ApplyKustomizationDeleted(ctx context.Context, ref model.FluxKustomizationRef) error {
-	return s.applyKustomizationDeleted(ctx, ref)
+	return s.applyKustomizationDeleted(stampEffectsOwner(ctx), ref)
 }
 
 // HasPendingRollouts satisfies flux.RolloutSink.
@@ -168,6 +170,7 @@ func (s *RouterServer) applyKustomizationDeleted(ctx context.Context, ref fluxKu
 // is still deploying with work left undone; the watcher then backs off and re-lists, because a
 // Kustomization already in its final state emits no further event to retry on.
 func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedRollout, obs kustomizationObservation) error {
+	ctx = restateclient.WithEventIdentity(ctx, kustomizationObservationIdentity(obs))
 	repatchAt := ""
 	var errs []error
 	var state kustomizationRolloutState
@@ -205,6 +208,13 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// kustomizationObservationIdentity scopes Restate idempotency keys to one
+// observed Kustomization state, so a re-list of an unchanged Kustomization
+// re-sends identical events that dedup at the Restate ingress.
+func kustomizationObservationIdentity(obs kustomizationObservation) string {
+	return fmt.Sprintf("flux:%s/%s:%s:%s", obs.Ref.Namespace, obs.Ref.Name, obs.LastAppliedRevision, obs.LastHandledReconcileAt)
 }
 
 // kustomizationRolloutState is the live cluster state of one applied Kustomization that gates PR deploys.
