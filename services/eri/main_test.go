@@ -1047,6 +1047,37 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	})
 }
 
+func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/quota" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"name":"restate-test-quota"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	t.Setenv("ERI_RESTATE_URL", ts.URL)
+
+	_, cfg := newLifecycleCfg(t)
+	client := NewRestateIngressClient("http://127.0.0.1:8080", "aerial-test")
+	_, cancel, wait := runBrainAppUntilReady(t, cfg, WithRestateIngressClient(client))
+
+	qp := currentFunnelQuotaProvider()
+	if qp == nil {
+		t.Fatal("expected funnel quota provider to be set by RunBrainApp with restate client")
+	}
+	groups := qp()
+	if len(groups) != 1 || groups[0].Name != "restate-test-quota" {
+		t.Fatalf("unexpected quota groups from wired provider: %+v", groups)
+	}
+
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("unexpected error waiting for shutdown: %v", err)
+	}
+}
+
 func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()

@@ -174,24 +174,6 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-            - mountPath: /data
-              name: brain-data
-            - mountPath: /data/cache
-              name: ci-cache
-            - mountPath: /data/ssh
-              name: ssh-state
-            - mountPath: /local/antigravity-oauth-token
-              name: oauth-token
-              readOnly: true
-              subPath: antigravity-oauth-token
-            - mountPath: /local/codex-auth.json
-              name: codex-auth
-              readOnly: true
-              subPath: codex-auth.json
-            - mountPath: /local/muse-auth.json
-              name: muse-auth
-              readOnly: true
-              subPath: muse-auth.json
             - mountPath: /secrets
               name: shared-secrets
               readOnly: true
@@ -287,118 +269,17 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-        - command:
-            - /bin/sh
-            - -ec
-            - |
-              umask 077
-              chown 1000:1000 /data
-              find /data/cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
-              install -d -o 1000 -g 1000 -m 0700 /data/ssh
-              key=/data/ssh/id_ed25519
-              if [ -s /ssh-secret/id_ed25519 ]; then
-                tmp=$(mktemp /data/ssh/.id_ed25519.XXXXXX)
-                pubtmp=$(mktemp /data/ssh/.id_ed25519.pub.XXXXXX)
-                printf '%s\n' "$(cat /ssh-secret/id_ed25519)" > "$tmp"
-                if ssh-keygen -y -f "$tmp" > "$pubtmp" 2>/dev/null; then
-                  chown 1000:1000 "$tmp" "$pubtmp"
-                  chmod 0600 "$tmp"
-                  chmod 0644 "$pubtmp"
-                  mv -f "$pubtmp" "$key.pub"
-                  mv -f "$tmp" "$key"
-                  echo "ssh-bootstrap: installed private key from secret"
-                else
-                  rm -f "$tmp" "$pubtmp"
-                  echo "ssh-bootstrap: WARNING secret key failed validation; keeping existing key"
-                fi
-              else
-                echo "ssh-bootstrap: WARNING ssh key secret empty or missing; keeping existing key"
-              fi
-              if [ -f /share/aerial-config/ssh/config ]; then
-                install -o 1000 -g 1000 -m 0600 /share/aerial-config/ssh/config /data/ssh/config
-              else
-                echo "ssh-bootstrap: no ssh config in aerial-config; skipped"
-              fi
-          image: ghcr.io/azylman/aerial-eri:${TAG_AERIAL_ERI:=latest}
-          name: ssh-bootstrap
-          resources:
-            limits:
-              cpu: 100m
-              memory: 64Mi
-            requests:
-              cpu: 10m
-              memory: 16Mi
-          securityContext:
-            runAsGroup: 0
-            runAsUser: 0
-          volumeMounts:
-            - mountPath: /data
-              name: brain-data
-            - mountPath: /data/cache
-              name: ci-cache
-            - mountPath: /data/ssh
-              name: ssh-state
-            - mountPath: /share
-              name: share
-              readOnly: true
-            - mountPath: /ssh-secret
-              name: ssh-key
-              readOnly: true
       securityContext:
         fsGroup: 65533
       shareProcessNamespace: true
       volumes:
         - emptyDir: {}
           name: share
-        - hostPath:
-            path: /var/lib/aerial/brain-data
-            type: DirectoryOrCreate
-          name: brain-data
-        - hostPath:
-            path: /var/lib/aerial/ci-cache
-            type: DirectoryOrCreate
-          name: ci-cache
-        - name: oauth-token
-          secret:
-            defaultMode: 384
-            items:
-              - key: ANTIGRAVITY_OAUTH_TOKEN
-                path: antigravity-oauth-token
-            optional: true
-            secretName: eri-secret
-        - name: codex-auth
-          secret:
-            defaultMode: 384
-            items:
-              - key: CODEX_AUTH_JSON
-                path: codex-auth.json
-            optional: true
-            secretName: eri-secret
-        - name: muse-auth
-          secret:
-            defaultMode: 384
-            items:
-              - key: MUSE_AUTH_JSON
-                path: muse-auth.json
-            optional: true
-            secretName: eri-secret
         - name: shared-secrets
           secret:
             defaultMode: 256
             optional: true
             secretName: shared-secrets
-        - name: ssh-key
-          secret:
-            defaultMode: 256
-            items:
-              - key: SSH_PRIVATE_KEY
-                path: id_ed25519
-            optional: true
-            secretName: eri-ssh-key
-        - emptyDir:
-            medium: Memory
-            sizeLimit: 1Mi
-          name: ssh-state
         - configMap:
             name: tracing-config
             optional: true

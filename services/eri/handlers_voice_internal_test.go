@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -763,4 +764,63 @@ func TestStreamProxyResponse_NonFlusher(t *testing.T) {
 func TestCleanTempDir_ErrorBranch(t *testing.T) {
 	t.Parallel()
 	cleanTempDir("/dev/null/impossible-path-that-fails-removeall")
+}
+
+func TestStreamRestateVoiceEvents_BufferedEventOrder(t *testing.T) {
+	bus := pubsub.NewMemoryBus()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req queue.VoiceSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		topic := "voice.stream." + req.TurnID
+		for i, ev := range []queue.VoiceStreamEvent{
+			{Event: "status", Status: "buffered-wait"},
+			{Event: "sentence", Text: "Token chunk 1"},
+			{Event: "reply", Reply: "Full response.", ConversationID: "conv-buff-1"},
+		} {
+			_ = bus.Publish(r.Context(), topic, fmt.Sprintf("step-%d", i), ev)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(queue.VoiceSessionResult{
+			Reply:          "Full response.",
+			ConversationID: "conv-buff-1",
+			DeviceKey:      "kiosk-1",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+
+	var statuses []string
+	var sentences []string
+	var sseEvents []string
+
+	onStatus := func(s string) {
+		statuses = append(statuses, s)
+	}
+	onSentence := func(s string) {
+		sentences = append(sentences, s)
+	}
+	emitSSE := func(event string, payload any) {
+		sseEvents = append(sseEvents, event)
+	}
+
+	req := VoiceAskRequest{
+		Prompt: "test buffered voice",
+		NodeID: "kiosk-1",
+	}
+	streamRestateVoiceEvents(context.Background(), nil, client, bus, req, "kiosk-1", onStatus, onSentence, emitSSE)
+
+	if len(statuses) != 1 || statuses[0] != "buffered-wait" {
+		t.Fatalf("unexpected statuses: %+v", statuses)
+	}
+	if len(sentences) != 1 || sentences[0] != "Token chunk 1" {
+		t.Fatalf("unexpected sentences: %+v", sentences)
+	}
+	if len(sseEvents) != 2 || sseEvents[0] != "reply" || sseEvents[1] != "done" {
+		t.Fatalf("unexpected sseEvents: %+v", sseEvents)
+	}
 }

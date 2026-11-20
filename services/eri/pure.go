@@ -17,7 +17,41 @@ import (
 
 const discordErrCodeThreadAlreadyCreated = 160004
 
-var mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)\d+>`)
+var (
+	mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)\d+>`)
+	reDispatchSource     = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+)
+
+func validateDispatchRequest(req *DispatchRequest) error {
+	source := strings.ToLower(strings.TrimSpace(req.Source))
+	if !reDispatchSource.MatchString(source) {
+		return errors.New("Invalid payload: 'source' must match ^[a-z0-9_-]{1,64}$")
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return errors.New("Invalid payload: 'prompt' field is required and cannot be empty")
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID != "" {
+		if queue.IsNumericSnowflake(sessionID) || strings.HasPrefix(strings.ToLower(sessionID), "discord-") || !queue.IsValidThreadKey(sessionID) {
+			return errors.New("Invalid payload: 'session_id' cannot be a numeric snowflake, start with 'discord-', or contain invalid characters")
+		}
+	}
+	effort := strings.ToLower(strings.TrimSpace(req.Effort))
+	if effort != "" && effort != config.EffortLow && effort != config.EffortMedium && effort != config.EffortHigh {
+		return errors.New("Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
+	}
+	req.TargetID = runner.NormalizeEnvTargetID(req.TargetID)
+	req.VanadisChunkID = strings.TrimSpace(req.VanadisChunkID)
+	return nil
+}
+
+func validatePromptEffort(effort string) error {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort != "" && effort != config.EffortLow && effort != config.EffortMedium && effort != config.EffortHigh {
+		return errors.New("Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
+	}
+	return nil
+}
 
 // DeriveThreadTitle extracts a clean, readable thread title from a message content string.
 func DeriveThreadTitle(content string) string {

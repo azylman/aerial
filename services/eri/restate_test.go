@@ -10,9 +10,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -722,6 +724,564 @@ func TestRestateIngressClient_AskVoice(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantReply, res.Reply)
+		})
+	}
+}
+
+func runWithMockRestate(statusCode int, serverResp string, fn func()) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(serverResp))
+	}))
+	defer ts.Close()
+
+	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+	orig := ActiveRestateIngressClient()
+	SetActiveRestateIngressClient(client)
+	defer SetActiveRestateIngressClient(orig)
+
+	fn()
+}
+
+func TestHandlePrompt_RestateCutover(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverResp string
+		statusCode int
+		reqBody    string
+		wantCode   int
+		wantSubstr string
+	}{
+		{
+			name:       "accepted via restate",
+			serverResp: `{"status":"accepted","thread_id":"123456789012345678","message_id":"msg-1"}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"prompt":"hello world","channel_id":"123456789012345678","message_id":"msg-1"}`,
+			wantCode:   http.StatusAccepted,
+			wantSubstr: `"status":"accepted"`,
+		},
+		{
+			name:       "skipped active via restate",
+			serverResp: `{"status":"skipped_active","thread_id":"123456789012345678"}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"prompt":"hello again","channel_id":"123456789012345678","skip_if_active":true}`,
+			wantCode:   http.StatusOK,
+			wantSubstr: `"status":"skipped_active"`,
+		},
+		{
+			name:       "restate error",
+			serverResp: `{"error":"restate failure"}`,
+			statusCode: http.StatusInternalServerError,
+			reqBody:    `{"prompt":"hello error","channel_id":"123456789012345678"}`,
+			wantCode:   http.StatusInternalServerError,
+			wantSubstr: "Failed to enqueue prompt",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
+				handler := handlePrompt(nil, nil)
+				req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.reqBody))
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+
+				assert.Equal(t, tc.wantCode, rec.Code)
+				assert.Contains(t, rec.Body.String(), tc.wantSubstr)
+			})
+		})
+	}
+}
+
+func TestHandleDispatch_RestateCutover(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverResp string
+		statusCode int
+		reqBody    string
+		wantCode   int
+		wantSubstr string
+	}{
+		{
+			name:       "accepted via restate",
+			serverResp: `{"status":"accepted","dispatch_id":"disp-1","session_id":"vanadis-1"}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"source":"vanadis","prompt":"run chunk","vanadis_chunk_id":"1","id":"disp-1"}`,
+			wantCode:   http.StatusAccepted,
+			wantSubstr: `"status":"accepted"`,
+		},
+		{
+			name:       "skipped active via restate",
+			serverResp: `{"status":"skipped_active","dispatch_id":"disp-2","session_id":"vanadis-2"}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"source":"vanadis","prompt":"run chunk 2","vanadis_chunk_id":"2","id":"disp-2","skip_if_active":true}`,
+			wantCode:   http.StatusOK,
+			wantSubstr: `"status":"skipped_active"`,
+		},
+		{
+			name:       "already exists via restate",
+			serverResp: `{"status":"already_exists","dispatch_id":"disp-3","session_id":"vanadis-3"}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"source":"vanadis","prompt":"run chunk 3","vanadis_chunk_id":"3","id":"disp-3"}`,
+			wantCode:   http.StatusOK,
+			wantSubstr: `"status":"already_exists"`,
+		},
+		{
+			name:       "restate error",
+			serverResp: `{"error":"internal error"}`,
+			statusCode: http.StatusInternalServerError,
+			reqBody:    `{"source":"vanadis","prompt":"run chunk 4","vanadis_chunk_id":"4","id":"disp-4"}`,
+			wantCode:   http.StatusInternalServerError,
+			wantSubstr: "Failed to enqueue dispatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
+				handler := handleDispatch(nil, nil)
+				req := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(tc.reqBody))
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+
+				assert.Equal(t, tc.wantCode, rec.Code)
+				assert.Contains(t, rec.Body.String(), tc.wantSubstr)
+			})
+		})
+	}
+}
+
+func TestHandleCancelDispatch_RestateCutover(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverResp string
+		statusCode int
+		reqBody    string
+		wantCode   int
+		wantSubstr string
+	}{
+		{
+			name:       "cancel success via restate",
+			serverResp: `{"status":"ok","cancelled_count":1,"cancelled_ids":["disp-1"]}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"dispatch_id":"disp-1","reason":"test cancel"}`,
+			wantCode:   http.StatusOK,
+			wantSubstr: `"cancelled_count":1`,
+		},
+		{
+			name:       "cancel by build_id via restate",
+			serverResp: `{"status":"ok","cancelled_count":2,"cancelled_ids":["disp-1","disp-2"]}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"build_id":"build-99","reason":"test build cancel"}`,
+			wantCode:   http.StatusOK,
+			wantSubstr: `"cancelled_count":2`,
+		},
+		{
+			name:       "cancel error via restate",
+			serverResp: `{"error":"restate failure"}`,
+			statusCode: http.StatusInternalServerError,
+			reqBody:    `{"dispatch_id":"disp-2"}`,
+			wantCode:   http.StatusInternalServerError,
+			wantSubstr: "Failed to cancel dispatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
+				handler := handleCancelDispatch(nil)
+				req := httptest.NewRequest(http.MethodPost, "/dispatch/cancel", strings.NewReader(tc.reqBody))
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+
+				assert.Equal(t, tc.wantCode, rec.Code)
+				assert.Contains(t, rec.Body.String(), tc.wantSubstr)
+			})
+		})
+	}
+}
+
+func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		statusCode  int
+		serverResp  string
+		wantCode    int
+		wantPathSub string
+		wantSubstr  string
+	}{
+		{
+			name:        "interrupt application command",
+			body:        `{"id":"int-1","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"name":"interrupt"}}`,
+			statusCode:  http.StatusOK,
+			serverResp:  `{"status":"ok"}`,
+			wantCode:    http.StatusOK,
+			wantPathSub: "/ThreadSession/123456789012345678/CancelTurn",
+			wantSubstr:  `"status":"ok"`,
+		},
+		{
+			name:        "rotate application command",
+			body:        `{"id":"int-2","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"name":"rotate"}}`,
+			statusCode:  http.StatusOK,
+			serverResp:  `{"status":"ok"}`,
+			wantCode:    http.StatusOK,
+			wantPathSub: "/ThreadSession/123456789012345678/RotateSession",
+			wantSubstr:  `"status":"ok"`,
+		},
+		{
+			name:        "stop_turn message component",
+			body:        `{"id":"int-3","type":3,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"custom_id":"stop_turn:msg-1"}}`,
+			statusCode:  http.StatusOK,
+			serverResp:  `{"status":"ok"}`,
+			wantCode:    http.StatusOK,
+			wantPathSub: "/ThreadSession/123456789012345678/CancelTurn",
+			wantSubstr:  `"status":"ok"`,
+		},
+		{
+			name:        "interrupt failure propagates 500",
+			body:        `{"id":"int-4","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"name":"interrupt"}}`,
+			statusCode:  http.StatusInternalServerError,
+			serverResp:  `{"error":"restate down"}`,
+			wantCode:    http.StatusInternalServerError,
+			wantPathSub: "/ThreadSession/123456789012345678/CancelTurn",
+			wantSubstr:  "Restate control interaction failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			lastPath := ""
+
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				lastPath = r.URL.EscapedPath()
+				mu.Unlock()
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.serverResp))
+			}))
+			defer ts.Close()
+
+			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			orig := activeRestateIngressClient.Swap(client)
+			defer activeRestateIngressClient.Store(orig)
+
+			handler := handleInternalDiscordInteraction(nil, nil)
+			req := httptest.NewRequest(http.MethodPost, "/internal/discord/interaction", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			assert.Equal(t, tc.wantCode, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.wantSubstr)
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Contains(t, lastPath, tc.wantPathSub)
+		})
+	}
+}
+
+func TestHandleVoiceAsk_RestateCutover(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverResp string
+		statusCode int
+		reqBody    string
+		wantCode   int
+		wantReply  string
+	}{
+		{
+			name:       "voice ask json success",
+			serverResp: `{"reply":"Restate voice reply","conversation_id":"conv-voice-1","device_key":"kiosk-1"}`,
+			statusCode: http.StatusOK,
+			reqBody:    `{"prompt":"hello voice","node_id":"kiosk-1"}`,
+			wantCode:   http.StatusOK,
+			wantReply:  "Restate voice reply",
+		},
+		{
+			name:       "voice ask json error",
+			serverResp: `{"error":"speech model timeout"}`,
+			statusCode: http.StatusInternalServerError,
+			reqBody:    `{"prompt":"bad voice","node_id":"kiosk-1"}`,
+			wantCode:   http.StatusInternalServerError,
+			wantReply:  "speech model timeout",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
+				handler := handleVoiceAsk(nil)
+				req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(tc.reqBody))
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+
+				assert.Equal(t, tc.wantCode, rec.Code)
+				assert.Contains(t, rec.Body.String(), tc.wantReply)
+			})
+		})
+	}
+}
+
+func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
+	bus := pubsub.NewMemoryBus()
+	SetVoiceEventBus(bus)
+	defer SetVoiceEventBus(nil)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req queue.VoiceSessionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		subj := "voice.stream." + req.TurnID
+		_ = bus.Publish(r.Context(), subj, "1", queue.VoiceStreamEvent{Event: "status", Status: "thinking"})
+		_ = bus.Publish(r.Context(), subj, "2", queue.VoiceStreamEvent{Event: "sentence", Text: "Hello from SSE."})
+		_ = bus.Publish(r.Context(), subj, "3", queue.VoiceStreamEvent{Event: "reply", Reply: "Hello from SSE.", ConversationID: "conv-123"})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"reply":"Hello from SSE.","conversation_id":"conv-123","device_key":"kiosk-sse"}`))
+	}))
+	defer ts.Close()
+
+	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+	orig := ActiveRestateIngressClient()
+	SetActiveRestateIngressClient(client)
+	defer SetActiveRestateIngressClient(orig)
+
+	handler := handleVoiceAsk(nil)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-sse"}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: status")
+	assert.Contains(t, body, "event: sentence")
+	assert.Contains(t, body, "event: reply")
+	assert.Contains(t, body, "event: done")
+}
+
+func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/internal/llm", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"response":"remote llm result"}`))
+	}))
+	defer ts.Close()
+
+	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+	orig := ActiveRestateIngressClient()
+	SetActiveRestateIngressClient(client)
+	defer SetActiveRestateIngressClient(orig)
+
+	t.Setenv("ERI_RESTATE_URL", ts.URL)
+
+	mux := SetupBrainMuxWithEmbedder(nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/internal/llm", strings.NewReader(`{"prompt":"summarize"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "remote llm result")
+}
+
+func TestRestateIngressClient_Controls(t *testing.T) {
+	tests := []struct {
+		name           string
+		cancelThreadID string
+		serverResp     string
+		wantSubstr     string
+	}{
+		{
+			name:           "cancel thread immediate success",
+			cancelThreadID: "t-123",
+			serverResp:     `{"status":"ok","cancelled_count":2}`,
+			wantSubstr:     "ok",
+		},
+		{
+			name:       "cancel dispatch immediate success",
+			serverResp: `{"status":"ok","cancelled_count":1}`,
+			wantSubstr: "ok",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.serverResp))
+			}))
+			defer ts.Close()
+
+			c := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			if tc.cancelThreadID != "" {
+				resp, err := c.CancelThreadImmediate(context.Background(), tc.cancelThreadID, queue.CancelThreadControlRequest{})
+				assert.NoError(t, err)
+				assert.Equal(t, tc.wantSubstr, resp.Status)
+			} else {
+				resp, err := c.CancelDispatchImmediate(context.Background(), queue.CancelDispatchControlRequest{BuildID: "b-1"})
+				assert.NoError(t, err)
+				assert.Equal(t, tc.wantSubstr, resp.Status)
+			}
+		})
+	}
+}
+
+func TestHandleVoiceAskSSE_RestateNoBusWithPool(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		serverResp string
+		wantEvent  string
+		wantSubstr string
+	}{
+		{
+			name:       "restate no-bus ask voice success",
+			statusCode: http.StatusOK,
+			serverResp: `{"reply":"restate non-streaming reply","conversation_id":"conv-nobus-1","device_key":"kiosk-nobus"}`,
+			wantEvent:  "event: reply",
+			wantSubstr: "restate non-streaming reply",
+		},
+		{
+			name:       "restate no-bus ask voice error",
+			statusCode: http.StatusInternalServerError,
+			serverResp: `{"error":"restate voice failure"}`,
+			wantEvent:  "event: error",
+			wantSubstr: "restate voice failure",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.serverResp))
+			}))
+			defer ts.Close()
+
+			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			origClient := ActiveRestateIngressClient()
+			SetActiveRestateIngressClient(client)
+			defer SetActiveRestateIngressClient(origClient)
+
+			SetVoiceEventBus(nil)
+
+			cfg := newTestConfig()
+			mockPool := queue.New(cfg, queue.WorkerPoolConfig{})
+			handler := handleVoiceAsk(mockPool)
+
+			req := httptest.NewRequest(http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-nobus"}`))
+			req.Header.Set("Accept", "text/event-stream")
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			body := rec.Body.String()
+			assert.Contains(t, body, tc.wantEvent)
+			assert.Contains(t, body, tc.wantSubstr)
+			assert.Contains(t, body, "event: done")
+		})
+	}
+}
+
+func TestHandleInteractionViaRestate_NilAndUnhandledInteractions(t *testing.T) {
+	tests := []struct {
+		name        string
+		nilClient   bool
+		serverError bool
+		interaction *discordgo.Interaction
+	}{
+		{name: "nil client", nilClient: true, interaction: &discordgo.Interaction{ChannelID: "123"}},
+		{name: "nil interaction", nilClient: false, interaction: nil},
+		{name: "empty channel id", nilClient: false, interaction: &discordgo.Interaction{ChannelID: " "}},
+		{name: "unhandled command name", nilClient: false, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "unknown"}}},
+		{name: "unhandled component custom id", nilClient: false, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionMessageComponent, Data: discordgo.MessageComponentInteractionData{CustomID: "ignore_me"}}},
+		{name: "interrupt command with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "interrupt"}}},
+		{name: "rotate command with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "rotate"}}},
+		{name: "stop_turn component with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionMessageComponent, Data: discordgo.MessageComponentInteractionData{CustomID: "stop_turn:msg-1"}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var client *RestateIngressClient
+			if !tc.nilClient {
+				if tc.serverError {
+					ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(http.StatusInternalServerError)
+						_, _ = w.Write([]byte(`{"error":"server error"}`))
+					}))
+					defer ts.Close()
+					client = NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+				} else {
+					client = NewRestateIngressClient("http://localhost:8080", "aerial")
+				}
+			}
+			handled, err := handleInteractionViaRestate(context.Background(), client, tc.interaction)
+			if tc.serverError {
+				assert.True(t, handled)
+				assert.Error(t, err)
+			} else {
+				assert.False(t, handled)
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverResp string
+		statusCode int
+		publishErr bool
+		wantSubstr string
+	}{
+		{
+			name:       "voice ask restate error emits sse error",
+			serverResp: `{"error":"speech model crash"}`,
+			statusCode: http.StatusInternalServerError,
+			wantSubstr: "event: error",
+		},
+		{
+			name:       "voice ask bus error event emits sse error",
+			serverResp: `{"reply":"ok"}`,
+			statusCode: http.StatusOK,
+			publishErr: true,
+			wantSubstr: "event: error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bus := pubsub.NewMemoryBus()
+			SetVoiceEventBus(bus)
+			defer SetVoiceEventBus(nil)
+
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.publishErr {
+					var req queue.VoiceSessionRequest
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					_ = bus.Publish(r.Context(), "voice.stream."+req.TurnID, "err-1", queue.VoiceStreamEvent{
+						Event: "error",
+						Error: "bus stream failed",
+					})
+				}
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.serverResp))
+			}))
+			defer ts.Close()
+
+			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			orig := activeRestateIngressClient.Swap(client)
+			defer activeRestateIngressClient.Store(orig)
+
+			handler := handleVoiceAsk(nil)
+			req := httptest.NewRequest(http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-err"}`))
+			req.Header.Set("Accept", "text/event-stream")
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.wantSubstr)
+			assert.Contains(t, rec.Body.String(), "event: done")
 		})
 	}
 }

@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -129,6 +132,33 @@ type RestateIngressClient struct {
 	httpClient *http.Client
 }
 
+var activeRestateIngressClient atomic.Pointer[RestateIngressClient]
+
+// SetActiveRestateIngressClient sets the global active RestateIngressClient instance.
+func SetActiveRestateIngressClient(c *RestateIngressClient) {
+	activeRestateIngressClient.Store(c)
+}
+
+// ActiveRestateIngressClient returns the global active RestateIngressClient instance, or nil.
+func ActiveRestateIngressClient() *RestateIngressClient {
+	return activeRestateIngressClient.Load()
+}
+
+func resolveRestateClient(clients ...*RestateIngressClient) *RestateIngressClient {
+	if len(clients) > 0 && clients[0] != nil {
+		return clients[0]
+	}
+	return ActiveRestateIngressClient()
+}
+
+// AgentName returns the configured agent name on this client.
+func (c *RestateIngressClient) AgentName() string {
+	if c == nil {
+		return ""
+	}
+	return c.agentName
+}
+
 // NewRestateIngressClient constructs a RestateIngressClient.
 func NewRestateIngressClient(ingressURL, agentName string, httpClient ...*http.Client) *RestateIngressClient {
 	ingressURL = strings.TrimRight(strings.TrimSpace(ingressURL), "/")
@@ -146,7 +176,7 @@ func NewRestateIngressClient(ingressURL, agentName string, httpClient ...*http.C
 	}
 }
 
-func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, method string, payload any, out any) error {
+func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, method string, payload any, out any, idempotencyKey ...string) error {
 	if c == nil || c.httpClient == nil {
 		return errors.New("restate ingress client is nil")
 	}
@@ -165,6 +195,9 @@ func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, metho
 		return fmt.Errorf("create restate request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(idempotencyKey) > 0 && strings.TrimSpace(idempotencyKey[0]) != "" {
+		req.Header.Set("Idempotency-Key", strings.TrimSpace(idempotencyKey[0]))
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -190,10 +223,10 @@ func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, metho
 }
 
 // EnqueueThread enqueues a message into ThreadSession via Restate Ingress.
-func (c *RestateIngressClient) EnqueueThread(ctx context.Context, threadID string, req queue.ThreadEnqueueRequest) (queue.ThreadEnqueueResponse, error) {
+func (c *RestateIngressClient) EnqueueThread(ctx context.Context, threadID string, req queue.ThreadEnqueueRequest, idempotencyKey ...string) (queue.ThreadEnqueueResponse, error) {
 	var resp queue.ThreadEnqueueResponse
 	svcName := queue.ThreadSessionServiceName(c.agentName)
-	err := c.postJSON(ctx, svcName, threadID, "Enqueue", req, &resp)
+	err := c.postJSON(ctx, svcName, threadID, "Enqueue", req, &resp, idempotencyKey...)
 	return resp, err
 }
 
@@ -214,10 +247,10 @@ func (c *RestateIngressClient) RotateThreadSession(ctx context.Context, threadID
 }
 
 // EnqueueDispatch enqueues a dispatch request into DispatchSession via Restate Ingress.
-func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey string, req queue.BrainDispatchRequest) (queue.DispatchEnqueueResponse, error) {
+func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey string, req queue.BrainDispatchRequest, idempotencyKey ...string) (queue.DispatchEnqueueResponse, error) {
 	var resp queue.DispatchEnqueueResponse
 	svcName := queue.DispatchSessionServiceName(c.agentName)
-	err := c.postJSON(ctx, svcName, sessionKey, "Enqueue", req, &resp)
+	err := c.postJSON(ctx, svcName, sessionKey, "Enqueue", req, &resp, idempotencyKey...)
 	return resp, err
 }
 
@@ -283,6 +316,97 @@ func (c *RestateIngressClient) CancelDispatchImmediate(ctx context.Context, req 
 	return resp, err
 }
 
+func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, req PromptRequest, channelID, msgID string) (string, error) {
+	reqEnqueue := queue.ThreadEnqueueRequest{
+		Prompt:       req.Prompt,
+		ChannelID:    channelID,
+		Title:        strings.TrimSpace(req.Title),
+		MessageID:    msgID,
+		Model:        strings.TrimSpace(req.Model),
+		Effort:       strings.TrimSpace(req.Effort),
+		SkipIfActive: req.SkipIfActive,
+		IsPrompt:     true,
+	}
+	idempotencyKey := "prompt:" + channelID + ":" + msgID
+	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
+	if err != nil {
+		return "", err
+	}
+	return resp.Status, nil
+}
+
+func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient, req DispatchRequest, sessionKey, dispatchID string) (string, error) {
+	bReq := queue.BrainDispatchRequest{
+		ID:             dispatchID,
+		Source:         strings.ToLower(strings.TrimSpace(req.Source)),
+		SessionID:      sessionKey,
+		TargetID:       req.TargetID,
+		VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
+		Prompt:         req.Prompt,
+		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
+		Model:          strings.TrimSpace(req.Model),
+		SkipIfActive:   req.SkipIfActive,
+	}
+	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, dispatchID)
+	if err != nil {
+		return "", err
+	}
+	return resp.Status, nil
+}
+
+func handleCancelDispatchViaRestate(ctx context.Context, client *RestateIngressClient, dispatchID, buildID, reason string) (int, []string, error) {
+	resp, err := client.CancelDispatchImmediate(ctx, queue.CancelDispatchControlRequest{
+		DispatchID: dispatchID,
+		BuildID:    buildID,
+		ChunkID:    buildID,
+		Reason:     reason,
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.CancelledCount, resp.CancelledIDs, nil
+}
+
+func handleInteractionViaRestate(ctx context.Context, client *RestateIngressClient, interaction *discordgo.Interaction) (bool, error) {
+	if client == nil || interaction == nil || strings.TrimSpace(interaction.ChannelID) == "" {
+		return false, nil
+	}
+	switch interaction.Type {
+	case discordgo.InteractionApplicationCommand:
+		cmd := interaction.ApplicationCommandData()
+		switch cmd.Name {
+		case "interrupt":
+			if _, err := client.CancelThreadTurn(ctx, interaction.ChannelID, queue.CancelTurnRequest{
+				Reason: "cancelled by operator via /interrupt",
+			}); err != nil {
+				log.Printf("[Restate] Failed to cancel thread turn: %v", err)
+				return true, err
+			}
+			return true, nil
+		case "rotate":
+			if _, err := client.RotateThreadSession(ctx, interaction.ChannelID, queue.RotateSessionRequest{}); err != nil {
+				log.Printf("[Restate] Failed to rotate thread session: %v", err)
+				return true, err
+			}
+			return true, nil
+		}
+	case discordgo.InteractionMessageComponent:
+		data := interaction.MessageComponentData()
+		if strings.HasPrefix(data.CustomID, "stop_turn") {
+			if _, err := client.CancelThreadTurn(ctx, interaction.ChannelID, queue.CancelTurnRequest{
+				Reason: "cancelled by operator via stop_turn button",
+			}); err != nil {
+				log.Printf("[Restate] Failed to cancel thread turn via button: %v", err)
+				return true, err
+			}
+			return true, nil
+		}
+	default:
+		// Ignored.
+	}
+	return false, nil
+}
+
 // darkLaunchRestateAnchor preserves dark-launched Restate actors and ingress client from deadcode analysis
 // within the services/eri module while their runtime server registration lives in services/eri-restate.
 var _ = []any{
@@ -295,6 +419,10 @@ var _ = []any{
 	(*RemoteQuotaProvider).ProviderFunc,
 	NewRemoteEphemeralLLMFunc,
 	NewRestateIngressClient,
+	SetActiveRestateIngressClient,
+	ActiveRestateIngressClient,
+	resolveRestateClient,
+	(*RestateIngressClient).AgentName,
 	(*RestateIngressClient).postJSON,
 	(*RestateIngressClient).EnqueueThread,
 	(*RestateIngressClient).CancelThreadTurn,
@@ -305,4 +433,10 @@ var _ = []any{
 	(*RestateIngressClient).CancelDispatch,
 	(*RestateIngressClient).CancelDispatchImmediate,
 	(*RestateIngressClient).AskVoice,
+	handlePromptViaRestate,
+	handleDispatchViaRestate,
+	handleCancelDispatchViaRestate,
+	handleInteractionViaRestate,
+	SetVoiceEventBus,
+	WithRestateIngressClient,
 }

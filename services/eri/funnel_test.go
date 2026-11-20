@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1272,6 +1273,82 @@ channels:
 				dbMsg, err := store.GetMessage(context.Background(), tc.msgID)
 				if err != nil || dbMsg == nil {
 					t.Fatalf("expected message %s to be persisted in store", tc.msgID)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverResp string
+		statusCode int
+		emptyChan  bool
+		wantResult string
+		wantErr    bool
+	}{
+		{
+			name:       "restate enqueue success",
+			serverResp: `{"status":"ok","message_id":"msg-restate-1"}`,
+			statusCode: http.StatusOK,
+			wantResult: "enqueued",
+		},
+		{
+			name:       "restate enqueue duplicate",
+			serverResp: `{"status":"already_exists","message_id":"msg-restate-2"}`,
+			statusCode: http.StatusOK,
+			wantResult: "duplicate",
+		},
+		{
+			name:       "restate enqueue error",
+			serverResp: `{"error":"restate down"}`,
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
+		},
+		{
+			name:      "empty target thread id returns error",
+			emptyChan: true,
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.serverResp))
+			}))
+			defer ts.Close()
+
+			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			s := newMockDiscordSession(t, nil)
+			s.State.User = &discordgo.User{ID: "bot-123", Username: "AerialBot"}
+
+			chanID := "chan-dm"
+			if tc.emptyChan {
+				chanID = ""
+			}
+			m := &discordgo.Message{
+				ID:        "msg-restate-1",
+				ChannelID: chanID,
+				GuildID:   "",
+				Content:   "Hello Aerial via Restate",
+				Author:    &discordgo.User{ID: "user-456", Username: "alex"},
+				Timestamp: time.Now().UTC(),
+			}
+
+			res, err := processFunnelMessageIngress(context.Background(), s, nil, nil, m, "bot-123", nil, client)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if res != tc.wantResult {
+					t.Fatalf("result = %q, want %q", res, tc.wantResult)
 				}
 			}
 		})

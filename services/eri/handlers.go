@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,7 +28,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
-	"github.com/azylman/aerial/services/eri/pkg/guard"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -119,6 +117,30 @@ func handleDuplicatePrompt(ctx context.Context, w http.ResponseWriter, store db.
 	return false
 }
 
+func handleRestatePrompt(ctx context.Context, w http.ResponseWriter, client *RestateIngressClient, req PromptRequest, channelID string) {
+	msgID := strings.TrimSpace(req.MessageID)
+	if msgID == "" {
+		msgID = uuid.New().String()
+	}
+	status, err := handlePromptViaRestate(ctx, client, req, channelID, msgID)
+	if err != nil {
+		log.Printf("[HTTP] Failed to enqueue prompt via restate: %v", err)
+		writeErr(w, http.StatusInternalServerError, "Failed to enqueue prompt: "+err.Error())
+		return
+	}
+	httpCode := http.StatusAccepted
+	if status == statusSkippedActive || status == statusAlreadyExists {
+		httpCode = http.StatusOK
+	}
+	httpkit.WriteJSON(w, httpCode, map[string]string{
+		jsonKeyStatus:    status,
+		jsonKeyChannelID: channelID,
+		jsonKeySessionID: channelID,
+		jsonKeyMessageID: msgID,
+		"message":        "Prompt execution enqueued in background",
+	})
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -144,8 +166,19 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			channelID = pool.RedirectBuildPrompt(channelID, req.Prompt)
 		}
 
+		if err := validatePromptEffort(req.Effort); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		model := strings.TrimSpace(req.Model)
 		effort := resolvePromptEffort(model, strings.TrimSpace(req.Effort))
+		req.Model = model
+		req.Effort = effort
+
+		if pool != nil {
+			channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
+		}
 
 		active, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, channelID)
 		if err != nil {
@@ -166,8 +199,9 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if pool != nil {
-			channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
+		if client := resolveRestateClient(); client != nil {
+			handleRestatePrompt(r.Context(), w, client, req, channelID)
+			return
 		}
 
 		msgID := strings.TrimSpace(req.MessageID)
@@ -243,34 +277,6 @@ type DispatchRequest struct {
 	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
 }
 
-var reDispatchSource = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
-
-func validateDispatchRequest(req *DispatchRequest) error {
-	if req == nil {
-		return errors.New("Invalid payload: request cannot be nil")
-	}
-	source := strings.ToLower(strings.TrimSpace(req.Source))
-	if !reDispatchSource.MatchString(source) {
-		return errors.New("Invalid payload: 'source' must match ^[a-z0-9_-]{1,64}$")
-	}
-	if strings.TrimSpace(req.Prompt) == "" {
-		return errors.New("Invalid payload: 'prompt' field is required and cannot be empty")
-	}
-	sessionID := strings.TrimSpace(req.SessionID)
-	if sessionID != "" {
-		if queue.IsNumericSnowflake(sessionID) || strings.HasPrefix(strings.ToLower(sessionID), "discord-") || !queue.IsValidThreadKey(sessionID) {
-			return errors.New("Invalid payload: 'session_id' cannot be a numeric snowflake, start with 'discord-', or contain invalid characters")
-		}
-	}
-	effort := strings.ToLower(strings.TrimSpace(req.Effort))
-	if effort != "" && effort != config.EffortLow && effort != config.EffortMedium && effort != config.EffortHigh {
-		return errors.New("Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
-	}
-	req.TargetID = runner.NormalizeEnvTargetID(req.TargetID)
-	req.VanadisChunkID = strings.TrimSpace(req.VanadisChunkID)
-	return nil
-}
-
 func checkDuplicateDispatch(ctx context.Context, store db.Store, dispatchID string) (bool, error) {
 	existing, err := store.GetDispatch(ctx, dispatchID)
 	if err != nil {
@@ -301,7 +307,7 @@ func handleSkipActiveDispatch(ctx context.Context, w http.ResponseWriter, store 
 }
 
 func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, rawID, dispatchID, sessionID string) bool {
-	if strings.TrimSpace(rawID) == "" {
+	if strings.TrimSpace(rawID) == "" || store == nil {
 		return false
 	}
 	exists, err := checkDuplicateDispatch(ctx, store, dispatchID)
@@ -338,6 +344,33 @@ func buildDispatchRecord(req DispatchRequest, dispatchID, sessionID, traceparent
 	}
 }
 
+func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *RestateIngressClient, req DispatchRequest, sessionID, dispatchID string) {
+	sessionKey := sessionID
+	if sessionKey == "" {
+		sessionKey = queue.ResolveDispatchSessionKey(queue.BrainDispatchRequest{
+			SessionID:      req.SessionID,
+			VanadisChunkID: req.VanadisChunkID,
+			ID:             dispatchID,
+		})
+	}
+	status, err := handleDispatchViaRestate(ctx, client, req, sessionKey, dispatchID)
+	if err != nil {
+		log.Printf("[HTTP] Failed to enqueue dispatch via restate: %v", err)
+		writeErr(w, http.StatusInternalServerError, "Failed to enqueue dispatch: "+err.Error())
+		return
+	}
+	httpCode := http.StatusAccepted
+	if status == statusSkippedActive || status == statusAlreadyExists {
+		httpCode = http.StatusOK
+	}
+	httpkit.WriteJSON(w, httpCode, map[string]string{
+		jsonKeyStatus:     status,
+		jsonKeyDispatchID: dispatchID,
+		jsonKeyMessageID:  dispatchID,
+		jsonKeySessionID:  sessionKey,
+	})
+}
+
 func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -361,16 +394,21 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			dispatchID = uuid.New().String()
 		}
 
-		if store == nil {
-			writeErr(w, http.StatusInternalServerError, "Database store not configured")
-			return
-		}
-
 		if handleDuplicateDispatch(r.Context(), w, store, req.ID, dispatchID, sessionID) {
 			return
 		}
 
 		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
+			return
+		}
+
+		if client := resolveRestateClient(); client != nil {
+			handleRestateDispatch(r.Context(), w, client, req, sessionID, dispatchID)
+			return
+		}
+
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database store not configured")
 			return
 		}
 
@@ -424,10 +462,6 @@ func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.Handl
 			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
-		if store == nil {
-			writeErr(w, http.StatusInternalServerError, "Database store not configured")
-			return
-		}
 		var req CancelDispatchRequest
 		if !readPostJSON(w, r, &req) {
 			return
@@ -446,6 +480,20 @@ func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.Handl
 			return
 		}
 		reason := resolveCancelReason(req.Reason, buildID, dispatchID)
+		if client := resolveRestateClient(); client != nil {
+			count, ids, err := handleCancelDispatchViaRestate(r.Context(), client, dispatchID, buildID, reason)
+			if err != nil {
+				log.Printf("[HTTP] Failed to cancel dispatch via restate: %v", err)
+				writeErr(w, http.StatusInternalServerError, "Failed to cancel dispatch: "+err.Error())
+				return
+			}
+			httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", "cancelled_count": count, "cancelled_ids": ids})
+			return
+		}
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database store not configured")
+			return
+		}
 		cancelledIDs, err := store.CancelPendingDispatches(r.Context(), dispatchID, buildID, reason)
 		if err != nil {
 			writeStoreErr(w, "cancelling dispatches", err)
@@ -1260,6 +1308,18 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 		}
 
 		ic := &discordgo.InteractionCreate{Interaction: &interaction}
+		if client := resolveRestateClient(); client != nil {
+			handled, restateErr := handleInteractionViaRestate(r.Context(), client, &interaction)
+			if restateErr != nil {
+				writeErr(w, http.StatusInternalServerError, "Restate control interaction failed: "+restateErr.Error())
+				return
+			}
+			if handled {
+				httpkit.WriteJSON(w, http.StatusOK, map[string]string{jsonKeyStatus: "ok"})
+				return
+			}
+		}
+
 		router := activeInteractionRouter.Load()
 		if router == nil {
 			router = initFunnelInteractionRouter(store, pool)
@@ -1328,69 +1388,6 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// GuardScanRequest represents the payload for POST /internal/guard/scan.
-type GuardScanRequest struct {
-	Diff                 string `json:"diff"`
-	Text                 string `json:"text"`
-	SourceLabel          string `json:"source_label"`
-	CheckTestFiles       bool   `json:"check_test_files"`
-	IgnoreInternalDomain bool   `json:"ignore_internal_domain"`
-}
-
-// GuardScanResponse represents the outcome of a guard scan request.
-type GuardScanResponse struct {
-	Decision   string            `json:"decision"`
-	Reason     string            `json:"reason,omitempty"`
-	Violations []guard.Violation `json:"violations,omitempty"`
-}
-
-func handleInternalGuardScan() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req GuardScanRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{jsonKeyError: "Invalid request payload"})
-			return
-		}
-
-		var violations []guard.Violation
-		patterns := guard.GetActivePatterns()
-
-		if req.Diff != "" {
-			diffPatterns := patterns
-			if req.IgnoreInternalDomain {
-				filtered := make([]guard.PatternRule, 0, len(patterns))
-				for _, p := range patterns {
-					if p.Category != "InternalClusterDomain" {
-						filtered = append(filtered, p)
-					}
-				}
-				diffPatterns = filtered
-			}
-			violations = append(violations, guard.ScanDiffForSecrets(req.Diff, req.CheckTestFiles, diffPatterns)...)
-		}
-
-		if req.Text != "" {
-			violations = append(violations, guard.ScanTextForSecrets(req.Text, req.SourceLabel, patterns)...)
-		}
-
-		resp := GuardScanResponse{
-			Decision: "allow",
-		}
-		if len(violations) > 0 {
-			resp.Decision = "deny"
-			resp.Reason = guard.FormatCommitDenyReason(violations)
-			resp.Violations = violations
-		}
-
-		httpkit.WriteJSON(w, http.StatusOK, resp)
-	}
-}
-
 func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	_ = searchPaths
 	mux := http.NewServeMux()
@@ -1430,6 +1427,9 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	var llmFn func(context.Context, string, string) (string, error)
 	if pool != nil {
 		llmFn = pool.LLMFunc()
+	}
+	if llmFn == nil && activeRestateIngressClient.Load() != nil {
+		llmFn = NewRemoteEphemeralLLMFunc(os.Getenv("ERI_RESTATE_URL"))
 	}
 	mux.HandleFunc("/internal/llm", handleInternalLLM(llmFn))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri"))

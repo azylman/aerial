@@ -23,6 +23,7 @@ import (
 var (
 	funnelCfg               atomic.Pointer[config.Config]
 	funnelPool              atomic.Pointer[queue.WorkerPool]
+	funnelQuotaProvider     atomic.Pointer[interactions.QuotaProvider]
 	activeInteractionRouter atomic.Pointer[interactions.Router]
 	titleSummarizeSem       = make(chan struct{}, 2)
 	discordSessionOpener    = hydrateDiscordSessionREST
@@ -34,6 +35,22 @@ var (
 		return s.GuildMember(guildID, userID)
 	}
 )
+
+// SetFunnelQuotaProvider sets the active *interactions.QuotaProvider for the Discord funnel slash commands.
+func SetFunnelQuotaProvider(qp interactions.QuotaProvider) {
+	if qp == nil {
+		funnelQuotaProvider.Store(nil)
+		return
+	}
+	funnelQuotaProvider.Store(&qp)
+}
+
+func currentFunnelQuotaProvider() interactions.QuotaProvider {
+	if p := funnelQuotaProvider.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 type DiscordMessageIngressRequest struct {
 	BotUserID string             `json:"bot_user_id,omitempty"`
@@ -452,7 +469,7 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return containsFunnelKeyword(m.Content)
 }
 
-func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, store db.Store, m *discordgo.Message, targetThreadID string, createdAt time.Time, extraRoleNames ...map[string]string) (db.Message, error) {
+func buildFunnelMessage(ctx context.Context, s *discordgo.Session, m *discordgo.Message, targetThreadID string, createdAt time.Time, extraRoleNames ...map[string]string) db.Message {
 	resolvedGuildID := resolveGuildID(s, m)
 	if m != nil {
 		m.GuildID = resolvedGuildID
@@ -485,6 +502,11 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		UpdatedAt:   time.Now().UTC(),
 	}
 	populateDiscordMessageFields(s, m, &msg, extraRoleNames...)
+	return msg
+}
+
+func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, store db.Store, m *discordgo.Message, targetThreadID string, createdAt time.Time, extraRoleNames ...map[string]string) (db.Message, error) {
+	msg := buildFunnelMessage(ctx, s, m, targetThreadID, createdAt, extraRoleNames...)
 	if store != nil {
 		if err := store.InsertMessage(ctx, msg); err != nil {
 			return msg, err
@@ -526,7 +548,7 @@ func isSelfOrNilMessage(s *discordgo.Session, m *discordgo.Message, botUserID st
 	return false
 }
 
-func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, store db.Store, pool *queue.WorkerPool, m *discordgo.Message, botUserID string, extraRoleNames map[string]string) (string, error) {
+func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, store db.Store, pool *queue.WorkerPool, m *discordgo.Message, botUserID string, extraRoleNames map[string]string, clients ...*RestateIngressClient) (string, error) {
 	seedSessionStateForIngress(s, botUserID, m)
 
 	if isSelfOrNilMessage(s, m, botUserID) {
@@ -536,6 +558,26 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, stor
 	if !isFunnelBotTargeted(s, &discordgo.MessageCreate{Message: m}) {
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "ignored").Inc()
 		return "ignored", nil
+	}
+
+	if client := resolveRestateClient(clients...); client != nil {
+		targetThreadID, _ := getOrCreateThreadID(ctx, s, m)
+		if strings.TrimSpace(targetThreadID) == "" {
+			return "", errors.New("target thread ID is empty")
+		}
+		msg := buildFunnelMessage(ctx, s, m, targetThreadID, m.Timestamp, extraRoleNames)
+		idempotencyKey := "discord:" + m.ID
+		resp, err := client.EnqueueThread(ctx, targetThreadID, queue.ThreadEnqueueRequest{
+			Message: &msg,
+		}, idempotencyKey)
+		if err != nil {
+			return "", err
+		}
+		if resp.Status == "already_exists" {
+			return "duplicate", nil
+		}
+		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
+		return "enqueued", nil
 	}
 
 	if store != nil {
@@ -549,6 +591,9 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, stor
 	}
 
 	targetThreadID, _ := getOrCreateThreadID(ctx, s, m)
+	if strings.TrimSpace(targetThreadID) == "" {
+		return "", errors.New("target thread ID is empty")
+	}
 	msg, err := buildAndInsertFunnelMessage(ctx, s, store, m, targetThreadID, m.Timestamp, extraRoleNames)
 	if err != nil {
 		return "", err
@@ -707,10 +752,14 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		haroURL = fc.Current().HaroURL
 		covenURL = fc.Current().CovenURL
 	}
-	interactionRouter := interactions.NewRouter(interactions.InteractionDeps{
+	deps := interactions.InteractionDeps{
 		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
 		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
-	})
+	}
+	if qp := currentFunnelQuotaProvider(); qp != nil {
+		deps.QuotaProvider = qp
+	}
+	interactionRouter := interactions.NewRouter(deps)
 	activeInteractionRouter.Store(interactionRouter)
 
 	openDiscordSessionWithRetry(ctx, dg)
@@ -727,10 +776,14 @@ func initFunnelInteractionRouter(store db.Store, pool *queue.WorkerPool) *intera
 		haroURL = fc.Current().HaroURL
 		covenURL = fc.Current().CovenURL
 	}
-	router = interactions.NewRouter(interactions.InteractionDeps{
+	deps := interactions.InteractionDeps{
 		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
 		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
-	})
+	}
+	if qp := currentFunnelQuotaProvider(); qp != nil {
+		deps.QuotaProvider = qp
+	}
+	router = interactions.NewRouter(deps)
 	activeInteractionRouter.Store(router)
 	return router
 }
