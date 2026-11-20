@@ -34,12 +34,14 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 	tests := []struct {
 		name         string
 		threadID     string
+		agent        string
 		statusCode   int
 		body         string
 		wantErr      bool
 		wantFacts    int
 		wantTools    int
 		wantStackHit bool
+		wantAgent    string
 	}{
 		{
 			name:         "returns facts and tool calls",
@@ -79,6 +81,15 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 			statusCode: http.StatusOK,
 			body:       `{"retrieved_facts":["x"],"tool_calls":["y"]}`,
 		},
+		{
+			name:         "explicit agent overrides default stack in query",
+			threadID:     "th-1",
+			agent:        "agent-alpha",
+			statusCode:   http.StatusOK,
+			body:         `{"retrieved_facts":[],"tool_calls":[]}`,
+			wantStackHit: true,
+			wantAgent:    "agent-alpha",
+		},
 	}
 
 	for _, tc := range tests {
@@ -96,7 +107,7 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 			defer srv.Close()
 
 			client := NewIndexerClient(srv.URL, "canary", srv.Client())
-			got, err := client.GetTrajectoryContext(context.Background(), tc.threadID)
+			got, err := client.GetTrajectoryContext(context.Background(), tc.agent, tc.threadID)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -109,22 +120,26 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 			if len(got.ToolCalls) != tc.wantTools {
 				t.Errorf("ToolCalls count = %d, want %d", len(got.ToolCalls), tc.wantTools)
 			}
-			assertTrajectoryHits(t, tc.wantStackHit, tc.threadID, hits, gotStack, gotAgent, gotThread)
+			expectedAgent := "canary"
+			if tc.wantAgent != "" {
+				expectedAgent = tc.wantAgent
+			}
+			assertTrajectoryHits(t, tc.wantStackHit, tc.threadID, hits, gotStack, gotAgent, gotThread, expectedAgent)
 		})
 	}
 }
 
-func assertTrajectoryHits(t *testing.T, wantStackHit bool, threadID string, hits int, gotStack, gotAgent, gotThread string) {
+func assertTrajectoryHits(t *testing.T, wantStackHit bool, threadID string, hits int, gotStack, gotAgent, gotThread, wantAgent string) {
 	t.Helper()
 	if wantStackHit {
 		if hits != 1 {
 			t.Fatalf("server hits = %d, want 1", hits)
 		}
-		if gotStack != "canary" {
-			t.Errorf("stack query param = %q, want %q (Roles N5 stack filter)", gotStack, "canary")
+		if gotStack != wantAgent {
+			t.Errorf("stack query param = %q, want %q (Roles N5 stack filter)", gotStack, wantAgent)
 		}
-		if gotAgent != "canary" {
-			t.Errorf("agent query param = %q, want %q", gotAgent, "canary")
+		if gotAgent != wantAgent {
+			t.Errorf("agent query param = %q, want %q", gotAgent, wantAgent)
 		}
 		if !strings.Contains(gotThread, "th-") {
 			t.Errorf("request path = %q, want thread id in path", gotThread)
@@ -156,7 +171,7 @@ func TestIndexerClient_SetMaxSteps(t *testing.T) {
 			defer srv.Close()
 			client := NewIndexerClient(srv.URL, "aerial", srv.Client())
 			client.SetMaxSteps(tc.set)
-			if _, err := client.GetTrajectoryContext(context.Background(), "th-1"); err != nil {
+			if _, err := client.GetTrajectoryContext(context.Background(), "aerial", "th-1"); err != nil {
 				t.Fatalf("GetTrajectoryContext() err = %v", err)
 			}
 			if !strings.Contains(gotQuery, tc.want) {
@@ -170,7 +185,7 @@ func TestIndexerClient_SetMaxSteps(t *testing.T) {
 
 func TestNewIndexerClient_EmptyBaseURL(t *testing.T) {
 	client := NewIndexerClient("  ", "aerial", nil)
-	if _, err := client.GetTrajectoryContext(context.Background(), "th-1"); err == nil {
+	if _, err := client.GetTrajectoryContext(context.Background(), "aerial", "th-1"); err == nil {
 		t.Error("GetTrajectoryContext() with empty base URL = nil error, want error")
 	}
 }

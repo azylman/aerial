@@ -29,6 +29,10 @@ type queryMockDBTX struct {
 	capturedQuery *string
 	rowSQL        string
 	rowsSQL       string
+	watermarkSQL  string
+	summarySQL    string
+	joinSQL       string
+	messagesSQL   string
 }
 
 func (q queryMockDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -54,6 +58,21 @@ func (q queryMockDBTX) QueryRowContext(ctx context.Context, query string, args .
 	if strings.Contains(query, "COUNT(*)") {
 		return q.dbMem.QueryRowContext(ctx, "SELECT 1")
 	}
+	if q.watermarkSQL != "" && strings.Contains(query, "extraction_watermarks") {
+		return q.dbMem.QueryRowContext(ctx, q.watermarkSQL)
+	}
+	if strings.Contains(query, "JOIN sessions") {
+		if q.joinSQL != "" {
+			return q.dbMem.QueryRowContext(ctx, q.joinSQL)
+		}
+		return q.dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
+	}
+	if strings.Contains(query, "sessions") {
+		if q.summarySQL != "" {
+			return q.dbMem.QueryRowContext(ctx, q.summarySQL)
+		}
+		return q.dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
+	}
 	if q.rowSQL != "" {
 		return q.dbMem.QueryRowContext(ctx, q.rowSQL)
 	}
@@ -66,6 +85,9 @@ func (q queryMockDBTX) QueryContext(ctx context.Context, query string, args ...a
 	}
 	if q.queryErr != nil {
 		return nil, q.queryErr
+	}
+	if q.messagesSQL != "" && strings.Contains(query, "messages") {
+		return q.dbMem.QueryContext(ctx, q.messagesSQL)
 	}
 	if q.rowsSQL != "" {
 		return q.dbMem.QueryContext(ctx, q.rowsSQL)
@@ -97,20 +119,28 @@ type sqlStoreSetterTestCase struct {
 	wantStack    string
 }
 
-func runSQLStoreSetterCase(t *testing.T, tc sqlStoreSetterTestCase, dbMem *sql.DB) {
+func runNilStoreFallbackCase(t *testing.T, tc sqlStoreSetterTestCase) {
 	t.Helper()
 	var store *SQLStore
+	if got := store.getBrainURL(); got != tc.wantBrainURL {
+		t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
+	}
+	if got := store.Stack(); got != tc.wantStack {
+		t.Errorf("Stack() = %q, want %q", got, tc.wantStack)
+	}
+	if _, err := store.Conn(context.Background()); err == nil {
+		t.Errorf("Conn() expected error for nil store")
+	}
+}
+
+func runSQLStoreSetterCase(t *testing.T, tc sqlStoreSetterTestCase, dbMem *sql.DB) {
+	t.Helper()
 	if tc.name == "NilStoreFallback" {
-		if got := store.getBrainURL(); got != tc.wantBrainURL {
-			t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
-		}
-		if got := store.Stack(); got != tc.wantStack {
-			t.Errorf("Stack() = %q, want %q", got, tc.wantStack)
-		}
+		runNilStoreFallbackCase(t, tc)
 		return
 	}
 
-	store = NewSQLStoreWithBrainURL(dbMem, tc.initialURL, nil)
+	store := NewSQLStoreWithBrainURL(dbMem, tc.initialURL, nil)
 	if tc.setURL != "" {
 		store.SetBrainURL(tc.setURL)
 	}
@@ -188,6 +218,11 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runSQLStoreSetterCase(t, tc, dbMem)
 		})
+	}
+
+	mockStore := NewSQLStore(queryMockDBTX{dbMem: dbMem})
+	if c, err := mockStore.Conn(context.Background()); !errors.Is(err, errNoPinnedConn) || c != nil {
+		t.Errorf("mockStore.Conn() = (%v, %v), want (nil, errNoPinnedConn)", c, err)
 	}
 }
 
@@ -683,45 +718,25 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:         "EriHTTPError",
-			threadID:     "th-1",
-			watermarkSQL: "SELECT 5, NULL",
-			eriStatus:    http.StatusInternalServerError,
-			wantErr:      true,
-		},
-		{
-			name:         "EriJSONError",
-			threadID:     "th-1",
-			watermarkSQL: "SELECT 5, NULL",
-			eriBody:      "invalid-json",
-			wantErr:      true,
-		},
-		{
 			name:         "Success",
 			threadID:     "th-1",
+			limit:        50,
+			agent:        "agent-alpha",
 			watermarkSQL: "SELECT 10, NULL",
-			eriBody: `{"status":"ok","tasks":[
-				{"id":"m1","row_id":12,"thread_id":"th-1","prompt":"hello","response_text":"world","status":"COMPLETED","is_admin":true},
-				{"id":"m2","row_id":14,"thread_id":"th-1","prompt":"skip","response_text":"[SILENT]","status":"COMPLETED","is_admin":true},
-				{"id":"m3","row_id":15,"thread_id":"th-1","prompt":"non-admin","response_text":"ok","status":"COMPLETED","is_admin":false}
-			]}`,
+			rowsSQL:      "SELECT 'm1', 12, 'th-1', 'hello', 'world', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
 			wantCount:    1,
 			wantRowIDs:   []int64{12},
-			wantPatterns: []string{"FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2"},
-			wantURLSub:   "after_row_id=10&order=asc&limit=50",
+			wantPatterns: []string{"FROM messages", "WHERE agent = $1 AND thread_id = $2"},
 		},
 		{
-			name:         "Success_ReverseOrderSortedAscending",
+			name:         "Success_MultipleTurnsSortedAscending",
 			threadID:     "th-2",
+			limit:        50,
 			watermarkSQL: "SELECT 0, NULL",
-			eriBody: `{"status":"ok","tasks":[
-				{"id":"m2","row_id":25,"thread_id":"th-2","prompt":"turn 2","response_text":"answer 2","status":"COMPLETED","is_admin":true},
-				{"id":"m1","row_id":10,"thread_id":"th-2","prompt":"turn 1","response_text":"answer 1","status":"COMPLETED","is_admin":true}
-			]}`,
+			rowsSQL:      "SELECT 'm1', 10, 'th-2', 'turn 1', 'answer 1', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00' UNION ALL SELECT 'm2', 25, 'th-2', 'turn 2', 'answer 2', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
 			wantCount:    2,
 			wantRowIDs:   []int64{10, 25},
-			wantPatterns: []string{"FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2"},
-			wantURLSub:   "after_row_id=0&order=asc&limit=50",
+			wantPatterns: []string{"FROM messages", "WHERE agent = $1 AND thread_id = $2"},
 		},
 	}
 
@@ -737,14 +752,14 @@ func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		nilDB      bool
-		threadID   string
-		eriStatus  int
-		eriBody    string
-		wantErr    bool
-		wantID     int64
-		wantURLSub string
+		name     string
+		nilDB    bool
+		threadID string
+		agent    string
+		queryErr error
+		rowSQL   string
+		wantErr  bool
+		wantID   int64
 	}{
 		{
 			name:     "NilDBError",
@@ -759,59 +774,45 @@ func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
 			wantID:   0,
 		},
 		{
-			name:      "EriHTTPError",
-			threadID:  "th-1",
-			eriStatus: http.StatusInternalServerError,
-			wantErr:   true,
-		},
-		{
-			name:     "EmptyTasks",
+			name:     "QueryError",
 			threadID: "th-1",
-			eriBody:  `{"status":"ok","tasks":[]}`,
-			wantID:   0,
+			queryErr: errors.New("db error"),
+			wantErr:  true,
 		},
 		{
-			name:       "SuccessWithRow",
-			threadID:   "th-1",
-			eriBody:    `{"status":"ok","tasks":[{"row_id":42}]}`,
-			wantID:     42,
-			wantURLSub: "status=COMPLETED&limit=1",
+			name:     "SuccessWithRow",
+			threadID: "th-1",
+			agent:    "agent-alpha",
+			rowSQL:   "SELECT 42",
+			wantID:   42,
+		},
+		{
+			name:     "SuccessEmptyDefaultZero",
+			threadID: "th-2",
+			rowSQL:   "SELECT 0",
+			wantID:   0,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedURL string
 			var store *SQLStore
-
 			if tc.nilDB {
 				store = &SQLStore{}
 			} else {
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					capturedURL = r.URL.String()
-					if tc.eriStatus != 0 {
-						w.WriteHeader(tc.eriStatus)
-					}
-					if tc.eriBody != "" {
-						_, _ = w.Write([]byte(tc.eriBody))
-					}
-				}))
-				defer server.Close()
-
-				store = NewSQLStoreWithBrainURL(queryMockDBTX{
-					dbMem: dbMem,
-				}, server.URL, server.Client())
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:    dbMem,
+					queryErr: tc.queryErr,
+					rowSQL:   tc.rowSQL,
+				})
 			}
 
-			id, err := store.GetMaxMessageRowID(ctx, tc.threadID)
+			id, err := store.GetMaxMessageRowID(ctx, tc.threadID, tc.agent)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetMaxMessageRowID() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if !tc.wantErr && id != tc.wantID {
 				t.Errorf("GetMaxMessageRowID() = %d, want %d", id, tc.wantID)
-			}
-			if tc.wantURLSub != "" && !strings.Contains(capturedURL, tc.wantURLSub) {
-				t.Errorf("captured URL missing %q: %s", tc.wantURLSub, capturedURL)
 			}
 		})
 	}
@@ -1087,58 +1088,47 @@ func runGetFactsPaginatedCase(t *testing.T, tc sqlStoreGetFactsPaginatedCase, db
 	assertCapturedQueryPatterns(t, captured, tc.wantPatterns)
 }
 
-func setupBrainMockServer(status int, body string, capturedURL *string) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if capturedURL != nil {
-			*capturedURL = r.URL.String()
-		}
-		if status != 0 {
-			w.WriteHeader(status)
-		}
-		if body != "" {
-			_, _ = w.Write([]byte(body))
-		}
-	}))
-}
-
 type unextractedAdminTurnsTestCase struct {
 	name         string
 	nilDB        bool
 	threadID     string
+	limit        int
+	agent        string
 	queryErr     error
 	watermarkSQL string
-	eriStatus    int
-	eriBody      string
+	rowsSQL      string
 	wantErr      bool
 	wantEmpty    bool
 	wantCount    int
 	wantRowIDs   []int64
 	wantPatterns []string
-	wantURLSub   string
 }
 
 func runGetUnextractedAdminTurnsCase(t *testing.T, tc unextractedAdminTurnsTestCase, dbMem *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
 	var captured string
-	var capturedURL string
 	var store *SQLStore
 
 	if tc.nilDB {
 		store = &SQLStore{}
 	} else {
-		server := setupBrainMockServer(tc.eriStatus, tc.eriBody, &capturedURL)
-		defer server.Close()
-
-		store = NewSQLStoreWithBrainURL(queryMockDBTX{
+		store = NewSQLStore(queryMockDBTX{
 			dbMem:         dbMem,
 			queryErr:      tc.queryErr,
 			rowSQL:        tc.watermarkSQL,
+			rowsSQL:       tc.rowsSQL,
 			capturedQuery: &captured,
-		}, server.URL, server.Client())
+		})
 	}
 
-	turns, err := store.GetUnextractedAdminTurns(ctx, tc.threadID)
+	var turns []Message
+	var err error
+	if tc.agent != "" {
+		turns, err = store.GetUnextractedAdminTurns(ctx, tc.threadID, tc.limit, tc.agent)
+	} else {
+		turns, err = store.GetUnextractedAdminTurns(ctx, tc.threadID, tc.limit)
+	}
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("GetUnextractedAdminTurns() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -1155,9 +1145,6 @@ func runGetUnextractedAdminTurnsCase(t *testing.T, tc unextractedAdminTurnsTestC
 		if !strings.Contains(captured, pat) {
 			t.Errorf("captured query missing %q: %s", pat, captured)
 		}
-	}
-	if tc.wantURLSub != "" && !strings.Contains(capturedURL, tc.wantURLSub) {
-		t.Errorf("captured URL missing %q: %s", tc.wantURLSub, capturedURL)
 	}
 }
 

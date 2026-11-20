@@ -9,47 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/pgvector/pgvector-go"
 )
-
-type eriTasksResponse struct {
-	Status string        `json:"status"`
-	Total  int           `json:"total"`
-	Tasks  []eriTaskItem `json:"tasks"`
-}
-
-type eriTaskItem struct {
-	ID                string    `json:"id"`
-	RowID             int64     `json:"row_id"`
-	ThreadID          string    `json:"thread_id"`
-	SessionID         string    `json:"session_id"`
-	PreviousSessionID string    `json:"previous_session_id"`
-	ThreadSummary     string    `json:"thread_summary"`
-	Prompt            string    `json:"prompt"`
-	ResponseText      string    `json:"response_text"`
-	Status            string    `json:"status"`
-	IsAdmin           bool      `json:"is_admin"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
-}
-
-func (t eriTaskItem) toMessage() Message {
-	return Message{
-		ID:           t.ID,
-		RowID:        t.RowID,
-		ThreadID:     t.ThreadID,
-		Content:      t.Prompt,
-		ResponseText: t.ResponseText,
-		Status:       t.Status,
-		IsAdmin:      t.IsAdmin,
-		CreatedAt:    t.CreatedAt,
-		UpdatedAt:    t.UpdatedAt,
-	}
-}
 
 type eriTranscriptSearchResult struct {
 	Steps []eriTranscriptStepItem `json:"steps"`
@@ -88,18 +52,14 @@ func (s *SQLStore) fetchBrainJSON(ctx context.Context, endpointURL, label string
 	return nil
 }
 
-func (s *SQLStore) fetchTasks(ctx context.Context, endpoint string) ([]eriTaskItem, error) {
-	var data eriTasksResponse
-	if err := s.fetchBrainJSON(ctx, endpoint, "eri tasks", &data); err != nil {
-		return nil, err
-	}
-	return data.Tasks, nil
-}
-
 // GetConversationFactWatermark retrieves the last extracted row ID and timestamp for a thread or sentinel key.
-func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error) {
+func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID string, agent ...string) (int64, *time.Time, error) {
 	if err := s.checkDB(); err != nil {
 		return 0, nil, err
+	}
+	targetAgent := s.effectiveAgent()
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		targetAgent = strings.TrimSpace(agent[0])
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -107,7 +67,7 @@ func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID st
 	var lastRowID int64
 	var factExtractedAt FactTime
 	query := `SELECT COALESCE(last_extracted_rowid, 0), fact_extracted_at FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2`
-	err := s.db.QueryRowContext(queryCtx, query, s.effectiveStack(), threadID).Scan(&lastRowID, &factExtractedAt)
+	err := s.db.QueryRowContext(queryCtx, query, targetAgent, threadID).Scan(&lastRowID, &factExtractedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil, nil
@@ -122,75 +82,103 @@ func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID st
 }
 
 // GetUnextractedAdminTurns retrieves completed admin turns for threadID that haven't been extracted.
-func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error) {
+func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit int, agent ...string) ([]Message, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil
 	}
-	lastRowID, _, err := s.GetConversationFactWatermark(ctx, threadID)
+	targetAgent := s.effectiveAgent()
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		targetAgent = strings.TrimSpace(agent[0])
+	}
+	lastRowID, _, err := s.GetConversationFactWatermark(ctx, threadID, targetAgent)
 	if err != nil {
 		return nil, err
 	}
 
 	batchLimit := 50
-	if len(limit) > 0 && limit[0] > 0 {
-		batchLimit = limit[0]
+	if limit > 0 {
+		batchLimit = limit
 	}
 
-	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&is_admin=true&after_row_id=%d&order=asc&limit=%d",
-		s.getBrainURL(), url.QueryEscape(threadID), lastRowID, batchLimit)
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
 
-	tasks, err := s.fetchTasks(ctx, endpoint)
+	query := `SELECT id, COALESCE(row_id, 0), thread_id, content, COALESCE(response_text, ''), status, is_admin, created_at, updated_at
+	FROM messages
+	WHERE agent = $1 AND thread_id = $2 AND status = 'COMPLETED' AND is_admin = true AND row_id > $3
+	ORDER BY row_id ASC
+	LIMIT $4`
+
+	rows, err := s.db.QueryContext(queryCtx, query, targetAgent, threadID, lastRowID, batchLimit)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	var turns []Message
-	for _, t := range tasks {
-		m := t.toMessage()
+	for rows.Next() {
+		var (
+			m         Message
+			createdAt FactTime
+			updatedAt FactTime
+		)
+		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.IsAdmin, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan turn message: %w", err)
+		}
+		m.CreatedAt = createdAt.Time
+		m.UpdatedAt = updatedAt.Time
 		if IsExtractableAdminTurn(m) {
 			turns = append(turns, m)
 		}
 	}
-	// Sort turns ascending by RowID to guarantee strictly chronological conversation order
-	// regardless of whether Eri returned results in DESC order (e.g. when after_row_id=0).
-	sort.Slice(turns, func(i, j int) bool {
-		return turns[i].RowID < turns[j].RowID
-	})
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed reading unextracted turn rows: %w", err)
+	}
+
 	return turns, nil
 }
 
 // GetMaxMessageRowID returns the maximum row ID of completed messages for a thread.
-func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
+func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string, agent ...string) (int64, error) {
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return 0, nil
 	}
+	targetAgent := s.effectiveAgent()
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		targetAgent = strings.TrimSpace(agent[0])
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
 
-	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
-		s.getBrainURL(), url.QueryEscape(threadID))
-
-	tasks, err := s.fetchTasks(ctx, endpoint)
+	query := `SELECT COALESCE(MAX(row_id), 0) FROM messages WHERE agent = $1 AND thread_id = $2 AND status = 'COMPLETED'`
+	var maxRowID int64
+	err := s.db.QueryRowContext(queryCtx, query, targetAgent, threadID).Scan(&maxRowID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
 		return 0, err
 	}
-	if len(tasks) == 0 {
-		return 0, nil
-	}
-	return tasks[0].RowID, nil
+	return maxRowID, nil
 }
 
 // UpdateConversationFactWatermark updates or inserts watermark for thread fact extraction.
-func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64, agent ...string) error {
 	if err := s.checkDB(); err != nil {
 		return err
 	}
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil
+	}
+	targetAgent := s.effectiveAgent()
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		targetAgent = strings.TrimSpace(agent[0])
 	}
 	now := time.Now().UTC()
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
@@ -202,12 +190,12 @@ func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID
 	  last_extracted_rowid = GREATEST(extraction_watermarks.last_extracted_rowid, EXCLUDED.last_extracted_rowid),
 	  fact_extracted_at = EXCLUDED.fact_extracted_at,
 	  updated_at = EXCLUDED.updated_at`
-	_, err := s.db.ExecContext(queryCtx, query, s.effectiveStack(), threadID, maxRowID, now, now)
+	_, err := s.db.ExecContext(queryCtx, query, targetAgent, threadID, maxRowID, now, now)
 	return err
 }
 
 // GetThreadContextBeforeWatermark returns the thread summary and up to priorTurnLimit prior admin turns before the extraction watermark.
-func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error) {
+func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int, agent ...string) (string, []Message, error) {
 	if err := s.checkDB(); err != nil {
 		return "", nil, err
 	}
@@ -217,49 +205,71 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 	if priorTurnLimit <= 0 {
 		priorTurnLimit = 2
 	}
+	targetAgent := s.effectiveAgent()
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		targetAgent = strings.TrimSpace(agent[0])
+	}
 
-	lastRowID, _, err := s.GetConversationFactWatermark(ctx, threadID)
+	lastRowID, _, err := s.GetConversationFactWatermark(ctx, threadID, targetAgent)
 	if err != nil {
 		return "", nil, err
 	}
 
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Direct PostgreSQL query against sessions scoped by agent and session_id
+	var summary string
+	sessionQuery := `SELECT COALESCE(s.summary, '')
+	FROM sessions s
+	WHERE s.agent = $1 AND (s.session_id = $2 OR s.session_id = 'discord-' || $2)
+	ORDER BY s.updated_at DESC
+	LIMIT 1`
+	if scanErr := s.db.QueryRowContext(queryCtx, sessionQuery, targetAgent, threadID).Scan(&summary); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return "", nil, fmt.Errorf("failed to query session summary: %w", scanErr)
+	}
+
+	if summary == "" {
+		joinQuery := `SELECT COALESCE(s.summary, '')
+		FROM messages m
+		JOIN sessions s ON s.agent = m.agent AND s.session_id = m.conversation_id
+		WHERE m.agent = $1 AND m.thread_id = $2 AND s.summary != ''
+		ORDER BY m.row_id DESC
+		LIMIT 1`
+		if joinErr := s.db.QueryRowContext(queryCtx, joinQuery, targetAgent, threadID).Scan(&summary); joinErr != nil && !errors.Is(joinErr, sql.ErrNoRows) {
+			return "", nil, fmt.Errorf("failed to query joined session summary: %w", joinErr)
+		}
+	}
+
 	if lastRowID <= 0 {
-		endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
-			s.getBrainURL(), url.QueryEscape(threadID))
-		tasks, fetchTasksErr := s.fetchTasks(ctx, endpoint)
-		if fetchTasksErr != nil {
-			return "", nil, fetchTasksErr
-		}
-		var summary string
-		if len(tasks) > 0 {
-			summary = tasks[0].ThreadSummary
-		}
 		return summary, nil, nil
 	}
 
 	fetchLimit := priorTurnLimit * 3
-	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&is_admin=true&before_row_id=%d&limit=%d",
-		s.getBrainURL(), url.QueryEscape(threadID), lastRowID, fetchLimit)
-	tasks, err := s.fetchTasks(ctx, endpoint)
+	turnsQuery := `SELECT id, COALESCE(row_id, 0), thread_id, content, COALESCE(response_text, ''), status, is_admin, created_at, updated_at
+	FROM messages
+	WHERE agent = $1 AND thread_id = $2 AND status = 'COMPLETED' AND is_admin = true AND row_id < $3
+	ORDER BY row_id DESC
+	LIMIT $4`
+
+	rows, err := s.db.QueryContext(queryCtx, turnsQuery, targetAgent, threadID, lastRowID, fetchLimit)
 	if err != nil {
 		return "", nil, err
 	}
-
-	var summary string
-	if len(tasks) > 0 {
-		summary = tasks[0].ThreadSummary
-	} else {
-		fbEndpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
-			s.getBrainURL(), url.QueryEscape(threadID))
-		fbTasks, err := s.fetchTasks(ctx, fbEndpoint)
-		if err == nil && len(fbTasks) > 0 {
-			summary = fbTasks[0].ThreadSummary
-		}
-	}
+	defer rows.Close()
 
 	var priorTurns []Message
-	for _, t := range tasks {
-		m := t.toMessage()
+	for rows.Next() {
+		var (
+			m         Message
+			createdAt FactTime
+			updatedAt FactTime
+		)
+		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.IsAdmin, &createdAt, &updatedAt); err != nil {
+			return "", nil, fmt.Errorf("failed to scan prior turn message: %w", err)
+		}
+		m.CreatedAt = createdAt.Time
+		m.UpdatedAt = updatedAt.Time
 		if IsExtractableAdminTurn(m) {
 			priorTurns = append(priorTurns, m)
 			if len(priorTurns) >= priorTurnLimit {
@@ -267,7 +277,11 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return "", nil, fmt.Errorf("failed reading prior turn rows: %w", err)
+	}
 
+	// Reverse to strictly chronological order (ascending row_id)
 	for i, j := 0, len(priorTurns)-1; i < j; i, j = i+1, j-1 {
 		priorTurns[i], priorTurns[j] = priorTurns[j], priorTurns[i]
 	}
@@ -385,17 +399,6 @@ func extractTrajectorySignals(stepType, toolName, content string) ([]string, str
 	return nil, ""
 }
 
-func extractSessionIDs(task eriTaskItem) []string {
-	var parts []string
-	if sessID := strings.TrimSpace(task.SessionID); sessID != "" {
-		parts = append(parts, sessID)
-	}
-	if prevSessID := strings.TrimSpace(task.PreviousSessionID); prevSessID != "" && prevSessID != task.SessionID {
-		parts = append(parts, prevSessID)
-	}
-	return parts
-}
-
 func parseTrajectorySteps(steps []eriTranscriptStepItem) ([]string, []string) {
 	var retrievedFacts []string
 	var toolCalls []string
@@ -431,50 +434,87 @@ func (s *SQLStore) fetchTranscriptSteps(ctx context.Context, sessionCSV, sinceRF
 	return searchRes.Steps, nil
 }
 
+func (s *SQLStore) findThreadSessionIDs(ctx context.Context, targetAgent, threadID string) ([]string, error) {
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var sessionParts []string
+	rows, qErr := s.db.QueryContext(queryCtx,
+		`SELECT conversation_id FROM messages WHERE agent = $1 AND thread_id = $2 AND conversation_id != '' GROUP BY conversation_id ORDER BY MAX(row_id) DESC LIMIT 3`,
+		targetAgent, threadID)
+	if qErr != nil {
+		return nil, fmt.Errorf("failed to query messages for trajectory context: %w", qErr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid string
+		if scanErr := rows.Scan(&cid); scanErr == nil && cid != "" {
+			sessionParts = append(sessionParts, cid)
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("failed reading conversation_id rows: %w", rowsErr)
+	}
+	if len(sessionParts) > 0 {
+		return sessionParts, nil
+	}
+
+	var sessID, prevSessID string
+	if sessErr := s.db.QueryRowContext(queryCtx,
+		`SELECT conversation_id, previous_conversation_id FROM sessions WHERE agent = $1 AND (session_id = $2 OR session_id = 'discord-' || $2) LIMIT 1`,
+		targetAgent, threadID).Scan(&sessID, &prevSessID); sessErr != nil && !errors.Is(sessErr, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to query session for trajectory context: %w", sessErr)
+	}
+	if sessID != "" {
+		sessionParts = append(sessionParts, sessID)
+	}
+	if prevSessID != "" && prevSessID != sessID {
+		sessionParts = append(sessionParts, prevSessID)
+	}
+	return sessionParts, nil
+}
+
 // GetThreadTrajectoryContext queries the trajectory context (retrieved facts and tool calls) for an active thread.
-func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
+func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string, agent ...string) ([]string, []string, error) {
 	if checkDBErr := s.checkDB(); checkDBErr != nil {
 		return nil, nil, checkDBErr
 	}
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil, nil
 	}
+	targetAgent := s.effectiveAgent()
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		targetAgent = strings.TrimSpace(agent[0])
+	}
 
 	if s.indexerClient != nil {
-		tc, tcErr := s.indexerClient.GetTrajectoryContext(ctx, threadID)
+		tc, tcErr := s.indexerClient.GetTrajectoryContext(ctx, targetAgent, threadID)
 		if tcErr != nil {
 			return nil, nil, tcErr
 		}
 		return tc.RetrievedFacts, tc.ToolCalls, nil
 	}
 
-	_, factExtractedAt, err := s.GetConversationFactWatermark(ctx, threadID)
-	if err != nil {
-		return nil, nil, err
+	_, factExtractedAt, watermarkErr := s.GetConversationFactWatermark(ctx, threadID, targetAgent)
+	if watermarkErr != nil {
+		return nil, nil, watermarkErr
 	}
 	sinceTime := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 	if factExtractedAt != nil && !factExtractedAt.IsZero() {
 		sinceTime = factExtractedAt.UTC()
 	}
 
-	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
-		s.getBrainURL(), url.QueryEscape(threadID))
-	tasks, err := s.fetchTasks(ctx, endpoint)
-	if err != nil {
-		return nil, nil, err
+	sessionParts, sessErr := s.findThreadSessionIDs(ctx, targetAgent, threadID)
+	if sessErr != nil {
+		return nil, nil, sessErr
 	}
-	if len(tasks) == 0 {
-		return nil, nil, nil
-	}
-
-	sessionParts := extractSessionIDs(tasks[0])
 	if len(sessionParts) == 0 {
 		return nil, nil, nil
 	}
 
-	steps, err := s.fetchTranscriptSteps(ctx, strings.Join(sessionParts, ","), sinceTime.Format(time.RFC3339))
-	if err != nil {
-		return nil, nil, err
+	steps, fetchErr := s.fetchTranscriptSteps(ctx, strings.Join(sessionParts, ","), sinceTime.Format(time.RFC3339))
+	if fetchErr != nil {
+		return nil, nil, fetchErr
 	}
 
 	facts, tools := parseTrajectorySteps(steps)

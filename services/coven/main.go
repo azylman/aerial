@@ -38,16 +38,33 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 		return nil
 	}
 	threadID := strings.TrimSpace(args.ThreadID)
+	targetAgent := args.EffectiveAgent()
+	if subjectAgent, subjThread, ok := ParseCovenExtractSubject(msg.Subject()); ok {
+		targetAgent = subjectAgent
+		if threadID == "" {
+			threadID = subjThread
+		}
+	}
 	if threadID == "" {
 		if termErr := msg.Term(); termErr != nil {
 			slog.WarnContext(ctx, "[Coven] error terming empty thread coven extract job", "error", termErr)
 		}
 		return nil
 	}
-	if worker != nil && NormalizeStack(args.EffectiveAgent()) != NormalizeStack(worker.Stack()) {
+	if !IsValidAgentSlug(targetAgent) {
+		slog.WarnContext(ctx, "[Coven] invalid agent slug in coven extract job", "agent", targetAgent)
+		if termErr := msg.Term(); termErr != nil {
+			slog.WarnContext(ctx, "[Coven] error terming invalid agent slug coven extract job", "error", termErr)
+		}
 		return nil
 	}
-	if err := worker.ExtractThread(ctx, threadID); err != nil {
+	if worker != nil {
+		isAll := strings.EqualFold(strings.TrimSpace(worker.Role()), "all")
+		if !isAll && NormalizeStack(targetAgent) != NormalizeStack(worker.Stack()) {
+			return nil
+		}
+	}
+	if err := worker.ExtractThread(ctx, threadID, targetAgent); err != nil {
 		if errors.Is(err, ErrAdvisoryLockBusy) {
 			if nakErr := msg.NakWithDelay(5 * time.Second); nakErr != nil {
 				slog.WarnContext(ctx, "[Coven] error naking coven extract job on advisory lock busy", "error", nakErr)
@@ -78,7 +95,10 @@ func covenExtractDurable(stack string) string {
 	return "coven-extract-" + s
 }
 
-func covenExtractSubjectFilter(stack string) string {
+func covenExtractSubjectFilter(stack string, role ...string) string {
+	if len(role) > 0 && strings.EqualFold(strings.TrimSpace(role[0]), "all") {
+		return "aerial.coalesced.coven_extract.>"
+	}
 	s := NormalizeStack(stack)
 	if s == DefaultStack {
 		return "aerial.coalesced.coven_extract.>"
@@ -86,13 +106,17 @@ func covenExtractSubjectFilter(stack string) string {
 	return pubsub.SubjectCovenExtractCoalescedForAgent(s, ">")
 }
 
-func subscribeCovenTranscriptsIndexed(ctx context.Context, b pubsub.Bus, stack string) error {
+func subscribeCovenTranscriptsIndexed(ctx context.Context, b pubsub.Bus, stack string, role ...string) error {
 	if b == nil {
 		return nil
 	}
 	subject := pubsub.SubjectAerialTurnPrefix + "transcripts_indexed"
 	durable := covenTranscriptsIndexedDurable(stack)
-	_, err := b.Subscribe(ctx, subject, durable, newTranscriptsIndexedHandler(b, stack))
+	userRole := ""
+	if len(role) > 0 {
+		userRole = strings.TrimSpace(role[0])
+	}
+	_, err := b.Subscribe(ctx, subject, durable, newTranscriptsIndexedHandler(b, stack, userRole))
 	if err != nil {
 		log.Printf("[Coven] warning: failed to subscribe %s: %v", durable, err)
 		return err
@@ -106,7 +130,7 @@ func subscribeCovenExtract(ctx context.Context, b pubsub.Bus, worker *Worker) er
 		return nil
 	}
 	stack := worker.Stack()
-	subject := covenExtractSubjectFilter(stack)
+	subject := covenExtractSubjectFilter(stack, worker.Role())
 	durable := covenExtractDurable(stack)
 	_, err := b.Subscribe(ctx, subject, durable, func(msgCtx context.Context, msg pubsub.Message) error {
 		return handleCovenExtractJob(msgCtx, msg, worker)
@@ -132,7 +156,7 @@ func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker 
 		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
 	}
 	if !c.subscribedTranscriptsIndexed {
-		if err := subscribeCovenTranscriptsIndexed(ctx, b, worker.Stack()); err != nil {
+		if err := subscribeCovenTranscriptsIndexed(ctx, b, worker.Stack(), worker.Role()); err != nil {
 			return err
 		}
 		c.subscribedTranscriptsIndexed = true

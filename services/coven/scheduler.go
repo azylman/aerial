@@ -86,8 +86,16 @@ func (w *Worker) Stack() string {
 	return DefaultStack
 }
 
+// Role returns the configured role for this worker.
+func (w *Worker) Role() string {
+	if w != nil {
+		return w.role
+	}
+	return ""
+}
+
 // ExtractThread extracts facts for a single thread within the configured extraction timeout.
-func (w *Worker) ExtractThread(ctx context.Context, threadID string) error {
+func (w *Worker) ExtractThread(ctx context.Context, threadID string, agent ...string) error {
 	if w == nil {
 		return errors.New("coven worker is nil")
 	}
@@ -97,7 +105,7 @@ func (w *Worker) ExtractThread(ctx context.Context, threadID string) error {
 	}
 	extractCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return ExtractThreadFacts(extractCtx, w.store, w.ollama, w.llmClient, threadID)
+	return ExtractThreadFacts(extractCtx, w.store, w.ollama, w.llmClient, threadID, agent...)
 }
 
 // Start begins the maintenance worker, executing the periodic maintenance loop

@@ -144,12 +144,12 @@ type Store interface {
 	SearchCandidateFacts(ctx context.Context, embedding []float32, queryText string, candidateLimit int, minScore float64) ([]ScoredFactWithEmbedding, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
 	GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactWithEmbedding, error)
-	GetUnextractedAdminTurns(ctx context.Context, threadID string, limit ...int) ([]Message, error)
-	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
-	GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error)
-	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
-	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error)
-	GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error)
+	GetUnextractedAdminTurns(ctx context.Context, threadID string, limit int, agent ...string) ([]Message, error)
+	GetMaxMessageRowID(ctx context.Context, threadID string, agent ...string) (int64, error)
+	GetConversationFactWatermark(ctx context.Context, threadID string, agent ...string) (int64, *time.Time, error)
+	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64, agent ...string) error
+	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int, agent ...string) (string, []Message, error)
+	GetThreadTrajectoryContext(ctx context.Context, threadID string, agent ...string) (retrievedFacts []string, toolCalls []string, err error)
 	FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error)
 	InsertProceduralCandidate(ctx context.Context, cand ProceduralCandidate) (int64, error)
 	GetPendingProceduralCandidates(ctx context.Context) ([]ProceduralCandidate, error)
@@ -203,6 +203,10 @@ func (s *SQLStore) effectiveStack() string {
 		return NormalizeStack(s.stack)
 	}
 	return DefaultStack
+}
+
+func (s *SQLStore) effectiveAgent() string {
+	return s.effectiveStack()
 }
 
 // SetIndexerClient sets the IndexerClient used for trajectory lookups.

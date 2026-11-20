@@ -160,13 +160,13 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			}
 			calls := 0
 			retErr := tc.extractErr
-			extract := func(_ context.Context, _ string) error {
+			extract := func(_ context.Context, _, _ string) error {
 				calls++
 				return retErr
 			}
-			err := handleTranscriptsIndexedEvent(context.Background(), msg, tc.stack, extract)
+			err := HandleTranscriptsIndexed(context.Background(), msg, tc.stack, "", extract)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("handleTranscriptsIndexedEvent() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("HandleTranscriptsIndexed() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if msg.termed != tc.wantTermed {
 				t.Errorf("termed = %v, want %v", msg.termed, tc.wantTermed)
@@ -273,6 +273,165 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 				if args.Agent != tc.stack || args.ThreadID != tc.threadID {
 					t.Fatalf("published args = %+v, want Agent=%q ThreadID=%q", args, tc.stack, tc.threadID)
 				}
+			}
+		})
+	}
+}
+
+func TestIsValidAgentSlug(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		slug string
+		want bool
+	}{
+		{name: "standard alpha slug", slug: "agent-alpha", want: true},
+		{name: "standard beta slug", slug: "agent-beta", want: true},
+		{name: "single word slug", slug: "aerial", want: true},
+		{name: "slug with numbers", slug: "agent-42", want: true},
+		{name: "empty slug", slug: "", want: false},
+		{name: "spaces only", slug: "   ", want: false},
+		{name: "uppercase disallowed", slug: "Agent-Alpha", want: false},
+		{name: "underscores disallowed", slug: "agent_alpha", want: false},
+		{name: "special chars disallowed", slug: "agent@alpha", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsValidAgentSlug(tc.slug); got != tc.want {
+				t.Errorf("IsValidAgentSlug(%q) = %v, want %v", tc.slug, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseCovenExtractSubject(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		subject      string
+		wantAgent    string
+		wantThreadID string
+		wantOK       bool
+	}{
+		{
+			name:         "valid 5-token subject alpha",
+			subject:      "aerial.coalesced.coven_extract.agent-alpha.th-100",
+			wantAgent:    "agent-alpha",
+			wantThreadID: "th-100",
+			wantOK:       true,
+		},
+		{
+			name:         "valid 5-token subject beta",
+			subject:      "aerial.coalesced.coven_extract.agent-beta.th-200",
+			wantAgent:    "agent-beta",
+			wantThreadID: "th-200",
+			wantOK:       true,
+		},
+		{
+			name:    "too few tokens",
+			subject: "aerial.coalesced.coven_extract.agent-alpha",
+			wantOK:  false,
+		},
+		{
+			name:    "too many tokens",
+			subject: "aerial.coalesced.coven_extract.agent-alpha.th-100.extra",
+			wantOK:  false,
+		},
+		{
+			name:    "wrong prefix",
+			subject: "other.coalesced.coven_extract.agent-alpha.th-100",
+			wantOK:  false,
+		},
+		{
+			name:    "invalid agent slug",
+			subject: "aerial.coalesced.coven_extract.Agent_Alpha.th-100",
+			wantOK:  false,
+		},
+		{
+			name:    "empty thread",
+			subject: "aerial.coalesced.coven_extract.agent-alpha.   ",
+			wantOK:  false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotAgent, gotThread, ok := ParseCovenExtractSubject(tc.subject)
+			if ok != tc.wantOK {
+				t.Fatalf("ParseCovenExtractSubject(%q) ok = %v, want %v", tc.subject, ok, tc.wantOK)
+			}
+			if ok {
+				if gotAgent != tc.wantAgent || gotThread != tc.wantThreadID {
+					t.Errorf("ParseCovenExtractSubject(%q) = (%q, %q), want (%q, %q)", tc.subject, gotAgent, gotThread, tc.wantAgent, tc.wantThreadID)
+				}
+			}
+		})
+	}
+}
+
+func TestNewTranscriptsIndexedHandler_RoleAll(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		eventAgent  string
+		threadID    string
+		role        string
+		wantPub     bool
+		wantSubject string
+	}{
+		{
+			name:        "role all accepts agent-alpha",
+			eventAgent:  "agent-alpha",
+			threadID:    "th-alpha-1",
+			role:        "all",
+			wantPub:     true,
+			wantSubject: "aerial.coalesced.coven_extract.agent-alpha.th-alpha-1",
+		},
+		{
+			name:        "role all accepts agent-beta",
+			eventAgent:  "agent-beta",
+			threadID:    "th-beta-1",
+			role:        "all",
+			wantPub:     true,
+			wantSubject: "aerial.coalesced.coven_extract.agent-beta.th-beta-1",
+		},
+		{
+			name:       "role all rejects invalid slug",
+			eventAgent: "INVALID_SLUG!",
+			threadID:   "th-bad",
+			role:       "all",
+			wantPub:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+
+			bus := &mockRecordedPublishBus{Bus: memBus}
+			handler := newTranscriptsIndexedHandler(bus, "aerial", tc.role)
+			ev := pubsub.TranscriptsIndexedEvent{
+				Agent:    tc.eventAgent,
+				ThreadID: tc.threadID,
+			}
+			data, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			msg := &mockPubsubMsg{data: data}
+
+			err = handler(context.Background(), msg)
+			if err != nil {
+				t.Fatalf("handler returned unexpected error: %v", err)
+			}
+			if (bus.publishCalls > 0) != tc.wantPub {
+				t.Fatalf("publishCalls = %d, wantPub = %v", bus.publishCalls, tc.wantPub)
+			}
+			if tc.wantPub && bus.publishedSubject != tc.wantSubject {
+				t.Fatalf("published subject = %q, want %q", bus.publishedSubject, tc.wantSubject)
 			}
 		})
 	}
