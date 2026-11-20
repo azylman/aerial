@@ -86,7 +86,7 @@ func NewServer(handler *tools.ToolHandler, dispatcher ...dispatch.PromptDispatch
 	if len(dispatcher) > 0 && dispatcher[0] != nil {
 		disp = dispatcher[0]
 	} else if handler.Cfg != nil && strings.TrimSpace(handler.Cfg.EriURL) != "" {
-		disp = dispatch.NewHTTPPromptDispatcher(handler.Cfg.EriURL)
+		disp = dispatch.NewHTTPPromptDispatcher(handler.Cfg.EriURL, handler.Cfg.RestateURL, handler.Cfg.AgentName)
 	}
 
 	opts := &mcp.StreamableHTTPOptions{

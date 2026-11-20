@@ -41,6 +41,8 @@ type Config struct {
 	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
 	NATSURL           string   `yaml:"nats_url"`
+	RestateURL        string   `yaml:"restate_url"`
+	AgentName         string   `yaml:"agent_name"`
 	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
 
@@ -67,6 +69,8 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		EriURL            string   `yaml:"eri_url"`
 		VanadisURL        string   `yaml:"vanadis_url"`
 		NATSURL           string   `yaml:"nats_url"`
+		RestateURL        string   `yaml:"restate_url"`
+		AgentName         string   `yaml:"agent_name"`
 		ExtraEventSources []string `yaml:"extra_event_sources"`
 	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
@@ -131,6 +135,21 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		natsURL = "nats://nats.aerial:4222"
 	}
 
+	restateURL := os.Getenv("RESTATE_INGRESS_URL")
+	if restateURL == "" {
+		restateURL = ycfg.RestateURL
+	}
+	restateURL = strings.TrimRight(strings.TrimSpace(restateURL), "/")
+
+	agentName := os.Getenv("AGENT_NAME")
+	if agentName == "" {
+		agentName = ycfg.AgentName
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		agentName = "aerial"
+	}
+
 	cfg := &Config{
 		DatabaseURL:       cleanDB,
 		Timezone:          tz,
@@ -138,6 +157,8 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		EriURL:            eriURL,
 		VanadisURL:        vanadisURL,
 		NATSURL:           natsURL,
+		RestateURL:        restateURL,
+		AgentName:         agentName,
 		ExtraEventSources: extraSources,
 	}
 	RegisterConfigTokens(cfg)

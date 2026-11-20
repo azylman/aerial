@@ -621,7 +621,7 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	// configureServerEventBus with dispatcher
 	dispSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer dispSrv.Close()
-	disp := dispatch.NewHTTPPromptDispatcher(dispSrv.URL)
+	disp := dispatch.NewHTTPPromptDispatcher(dispSrv.URL, "http://restate:8080", "aerial")
 	serverWithDisp := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), disp)
 	memBusInit := pubsub.NewMemoryBus()
 	defer memBusInit.Close()

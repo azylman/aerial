@@ -17,6 +17,7 @@ const (
 	labelQueue   = "queue"
 	fieldKind    = "kind"
 	fieldStatus  = "status"
+	fieldReason  = "reason"
 
 	statusPending = "pending"
 
@@ -57,7 +58,7 @@ var (
 			Name: "synapse_job_retries_total",
 			Help: "Total number of job retry attempts by reason.",
 		},
-		[]string{labelQueue, fieldKind, "reason"},
+		[]string{labelQueue, fieldKind, fieldReason},
 	)
 
 	JobsDroppedTotal = prometheus.NewCounterVec(
@@ -65,7 +66,7 @@ var (
 			Name: "synapse_jobs_dropped_total",
 			Help: "Total number of jobs dropped or cancelled by reason.",
 		},
-		[]string{labelQueue, fieldKind, "reason"},
+		[]string{labelQueue, fieldKind, fieldReason},
 	)
 
 	QueueDepth = prometheus.NewGaugeVec(
@@ -81,6 +82,28 @@ var (
 			Name: "synapse_discord_gateway_latency_seconds",
 			Help: "Heartbeat latency of the Discord Gateway connection in seconds.",
 		},
+	)
+
+	// RestateShadowSendsTotal counts dark shadow requests mirrored at the
+	// Restate PRObject/RepoObject ingress, partitioned by handler and outcome.
+	// Shadow failures always fail closed; the legacy path stays authoritative.
+	RestateShadowSendsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_restate_shadow_sends_total",
+			Help: "Total number of dark shadow requests mirrored at Restate ingress by outcome.",
+		},
+		[]string{"handler", fieldStatus},
+	)
+
+	// RestateShadowDivergenceTotal counts first-touch hydration mismatches
+	// between live events and the pr_registry projection. The cutover gate
+	// requires this to stay zero.
+	RestateShadowDivergenceTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_restate_shadow_divergence_total",
+			Help: "Total number of dark shadow hydration divergences from the registry projection by reason.",
+		},
+		[]string{fieldReason},
 	)
 )
 
@@ -102,6 +125,8 @@ func registerCollector(c prometheus.Collector) {
 }
 
 func init() {
+	registerCollector(RestateShadowSendsTotal)
+	registerCollector(RestateShadowDivergenceTotal)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
@@ -158,6 +183,27 @@ func RecordJobDropped(queue, kind, reason string) {
 		reason = unknownLabel
 	}
 	JobsDroppedTotal.WithLabelValues(queue, kind, reason).Inc()
+}
+
+// RecordRestateShadowSend increments the RestateShadowSendsTotal counter for
+// the specified frozen handler and outcome ("sent" or "error").
+func RecordRestateShadowSend(handler, status string) {
+	if handler == "" {
+		handler = unknownLabel
+	}
+	if status == "" {
+		status = unknownLabel
+	}
+	RestateShadowSendsTotal.WithLabelValues(handler, status).Inc()
+}
+
+// RecordRestateShadowDivergence increments the RestateShadowDivergenceTotal
+// counter for the specified mismatch reason.
+func RecordRestateShadowDivergence(reason string) {
+	if reason == "" {
+		reason = unknownLabel
+	}
+	RestateShadowDivergenceTotal.WithLabelValues(reason).Inc()
 }
 
 // SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.
