@@ -73,7 +73,13 @@ while [ $# -gt 0 ]; do
             BODY="$2"
             shift 2
             ;;
-        -H|-w|--connect-timeout|--max-time)
+        -H)
+            if [ -n "${MOCK_CAPTURE_HEADERS:-}" ]; then
+                echo "$2" >> "${MOCK_CAPTURE_HEADERS}"
+            fi
+            shift 2
+            ;;
+        -w|--connect-timeout|--max-time)
             shift 2
             ;;
         -s|-S|-sS)
@@ -215,6 +221,21 @@ TEST_CONFIG_YAML="${TMP_DIR}/config.yaml"
 echo 'vanadis_url: "http://127.0.0.1:4025"' > "$TEST_CONFIG_YAML"
 CONFIG_STATUS_OUT="$(CONFIG_PATH="$TEST_CONFIG_YAML" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101)"
 assert_eq "running" "$(printf '%s' "$CONFIG_STATUS_OUT" | jq -r '.build.status')" "status command resolves VANADIS_URL from CONFIG_PATH"
+
+# Test 11: Bearer token injection when AERIAL_SA_TOKEN_PATH is set
+TOKEN_FILE="${TMP_DIR}/sa-token.jwt"
+echo "test-sa-jwt-token-999" > "$TOKEN_FILE"
+CAPTURED_HEADERS="${TMP_DIR}/captured_headers.txt"
+export MOCK_CAPTURE_HEADERS="$CAPTURED_HEADERS"
+
+rm -f "$CAPTURED_HEADERS"
+AERIAL_SA_TOKEN_PATH="$TOKEN_FILE" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
+assert_eq "true" "$([ -f "$CAPTURED_HEADERS" ] && grep -Fq "Authorization: Bearer test-sa-jwt-token-999" "$CAPTURED_HEADERS" && echo true || echo false)" "Bearer token injected into curl requests from AERIAL_SA_TOKEN_PATH"
+
+# Test 12: No Bearer token when token file does not exist
+rm -f "$CAPTURED_HEADERS"
+AERIAL_SA_TOKEN_PATH="${TMP_DIR}/nonexistent.token" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
+assert_eq "false" "$([ -f "$CAPTURED_HEADERS" ] && grep -Fq "Authorization: Bearer" "$CAPTURED_HEADERS" && echo true || echo false)" "Bearer token omitted when token file does not exist"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

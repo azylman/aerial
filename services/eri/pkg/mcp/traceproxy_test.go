@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1027,4 +1029,180 @@ func TestTraceProxy_StreamsSSE_Shaped(t *testing.T) {
 	}
 
 	close(streamDone)
+}
+
+type bearerTokenStep struct {
+	advanceClock time.Duration
+	updateToken  string
+	inboundAuth  string
+	wantAuth     string
+}
+
+type bearerTokenCase struct {
+	name       string
+	tokenSetup string
+	tokenPath  string
+	steps      []bearerTokenStep
+}
+
+func TestTraceProxy_BearerToken(t *testing.T) {
+	t.Parallel()
+
+	tests := []bearerTokenCase{
+		{
+			name:       "injects bearer token when authorization is absent",
+			tokenSetup: "initial-token-123\n",
+			steps: []bearerTokenStep{
+				{
+					inboundAuth: "",
+					wantAuth:    "Bearer initial-token-123",
+				},
+			},
+		},
+		{
+			name:       "preserves explicit inbound authorization header",
+			tokenSetup: "initial-token-123",
+			steps: []bearerTokenStep{
+				{
+					inboundAuth: "Bearer explicit-client-token",
+					wantAuth:    "Bearer explicit-client-token",
+				},
+			},
+		},
+		{
+			name:       "missing token file falls back gracefully",
+			tokenSetup: "__MISSING__",
+			steps: []bearerTokenStep{
+				{
+					inboundAuth: "",
+					wantAuth:    "",
+				},
+			},
+		},
+		{
+			name:       "empty token file falls back gracefully without bearer",
+			tokenSetup: "   \n\t  ",
+			steps: []bearerTokenStep{
+				{
+					inboundAuth: "",
+					wantAuth:    "",
+				},
+			},
+		},
+		{
+			name:       "60-second caching reuses cached token until ttl expires",
+			tokenSetup: "cached-token-v1",
+			steps: []bearerTokenStep{
+				{
+					inboundAuth: "",
+					wantAuth:    "Bearer cached-token-v1",
+				},
+				{
+					advanceClock: 30 * time.Second,
+					updateToken:  "cached-token-v2",
+					inboundAuth:  "",
+					wantAuth:     "Bearer cached-token-v1",
+				},
+				{
+					advanceClock: 31 * time.Second,
+					inboundAuth:  "",
+					wantAuth:     "Bearer cached-token-v2",
+				},
+			},
+		},
+		{
+			name:       "default token path when unset in config",
+			tokenSetup: "__MISSING__",
+			tokenPath:  "__DEFAULT__",
+			steps: []bearerTokenStep{
+				{
+					inboundAuth: "",
+					wantAuth:    "",
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runBearerTokenCase(t, tc)
+		})
+	}
+}
+
+func runBearerTokenCase(t *testing.T, tc bearerTokenCase) {
+	t.Helper()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "token")
+	if tc.tokenSetup != "__MISSING__" {
+		if err := os.WriteFile(filePath, []byte(tc.tokenSetup), 0o600); err != nil {
+			t.Fatalf("write token file: %v", err)
+		}
+	}
+
+	cfgPath := filePath
+	if tc.tokenPath == "__DEFAULT__" {
+		cfgPath = ""
+	}
+
+	var lastSeenAuth string
+	var mu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lastSeenAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer upstream.Close()
+
+	clock := &manualClock{now: time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)}
+	proxy := mcp.NewTraceProxy(mcp.TraceProxyConfig{
+		Upstreams: upstreamMap{"discord/test": upstream.URL},
+		Turns:     runner.NewActiveTurnRegistry(),
+		Clock:     clock.Now,
+		TokenPath: cfgPath,
+	})
+	mux := http.NewServeMux()
+	proxy.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	for i, st := range tc.steps {
+		executeBearerTokenStep(t, srv, clock, filePath, &mu, &lastSeenAuth, i, st)
+	}
+}
+
+func executeBearerTokenStep(t *testing.T, srv *httptest.Server, clock *manualClock, filePath string, mu *sync.Mutex, lastSeenAuth *string, i int, st bearerTokenStep) {
+	t.Helper()
+	if st.advanceClock > 0 {
+		clock.Advance(st.advanceClock)
+	}
+	if st.updateToken != "" {
+		if err := os.WriteFile(filePath, []byte(st.updateToken), 0o600); err != nil {
+			t.Fatalf("step %d update token: %v", i, err)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/test", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatalf("step %d new request: %v", i, err)
+	}
+	if st.inboundAuth != "" {
+		req.Header.Set("Authorization", st.inboundAuth)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("step %d client do: %v", i, err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	seen := *lastSeenAuth
+	mu.Unlock()
+
+	if seen != st.wantAuth {
+		t.Errorf("step %d: got auth %q, want %q", i, seen, st.wantAuth)
+	}
 }

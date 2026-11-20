@@ -294,39 +294,78 @@ var (
 	}
 )
 
-func fetchTranscriptAPI[T any](ctx context.Context, baseURL, endpointPath string, params url.Values) (T, error) {
-	var out T
-	targetURL := strings.TrimRight(baseURL, "/") + endpointPath
+type client struct {
+	BaseURL    string
+	TokenPath  string
+	HTTPClient *http.Client
+}
+
+func defaultTokenPath() string {
+	if p := os.Getenv("AERIAL_SA_TOKEN_PATH"); p != "" {
+		return p
+	}
+	return "/var/run/secrets/kubernetes.io/serviceaccount/token"
+}
+
+func newClient(baseURL string) *client {
+	return &client{
+		BaseURL:    baseURL,
+		TokenPath:  defaultTokenPath(),
+		HTTPClient: newHTTPClient(5 * time.Second),
+	}
+}
+
+func (c *client) getJSON(ctx context.Context, endpointPath string, params url.Values, out any) error {
+	targetURL := strings.TrimRight(c.BaseURL, "/") + endpointPath
 	if len(params) > 0 {
 		targetURL += "?" + params.Encode()
 	}
 
 	req, err := newRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return out, err
+		return err
 	}
 
-	client := newHTTPClient(5 * time.Second)
-	resp, err := client.Do(req)
+	if c.TokenPath != "" {
+		if data, readErr := os.ReadFile(c.TokenPath); readErr == nil {
+			if tok := strings.TrimSpace(string(data)); tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
+		}
+	}
+
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = newHTTPClient(5 * time.Second)
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return out, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return out, err
+		return err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	if err := json.Unmarshal(body, &out); err != nil {
-		return out, fmt.Errorf("failed unmarshaling response: %w", err)
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("failed unmarshaling response: %w", err)
 	}
 
-	return out, nil
+	return nil
+}
+
+func fetchTranscriptAPI[T any](ctx context.Context, baseURL, endpointPath string, params url.Values) (T, error) {
+	var out T
+	c := newClient(baseURL)
+	err := c.getJSON(ctx, endpointPath, params, &out)
+	return out, err
 }
 
 func executeSearchHTTP(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {

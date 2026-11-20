@@ -9,8 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1005,4 +1008,99 @@ func TestJSONMarshalIndentErrors(t *testing.T) {
 			t.Fatalf("expected marshal error in get json, got %v", err)
 		}
 	})
+}
+
+func TestClient_GetJSON_BearerToken(t *testing.T) {
+	tests := []struct {
+		name       string
+		tokenSetup string
+		customPath bool
+		envVar     string
+		wantAuth   string
+	}{
+		{
+			name:       "valid token file injects authorization bearer",
+			tokenSetup: "test-sa-jwt-token-xyz\n",
+			customPath: true,
+			wantAuth:   "Bearer test-sa-jwt-token-xyz",
+		},
+		{
+			name:       "empty token file does not set authorization header",
+			tokenSetup: "   \n\t  ",
+			customPath: true,
+			wantAuth:   "",
+		},
+		{
+			name:       "missing token file falls back gracefully without header",
+			tokenSetup: "__MISSING__",
+			customPath: true,
+			wantAuth:   "",
+		},
+		{
+			name:       "empty tokenPath field does not set authorization header",
+			tokenSetup: "some-token",
+			customPath: false,
+			wantAuth:   "",
+		},
+		{
+			name:       "default token path respects AERIAL_SA_TOKEN_PATH env var",
+			tokenSetup: "env-injected-token",
+			envVar:     "__USE_FILE__",
+			wantAuth:   "Bearer env-injected-token",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, "token")
+			if tc.tokenSetup != "__MISSING__" {
+				if err := os.WriteFile(filePath, []byte(tc.tokenSetup), 0o600); err != nil {
+					t.Fatalf("write token file: %v", err)
+				}
+			}
+
+			var seenAuth string
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				seenAuth = r.Header.Get("Authorization")
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			}))
+			defer server.Close()
+
+			var c *client
+			if tc.envVar != "" {
+				t.Setenv("AERIAL_SA_TOKEN_PATH", filePath)
+				c = newClient(server.URL)
+				c.HTTPClient = server.Client()
+			} else {
+				tokenPath := ""
+				if tc.customPath {
+					tokenPath = filePath
+				}
+				c = &client{
+					BaseURL:    server.URL,
+					TokenPath:  tokenPath,
+					HTTPClient: server.Client(),
+				}
+			}
+
+			var out map[string]any
+			err := c.getJSON(context.Background(), "/test", nil, &out)
+			if err != nil {
+				t.Fatalf("unexpected getJSON error: %v", err)
+			}
+
+			mu.Lock()
+			got := seenAuth
+			mu.Unlock()
+
+			if got != tc.wantAuth {
+				t.Errorf("seen Authorization = %q, want %q", got, tc.wantAuth)
+			}
+		})
+	}
 }

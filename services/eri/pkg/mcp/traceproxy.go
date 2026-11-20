@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,9 @@ const (
 	traceProxyTracerScope  = "github.com/azylman/aerial/services/eri/pkg/mcp"
 	traceProxyRoutePattern = env.MCPProxyPathPrefix + "{target}/{server}"
 	traceAnnounceRoute     = "POST " + env.MCPProxyPathPrefix + "announce"
+
+	defaultServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	tokenCacheTTL                  = 60 * time.Second
 )
 
 // UpstreamResolver returns the original URL of a target's MCP server (env.MCPProxyRoutes).
@@ -132,6 +136,7 @@ type TraceProxyConfig struct {
 	// AnnouncementOutcomes counts announcements by outcome and via; nil uses
 	// metrics.MCPTraceAnnouncementsTotal.
 	AnnouncementOutcomes *prometheus.CounterVec
+	TokenPath            string
 }
 
 // TraceProxy is eri's loopback MCP proxy. Agents' HTTP MCP servers point at it when tracing
@@ -147,10 +152,18 @@ type TraceProxy struct {
 	transport     http.RoundTripper
 	tracer        trace.Tracer
 	outcomes      *prometheus.CounterVec
+	tokenPath     string
+	tokenMu       sync.Mutex
+	cachedToken   string
+	tokenExpiry   time.Time
 }
 
 // NewTraceProxy returns a proxy over cfg.
 func NewTraceProxy(cfg TraceProxyConfig) *TraceProxy {
+	tokenPath := strings.TrimSpace(cfg.TokenPath)
+	if tokenPath == "" {
+		tokenPath = defaultServiceAccountTokenPath
+	}
 	p := &TraceProxy{
 		upstreams:     cfg.Upstreams,
 		turns:         cfg.Turns,
@@ -158,6 +171,7 @@ func NewTraceProxy(cfg TraceProxyConfig) *TraceProxy {
 		now:           cfg.Clock,
 		transport:     cfg.Transport,
 		outcomes:      cfg.AnnouncementOutcomes,
+		tokenPath:     tokenPath,
 	}
 	if p.outcomes == nil {
 		p.outcomes = metrics.MCPTraceAnnouncementsTotal
@@ -183,6 +197,26 @@ func NewTraceProxy(cfg TraceProxyConfig) *TraceProxy {
 func (p *TraceProxy) Register(mux *http.ServeMux) {
 	mux.Handle(traceAnnounceRoute, httpkit.LoopbackOnly(http.HandlerFunc(p.serveAnnounce)))
 	mux.Handle(traceProxyRoutePattern, httpkit.LoopbackOnly(http.HandlerFunc(p.serveProxy)))
+}
+
+func (p *TraceProxy) token() string {
+	if p.tokenPath == "" {
+		return ""
+	}
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+	now := p.now()
+	if !p.tokenExpiry.IsZero() && now.Before(p.tokenExpiry) {
+		return p.cachedToken
+	}
+	p.tokenExpiry = now.Add(tokenCacheTTL)
+	data, err := os.ReadFile(p.tokenPath)
+	if err != nil {
+		p.cachedToken = ""
+		return ""
+	}
+	p.cachedToken = strings.TrimSpace(string(data))
+	return p.cachedToken
 }
 
 // Announcement outcomes and daemon resolutions counted by serveAnnounce.
@@ -357,6 +391,9 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 			pr.Out.Header.Del(env.DaemonHeader)
 			if hasActivePolicy(policy) {
 				pr.Out.Header.Del("Accept-Encoding")
+			}
+			if tok := p.token(); tok != "" && pr.Out.Header.Get("Authorization") == "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+tok)
 			}
 			if span != nil {
 				propagation.TraceContext{}.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
