@@ -445,3 +445,45 @@ func TestValidateBrainChannel(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatchDiscordToURL_UsesExplicitURL(t *testing.T) {
+	t.Parallel()
+	var fallbackHits, explicitHits atomic.Int32
+
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer fallbackServer.Close()
+
+	explicitServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		explicitHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer explicitServer.Close()
+
+	c := NewClient(fallbackServer.URL, nil)
+
+	ctx := context.Background()
+	msgReq := model.DiscordMessageIngressRequest{
+		BotUserID: "bot-1",
+		Message:   &discordgo.Message{ID: "m1", Content: "hi"},
+	}
+	if err := c.DispatchDiscordMessageToURL(ctx, explicitServer.URL, msgReq); err != nil {
+		t.Fatalf("DispatchDiscordMessageToURL err = %v", err)
+	}
+
+	interaction := &discordgo.Interaction{ID: "i1", Type: discordgo.InteractionApplicationCommand}
+	if err := c.DispatchDiscordInteractionToURL(ctx, explicitServer.URL, interaction); err != nil {
+		t.Fatalf("DispatchDiscordInteractionToURL err = %v", err)
+	}
+
+	if got := explicitHits.Load(); got != 2 {
+		t.Errorf("explicitServer hits = %d, want 2", got)
+	}
+	if got := fallbackHits.Load(); got != 0 {
+		t.Errorf("fallbackServer hits = %d, want 0", got)
+	}
+}

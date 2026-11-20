@@ -601,25 +601,28 @@ func (r *PostgresPRRegistry) LoadPRBuildLifecycle(ctx context.Context, repo stri
 	return state, err
 }
 
-// LoadRawPRMetadata returns the unmarshaled raw metadata jsonb for a PR.
-func (r *PostgresPRRegistry) LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, error) {
+// LoadRawPRMetadata returns the unmarshaled raw metadata jsonb for a PR and whether the row exists.
+func (r *PostgresPRRegistry) LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, bool, error) {
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return map[string]any{}, nil
+		return map[string]any{}, false, nil
 	}
 	var raw []byte
 	found, err := r.queryRowScan(ctx, "load raw pr metadata", `SELECT COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, []any{&raw}, repo, prNumber)
-	if err != nil || !found || len(raw) == 0 {
-		return map[string]any{}, err
+	if err != nil || !found {
+		return map[string]any{}, false, err
+	}
+	if len(raw) == 0 {
+		return map[string]any{}, true, nil
 	}
 	var meta map[string]any
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, fmt.Errorf("load raw pr metadata: %w", err)
+		return nil, true, fmt.Errorf("load raw pr metadata: %w", err)
 	}
 	if meta == nil {
 		meta = map[string]any{}
 	}
-	return meta, nil
+	return meta, true, nil
 }
 
 // IsPRDeployed reports whether the PR status is deployed (case-insensitive).

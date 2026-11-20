@@ -94,6 +94,14 @@ func (s *RouterServer) routeEvent(ctx context.Context, handler string, journal f
 // routePREvent journals one PRObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev restateclient.PREvent) error {
+	if ev.Agent == "" {
+		if s.registry != nil && ev.Repo != "" && ev.PRNumber > 0 {
+			ev.Agent = s.resolveOwningAgent(ctx, ev.Repo, ev.PRNumber, "")
+		}
+		if ev.Agent == "" && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
+			ev.Agent = s.cfgSrc.Current().DefaultOwnerAgent()
+		}
+	}
 	return s.routeEvent(ctx, handler,
 		func(r *shadowRestateReporter, ctx context.Context) error {
 			return r.client.SendPREvent(ctx, handler, ev)
@@ -106,6 +114,9 @@ func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev rest
 // routeRepoEvent journals one RepoObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routeRepoEvent(ctx context.Context, handler string, ev restateclient.RepoEvent) error {
+	if ev.Agent == "" && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
+		ev.Agent = s.cfgSrc.Current().DefaultOwnerAgent()
+	}
 	return s.routeEvent(ctx, handler,
 		func(r *shadowRestateReporter, ctx context.Context) error {
 			return r.client.SendRepoEvent(ctx, handler, ev)

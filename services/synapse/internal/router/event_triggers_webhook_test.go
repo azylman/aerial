@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -222,7 +220,6 @@ type handleEventsWebhookTestCase struct {
 	payload          string
 	useBus           bool
 	closeBus         bool
-	withPeerURL      bool
 	wantStatus       int
 	wantPubCount     int
 	wantPubTopic     string
@@ -233,22 +230,7 @@ type handleEventsWebhookTestCase struct {
 func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestCase) {
 	t.Helper()
 	cfg := Config{}
-	var (
-		forwardedPayload atomic.Value
-		client           *http.Client
-	)
-	if tc.withPeerURL {
-		peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body, _ := io.ReadAll(r.Body)
-			forwardedPayload.Store(string(body))
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer peerServer.Close()
-		cfg.WebhookForwardURLs = map[string]string{"peer": peerServer.URL}
-		client = peerServer.Client()
-	} else {
-		client = &http.Client{Transport: &zeroCallTransport{}}
-	}
+	client := &http.Client{Transport: &zeroCallTransport{}}
 	srv := NewRouterServer(fixedConfig(cfg), client)
 
 	var tracker *eventTracker
@@ -272,13 +254,6 @@ func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestC
 		t.Fatalf("status code = %d, want %d: body=%s", w.Code, tc.wantStatus, w.Body.String())
 	}
 
-	if tc.withPeerURL {
-		received, _ := forwardedPayload.Load().(string)
-		if received != tc.payload {
-			t.Errorf("forwarded peer payload = %q, want %q", received, tc.payload)
-		}
-	}
-
 	if tc.useBus && !tc.closeBus {
 		verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, tc.wantTargets, tc.wantHeaderSubstr)
 	}
@@ -299,10 +274,9 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 			wantHeaderSubstr: "Driveway motion",
 		},
 		{
-			name:             "valid event with target singular and details formats context header and forwards to peer",
+			name:             "valid event with target singular and details formats context header",
 			payload:          `{"source":"camera","event_type":"motion","target":"backyard","details":"high confidence"}`,
 			useBus:           true,
-			withPeerURL:      true,
 			wantStatus:       http.StatusOK,
 			wantPubCount:     1,
 			wantPubTopic:     "aerial.events.camera.motion",

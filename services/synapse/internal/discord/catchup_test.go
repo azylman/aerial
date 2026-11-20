@@ -59,14 +59,67 @@ func TestChannelWatermarks(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			before := GetChannelWatermark(tc.channelID)
+			before := GetChannelWatermarkForAgent("", tc.channelID)
 			if before != tc.wantBefore {
 				t.Errorf("before = %q, want %q", before, tc.wantBefore)
 			}
-			AdvanceChannelWatermark(tc.channelID, tc.advanceID)
-			after := GetChannelWatermark(tc.channelID)
+			AdvanceChannelWatermarkForAgent("", tc.channelID, tc.advanceID)
+			after := GetChannelWatermarkForAgent("", tc.channelID)
 			if after != tc.wantAfter {
 				t.Errorf("after = %q, want %q", after, tc.wantAfter)
+			}
+		})
+	}
+}
+
+func TestChannelWatermarksForAgent(t *testing.T) {
+	ResetWatermarksForTest()
+	t.Cleanup(ResetWatermarksForTest)
+
+	tests := []struct {
+		name       string
+		agent      string
+		channelID  string
+		advanceID  string
+		wantBefore string
+		wantAfter  string
+	}{
+		{
+			name:       "scoped agent advance sets agent watermark without affecting other agents or legacy",
+			agent:      "agent-alpha",
+			channelID:  "chan-agent-2",
+			advanceID:  "250",
+			wantBefore: "",
+			wantAfter:  "250",
+		},
+		{
+			name:       "other agent has empty watermark for same channel",
+			agent:      "agent-beta",
+			channelID:  "chan-agent-2",
+			advanceID:  "",
+			wantBefore: "",
+			wantAfter:  "",
+		},
+		{
+			name:       "legacy unscoped has empty watermark for agent-advanced channel",
+			agent:      "",
+			channelID:  "chan-agent-2",
+			advanceID:  "",
+			wantBefore: "",
+			wantAfter:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := GetChannelWatermarkForAgent(tc.agent, tc.channelID)
+			if before != tc.wantBefore {
+				t.Errorf("GetChannelWatermarkForAgent(%q, %q) before = %q, want %q", tc.agent, tc.channelID, before, tc.wantBefore)
+			}
+			AdvanceChannelWatermarkForAgent(tc.agent, tc.channelID, tc.advanceID)
+			after := GetChannelWatermarkForAgent(tc.agent, tc.channelID)
+			if after != tc.wantAfter {
+				t.Errorf("GetChannelWatermarkForAgent(%q, %q) after = %q, want %q", tc.agent, tc.channelID, after, tc.wantAfter)
 			}
 		})
 	}
@@ -233,7 +286,7 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 	defer ResetWatermarksForTest()
 
 	if tc.initialWatermark != "" && tc.channelID != "" {
-		AdvanceChannelWatermark(tc.channelID, tc.initialWatermark)
+		AdvanceChannelWatermarkForAgent("", tc.channelID, tc.initialWatermark)
 	}
 
 	srv := &testIngressServer{}
@@ -261,16 +314,16 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 		targetServer = srv
 	}
 
-	RunCatchUpSweep(targetCtx, session, targetServer, tc.now)
+	RunCatchUpSweepForAgent(targetCtx, session, targetServer, tc.now, "")
 
 	if tc.runSecondSweep {
-		RunCatchUpSweep(targetCtx, session, targetServer, tc.now)
+		RunCatchUpSweepForAgent(targetCtx, session, targetServer, tc.now, "")
 	}
 
 	assertCatchUpSweepResults(t, tc, srv, bus, transport)
 
 	if tc.channelID != "" && tc.wantWatermark != "" {
-		wm := GetChannelWatermark(tc.channelID)
+		wm := GetChannelWatermarkForAgent("", tc.channelID)
 		if wm != tc.wantWatermark {
 			t.Errorf("channel watermark = %q, want %q", wm, tc.wantWatermark)
 		}
@@ -653,7 +706,7 @@ func TestEnqueueDiscordMessageDirect(t *testing.T) {
 			if srv != nil {
 				targetServer = srv
 			}
-			EnqueueDiscordMessage(ctx, targetServer, nil, m, tc.botUserID)
+			EnqueueDiscordMessageForAgent(ctx, targetServer, nil, m, tc.botUserID, "")
 
 			if srv != nil && len(srv.processedIngress) != tc.wantProcessed {
 				t.Errorf("processedIngress = %d, want %d", len(srv.processedIngress), tc.wantProcessed)
@@ -757,10 +810,67 @@ func TestCatchUpChannelMessages(t *testing.T) {
 	}
 	sess.Client = &http.Client{Transport: &mockDiscordTransport{}}
 
-	CatchUpChannelMessages(ctx, nil, nil, nil, "", "", "", now)
-	CatchUpChannelMessages(ctx, sess, &testIngressServer{}, &discordgo.Channel{}, "", "", "", now)
+	CatchUpChannelMessagesForAgent(ctx, nil, nil, nil, "", "", "", now, "")
+	CatchUpChannelMessagesForAgent(ctx, sess, &testIngressServer{}, &discordgo.Channel{}, "", "", "", now, "")
 
 	cCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	CatchUpChannelMessages(cCtx, sess, &testIngressServer{}, &discordgo.Channel{ID: "c1", LastMessageID: "999"}, "", "", "1", now)
+	CatchUpChannelMessagesForAgent(cCtx, sess, &testIngressServer{}, &discordgo.Channel{ID: "c1", LastMessageID: "999"}, "", "", "1", now, "")
+}
+
+func TestRunStartupCatchup(t *testing.T) {
+	ResetWatermarksForTest()
+	t.Cleanup(ResetWatermarksForTest)
+
+	ctx := context.Background()
+	sess, err := discordgo.New("Bot dummy")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+
+	channelID := "chan-catchup-1"
+	guildID := "guild-catchup-1"
+	msgID := DiscordSnowflakeFromTime(time.Now().UTC().Add(-5 * time.Minute))
+
+	msg := &discordgo.Message{
+		ID:        msgID,
+		ChannelID: channelID,
+		GuildID:   guildID,
+		Author:    &discordgo.User{ID: "u1"},
+		Content:   "hello",
+		Timestamp: time.Now().UTC().Add(-5 * time.Minute),
+	}
+
+	transport := &mockDiscordTransport{
+		messagesResp: map[string][]*discordgo.Message{channelID: {msg}},
+	}
+	sess.Client = &http.Client{Transport: transport}
+	sess.State.Guilds = []*discordgo.Guild{
+		{
+			ID: guildID,
+			Channels: []*discordgo.Channel{
+				{ID: channelID, GuildID: guildID, LastMessageID: msgID},
+			},
+		},
+	}
+
+	srv := &testIngressServer{}
+	RunCatchUpSweepForAgent(ctx, sess, srv, time.Now().UTC(), "agent-alpha")
+
+	if len(srv.processedIngress) != 1 {
+		t.Fatalf("processedIngress = %d, want 1", len(srv.processedIngress))
+	}
+	if got := srv.processedIngress[0].Agent; got != "agent-alpha" {
+		t.Errorf("processed message agent = %q, want %q", got, "agent-alpha")
+	}
+	if got := srv.processedIngress[0].MessageID; got != msgID {
+		t.Errorf("processed message ID = %q, want %q", got, msgID)
+	}
+
+	if got := GetChannelWatermarkForAgent("agent-alpha", channelID); got != msgID {
+		t.Errorf("GetChannelWatermarkForAgent(agent-alpha) = %q, want %q", got, msgID)
+	}
+	if got := GetChannelWatermarkForAgent("aerial", channelID); got != "" {
+		t.Errorf("GetChannelWatermarkForAgent(aerial) = %q, want empty", got)
+	}
 }

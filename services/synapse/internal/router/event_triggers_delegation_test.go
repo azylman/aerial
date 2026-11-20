@@ -54,19 +54,12 @@ func TestAlertsWebhook_InvalidTargetChannel(t *testing.T) {
 	}
 }
 
-func TestEventsWebhook_ForwardToPeers(t *testing.T) {
+func TestEventsWebhook_Success(t *testing.T) {
 	t.Parallel()
 
-	peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer peerServer.Close()
-
 	bus := &mockEventBus{}
-	cfg := Config{
-		WebhookForwardURLs: map[string]string{"peer": peerServer.URL},
-	}
-	srv := newTestRouter(cfg, peerServer.Client(), nil, nil, bus)
+	cfg := Config{}
+	srv := newTestRouter(cfg, nil, nil, nil, bus)
 
 	body := `{"source":"ci","event_type":"build","target":"api"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/events", bytes.NewBufferString(body))

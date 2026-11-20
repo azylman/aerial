@@ -62,7 +62,7 @@ func isMainBranch(branch string) bool {
 func (s *RouterServer) ownsWorkflowRunEvent(ctx context.Context, repo string, prNum int) bool {
 	cfg := s.cfgSrc.Current()
 	if prNum > 0 {
-		return s.isPROwnedLocally(ctx, repo, prNum) || (cfg.DefaultOwner && len(cfg.WebhookForwardURLs) == 0)
+		return s.isPROwnedLocally(ctx, repo, prNum) || cfg.DefaultOwner
 	}
 	return cfg.DefaultOwner || s.registry == nil
 }

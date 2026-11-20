@@ -26,8 +26,12 @@ func ResetWatermarksForTest() {
 
 // SetSweepRunningForTest forces the sweep running state for testing concurrent sweep prevention.
 func SetSweepRunningForTest(running bool) func() {
-	prev := discordSweepRunning.Swap(running)
-	return func() {
-		discordSweepRunning.Store(prev)
+	if running {
+		agentSweepsRunning.Store("default", true)
+		return func() {
+			agentSweepsRunning.Delete("default")
+		}
 	}
+	agentSweepsRunning.Delete("default")
+	return func() {}
 }

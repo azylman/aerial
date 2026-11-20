@@ -595,10 +595,10 @@ func TestClient_DiscoverRepoKustomizations(t *testing.T) {
 	ctx := context.Background()
 
 	routes := map[string]string{
-		"GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations":      `{"items":[{"metadata":{"name":"core"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},{"metadata":{"name":"suspended"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"aerial"}}}]}`,
-		"GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/marida-system/kustomizations":    `{"items":[]}`,
-		"GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/miorine-system/kustomizations":   `{"items":[]}`,
-		"GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial": `{"spec":{"url":"ssh://git@github.com/azylman/aerial"}}`,
+		"GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations":        `{"items":[{"metadata":{"name":"core"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},{"metadata":{"name":"suspended"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"aerial"}}}]}`,
+		"GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/marida-system/kustomizations":      `{"items":[]}`,
+		"GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/agent-alpha-system/kustomizations": `{"items":[]}`,
+		"GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial":   `{"spec":{"url":"ssh://git@github.com/azylman/aerial"}}`,
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
