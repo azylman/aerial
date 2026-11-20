@@ -24,8 +24,13 @@ type DockerContainerJSON struct {
 }
 
 type pipelineEntry struct {
-	dep       *DeploymentStatus
+	dep *DeploymentStatus
+	// canonical is the normalized SHA of the run currently applied to the card.
 	canonical string
+	// key is the pipeline identity (pipelineKey): "pr:<repo>:<branch>" or a SHA.
+	key string
+	// latestRunAt is the CreatedAt of the newest run applied to the card.
+	latestRunAt time.Time
 }
 
 type pipelineRegistry struct {
@@ -73,7 +78,42 @@ func (r *pipelineRegistry) getOrCreate(sha, fallbackID string) *pipelineEntry {
 	if e := r.find(sha); e != nil {
 		return e
 	}
-	norm := normalizeSHA(sha)
+	return r.create(normalizeSHA(sha), normalizeSHA(sha), fallbackID)
+}
+
+// findByKey returns the entry owning a pipeline key. PR keys match exactly;
+// SHA keys match SHA-keyed entries only, with the same prefix rules as find.
+func (r *pipelineRegistry) findByKey(key string) *pipelineEntry {
+	if isPRPipelineKey(key) {
+		for _, e := range r.entries {
+			if e.key == key {
+				return e
+			}
+		}
+		return nil
+	}
+	if key == "" {
+		return nil
+	}
+	for _, e := range r.entries {
+		if isPRPipelineKey(e.key) {
+			continue
+		}
+		if e.canonical == key || (isHexSHA(e.canonical) && isHexSHA(key) && shasMatchPrefix(e.canonical, key)) {
+			return e
+		}
+	}
+	return nil
+}
+
+func (r *pipelineRegistry) getOrCreateByKey(key, sha, fallbackID string) *pipelineEntry {
+	if e := r.findByKey(key); e != nil {
+		return e
+	}
+	return r.create(key, normalizeSHA(sha), fallbackID)
+}
+
+func (r *pipelineRegistry) create(key, norm, fallbackID string) *pipelineEntry {
 	short := shortenSHA(norm)
 	if short == "" {
 		short = fallbackID
@@ -86,6 +126,7 @@ func (r *pipelineRegistry) getOrCreate(sha, fallbackID string) *pipelineEntry {
 	entry := &pipelineEntry{
 		dep:       dep,
 		canonical: norm,
+		key:       key,
 	}
 	r.entries = append(r.entries, entry)
 	return entry
@@ -154,6 +195,76 @@ func detectRecentContainerSwap(run GitHubRun, shortSHA, currentCommit string, ae
 	return false
 }
 
+func isPRRun(run GitHubRun) bool {
+	return (run.HeadBranch != "" && run.HeadBranch != "main" && run.HeadBranch != "master") || run.Event == "pull_request"
+}
+
+const prPipelineKeyPrefix = "pr:"
+
+func isPRPipelineKey(key string) bool {
+	return strings.HasPrefix(key, prPipelineKeyPrefix)
+}
+
+// pipelineKey returns the card identity for a run: one card per pull request
+// (branch runs and the push to main that merged them), else the head SHA.
+func pipelineKey(run GitHubRun) string {
+	switch {
+	case isPRRun(run) && run.HeadBranch != "":
+		return prPipelineKeyPrefix + run.Repository + ":" + run.HeadBranch
+	case !isPRRun(run) && run.MergedFromBranch != "":
+		return prPipelineKeyPrefix + run.Repository + ":" + run.MergedFromBranch
+	default:
+		return normalizeSHA(run.HeadSHA)
+	}
+}
+
+// prPipelineCardID returns a stable card ID for a PR key so the UI key does not
+// change as new runs supersede old ones.
+func prPipelineCardID(repo, branch string) string {
+	raw := strings.ToLower("pr-" + strings.ReplaceAll(repo, "/", "-") + "-" + branch)
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, ch := range raw {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+			b.WriteRune(ch)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// runCardBranch returns the PR branch backing a PR-keyed run.
+func runCardBranch(run GitHubRun) string {
+	if isPRRun(run) {
+		return run.HeadBranch
+	}
+	return run.MergedFromBranch
+}
+
+// dropSupersededCancelledMainRuns removes cancelled push-to-main runs when a
+// newer push-to-main run exists for the same repository (main runs queue, and
+// newer pushes cancel the queued ones).
+func dropSupersededCancelledMainRuns(runs []GitHubRun) []GitHubRun {
+	newestMain := make(map[string]time.Time)
+	for _, r := range runs {
+		if isPRRun(r) {
+			continue
+		}
+		if r.CreatedAt.After(newestMain[r.Repository]) {
+			newestMain[r.Repository] = r.CreatedAt
+		}
+	}
+	kept := make([]GitHubRun, 0, len(runs))
+	for _, r := range runs {
+		if !isPRRun(r) && r.Conclusion == "cancelled" && newestMain[r.Repository].After(r.CreatedAt) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
+}
+
 func evaluateSuccessfulCIRun(
 	run GitHubRun,
 	runJobs []GitHubJob,
@@ -162,8 +273,7 @@ func evaluateSuccessfulCIRun(
 	aerialContainers []DockerContainerJSON,
 	refTime time.Time,
 ) (stage, ciStatus, commitMsgOverride string, progress int, skip bool) {
-	isPRRun := (run.HeadBranch != "" && run.HeadBranch != "main" && run.HeadBranch != "master") || run.Event == "pull_request"
-	if isPRRun {
+	if isPRRun(run) {
 		return "", "", "", 0, true
 	}
 	hasContainerBuilds := hasActiveContainerBuildJob(runJobs)
@@ -267,8 +377,9 @@ func applyCIRunToDeployment(
 	stage, ciStatus string,
 	progress int,
 	ciChips []MatrixJobChip,
+	cardID string,
 ) {
-	dep.ID = fmt.Sprintf("gh-run-%d", run.ID)
+	dep.ID = cardID
 	dep.Commit = shortSHA
 	applyRepositoryService(dep, run.Repository)
 	if commitMsg != "" {
@@ -307,6 +418,23 @@ func applyCIRunToDeployment(
 	dep.MatrixJobs = ciChips
 }
 
+// resetDeploymentForRun clears run-derived card state before a newer run for
+// the same pipeline key takes the card over.
+func resetDeploymentForRun(entry *pipelineEntry, normSHA string, runCreatedAt time.Time) {
+	dep := entry.dep
+	dep.Stage = ""
+	dep.Progress = 0
+	dep.Steps = nil
+	dep.MatrixJobs = nil
+	dep.CommitMsg = ""
+	dep.CommitTime = nil
+	dep.HTMLURL = ""
+	dep.StartedAt = time.Time{}
+	dep.Commit = shortenSHA(normSHA)
+	entry.canonical = normSHA
+	entry.latestRunAt = runCreatedAt
+}
+
 func ingestGitHubRun(
 	reg *pipelineRegistry,
 	run GitHubRun,
@@ -321,6 +449,18 @@ func ingestGitHubRun(
 	if shortSHA == "" {
 		shortSHA = fmt.Sprintf("gh-run-%d", run.ID)
 	}
+	key := pipelineKey(run)
+	prKeyed := isPRPipelineKey(key)
+	cardID := fmt.Sprintf("gh-run-%d", run.ID)
+	if prKeyed {
+		cardID = prPipelineCardID(run.Repository, runCardBranch(run))
+	}
+
+	existing := reg.findByKey(key)
+	if existing != nil && run.CreatedAt.Before(existing.latestRunAt) {
+		// An older run for this pipeline was superseded by a newer one.
+		return
+	}
 
 	commitMsg, commitTime := extractRunCommitMetadata(run)
 
@@ -333,19 +473,33 @@ func ingestGitHubRun(
 	stage, ciStatus, commitMsgOverride, progress := evaluateCIRunStage(
 		run, runJobs, ciChips, shortSHA, currentCommit, gitSync, aerialContainers, refTime,
 	)
-	if stage == "" {
+	if stage == "" && !prKeyed {
 		return
 	}
 	if commitMsgOverride != "" {
 		commitMsg = commitMsgOverride
 	}
 
-	entry := reg.getOrCreate(normSHA, fmt.Sprintf("gh-run-%d", run.ID))
+	entry := existing
+	if entry == nil {
+		entry = reg.getOrCreateByKey(key, normSHA, cardID)
+	}
 	dep := entry.dep
 	applyRepositoryService(dep, run.Repository)
 
-	if shouldUpdateDeploymentFromRun(dep, stage, run.CreatedAt) {
-		applyCIRunToDeployment(dep, run, shortSHA, commitMsg, commitTime, stage, ciStatus, progress, ciChips)
+	isNewer := entry.latestRunAt.IsZero() || run.CreatedAt.After(entry.latestRunAt)
+	if isNewer {
+		resetDeploymentForRun(entry, normSHA, run.CreatedAt)
+		dep.ID = cardID
+	}
+	if stage == "" {
+		// Newest PR run needs no card (successful branch run, stale, pending):
+		// keep the entry hidden so older runs cannot resurrect it.
+		return
+	}
+	if isNewer || shouldUpdateDeploymentFromRun(dep, stage, run.CreatedAt) {
+		applyCIRunToDeployment(dep, run, shortSHA, commitMsg, commitTime, stage, ciStatus, progress, ciChips, cardID)
+		entry.canonical = normSHA
 	}
 }
 
@@ -436,6 +590,10 @@ func ingestHangarReconciliation(
 		shortReconSHA = "hangar"
 	}
 
+	if hidden := reg.find(normReconSHA); hidden != nil && hidden.dep.Stage == "" {
+		// Hidden PR cards (newest run needs no card) are never resurrected.
+		return
+	}
 	entry := reg.getOrCreate(normReconSHA, "dep-aerial-stack-"+shortReconSHA)
 	dep := entry.dep
 
@@ -654,7 +812,7 @@ func MergeClusterDeploymentsWithHangar(
 	reg := &pipelineRegistry{}
 
 	// 1. Ingest GitHub Actions CI runs
-	for _, run := range runs {
+	for _, run := range dropSupersededCancelledMainRuns(runs) {
 		ingestGitHubRun(reg, run, jobs, gitSync, aerialContainers, currentCommit, refTime)
 	}
 
@@ -665,8 +823,9 @@ func MergeClusterDeploymentsWithHangar(
 	groupsByCommit := groupContainersByCommit(aerialContainers, gitSync, currentCommit)
 	for groupSHA, groupContainers := range groupsByCommit {
 		entry := reg.find(groupSHA)
-		if entry == nil {
-			// Strictly top-down invariant: Unparented containers NEVER synthesize deployment cards.
+		if entry == nil || entry.dep.Stage == "" {
+			// Strictly top-down invariant: Unparented containers NEVER synthesize deployment cards,
+			// and hidden PR cards are never resurrected.
 			continue
 		}
 		applyContainerGroupState(entry.dep, groupSHA, groupContainers, gitSync, refTime)

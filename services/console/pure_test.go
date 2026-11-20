@@ -44,10 +44,10 @@ func mkRun(id int64, repo, sha, status, conclusion, msg string, createdOff, upda
 	return r
 }
 
-func mkPRRun(id int64, repo, sha, status, conclusion string, createdOff, updatedOff time.Duration) GitHubRun {
+func mkPRRun(id int64, repo, branch, sha, status, conclusion string, createdOff, updatedOff time.Duration) GitHubRun {
 	r := mkRun(id, repo, sha, status, conclusion, "", createdOff, updatedOff)
 	r.Event = "pull_request"
-	r.HeadBranch = "feat/sidecars-pr"
+	r.HeadBranch = branch
 	return r
 }
 
@@ -896,10 +896,11 @@ type wantDep struct {
 
 func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 	t.Parallel()
-	tests := make([]mergeClusterTestCase, 0, 55)
+	tests := make([]mergeClusterTestCase, 0, 70)
 	tests = append(tests, mergeClusterBatch1Cases()...)
 	tests = append(tests, mergeClusterBatch2Cases()...)
 	tests = append(tests, mergeClusterBatch3Cases()...)
+	tests = append(tests, mergeClusterBatch4Cases()...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1054,10 +1055,10 @@ func mergeClusterBatch3Cases() []mergeClusterTestCase {
 		{name: "NonContainerRepoNoTimeout", runs: mkRuns(mkRun(301, "azylman/aerial-config", "3333ccc", "completed", "success", "", -5*time.Minute, -150*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantList: []wantDep{{Service: "aerial-config", Stage: "awaiting_pull"}}},
 
 		// 40. ActivePRRunShowsBuilding
-		{name: "ActivePRRunShowsBuilding", runs: mkRuns(mkPRRun(9001, "azylman/aerial-sidecars", "aabbccdd1122", "in_progress", "", -1*time.Minute, -30*time.Second)), jobs: map[int64][]GitHubJob{9001: {mkJob(0, 9001, "Run Sidecar Tests & Lint", "completed", "success", 0, 0), mkJob(0, 9001, "Build & Push Sidecar Images to GHCR (aura-farming)", "in_progress", "", 0, 0)}}, currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Stage: "building", MatrixJobCount: 2}}},
+		{name: "ActivePRRunShowsBuilding", runs: mkRuns(mkPRRun(9001, "azylman/aerial-sidecars", "feat/sidecars-pr", "aabbccdd1122", "in_progress", "", -1*time.Minute, -30*time.Second)), jobs: map[int64][]GitHubJob{9001: {mkJob(0, 9001, "Run Sidecar Tests & Lint", "completed", "success", 0, 0), mkJob(0, 9001, "Build & Push Sidecar Images to GHCR (aura-farming)", "in_progress", "", 0, 0)}}, currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Stage: "building", MatrixJobCount: 2}}},
 
 		// 41. CompletedPRRunDoesNotTimeout
-		{name: "CompletedPRRunDoesNotTimeout", runs: mkRuns(mkPRRun(9002, "azylman/aerial-sidecars", "aabbccdd1122", "completed", "success", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{9002: {mkJob(0, 9002, "Build & Push Sidecar Images to GHCR (aura-farming)", "completed", "success", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantCount: 0},
+		{name: "CompletedPRRunDoesNotTimeout", runs: mkRuns(mkPRRun(9002, "azylman/aerial-sidecars", "feat/sidecars-pr", "aabbccdd1122", "completed", "success", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{9002: {mkJob(0, 9002, "Build & Push Sidecar Images to GHCR (aura-farming)", "completed", "success", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantCount: 0},
 
 		// 42. ReconTargetServices_MatchingContainerWithoutCommitLabel
 		{name: "ReconTargetServices_MatchingContainerWithoutCommitLabel", gitSync: mkRecon(true, "pulling", "8888888888888888888888888888888888888888", "", []string{"proxy"}, -15*time.Second), containers: []DockerContainerJSON{mkCont("aerial-proxy", "proxy", "", "running", "", -10*time.Second)}, wantList: []wantDep{{Commit: "8888888", MatrixJobCount: 1, HasContainerChip: true}}},
