@@ -14,12 +14,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
 var restateActiveStepHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
+}
+
+func resolveSATokenPath() string {
+	if p := os.Getenv("AERIAL_SA_TOKEN_PATH"); p != "" {
+		return p
+	}
+	return k8sauth.DefaultTokenPath
+}
+
+func (p *WorkerPool) vanadisHTTPClient() *http.Client {
+	if p != nil && p.cfg.VanadisHTTPClient != nil {
+		return p.cfg.VanadisHTTPClient
+	}
+	tokenPath := resolveSATokenPath()
+	if p != nil && p.cfg.SATokenPath != "" {
+		tokenPath = p.cfg.SATokenPath
+	}
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: k8sauth.NewServiceAccountTransport(nil, tokenPath),
+	}
 }
 
 // BuildServiceName derives the Restate Build Virtual Object name for an agent.
@@ -41,12 +63,88 @@ func (p *WorkerPool) resolveRestateIngressURL() string {
 	return "http://restate.aerial:8080"
 }
 
+func (p *WorkerPool) resolveVanadisAPIURL() string {
+	if p != nil && strings.TrimSpace(p.cfg.VanadisURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(p.cfg.VanadisURL), "/")
+	}
+	if p != nil && p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.VanadisURL) != "" {
+			return strings.TrimRight(strings.TrimSpace(cur.VanadisURL), "/")
+		}
+	}
+	if envURL := strings.TrimSpace(os.Getenv("VANADIS_URL")); envURL != "" {
+		return strings.TrimRight(envURL, "/")
+	}
+	return "http://vanadis.aerial:4025"
+}
+
 type updateActiveStepPayload struct {
 	ChunkID    string `json:"chunk_id"`
 	ActiveStep string `json:"active_step"`
 }
 
-// FlushChunkActiveStepToRestate forwards the active step for a running chunk to vanadis-restate BuildObject.UpdateActiveStep.
+func (p *WorkerPool) flushActiveStepToRestateIngress(ctx context.Context, buildID string, body []byte) error {
+	agentName := ""
+	if p != nil {
+		agentName = p.cfg.AgentName
+	}
+	serviceName := BuildServiceName(agentName)
+	ingressURL := p.resolveRestateIngressURL()
+	targetURL := fmt.Sprintf("%s/%s/%s/UpdateActiveStep/send", ingressURL, serviceName, url.PathEscape(buildID))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := restateActiveStepHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if readErr != nil {
+			respBody = []byte(fmt.Sprintf("<error reading response: %v>", readErr))
+		}
+		return fmt.Errorf("restate returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, buildID string, body []byte) error {
+	vanadisURL := p.resolveVanadisAPIURL()
+	targetURL := fmt.Sprintf("%s/builds/%s/active-step", vanadisURL, url.PathEscape(buildID))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.vanadisHTTPClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if readErr != nil {
+			respBody = []byte(fmt.Sprintf("<error reading response: %v>", readErr))
+		}
+		return fmt.Errorf("vanadis returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+// FlushChunkActiveStepToRestate forwards the active step for a running chunk.
+// When RestateIngressURL is explicitly configured on PoolConfig and VanadisURL is empty,
+// it falls back to direct Restate ingress (<ingressURL>/<BuildServiceName>/<buildID>/UpdateActiveStep/send)
+// for backward compatibility and hermetic unit tests. Otherwise, it routes through the vanadis
+// HTTP API (<vanadisURL>/builds/<buildID>/active-step) using a ServiceAccount Bearer token.
 func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID, chunkID, step string) error {
 	trimmedChunkID := strings.TrimSpace(chunkID)
 	if trimmedChunkID == "" {
@@ -60,14 +158,6 @@ func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID,
 		return err
 	}
 
-	agentName := ""
-	if p != nil {
-		agentName = p.cfg.AgentName
-	}
-	serviceName := BuildServiceName(agentName)
-	ingressURL := p.resolveRestateIngressURL()
-	targetURL := fmt.Sprintf("%s/%s/%s/UpdateActiveStep/send", ingressURL, serviceName, url.PathEscape(trimmedBuildID))
-
 	payload := updateActiveStepPayload{
 		ChunkID:    trimmedChunkID,
 		ActiveStep: strings.TrimSpace(step),
@@ -78,30 +168,18 @@ func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID,
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
-		log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, err)
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := restateActiveStepHTTPClient.Do(req)
-	if err != nil {
-		log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if readErr != nil {
-			respBody = []byte(fmt.Sprintf("<error reading response: %v>", readErr))
+	if p != nil && strings.TrimSpace(p.cfg.RestateIngressURL) != "" && strings.TrimSpace(p.cfg.VanadisURL) == "" {
+		if flushErr := p.flushActiveStepToRestateIngress(ctx, trimmedBuildID, body); flushErr != nil {
+			log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, flushErr)
+			return flushErr
 		}
-		respErr := fmt.Errorf("restate returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-		log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, respErr)
-		return respErr
+		return nil
 	}
 
+	if flushErr := p.flushActiveStepToVanadisAPI(ctx, trimmedBuildID, body); flushErr != nil {
+		log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, flushErr)
+		return flushErr
+	}
 	return nil
 }
 

@@ -183,3 +183,97 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 		})
 	}
 }
+
+type mockRecordedPublishBus struct {
+	pubsub.Bus
+
+	publishedSubject string
+	publishedData    any
+	publishCalls     int
+}
+
+func (m *mockRecordedPublishBus) Publish(ctx context.Context, subject, msgID string, data any) error {
+	m.publishCalls++
+	m.publishedSubject = subject
+	m.publishedData = data
+	return m.Bus.Publish(ctx, subject, msgID, data)
+}
+
+func TestNewTranscriptsIndexedHandler(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		eventAgent  string
+		eventStack  string
+		threadID    string
+		stack       string
+		wantPub     bool
+		wantSubject string
+	}{
+		{
+			name:        "matching agent publishes coalesced job",
+			eventAgent:  "miorine",
+			threadID:    "th-1",
+			stack:       "miorine",
+			wantPub:     true,
+			wantSubject: "aerial.coalesced.coven_extract.miorine.th-1",
+		},
+		{
+			name:        "fallback to event stack matches",
+			eventAgent:  "",
+			eventStack:  "suletta",
+			threadID:    "th-2",
+			stack:       "suletta",
+			wantPub:     true,
+			wantSubject: "aerial.coalesced.coven_extract.suletta.th-2",
+		},
+		{
+			name:       "mismatched agent skips publishing",
+			eventAgent: "aerial",
+			threadID:   "th-3",
+			stack:      "miorine",
+			wantPub:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+
+			bus := &mockRecordedPublishBus{Bus: memBus}
+			handler := newTranscriptsIndexedHandler(bus, tc.stack)
+			ev := pubsub.TranscriptsIndexedEvent{
+				Agent:    tc.eventAgent,
+				Stack:    tc.eventStack,
+				ThreadID: tc.threadID,
+			}
+			data, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			msg := &mockPubsubMsg{data: data}
+
+			err = handler(context.Background(), msg)
+			if err != nil {
+				t.Fatalf("handler returned unexpected error: %v", err)
+			}
+			if (bus.publishCalls > 0) != tc.wantPub {
+				t.Fatalf("publishCalls = %d, wantPub = %v", bus.publishCalls, tc.wantPub)
+			}
+			if tc.wantPub {
+				if bus.publishedSubject != tc.wantSubject {
+					t.Fatalf("published subject = %q, want %q", bus.publishedSubject, tc.wantSubject)
+				}
+				args, ok := bus.publishedData.(pubsub.CovenExtractJobArgs)
+				if !ok {
+					t.Fatalf("expected pubsub.CovenExtractJobArgs, got %T", bus.publishedData)
+				}
+				if args.Agent != tc.stack || args.ThreadID != tc.threadID {
+					t.Fatalf("published args = %+v, want Agent=%q ThreadID=%q", args, tc.stack, tc.threadID)
+				}
+			}
+		})
+	}
+}

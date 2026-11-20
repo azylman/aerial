@@ -137,6 +137,7 @@ type ExternalEvent struct {
 // batch; a duplicate Final batch re-publish is expected and safe.
 type TranscriptsIndexedEvent struct {
 	Stack        string    `json:"stack"`
+	Agent        string    `json:"agent,omitempty"`
 	SessionID    string    `json:"session_id"`
 	ThreadID     string    `json:"thread_id,omitempty"`
 	FileMtime    time.Time `json:"file_mtime"`
@@ -145,6 +146,19 @@ type TranscriptsIndexedEvent struct {
 	StepsIndexed int       `json:"steps_indexed"`
 	Final        bool      `json:"final"`
 	IndexedAt    time.Time `json:"indexed_at"`
+}
+
+const defaultAgent = "aerial"
+
+// EffectiveAgent returns Agent if non-empty, falling back to Stack, defaulting to "aerial".
+func (e TranscriptsIndexedEvent) EffectiveAgent() string {
+	if a := strings.TrimSpace(e.Agent); a != "" {
+		return a
+	}
+	if s := strings.TrimSpace(e.Stack); s != "" {
+		return s
+	}
+	return defaultAgent
 }
 
 // TurnCompletedEvent represents an agent conversation turn completion on aerial.turn.completed.
@@ -162,8 +176,21 @@ type TurnCompletedEvent struct {
 
 // CovenExtractJobArgs contains arguments for coalesced Coven thread fact extraction.
 type CovenExtractJobArgs struct {
+	Agent     string `json:"agent,omitempty"`
+	Stack     string `json:"stack,omitempty"`
 	ThreadID  string `json:"thread_id"`
 	SessionID string `json:"session_id,omitempty"`
+}
+
+// EffectiveAgent returns Agent if non-empty, falling back to Stack, defaulting to "aerial".
+func (c CovenExtractJobArgs) EffectiveAgent() string {
+	if a := strings.TrimSpace(c.Agent); a != "" {
+		return a
+	}
+	if s := strings.TrimSpace(c.Stack); s != "" {
+		return s
+	}
+	return defaultAgent
 }
 
 // WidgetSyncJobArgs contains arguments for coalesced widget sync jobs.
@@ -272,6 +299,24 @@ func SubjectCovenExtractCoalesced(threadID string) string {
 		t = unknownSubjectToken
 	}
 	return SubjectCovenExtractPrefix + t
+}
+
+// SubjectCovenExtractCoalescedForAgent returns the coalesced extraction subject scoped by agent.
+func SubjectCovenExtractCoalescedForAgent(agent, threadID string) string {
+	a := cleanSubjectToken(agent)
+	if a == "" || a == unknownSubjectToken {
+		a = defaultAgent
+	}
+	t := strings.TrimSpace(threadID)
+	if t == ">" || t == "*" {
+		return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
+	}
+	t = cleanSubjectToken(t)
+	t = strings.ReplaceAll(t, ".", "-")
+	if t == "" {
+		t = unknownSubjectToken
+	}
+	return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
 }
 
 // SubjectBuildWidgetSyncCoalesced returns the coalesced subject for build widget sync.

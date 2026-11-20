@@ -391,6 +391,8 @@ type flushActiveStepTestCase struct {
 	step            string
 	serverStatus    int
 	serverBody      string
+	restateURL      string
+	vanadisURL      string
 	expectErr       bool
 	expectErrSubstr string
 	wantURI         string
@@ -407,6 +409,7 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 	var capturedMu sync.Mutex
 
 	var serverURL string
+	var vanClient *http.Client
 	if !tc.skipServer {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			capturedMu.Lock()
@@ -419,12 +422,26 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 		}))
 		defer srv.Close()
 		serverURL = srv.URL
+		vanClient = srv.Client()
+	}
+
+	restateIngress := tc.restateURL
+	vanadisIngress := tc.vanadisURL
+	switch {
+	case !tc.skipServer && restateIngress == "" && vanadisIngress == "":
+		restateIngress = serverURL
+	case restateIngress == "USE_SERVER":
+		restateIngress = serverURL
+	case vanadisIngress == "USE_SERVER":
+		vanadisIngress = serverURL
 	}
 
 	pool := &WorkerPool{
 		cfg: WorkerPoolConfig{
 			AgentName:         tc.agentName,
-			RestateIngressURL: serverURL,
+			RestateIngressURL: restateIngress,
+			VanadisURL:        vanadisIngress,
+			VanadisHTTPClient: vanClient,
 		},
 	}
 
@@ -460,105 +477,157 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 	}
 }
 
+var flushActiveStepTestCases = []flushActiveStepTestCase{
+	{
+		name:           "successful step update default agent via restate fallback",
+		agentName:      "",
+		buildID:        "build-101",
+		chunkID:        "chunk-live-1",
+		step:           "Executing `git status`",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/Build/build-101/UpdateActiveStep/send",
+		wantChunkID:    "chunk-live-1",
+		wantActiveStep: "Executing `git status`",
+	},
+	{
+		name:           "successful step update via vanadis API",
+		vanadisURL:     "USE_SERVER",
+		buildID:        "build-vanadis-1",
+		chunkID:        "chunk-live-v1",
+		step:           "Running vanadis build step...",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/builds/build-vanadis-1/active-step",
+		wantChunkID:    "chunk-live-v1",
+		wantActiveStep: "Running vanadis build step...",
+	},
+	{
+		name:           "successful step update via vanadis API with special characters in buildID",
+		vanadisURL:     "USE_SERVER",
+		buildID:        "build/special:v2",
+		chunkID:        "chunk-live-v2",
+		step:           "Testing special build ID...",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/builds/" + url.PathEscape("build/special:v2") + "/active-step",
+		wantChunkID:    "chunk-live-v2",
+		wantActiveStep: "Testing special build ID...",
+	},
+	{
+		name:            "vanadis API 500 error fails loud",
+		vanadisURL:      "USE_SERVER",
+		buildID:         "build-err-vanadis",
+		chunkID:         "chunk-err-v1",
+		step:            "failing vanadis step",
+		serverStatus:    http.StatusInternalServerError,
+		serverBody:      `{"error":"internal vanadis failure"}`,
+		expectErr:       true,
+		expectErrSubstr: "vanadis returned status 500",
+		wantURI:         "/builds/build-err-vanadis/active-step",
+		wantChunkID:     "chunk-err-v1",
+		wantActiveStep:  "failing vanadis step",
+	},
+	{
+		name:            "vanadis API 404 error fails loud",
+		vanadisURL:      "USE_SERVER",
+		buildID:         "build-404-vanadis",
+		chunkID:         "chunk-404-v1",
+		step:            "not found step",
+		serverStatus:    http.StatusNotFound,
+		serverBody:      `{"error":"build not found"}`,
+		expectErr:       true,
+		expectErrSubstr: "vanadis returned status 404",
+		wantURI:         "/builds/build-404-vanadis/active-step",
+		wantChunkID:     "chunk-404-v1",
+		wantActiveStep:  "not found step",
+	},
+	{
+		name:           "successful step update custom agent via restate fallback",
+		agentName:      "miorine",
+		buildID:        "build-202",
+		chunkID:        "chunk-live-2",
+		step:           "Compiling binaries...",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/Build-miorine/build-202/UpdateActiveStep/send",
+		wantChunkID:    "chunk-live-2",
+		wantActiveStep: "Compiling binaries...",
+	},
+	{
+		name:           "step text trimming and special characters in buildID via restate fallback",
+		agentName:      "suletta",
+		buildID:        "build/special:1",
+		chunkID:        "chunk-trim",
+		step:           "   Running tests...   \n",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/Build-suletta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
+		wantChunkID:    "chunk-trim",
+		wantActiveStep: "Running tests...",
+	},
+	{
+		name:           "empty step clears active step",
+		agentName:      "aerial",
+		buildID:        "build-clear",
+		chunkID:        "chunk-clear-1",
+		step:           "",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/Build/build-clear/UpdateActiveStep/send",
+		wantChunkID:    "chunk-clear-1",
+		wantActiveStep: "",
+	},
+	{
+		name:       "empty chunkID is a no-op",
+		buildID:    "build-noop",
+		chunkID:    "",
+		step:       "anything",
+		skipServer: true,
+	},
+	{
+		name:            "missing buildID with non-empty chunkID fails loud",
+		buildID:         "",
+		chunkID:         "chunk-missing-build",
+		step:            "anything",
+		expectErr:       true,
+		expectErrSubstr: "missing build_id",
+		skipServer:      true,
+	},
+	{
+		name:            "restate server 500 error fails loud",
+		agentName:       "aerial",
+		buildID:         "build-err-500",
+		chunkID:         "chunk-err-500",
+		step:            "failing step",
+		serverStatus:    http.StatusInternalServerError,
+		serverBody:      `{"error":"restate internal failure"}`,
+		expectErr:       true,
+		expectErrSubstr: "restate returned status 500",
+		wantURI:         "/Build/build-err-500/UpdateActiveStep/send",
+		wantChunkID:     "chunk-err-500",
+		wantActiveStep:  "failing step",
+	},
+	{
+		name:            "restate server 404 error fails loud",
+		agentName:       "aerial",
+		buildID:         "build-err-404",
+		chunkID:         "chunk-err-404",
+		step:            "not found step",
+		serverStatus:    http.StatusNotFound,
+		serverBody:      `{"error":"build not found"}`,
+		expectErr:       true,
+		expectErrSubstr: "restate returned status 404",
+		wantURI:         "/Build/build-err-404/UpdateActiveStep/send",
+		wantChunkID:     "chunk-err-404",
+		wantActiveStep:  "not found step",
+	},
+}
+
 func TestWorkerPool_FlushChunkActiveStepToRestate(t *testing.T) {
 	t.Parallel()
 
-	tests := []flushActiveStepTestCase{
-		{
-			name:           "successful step update default agent",
-			agentName:      "",
-			buildID:        "build-101",
-			chunkID:        "chunk-live-1",
-			step:           "Executing `git status`",
-			serverStatus:   http.StatusOK,
-			serverBody:     `{"status":"ok"}`,
-			wantURI:        "/Build/build-101/UpdateActiveStep/send",
-			wantChunkID:    "chunk-live-1",
-			wantActiveStep: "Executing `git status`",
-		},
-		{
-			name:           "successful step update custom agent",
-			agentName:      "miorine",
-			buildID:        "build-202",
-			chunkID:        "chunk-live-2",
-			step:           "Compiling binaries...",
-			serverStatus:   http.StatusOK,
-			serverBody:     `{"status":"ok"}`,
-			wantURI:        "/Build-miorine/build-202/UpdateActiveStep/send",
-			wantChunkID:    "chunk-live-2",
-			wantActiveStep: "Compiling binaries...",
-		},
-		{
-			name:           "step text trimming and special characters in buildID",
-			agentName:      "suletta",
-			buildID:        "build/special:1",
-			chunkID:        "chunk-trim",
-			step:           "   Running tests...   \n",
-			serverStatus:   http.StatusOK,
-			serverBody:     `{"status":"ok"}`,
-			wantURI:        "/Build-suletta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
-			wantChunkID:    "chunk-trim",
-			wantActiveStep: "Running tests...",
-		},
-		{
-			name:           "empty step clears active step",
-			agentName:      "aerial",
-			buildID:        "build-clear",
-			chunkID:        "chunk-clear-1",
-			step:           "",
-			serverStatus:   http.StatusOK,
-			serverBody:     `{"status":"ok"}`,
-			wantURI:        "/Build/build-clear/UpdateActiveStep/send",
-			wantChunkID:    "chunk-clear-1",
-			wantActiveStep: "",
-		},
-		{
-			name:       "empty chunkID is a no-op",
-			buildID:    "build-noop",
-			chunkID:    "",
-			step:       "anything",
-			skipServer: true,
-		},
-		{
-			name:            "missing buildID with non-empty chunkID fails loud",
-			buildID:         "",
-			chunkID:         "chunk-missing-build",
-			step:            "anything",
-			expectErr:       true,
-			expectErrSubstr: "missing build_id",
-			skipServer:      true,
-		},
-		{
-			name:            "restate server 500 error fails loud",
-			agentName:       "aerial",
-			buildID:         "build-err-500",
-			chunkID:         "chunk-err-500",
-			step:            "failing step",
-			serverStatus:    http.StatusInternalServerError,
-			serverBody:      `{"error":"restate internal failure"}`,
-			expectErr:       true,
-			expectErrSubstr: "restate returned status 500",
-			wantURI:         "/Build/build-err-500/UpdateActiveStep/send",
-			wantChunkID:     "chunk-err-500",
-			wantActiveStep:  "failing step",
-		},
-		{
-			name:            "restate server 404 error fails loud",
-			agentName:       "aerial",
-			buildID:         "build-err-404",
-			chunkID:         "chunk-err-404",
-			step:            "not found step",
-			serverStatus:    http.StatusNotFound,
-			serverBody:      `{"error":"build not found"}`,
-			expectErr:       true,
-			expectErrSubstr: "restate returned status 404",
-			wantURI:         "/Build/build-err-404/UpdateActiveStep/send",
-			wantChunkID:     "chunk-err-404",
-			wantActiveStep:  "not found step",
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range flushActiveStepTestCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runFlushActiveStepCase(t, tc)

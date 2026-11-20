@@ -84,10 +84,11 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var hits int
-			var gotStack, gotThread string
+			var gotStack, gotAgent, gotThread string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				hits++
 				gotStack = r.URL.Query().Get("stack")
+				gotAgent = r.URL.Query().Get("agent")
 				gotThread = r.URL.Path
 				w.WriteHeader(tc.statusCode)
 				_, _ = fmt.Fprint(w, tc.body)
@@ -108,20 +109,30 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 			if len(got.ToolCalls) != tc.wantTools {
 				t.Errorf("ToolCalls count = %d, want %d", len(got.ToolCalls), tc.wantTools)
 			}
-			if tc.wantStackHit {
-				if hits != 1 {
-					t.Fatalf("server hits = %d, want 1", hits)
-				}
-				if gotStack != "canary" {
-					t.Errorf("stack query param = %q, want %q (Roles N5 stack filter)", gotStack, "canary")
-				}
-				if !strings.Contains(gotThread, "th-") {
-					t.Errorf("request path = %q, want thread id in path", gotThread)
-				}
-			} else if strings.TrimSpace(tc.threadID) == "" && hits != 0 {
-				t.Errorf("empty thread issued %d requests, want 0", hits)
-			}
+			assertTrajectoryHits(t, tc.wantStackHit, tc.threadID, hits, gotStack, gotAgent, gotThread)
 		})
+	}
+}
+
+func assertTrajectoryHits(t *testing.T, wantStackHit bool, threadID string, hits int, gotStack, gotAgent, gotThread string) {
+	t.Helper()
+	if wantStackHit {
+		if hits != 1 {
+			t.Fatalf("server hits = %d, want 1", hits)
+		}
+		if gotStack != "canary" {
+			t.Errorf("stack query param = %q, want %q (Roles N5 stack filter)", gotStack, "canary")
+		}
+		if gotAgent != "canary" {
+			t.Errorf("agent query param = %q, want %q", gotAgent, "canary")
+		}
+		if !strings.Contains(gotThread, "th-") {
+			t.Errorf("request path = %q, want thread id in path", gotThread)
+		}
+		return
+	}
+	if strings.TrimSpace(threadID) == "" && hits != 0 {
+		t.Errorf("empty thread issued %d requests, want 0", hits)
 	}
 }
 

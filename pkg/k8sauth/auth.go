@@ -120,7 +120,7 @@ type Authenticator struct {
 // NewAuthenticator constructs an Authenticator with sensible defaults.
 func NewAuthenticator(cfg Config) *Authenticator {
 	if cfg.TokenPath == "" {
-		cfg.TokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+		cfg.TokenPath = DefaultTokenPath
 	}
 	if cfg.AgentSAPrefix == "" {
 		cfg.AgentSAPrefix = "system:serviceaccount:default:eri-"
@@ -175,6 +175,19 @@ func NewAuthenticator(cfg Config) *Authenticator {
 		sarCache:    NewLRUCache[struct{}](cfg.CacheMaxEntries, cfg.CacheTTL, cfg.Now),
 		tokenSource: ts,
 	}
+}
+
+// Enabled reports whether the Authenticator is enabled.
+func (a *Authenticator) Enabled() bool {
+	return a != nil && a.cfg.Enabled
+}
+
+// Config returns a copy of the Authenticator's configuration.
+func (a *Authenticator) Config() Config {
+	if a == nil {
+		return Config{}
+	}
+	return a.cfg
 }
 
 func defaultK8sHTTPClient(tokenPath string) *http.Client {

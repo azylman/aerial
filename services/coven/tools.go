@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // MemorySearchArgs defines inputs for the memory_search MCP tool.
 type MemorySearchArgs struct {
 	Query string `json:"query"           jsonschema:"Search query text to find semantically relevant facts."`
@@ -26,6 +35,7 @@ type MemorySearchOutput struct {
 type MemoryStoreArgs struct {
 	FactText     string `json:"fact_text"               jsonschema:"One durable, standalone fact to persist or update. New facts pass an admission gate that rejects text under 10 characters, plaintext credentials, and ephemeral telemetry (PR numbers, build or chunk IDs, commit SHAs, 'currently in progress') unless phrased as a durable directive (e.g. always, never, must, prefers); the gate is skipped when supersedes_id is set."`
 	SupersedesID int64  `json:"supersedes_id,omitempty" jsonschema:"Optional ID of an existing fact to overwrite and supersede."`
+	TargetAgent  string `json:"target_agent,omitempty"  jsonschema:"Optional target agent to attribute or store the fact for."`
 }
 
 // MemoryStoreOutput defines the result structure for memory_store.
@@ -36,16 +46,18 @@ type MemoryStoreOutput struct {
 	Message string `json:"message"`
 }
 
-// MemoryForgetArgs defines inputs for the memory_forget MCP tool.
-type MemoryForgetArgs struct {
-	FactID int64 `json:"fact_id" jsonschema:"ID of the fact to forget and delete."`
+// FactInput encapsulates inputs for persisting a fact with provenance attribution.
+type FactInput struct {
+	FactText     string `json:"fact_text"`
+	SupersedesID int64  `json:"supersedes_id,omitempty"`
+	SourceAgent  string `json:"source_agent,omitempty"`
 }
 
-// MemoryForgetOutput defines the result structure for memory_forget.
-type MemoryForgetOutput struct {
-	Status  string `json:"status"`
-	FactID  int64  `json:"fact_id"`
-	Message string `json:"message"`
+// FactSummary summarizes a fact for listing or response payloads.
+type FactSummary struct {
+	ID          int64  `json:"id"`
+	FactText    string `json:"fact_text"`
+	SourceAgent string `json:"source_agent,omitempty"`
 }
 
 // ContextResponse defines the structure returned by GET /context.
@@ -189,14 +201,33 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 
 // MemoryStore persists, updates, or reinforces a fact.
 func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (MemoryStoreOutput, error) {
+	agent := DefaultStack
+	if h != nil && h.cfg != nil && h.cfg.Stack != "" {
+		agent = h.cfg.EffectiveStack()
+	}
+	agent = firstNonEmpty(args.TargetAgent, agent, DefaultStack)
+	return h.MemoryStoreWithInput(ctx, FactInput{
+		FactText:     args.FactText,
+		SupersedesID: args.SupersedesID,
+		SourceAgent:  agent,
+	})
+}
+
+// MemoryStoreWithInput persists, updates, or reinforces a fact from a typed FactInput.
+func (h *ToolHandler) MemoryStoreWithInput(ctx context.Context, input FactInput) (MemoryStoreOutput, error) {
 	start := time.Now()
-	factText := strings.TrimSpace(args.FactText)
+	factText := strings.TrimSpace(input.FactText)
 	if factText == "" {
 		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("'fact_text' cannot be empty")
 	}
 
-	if args.SupersedesID == 0 {
+	sourceAgent := strings.TrimSpace(input.SourceAgent)
+	if sourceAgent == "" {
+		sourceAgent = DefaultStack
+	}
+
+	if input.SupersedesID == 0 {
 		admit, reason := EvaluateCandidateAdmission(ExtractedFactItem{
 			FactText: factText,
 		})
@@ -222,12 +253,12 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	}
 
 	// 1. Explicit overwrite via supersedes_id
-	if args.SupersedesID > 0 {
-		updateFactErr := h.store.UpdateFact(ctx, args.SupersedesID, factText, emb)
+	if input.SupersedesID > 0 {
+		updateFactErr := h.store.UpdateFact(ctx, input.SupersedesID, factText, emb)
 		if updateFactErr != nil {
 			RecordOperation("store", "error", time.Since(start).Seconds())
 			if errors.Is(updateFactErr, ErrFactNotFound) {
-				return MemoryStoreOutput{}, fmt.Errorf("fact with id %d not found to supersede", args.SupersedesID)
+				return MemoryStoreOutput{}, fmt.Errorf("fact with id %d not found to supersede", input.SupersedesID)
 			}
 			return MemoryStoreOutput{}, fmt.Errorf("failed to supersede fact: %w", updateFactErr)
 		}
@@ -235,7 +266,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 		RecordOperation("store", "success", time.Since(start).Seconds())
 		return MemoryStoreOutput{
 			Status:  statusSuccess,
-			FactID:  args.SupersedesID,
+			FactID:  input.SupersedesID,
 			Action:  "updated",
 			Message: "Fact updated successfully.",
 		}, nil
@@ -264,7 +295,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	}
 
 	// 3. Insert new fact
-	id, err := h.store.InsertFact(ctx, factText, emb)
+	id, err := h.store.InsertFact(ctx, factText, emb, sourceAgent)
 	if err != nil {
 		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("failed to insert fact: %w", err)
@@ -277,32 +308,6 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 		FactID:  id,
 		Action:  "inserted",
 		Message: "Fact inserted successfully.",
-	}, nil
-}
-
-// MemoryForget deletes a fact by its ID.
-func (h *ToolHandler) MemoryForget(ctx context.Context, args MemoryForgetArgs) (MemoryForgetOutput, error) {
-	start := time.Now()
-	if args.FactID <= 0 {
-		RecordOperation("forget", "error", time.Since(start).Seconds())
-		return MemoryForgetOutput{}, fmt.Errorf("'fact_id' is required and must be positive")
-	}
-
-	err := h.store.DeleteFact(ctx, args.FactID)
-	if err != nil {
-		RecordOperation("forget", "error", time.Since(start).Seconds())
-		if errors.Is(err, ErrFactNotFound) {
-			return MemoryForgetOutput{}, fmt.Errorf("fact with id %d not found", args.FactID)
-		}
-		return MemoryForgetOutput{}, fmt.Errorf("failed to delete fact: %w", err)
-	}
-
-	RecordFactStored("deleted")
-	RecordOperation("forget", "success", time.Since(start).Seconds())
-	return MemoryForgetOutput{
-		Status:  statusSuccess,
-		FactID:  args.FactID,
-		Message: "Fact deleted successfully.",
 	}, nil
 }
 

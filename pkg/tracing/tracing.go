@@ -43,6 +43,7 @@ const ScopeName = "github.com/azylman/aerial/pkg/tracing"
 
 // Attribute keys shared by Aerial services.
 const (
+	AttrAgent         = attribute.Key("aerial.agent")
 	AttrStack         = attribute.Key("aerial.stack")
 	AttrMCPMethodName = attribute.Key("mcp.method.name")
 	AttrGenAIToolName = attribute.Key("gen_ai.tool.name")
@@ -63,6 +64,7 @@ type Config struct {
 	Enabled     bool    `yaml:"enabled"`
 	Endpoint    string  `yaml:"endpoint"`
 	SampleRatio float64 `yaml:"sample_ratio"`
+	Agent       string  `yaml:"agent"`
 	Stack       string  `yaml:"stack"`
 	// CaptureContent records redacted, size-capped prompt and response text on agent spans.
 	// Off by default: span content is otherwise limited to names, sizes and usage.
@@ -157,15 +159,23 @@ func envOverrides(getenv func(string) string) sdkEnvOverrides {
 }
 
 // newResource describes service with semantic-convention attributes: service.name,
-// service.namespace (the stack, omitted when empty), the telemetry.sdk.* attributes, and the
-// legacy aerial.stack kept for existing saved queries. OTEL_RESOURCE_ATTRIBUTES (k8s.*,
-// service.version) and OTEL_SERVICE_NAME are applied last, so they win per SDK precedence.
+// service.namespace (the agent/stack, omitted when empty), the telemetry.sdk.* attributes, and the
+// aerial.agent resource attribute (with aerial.stack kept for backward-compatible saved queries).
+// OTEL_RESOURCE_ATTRIBUTES (k8s.*, service.version) and OTEL_SERVICE_NAME are applied last,
+// so they win per SDK precedence.
 func newResource(ctx context.Context, service string, cfg Config) (*resource.Resource, error) {
 	attrs := []attribute.KeyValue{semconv.ServiceName(service)}
-	if cfg.Stack != "" {
-		attrs = append(attrs, semconv.ServiceNamespace(cfg.Stack))
+	agent := strings.TrimSpace(cfg.Agent)
+	if agent == "" {
+		agent = strings.TrimSpace(cfg.Stack)
 	}
-	attrs = append(attrs, AttrStack.String(cfg.Stack))
+	if agent != "" {
+		attrs = append(attrs, semconv.ServiceNamespace(agent))
+	}
+	if agent != "" {
+		attrs = append(attrs, AttrAgent.String(agent))
+	}
+	attrs = append(attrs, AttrStack.String(agent))
 	return resource.New(ctx,
 		resource.WithSchemaURL(semconv.SchemaURL),
 		resource.WithAttributes(attrs...),
