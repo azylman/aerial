@@ -1,8 +1,11 @@
 package widget
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -176,8 +179,146 @@ func TestBuildSyncWidgetRequest(t *testing.T) {
 	if len(req.Chunks) != 2 {
 		t.Fatalf("expected 2 chunks, got %d", len(req.Chunks))
 	}
-	assert.Equal(t, "aerial", req.Chunks[0].Repo)
-	assert.Equal(t, "", req.Chunks[1].Repo)
+	// The running action chunk renders above the pending PR chunk.
+	assert.Equal(t, "c2", req.Chunks[0].ID)
+	assert.Equal(t, "", req.Chunks[0].Repo)
+	assert.Equal(t, "c1", req.Chunks[1].ID)
+	assert.Equal(t, "aerial", req.Chunks[1].Repo)
+}
+
+var widgetOrderBase = time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+
+// orderChunk builds a fixture chunk; startedMin/completedMin < 0 leave the timestamp zero.
+func orderChunk(id string, idx int, status string, startedMin, completedMin int, deps ...string) model.VanadisChunk {
+	c := model.VanadisChunk{ID: id, ChunkIndex: idx, Status: status, DependsOn: deps}
+	if startedMin >= 0 {
+		c.StartedAt = widgetOrderBase.Add(time.Duration(startedMin) * time.Minute)
+	}
+	if completedMin >= 0 {
+		c.CompletedAt = widgetOrderBase.Add(time.Duration(completedMin) * time.Minute)
+	}
+	return c
+}
+
+// regressionOrderChunks reproduces an appended-DAG build: 0-14 completed, 15 running,
+// 16 pending verify (depends on 21), 17-20 completed later, 21 pending (depends on 15).
+func regressionOrderChunks() []model.VanadisChunk {
+	chunks := make([]model.VanadisChunk, 0, 22)
+	for i := range 15 {
+		chunks = append(chunks, orderChunk(fmt.Sprintf("c%02d", i), i, "completed", i, i+1))
+	}
+	chunks = append(chunks,
+		orderChunk("c15", 15, "running", 30, -1),
+		orderChunk("c16", 16, "pending", -1, -1, "c21"),
+	)
+	for i := 17; i <= 20; i++ {
+		chunks = append(chunks, orderChunk(fmt.Sprintf("c%02d", i), i, "merged", i, i+20))
+	}
+	return append(chunks, orderChunk("c21", 21, "pending", -1, -1, "c15"))
+}
+
+func TestOrderWidgetChunks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		chunks []model.VanadisChunk
+		want   []string
+	}{
+		{
+			name:   "empty input",
+			chunks: nil,
+			want:   []string{},
+		},
+		{
+			name:   "appended dag regression orders done by completion then running then pending by depth",
+			chunks: regressionOrderChunks(),
+			want: []string{
+				"c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09",
+				"c10", "c11", "c12", "c13", "c14", "c17", "c18", "c19", "c20",
+				"c15", "c21", "c16",
+			},
+		},
+		{
+			name: "failed chunk stays in progress stage ahead of pending",
+			chunks: []model.VanadisChunk{
+				orderChunk("p", 0, "pending", -1, -1),
+				orderChunk("f", 1, "failed", 5, -1),
+				orderChunk("r", 2, "coding", 2, -1),
+				orderChunk("d", 3, "deployed", 1, 3),
+			},
+			want: []string{"d", "r", "f", "p"},
+		},
+		{
+			name: "cancelled closed synced and success are done",
+			chunks: []model.VanadisChunk{
+				orderChunk("open", 0, "pr_opened", 1, -1),
+				orderChunk("cancel", 1, "cancelled", -1, 4),
+				orderChunk("close", 2, "closed", -1, 3),
+				orderChunk("sync", 3, "synced", -1, 2),
+				orderChunk("ok", 4, "success", -1, 1),
+			},
+			want: []string{"ok", "sync", "close", "cancel", "open"},
+		},
+		{
+			name: "pending dag depth beats chunk index",
+			chunks: []model.VanadisChunk{
+				orderChunk("deep", 0, "pending", -1, -1, "mid"),
+				orderChunk("mid", 1, "pending", -1, -1, "root"),
+				orderChunk("root", 2, "pending", -1, -1),
+				orderChunk("blank", 3, "", -1, -1),
+			},
+			want: []string{"root", "blank", "mid", "deep"},
+		},
+		{
+			name: "unknown depends on ids are treated as roots",
+			chunks: []model.VanadisChunk{
+				orderChunk("child", 0, "pending", -1, -1, "orphan-parent"),
+				orderChunk("leaf", 1, "pending", -1, -1, "child"),
+				orderChunk("root", 2, "pending", -1, -1, "missing"),
+			},
+			want: []string{"child", "root", "leaf"},
+		},
+		{
+			name: "dependency cycle terminates and falls back to chunk index",
+			chunks: []model.VanadisChunk{
+				orderChunk("a", 0, "pending", -1, -1, "b"),
+				orderChunk("b", 1, "pending", -1, -1, "a"),
+			},
+			want: []string{"b", "a"},
+		},
+		{
+			name: "zero timestamps sort after set ones then fall back to chunk index",
+			chunks: []model.VanadisChunk{
+				orderChunk("done-zero-b", 1, "completed", -1, -1),
+				orderChunk("done-zero-a", 0, "completed", -1, -1),
+				orderChunk("done-set", 2, "completed", -1, 9),
+				orderChunk("run-zero", 3, "running", -1, -1),
+				orderChunk("run-set", 4, "running", 7, -1),
+			},
+			want: []string{"done-set", "done-zero-a", "done-zero-b", "run-set", "run-zero"},
+		},
+		{
+			name: "identical keys tiebreak on id",
+			chunks: []model.VanadisChunk{
+				orderChunk("zeta", 0, "pending", -1, -1),
+				orderChunk("alpha", 0, "pending", -1, -1),
+			},
+			want: []string{"alpha", "zeta"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			before := slices.Clone(tc.chunks)
+			got := orderWidgetChunks(tc.chunks)
+			ids := make([]string, 0, len(got))
+			for _, c := range got {
+				ids = append(ids, c.ID)
+			}
+			assert.Equal(t, tc.want, ids)
+			assert.Equal(t, before, tc.chunks, "input slice must not be mutated")
+		})
+	}
 }
 
 func TestChunkActiveStepBranches(t *testing.T) {
