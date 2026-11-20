@@ -15,6 +15,13 @@ import (
 	"time"
 )
 
+const (
+	statusSkippedActive = "skipped_active"
+	statusAccepted      = "accepted"
+	statusAlreadyExists = "already_exists"
+	statusOK            = "ok"
+)
+
 // ErrDispatchActive reports that Eri skipped a dispatch because a session is already active.
 var ErrDispatchActive = errors.New("dispatch active; reconciliation deferred")
 
@@ -143,10 +150,10 @@ func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) 
 	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("decode eri dispatch response: %w", err)
 	}
-	if result.Status == "skipped_active" {
+	if result.Status == statusSkippedActive {
 		return ErrDispatchActive
 	}
-	if result.Status != "" && result.Status != "ok" && result.Status != "accepted" && result.Status != "already_exists" {
+	if result.Status != "" && result.Status != statusOK && result.Status != statusAccepted && result.Status != statusAlreadyExists {
 		return fmt.Errorf("eri rejected dispatch %q (status %q)", req.ID, result.Status)
 	}
 	return nil
@@ -166,10 +173,10 @@ func (c *HTTPEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchR
 	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("decode eri dispatch acceptance: %w", err)
 	}
-	if result.Status == "skipped_active" {
+	if result.Status == statusSkippedActive {
 		return ErrDispatchActive
 	}
-	if req.ID == "" || result.DispatchID != req.ID || (result.Status != "accepted" && result.Status != "already_exists") {
+	if req.ID == "" || result.DispatchID != req.ID || (result.Status != statusAccepted && result.Status != statusAlreadyExists) {
 		return fmt.Errorf("eri did not accept dispatch %q (status %q, identity %q)", req.ID, result.Status, result.DispatchID)
 	}
 	return nil
