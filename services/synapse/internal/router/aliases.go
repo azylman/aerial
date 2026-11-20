@@ -95,6 +95,7 @@ const (
 
 var (
 	prRolloutStatus                 = flux.PRRolloutStatus
+	prRolloutJobProgress            = flux.PRRolloutJobProgress
 	NewPostgresPRRegistry           = registry.NewPostgresPRRegistry
 	LoadConfig                      = config.LoadConfig
 	LoadConfigStrict                = config.LoadConfigStrict

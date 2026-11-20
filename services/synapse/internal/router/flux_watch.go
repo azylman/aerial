@@ -232,6 +232,43 @@ func (s *RouterServer) loadKustomizationRollout(ctx context.Context, obs kustomi
 	return kustomizationRolloutState{Workloads: workloads, ConfigMaps: configMaps, SourceRepo: sourceRepo}, nil
 }
 
+// pendingOtherKustomizationJobs lists workloads for any other pending Kustomization request
+// in pr.Metadata and returns a set of jobs that appear on a workload not yet rolled out on commitSHA.
+func (s *RouterServer) pendingOtherKustomizationJobs(ctx context.Context, pr DeployingPR, currentRef fluxKustomizationRef) (map[string]bool, error) {
+	requests := recordedKustomizationRequests(pr.Metadata)
+	deployed := extractStringSliceFromMetadata(pr.Metadata, deployedKustomizationsKey)
+	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
+	pendingJobs := make(map[string]bool)
+	for name, req := range requests {
+		if name == currentRef.Name || slices.Contains(deployed, name) {
+			continue
+		}
+		ref := fluxKustomizationRef{
+			Namespace: cmp.Or(req.Namespace, fluxSystemNamespace),
+			Name:      name,
+		}
+		workloads, err := s.dispatcher.ListKustomizationWorkloads(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("list workloads of other kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+		}
+		flux.LinkManagedWorkloads(workloads)
+		for _, w := range workloads {
+			wDone, wFailed, _ := flux.WorkloadRolloutComplete(w)
+			for _, img := range w.Images {
+				_, _, job := model.ResolveImageTag(pr.Repo, img)
+				if job == "" {
+					continue
+				}
+				rolledOut := flux.ImageTag(img) == commitSHA && wDone && !wFailed
+				if !rolledOut {
+					pendingJobs[job] = true
+				}
+			}
+		}
+	}
+	return pendingJobs, nil
+}
+
 // gateKustomizationRequest completes an applied Kustomization request once the PR's change is live:
 // when the Kustomization's source is the PR's repo, Flux must have applied the merge commit or a
 // descendant of it, and every workload the change reached must have rolled out (prRolloutStatus, with
@@ -259,16 +296,83 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	if err != nil {
 		return fmt.Errorf("resolve merge time of %s#%d: %w", pr.Repo, pr.PRNumber, err)
 	}
-	done, failed, reason := prRolloutStatus(prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()})
+	in := prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()}
+	done, failed, reason := prRolloutStatus(in)
 	switch {
 	case failed:
 		return s.failKustomizationRollout(ctx, pr, name, reason)
 	case done:
+		// For multi-Kustomization PRs, MarkKustomizationsDeployed only merges started_jobs once ALL
+		// Kustomizations finish, so record ready jobs from this Kustomization best-effort without blocking completion.
+		if len(recordedKustomizationRequests(pr.Metadata)) > 1 {
+			if _, rErr := s.recordPRRolloutJobProgress(ctx, pr, obs.Ref, in); rErr != nil {
+				slog.WarnContext(ctx, "[synapse] [flux-watch] best-effort job progress failed before completing kustomization", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", rErr)
+			}
+		}
 		return s.completeKustomizationRequest(ctx, pr, name)
 	default:
 		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
+		s.emitWaitingRolloutJobProgress(ctx, pr, obs.Ref, in)
 		return nil
 	}
+}
+
+func (s *RouterServer) emitWaitingRolloutJobProgress(ctx context.Context, pr DeployingPR, ref fluxKustomizationRef, in prRolloutInput) {
+	name := ref.Name
+	updated, err := s.recordPRRolloutJobProgress(ctx, pr, ref, in)
+	if err != nil {
+		slog.WarnContext(ctx, "[synapse] [flux-watch] record job progress failed", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+		return
+	}
+	if !updated {
+		return
+	}
+	if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+		slog.WarnContext(ctx, "[synapse] [flux-watch] route rollout progress failed", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+	}
+	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "rollout_updated",
+		Repo:         pr.Repo,
+		PRNumber:     pr.PRNumber,
+		HeadSHA:      pr.HeadSHA,
+		MergeSHA:     pr.MergeSHA,
+		JobName:      name,
+		Status:       statusDeploying,
+		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		slog.WarnContext(ctx, "[synapse] [flux-watch] publish rollout_updated failed", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+	}
+}
+
+// recordPRRolloutJobProgress records newly ready jobs across kustomization workloads, filtering against
+// other pending kustomizations for the PR.
+func (s *RouterServer) recordPRRolloutJobProgress(ctx context.Context, pr DeployingPR, ref fluxKustomizationRef, in prRolloutInput) (bool, error) {
+	readyJobs, _ := prRolloutJobProgress(in, pr.Repo)
+	if len(readyJobs) == 0 || s.registry == nil {
+		return false, nil
+	}
+	requests := recordedKustomizationRequests(pr.Metadata)
+	if len(requests) > 1 {
+		pendingOther, pErr := s.pendingOtherKustomizationJobs(ctx, pr, ref)
+		if pErr != nil {
+			return false, pErr
+		}
+		if len(pendingOther) > 0 {
+			var filtered []string
+			for _, j := range readyJobs {
+				if !pendingOther[j] {
+					filtered = append(filtered, j)
+				}
+			}
+			readyJobs = filtered
+		}
+	}
+	if len(readyJobs) == 0 {
+		return false, nil
+	}
+	return s.registry.RecordDeployedJobs(ctx, pr.Repo, pr.PRNumber, readyJobs)
 }
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.

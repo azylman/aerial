@@ -223,3 +223,70 @@ func PRRolloutStatus(in PRRolloutInput) (done, failed bool, reason string) {
 	}
 	return true, false, ""
 }
+
+// PRRolloutJobProgress inspects workloads whose images match in.CommitSHA, determining which jobs
+// have completed rollout across all workloads in this Kustomization and which are still pending.
+func PRRolloutJobProgress(in PRRolloutInput, repo string) (readyJobs, pendingJobs []string) {
+	if in.CommitSHA == "" {
+		return nil, nil
+	}
+	LinkManagedWorkloads(in.Workloads)
+	cutoff := in.Since.Add(-rolloutChangeSkew)
+	changed := func(at time.Time) bool { return !at.IsZero() && !at.Before(cutoff) }
+
+	seenReady := make(map[string]bool)
+	seenPending := make(map[string]bool)
+
+	for _, w := range in.Workloads {
+		matchingJobs := workloadMatchingJobs(w, in.CommitSHA, repo)
+		if len(matchingJobs) == 0 {
+			continue
+		}
+
+		wDone, wFailed, _ := WorkloadRolloutComplete(w)
+		isPending := !wDone || wFailed || workloadReloaderPending(w, in.ConfigMaps, changed)
+
+		for _, job := range matchingJobs {
+			if isPending {
+				seenPending[job] = true
+			} else {
+				seenReady[job] = true
+			}
+		}
+	}
+
+	for job := range seenPending {
+		pendingJobs = append(pendingJobs, job)
+	}
+	slices.Sort(pendingJobs)
+
+	for job := range seenReady {
+		if !seenPending[job] {
+			readyJobs = append(readyJobs, job)
+		}
+	}
+	slices.Sort(readyJobs)
+
+	return readyJobs, pendingJobs
+}
+
+func workloadMatchingJobs(w model.WorkloadRollout, commitSHA, repo string) []string {
+	var jobs []string
+	for _, img := range w.Images {
+		if ImageTag(img) == commitSHA {
+			if _, _, job := model.ResolveImageTag(repo, img); job != "" {
+				jobs = append(jobs, job)
+			}
+		}
+	}
+	return jobs
+}
+
+func workloadReloaderPending(w model.WorkloadRollout, configMaps []model.ConfigMapChange, changed func(time.Time) bool) bool {
+	for _, cm := range configMaps {
+		if cm.Namespace == w.Namespace && changed(cm.ChangedAt) && ReloadsOn(w, cm.Name) && w.ChangedAt.Before(cm.ChangedAt) {
+			return true
+		}
+	}
+	return false
+}

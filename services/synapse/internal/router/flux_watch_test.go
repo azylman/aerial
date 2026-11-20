@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -207,6 +208,16 @@ func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref
 }
 
 func (m *mockOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
+	if m.workloadsErrByName != nil {
+		if err, ok := m.workloadsErrByName[ref.Name]; ok {
+			return nil, err
+		}
+	}
+	if m.workloadsByName != nil {
+		if ws, ok := m.workloadsByName[ref.Name]; ok {
+			return ws, m.workloadsErr
+		}
+	}
 	return m.workloads, m.workloadsErr
 }
 
@@ -216,16 +227,25 @@ func (m *mockOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context
 
 // rolloutOutcome is the observable effect of a watcher apply call on registry and dispatcher fakes.
 type rolloutOutcome struct {
-	marks       []string
-	failed      int
-	prompts     int
-	promptSub   string
-	dispatches  int
-	dispatchSub string
-	repatchAts  []string
+	marks        []string
+	deployedJobs []string
+	events       []string
+	failed       int
+	prompts      int
+	promptSub    string
+	dispatches   int
+	dispatchSub  string
+	repatchAts   []string
 }
 
-func observeRollout(t *testing.T, reg *mockPRRegistry, disp *mockOutboundDispatcher, want rolloutOutcome) {
+func observeRollout(t *testing.T, reg *mockPRRegistry, disp *mockOutboundDispatcher, want rolloutOutcome, bus ...*mockEventBus) {
+	t.Helper()
+	assertRolloutRegistry(t, reg, want)
+	assertRolloutEvents(t, bus, want.events)
+	assertRolloutDispatcher(t, disp, want)
+}
+
+func assertRolloutRegistry(t *testing.T, reg *mockPRRegistry, want rolloutOutcome) {
 	t.Helper()
 	var marks []string
 	for _, c := range reg.markKustomizationsCalls {
@@ -234,9 +254,36 @@ func observeRollout(t *testing.T, reg *mockPRRegistry, disp *mockOutboundDispatc
 	if !slices.Equal(marks, want.marks) {
 		t.Errorf("marked deployed = %v, want %v", marks, want.marks)
 	}
+	if want.deployedJobs != nil {
+		var deployed []string
+		for _, c := range reg.recordDeployedJobsCalls {
+			deployed = append(deployed, c.jobs...)
+		}
+		if !slices.Equal(deployed, want.deployedJobs) {
+			t.Errorf("recordDeployedJobs = %v, want %v", deployed, want.deployedJobs)
+		}
+	}
 	if len(reg.deployFailedCalls) != want.failed {
 		t.Errorf("deploy_failed transitions = %d, want %d", len(reg.deployFailedCalls), want.failed)
 	}
+}
+
+func assertRolloutEvents(t *testing.T, bus []*mockEventBus, want []string) {
+	t.Helper()
+	if want == nil || len(bus) == 0 || bus[0] == nil {
+		return
+	}
+	gotEvents := make([]string, 0, len(bus[0].publishedPREvents))
+	for _, e := range bus[0].publishedPREvents {
+		gotEvents = append(gotEvents, e.Event)
+	}
+	if !slices.Equal(gotEvents, want) {
+		t.Errorf("published events = %v, want %v", gotEvents, want)
+	}
+}
+
+func assertRolloutDispatcher(t *testing.T, disp *mockOutboundDispatcher, want rolloutOutcome) {
+	t.Helper()
 	prompts := disp.PromptCalls()
 	if len(prompts) != want.prompts {
 		t.Errorf("prompts = %d, want %d", len(prompts), want.prompts)
@@ -263,7 +310,7 @@ const (
 
 // newRolloutRouter builds a router whose GitHub API serves the trackedPR merge commits (all merged at
 // 10:00:00 UTC on the fixture day), overlaid with overrides.
-func newRolloutRouter(t *testing.T, reg PRRegistryUpdater, disp OutboundDispatcher, overrides map[string]kubeRoute) (*kubeFixture, *RouterServer) {
+func newRolloutRouter(t *testing.T, reg PRRegistryUpdater, disp OutboundDispatcher, overrides map[string]kubeRoute, bus ...pubsub.Bus) (*kubeFixture, *RouterServer) {
 	t.Helper()
 	routes := map[string]kubeRoute{
 		"GET /repos/azylman/aerial/git/commits/sha-41": {body: `{"sha":"sha-41","committer":{"date":"2026-11-08T10:00:00Z"}}`},
@@ -271,7 +318,7 @@ func newRolloutRouter(t *testing.T, reg PRRegistryUpdater, disp OutboundDispatch
 	}
 	maps.Copy(routes, overrides)
 	fixture, ts := newKubeFixture(t, routes)
-	return fixture, newTestRouter(Config{GitHubAPIURL: ts.URL}, ts.Client(), reg, disp)
+	return fixture, newTestRouter(Config{GitHubAPIURL: ts.URL}, ts.Client(), reg, disp, bus...)
 }
 
 func TestApplyKustomizationStatus(t *testing.T) {
@@ -280,24 +327,29 @@ func TestApplyKustomizationStatus(t *testing.T) {
 	twoTargets := map[string]string{"aerial-core": reqT1, "marida-core": reqT1}
 
 	tests := []struct {
-		name          string
-		prs           []DeployingPR
-		listErr       error
-		markRes       bool
-		markErr       error
-		dispatchErr   error
-		patchErr      error
-		workloads     []workloadRollout
-		workloadsErr  error
-		configMaps    []configMapChange
-		configMapsErr error
-		sourceRepo    string
-		sourceErr     error
-		github        map[string]kubeRoute
-		revision      string
-		obs           kustomizationObservation
-		want          rolloutOutcome
-		wantErr       bool
+		name               string
+		prs                []DeployingPR
+		listErr            error
+		markRes            bool
+		markErr            error
+		recordDeployedRes  bool
+		recordDeployedErr  error
+		dispatchErr        error
+		patchErr           error
+		workloads          []workloadRollout
+		workloadsByName    map[string][]workloadRollout
+		workloadsErrByName map[string]error
+		workloadsErr       error
+		configMaps         []configMapChange
+		configMapsErr      error
+		sourceRepo         string
+		sourceErr          error
+		github             map[string]kubeRoute
+		revision           string
+		obs                kustomizationObservation
+		busErr             error
+		want               rolloutOutcome
+		wantErr            bool
 	}{
 		{name: "two-target PR stays deploying after the first kustomization", prs: []DeployingPR{trackedPR(42, twoTargets)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}}},
 		{name: "two-target PR deploys on the second kustomization", prs: []DeployingPR{trackedPR(42, twoTargets, "aerial-core")}, markRes: true, obs: kobs("marida-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"marida-core"}}},
@@ -335,18 +387,25 @@ func TestApplyKustomizationStatus(t *testing.T) {
 		{name: "configmap list failure is returned and leaves the PR deploying", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, configMapsErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
 		{name: "source resolution failure is returned and leaves the PR deploying", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, sourceErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
 		{name: "re-patch failure is returned so the watcher re-lists", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, patchErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT0, reqT0, false, ready), want: rolloutOutcome{repatchAts: []string{reqT1}}, wantErr: true},
+		{name: "waiting rollout records deployed jobs and publishes rollout_updated when a workload completes", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, recordDeployedRes: true, workloads: []workloadRollout{deployRollout("synapse", sha42Image, 3, 3, 1, 1, 1, 1, false), deployRollout("eri", "ghcr.io/azylman/aerial-eri:sha-42", 3, 3, 1, 1, 0, 2, false)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{deployedJobs: []string{"aerial-synapse"}, events: []string{"rollout_updated"}}},
+		{name: "waiting rollout bus publish failure is best-effort and does not fail watcher", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, recordDeployedRes: true, workloads: []workloadRollout{deployRollout("synapse", sha42Image, 3, 3, 1, 1, 1, 1, false), deployRollout("eri", "ghcr.io/azylman/aerial-eri:sha-42", 3, 3, 1, 1, 0, 2, false)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), busErr: errors.New("bus down"), want: rolloutOutcome{deployedJobs: []string{"aerial-synapse"}, events: []string{}}},
+		{name: "multi-kustomization filters ready jobs pending in another kustomization", prs: []DeployingPR{trackedPR(42, twoTargets)}, recordDeployedRes: true, workloadsByName: map[string][]workloadRollout{"aerial-core": {deployRollout("synapse", sha42Image, 3, 3, 1, 1, 1, 1, false), deployRollout("eri", "ghcr.io/azylman/aerial-eri:sha-42", 3, 3, 1, 1, 1, 1, false)}, "marida-core": {deployRollout("synapse", sha42Image, 3, 3, 1, 1, 0, 2, false), deployRollout("custom", "example.com/custom:sha-42", 3, 3, 1, 1, 1, 1, false)}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, deployedJobs: []string{"aerial-eri"}}},
+		{name: "multi-kustomization does not filter jobs when other kustomization already deployed", prs: []DeployingPR{trackedPR(42, twoTargets, "marida-core")}, markRes: true, recordDeployedRes: true, workloadsByName: map[string][]workloadRollout{"aerial-core": {deployRollout("synapse", sha42Image, 3, 3, 1, 1, 1, 1, false)}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, deployedJobs: []string{"aerial-synapse"}}},
+		{name: "multi-kustomization other workload list failure does not block kustomization completion", prs: []DeployingPR{trackedPR(42, twoTargets)}, workloads: []workloadRollout{deployRollout("synapse", sha42Image, 3, 3, 1, 1, 1, 1, false)}, workloadsErrByName: map[string]error{"marida-core": errors.New("k8s api timeout")}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, deployedJobs: []string{}}},
+		{name: "waiting rollout record deployed jobs failure is best-effort", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, recordDeployedErr: errors.New("db error"), workloads: []workloadRollout{deployRollout("synapse", sha42Image, 3, 3, 1, 1, 1, 1, false), deployRollout("eri", "ghcr.io/azylman/aerial-eri:sha-42", 3, 3, 1, 1, 0, 2, false)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{deployedJobs: []string{"aerial-synapse"}, events: []string{}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			reg := &mockPRRegistry{listDeployingPRs: tc.prs, listDeployingErr: tc.listErr, markKustomizationsRes: tc.markRes, markKustomizationsErr: tc.markErr, deployFailedUpdated: true}
-			disp := &mockOutboundDispatcher{dispatchErr: tc.dispatchErr, reconcileErrs: map[string]error{"aerial-core": tc.patchErr}, workloads: tc.workloads, workloadsErr: tc.workloadsErr, configMaps: tc.configMaps, configMapsErr: tc.configMapsErr, sourceRepo: tc.sourceRepo, sourceRepoErr: tc.sourceErr}
-			_, srv := newRolloutRouter(t, reg, disp, tc.github)
+			reg := &mockPRRegistry{listDeployingPRs: tc.prs, listDeployingErr: tc.listErr, markKustomizationsRes: tc.markRes, markKustomizationsErr: tc.markErr, recordDeployedJobsRes: tc.recordDeployedRes, recordDeployedJobsErr: tc.recordDeployedErr, deployFailedUpdated: true}
+			disp := &mockOutboundDispatcher{dispatchErr: tc.dispatchErr, reconcileErrs: map[string]error{"aerial-core": tc.patchErr}, workloads: tc.workloads, workloadsByName: tc.workloadsByName, workloadsErrByName: tc.workloadsErrByName, workloadsErr: tc.workloadsErr, configMaps: tc.configMaps, configMapsErr: tc.configMapsErr, sourceRepo: tc.sourceRepo, sourceRepoErr: tc.sourceErr}
+			bus := &mockEventBus{err: tc.busErr}
+			_, srv := newRolloutRouter(t, reg, disp, tc.github, bus)
 			tc.obs.LastAppliedRevision = tc.revision
 			if err := srv.applyKustomizationStatus(context.Background(), tc.obs); (err != nil) != tc.wantErr {
 				t.Fatalf("applyKustomizationStatus() err = %v, wantErr %v", err, tc.wantErr)
 			}
-			observeRollout(t, reg, disp, tc.want)
+			observeRollout(t, reg, disp, tc.want, bus)
 		})
 	}
 }

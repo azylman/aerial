@@ -85,6 +85,38 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 	}
 }
 
+func TestPostgresPRRegistry_RecordDeployedJobsUnit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []postgresPRRegistryUnitCase{
+		{name: "RecordDeployedJobs empty repo guard", repo: "", prNumber: 42, jobs: []string{"eri"}},
+		{name: "RecordDeployedJobs zero pr guard", repo: "azylman/aerial", prNumber: 0, jobs: []string{"eri"}},
+		{name: "RecordDeployedJobs nil pool guard", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}},
+		{name: "RecordDeployedJobs empty jobs guard", repo: "azylman/aerial", prNumber: 42, jobs: []string{" "}},
+		{name: "RecordDeployedJobs returns true on update", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, wantUpdated: true},
+		{name: "RecordDeployedJobs returns false when no new jobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "RecordDeployedJobs db error", repo: "azylman/aerial", prNumber: 42, jobs: []string{"eri"}, mockSelectErr: errors.New("db error"), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotSQL, gotExecSQL string
+			pool := buildMockPRRegistryPool(tc, &gotSQL, &gotExecSQL)
+			reg := NewPostgresPRRegistry(pool)
+
+			got, err := reg.RecordDeployedJobs(ctx, tc.repo, tc.prNumber, tc.jobs)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RecordDeployedJobs err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if got != tc.wantUpdated {
+				t.Errorf("updated = %v, want %v", got, tc.wantUpdated)
+			}
+		})
+	}
+}
+
 func TestPostgresPRRegistry_RetryReadinessUnit(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

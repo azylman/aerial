@@ -35,6 +35,8 @@ type mockOutboundDispatcher struct {
 	discordInteractionErr   error
 	kustomizationsByImage   map[string][]fluxKustomizationRef
 	workloads               []workloadRollout
+	workloadsByName         map[string][]workloadRollout
+	workloadsErrByName      map[string]error
 	workloadsErr            error
 	configMaps              []configMapChange
 	configMapsErr           error

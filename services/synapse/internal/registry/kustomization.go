@@ -13,6 +13,7 @@ import (
 const (
 	KustomizationRequestsKey  = "kustomization_requests"
 	DeployedKustomizationsKey = "deployed_kustomizations"
+	DeployedJobsKey           = "deployed_jobs"
 )
 
 // RecordKustomizationRequests replaces the PR's kustomization_requests wholesale and clears
@@ -69,13 +70,25 @@ func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, rep
 			FROM cur
 		), completed AS (
 			SELECT id, meta, deployed,
-			    NOT EXISTS (SELECT 1 FROM jsonb_object_keys(meta->'` + KustomizationRequestsKey + `') AS k WHERE NOT deployed ? k) AS done
+			    NOT EXISTS (SELECT 1 FROM jsonb_object_keys(meta->'` + KustomizationRequestsKey + `') AS k WHERE NOT deployed ? k) AS done,
+			    (
+				SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+				FROM jsonb_array_elements(
+					CASE WHEN jsonb_typeof(meta->'` + DeployedJobsKey + `') = 'array' THEN meta->'` + DeployedJobsKey + `' ELSE '[]'::jsonb END
+					|| CASE WHEN jsonb_typeof(meta->'started_jobs') = 'array' THEN meta->'started_jobs' ELSE '[]'::jsonb END
+				) AS elem
+			    ) AS final_deployed_jobs
 			FROM next
 		)
 		UPDATE pr_registry p
 		SET metadata = jsonb_set(
 				CASE
-					WHEN n.done THEN jsonb_set(n.meta - 'banner' - 'deploy_failed_published', '{deploy_success_pending}', 'true'::jsonb, true)
+					WHEN n.done THEN jsonb_set(
+						jsonb_set(n.meta - 'banner' - 'deploy_failed_published', '{deploy_success_pending}', 'true'::jsonb, true),
+						'{` + DeployedJobsKey + `}',
+						n.final_deployed_jobs,
+						true
+					)
 					ELSE n.meta
 				END,
 				'{` + DeployedKustomizationsKey + `}',
@@ -95,6 +108,40 @@ func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, rep
 		return false, err
 	}
 	return transitioned, nil
+}
+
+// RecordDeployedJobs unions jobs into metadata->'deployed_jobs' for deploying, deploy_failed,
+// or deployed PRs, returning true if any new jobs were added.
+func (r *PostgresPRRegistry) RecordDeployedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	repo = model.NormalizeRepo(repo)
+	jobs = model.DedupeTrimmedStrings(jobs)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(jobs) == 0 {
+		return false, nil
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(
+				COALESCE(metadata, '{}'::jsonb),
+				'{` + DeployedJobsKey + `}',
+				(
+					SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+					FROM jsonb_array_elements(
+						CASE WHEN jsonb_typeof(metadata->'` + DeployedJobsKey + `') = 'array' THEN metadata->'` + DeployedJobsKey + `' ELSE '[]'::jsonb END
+						|| (SELECT COALESCE(jsonb_agg(to_jsonb(j)), '[]'::jsonb) FROM unnest($3::text[]) AS j)
+					) AS elem
+				),
+				true
+			),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status IN ('deploying', 'deploy_failed', 'deployed')
+		  AND EXISTS (SELECT 1 FROM unnest($3::text[]) AS j WHERE NOT (COALESCE(metadata->'` + DeployedJobsKey + `', '[]'::jsonb) @> to_jsonb(j)))
+		RETURNING true;`
+	var updated bool
+	found, err := r.queryRowScan(ctx, "record deployed jobs", query, []any{&updated}, repo, prNumber, jobs)
+	if err != nil {
+		return false, err
+	}
+	return found && updated, nil
 }
 
 // HasKustomizationRequests reports whether the PR's completion is tracked by the Kustomization watcher.
