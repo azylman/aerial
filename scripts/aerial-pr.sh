@@ -577,9 +577,11 @@ register_pr_in_brain() {
     local delay="${AERIAL_PR_REGISTER_RETRY_DELAY:-1}"
     local attempt=1
     local reg_resp=""
+    get_vanadis_auth_args
 
     while [ "$attempt" -le "$max_attempts" ]; do
         reg_resp=$(curl -s --connect-timeout 2 -m 15 -X POST \
+            ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} \
             -H "Content-Type: application/json" \
             -d "$reg_payload" \
             "$brain_reg_url" 2>/dev/null || true)

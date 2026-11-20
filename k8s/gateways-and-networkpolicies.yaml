@@ -580,6 +580,10 @@ spec:
                 values:
                   - eri
                   - eri-restate
+                  - eri-miorine
+                  - eri-miorine-restate
+                  - eri-suletta
+                  - eri-suletta-restate
                   - synapse
                   - haro
                   - vanadis-restate
@@ -609,6 +613,10 @@ spec:
                 values:
                   - eri
                   - eri-restate
+                  - eri-miorine
+                  - eri-miorine-restate
+                  - eri-suletta
+                  - eri-suletta-restate
                   - synapse
                   - console
                   - vision

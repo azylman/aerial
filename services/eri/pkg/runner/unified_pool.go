@@ -392,12 +392,18 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 			return DaemonConfig{}, fmt.Errorf("failed to create turn env directory %q: %w", turnEnvDir, err)
 		}
 		turnEnvFile = filepath.Join(turnEnvDir, SanitizeDaemonTargetKey(targetKey)+".sh")
+		saTokenDest := filepath.Join(turnEnvDir, "sa-token")
+		syncedTokenPath, syncErr := session.SyncTurnSATokenFile(os.Getenv("AERIAL_K8S_SA_TOKEN_SRC"), saTokenDest, getEuid(), os.Chown)
+		if syncErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning: failed syncing SA token file %q: %v", saTokenDest, syncErr)
+		}
 		daemonEnv = BuildAgyEnv(AgyEnvInput{
 			BaseEnv:      cfg.Env,
 			HomeDir:      home,
 			Engine:       cfg.Engine,
 			TargetID:     targetKey,
 			TurnEnvFile:  turnEnvFile,
+			SATokenPath:  syncedTokenPath,
 			Timezone:     cfg.Timezone,
 			DaemonID:     p.daemonID(targetKey),
 			MCPProxyPort: cfg.MCPProxyPort,

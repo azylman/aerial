@@ -1727,6 +1727,16 @@ VANADIS_ATTACH_CHECK=$(bash -c "
     export -f curl
     out6b=\$(AERIAL_SA_TOKEN_PATH=\"\$TMP_TOKEN\" attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-4\"}' 104 2>/dev/null)
     grep -q -- \"Authorization: Bearer test-sa-jwt-token\" \"\$ARGS_FILE\" && echo 'att_sa:ok'
+
+    # Subtest 6c: register_pr_in_brain passes SA bearer token from AERIAL_SA_TOKEN_PATH
+    : > \"\$ARGS_FILE\"
+    curl() {
+        echo \"\$*\" > \"\$ARGS_FILE\"
+        printf '{\"status\":\"registered\",\"target_id\":\"th-999\"}'
+    }
+    export -f curl
+    AERIAL_SA_TOKEN_PATH=\"\$TMP_TOKEN\" register_pr_in_brain 'http://synapse.aerial:4020/internal/pr/register' '{\"repo\":\"aerial\",\"pr_number\":104}' 104 'th-999' 2>/dev/null
+    grep -q -- \"Authorization: Bearer test-sa-jwt-token\" \"\$ARGS_FILE\" && echo 'reg_sa:ok'
     rm -f \"\$TMP_TOKEN\" \"\$ARGS_FILE\"
 ")
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url1:ok' && echo true || echo false)" "resolve_vanadis_url resolves from VANADIS_URL env"
@@ -1736,6 +1746,7 @@ assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att1:ok' && echo tru
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att2:ok' && echo true || echo false)" "attach_pr_in_vanadis retries transient error and succeeds"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att3:ok' && echo true || echo false)" "attach_pr_in_vanadis fails after exhausting retries"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att_sa:ok' && echo true || echo false)" "attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'reg_sa:ok' && echo true || echo false)" "register_pr_in_brain passes SA bearer token from AERIAL_SA_TOKEN_PATH"
 
 # Subtest 7: submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id
 SUBMIT_VANADIS_CHECK=$(bash -c "
