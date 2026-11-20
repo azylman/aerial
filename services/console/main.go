@@ -46,6 +46,10 @@ type ServiceStatus struct {
 	Status        string    `json:"status"`
 	UptimeSeconds int64     `json:"uptime_seconds"`
 	LastCheckTime time.Time `json:"last_check_time"`
+	// Commit is the full commit SHA from the Deployment's image tag (k8s mode only).
+	Commit string `json:"commit,omitempty"`
+	// Image is the Deployment's image reference (k8s mode only).
+	Image string `json:"image,omitempty"`
 }
 
 type MatrixJobChip struct {
@@ -472,8 +476,9 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 }
 
 // synthesizeContainersFromServices converts ServiceStatus entries into DockerContainerJSON
-// records without stamping aerial.commit_sha so resolveContainerCommit can match recon.TargetServices
-// before falling back to currentCommit.
+// records. aerial.commit_sha and aerial.image are stamped from the Deployment image tag when
+// known; services without them fall back to recon.TargetServices or currentCommit in
+// resolveContainerCommit.
 func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) []DockerContainerJSON {
 	out := make([]DockerContainerJSON, 0, len(services))
 	for _, svc := range services {
@@ -481,12 +486,20 @@ func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) [
 		if svc.Status == healthUnhealthy {
 			state = "exited"
 		}
+		labels := map[string]string{"aerial.service": svc.Name}
+		if svc.Commit != "" {
+			labels[labelCommitSHA] = svc.Commit
+		}
+		if svc.Image != "" {
+			labels[labelImage] = imageName(svc.Image)
+		}
 		out = append(out, DockerContainerJSON{
 			Names:   []string{"/" + svc.Name},
+			Image:   svc.Image,
 			Created: now.Unix() - svc.UptimeSeconds,
 			State:   state,
 			Status:  svc.Status,
-			Labels:  map[string]string{"aerial.service": svc.Name},
+			Labels:  labels,
 			Health:  &DockerContainerHealth{Status: svc.Status},
 		})
 	}

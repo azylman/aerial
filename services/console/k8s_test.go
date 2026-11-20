@@ -23,6 +23,8 @@ type parseK8sClusterStateTestCase struct {
 	wantCount       int
 	wantStatuses    map[string]string
 	wantUptimes     map[string]int64
+	wantCommits     map[string]string
+	wantImages      map[string]string
 }
 
 func TestParseK8sClusterState(t *testing.T) {
@@ -33,6 +35,7 @@ func TestParseK8sClusterState(t *testing.T) {
 	tests := parseK8sClusterStatePrimaryCases(refTime, tenSecAgo, twentySecAgo)
 	tests = append(tests, parseK8sClusterStateSecondaryCases(refTime, tenSecAgo)...)
 	tests = append(tests, parseK8sClusterStateTertiaryCases(refTime, tenSecAgo, twentySecAgo)...)
+	tests = append(tests, parseK8sClusterStateRolloutCases(refTime)...)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,7 +64,7 @@ func parseK8sClusterStatePrimaryCases(refTime, tenSecAgo, twentySecAgo time.Time
 		},
 		{
 			name:            "invalid pods json error",
-			deploymentsJSON: `{"items":[{"metadata":{"name":"eri"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}`,
+			deploymentsJSON: `{"items":[{"metadata":{"name":"eri"},"spec":{"replicas":1},"status":{"readyReplicas": 1, "updatedReplicas": 1}}]}`,
 			podsJSON:        `{invalid-pods-json`,
 			now:             refTime,
 			wantErr:         true,
@@ -69,7 +72,7 @@ func parseK8sClusterStatePrimaryCases(refTime, tenSecAgo, twentySecAgo time.Time
 		},
 		{
 			name:            "healthy deployment with running pod",
-			deploymentsJSON: `{"items":[{"metadata":{"name":"eri","creationTimestamp":"` + twentySecAgo.Format(time.RFC3339) + `"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":1}}]}`,
+			deploymentsJSON: `{"items":[{"metadata":{"name":"eri","creationTimestamp":"` + twentySecAgo.Format(time.RFC3339) + `"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas": 1, "updatedReplicas": 1}}]}`,
 			podsJSON: `{
 				"items": [
 					{
@@ -95,8 +98,8 @@ func parseK8sClusterStatePrimaryCases(refTime, tenSecAgo, twentySecAgo time.Time
 			name: "prefix matching disambiguation with overlapping hyphenated names",
 			deploymentsJSON: `{
 				"items": [
-					{"metadata": {"name": "victoriametrics"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}},
-					{"metadata": {"name": "victoriametrics-mcp"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}}
+					{"metadata": {"name": "victoriametrics"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}},
+					{"metadata": {"name": "victoriametrics-mcp"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}}
 				]
 			}`,
 			podsJSON: `{
@@ -148,7 +151,7 @@ func parseK8sClusterStateSecondaryCases(refTime, tenSecAgo time.Time) []parseK8s
 	return []parseK8sClusterStateTestCase{
 		{
 			name:            "starting deployment readyReplicas less than replicas without crashloop",
-			deploymentsJSON: `{"items":[{"metadata":{"name":"coven"},"spec":{"replicas":2},"status":{"replicas":2,"readyReplicas":1}}]}`,
+			deploymentsJSON: `{"items":[{"metadata":{"name":"coven"},"spec":{"replicas":2},"status":{"replicas":2,"readyReplicas": 1, "updatedReplicas": 1}}]}`,
 			podsJSON: `{
 				"items": [
 					{
@@ -309,10 +312,10 @@ func parseK8sClusterStateTertiaryCases(refTime, tenSecAgo, twentySecAgo time.Tim
 			name: "multiple deployments sorted alphabetically with uptime fallback",
 			deploymentsJSON: `{
 				"items": [
-					{"metadata": {"name": "synapse", "creationTimestamp": "` + tenSecAgo.Format(time.RFC3339) + `"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}},
-					{"metadata": {"name": "coven", "creationTimestamp": "` + twentySecAgo.Format(time.RFC3339) + `"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}},
-					{"metadata": {"name": ""}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}},
-					{"metadata": {"name": "eri"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}}
+					{"metadata": {"name": "synapse", "creationTimestamp": "` + tenSecAgo.Format(time.RFC3339) + `"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}},
+					{"metadata": {"name": "coven", "creationTimestamp": "` + twentySecAgo.Format(time.RFC3339) + `"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}},
+					{"metadata": {"name": ""}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}},
+					{"metadata": {"name": "eri"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}}
 				]
 			}`,
 			podsJSON:  "",
@@ -324,6 +327,71 @@ func parseK8sClusterStateTertiaryCases(refTime, tenSecAgo, twentySecAgo time.Tim
 				"eri":     "healthy",
 				"synapse": "healthy",
 			},
+		},
+	}
+}
+
+func parseK8sClusterStateRolloutCases(refTime time.Time) []parseK8sClusterStateTestCase {
+	const (
+		sha    = "de22ef4a238e56b6f9fb67cb7eb676f39d6596c3"
+		synImg = "ghcr.io/azylman/aerial-synapse:" + sha
+		eriImg = "ghcr.io/azylman/aerial-eri:" + sha
+	)
+	return []parseK8sClusterStateTestCase{
+		{
+			name:            "fills commit and image from container named like deployment",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"synapse","generation":3},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"otel","image":"ghcr.io/azylman/aerial-eri:1111222233334444555566667777888899990000"},{"name":"synapse","image":"` + synImg + `"}]}}},"status":{"replicas":1,"readyReplicas":1,"updatedReplicas":1,"observedGeneration":3}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantStatuses:    map[string]string{"synapse": "healthy"},
+			wantCommits:     map[string]string{"synapse": sha},
+			wantImages:      map[string]string{"synapse": synImg},
+		},
+		{
+			name:            "sibling deployment picks first sha-tagged container",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"eri-suletta"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"git-sync","image":"registry.k8s.io/git-sync/git-sync:v4.4.0"},{"name":"eri","image":"` + eriImg + `"}]}}},"status":{"replicas":1,"readyReplicas":1,"updatedReplicas":1}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantCommits:     map[string]string{"eri-suletta": sha},
+			wantImages:      map[string]string{"eri-suletta": eriImg},
+		},
+		{
+			name:            "non-sha tag keeps image without commit",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"grafana"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"grafana","image":"grafana/grafana:11.3.0"}]}}},"status":{"replicas":1,"readyReplicas":1,"updatedReplicas":1}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantCommits:     map[string]string{"grafana": ""},
+			wantImages:      map[string]string{"grafana": "grafana/grafana:11.3.0"},
+		},
+		{
+			name:            "scaled to zero keeps status and drops commit",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"synapse"},"spec":{"replicas":0,"template":{"spec":{"containers":[{"name":"synapse","image":"` + synImg + `"}]}}},"status":{}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantStatuses:    map[string]string{"synapse": "unhealthy"},
+			wantCommits:     map[string]string{"synapse": ""},
+			wantImages:      map[string]string{"synapse": synImg},
+		},
+		{
+			name:            "updated replicas below desired is starting",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"synapse"},"spec":{"replicas":2},"status":{"replicas":2,"readyReplicas":2,"updatedReplicas":1}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantStatuses:    map[string]string{"synapse": "starting"},
+		},
+		{
+			name:            "old replicaset pods still present is starting",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"synapse"},"spec":{"replicas":1},"status":{"replicas":2,"readyReplicas":1,"updatedReplicas":1}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantStatuses:    map[string]string{"synapse": "starting"},
+		},
+		{
+			name:            "unobserved generation is starting",
+			deploymentsJSON: `{"items":[{"metadata":{"name":"synapse","generation":5},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":1,"updatedReplicas":1,"observedGeneration":4}}]}`,
+			now:             refTime,
+			wantCount:       1,
+			wantStatuses:    map[string]string{"synapse": "starting"},
 		},
 	}
 }
@@ -356,6 +424,12 @@ func runParseK8sClusterStateCase(t *testing.T, tc parseK8sClusterStateTestCase) 
 			if svc.Status != expectedStatus {
 				t.Errorf("service %q expected status %q, got %q", svc.Name, expectedStatus, svc.Status)
 			}
+		}
+		if expectedCommit, ok := tc.wantCommits[svc.Name]; ok && svc.Commit != expectedCommit {
+			t.Errorf("service %q expected commit %q, got %q", svc.Name, expectedCommit, svc.Commit)
+		}
+		if expectedImage, ok := tc.wantImages[svc.Name]; ok && svc.Image != expectedImage {
+			t.Errorf("service %q expected image %q, got %q", svc.Name, expectedImage, svc.Image)
 		}
 		if expectedUptime, ok := tc.wantUptimes[svc.Name]; ok {
 			if svc.UptimeSeconds != expectedUptime {
@@ -405,7 +479,7 @@ func TestFetchK8sClusterState(t *testing.T) {
 		case "/ok/apis/apps/v1/namespaces/default/deployments":
 			_, _ = w.Write([]byte(`{
 				"items": [
-					{"metadata": {"name": "eri"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}}
+					{"metadata": {"name": "eri"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}}
 				]
 			}`))
 		case "/ok/api/v1/namespaces/default/pods":
@@ -433,7 +507,7 @@ func TestFetchK8sClusterState(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/apis/apps/v1/namespaces/default/deployments":
-			_, _ = w.Write([]byte(`{"items": [{"metadata": {"name": "eri-tls"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1}}]}`))
+			_, _ = w.Write([]byte(`{"items": [{"metadata": {"name": "eri-tls"}, "spec": {"replicas": 1}, "status": {"replicas": 1, "readyReplicas": 1, "updatedReplicas": 1}}]}`))
 		case "/api/v1/namespaces/default/pods":
 			_, _ = w.Write([]byte(`{"items": []}`))
 		default:

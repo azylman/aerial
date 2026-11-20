@@ -79,17 +79,33 @@ type k8sObjectMeta struct {
 	Namespace         string            `json:"namespace"`
 	Labels            map[string]string `json:"labels"`
 	CreationTimestamp time.Time         `json:"creationTimestamp"`
+	Generation        int64             `json:"generation"`
 }
 
 type k8sDeploymentSpec struct {
-	Replicas *int32 `json:"replicas"`
+	Replicas *int32             `json:"replicas"`
+	Template k8sPodTemplateSpec `json:"template"`
+}
+
+type k8sPodTemplateSpec struct {
+	Spec k8sPodSpec `json:"spec"`
+}
+
+type k8sPodSpec struct {
+	Containers []k8sContainer `json:"containers"`
+}
+
+type k8sContainer struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
 }
 
 type k8sDeploymentStatus struct {
-	Replicas          int32 `json:"replicas"`
-	ReadyReplicas     int32 `json:"readyReplicas"`
-	AvailableReplicas int32 `json:"availableReplicas"`
-	UpdatedReplicas   int32 `json:"updatedReplicas"`
+	Replicas           int32 `json:"replicas"`
+	ReadyReplicas      int32 `json:"readyReplicas"`
+	AvailableReplicas  int32 `json:"availableReplicas"`
+	UpdatedReplicas    int32 `json:"updatedReplicas"`
+	ObservedGeneration int64 `json:"observedGeneration"`
 }
 
 type k8sPodList struct {
@@ -194,6 +210,63 @@ func indexPodsByDeployment(pods []k8sPod, depNames map[string]struct{}) map[stri
 	return res
 }
 
+// isDeploymentRolloutUnfinished reports whether the Deployment controller has not
+// yet observed the latest spec or still runs pods from an older ReplicaSet.
+func isDeploymentRolloutUnfinished(dep k8sDeployment, desired int32) bool {
+	return dep.Status.UpdatedReplicas < desired ||
+		dep.Status.Replicas > dep.Status.UpdatedReplicas ||
+		dep.Status.ObservedGeneration < dep.Metadata.Generation
+}
+
+// imageCommitSHA returns the image tag when it is a full 40-char hex commit SHA, else "".
+func imageCommitSHA(image string) string {
+	if strings.Contains(image, "@") {
+		return ""
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	colon := strings.LastIndex(image, ":")
+	if colon <= lastSlash {
+		return ""
+	}
+	tag := image[colon+1:]
+	if len(tag) != 40 || !isHexSHA(tag) {
+		return ""
+	}
+	return strings.ToLower(tag)
+}
+
+// imageName returns the last path segment of an image reference without tag or digest.
+func imageName(image string) string {
+	ref := image
+	if at := strings.Index(ref, "@"); at >= 0 {
+		ref = ref[:at]
+	}
+	if slash := strings.LastIndex(ref, "/"); slash >= 0 {
+		ref = ref[slash+1:]
+	}
+	if colon := strings.Index(ref, ":"); colon >= 0 {
+		ref = ref[:colon]
+	}
+	return ref
+}
+
+// deploymentImage picks the image representing a Deployment: the container named like
+// the Deployment, else the first container whose tag is a commit SHA.
+func deploymentImage(dep k8sDeployment) string {
+	containers := dep.Spec.Template.Spec.Containers
+	for _, c := range containers {
+		if c.Name == dep.Metadata.Name && c.Image != "" {
+			return c.Image
+		}
+	}
+	for _, c := range containers {
+		if imageCommitSHA(c.Image) != "" {
+			return c.Image
+		}
+	}
+	return ""
+}
+
 func evaluateDeploymentStatus(dep k8sDeployment, pods []k8sPod, now time.Time) (string, int64) {
 	hasCrashloop := false
 	hasPending := false
@@ -217,6 +290,7 @@ func evaluateDeploymentStatus(dep k8sDeployment, pods []k8sPod, now time.Time) (
 		replicas = *dep.Spec.Replicas
 	}
 	readyReplicas := dep.Status.ReadyReplicas
+	rolloutUnfinished := replicas > 0 && isDeploymentRolloutUnfinished(dep, replicas)
 
 	var uptimeSec int64
 	if !earliestStartTime.IsZero() {
@@ -228,7 +302,7 @@ func evaluateDeploymentStatus(dep k8sDeployment, pods []k8sPod, now time.Time) (
 	switch {
 	case hasCrashloop:
 		return healthUnhealthy, uptimeSec
-	case hasPending || (readyReplicas < replicas):
+	case hasPending || (readyReplicas < replicas) || rolloutUnfinished:
 		return healthStarting, uptimeSec
 	case readyReplicas >= replicas && replicas > 0:
 		return healthHealthy, uptimeSec
@@ -273,11 +347,19 @@ func ParseK8sClusterState(deploymentsData, podsData []byte, now time.Time) ([]Se
 			continue
 		}
 		status, uptimeSec := evaluateDeploymentStatus(dep, podsByDep[name], now)
+		image := deploymentImage(dep)
+		commit := imageCommitSHA(image)
+		if dep.Spec.Replicas != nil && *dep.Spec.Replicas == 0 {
+			// Scaled-to-zero Deployments run nothing, so rollout tracking ignores them.
+			commit = ""
+		}
 		services = append(services, ServiceStatus{
 			Name:          name,
 			Status:        status,
 			UptimeSeconds: uptimeSec,
 			LastCheckTime: now,
+			Commit:        commit,
+			Image:         image,
 		})
 	}
 

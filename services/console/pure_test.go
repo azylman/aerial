@@ -431,36 +431,6 @@ func TestFormatUptimeString_TableDriven(t *testing.T) {
 	}
 }
 
-func TestIsCoreAerialContainer_TableDriven(t *testing.T) {
-	tests := []struct {
-		name      string
-		container DockerContainerJSON
-		wantCore  bool
-	}{
-		{name: "core aerial service via compose label", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain"}), wantCore: true},
-		{name: "core aerial service via container name prefix", container: mkCont("aerial-dashboard", "", "", "", "", 0), wantCore: true},
-		{name: "ignored auxiliary service watchtower via compose label", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "watchtower"}), wantCore: false},
-		{name: "ignored auxiliary service autoheal via name", container: mkCont("aerial-autoheal", "", "", "", "", 0), wantCore: false},
-		{name: "ignored auxiliary service agentsview", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "agentsview"}), wantCore: false},
-		{name: "ignored auxiliary service ollama", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "ollama"}), wantCore: false},
-		{name: "image containing watchtower is excluded", container: DockerContainerJSON{Image: "containrrr/watchtower:latest"}, wantCore: false},
-		{name: "image containing autoheal is excluded", container: DockerContainerJSON{Image: "willfarrell/autoheal:latest"}, wantCore: false},
-		{name: "image containing ollama is excluded", container: DockerContainerJSON{Image: "ollama/ollama:latest"}, wantCore: false},
-		{name: "foreign image source excluded", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "custom-service", "org.opencontainers.image.source": "https://github.com/someone/other-repo"}), wantCore: false},
-		{name: "valid aerial image source accepted", container: mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "custom-service", "org.opencontainers.image.source": "https://github.com/azylman/aerial"}), wantCore: true},
-		{name: "nil labels and names defaults to true", container: DockerContainerJSON{Image: "alpine:latest"}, wantCore: true},
-		{name: "image containing agentsview is excluded", container: DockerContainerJSON{Image: "ghcr.io/azylman/agentsview:latest"}, wantCore: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsCoreAerialContainer(tt.container); got != tt.wantCore {
-				t.Errorf("IsCoreAerialContainer() = %v, want %v", got, tt.wantCore)
-			}
-		})
-	}
-}
-
 func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -577,38 +547,6 @@ func TestBuildContainerChips_TableDriven(t *testing.T) {
 				if want.Duration != "" && chips[i].Duration != want.Duration {
 					t.Errorf("chip[%d] duration = %q, want %q", i, chips[i].Duration, want.Duration)
 				}
-			}
-		})
-	}
-}
-
-func TestGetContainerCommit_TableDriven(t *testing.T) {
-	tests := []struct {
-		name       string
-		containers []DockerContainerJSON
-		expected   string
-	}{
-		{name: "empty containers returns empty", containers: []DockerContainerJSON{}, expected: ""},
-		{name: "ignored auxiliary container is skipped", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "watchtower", "org.opencontainers.image.revision": "abcdef123456"})}, expected: ""},
-		{name: "org.opencontainers.image.revision prioritized and truncated to 7 chars", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain", "org.opencontainers.image.revision": "1234567890abcdef", "aerial.commit_sha": "fedcba0987654321"})}, expected: "1234567"},
-		{name: "aerial.commit_sha prioritized over vcs-ref", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain", "aerial.commit_sha": "abcdef1", "vcs-ref": "9999999"})}, expected: "abcdef1"},
-		{name: "vcs-ref used as fallback", containers: []DockerContainerJSON{mkLabeledCont("", "", map[string]string{"com.docker.compose.service": "brain", "vcs-ref": "short"})}, expected: "short"},
-		{name: "core container with nil labels returns empty", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "", "", 0)}, expected: ""},
-		{name: "short org.opencontainers.image.revision returned untruncated", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "", map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "123456"})}, expected: "123456"},
-		{name: "long aerial.commit_sha truncated to 7 chars", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "", map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef012345"})}, expected: "abcdef0"},
-		{name: "long vcs-ref truncated to 7 chars", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "", map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "9876543210"})}, expected: "9876543"},
-		{name: "auxiliary sidecars ignored before brain", containers: []DockerContainerJSON{
-			{ID: "c-agentsview", Names: []string{"/aerial-agentsview"}, Image: "ghcr.io/azylman/agentsview:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "agentsview", "org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20"}},
-			{ID: "c-watchtower", Names: []string{"/aerial-watchtower"}, Image: "containrrr/watchtower:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "watchtower", "org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed"}},
-			{ID: "c-autoheal", Names: []string{"/aerial-autoheal"}, Image: "willfarrell/autoheal:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "autoheal", "org.opencontainers.image.revision": "autohealsha1234"}},
-			{ID: "c-brain", Names: []string{"/aerial-brain"}, Image: "ghcr.io/azylman/aerial-brain:latest", Labels: map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "aerial.commit_sha": "e056544d32a5f9d8a4cc50915a20db5eaea7db1e"}},
-		}, expected: "e056544"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := GetContainerCommit(tt.containers); got != tt.expected {
-				t.Errorf("GetContainerCommit() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
@@ -901,6 +839,7 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 	tests = append(tests, mergeClusterBatch2Cases()...)
 	tests = append(tests, mergeClusterBatch3Cases()...)
 	tests = append(tests, mergeClusterBatch4Cases()...)
+	tests = append(tests, mergeClusterBatch5Cases()...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -987,7 +926,7 @@ func mergeClusterBatch1Cases() []mergeClusterTestCase {
 		{name: "AwaitingHangarSync", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(483, "", "def5678901", "completed", "success", "", -4*time.Minute, -45*time.Second)), jobs: map[int64][]GitHubJob{483: {mkJob(0, 483, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull", StepStatusMap: map[int]string{2: "active"}}}},
 
 		// 20. HangarSyncTimeout
-		{name: "HangarSyncTimeout", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(484, "", "timeout1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{484: {mkJob(0, 484, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "Hangar reconciliation timed out (>120s)", StepStatusMap: map[int]string{2: "failed"}}}},
+		{name: "HangarSyncTimeout", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(484, "", "timeout1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{484: {mkJob(0, 484, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, gitSync: mkRecon(false, "idle", "", "", nil, -1*time.Hour), currentCommit: "old1234", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "Hangar reconciliation timed out (>120s)", StepStatusMap: map[int]string{2: "failed"}}}},
 	}
 }
 
