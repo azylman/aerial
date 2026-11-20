@@ -294,6 +294,70 @@ var (
 	}
 )
 
+const defaultSATokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+func resolveSATokenPath() string {
+	if p := os.Getenv("AERIAL_SA_TOKEN_PATH"); p != "" {
+		return p
+	}
+	return defaultSATokenPath
+}
+
+type client struct {
+	BaseURL    string
+	TokenPath  string
+	HTTPClient *http.Client
+}
+
+func newClient(baseURL string) *client {
+	return &client{
+		BaseURL:    baseURL,
+		TokenPath:  resolveSATokenPath(),
+		HTTPClient: newHTTPClient(5 * time.Second),
+	}
+}
+
+func (c *client) getJSON(ctx context.Context, targetURL string, out any) error {
+	req, err := newRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return err
+	}
+
+	if c.TokenPath != "" {
+		if data, readErr := os.ReadFile(c.TokenPath); readErr == nil {
+			if token := strings.TrimSpace(string(data)); token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+		}
+	}
+
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = newHTTPClient(5 * time.Second)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("failed unmarshaling response: %w", err)
+	}
+
+	return nil
+}
+
 func fetchTranscriptAPI[T any](ctx context.Context, baseURL, endpointPath string, params url.Values) (T, error) {
 	var out T
 	targetURL := strings.TrimRight(baseURL, "/") + endpointPath
@@ -301,29 +365,9 @@ func fetchTranscriptAPI[T any](ctx context.Context, baseURL, endpointPath string
 		targetURL += "?" + params.Encode()
 	}
 
-	req, err := newRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
+	c := newClient(baseURL)
+	if err := c.getJSON(ctx, targetURL, &out); err != nil {
 		return out, err
-	}
-
-	client := newHTTPClient(5 * time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return out, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return out, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	if err := json.Unmarshal(body, &out); err != nil {
-		return out, fmt.Errorf("failed unmarshaling response: %w", err)
 	}
 
 	return out, nil

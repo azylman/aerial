@@ -48,6 +48,7 @@ MOCK_BIN="${TMP_DIR}/bin"
 mkdir -p "$MOCK_BIN"
 CAPTURED_REQ="${TMP_DIR}/captured_req.txt"
 CAPTURED_BODY="${TMP_DIR}/captured_body.json"
+CAPTURED_HEADERS="${TMP_DIR}/captured_headers.txt"
 
 cat << 'EOF' > "${MOCK_BIN}/curl"
 #!/usr/bin/env bash
@@ -73,7 +74,11 @@ while [ $# -gt 0 ]; do
             BODY="$2"
             shift 2
             ;;
-        -H|-w|--connect-timeout|--max-time)
+        -H)
+            echo "$2" >> "${MOCK_CAPTURE_HEADERS:-/dev/null}"
+            shift 2
+            ;;
+        -w|--connect-timeout|--max-time)
             shift 2
             ;;
         -s|-S|-sS)
@@ -120,6 +125,7 @@ chmod +x "${MOCK_BIN}/curl"
 export PATH="${MOCK_BIN}:${PATH}"
 export MOCK_CAPTURE_REQ="$CAPTURED_REQ"
 export MOCK_CAPTURE_BODY="$CAPTURED_BODY"
+export MOCK_CAPTURE_HEADERS="$CAPTURED_HEADERS"
 unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID AERIAL_TARGET_ID || true
 
 # Test 1: Executable permission and --help
@@ -215,6 +221,18 @@ TEST_CONFIG_YAML="${TMP_DIR}/config.yaml"
 echo 'vanadis_url: "http://127.0.0.1:4025"' > "$TEST_CONFIG_YAML"
 CONFIG_STATUS_OUT="$(CONFIG_PATH="$TEST_CONFIG_YAML" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101)"
 assert_eq "running" "$(printf '%s' "$CONFIG_STATUS_OUT" | jq -r '.build.status')" "status command resolves VANADIS_URL from CONFIG_PATH"
+
+# Test 11: AERIAL_SA_TOKEN_PATH injection
+TOKEN_FILE="${TMP_DIR}/test_sa_token"
+echo "test-bearer-token-xyz" > "$TOKEN_FILE"
+: > "$CAPTURED_HEADERS"
+AERIAL_SA_TOKEN_PATH="$TOKEN_FILE" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
+assert_contains "Authorization: Bearer test-bearer-token-xyz" "$(cat "$CAPTURED_HEADERS")" "status passes SA bearer token from AERIAL_SA_TOKEN_PATH"
+
+# Test 12: Missing AERIAL_SA_TOKEN_PATH file gracefully omitted
+: > "$CAPTURED_HEADERS"
+AERIAL_SA_TOKEN_PATH="${TMP_DIR}/nonexistent_token" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
+assert_eq "false" "$(grep -q "Authorization: Bearer" "$CAPTURED_HEADERS" && echo true || echo false)" "missing SA token file omits Authorization header"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

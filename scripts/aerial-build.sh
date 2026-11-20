@@ -79,14 +79,25 @@ do_curl_request() {
     local method="$1"
     local url="$2"
     local body="${3:-}"
+    local auth_args=()
+    local sa_token_path="${AERIAL_SA_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
+    if [ -r "$sa_token_path" ]; then
+        local sa_token
+        sa_token="$(tr -d '[:space:]' < "$sa_token_path" 2>/dev/null || true)"
+        if [ -n "$sa_token" ]; then
+            auth_args=(-H "Authorization: Bearer ${sa_token}")
+        fi
+    fi
 
     if [ -n "$body" ]; then
         curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$method" \
+            ${auth_args[@]+"${auth_args[@]}"} \
             -H "Content-Type: application/json" \
             -d "$body" \
             "$url"
     else
         curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$method" \
+            ${auth_args[@]+"${auth_args[@]}"} \
             "$url"
     fi
 }

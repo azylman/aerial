@@ -57,6 +57,7 @@ func LinkManagedWorkloads(workloads []model.WorkloadRollout) {
 		if workloads[i].Kind != kindRestateCluster {
 			continue
 		}
+		workloads[i].ManagedWorkloads = nil
 		targetNS := cmp.Or(workloads[i].Namespace, workloads[i].Name)
 		for _, other := range workloads {
 			if other.Kind == kindStatefulSet && other.Namespace == targetNS && (other.Name == workloads[i].Name || other.Name == "restate") {
@@ -64,6 +65,28 @@ func LinkManagedWorkloads(workloads []model.WorkloadRollout) {
 			}
 		}
 	}
+}
+
+// ImageServiceCandidates extracts candidate service names from an image reference.
+func ImageServiceCandidates(image string) []string {
+	base := model.ExtractImageWorkloadName(image)
+	if base == "" {
+		return nil
+	}
+	candidates := []string{base}
+	var stripped string
+	switch {
+	case strings.HasPrefix(base, "aerial-sidecar-"):
+		stripped = strings.TrimPrefix(base, "aerial-sidecar-")
+	case strings.HasPrefix(base, "aerial-"):
+		stripped = strings.TrimPrefix(base, "aerial-")
+	case strings.HasPrefix(base, "mirrormere-"):
+		stripped = strings.TrimPrefix(base, "mirrormere-")
+	}
+	if stripped != "" && stripped != base && !slices.Contains(candidates, stripped) {
+		candidates = append(candidates, stripped)
+	}
+	return candidates
 }
 
 // ManagedWorkloadMatchesClusterSpec checks whether a managed workload matches the cluster spec.
@@ -222,4 +245,70 @@ func PRRolloutStatus(in PRRolloutInput) (done, failed bool, reason string) {
 		return false, false, strings.Join(pending, "; ")
 	}
 	return true, false, ""
+}
+
+func workloadAwaitingConfigMapRestart(w model.WorkloadRollout, configMaps []model.ConfigMapChange, changed func(time.Time) bool) bool {
+	for _, cm := range configMaps {
+		if cm.Namespace == w.Namespace && changed(cm.ChangedAt) && ReloadsOn(w, cm.Name) && w.ChangedAt.Before(cm.ChangedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func commitMatchingImages(images []string, commitSHA string) []string {
+	var matching []string
+	for _, img := range images {
+		if ImageTag(img) == commitSHA {
+			matching = append(matching, img)
+		}
+	}
+	return matching
+}
+
+// ReadyForCommitServices identifies candidate service names whose commit-matching workloads have finished rolling out.
+func ReadyForCommitServices(in PRRolloutInput) []string {
+	if in.CommitSHA == "" || len(in.Workloads) == 0 {
+		return nil
+	}
+	LinkManagedWorkloads(in.Workloads)
+	cutoff := in.Since.Add(-rolloutChangeSkew)
+	changed := func(at time.Time) bool { return !at.IsZero() && !at.Before(cutoff) }
+
+	var (
+		seen    []string
+		seenMap = make(map[string]bool)
+		unready = make(map[string]bool)
+	)
+
+	for _, w := range in.Workloads {
+		commitImages := commitMatchingImages(w.Images, in.CommitSHA)
+		if len(commitImages) == 0 {
+			continue
+		}
+
+		awaitingRestart := workloadAwaitingConfigMapRestart(w, in.ConfigMaps, changed)
+		wDone, wFailed, _ := WorkloadRolloutComplete(w)
+		wReady := !awaitingRestart && wDone && !wFailed
+
+		for _, img := range commitImages {
+			for _, cand := range ImageServiceCandidates(img) {
+				if !seenMap[cand] {
+					seenMap[cand] = true
+					seen = append(seen, cand)
+				}
+				if !wReady {
+					unready[cand] = true
+				}
+			}
+		}
+	}
+
+	var ready []string
+	for _, cand := range seen {
+		if !unready[cand] {
+			ready = append(ready, cand)
+		}
+	}
+	return ready
 }

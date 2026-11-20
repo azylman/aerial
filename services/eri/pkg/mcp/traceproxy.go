@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +38,9 @@ const (
 	AnnouncementTTL = 30 * time.Second
 	// AnnouncementCap bounds the announcement store; the oldest entries are dropped past it.
 	AnnouncementCap = 1024
+
+	defaultTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	tokenCacheTTL    = 60 * time.Second
 
 	maxProxyRequestBytes   = 32 << 20
 	maxAnnouncementBytes   = 64 << 10
@@ -132,6 +137,11 @@ type TraceProxyConfig struct {
 	// AnnouncementOutcomes counts announcements by outcome and via; nil uses
 	// metrics.MCPTraceAnnouncementsTotal.
 	AnnouncementOutcomes *prometheus.CounterVec
+	TokenPath            string
+	// AllowedAuthHosts optionally restricts the hosts or domain suffixes that may receive
+	// the ServiceAccount bearer token. When nil or empty, default internal cluster host
+	// rules apply (*.aerial, *.lan, *.svc, *.cluster.local, localhost, 127.0.0.1, ::1).
+	AllowedAuthHosts []string
 }
 
 // TraceProxy is eri's loopback MCP proxy. Agents' HTTP MCP servers point at it when tracing
@@ -147,17 +157,28 @@ type TraceProxy struct {
 	transport     http.RoundTripper
 	tracer        trace.Tracer
 	outcomes      *prometheus.CounterVec
+
+	tokenPath        string
+	tokenMu          sync.Mutex
+	cachedToken      string
+	tokenReadAt      time.Time
+	allowedAuthHosts []string
 }
 
 // NewTraceProxy returns a proxy over cfg.
 func NewTraceProxy(cfg TraceProxyConfig) *TraceProxy {
 	p := &TraceProxy{
-		upstreams:     cfg.Upstreams,
-		turns:         cfg.Turns,
-		announcements: cfg.Announcements,
-		now:           cfg.Clock,
-		transport:     cfg.Transport,
-		outcomes:      cfg.AnnouncementOutcomes,
+		upstreams:        cfg.Upstreams,
+		turns:            cfg.Turns,
+		announcements:    cfg.Announcements,
+		now:              cfg.Clock,
+		transport:        cfg.Transport,
+		outcomes:         cfg.AnnouncementOutcomes,
+		tokenPath:        cfg.TokenPath,
+		allowedAuthHosts: cfg.AllowedAuthHosts,
+	}
+	if p.tokenPath == "" {
+		p.tokenPath = defaultTokenPath
 	}
 	if p.outcomes == nil {
 		p.outcomes = metrics.MCPTraceAnnouncementsTotal
@@ -177,6 +198,75 @@ func NewTraceProxy(cfg TraceProxyConfig) *TraceProxy {
 	}
 	p.tracer = tp.Tracer(traceProxyTracerScope)
 	return p
+}
+
+// BearerToken returns the cached ServiceAccount bearer token read from TokenPath,
+// refreshed every 60 seconds. Returns "" if the file does not exist or is empty.
+func (p *TraceProxy) BearerToken() string {
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+	now := p.now()
+	if !p.tokenReadAt.IsZero() && now.Sub(p.tokenReadAt) < tokenCacheTTL {
+		return p.cachedToken
+	}
+	p.tokenReadAt = now
+	data, err := os.ReadFile(p.tokenPath)
+	if err != nil {
+		p.cachedToken = ""
+		return ""
+	}
+	p.cachedToken = strings.TrimSpace(string(data))
+	return p.cachedToken
+}
+
+func isClusterInternalHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return false
+	}
+	if h == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	for _, suffix := range []string{".aerial", ".lan", ".cluster.local", ".svc"} {
+		if strings.HasSuffix(h, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchHostPattern(host, pattern string) bool {
+	pat := strings.ToLower(strings.TrimSpace(pattern))
+	if pat == "" {
+		return false
+	}
+	if strings.HasPrefix(pat, "*.") {
+		domain := pat[2:]
+		return host == domain || strings.HasSuffix(host, pat[1:])
+	}
+	return host == pat
+}
+
+func (p *TraceProxy) shouldInjectBearer(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return false
+	}
+	if len(p.allowedAuthHosts) > 0 {
+		for _, pattern := range p.allowedAuthHosts {
+			if matchHostPattern(host, pattern) {
+				return true
+			}
+		}
+		return false
+	}
+	return isClusterInternalHost(host)
 }
 
 // Register mounts the loopback-only proxy and announce routes on mux.
@@ -302,6 +392,50 @@ func (p *TraceProxy) clientSpanParent(ctx context.Context, target, server, metho
 	return parent, attrs, true
 }
 
+func handleBlockedTool(w http.ResponseWriter, body []byte, policy env.ServerPolicy) bool {
+	blocked, reqID, toolName := IsBlockedToolCall(body, policy)
+	if !blocked {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled.", toolName))); err != nil {
+		return true
+	}
+	return true
+}
+
+func (p *TraceProxy) rewriteRequest(pr *httputil.ProxyRequest, upstream *url.URL, policy env.ServerPolicy, span trace.Span) {
+	u := *upstream
+	pr.Out.URL = &u
+	pr.Out.Host = ""
+	pr.Out.Header.Del(env.DaemonHeader)
+	if hasActivePolicy(policy) {
+		pr.Out.Header.Del("Accept-Encoding")
+	}
+	if span != nil {
+		propagation.TraceContext{}.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
+	}
+	if p.shouldInjectBearer(upstream) {
+		if token := p.BearerToken(); token != "" && pr.Out.Header.Get("Authorization") == "" {
+			pr.Out.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+}
+
+func (p *TraceProxy) modifyProxyResponse(ctx context.Context, resp *http.Response, span trace.Span, method, tool string, body []byte, policy env.ServerPolicy, reqMethod string) error {
+	if span != nil {
+		span.SetAttributes(attrHTTPResponseStatus.Int(resp.StatusCode))
+		if resp.StatusCode >= http.StatusInternalServerError {
+			span.SetStatus(codes.Error, "")
+		}
+	}
+	if resp.StatusCode == http.StatusOK && needsResponseShaping(reqMethod, method, tool, policy) {
+		return p.shapeResponse(ctx, resp, method, tool, body, policy)
+	}
+	return nil
+}
+
 func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	target, server := r.PathValue("target"), r.PathValue("server")
 	upstreamURL, ok := p.upstreams.Upstream(target, server)
@@ -328,12 +462,7 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if hasPolicy && r.Method == http.MethodPost {
-		if blocked, reqID, toolName := IsBlockedToolCall(body, policy); blocked {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			if _, err := w.Write(BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled.", toolName))); err != nil {
-				return
-			}
+		if handleBlockedTool(w, body, policy) {
 			return
 		}
 	}
@@ -351,30 +480,12 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) { //nolint:contextcheck // pr.Out.Context() is the inbound request's context
-			u := *upstream
-			pr.Out.URL = &u
-			pr.Out.Host = ""
-			pr.Out.Header.Del(env.DaemonHeader)
-			if hasActivePolicy(policy) {
-				pr.Out.Header.Del("Accept-Encoding")
-			}
-			if span != nil {
-				propagation.TraceContext{}.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
-			}
+			p.rewriteRequest(pr, upstream, policy, span)
 		},
 		Transport:     p.transport,
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
-			if span != nil {
-				span.SetAttributes(attrHTTPResponseStatus.Int(resp.StatusCode))
-				if resp.StatusCode >= http.StatusInternalServerError {
-					span.SetStatus(codes.Error, "")
-				}
-			}
-			if resp.StatusCode == http.StatusOK && needsResponseShaping(r.Method, method, tool, policy) {
-				return p.shapeResponse(ctx, resp, method, tool, body, policy)
-			}
-			return nil
+			return p.modifyProxyResponse(ctx, resp, span, method, tool, body, policy, r.Method)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			if span != nil && !errors.Is(err, r.Context().Err()) {

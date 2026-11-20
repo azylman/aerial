@@ -13,6 +13,7 @@ import (
 const (
 	KustomizationRequestsKey  = "kustomization_requests"
 	DeployedKustomizationsKey = "deployed_kustomizations"
+	DeployedJobsKey           = "deployed_jobs"
 )
 
 // RecordKustomizationRequests replaces the PR's kustomization_requests wholesale and clears
@@ -31,13 +32,68 @@ func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, re
 
 	query := `
 		UPDATE pr_registry
-		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - '` + DeployedKustomizationsKey + `', '{` + KustomizationRequestsKey + `}', $3::jsonb),
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - '` + DeployedKustomizationsKey + `' - '` + DeployedJobsKey + `', '{` + KustomizationRequestsKey + `}', $3::jsonb),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1 AND pr_number = $2;`
 	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, reqBytes); err != nil {
 		return fmt.Errorf("record kustomization requests: %w", err)
 	}
 	return nil
+}
+
+// MarkJobsDeployed atomically unions ready job names into deployed_jobs for a deploying or
+// deploy_failed PR, filtering candidate jobs to those eligible in started_jobs/jobs.
+func (r *PostgresPRRegistry) MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	repo = model.NormalizeRepo(repo)
+	jobs = model.DedupeTrimmedStrings(jobs)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(jobs) == 0 {
+		return false, nil
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(
+				COALESCE(metadata, '{}'::jsonb),
+				'{` + DeployedJobsKey + `}',
+				(
+					SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+					FROM jsonb_array_elements(
+						CASE WHEN jsonb_typeof(metadata->'` + DeployedJobsKey + `') = 'array' THEN metadata->'` + DeployedJobsKey + `' ELSE '[]'::jsonb END
+						|| (
+							SELECT COALESCE(jsonb_agg(n), '[]'::jsonb)
+							FROM unnest($3::text[]) AS n
+							WHERE (
+								(CASE WHEN jsonb_typeof(metadata->'started_jobs') = 'array' THEN metadata->'started_jobs' ELSE '[]'::jsonb END
+								 || CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN metadata->'jobs' ELSE '[]'::jsonb END) = '[]'::jsonb
+								OR (CASE WHEN jsonb_typeof(metadata->'started_jobs') = 'array' THEN metadata->'started_jobs' ELSE '[]'::jsonb END
+								    || CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN metadata->'jobs' ELSE '[]'::jsonb END) ? n
+							)
+						)
+					) AS elem
+				),
+				true
+			),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status IN ('deploying', 'deploy_failed')
+		  AND EXISTS (
+				SELECT 1
+				FROM unnest($3::text[]) AS n
+				WHERE (
+					(CASE WHEN jsonb_typeof(metadata->'started_jobs') = 'array' THEN metadata->'started_jobs' ELSE '[]'::jsonb END
+					 || CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN metadata->'jobs' ELSE '[]'::jsonb END) = '[]'::jsonb
+					OR (CASE WHEN jsonb_typeof(metadata->'started_jobs') = 'array' THEN metadata->'started_jobs' ELSE '[]'::jsonb END
+					    || CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN metadata->'jobs' ELSE '[]'::jsonb END) ? n
+				)
+				AND NOT (
+					CASE WHEN jsonb_typeof(metadata->'` + DeployedJobsKey + `') = 'array' THEN metadata->'` + DeployedJobsKey + `' ELSE '[]'::jsonb END ? n
+				)
+		  )
+		RETURNING TRUE;`
+	var updated bool
+	found, err := r.queryRowScan(ctx, "mark jobs deployed", query, []any{&updated}, repo, prNumber, jobs)
+	if err != nil {
+		return false, err
+	}
+	return found && updated, nil
 }
 
 // MarkKustomizationsDeployed unions names (those recorded in kustomization_requests) into
@@ -120,7 +176,7 @@ func (r *PostgresPRRegistry) RetryPRReadiness(ctx context.Context, repo, merge s
 		return map[string]model.KustomizationRequest{}, nil
 	}
 	const query = `UPDATE pr_registry SET status = 'deploying',
- metadata = CASE WHEN status = 'deploying' THEN metadata ELSE metadata - '` + DeployedKustomizationsKey + `' END,
+ metadata = CASE WHEN status = 'deploying' THEN metadata ELSE metadata - '` + DeployedKustomizationsKey + `' - '` + DeployedJobsKey + `' END,
  updated_at = CURRENT_TIMESTAMP
  WHERE repo = $1 AND pr_number = $2 AND merge_sha = $3
  AND status IN ('deployed', 'deploy_failed', 'deploying')
