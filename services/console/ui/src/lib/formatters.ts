@@ -187,3 +187,17 @@ export function formatCountdown(targetDateStr: string | null | undefined, now: n
   if (diffSec >= -15) return countdown('TRIGGERING...', 'triggering');
   return countdown('OVERDUE (SYNCING...)', 'overdue');
 }
+
+/**
+ * Deterministic palette index (0..3) for non-aerial agents based on slug characters.
+ * Returns -1 for 'aerial', 'all', empty, or null.
+ */
+export function getAgentPaletteIndex(agent: string | null | undefined): number {
+  const norm = (agent ?? '').trim().toLowerCase();
+  if (!norm || norm === 'aerial' || norm === 'all') return -1;
+  let hash = 0;
+  for (let i = 0; i < norm.length; i++) {
+    hash = (hash * 31 + norm.charCodeAt(i)) >>> 0;
+  }
+  return hash % 4;
+}

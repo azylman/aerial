@@ -53,7 +53,7 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 		case strings.HasPrefix(r.URL.Path, "/brain/ok/tasks"):
 			_, _ = w.Write([]byte(`{
 				"status": "ok",
-				"total": 1,
+				"total": 2,
 				"tasks": [
 					{
 						"id": "task-abc",
@@ -65,11 +65,47 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 						"status": "PROCESSING",
 						"retry_count": 0,
 						"trigger_type": "discord",
+						"agent": "aerial",
+						"created_at": "2026-08-30T12:00:00Z",
+						"updated_at": "2026-08-30T12:00:10Z"
+					},
+					{
+						"id": "task-def",
+						"thread_id": "thread-124",
+						"session_id": "session-457",
+						"author_name": "UserB",
+						"prompt": "Test execution prompt 2",
+						"summary": "Test execution prompt summary 2",
+						"status": "PROCESSING",
+						"retry_count": 0,
+						"trigger_type": "discord",
+						"agent": "agent-alpha",
 						"created_at": "2026-08-30T12:00:00Z",
 						"updated_at": "2026-08-30T12:00:10Z"
 					}
 				]
 			}`))
+		case strings.HasPrefix(r.URL.Path, "/brain/empty/tasks"):
+			_, _ = w.Write([]byte(`{
+				"status": "ok",
+				"total": 0,
+				"tasks": []
+			}`))
+		case strings.HasPrefix(r.URL.Path, "/haro/ok/schedules"):
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status: "ok",
+				Crons: []CronSchedule{
+					{ID: "cron-1", Agent: "agent-beta"},
+				},
+				OneShots: []OneShotSchedule{},
+			})
+		case strings.HasPrefix(r.URL.Path, "/vanadis/ok/builds"):
+			_ = json.NewEncoder(w).Encode(BuildsAPIResponse{
+				Status: "ok",
+				Builds: []VanadisBuildDTO{
+					{ID: "b-1", Agent: "agent-gamma"},
+				},
+			})
 		case strings.HasPrefix(r.URL.Path, "/hangar/synced/status"):
 			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
 				Status:        "synced",
@@ -117,10 +153,55 @@ func statusHandlerPrimaryCases() []statusTestCase {
 			wantOngoingDeploy: "idle",
 		},
 		{
-			name:      "ActiveTasks_Success",
-			brainMode: "ok",
-			wantCode:  http.StatusOK,
-			wantTasks: 1,
+			name:                 "ActiveTasks_Success",
+			brainMode:            "ok",
+			wantCode:             http.StatusOK,
+			wantTasks:            2,
+			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name:                 "ActiveTasks_FilterAgent_Aerial",
+			brainMode:            "ok",
+			target:               "/api/status?agent=aerial",
+			wantCode:             http.StatusOK,
+			wantTasks:            1,
+			wantTaskID:           "task-abc",
+			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name:                 "ActiveTasks_FilterAgent_Other",
+			brainMode:            "ok",
+			target:               "/api/status?agent=agent-alpha",
+			wantCode:             http.StatusOK,
+			wantTasks:            1,
+			wantTaskID:           "task-def",
+			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name:                 "ActiveTasks_FilterAgent_All",
+			brainMode:            "ok",
+			target:               "/api/status?agent=all",
+			wantCode:             http.StatusOK,
+			wantTasks:            2,
+			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name:                 "ActiveTasks_EmptyTasks_DiscoverySourceHasAgent",
+			brainMode:            "empty",
+			discoveryAgents:      []string{"aerial", "agent-alpha"},
+			wantCode:             http.StatusOK,
+			wantTasks:            0,
+			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name:                 "ActiveTasks_EmptyTasks_UpstreamSchedulesAndBuildsDiscovery",
+			brainMode:            "empty",
+			haroMode:             "ok",
+			vanadisMode:          "ok",
+			useMux:               true,
+			wantCode:             http.StatusOK,
+			wantTasks:            0,
+			wantConfiguredAgents: []string{"aerial", "agent-beta", "agent-gamma"},
 		},
 		{
 			name:      "ActiveTasks_Degraded",
@@ -204,26 +285,62 @@ func statusHandlerSecondaryCases() []statusTestCase {
 }
 
 type statusTestCase struct {
-	name              string
-	method            string
-	useMux            bool
-	brainMode         string
-	gitSyncMode       string
-	k8sMode           string
-	emptyCommit       bool
-	dockerJSON        string
-	pollerRuns        []GitHubRun
-	pollerJobs        map[int64][]GitHubJob
-	yamlContent       string
-	wantCode          int
-	wantClusterStatus string
-	wantOngoingDeploy string
-	wantIsDeploying   bool
-	wantTasks         int
-	wantDeploys       int
-	wantMinServices   int
-	wantServiceName   string
-	wantQuickLink     string
+	name                 string
+	method               string
+	target               string
+	useMux               bool
+	brainMode            string
+	gitSyncMode          string
+	k8sMode              string
+	haroMode             string
+	vanadisMode          string
+	discoveryAgents      []string
+	emptyCommit          bool
+	dockerJSON           string
+	pollerRuns           []GitHubRun
+	pollerJobs           map[int64][]GitHubJob
+	yamlContent          string
+	wantCode             int
+	wantClusterStatus    string
+	wantOngoingDeploy    string
+	wantIsDeploying      bool
+	wantTasks            int
+	wantDeploys          int
+	wantMinServices      int
+	wantServiceName      string
+	wantQuickLink        string
+	wantConfiguredAgents []string
+	wantTaskID           string
+}
+
+func resolveStatusTestURLs(tc statusTestCase, mockServerURL string) (brainURL, gitSyncURL, kubeAPIServer, haroURL, vanadisURL string) {
+	switch tc.brainMode {
+	case "ok":
+		brainURL = mockServerURL + "/brain/ok"
+	case "empty":
+		brainURL = mockServerURL + "/brain/empty"
+	case "offline":
+		brainURL = "http://127.0.0.1:54321"
+	}
+	if tc.haroMode == "ok" {
+		haroURL = mockServerURL + "/haro/ok"
+	}
+	if tc.vanadisMode == "ok" {
+		vanadisURL = mockServerURL + "/vanadis/ok"
+	}
+	switch tc.gitSyncMode {
+	case "synced":
+		gitSyncURL = mockServerURL + "/hangar/synced"
+	case "swapping":
+		gitSyncURL = mockServerURL + "/hangar/swapping"
+	}
+	switch tc.k8sMode {
+	case "ok":
+		kubeAPIServer = mockServerURL + "/k8s/ok"
+	case "error500":
+		kubeAPIServer = mockServerURL + "/k8s/error500"
+	}
+	return brainURL, gitSyncURL, kubeAPIServer, haroURL, vanadisURL
 }
 
 func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string) {
@@ -262,28 +379,15 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 		}
 	}
 
-	brainURL := ""
-	switch tc.brainMode {
-	case "ok":
-		brainURL = mockServerURL + "/brain/ok"
-	case "offline":
-		brainURL = "http://127.0.0.1:54321"
-	}
+	brainURL, gitSyncURL, kubeAPIServer, haroURL, vanadisURL := resolveStatusTestURLs(tc, mockServerURL)
 
-	gitSyncURL := ""
-	switch tc.gitSyncMode {
-	case "synced":
-		gitSyncURL = mockServerURL + "/hangar/synced"
-	case "swapping":
-		gitSyncURL = mockServerURL + "/hangar/swapping"
-	}
-
-	kubeAPIServer := ""
-	switch tc.k8sMode {
-	case "ok":
-		kubeAPIServer = mockServerURL + "/k8s/ok"
-	case "error500":
-		kubeAPIServer = mockServerURL + "/k8s/error500"
+	discoveredAgentsCache.reset()
+	if len(tc.discoveryAgents) > 0 {
+		oldFn := configuredAgentsDiscoveryFn
+		defer func() { configuredAgentsDiscoveryFn = oldFn }()
+		configuredAgentsDiscoveryFn = func(ctx context.Context) ([]string, error) {
+			return tc.discoveryAgents, nil
+		}
 	}
 
 	commitArg := "testcommit"
@@ -299,17 +403,23 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 			ConfigPath:    cfgFile,
 			GitCommit:     commitArg,
 			KubeAPIServer: kubeAPIServer,
+			HaroURL:       haroURL,
+			VanadisURL:    vanadisURL,
 		}
 		h = SetupConsoleMux(cfg, nil)
 	} else {
-		h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer)
+		h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer, haroURL, vanadisURL)
 	}
 
 	method := tc.method
 	if method == "" {
 		method = http.MethodGet
 	}
-	req := httptest.NewRequest(method, "/api/status", http.NoBody)
+	target := tc.target
+	if target == "" {
+		target = "/api/status"
+	}
+	req := httptest.NewRequest(method, target, http.NoBody)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -350,30 +460,55 @@ func assertStatusBasic(t *testing.T, tc statusTestCase, resp ClusterResponse) {
 	if tc.wantIsDeploying != resp.IsDeploying {
 		t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
 	}
+	if len(tc.wantConfiguredAgents) > 0 {
+		if len(resp.ConfiguredAgents) != len(tc.wantConfiguredAgents) {
+			t.Fatalf("expected %d configured agents, got %d: %+v", len(tc.wantConfiguredAgents), len(resp.ConfiguredAgents), resp.ConfiguredAgents)
+		}
+		for i, a := range tc.wantConfiguredAgents {
+			if resp.ConfiguredAgents[i] != a {
+				t.Errorf("expected configured agent %d to be %q, got %q", i, a, resp.ConfiguredAgents[i])
+			}
+		}
+	}
 	assertStatusActiveTasks(t, tc, resp)
 	assertStatusDeployments(t, tc, resp)
 }
 
 func assertStatusActiveTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) {
 	t.Helper()
-	if tc.brainMode == "ok" {
-		if resp.ActiveTasksCount != tc.wantTasks || len(resp.ActiveTasks) != tc.wantTasks {
-			t.Fatalf("expected %d active tasks, got %d: %+v", tc.wantTasks, resp.ActiveTasksCount, resp.ActiveTasks)
-		}
-		if len(resp.ActiveTasks) > 0 {
-			task := resp.ActiveTasks[0]
-			if task.ID != "task-abc" || task.SessionID != "session-456" || task.TriggerType != "discord" || task.Summary != "Test execution prompt summary" || task.Status != "PROCESSING" || task.AuthorName != "UserA" {
-				t.Errorf("unexpected task contents: %+v", task)
-			}
-		}
+	switch tc.brainMode {
+	case "ok", "empty":
+		assertStatusOKTasks(t, tc, resp)
+	case "offline":
+		assertStatusOfflineTasks(t, resp)
 	}
-	if tc.brainMode == "offline" {
-		if resp.ActiveTasksCount != 0 {
-			t.Errorf("expected 0 active tasks on degraded brain, got %d", resp.ActiveTasksCount)
-		}
-		if resp.ActiveTasks == nil || len(resp.ActiveTasks) != 0 {
-			t.Errorf("expected non-nil empty ActiveTasks on degraded brain, got %+v", resp.ActiveTasks)
-		}
+}
+
+func assertStatusOKTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+	t.Helper()
+	if resp.ActiveTasksCount != tc.wantTasks || len(resp.ActiveTasks) != tc.wantTasks {
+		t.Fatalf("expected %d active tasks, got %d: %+v", tc.wantTasks, resp.ActiveTasksCount, resp.ActiveTasks)
+	}
+	if len(resp.ActiveTasks) == 0 {
+		return
+	}
+	task := resp.ActiveTasks[0]
+	expectedID := "task-abc"
+	if tc.wantTaskID != "" {
+		expectedID = tc.wantTaskID
+	}
+	if task.ID != expectedID || task.TriggerType != "discord" || task.Status != "PROCESSING" {
+		t.Errorf("unexpected task contents: %+v", task)
+	}
+}
+
+func assertStatusOfflineTasks(t *testing.T, resp ClusterResponse) {
+	t.Helper()
+	if resp.ActiveTasksCount != 0 {
+		t.Errorf("expected 0 active tasks on degraded brain, got %d", resp.ActiveTasksCount)
+	}
+	if resp.ActiveTasks == nil || len(resp.ActiveTasks) != 0 {
+		t.Errorf("expected non-nil empty ActiveTasks on degraded brain, got %+v", resp.ActiveTasks)
 	}
 }
 

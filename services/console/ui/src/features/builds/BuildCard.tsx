@@ -1,5 +1,6 @@
 import { type KeyboardEvent, type MouseEvent, memo, useCallback, useMemo, useState } from 'react';
 import type { VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
+import { AgentBadge } from '../../components/AgentBadge';
 import { GlyphText } from '../../components/Glyph';
 import { useLiveNow } from '../../hooks/useLiveNow';
 import { usePollingSync } from '../../hooks/usePollingSync';
@@ -157,12 +158,7 @@ export const BuildCard = memo(function BuildCard({ build, expanded, onToggle }: 
         <div className="build-card-header">
           <div className="build-badge-group">
             <BuildStatusBadge build={build} />
-            <span
-              className={`agent-badge agent-${(build.agent || 'aerial').toLowerCase()}`}
-              data-agent={(build.agent || 'aerial').toLowerCase()}
-            >
-              {(build.agent || 'aerial').toLowerCase()}
-            </span>
+            <AgentBadge agent={build.agent} />
           </div>
           {running ? <LiveDuration build={build} /> : <DurationBadge text={timing.durationText} />}
         </div>

@@ -1,5 +1,6 @@
 import { memo, useMemo } from 'react';
 import type { ActiveTaskStatus } from '../../api/types';
+import { AgentBadge } from '../../components/AgentBadge';
 import { TimerBadge } from '../../components/ElapsedTicker';
 import { Glyph, GlyphText } from '../../components/Glyph';
 import { getTriggerBadge } from '../../lib/formatters';
@@ -19,7 +20,6 @@ const selectTasks = (s: ConsoleState): readonly ActiveTaskStatus[] => s.status.c
 export const TaskCard = memo(function TaskCard({ task }: { readonly task: ActiveTaskStatus }) {
   const m = taskCardModel(task);
   const trigger = getTriggerBadge(task.trigger_type);
-  const agent = (task.agent || 'aerial').toLowerCase();
   return (
     <div className={m.cardClass}>
       <div className="task-card-header">
@@ -27,9 +27,7 @@ export const TaskCard = memo(function TaskCard({ task }: { readonly task: Active
           <span className={`task-trigger-badge ${trigger.css}`} data-trigger={trigger.css}>
             <Glyph name={trigger.icon} /> {trigger.text}
           </span>
-          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
-            {agent}
-          </span>
+          <AgentBadge agent={task.agent} />
           <span className="task-author">{m.author}</span>
           {m.retry > 0 ? (
             <span className="task-retry-badge" title="Retry Attempt">

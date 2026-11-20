@@ -1,5 +1,6 @@
 import { memo } from 'react';
 import type { CronSchedule, OneShotSchedule } from '../../api/types';
+import { AgentBadge } from '../../components/AgentBadge';
 import { CopyButton } from '../../components/CopyButton';
 import { Glyph } from '../../components/Glyph';
 import { formatCronExpression } from '../../lib/cron';
@@ -28,7 +29,6 @@ function PromptBox({ text }: { readonly text: string }) {
 }
 
 export const CronCard = memo(function CronCard({ cron }: { readonly cron: CronSchedule }) {
-  const agent = (cron.agent || 'aerial').toLowerCase();
   return (
     <div className="schedule-card cron-card">
       <div className="schedule-card-header">
@@ -36,9 +36,7 @@ export const CronCard = memo(function CronCard({ cron }: { readonly cron: CronSc
           <span className="schedule-type-badge cron">
             <Glyph name="alarm" /> CRON
           </span>
-          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
-            {agent}
-          </span>
+          <AgentBadge agent={cron.agent} />
           <span className="schedule-tz-badge">{cron.timezone || 'UTC'}</span>
         </div>
         <div className="schedule-status-group">
@@ -81,7 +79,6 @@ function ThreadRef({ threadId }: { readonly threadId: string }) {
 }
 
 export const OneShotCard = memo(function OneShotCard({ oneShot }: { readonly oneShot: OneShotSchedule }) {
-  const agent = (oneShot.agent || 'aerial').toLowerCase();
   return (
     <div className="schedule-card oneshot-card">
       <div className="schedule-card-header">
@@ -89,9 +86,7 @@ export const OneShotCard = memo(function OneShotCard({ oneShot }: { readonly one
           <span className="schedule-type-badge oneshot">
             <Glyph name="bolt" /> ONE-SHOT
           </span>
-          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
-            {agent}
-          </span>
+          <AgentBadge agent={oneShot.agent} />
         </div>
         <div className="schedule-status-group">
           <span className="pulse-dot healthy" title="Pending execution" />

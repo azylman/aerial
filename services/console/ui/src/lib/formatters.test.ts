@@ -9,6 +9,7 @@ import {
   formatTimeAgo,
   formatTimestamp,
   formatUptime,
+  getAgentPaletteIndex,
   getTriggerBadge,
   parseValidTimestampMs,
   type Countdown,
@@ -206,5 +207,30 @@ describe('formatCountdown', () => {
     { input: 'not-a-date', want: { text: '--:--:--', state: 'none', cssClass: '', icon: null } },
   ])('$input -> $want.text', ({ input, want }) => {
     expect(formatCountdown(input, NOW)).toEqual(want);
+  });
+});
+
+describe('getAgentPaletteIndex', () => {
+  it.each([
+    { input: 'aerial', want: -1 },
+    { input: 'AERIAL', want: -1 },
+    { input: 'all', want: -1 },
+    { input: 'ALL', want: -1 },
+    { input: '', want: -1 },
+    { input: null, want: -1 },
+    { input: undefined, want: -1 },
+  ])('$input -> -1', ({ input, want }) => {
+    expect(getAgentPaletteIndex(input)).toBe(want);
+  });
+
+  it('deterministically hashes non-aerial agents into 0..3 palette range', () => {
+    const alpha = getAgentPaletteIndex('agent-alpha');
+    const beta = getAgentPaletteIndex('agent-beta');
+    expect(alpha).toBeGreaterThanOrEqual(0);
+    expect(alpha).toBeLessThanOrEqual(3);
+    expect(beta).toBeGreaterThanOrEqual(0);
+    expect(beta).toBeLessThanOrEqual(3);
+    expect(getAgentPaletteIndex('agent-alpha')).toBe(alpha);
+    expect(getAgentPaletteIndex('AGENT-ALPHA')).toBe(alpha);
   });
 });

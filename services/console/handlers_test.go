@@ -28,6 +28,23 @@ func newFactsMockBrain(capturedQuery *url.Values) *httptest.Server {
 			_, _ = w.Write([]byte(`not-valid-json`))
 			return
 		}
+		if capturedQuery.Get("limit") == "50" && capturedQuery.Get("agent") == "aerial" {
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts: []FactItem{
+					{
+						ID:             1,
+						FactText:       "Fact 1",
+						ReinforceCount: 1,
+						CreatedAt:      time.Now().UTC(),
+						Agent:          "aerial",
+					},
+				},
+				Total:  120,
+				Limit:  50,
+				Offset: 0,
+			})
+			return
+		}
 		if capturedQuery.Get("limit") == "10" && capturedQuery.Get("offset") == "5" {
 			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
 				Facts:  nil,
@@ -86,6 +103,22 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			target:         "/api/facts?limit=25&q=dark%20mode",
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{"User prefers dark mode", `"last_reinforced_at":`},
+		},
+		{
+			name:           "Success_AgentFilter_Other",
+			brainURL:       mockBrain.URL,
+			method:         http.MethodGet,
+			target:         "/api/facts?agent=agent-alpha",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{`"facts":[]`},
+		},
+		{
+			name:           "Success_PreservesUpstreamTotalLargerThanPage",
+			brainURL:       mockBrain.URL,
+			method:         http.MethodGet,
+			target:         "/api/facts?limit=50&agent=aerial",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Fact 1", `"total":120`},
 		},
 		{
 			name:               "Success_UnlimitedDefault",
@@ -235,6 +268,22 @@ func schedulesAndRunsPrimaryCases(mockBrainURL, offlineURL string) []schedulesAn
 			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":3`},
 		},
 		{
+			name:           "Schedules_AgentFilter_Aerial",
+			brainURL:       mockBrainURL,
+			method:         "GET",
+			target:         "/api/schedules?agent=aerial",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":2`},
+		},
+		{
+			name:           "Schedules_AgentFilter_Other",
+			brainURL:       mockBrainURL,
+			method:         "GET",
+			target:         "/api/schedules?agent=agent-alpha",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Alpha Brief", `"total_active":1`},
+		},
+		{
 			name:           "Schedules_SuccessParams_NilSlices",
 			brainURL:       mockBrainURL + "/nil",
 			method:         "GET",
@@ -293,6 +342,24 @@ func schedulesAndRunsPrimaryCases(mockBrainURL, offlineURL string) []schedulesAn
 			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{"cron-brief-101", `"total":42`, `"duration_ms":1250`},
+		},
+		{
+			name:           "ScheduleRuns_AgentFilter_Aerial",
+			isRuns:         true,
+			brainURL:       mockBrainURL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success&agent=aerial",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"cron-brief-101", `"total":42`},
+		},
+		{
+			name:           "ScheduleRuns_AgentFilter_Other",
+			isRuns:         true,
+			brainURL:       mockBrainURL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success&agent=agent-alpha",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"cron-brief-102", `"total":42`},
 		},
 		{
 			name:           "ScheduleRuns_SuccessParams_NilSlices",
@@ -431,19 +498,27 @@ func newSchedulesMockBrain(t *testing.T) *httptest.Server {
 			})
 		case strings.HasSuffix(r.URL.Path, "/schedules/runs"):
 			q := r.URL.Query()
-			if q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("schedule_id") != "cron-1" || q.Get("status") != "success" {
+			if q.Get("schedule_id") == "cron-1" && (q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("status") != "success") {
 				t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
 			}
 			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
 				Status: "ok", Total: 42, Limit: 10, Offset: 5,
-				Runs: []ScheduleRun{{ID: "cron-brief-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Daily summary", Title: "Morning Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250}},
+				Runs: []ScheduleRun{
+					{ID: "cron-brief-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Daily summary", Title: "Morning Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250, Agent: "aerial"},
+					{ID: "cron-brief-102", ScheduleID: "cron-2", ScheduleType: "cron", Prompt: "Alpha summary", Title: "Alpha Brief #102", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1100, Agent: "agent-alpha"},
+				},
 			})
 		case strings.HasSuffix(r.URL.Path, "/schedules"):
 			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
-				Status:   "ok",
-				Summary:  ScheduleSummaryMetrics{TotalActive: 3, CronCount: 2, OneShotCount: 1, TotalRuns24h: 15, SuccessRate24h: 93.3},
-				Crons:    []CronSchedule{{ID: "cron-1", ChannelID: "chan-1", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * *", CronDescription: "Every day at 9:00 AM", Prompt: "Generate morning brief", Timezone: "America/Los_Angeles", Enabled: true}},
-				OneShots: []OneShotSchedule{{ID: "oneshot-1", ThreadID: "thread-1", Prompt: "Remind about tea", RunAt: time.Now().UTC().Add(10 * time.Minute)}},
+				Status:  "ok",
+				Summary: ScheduleSummaryMetrics{TotalActive: 3, CronCount: 2, OneShotCount: 1, TotalRuns24h: 15, SuccessRate24h: 93.3},
+				Crons: []CronSchedule{
+					{ID: "cron-1", ChannelID: "chan-1", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * *", CronDescription: "Every day at 9:00 AM", Prompt: "Generate morning brief", Timezone: "America/Los_Angeles", Enabled: true, Agent: "aerial"},
+					{ID: "cron-2", ChannelID: "chan-2", TitlePrefix: "Alpha Brief", CronExpr: "0 10 * * *", CronDescription: "Every day at 10:00 AM", Prompt: "Generate alpha brief", Timezone: "America/Los_Angeles", Enabled: true, Agent: "agent-alpha"},
+				},
+				OneShots: []OneShotSchedule{
+					{ID: "oneshot-1", ThreadID: "thread-1", Prompt: "Remind about tea", RunAt: time.Now().UTC().Add(10 * time.Minute), Agent: "aerial"},
+				},
 			})
 		default:
 			http.NotFound(w, r)
@@ -548,10 +623,10 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status":          "ok",
-				"total":           1,
-				"running_count":   1,
-				"queued_count":    0,
-				"completed_count": 0,
+				"total":           100,
+				"running_count":   10,
+				"queued_count":    20,
+				"completed_count": 70,
 				"builds": []map[string]any{
 					{
 						"id":             "build-101",
@@ -560,6 +635,7 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 						"shared_context": "drawer-only-shared-context",
 						"status":         "running",
 						"queue_state":    "running",
+						"agent":          "aerial",
 						"chunks": []map[string]any{
 							{
 								"id":          "chunk-0",
@@ -580,6 +656,25 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 								"acceptance_criteria": []string{"pass"},
 								"depends_on":          []string{"chunk-0"},
 								"status":              "completed",
+							},
+						},
+					},
+					{
+						"id":             "build-102",
+						"tier":           2,
+						"title":          "Alpha Feature",
+						"shared_context": "drawer-only-shared-context",
+						"status":         "running",
+						"queue_state":    "running",
+						"agent":          "agent-alpha",
+						"chunks": []map[string]any{
+							{
+								"id":          "chunk-alpha-0",
+								"build_id":    "build-102",
+								"chunk_index": 0,
+								"title":       "Chunk Alpha 0",
+								"depends_on":  nil,
+								"status":      "completed",
 							},
 						},
 					},
@@ -672,6 +767,24 @@ func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTes
 			wantStatus:        http.StatusOK,
 			wantBodySubstr:    []string{"build-101", "Vanadis Feature", "chunk-1", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
 			wantBodyNotSubstr: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria", `"depends_on":null`},
+		},
+		{
+			name:              "Builds_AgentFilter_Aerial",
+			vanadisURL:        mockVanadisURL,
+			method:            http.MethodGet,
+			target:            "/api/builds?agent=aerial",
+			wantStatus:        http.StatusOK,
+			wantBodySubstr:    []string{"build-101", `"total":100`, `"running_count":10`},
+			wantBodyNotSubstr: []string{"build-102"},
+		},
+		{
+			name:              "Builds_AgentFilter_Other",
+			vanadisURL:        mockVanadisURL,
+			method:            http.MethodGet,
+			target:            "/api/builds?agent=agent-alpha",
+			wantStatus:        http.StatusOK,
+			wantBodySubstr:    []string{"build-102", `"total":100`, `"running_count":10`},
+			wantBodyNotSubstr: []string{"build-101"},
 		},
 		{
 			name:           "Builds_DegradedFallback",

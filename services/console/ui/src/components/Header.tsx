@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import type { QuickLaunchLink } from '../api/types';
+import { getAgentPaletteIndex } from '../lib/formatters';
 import { applyTheme, initTheme, nextTheme, subscribeTheme, type ThemeMode } from '../lib/theme';
 import { dockLinks, isDockLinkActive, type PermetTone, permetScore } from '../store/selectors';
 import { useConsoleStore } from '../store/store';
@@ -84,7 +85,7 @@ const ThemeToggle = memo(function ThemeToggle() {
   );
 });
 
-const DEFAULT_AGENTS = ['all', 'aerial', 'miorine', 'suletta'] as const;
+const DEFAULT_AGENTS = ['all', 'aerial'] as const;
 
 export const AgentSelector = memo(function AgentSelector() {
   const selectedAgent = useConsoleStore((s) => s.selectedAgent);
@@ -104,12 +105,14 @@ export const AgentSelector = memo(function AgentSelector() {
       {agents.map((agent) => {
         const isSelected = selectedAgent === agent;
         const label = agent === 'all' ? 'All' : agent.charAt(0).toUpperCase() + agent.slice(1);
+        const palette = getAgentPaletteIndex(agent);
         return (
           <button
             key={agent}
             type="button"
             className={isSelected ? 'agent-pill active' : 'agent-pill'}
             data-agent={agent}
+            {...(palette >= 0 ? { 'data-agent-palette': String(palette) } : {})}
             aria-pressed={isSelected}
             onClick={() => setSelectedAgent(agent)}
           >
