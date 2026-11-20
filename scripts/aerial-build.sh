@@ -81,6 +81,9 @@ do_curl_request() {
     local body="${3:-}"
     local auth_args=()
     local sa_token_path="${AERIAL_SA_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
+    if [ ! -r "$sa_token_path" ] && [ -n "${HOME:-}" ] && [ -r "${HOME}/.gemini/turn_env/sa-token" ]; then
+        sa_token_path="${HOME}/.gemini/turn_env/sa-token"
+    fi
     if [ -r "$sa_token_path" ]; then
         local sa_token
         sa_token="$(tr -d '[:space:]' < "$sa_token_path" 2>/dev/null || true)"
