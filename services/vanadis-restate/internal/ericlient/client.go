@@ -25,6 +25,7 @@ type BrainDispatchRequest struct {
 	SessionID      string `json:"session_id,omitempty"`
 	TargetID       string `json:"target_id,omitempty"`
 	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	VanadisBuildID string `json:"vanadis_build_id,omitempty"`
 	Prompt         string `json:"prompt"`
 	Effort         string `json:"effort,omitempty"`
 	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
