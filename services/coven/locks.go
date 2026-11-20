@@ -30,11 +30,15 @@ func NewThreadLocker(db DBTX) *ThreadLocker {
 }
 
 // Lock acquires the advisory lock for threadID and returns a release closure.
-func (l *ThreadLocker) Lock(ctx context.Context, threadID string) (func() error, error) {
+// If an optional agent is provided, the lock key is scoped via ScopedThreadKey(agent[0], threadID).
+func (l *ThreadLocker) Lock(ctx context.Context, threadID string, agent ...string) (func() error, error) {
 	if l == nil || l.db == nil {
 		return nil, fmt.Errorf("coven lock: locker database is not initialized")
 	}
 	key := strings.TrimSpace(threadID)
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" {
+		key = ScopedThreadKey(agent[0], threadID)
+	}
 	if key == "" {
 		return nil, fmt.Errorf("coven lock: thread id cannot be empty")
 	}

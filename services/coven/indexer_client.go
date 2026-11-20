@@ -61,8 +61,8 @@ func ScopedThreadKey(stack, threadID string) string {
 }
 
 // GetTrajectoryContext fetches retrieved facts and tool calls for threadID,
-// filtered to the client's stack. Empty thread IDs return zero without a request.
-func (c *IndexerClient) GetTrajectoryContext(ctx context.Context, threadID string) (TrajectoryContext, error) {
+// filtered to the target agent (or client's default stack). Empty thread IDs return zero without a request.
+func (c *IndexerClient) GetTrajectoryContext(ctx context.Context, agent, threadID string) (TrajectoryContext, error) {
 	var zero TrajectoryContext
 	if c == nil || strings.TrimSpace(c.baseURL) == "" {
 		return zero, fmt.Errorf("indexer client: transcripts URL is not configured")
@@ -71,8 +71,12 @@ func (c *IndexerClient) GetTrajectoryContext(ctx context.Context, threadID strin
 	if threadID == "" {
 		return zero, nil
 	}
+	targetAgent := c.stack
+	if a := strings.TrimSpace(agent); a != "" {
+		targetAgent = NormalizeStack(a)
+	}
 	endpoint := fmt.Sprintf("%s/transcripts/threads/%s/trajectory?%s",
-		c.baseURL, url.PathEscape(threadID), c.query().Encode())
+		c.baseURL, url.PathEscape(threadID), c.query(targetAgent).Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return zero, fmt.Errorf("indexer client: failed to build trajectory request: %w", err)
@@ -96,10 +100,10 @@ func (c *IndexerClient) GetTrajectoryContext(ctx context.Context, threadID strin
 	return got, nil
 }
 
-func (c *IndexerClient) query() url.Values {
+func (c *IndexerClient) query(agent string) url.Values {
 	q := url.Values{}
-	q.Set("agent", c.stack)
-	q.Set("stack", c.stack)
+	q.Set("agent", agent)
+	q.Set("stack", agent)
 	if c.maxSteps > 0 {
 		q.Set("limit", strconv.Itoa(c.maxSteps))
 	}

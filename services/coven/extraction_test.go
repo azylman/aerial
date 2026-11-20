@@ -36,28 +36,41 @@ func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
 		{
 			name:         "LastExtractedRowIDZero",
 			threadID:     "t-1",
+			agent:        "agent-alpha",
 			watermarkSQL: "SELECT 0, NULL",
-			eriBody:      `{"status":"ok","tasks":[{"thread_summary":"summary text"}]}`,
+			summarySQL:   "SELECT 'summary text'",
 			wantSummary:  "summary text",
 		},
 		{
-			name:         "EriTasksError",
+			name:         "DBQueryErrorOnTurns",
 			threadID:     "t-1",
 			watermarkSQL: "SELECT 15, NULL",
-			eriStatus:    http.StatusInternalServerError,
+			summarySQL:   "SELECT 'summary text'",
+			queryErr:     errors.New("db disconnect"),
 			wantErr:      true,
 		},
 		{
-			name:         "SuccessChronologicalOrder",
-			threadID:     "t-1",
-			watermarkSQL: "SELECT 20, NULL",
-			eriBody: `{"status":"ok","tasks":[
-				{"id":"m2","row_id":12,"thread_id":"t-1","prompt":"second prompt","response_text":"second response","status":"COMPLETED","is_admin":true,"thread_summary":"Session summary here"},
-				{"id":"m1","row_id":8,"thread_id":"t-1","prompt":"first prompt","response_text":"first response","status":"COMPLETED","is_admin":true,"thread_summary":"Session summary here"}
-			]}`,
+			name:          "SuccessChronologicalOrder",
+			threadID:      "t-1",
+			agent:         "agent-beta",
+			watermarkSQL:  "SELECT 20, NULL",
+			summarySQL:    "SELECT 'Session summary here'",
+			rowsSQL:       "SELECT 'm2', 12, 't-1', 'second prompt', 'second response', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00' UNION ALL SELECT 'm1', 8, 't-1', 'first prompt', 'first response', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
 			priorLimit:    -1,
 			wantSummary:   "Session summary here",
 			wantTurnCount: 2,
+		},
+		{
+			name:          "SuccessChronologicalOrder_JoinFallbackSummary",
+			threadID:      "t-2",
+			agent:         "agent-alpha",
+			watermarkSQL:  "SELECT 20, NULL",
+			summarySQL:    "SELECT ''",
+			joinSQL:       "SELECT 'Fallback summary'",
+			rowsSQL:       "SELECT 'm1', 8, 't-2', 'first prompt', 'first response', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
+			priorLimit:    -1,
+			wantSummary:   "Fallback summary",
+			wantTurnCount: 1,
 		},
 	}
 
@@ -90,37 +103,40 @@ func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:         "EriTasksError",
-			threadID:     "t-1",
-			watermarkSQL: "SELECT 0, NULL",
-			tasksStatus:  http.StatusInternalServerError,
-			wantErr:      true,
-		},
-		{
 			name:         "EmptySessions",
 			threadID:     "t-1",
 			watermarkSQL: "SELECT 0, NULL",
-			tasksBody:    `{"status":"ok","tasks":[{"session_id":"","previous_session_id":""}]}`,
+			wantErr:      false,
+		},
+		{
+			name:         "SessionsFallbackWithPreviousConversationID",
+			threadID:     "t-1",
+			agent:        "agent-beta",
+			watermarkSQL: "SELECT 0, '2026-01-01T00:00:00Z'",
+			summarySQL:   "SELECT 'sess-1', 'sess-0'",
+			searchBody:   `{"steps":[]}`,
 			wantErr:      false,
 		},
 		{
 			name:         "TranscriptSearchError",
 			threadID:     "t-1",
+			agent:        "agent-alpha",
 			watermarkSQL: "SELECT 0, NULL",
-			tasksBody:    `{"status":"ok","tasks":[{"session_id":"s1","previous_session_id":"s0"}]}`,
+			messagesSQL:  "SELECT 's1' UNION ALL SELECT 's0'",
 			searchStatus: http.StatusInternalServerError,
 			wantErr:      true,
 		},
 		{
 			name:         "SuccessParsingAndDeduplication",
 			threadID:     "t-1",
+			agent:        "agent-beta",
 			watermarkSQL: "SELECT 0, '2026-01-01T00:00:00Z'",
-			tasksBody:    `{"status":"ok","tasks":[{"session_id":"s1","previous_session_id":"s0"}]}`,
+			messagesSQL:  "SELECT 's1' UNION ALL SELECT 's0'",
 			searchBody: `{"steps":[
 				{"step_type":"USER_INPUT","tool_name":"","content":"<retrieved_memory>\n- [id:42] User likes matcha\n- [id:42] User likes matcha\n- [id:43] Prefers dark mode\n</retrieved_memory>"},
 				{"step_type":"PLANNER_RESPONSE","tool_name":"memory_search","content":"{\"query\": \"matcha\"}"},
 				{"step_type":"USER_INPUT","tool_name":"","content":"<\\RETRIEVED_MEMORY>\n- [id:42] User likes matcha\n- [id:44] Morning coffee at 8am\n<\\/RETRIEVED_MEMORY>"},
-				{"step_type":"OTHER","tool_name":"","content":"ignored"}
+				{"step_type":"OTHER","tool_name":"","content":"ignored long content 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"}
 			]}`,
 			wantErr: false,
 			wantFacts: []string{
@@ -556,30 +572,30 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 	delete10 := `{"facts":[{"action":"DELETE","delete_id":10}]}`
 
 	tests := []reconcileCandidateFactTierTestCase{
-		{name: "NilStoreSafe", nilStore: true, item: valid},
-		{name: "NilClientSafe", nilClient: true, item: valid, want: reconcileUnchanged},
+		{name: "NilStoreSafe", nilStore: true, item: valid, wantErr: true},
+		{name: "NilClientSafe", nilClient: true, item: valid, wantErr: true, want: reconcileUnchanged},
 		{name: "UnadmittedTooShort", item: ExtractedFactItem{FactText: "short"}, want: reconcileUnchanged},
 		{name: "UnadmittedNoopAction", item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"}, want: reconcileUnchanged},
 		{name: "UnadmittedDeleteAction", item: ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact text should not be inserted or reinforced"}, want: reconcileUnchanged},
-		{name: "EmbeddingErrorLogged", item: valid, ollamaErr: errors.New("embed fail"), want: reconcileUnchanged},
-		{name: "FindNearestErrorLogged", item: valid, storeFailOp: "FindNearestScoredFacts", want: reconcileUnchanged},
+		{name: "EmbeddingErrorLogged", item: valid, ollamaErr: errors.New("embed fail"), wantErr: true, want: reconcileUnchanged},
+		{name: "FindNearestErrorLogged", item: valid, storeFailOp: "FindNearestScoredFacts", wantErr: true, want: reconcileUnchanged},
 		{name: "Tier1_NoNeighbors_Insert", item: valid, want: reconcileInserted},
-		{name: "Tier1_InsertErrorLogged", item: valid, storeFailOp: "InsertFact", want: reconcileUnchanged},
+		{name: "Tier1_InsertErrorLogged", item: valid, storeFailOp: "InsertFact", wantErr: true, want: reconcileUnchanged},
 		{name: "Tier2_HighSimReinforce", item: valid, neighborEmb: highSimEmb, want: reconcileReinforced},
-		{name: "Tier2_ReinforceErrorLogged", item: valid, neighborEmb: highSimEmb, storeFailOp: "ReinforceFact", want: reconcileUnchanged},
+		{name: "Tier2_ReinforceErrorLogged", item: valid, neighborEmb: highSimEmb, storeFailOp: "ReinforceFact", wantErr: true, want: reconcileUnchanged},
 		{name: "Tier3_NilLLM_FallbackInsert", item: valid, neighborEmb: tier3Emb, nilLLM: true, want: reconcileInserted},
 		{name: "Tier3_LLMError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmErr: errors.New("timeout"), want: reconcileInserted},
 		{name: "Tier3_ParseError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: "invalid json", want: reconcileInserted},
 		{name: "Tier3_EmptyFacts_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[]}`, want: reconcileInserted},
 		{name: "Tier3_ValidUpdate", item: valid, neighborEmb: tier3Emb, llmResp: update10, want: reconcileUpdated},
 		{name: "Tier3_UnwhitelistedUpdate_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","supersedes_id":999,"fact_text":"Updated text here"}]}`, want: reconcileInserted},
-		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, storeFailOp: "UpdateFact", want: reconcileUnchanged},
+		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, storeFailOp: "UpdateFact", wantErr: true, want: reconcileUnchanged},
 		{name: "Tier3_ValidDelete", item: valid, neighborEmb: tier3Emb, llmResp: delete10, want: reconcileDeleted},
 		{name: "Tier3_UnwhitelistedDelete_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","delete_id":999}]}`, want: reconcileUnchanged},
-		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, storeFailOp: "DeleteFact", want: reconcileUnchanged},
+		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, storeFailOp: "DeleteFact", wantErr: true, want: reconcileUnchanged},
 		{name: "Tier3_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, want: reconcileReinforced},
 		{name: "Tier3_NOOP_ExplicitSupersedesID", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP","supersedes_id":10}]}`, want: reconcileReinforced},
-		{name: "Tier3_NOOP_ReinforceErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, storeFailOp: "ReinforceFact", want: reconcileUnchanged},
+		{name: "Tier3_NOOP_ReinforceErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, storeFailOp: "ReinforceFact", wantErr: true, want: reconcileUnchanged},
 		{name: "Tier3_ADD", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"ADD"}]}`, want: reconcileInserted},
 		{name: "Tier3_DefaultUnknownAction", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"OTHER"}]}`, want: reconcileInserted},
 	}
@@ -596,10 +612,12 @@ type threadContextBeforeWatermarkTestCase struct {
 	nilDB         bool
 	threadID      string
 	priorLimit    int
+	agent         string
 	queryErr      error
 	watermarkSQL  string
-	eriStatus     int
-	eriBody       string
+	summarySQL    string
+	joinSQL       string
+	rowsSQL       string
 	wantErr       bool
 	wantSummary   string
 	wantTurnCount int
@@ -613,24 +631,24 @@ func runGetThreadContextBeforeWatermarkCase(t *testing.T, tc threadContextBefore
 	if tc.nilDB {
 		store = &SQLStore{}
 	} else {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if tc.eriStatus != 0 {
-				w.WriteHeader(tc.eriStatus)
-			}
-			if tc.eriBody != "" {
-				_, _ = w.Write([]byte(tc.eriBody))
-			}
-		}))
-		defer server.Close()
-
-		store = NewSQLStoreWithBrainURL(queryMockDBTX{
-			dbMem:    dbMem,
-			queryErr: tc.queryErr,
-			rowSQL:   tc.watermarkSQL,
-		}, server.URL, server.Client())
+		store = NewSQLStore(queryMockDBTX{
+			dbMem:        dbMem,
+			queryErr:     tc.queryErr,
+			watermarkSQL: tc.watermarkSQL,
+			summarySQL:   tc.summarySQL,
+			joinSQL:      tc.joinSQL,
+			rowsSQL:      tc.rowsSQL,
+		})
 	}
 
-	summary, turns, err := store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit)
+	var summary string
+	var turns []Message
+	var err error
+	if tc.agent != "" {
+		summary, turns, err = store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit, tc.agent)
+	} else {
+		summary, turns, err = store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit)
+	}
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("GetThreadContextBeforeWatermark() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -652,49 +670,16 @@ type threadTrajectoryContextTestCase struct {
 	name          string
 	nilDB         bool
 	threadID      string
+	agent         string
 	queryErr      error
 	watermarkSQL  string
-	tasksStatus   int
-	tasksBody     string
+	summarySQL    string
+	messagesSQL   string
 	searchStatus  int
 	searchBody    string
 	wantErr       bool
 	wantFacts     []string
 	wantToolCalls []string
-}
-
-func handleTrajectoryMock(w http.ResponseWriter, r *http.Request, tc threadTrajectoryContextTestCase) {
-	if strings.HasPrefix(r.URL.Path, "/tasks") {
-		handleTrajectoryTasks(w, tc.tasksStatus, tc.tasksBody)
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/transcripts/search") {
-		handleTrajectorySearch(w, tc.searchStatus, tc.searchBody)
-		return
-	}
-	http.NotFound(w, r)
-}
-
-func handleTrajectoryTasks(w http.ResponseWriter, status int, body string) {
-	if status != 0 {
-		w.WriteHeader(status)
-	}
-	if body != "" {
-		_, _ = w.Write([]byte(body))
-		return
-	}
-	_, _ = w.Write([]byte(`{"status":"ok","tasks":[]}`))
-}
-
-func handleTrajectorySearch(w http.ResponseWriter, status int, body string) {
-	if status != 0 {
-		w.WriteHeader(status)
-	}
-	if body != "" {
-		_, _ = w.Write([]byte(body))
-		return
-	}
-	_, _ = w.Write([]byte(`{"steps":[]}`))
 }
 
 func runGetThreadTrajectoryContextCase(t *testing.T, tc threadTrajectoryContextTestCase, dbMem *sql.DB) {
@@ -706,18 +691,33 @@ func runGetThreadTrajectoryContextCase(t *testing.T, tc threadTrajectoryContextT
 		store = &SQLStore{}
 	} else {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleTrajectoryMock(w, r, tc)
+			if tc.searchStatus != 0 {
+				w.WriteHeader(tc.searchStatus)
+			}
+			if tc.searchBody != "" {
+				_, _ = w.Write([]byte(tc.searchBody))
+				return
+			}
+			_, _ = w.Write([]byte(`{"steps":[]}`))
 		}))
 		defer server.Close()
 
 		store = NewSQLStoreWithBrainURL(queryMockDBTX{
-			dbMem:    dbMem,
-			queryErr: tc.queryErr,
-			rowSQL:   tc.watermarkSQL,
+			dbMem:        dbMem,
+			queryErr:     tc.queryErr,
+			watermarkSQL: tc.watermarkSQL,
+			summarySQL:   tc.summarySQL,
+			messagesSQL:  tc.messagesSQL,
 		}, server.URL, server.Client())
 	}
 
-	facts, tools, err := store.GetThreadTrajectoryContext(ctx, tc.threadID)
+	var facts, tools []string
+	var err error
+	if tc.agent != "" {
+		facts, tools, err = store.GetThreadTrajectoryContext(ctx, tc.threadID, tc.agent)
+	} else {
+		facts, tools, err = store.GetThreadTrajectoryContext(ctx, tc.threadID)
+	}
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -780,6 +780,7 @@ type reconcileCandidateFactTierTestCase struct {
 	llmResp     string
 	llmErr      error
 	nilLLM      bool
+	wantErr     bool
 	want        reconcileOutcome
 }
 
@@ -815,7 +816,10 @@ func runReconcileCandidateFactTierCase(t *testing.T, tc reconcileCandidateFactTi
 		}
 	}
 
-	reconcileCandidateFact(ctx, store, client, llm, tc.item)
+	err := reconcileCandidateFact(ctx, store, client, llm, tc.item, nil, "")
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("reconcileCandidateFact() err = %v, wantErr = %v", err, tc.wantErr)
+	}
 
 	if mem == nil {
 		return
@@ -860,12 +864,14 @@ func assertReconcileOutcome(t *testing.T, mem *TestMemStore, hasNeighbor bool, w
 }
 
 type extractThreadFactsTestCase struct {
-	name     string
-	ctx      context.Context
-	threadID string
-	nilStore bool
-	nilLLM   bool
-	wantErr  bool
+	name      string
+	ctx       context.Context
+	threadID  string
+	agent     string
+	nilStore  bool
+	nilLLM    bool
+	wantErr   bool
+	wantAgent string
 }
 
 func TestExtractThreadFacts(t *testing.T) {
@@ -906,6 +912,14 @@ func TestExtractThreadFacts(t *testing.T) {
 			threadID: "th-valid",
 			wantErr:  false,
 		},
+		{
+			name:      "ValidArgumentsWithAgentPropagation",
+			ctx:       ctx,
+			threadID:  "th-valid-agent",
+			agent:     "agent-alpha",
+			wantAgent: "agent-alpha",
+			wantErr:   false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -919,8 +933,13 @@ func TestExtractThreadFacts(t *testing.T) {
 func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase, validEmb []float32) {
 	t.Helper()
 	var store Store
+	var mem *TestMemStore
 	if !tc.nilStore {
-		store = newTestMemStore()
+		mem = newTestMemStore()
+		if tc.threadID != "" {
+			mem.maxRowIDs[tc.threadID] = 10
+		}
+		store = mem
 	}
 
 	client := &MockOllamaClient{embedding: validEmb}
@@ -932,8 +951,18 @@ func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase, vali
 		}
 	}
 
-	err := ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID)
+	var err error
+	if tc.agent != "" {
+		err = ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID, tc.agent)
+	} else {
+		err = ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID)
+	}
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if !tc.wantErr && tc.wantAgent != "" && mem != nil {
+		if mem.lastUpdatedWatermarkAgent != tc.wantAgent {
+			t.Errorf("watermark agent = %q, want %q", mem.lastUpdatedWatermarkAgent, tc.wantAgent)
+		}
 	}
 }
