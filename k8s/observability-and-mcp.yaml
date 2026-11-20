@@ -143,6 +143,7 @@ data:
   kubernetes-mcp.toml: |
     port = "8080"
     require_oauth = true
+    skip_jwt_verification = true
   kernel-mcp.yaml: |
     cdp_host: "browser.aerial"
     cdp_port: "9222"
