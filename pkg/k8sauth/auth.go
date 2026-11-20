@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -377,9 +378,40 @@ func (a *Authenticator) Authenticate(ctx context.Context, bearerToken string) (C
 	return identity, nil
 }
 
+func sarCacheKey(caller CallerIdentity, resource, verb, targetAgent string) string {
+	h := sha256.New()
+	groups := slices.Clone(caller.Groups)
+	slices.Sort(groups)
+	for _, g := range groups {
+		h.Write([]byte(g))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte{0xff})
+	if len(caller.Extra) > 0 {
+		keys := make([]string, 0, len(caller.Extra))
+		for k := range caller.Extra {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			h.Write([]byte(k))
+			h.Write([]byte{0})
+			vals := slices.Clone(caller.Extra[k])
+			slices.Sort(vals)
+			for _, v := range vals {
+				h.Write([]byte(v))
+				h.Write([]byte{0})
+			}
+			h.Write([]byte{0xfe})
+		}
+	}
+	digest := hex.EncodeToString(h.Sum(nil))
+	return caller.Username + "\x00" + digest + "\x00" + resource + "\x00" + verb + "\x00" + targetAgent
+}
+
 // Authorize verifies that caller has permissions for the resource, verb, and targetAgent in aerial.io.
 func (a *Authenticator) Authorize(ctx context.Context, caller CallerIdentity, resource, verb, targetAgent string) error {
-	sarKey := caller.Username + "\x00" + resource + "\x00" + verb + "\x00" + targetAgent
+	sarKey := sarCacheKey(caller, resource, verb, targetAgent)
 	if _, ok := a.sarCache.Get(sarKey); ok {
 		return nil
 	}
@@ -521,7 +553,11 @@ func (a *Authenticator) Middleware(exemptPaths ...string) func(http.Handler) htt
 
 			caller, err := a.Authenticate(r.Context(), token)
 			if err != nil {
-				writeJSONError(w, http.StatusUnauthorized, err.Error())
+				if _, ok := errors.AsType[*UnauthorizedError](err); ok {
+					writeJSONError(w, http.StatusUnauthorized, err.Error())
+					return
+				}
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 

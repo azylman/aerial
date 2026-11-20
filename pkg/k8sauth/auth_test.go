@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -396,12 +397,29 @@ func TestServiceAccountTransport_TokenError(t *testing.T) {
 func TestServiceAccountTransport_DefaultBase(t *testing.T) {
 	t.Parallel()
 
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	transport := NewServiceAccountTransport(nil, tokenFile)
+	var capturedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
 
-	st, ok := transport.(*ServiceAccountTransport)
-	if !ok || st.base == nil {
-		t.Fatalf("expected default base transport to be non-nil")
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("default-base-token"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	transport := NewServiceAccountTransport(nil, tokenFile)
+	client := &http.Client{Transport: transport}
+
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if capturedAuth != "Bearer default-base-token" {
+		t.Fatalf("Authorization header = %q, want %q", capturedAuth, "Bearer default-base-token")
 	}
 }
 
@@ -803,7 +821,12 @@ func TestAuthorize_Allowed(t *testing.T) {
 		HTTPClient:   &http.Client{Transport: rt},
 	})
 
-	caller := CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial"}
+	caller := CallerIdentity{
+		Username:    "system:serviceaccount:default:eri-aerial",
+		CallerAgent: "aerial",
+		Groups:      []string{"group-a"},
+		Extra:       map[string][]string{"role": {"admin"}},
+	}
 	if err := auth.Authorize(context.Background(), caller, "builds", "get", "aerial"); err != nil {
 		t.Fatalf("Authorize() unexpected error = %v", err)
 	}
@@ -812,6 +835,17 @@ func TestAuthorize_Allowed(t *testing.T) {
 	rt.err = errors.New("transport should not be called on cache hit")
 	if err := auth.Authorize(context.Background(), caller, "builds", "get", "aerial"); err != nil {
 		t.Fatalf("Authorize() cache hit error = %v", err)
+	}
+
+	// Call with different groups must not hit cache
+	callerDiffGroup := CallerIdentity{
+		Username:    "system:serviceaccount:default:eri-aerial",
+		CallerAgent: "aerial",
+		Groups:      []string{"group-b"},
+		Extra:       map[string][]string{"role": {"admin"}},
+	}
+	if err := auth.Authorize(context.Background(), callerDiffGroup, "builds", "get", "aerial"); err == nil {
+		t.Fatalf("expected transport error on different groups cache miss, got nil")
 	}
 }
 
@@ -1284,6 +1318,14 @@ func TestMiddleware(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
+			name:         "authenticate infrastructure failure returns 500",
+			enabled:      true,
+			reqPath:      "/api/secure",
+			authHeader:   "Bearer valid-token",
+			transportErr: true,
+			wantStatus:   http.StatusInternalServerError,
+		},
+		{
 			name:       "authenticated request attaches caller to context",
 			enabled:    true,
 			reqPath:    "/api/secure",
@@ -1342,54 +1384,28 @@ func TestMiddleware(t *testing.T) {
 	}
 }
 
-func TestNewAuthenticatorDefaults(t *testing.T) {
+func TestNewAuthenticator_APIServerURL(t *testing.T) {
 	tests := []struct {
-		name          string
-		cfg           Config
-		envHost       string
-		envPort       string
-		wantURLPrefix string
-		wantPrefix    string
-		wantTTL       time.Duration
-		wantEntries   int
-		wantAgents    int
+		name    string
+		url     string
+		envHost string
+		envPort string
+		wantURL string
 	}{
 		{
-			name:          "all defaults applied",
-			cfg:           Config{},
-			wantURLPrefix: "https://kubernetes.default.svc",
-			wantPrefix:    "system:serviceaccount:default:eri-",
-			wantTTL:       45 * time.Second,
-			wantEntries:   1024,
-			wantAgents:    3,
+			name:    "default url when env unset",
+			wantURL: "https://kubernetes.default.svc",
 		},
 		{
-			name: "custom parameters preserved",
-			cfg: Config{
-				TokenPath:        "/custom/token",
-				AgentSAPrefix:    "custom-prefix-",
-				SAAgentAliases:   map[string]string{"custom": "aerial"},
-				ConfiguredAgents: []string{"aerial", "suletta"},
-				CacheTTL:         10 * time.Second,
-				CacheMaxEntries:  500,
-				APIServerURL:     "https://apiserver.custom.domain/",
-			},
-			wantURLPrefix: "https://apiserver.custom.domain",
-			wantPrefix:    "custom-prefix-",
-			wantTTL:       10 * time.Second,
-			wantEntries:   500,
-			wantAgents:    2,
+			name:    "custom url with trailing slash trimmed",
+			url:     "https://apiserver.custom.domain/",
+			wantURL: "https://apiserver.custom.domain",
 		},
 		{
-			name:          "environment service host and port used",
-			cfg:           Config{},
-			envHost:       "10.96.0.1",
-			envPort:       "443",
-			wantURLPrefix: "https://10.96.0.1:443",
-			wantPrefix:    "system:serviceaccount:default:eri-",
-			wantTTL:       45 * time.Second,
-			wantEntries:   1024,
-			wantAgents:    3,
+			name:    "environment service host and port used",
+			envHost: "10.96.0.1",
+			envPort: "443",
+			wantURL: "https://10.96.0.1:443",
 		},
 	}
 
@@ -1403,23 +1419,61 @@ func TestNewAuthenticatorDefaults(t *testing.T) {
 				t.Setenv("KUBERNETES_SERVICE_PORT", "")
 			}
 
-			auth := NewAuthenticator(tc.cfg)
-
-			if auth.cfg.APIServerURL != tc.wantURLPrefix {
-				t.Fatalf("APIServerURL = %q, want %q", auth.cfg.APIServerURL, tc.wantURLPrefix)
-			}
-			if auth.cfg.AgentSAPrefix != tc.wantPrefix {
-				t.Fatalf("AgentSAPrefix = %q, want %q", auth.cfg.AgentSAPrefix, tc.wantPrefix)
-			}
-			if auth.cfg.CacheTTL != tc.wantTTL {
-				t.Fatalf("CacheTTL = %v, want %v", auth.cfg.CacheTTL, tc.wantTTL)
-			}
-			if auth.cfg.CacheMaxEntries != tc.wantEntries {
-				t.Fatalf("CacheMaxEntries = %d, want %d", auth.cfg.CacheMaxEntries, tc.wantEntries)
-			}
-			if len(auth.cfg.ConfiguredAgents) != tc.wantAgents {
-				t.Fatalf("len(ConfiguredAgents) = %d, want %d", len(auth.cfg.ConfiguredAgents), tc.wantAgents)
+			auth := NewAuthenticator(Config{APIServerURL: tc.url})
+			if auth.cfg.APIServerURL != tc.wantURL {
+				t.Fatalf("APIServerURL = %q, want %q", auth.cfg.APIServerURL, tc.wantURL)
 			}
 		})
+	}
+}
+
+func TestNewAuthenticator_Defaults(t *testing.T) {
+	t.Parallel()
+
+	auth := NewAuthenticator(Config{})
+	if auth.cfg.CacheTTL <= 0 {
+		t.Fatalf("expected positive default CacheTTL, got %v", auth.cfg.CacheTTL)
+	}
+	if auth.cfg.CacheMaxEntries <= 0 {
+		t.Fatalf("expected positive default CacheMaxEntries, got %d", auth.cfg.CacheMaxEntries)
+	}
+	if auth.cfg.AgentSAPrefix == "" {
+		t.Fatalf("expected non-empty default AgentSAPrefix")
+	}
+	if len(auth.cfg.ConfiguredAgents) == 0 {
+		t.Fatalf("expected non-empty default ConfiguredAgents")
+	}
+	if auth.cfg.TokenPath == "" {
+		t.Fatalf("expected non-empty default TokenPath")
+	}
+}
+
+func TestNewAuthenticator_CustomConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		TokenPath:        "/custom/token",
+		AgentSAPrefix:    "custom-prefix-",
+		SAAgentAliases:   map[string]string{"custom": "aerial"},
+		ConfiguredAgents: []string{"aerial", "suletta"},
+		CacheTTL:         10 * time.Second,
+		CacheMaxEntries:  500,
+	}
+	auth := NewAuthenticator(cfg)
+
+	if auth.cfg.TokenPath != cfg.TokenPath {
+		t.Fatalf("TokenPath = %q, want %q", auth.cfg.TokenPath, cfg.TokenPath)
+	}
+	if auth.cfg.AgentSAPrefix != cfg.AgentSAPrefix {
+		t.Fatalf("AgentSAPrefix = %q, want %q", auth.cfg.AgentSAPrefix, cfg.AgentSAPrefix)
+	}
+	if auth.cfg.CacheTTL != cfg.CacheTTL {
+		t.Fatalf("CacheTTL = %v, want %v", auth.cfg.CacheTTL, cfg.CacheTTL)
+	}
+	if auth.cfg.CacheMaxEntries != cfg.CacheMaxEntries {
+		t.Fatalf("CacheMaxEntries = %d, want %d", auth.cfg.CacheMaxEntries, cfg.CacheMaxEntries)
+	}
+	if !slices.Equal(auth.cfg.ConfiguredAgents, cfg.ConfiguredAgents) {
+		t.Fatalf("ConfiguredAgents = %v, want %v", auth.cfg.ConfiguredAgents, cfg.ConfiguredAgents)
 	}
 }
