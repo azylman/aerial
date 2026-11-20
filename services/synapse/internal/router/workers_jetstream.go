@@ -12,8 +12,56 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
-func resolveJetStreamJobCoords(args any) (string, string) {
-	return metrics.ResolveJetStreamJobCoords(args)
+func resolveJetStreamJobCoords(args any, routing metrics.DiscordRouting) (string, string) {
+	return metrics.ResolveJetStreamJobCoords(args, routing)
+}
+
+// discordRoutingFor derives per-agent Discord subject routing from cfg's
+// configured bots and default owner agent. A nil cfg routes everything to the
+// default owner fallback.
+func discordRoutingFor(cfg *Config) metrics.DiscordRouting {
+	var agents []string
+	if cfg != nil {
+		for agent := range cfg.Bots {
+			agents = append(agents, agent)
+		}
+	}
+	return metrics.NewDiscordRouting(agents, cfg.DefaultOwnerAgent())
+}
+
+// discordRouting returns routing for the current config snapshot. Changing
+// bots forces a synapse restart, so the snapshot used at consumer startup and
+// at publish time agree for the lifetime of the process.
+func (s *RouterServer) discordRouting() metrics.DiscordRouting {
+	return discordRoutingFor(s.Config())
+}
+
+type consumerSpec struct {
+	subject string
+	queue   string
+	handler pubsub.Handler
+}
+
+// jobConsumerSpecs lists every AERIAL_JOBS durable synapse subscribes: github,
+// deploy, the legacy drain-only shared Discord durables, then one ingress and
+// one interaction durable per agent in sorted order. Filter subjects are exact
+// (no wildcards), so they never overlap on the WorkQueue stream.
+func (s *RouterServer) jobConsumerSpecs(routing metrics.DiscordRouting) []consumerSpec {
+	agents := routing.Agents()
+	specs := make([]consumerSpec, 0, 4+2*len(agents))
+	specs = append(specs,
+		consumerSpec{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
+		consumerSpec{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
+		consumerSpec{metrics.LegacyDiscordIngressSubject, metrics.LegacyDiscordIngressDurable, s.HandleDiscordIngressJob},
+		consumerSpec{metrics.LegacyDiscordInteractionSubject, metrics.LegacyDiscordInteractionDurable, s.HandleDiscordInteractionJob},
+	)
+	for _, agent := range agents {
+		specs = append(specs,
+			consumerSpec{metrics.DiscordIngressSubject(agent), metrics.DiscordIngressDurable(agent), s.HandleDiscordIngressJob},
+			consumerSpec{metrics.DiscordInteractionSubject(agent), metrics.DiscordInteractionDurable(agent), s.HandleDiscordInteractionJob},
+		)
+	}
+	return specs
 }
 
 const (
@@ -95,7 +143,7 @@ func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) 
 	})
 }
 
-// HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress job message from JetStream.
+// HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress[.<agent>] job message from JetStream.
 // ctx carries the trace context extracted from the NATS message headers; a legacy
 // traceparent key left in older job bodies is an unknown JSON field and is ignored.
 func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.Message) (err error) {
@@ -164,7 +212,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	}
 }
 
-// HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction job message from JetStream.
+// HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction[.<agent>] job message from JetStream.
 // ctx carries the trace context extracted from the NATS message headers.
 func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) error {
 	var args DiscordInteractionArgs
@@ -195,18 +243,7 @@ func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 	if s == nil || s.bus == nil {
 		return nil
 	}
-	type consumerSpec struct {
-		subject string
-		queue   string
-		handler pubsub.Handler
-	}
-	specs := []consumerSpec{
-		{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
-		{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
-		{"aerial.jobs.synapse.discord_ingress", "synapse-discord-ingress", s.HandleDiscordIngressJob},
-		{"aerial.jobs.synapse.discord_interaction", "synapse-discord-interaction", s.HandleDiscordInteractionJob},
-	}
-	for _, spec := range specs {
+	for _, spec := range s.jobConsumerSpecs(s.discordRouting()) {
 		if _, err := s.bus.ConsumeQueue(ctx, spec.subject, spec.queue, spec.handler); err != nil {
 			slog.WarnContext(ctx, "[synapse] failed to subscribe", "queue", spec.queue, "error", err)
 			return fmt.Errorf("subscribe %s: %w", spec.queue, err)

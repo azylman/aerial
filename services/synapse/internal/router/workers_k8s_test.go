@@ -73,7 +73,7 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 			if !tc.nilQuerier {
 				q = &mockConsumerStatsQuerier{stats: tc.stats, err: tc.querierErr}
 			}
-			err := collectJetStreamQueueMetrics(ctx, q)
+			err := collectJetStreamQueueMetrics(ctx, q, discordRoutingFor(nil))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("collectJetStreamQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
 			}

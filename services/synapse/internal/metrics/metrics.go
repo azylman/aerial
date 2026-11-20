@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,6 +17,7 @@ import (
 const (
 	unknownLabel = "unknown"
 	labelQueue   = "queue"
+	labelAgent   = "agent"
 	fieldKind    = "kind"
 	fieldStatus  = "status"
 	fieldReason  = "reason"
@@ -78,6 +80,17 @@ var (
 		[]string{labelQueue, "state"},
 	)
 
+	// DiscordAgentQueueDepth breaks the Discord queues down per bot. The
+	// aggregate stays on QueueDepth so existing dashboards and alerts are
+	// unchanged; legacy drain-only consumers count toward QueueDepth only.
+	DiscordAgentQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "synapse_discord_agent_queue_depth",
+			Help: "Current depth of per-agent Discord queues partitioned by state.",
+		},
+		[]string{labelQueue, labelAgent, "state"},
+	)
+
 	DiscordGatewayLatencySeconds = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "synapse_discord_gateway_latency_seconds",
@@ -134,6 +147,7 @@ func init() {
 	registerCollector(JobRetriesTotal)
 	registerCollector(JobsDroppedTotal)
 	registerCollector(QueueDepth)
+	registerCollector(DiscordAgentQueueDepth)
 	registerCollector(DiscordGatewayLatencySeconds)
 
 	for _, q := range knownQueues {
@@ -221,21 +235,38 @@ type synapseConsumerTarget struct {
 	stream   string
 	consumer string
 	queue    string
+	agent    string
 }
 
 var synapseConsumerTargets = []synapseConsumerTarget{
 	{stream: pubsub.StreamAerialJobs, consumer: "synapse-github", queue: QueueDefault},
 	{stream: pubsub.StreamAerialJobs, consumer: "synapse-deploy", queue: QueueDefault},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
+	{stream: pubsub.StreamAerialJobs, consumer: LegacyDiscordIngressDurable, queue: QueueDiscordIngress},
+	{stream: pubsub.StreamAerialJobs, consumer: LegacyDiscordInteractionDurable, queue: QueueDiscordInteraction},
 }
 
-// CollectJetStreamQueueMetrics reads consumer pending and in-flight counts and updates QueueDepth gauges.
-func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) error {
+// consumerTargetsFor returns the static targets followed by one ingress and
+// one interaction durable per Discord agent, in routing order.
+func consumerTargetsFor(routing DiscordRouting) []synapseConsumerTarget {
+	targets := slices.Clone(synapseConsumerTargets)
+	for _, agent := range routing.Agents() {
+		targets = append(targets,
+			synapseConsumerTarget{stream: pubsub.StreamAerialJobs, consumer: DiscordIngressDurable(agent), queue: QueueDiscordIngress, agent: agent},
+			synapseConsumerTarget{stream: pubsub.StreamAerialJobs, consumer: DiscordInteractionDurable(agent), queue: QueueDiscordInteraction, agent: agent},
+		)
+	}
+	return targets
+}
+
+// CollectJetStreamQueueMetrics reads consumer pending and in-flight counts and
+// updates QueueDepth (summed per queue across every durable, including the
+// per-agent Discord ones) and DiscordAgentQueueDepth (per agent).
+func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier, routing DiscordRouting) error {
 	for _, queue := range knownQueues {
 		QueueDepth.WithLabelValues(queue, "pending").Set(0)
 		QueueDepth.WithLabelValues(queue, "in_flight").Set(0)
 	}
+	DiscordAgentQueueDepth.Reset()
 	if q == nil {
 		return nil
 	}
@@ -243,7 +274,7 @@ func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) e
 	queuePending := make(map[string]int64)
 	queueInFlight := make(map[string]int64)
 	var firstErr error
-	for _, target := range synapseConsumerTargets {
+	for _, target := range consumerTargetsFor(routing) {
 		pending, inFlight, err := q.ConsumerStats(ctx, target.stream, target.consumer)
 		if err != nil {
 			if firstErr == nil {
@@ -254,6 +285,10 @@ func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) e
 		}
 		queuePending[target.queue] += pending
 		queueInFlight[target.queue] += inFlight
+		if target.agent != "" {
+			DiscordAgentQueueDepth.WithLabelValues(target.queue, target.agent, "pending").Set(float64(pending))
+			DiscordAgentQueueDepth.WithLabelValues(target.queue, target.agent, "in_flight").Set(float64(inFlight))
+		}
 	}
 	for queue, p := range queuePending {
 		QueueDepth.WithLabelValues(queue, "pending").Set(float64(p))
@@ -311,17 +346,111 @@ func discordDedupID(prefix, agent, id string) string {
 	return prefix + id
 }
 
+// Legacy shared Discord subjects and durables. They are drain-only: synapse
+// still consumes them so jobs published before the per-agent rollout deliver,
+// but never publishes to them.
+const (
+	LegacyDiscordIngressSubject     = "aerial.jobs.synapse.discord_ingress"
+	LegacyDiscordInteractionSubject = "aerial.jobs.synapse.discord_interaction"
+	LegacyDiscordIngressDurable     = "synapse-discord-ingress"
+	LegacyDiscordInteractionDurable = "synapse-discord-interaction"
+)
+
+// SanitizeDiscordAgent lowercases and trims agent and maps it to a single
+// NATS subject token that is also a valid durable name suffix: every rune
+// outside [a-z0-9_-] becomes '_'. Blank input returns "".
+func SanitizeDiscordAgent(agent string) string {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, agent)
+}
+
+// DiscordIngressSubject returns the per-agent Discord message job subject.
+func DiscordIngressSubject(agent string) string {
+	return LegacyDiscordIngressSubject + "." + agentToken(agent)
+}
+
+// DiscordInteractionSubject returns the per-agent Discord interaction job subject.
+func DiscordInteractionSubject(agent string) string {
+	return LegacyDiscordInteractionSubject + "." + agentToken(agent)
+}
+
+// DiscordIngressDurable returns the per-agent Discord message consumer durable.
+func DiscordIngressDurable(agent string) string {
+	return LegacyDiscordIngressDurable + "-" + agentToken(agent)
+}
+
+// DiscordInteractionDurable returns the per-agent Discord interaction consumer durable.
+func DiscordInteractionDurable(agent string) string {
+	return LegacyDiscordInteractionDurable + "-" + agentToken(agent)
+}
+
+func agentToken(agent string) string {
+	if token := SanitizeDiscordAgent(agent); token != "" {
+		return token
+	}
+	return unknownLabel
+}
+
+// DiscordRouting maps Discord job agents onto the per-agent subjects that
+// synapse actually consumes. Publish, consume and metrics paths all derive
+// from the same routing so a published job always has a durable.
+type DiscordRouting struct {
+	defaultAgent string
+	agents       []string
+}
+
+// NewDiscordRouting builds routing for the configured bot names and default
+// owner agent. Agents are sanitized, deduplicated and sorted; the default
+// owner is always included so its subject is consumed even with no bots.
+func NewDiscordRouting(configured []string, defaultAgent string) DiscordRouting {
+	def := agentToken(defaultAgent)
+	agents := []string{def}
+	for _, a := range configured {
+		if token := SanitizeDiscordAgent(a); token != "" {
+			agents = append(agents, token)
+		}
+	}
+	slices.Sort(agents)
+	return DiscordRouting{defaultAgent: def, agents: slices.Compact(agents)}
+}
+
+// Agents returns the sorted agent tokens that get their own durables.
+func (r DiscordRouting) Agents() []string {
+	if len(r.agents) == 0 {
+		return []string{agentToken(r.defaultAgent)}
+	}
+	return slices.Clone(r.agents)
+}
+
+// Resolve returns the agent token a job for agent is routed to. Blank agents
+// and agents without a configured durable fall back to the default owner, so
+// no job lands on a subject nobody consumes. The job payload keeps its
+// original Agent field; only the subject changes.
+func (r DiscordRouting) Resolve(agent string) string {
+	token := SanitizeDiscordAgent(agent)
+	if token != "" && slices.Contains(r.agents, token) {
+		return token
+	}
+	return agentToken(r.defaultAgent)
+}
+
 // ResolveJetStreamJobCoords returns the JetStream subject and deduplication message ID for a job payload.
-func ResolveJetStreamJobCoords(args any) (string, string) {
+// Discord jobs are routed to their per-agent subject via routing.
+func ResolveJetStreamJobCoords(args any, routing DiscordRouting) (string, string) {
 	switch a := NormalizeJobArgs(args).(type) {
 	case model.GitHubWebhookArgs:
 		return "aerial.jobs.synapse.github", "github:" + a.Delivery
 	case model.DeployWebhookArgs:
 		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
 	case model.DiscordIngressArgs:
-		return "aerial.jobs.synapse.discord_ingress", discordDedupID("discord:msg:", a.Agent, a.MessageID)
+		return DiscordIngressSubject(routing.Resolve(a.Agent)), discordDedupID("discord:msg:", a.Agent, a.MessageID)
 	case model.DiscordInteractionArgs:
-		return "aerial.jobs.synapse.discord_interaction", discordDedupID("discord:ix:", a.Agent, a.InteractionID)
+		return DiscordInteractionSubject(routing.Resolve(a.Agent)), discordDedupID("discord:ix:", a.Agent, a.InteractionID)
 	default:
 		return "", ""
 	}

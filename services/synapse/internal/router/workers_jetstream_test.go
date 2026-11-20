@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,32 +76,45 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 		{
 			name:        "DiscordIngressArgs",
 			args:        DiscordIngressArgs{MessageID: "msg-999"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress",
+			wantSubject: "aerial.jobs.synapse.discord_ingress.beta",
 			wantPrefix:  "discord:msg:msg-999",
 		},
 		{
 			name:        "*DiscordIngressArgs",
 			args:        &DiscordIngressArgs{MessageID: "msg-888"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress",
+			wantSubject: "aerial.jobs.synapse.discord_ingress.beta",
 			wantPrefix:  "discord:msg:msg-888",
+		},
+		{
+			name:        "DiscordIngressArgs non-default agent",
+			args:        DiscordIngressArgs{MessageID: "msg-777", Agent: "alpha"},
+			wantSubject: "aerial.jobs.synapse.discord_ingress.alpha",
+			wantPrefix:  "discord:msg:alpha:msg-777",
 		},
 		{
 			name:        "DiscordInteractionArgs",
 			args:        DiscordInteractionArgs{InteractionID: "ix-111"},
-			wantSubject: "aerial.jobs.synapse.discord_interaction",
+			wantSubject: "aerial.jobs.synapse.discord_interaction.beta",
 			wantPrefix:  "discord:ix:ix-111",
 		},
 		{
 			name:        "*DiscordInteractionArgs",
 			args:        &DiscordInteractionArgs{InteractionID: "ix-222"},
-			wantSubject: "aerial.jobs.synapse.discord_interaction",
+			wantSubject: "aerial.jobs.synapse.discord_interaction.beta",
 			wantPrefix:  "discord:ix:ix-222",
 		},
+		{
+			name:        "DiscordInteractionArgs non-default agent",
+			args:        DiscordInteractionArgs{InteractionID: "ix-333", Agent: "Alpha"},
+			wantSubject: "aerial.jobs.synapse.discord_interaction.alpha",
+			wantPrefix:  "discord:ix:Alpha:ix-333",
+		},
 	}
+	routing := discordRoutingFor(&Config{Bots: map[string]BotConfig{"alpha": {}, "beta": {DefaultOwner: true}}})
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			subj, msgID := resolveJetStreamJobCoords(tc.args)
+			subj, msgID := resolveJetStreamJobCoords(tc.args, routing)
 			if subj != tc.wantSubject {
 				t.Errorf("subject = %q, want %q", subj, tc.wantSubject)
 			}
@@ -457,6 +471,14 @@ func (w *wiringDispatcher) DispatchDiscordInteraction(ctx context.Context, ix *d
 	return err
 }
 
+func (w *wiringDispatcher) DispatchDiscordInteractionForAgent(ctx context.Context, agent string, ix *discordgo.Interaction) error {
+	err := w.mockOutboundDispatcher.DispatchDiscordInteractionForAgent(ctx, agent, ix)
+	if w.onInteraction != nil {
+		w.onInteraction()
+	}
+	return err
+}
+
 func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -465,7 +487,10 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	defer memBus.Close()
 
 	srv := &RouterServer{
-		cfgSrc: fixedConfig(Config{SystemChannelID: "100000000000000001"}),
+		cfgSrc: fixedConfig(Config{
+			SystemChannelID: "100000000000000001",
+			Bots:            map[string]BotConfig{"alpha": {DefaultOwner: true}, "beta": {}},
+		}),
 	}
 	disp := &wiringDispatcher{}
 	srv.SetDispatcher(disp)
@@ -513,9 +538,12 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	}
 
 	cases := []struct {
-		name   string
-		args   any
-		signal <-chan struct{}
+		name string
+		args any
+		// rawSubject, when set, publishes straight to that subject instead of
+		// via publishJetStreamJob (simulates a job the pre-rollout pod published).
+		rawSubject string
+		signal     <-chan struct{}
 	}{
 		{
 			name:   "github",
@@ -544,11 +572,39 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 			args:   DiscordInteractionArgs{InteractionID: "wire-ix"},
 			signal: interactionCh,
 		},
+		{
+			name:   "discord_ingress non-default agent",
+			args:   DiscordIngressArgs{MessageID: "wire-ing-beta", Agent: "beta", Message: &discordgo.Message{ID: "wire-ing-beta"}},
+			signal: ingressCh,
+		},
+		{
+			name:   "discord_interaction non-default agent",
+			args:   DiscordInteractionArgs{InteractionID: "wire-ix-beta", Agent: "beta"},
+			signal: interactionCh,
+		},
+		{
+			name:       "legacy discord_ingress drain",
+			args:       DiscordIngressArgs{MessageID: "wire-ing-legacy", Agent: "beta", Message: &discordgo.Message{ID: "wire-ing-legacy"}},
+			rawSubject: "aerial.jobs.synapse.discord_ingress",
+			signal:     ingressCh,
+		},
+		{
+			name:       "legacy discord_interaction drain",
+			args:       DiscordInteractionArgs{InteractionID: "wire-ix-legacy", Agent: "beta"},
+			rawSubject: "aerial.jobs.synapse.discord_interaction",
+			signal:     interactionCh,
+		},
 	}
 
 	for _, tc := range cases {
-		if err := srv.publishJetStreamJob(ctx, tc.args); err != nil {
-			t.Fatalf("publishJetStreamJob(%s) error: %v", tc.name, err)
+		var err error
+		if tc.rawSubject != "" {
+			err = memBus.Publish(ctx, tc.rawSubject, tc.name, tc.args)
+		} else {
+			err = srv.publishJetStreamJob(ctx, tc.args)
+		}
+		if err != nil {
+			t.Fatalf("publish(%s) error: %v", tc.name, err)
 		}
 		select {
 		case <-tc.signal:
@@ -791,6 +847,69 @@ func TestHandleImagePromotionMessage_TerminalFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runHandleImagePromotionCase(t, tc)
+		})
+	}
+}
+
+func TestJobConsumerSpecs(t *testing.T) {
+	t.Parallel()
+
+	static := []string{
+		"aerial.jobs.synapse.github synapse-github",
+		"aerial.jobs.synapse.deploy synapse-deploy",
+		"aerial.jobs.synapse.discord_ingress synapse-discord-ingress",
+		"aerial.jobs.synapse.discord_interaction synapse-discord-interaction",
+	}
+	tests := []struct {
+		name      string
+		cfg       *Config
+		wantAgent []string
+	}{
+		{
+			name: "multiple bots subscribe one durable pair each in sorted order",
+			cfg:  &Config{Bots: map[string]BotConfig{"gamma": {}, "alpha": {DefaultOwner: true}, "beta": {}}},
+			wantAgent: []string{
+				"aerial.jobs.synapse.discord_ingress.alpha synapse-discord-ingress-alpha",
+				"aerial.jobs.synapse.discord_interaction.alpha synapse-discord-interaction-alpha",
+				"aerial.jobs.synapse.discord_ingress.beta synapse-discord-ingress-beta",
+				"aerial.jobs.synapse.discord_interaction.beta synapse-discord-interaction-beta",
+				"aerial.jobs.synapse.discord_ingress.gamma synapse-discord-ingress-gamma",
+				"aerial.jobs.synapse.discord_interaction.gamma synapse-discord-interaction-gamma",
+			},
+		},
+		{
+			name: "single bot without explicit default owner",
+			cfg:  &Config{Bots: map[string]BotConfig{"delta": {}}},
+			wantAgent: []string{
+				"aerial.jobs.synapse.discord_ingress.delta synapse-discord-ingress-delta",
+				"aerial.jobs.synapse.discord_interaction.delta synapse-discord-interaction-delta",
+			},
+		},
+		{
+			name: "agent needing sanitization",
+			cfg:  &Config{Bots: map[string]BotConfig{"ops.bot": {DefaultOwner: true}}},
+			wantAgent: []string{
+				"aerial.jobs.synapse.discord_ingress.ops_bot synapse-discord-ingress-ops_bot",
+				"aerial.jobs.synapse.discord_interaction.ops_bot synapse-discord-interaction-ops_bot",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := &RouterServer{}
+			var got []string
+			for _, spec := range srv.jobConsumerSpecs(discordRoutingFor(tc.cfg)) {
+				if spec.handler == nil {
+					t.Errorf("spec %s has nil handler", spec.queue)
+				}
+				got = append(got, spec.subject+" "+spec.queue)
+			}
+			want := append(slices.Clone(static), tc.wantAgent...)
+			if !slices.Equal(got, want) {
+				t.Errorf("jobConsumerSpecs() =\n%q\nwant\n%q", got, want)
+			}
 		})
 	}
 }
