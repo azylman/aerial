@@ -1,6 +1,6 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import type { QuickLaunchLink } from '../api/types';
-import { applyTheme, initTheme, nextTheme, type ThemeMode } from '../lib/theme';
+import { applyTheme, initTheme, nextTheme, subscribeTheme, type ThemeMode } from '../lib/theme';
 import { dockLinks, isDockLinkActive, type PermetTone, permetScore } from '../store/selectors';
 import { useConsoleStore } from '../store/store';
 import { Icon } from './Icon';
@@ -63,6 +63,8 @@ const QuickLaunchDock = memo(function QuickLaunchDock() {
 
 const ThemeToggle = memo(function ThemeToggle() {
   const [theme, setTheme] = useState<ThemeMode>(() => initTheme());
+  // Another tab, or another app on the shared cookie domain, changed the theme: follow it live.
+  useEffect(() => subscribeTheme(setTheme), []);
 
   return (
     <button

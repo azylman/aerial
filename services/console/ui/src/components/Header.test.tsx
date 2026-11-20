@@ -47,6 +47,7 @@ function badges(): Record<string, string | null> {
 describe('Header', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    document.cookie = 'theme=; path=/; max-age=0';
     delete document.documentElement.dataset.theme;
     document.documentElement.style.colorScheme = '';
     useConsoleStore.setState(useConsoleStore.getInitialState(), true);
@@ -125,6 +126,17 @@ describe('Header', () => {
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(window.localStorage.getItem('aerial-console-theme')).toBe('dark');
   });
+
+  it('ThemeToggle follows a theme change from another tab', () => {
+    render(<Header />);
+    const toggle = screen.getByRole('button', { name: 'Switch to light theme' });
+
+    document.cookie = 'theme=light; path=/';
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'aerial-theme' }));
+    });
+    expect(toggle.getAttribute('aria-label')).toBe('Switch to dark theme');
+  });
 });
 
 interface IsolationRow {
@@ -172,6 +184,7 @@ const isolationRows: IsolationRow[] = [
 describe('Header render isolation', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    document.cookie = 'theme=; path=/; max-age=0';
     delete document.documentElement.dataset.theme;
     document.documentElement.style.colorScheme = '';
     useConsoleStore.setState(useConsoleStore.getInitialState(), true);

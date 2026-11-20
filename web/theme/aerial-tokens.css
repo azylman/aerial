@@ -1,0 +1,140 @@
+/*
+ * Aerial dual-theme palette: the single source for every first-party frontend and for the
+ * third-party apps themed through their supported custom CSS hooks.
+ *
+ * (a) Raw primitives for BOTH palettes, always defined on :root:
+ *     --ae-dark-*  Catppuccin Mocha
+ *     --ae-light-* Polar Slate & Cobalt
+ *     Each colour also has a space-separated RGB triplet (-rgb) for rgb(var(--x) / a) consumers.
+ * (b) Semantic vars (--ae-canvas, --ae-ink, ...) mapped to dark by default, on data-theme="dark"
+ *     and on html.dark, and to light on data-theme="light" and html.light. Apps whose light mode is
+ *     "no dark class" remap the semantic vars to --ae-light-* in their own stylesheet.
+ */
+:root {
+    /* Catppuccin Mocha (dark) */
+    --ae-dark-canvas: #181825;
+    --ae-dark-surface: #1e1e2e;
+    --ae-dark-surface-elevated: #27273a;
+    --ae-dark-border: #313244;
+    --ae-dark-ink: #cdd6f4;
+    --ae-dark-ink-muted: #a6adc8;
+    --ae-dark-mauve: #cba6f7;
+    --ae-dark-green: #a6e3a1;
+    --ae-dark-sapphire: #89b4fa;
+    --ae-dark-yellow: #f9e2af;
+    --ae-dark-red: #f38ba8;
+
+    --ae-dark-canvas-rgb: 24 24 37;
+    --ae-dark-surface-rgb: 30 30 46;
+    --ae-dark-surface-elevated-rgb: 39 39 58;
+    --ae-dark-border-rgb: 49 50 68;
+    --ae-dark-ink-rgb: 205 214 244;
+    --ae-dark-ink-muted-rgb: 166 173 200;
+    --ae-dark-mauve-rgb: 203 166 247;
+    --ae-dark-green-rgb: 166 227 161;
+    --ae-dark-sapphire-rgb: 137 180 250;
+    --ae-dark-yellow-rgb: 249 226 175;
+    --ae-dark-red-rgb: 243 139 168;
+
+    /* Dark roles */
+    --ae-dark-accent: var(--ae-dark-mauve);
+    --ae-dark-ok: var(--ae-dark-green);
+    --ae-dark-info: var(--ae-dark-sapphire);
+    --ae-dark-warn: var(--ae-dark-yellow);
+    --ae-dark-danger: var(--ae-dark-red);
+    --ae-dark-accent-rgb: var(--ae-dark-mauve-rgb);
+    --ae-dark-ok-rgb: var(--ae-dark-green-rgb);
+    --ae-dark-info-rgb: var(--ae-dark-sapphire-rgb);
+    --ae-dark-warn-rgb: var(--ae-dark-yellow-rgb);
+    --ae-dark-danger-rgb: var(--ae-dark-red-rgb);
+
+    /* Polar Slate & Cobalt (light) */
+    --ae-light-canvas: #f8fafc;
+    --ae-light-surface: #ffffff;
+    --ae-light-surface-elevated: #f1f5f9;
+    --ae-light-border: #e2e8f0;
+    --ae-light-ink: #0f172a;
+    --ae-light-ink-muted: #475569;
+    --ae-light-cobalt: #2563eb;
+    --ae-light-emerald: #047857;
+    --ae-light-amber: #b45309;
+    --ae-light-red: #b91c1c;
+
+    --ae-light-canvas-rgb: 248 250 252;
+    --ae-light-surface-rgb: 255 255 255;
+    --ae-light-surface-elevated-rgb: 241 245 249;
+    --ae-light-border-rgb: 226 232 240;
+    --ae-light-ink-rgb: 15 23 42;
+    --ae-light-ink-muted-rgb: 71 85 105;
+    --ae-light-cobalt-rgb: 37 99 235;
+    --ae-light-emerald-rgb: 4 120 87;
+    --ae-light-amber-rgb: 180 83 9;
+    --ae-light-red-rgb: 185 28 28;
+
+    /* Light roles */
+    --ae-light-accent: var(--ae-light-cobalt);
+    --ae-light-ok: var(--ae-light-emerald);
+    --ae-light-info: var(--ae-light-cobalt);
+    --ae-light-warn: var(--ae-light-amber);
+    --ae-light-danger: var(--ae-light-red);
+    --ae-light-accent-rgb: var(--ae-light-cobalt-rgb);
+    --ae-light-ok-rgb: var(--ae-light-emerald-rgb);
+    --ae-light-info-rgb: var(--ae-light-cobalt-rgb);
+    --ae-light-warn-rgb: var(--ae-light-amber-rgb);
+    --ae-light-danger-rgb: var(--ae-light-red-rgb);
+}
+
+:root,
+:root[data-theme="dark"],
+html.dark {
+    --ae-canvas: var(--ae-dark-canvas);
+    --ae-surface: var(--ae-dark-surface);
+    --ae-surface-elevated: var(--ae-dark-surface-elevated);
+    --ae-border: var(--ae-dark-border);
+    --ae-ink: var(--ae-dark-ink);
+    --ae-ink-muted: var(--ae-dark-ink-muted);
+    --ae-accent: var(--ae-dark-accent);
+    --ae-ok: var(--ae-dark-ok);
+    --ae-info: var(--ae-dark-info);
+    --ae-warn: var(--ae-dark-warn);
+    --ae-danger: var(--ae-dark-danger);
+
+    --ae-canvas-rgb: var(--ae-dark-canvas-rgb);
+    --ae-surface-rgb: var(--ae-dark-surface-rgb);
+    --ae-surface-elevated-rgb: var(--ae-dark-surface-elevated-rgb);
+    --ae-border-rgb: var(--ae-dark-border-rgb);
+    --ae-ink-rgb: var(--ae-dark-ink-rgb);
+    --ae-ink-muted-rgb: var(--ae-dark-ink-muted-rgb);
+    --ae-accent-rgb: var(--ae-dark-accent-rgb);
+    --ae-ok-rgb: var(--ae-dark-ok-rgb);
+    --ae-info-rgb: var(--ae-dark-info-rgb);
+    --ae-warn-rgb: var(--ae-dark-warn-rgb);
+    --ae-danger-rgb: var(--ae-dark-danger-rgb);
+}
+
+:root[data-theme="light"],
+html.light {
+    --ae-canvas: var(--ae-light-canvas);
+    --ae-surface: var(--ae-light-surface);
+    --ae-surface-elevated: var(--ae-light-surface-elevated);
+    --ae-border: var(--ae-light-border);
+    --ae-ink: var(--ae-light-ink);
+    --ae-ink-muted: var(--ae-light-ink-muted);
+    --ae-accent: var(--ae-light-accent);
+    --ae-ok: var(--ae-light-ok);
+    --ae-info: var(--ae-light-info);
+    --ae-warn: var(--ae-light-warn);
+    --ae-danger: var(--ae-light-danger);
+
+    --ae-canvas-rgb: var(--ae-light-canvas-rgb);
+    --ae-surface-rgb: var(--ae-light-surface-rgb);
+    --ae-surface-elevated-rgb: var(--ae-light-surface-elevated-rgb);
+    --ae-border-rgb: var(--ae-light-border-rgb);
+    --ae-ink-rgb: var(--ae-light-ink-rgb);
+    --ae-ink-muted-rgb: var(--ae-light-ink-muted-rgb);
+    --ae-accent-rgb: var(--ae-light-accent-rgb);
+    --ae-ok-rgb: var(--ae-light-ok-rgb);
+    --ae-info-rgb: var(--ae-light-info-rgb);
+    --ae-warn-rgb: var(--ae-light-warn-rgb);
+    --ae-danger-rgb: var(--ae-light-danger-rgb);
+}
