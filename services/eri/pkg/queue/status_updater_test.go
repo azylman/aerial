@@ -497,3 +497,23 @@ func TestStatusUpdater_LifecycleAndConcurrency(t *testing.T) {
 	}
 	uZombie.Stop()
 }
+
+func TestStatusUpdater_DeleteWarningAndEmptyTool(t *testing.T) {
+	t.Parallel()
+
+	u := &StatusUpdater{
+		threadID: "th-del-warn",
+		deleteFunc: func(channelID, messageID string) error {
+			return errors.New("simulated discord delete 500 error")
+		},
+	}
+	u.performDeleteMessage("th-del-warn", "msg-1", " on test")
+
+	uTool := &StatusUpdater{
+		phase:     phaseTool,
+		turnStart: time.Now().Add(-2 * time.Second),
+	}
+	if !strings.Contains(uTool.currentStatusText(), "Generating response") {
+		t.Errorf("expected generating response, got %s", uTool.currentStatusText())
+	}
+}
