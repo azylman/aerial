@@ -395,6 +395,27 @@ func TestWorkerPool_StackName_Resolution_TableDriven(t *testing.T) {
 			poolAgentName: "",
 			wantStack:     "aerial",
 		},
+		{
+			name:          "uppercase and underscore normalized to slug",
+			cfgStack:      "",
+			cfgBotID:      "Agent_Alpha",
+			poolAgentName: "",
+			wantStack:     "agent-alpha",
+		},
+		{
+			name:          "dotted name normalized to slug",
+			cfgStack:      "",
+			cfgBotID:      "agent.beta",
+			poolAgentName: "",
+			wantStack:     "agent-beta",
+		},
+		{
+			name:          "unnormalizable non-slug falls back to aerial",
+			cfgStack:      "",
+			cfgBotID:      "---",
+			poolAgentName: "",
+			wantStack:     "aerial",
+		},
 	}
 
 	for _, tc := range tests {

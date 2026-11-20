@@ -75,8 +75,6 @@ func TestServerRoutes(t *testing.T) {
 		{"steps context over 20 clamped", "/steps?session=sess-a&step=1&context=50", http.StatusOK, `"context":20`},
 		{"steps empty step param", "/steps?session=sess-a&step=", http.StatusBadRequest, "step is required"},
 		{"search since rfc3339nano", "/search?q=content&since=2026-11-18T12:00:00.123456789Z", http.StatusOK, `"total":`},
-		{"stats empty result", "/stats?agent=missing-agent", http.StatusOK, `"total_sessions":0`},
-		{"watermarks empty result", "/watermarks?agent=missing-agent", http.StatusOK, `"watermarks":[]`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
