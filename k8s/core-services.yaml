@@ -111,13 +111,15 @@ spec:
               value: http://restate.aerial:8080
             - name: ERI_RESTATE_URL
               value: http://eri-restate-health:4028
-            - name: NATS_AERIAL_PASSWORD
+            - name: NATS_USER
+              value: "eri-aerial"
+            - name: NATS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: NATS_AERIAL_PASSWORD
-                  name: nats-aerial-client
+                  key: NATS_ERI_AERIAL_PASSWORD
+                  name: nats-eri-aerial-client
             - name: NATS_URL
-              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
+              value: nats://nats.aerial:4222
             - name: AERIAL_INTERNAL_ERI_URL
               value: http://127.0.0.1:8080
             - name: GIT_TERMINAL_PROMPT
@@ -399,13 +401,15 @@ spec:
               value: http://eri.aerial
             - name: HARO_URL
               value: http://haro.aerial
-            - name: NATS_AERIAL_PASSWORD
+            - name: NATS_USER
+              value: "eri-aerial"
+            - name: NATS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: NATS_AERIAL_PASSWORD
-                  name: nats-aerial-client
+                  key: NATS_ERI_AERIAL_PASSWORD
+                  name: nats-eri-aerial-client
             - name: NATS_URL
-              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
+              value: nats://nats.aerial:4222
             - name: AERIAL_INTERNAL_ERI_URL
               value: http://eri.aerial
             - name: RESTATE_INGRESS_URL
@@ -1059,6 +1063,8 @@ spec:
               value: "4008"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/coven/coven.yaml
+            - name: K8S_AUTH_ENABLED
+              value: "true"
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1238,6 +1244,8 @@ spec:
               value: "4030"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/transcripts/transcripts.yaml
+            - name: K8S_AUTH_ENABLED
+              value: "true"
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1246,12 +1254,12 @@ spec:
             - name: NATS_URL
               value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: POSTGRES_USER
-              value: transcripts_aerial
+              value: "aerial"
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   key: password
-                  name: postgres-transcripts-aerial-role
+                  name: postgres-aerial-role
           image: ghcr.io/azylman/aerial-transcripts:${TAG_AERIAL_TRANSCRIPTS:=latest}
           imagePullPolicy: Always
           name: transcripts
