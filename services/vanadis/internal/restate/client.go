@@ -43,7 +43,7 @@ func (c *Client) BuildRouterServiceName() string {
 
 // ObjectPath returns the Restate ingress path for a Build Virtual Object handler.
 func (c *Client) ObjectPath(buildID, handler string) string {
-	return "/" + c.BuildServiceName() + "/" + buildID + "/" + handler
+	return "/" + c.BuildServiceName() + "/" + url.PathEscape(buildID) + "/" + handler
 }
 
 // RouterPath returns the Restate ingress path for a BuildRouter service handler.

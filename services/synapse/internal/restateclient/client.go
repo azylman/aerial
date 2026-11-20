@@ -137,6 +137,27 @@ func RepoObjectKey(repo string) string {
 	return model.NormalizeRepo(repo)
 }
 
+type contextKey int
+
+const (
+	idempotencyKeyCtx contextKey = iota
+)
+
+// WithIdempotencyKey binds an explicit Restate idempotency key into ctx.
+func WithIdempotencyKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, idempotencyKeyCtx, strings.TrimSpace(key))
+}
+
+func idempotencyKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if val, ok := ctx.Value(idempotencyKeyCtx).(string); ok {
+		return strings.TrimSpace(val)
+	}
+	return ""
+}
+
 // Client invokes Restate Virtual Object handlers over the ingress HTTP API.
 type Client struct {
 	baseURL     string
@@ -245,6 +266,9 @@ func (c *Client) post(ctx context.Context, service, key, handler string, payload
 		return nil, fmt.Errorf("create restate request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if idKey := idempotencyKeyFromContext(ctx); idKey != "" {
+		httpReq.Header.Set("Idempotency-Key", idKey)
+	}
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("restate ingress request failed: %w", err)
