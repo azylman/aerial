@@ -1715,6 +1715,19 @@ VANADIS_ATTACH_CHECK=$(bash -c "
     out6=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-3\"}' 103 2>/dev/null || echo 'failed')
     [ \"\$out6\" = 'failed' ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 3 ] && echo 'att3:ok'
     rm -f \"\$ATTEMPT_FILE\"
+
+    # Subtest 6b: attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH
+    TMP_TOKEN=\$(mktemp /tmp/sa-tok.XXXXXX)
+    echo \"test-sa-jwt-token\" > \"\$TMP_TOKEN\"
+    ARGS_FILE=\$(mktemp /tmp/vanadis-args.XXXXXX)
+    curl() {
+        echo \"\$*\" > \"\$ARGS_FILE\"
+        printf '{\"status\":\"attached\",\"build_id\":\"b-4\",\"chunk_id\":\"c-4\",\"thread_id\":\"th-999\"}'
+    }
+    export -f curl
+    out6b=\$(AERIAL_SA_TOKEN_PATH=\"\$TMP_TOKEN\" attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-4\"}' 104 2>/dev/null)
+    grep -q -- \"Authorization: Bearer test-sa-jwt-token\" \"\$ARGS_FILE\" && echo 'att_sa:ok'
+    rm -f \"\$TMP_TOKEN\" \"\$ARGS_FILE\"
 ")
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url1:ok' && echo true || echo false)" "resolve_vanadis_url resolves from VANADIS_URL env"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url2:ok' && echo true || echo false)" "resolve_vanadis_url resolves from config.yaml"
@@ -1722,6 +1735,7 @@ assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url3:ok' && echo t
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att1:ok' && echo true || echo false)" "attach_pr_in_vanadis succeeds on first attempt"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att2:ok' && echo true || echo false)" "attach_pr_in_vanadis retries transient error and succeeds"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att3:ok' && echo true || echo false)" "attach_pr_in_vanadis fails after exhausting retries"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att_sa:ok' && echo true || echo false)" "attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH"
 
 # Subtest 7: submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id
 SUBMIT_VANADIS_CHECK=$(bash -c "

@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1027,4 +1029,124 @@ func TestTraceProxy_StreamsSSE_Shaped(t *testing.T) {
 	}
 
 	close(streamDone)
+}
+
+type bearerAuthCase struct {
+	name             string
+	initToken        string
+	updateToken      string
+	advance          time.Duration
+	clientAuth       string
+	allowedAuthHosts []string
+	wantAuth1        string
+	wantAuth2        string
+}
+
+func TestTraceProxy_BearerAuth(t *testing.T) {
+	t.Parallel()
+	tests := []bearerAuthCase{
+		{
+			name:      "injects bearer token from file when auth header empty",
+			initToken: "test-token-alpha",
+			wantAuth1: "Bearer test-token-alpha",
+		},
+		{
+			name:       "preserves explicit upstream authorization header",
+			initToken:  "test-token-alpha",
+			clientAuth: "Bearer custom-agent-token",
+			wantAuth1:  "Bearer custom-agent-token",
+		},
+		{
+			name:      "graceful fallback when token file does not exist",
+			initToken: "",
+			wantAuth1: "",
+		},
+		{
+			name:        "caches token for 60 seconds and re-reads after expiry",
+			initToken:   "token-initial",
+			updateToken: "token-rotated",
+			advance:     61 * time.Second,
+			wantAuth1:   "Bearer token-initial",
+			wantAuth2:   "Bearer token-rotated",
+		},
+		{
+			name:        "serves cached token within 60 seconds",
+			initToken:   "token-initial",
+			updateToken: "token-rotated",
+			advance:     30 * time.Second,
+			wantAuth1:   "Bearer token-initial",
+			wantAuth2:   "Bearer token-initial",
+		},
+		{
+			name:             "does not inject bearer token to unallowed upstreams",
+			initToken:        "test-token-alpha",
+			allowedAuthHosts: []string{"other.cluster.local"},
+			wantAuth1:        "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runBearerAuthCase(t, tc)
+		})
+	}
+}
+
+func runBearerAuthCase(t *testing.T, tc bearerAuthCase) {
+	t.Helper()
+	upstream, seen := newUpstream(t)
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	if tc.initToken != "" {
+		if err := os.WriteFile(tokenPath, []byte(tc.initToken+"\n"), 0o600); err != nil {
+			t.Fatalf("write token: %v", err)
+		}
+	}
+
+	clock := &manualClock{now: time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)}
+	proxy := mcp.NewTraceProxy(mcp.TraceProxyConfig{
+		Upstreams:        upstreamMap{"discord/docket": upstream.URL + "/mcp"},
+		Turns:            runner.NewActiveTurnRegistry(),
+		Clock:            clock.Now,
+		TokenPath:        tokenPath,
+		AllowedAuthHosts: tc.allowedAuthHosts,
+	})
+	mux := http.NewServeMux()
+	proxy.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	got1 := doBearerProxyCall(t, srv.Client(), srv.URL, tc.clientAuth, seen)
+	if got1.auth != tc.wantAuth1 {
+		t.Errorf("call 1 auth = %q, want %q", got1.auth, tc.wantAuth1)
+	}
+
+	if tc.updateToken == "" {
+		return
+	}
+	if err := os.WriteFile(tokenPath, []byte(tc.updateToken+"\n"), 0o600); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
+	clock.Advance(tc.advance)
+	got2 := doBearerProxyCall(t, srv.Client(), srv.URL, tc.clientAuth, seen)
+	if got2.auth != tc.wantAuth2 {
+		t.Errorf("call 2 auth = %q, want %q", got2.auth, tc.wantAuth2)
+	}
+}
+
+func doBearerProxyCall(t *testing.T, client *http.Client, srvURL, authHeader string, seen <-chan seenRequest) seenRequest {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srvURL+"/internal/mcp-proxy/discord/docket", strings.NewReader(toolsList))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+	return <-seen
 }

@@ -200,7 +200,7 @@ func TestParseClaudeModelAndEffort(t *testing.T) {
 	}
 }
 
-func TestBuildAgyEnv(t *testing.T) {
+func TestFilterAgyBaseEnv(t *testing.T) {
 	t.Parallel()
 	filt := FilterAgyBaseEnv([]string{
 		"FOO=bar",
@@ -238,13 +238,19 @@ func TestBuildAgyEnv(t *testing.T) {
 		"DEPLOY_PAT=s29",
 		"STRIPE_API_KEY=s30",
 		"SSH_PRIVATE_KEY=s31",
+		"NATS_URL=nats://secret-nats:4222",
+		"RESTATE_INGRESS_URL=http://secret-restate:8080",
+		"RESTATE_ADMIN_URL=http://secret-restate:9070",
 		"MALFORMED_NO_EQUALS",
 		"PATH=/usr/bin",
 	})
-	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret1") || strings.Contains(fj, "=s") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "CLAUDE_CODE_OAUTH_TOKEN=claude-secret-kept") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
+	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret1") || strings.Contains(fj, "=s") || strings.Contains(fj, "secret-nats") || strings.Contains(fj, "secret-restate") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "CLAUDE_CODE_OAUTH_TOKEN=claude-secret-kept") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
 		t.Errorf("FilterAgyBaseEnv leak or drop: %v", filt)
 	}
+}
 
+func TestBuildAgyEnv(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		input       AgyEnvInput
 		contains    []string
@@ -254,6 +260,11 @@ func TestBuildAgyEnv(t *testing.T) {
 			AgyEnvInput{BaseEnv: []string{"OTHER_AGENT_DISCORD_BOT_TOKEN=other-agent-secret", "EXAMPLE_AGENT_DISCORD_BOT_TOKEN=example-agent-secret", "arbitrary_prefix_token=arbitrary-secret", "CLAUDE_CODE_OAUTH_TOKEN=oauth-kept", "OTHER_ENV=kept"}},
 			[]string{"OTHER_ENV=kept", "CLAUDE_CODE_OAUTH_TOKEN=oauth-kept"},
 			[]string{"OTHER_AGENT_DISCORD_BOT_TOKEN=", "EXAMPLE_AGENT_DISCORD_BOT_TOKEN=", "other-agent-secret", "example-agent-secret", "arbitrary_prefix_token=", "arbitrary-secret"},
+		},
+		{
+			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "NATS_URL=nats://leak-nats:4222", "RESTATE_INGRESS_URL=http://leak-restate:8080", "RESTATE_ADMIN_URL=http://leak-restate:9070", "OTHER_ENV=kept"}},
+			[]string{"CUSTOM_BASE=1", "OTHER_ENV=kept"},
+			[]string{"NATS_URL=", "leak-nats", "RESTATE_INGRESS_URL=", "RESTATE_ADMIN_URL=", "leak-restate"},
 		},
 		{AgyEnvInput{}, []string{"GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug"}, nil},
 		{

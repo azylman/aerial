@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -1005,4 +1007,105 @@ func TestJSONMarshalIndentErrors(t *testing.T) {
 			t.Fatalf("expected marshal error in get json, got %v", err)
 		}
 	})
+}
+
+func TestClient_GetJSON(t *testing.T) {
+	t.Parallel()
+	type testResponse struct {
+		Message string `json:"message"`
+	}
+
+	tests := []struct {
+		name       string
+		token      string
+		tokenPath  string
+		status     int
+		body       string
+		wantAuth   string
+		wantErrSub string
+	}{
+		{
+			name:     "attaches bearer token from file",
+			token:    "secret-agent-token",
+			status:   http.StatusOK,
+			body:     `{"message":"ok"}`,
+			wantAuth: "Bearer secret-agent-token",
+		},
+		{
+			name:      "skips auth when token file is missing",
+			tokenPath: "/nonexistent/path/to/token",
+			status:    http.StatusOK,
+			body:      `{"message":"ok"}`,
+			wantAuth:  "",
+		},
+		{
+			name:     "skips auth when token file is empty",
+			token:    "   \n  \t  ",
+			status:   http.StatusOK,
+			body:     `{"message":"ok"}`,
+			wantAuth: "",
+		},
+		{
+			name:       "returns error on http 403 status",
+			token:      "invalid-token",
+			status:     http.StatusForbidden,
+			body:       "forbidden",
+			wantAuth:   "Bearer invalid-token",
+			wantErrSub: "HTTP 403: forbidden",
+		},
+		{
+			name:       "returns error on invalid json",
+			status:     http.StatusOK,
+			body:       "{invalid-json",
+			wantErrSub: "failed unmarshaling response",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var receivedAuth string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedAuth = r.Header.Get("Authorization")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			tokenPath := tc.tokenPath
+			if tokenPath == "" {
+				dir := t.TempDir()
+				tokenPath = filepath.Join(dir, "sa-token")
+				if tc.token != "" {
+					if err := os.WriteFile(tokenPath, []byte(tc.token), 0o600); err != nil {
+						t.Fatalf("failed writing token file: %v", err)
+					}
+				}
+			}
+
+			c := &client{
+				BaseURL:    server.URL,
+				TokenPath:  tokenPath,
+				HTTPClient: server.Client(),
+			}
+
+			var resp testResponse
+			err := c.getJSON(context.Background(), server.URL+"/test", &resp)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if receivedAuth != tc.wantAuth {
+				t.Errorf("Authorization header = %q, want %q", receivedAuth, tc.wantAuth)
+			}
+			if resp.Message != "ok" {
+				t.Errorf("expected response message 'ok', got %q", resp.Message)
+			}
+		})
+	}
 }
