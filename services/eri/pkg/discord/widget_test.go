@@ -2,6 +2,7 @@ package discord
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -797,6 +798,20 @@ func assertChunkRuntimeCompletedBuilds(t *testing.T, req StatusWidgetRequest, no
 	footerDeploying := requireComponent[*discordgo.TextDisplay](t, containerDeploying.Components[4])
 	if footerDeploying.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
 		t.Errorf("unexpected footer text for build with deploying chunk: %q", footerDeploying.Content)
+	}
+}
+
+func TestFormatChunkRuntimeSuffixCIFailedStaysLive(t *testing.T) {
+	start := time.Unix(1760000000, 0)
+	for _, status := range []string{"ci_failed", "conflict"} {
+		got := formatChunkRuntimeSuffix(StatusWidgetChunk{Status: status, StartedAt: start, UpdatedAt: start.Add(time.Hour)})
+		want := fmt.Sprintf(" *(started <t:%d:R>)*", start.Unix())
+		if got != want {
+			t.Errorf("formatChunkRuntimeSuffix(%q) = %q, want live %q", status, got, want)
+		}
+	}
+	if got := formatChunkRuntimeSuffix(StatusWidgetChunk{Status: "failed", StartedAt: start, UpdatedAt: start.Add(time.Hour)}); got != " *(1h)*" {
+		t.Errorf("formatChunkRuntimeSuffix(failed) = %q, want frozen %q", got, " *(1h)*")
 	}
 }
 

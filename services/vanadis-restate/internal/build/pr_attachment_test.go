@@ -30,6 +30,10 @@ func TestRecoveredChunkRemediationWake(t *testing.T) {
 	st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
 	payloads := make(chan executor.BrainDispatchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/discord/widget" {
+			w.Write([]byte(`{}`))
+			return
+		}
 		var req executor.BrainDispatchRequest
 		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)

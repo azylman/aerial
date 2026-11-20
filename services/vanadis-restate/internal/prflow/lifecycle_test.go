@@ -542,6 +542,17 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 	}
 }
 
+func TestFlow_HandleCIFailureEventSyncsBuildWidget(t *testing.T) {
+	t.Parallel()
+	spy := &checkStatusSpyStore{}
+	f, eri := newRemediationTestHarness(t, spy, nil, nil)
+	require.NoError(t, f.HandleCIFailureEvent(context.Background(), "b1", "c1", "ci_failed", ciFailEv("unit-tests", "abcdef1234")))
+	if assert.NotNil(t, eri.lastWidget, "ci_failed must sync the build widget so the card shows remediation instead of going static") {
+		assert.Contains(t, eri.lastWidget.Banner, "remediation")
+		assert.Contains(t, eri.lastWidget.Banner, "unit-tests")
+	}
+}
+
 func TestFlow_TrailingSameSHAFailureAtCapDoesNotCancelActiveRemediation(t *testing.T) {
 	t.Parallel()
 	spy := &checkStatusSpyStore{failCount: 4}

@@ -251,9 +251,29 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA)
 	err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatConflictPrompt(ev))
 	if errors.Is(err, executor.ErrDispatchActive) {
+		f.syncBuildWidget(ctx, buildID, "Merge conflict detected — remediation in progress")
 		return nil
 	}
+	if err == nil {
+		f.syncBuildWidget(ctx, buildID, "Merge conflict detected — remediation in progress")
+	}
 	return err
+}
+
+// syncBuildWidget refreshes the build card after a recoverable failure so
+// it does not go static while remediation runs. Best-effort: failures only log.
+func (f *Flow) syncBuildWidget(ctx context.Context, buildID, notice string) {
+	if f == nil || f.Exec == nil || f.Store == nil {
+		return
+	}
+	bld, chunks, err := f.Store.GetBuild(ctx, buildID)
+	if err != nil || bld == nil {
+		slog.WarnContext(ctx, "[vanadis-restate] widget sync build read warning", "error", err)
+		return
+	}
+	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, notice); sErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
+	}
 }
 
 // HandleCIFailureEvent records a CI failure and orchestrates remediation,
@@ -284,6 +304,7 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	cleanHead := strings.TrimSpace(ev.HeadSHA)
 	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
 		if cleanHead != "" && strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead) {
+			f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
 			return nil
 		}
 		var failCount int
@@ -303,6 +324,7 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
 	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
 		if errors.Is(err, executor.ErrDispatchActive) {
+			f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
 			return nil
 		}
 		return err
@@ -312,6 +334,7 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 			return err
 		}
 	}
+	f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
 	return nil
 }
 

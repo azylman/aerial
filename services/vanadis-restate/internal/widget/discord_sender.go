@@ -698,7 +698,7 @@ func formatChunkRuntimeSuffix(c ericlient.StatusWidgetChunk) string {
 	}
 	norm := strings.ToLower(strings.TrimSpace(c.Status))
 	switch norm {
-	case statusRunning, statusCoding, statusPROpened, statusOpen, statusDeploying:
+	case statusRunning, statusCoding, statusPROpened, statusOpen, statusDeploying, statusCIFailed, statusConflict:
 		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
 	default:
 		return ""
@@ -787,7 +787,7 @@ func formatChunkActiveStepLines(activeStep string) string {
 func isChunkTerminal(status string) bool {
 	norm := strings.ToLower(strings.TrimSpace(status))
 	switch norm {
-	case statusDeployed, statusCompleted, dispatchStatusSuccess, statusFailed, statusCIFailed, statusDeployFailed, statusConflict, statusClosed, statusError, statusCancelled, statusMerged, statusSynced:
+	case statusDeployed, statusCompleted, dispatchStatusSuccess, statusFailed, statusDeployFailed, statusClosed, statusError, statusCancelled, statusMerged, statusSynced:
 		return true
 	default:
 		return false
