@@ -217,6 +217,18 @@ func TestPostgresVanadisStore_UpdateBuild_Errors(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:    "update build success on failed build",
+			buildID: "b1",
+			req:     UpdateBuildRequest{Title: "Updated Title", Objective: "Updated Obj", SharedContext: "Shared"},
+			db: dbScript{
+				routes: []sqlRoute{
+					{match: "SELECT status FROM vanadis_builds", row: valuesRow("failed")},
+					{match: "SELECT id, thread_id", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "failed"}}},
+				},
+			},
+			wantErr: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -444,7 +456,13 @@ func TestPostgresVanadisStore_MutateChunks(t *testing.T) {
 			execTag:   "INSERT 0 1",
 			commitErr: errors.New("commit fail"),
 		}, wantErr: true},
+		{name: "append chunks success on failed build", db: dbScript{
+			row:     valuesRow("failed"),
+			chunks:  []model.VanadisChunk{{ID: "c1", BuildID: "b1", Title: "C1", Status: "running", Mode: "action"}},
+			execTag: "INSERT 0 1",
+		}},
 		{name: "remove chunk success", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Status: "pending", Mode: "action"}, {ID: "c2", Status: "pending", Mode: "action"}}, execTag: "DELETE 1"}},
+		{name: "remove chunk success on failed build", db: dbScript{row: valuesRow("failed"), chunks: []model.VanadisChunk{{ID: "c1", Status: "pending", Mode: "action"}, {ID: "c2", Status: "pending", Mode: "action"}}, execTag: "DELETE 1"}},
 		{name: "remove chunk only chunk", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Status: "pending", Mode: "action"}}}, wantErrIs: ErrBuildConflict},
 		{name: "remove chunk not found", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
 		{name: "remove chunk build not running", db: dbScript{row: valuesRow("completed")}, wantErrIs: ErrBuildConflict},
@@ -452,6 +470,7 @@ func TestPostgresVanadisStore_MutateChunks(t *testing.T) {
 		{name: "remove chunk begin error", db: dbScript{beginErr: errors.New("begin fail")}, wantErr: true},
 		{name: "remove chunk commit error", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Status: "pending", Mode: "action"}, {ID: "c2", Status: "pending", Mode: "action"}}, execTag: "DELETE 1", commitErr: errors.New("commit fail")}, wantErr: true},
 		{name: "update chunk success", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Status: "pending", Repo: "aerial", Mode: "pr"}}, execTag: "UPDATE 1"}},
+		{name: "update chunk success on failed build", db: dbScript{row: valuesRow("failed"), chunks: []model.VanadisChunk{{ID: "c1", Status: "pending", Repo: "aerial", Mode: "pr"}}, execTag: "UPDATE 1"}},
 		{name: "update chunk not found", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
 		{name: "update chunk not pending", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Status: "running", Repo: "aerial", Mode: "pr"}}}, wantErrIs: ErrBuildConflict},
 		{name: "update chunk begin error", db: dbScript{beginErr: errors.New("begin fail")}, wantErr: true},
@@ -461,18 +480,18 @@ func TestPostgresVanadisStore_MutateChunks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := tc.db.open()
-			switch tc.name {
-			case "append chunks success", "append chunks build not found", "append chunks build not running", "append chunks duplicate id", "append chunks begin error", "append chunks commit error":
+			switch {
+			case strings.HasPrefix(tc.name, "append chunks"):
 				inputID := ""
 				if tc.name == "append chunks duplicate id" {
 					inputID = "c-dup"
 				}
 				_, err := st.AppendChunks(context.Background(), "b1", []CreateChunkInput{{ID: inputID, Mode: "action", Title: "New Chunk", Instructions: "Inst", DependsOn: []string{}}})
 				assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
-			case "remove chunk success", "remove chunk only chunk", "remove chunk not found", "remove chunk build not running", "remove chunk not pending", "remove chunk begin error", "remove chunk commit error":
+			case strings.HasPrefix(tc.name, "remove chunk"):
 				_, _, err := st.RemoveChunk(context.Background(), "b1", "c1")
 				assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
-			case "update chunk success", "update chunk not found", "update chunk not pending", "update chunk begin error", "update chunk commit error":
+			case strings.HasPrefix(tc.name, "update chunk"):
 				_, err := st.UpdateChunk(context.Background(), "b1", "c1", UpdateChunkRequest{Title: "Updated"})
 				assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
 			}

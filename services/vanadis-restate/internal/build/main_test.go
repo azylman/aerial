@@ -389,15 +389,29 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 	// Cancel terminal builds
 	bComp := model.VanadisBuild{ID: "b1", Status: "completed"}
 	storeCompleted, _ := dbScript{buildRow: &mockRow{b: &bComp}}.open()
-	boCompleted := NewBuildObject("", nil).WithAuthority(storeCompleted, nil)
+	rtCompleted := newFakeObjectRuntime("b1")
+	boCompleted := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtCompleted }).WithAuthority(storeCompleted, nil)
 	_, err = boCompleted.Cancel(ctx, CancelBuildRequest{})
 	assert.Error(t, err)
+	assert.False(t, rtCompleted.cleared)
 
 	bFail := model.VanadisBuild{ID: "b1", Status: "failed"}
-	storeFailed, _ := dbScript{buildRow: &mockRow{b: &bFail}}.open()
-	boFailed := NewBuildObject("", nil).WithAuthority(storeFailed, nil)
-	_, err = boFailed.Cancel(ctx, CancelBuildRequest{})
+	storeFailed, _ := dbScript{buildRow: &mockRow{b: &bFail}, execTag: "UPDATE 1"}.open()
+	rtFailed := newFakeObjectRuntime("b1")
+	boFailed := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtFailed }).WithAuthority(storeFailed, nil)
+	canFailed, err := boFailed.Cancel(ctx, CancelBuildRequest{})
+	assert.NoError(t, err)
+	assert.Equal(t, statusCancelled, canFailed.Status)
+	assert.True(t, rtFailed.cleared)
+
+	bCancelled := model.VanadisBuild{ID: "b1", Status: statusCancelled}
+	storeCancelled, _ := dbScript{buildRow: &mockRow{b: &bCancelled}}.open()
+	rtCancelled := newFakeObjectRuntime("b1")
+	boCancelled := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtCancelled }).WithAuthority(storeCancelled, nil)
+	_, err = boCancelled.Cancel(ctx, CancelBuildRequest{})
 	assert.Error(t, err)
+	assert.ErrorContains(t, err, store.ErrBuildConflict.Error())
+	assert.False(t, rtCancelled.cleared)
 }
 
 func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {

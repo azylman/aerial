@@ -520,9 +520,9 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req store.UpdateBui
 func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (model.VanadisBuild, error) {
 	buildID := restate.Key(ctx)
 	rt := b.getRuntime(ctx)
-	defer rt.ClearState()
 
 	if b.store == nil {
+		rt.ClearState()
 		return model.VanadisBuild{ID: buildID, Status: statusCancelled}, nil
 	}
 
@@ -531,7 +531,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		if err != nil {
 			return model.VanadisBuild{}, err
 		}
-		if bld.Status == statusCompleted || bld.Status == statusFailed {
+		if bld.Status == statusCompleted || bld.Status == statusCancelled {
 			return *bld, fmt.Errorf("%w: cannot cancel terminal build %s", store.ErrBuildConflict, bld.Status)
 		}
 		if err := b.store.UpdateBuildStatus(rc, buildID, statusCancelled); err != nil {
@@ -556,6 +556,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 	if err != nil {
 		return model.VanadisBuild{}, ToTerminalErr(err)
 	}
+	rt.ClearState()
 	return res, nil
 }
 
@@ -659,7 +660,7 @@ func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld model.Vanadi
 	return b.flow().NotifyChunkFailure(rc, bld, chunkID, reason)
 }
 
-// FailChunk marks a chunk failed and cancels active work if the failure is terminal.
+// FailChunk marks a chunk failed and records failure while preserving Restate state.
 func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRequest) (model.FailChunkResponse, error) {
 	chunkID := strings.TrimSpace(req.ChunkID)
 	reason := strings.TrimSpace(req.Reason)
@@ -713,10 +714,6 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 		if nErr != nil {
 			return model.FailChunkResponse{}, ToTerminalErr(nErr)
 		}
-	}
-	if res.Failed && res.BuildStatus == statusFailed {
-		rt := b.getRuntime(ctx)
-		rt.ClearState()
 	}
 	return res, nil
 }

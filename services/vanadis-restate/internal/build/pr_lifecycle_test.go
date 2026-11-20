@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -564,11 +565,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	// 1. Replay notifyBuildTerminal on failure continuation when !terminalNotified
 	bFailed := model.VanadisBuild{ID: "b-failed", Status: statusFailed, ThreadID: "th-1", Objective: "Test failure"}
 	cFailed := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
-	st, _ := dbScript{
-		buildRow: &mockRow{b: &bFailed},
-		chunks:   []model.VanadisChunk{cFailed},
-		row:      failRow(statusFailed, statusFailed, 1),
-	}.open()
+	st, _ := dbScript{buildRow: &mockRow{b: &bFailed}, chunks: []model.VanadisChunk{cFailed}, row: failRow(statusFailed, statusFailed, 1)}.open()
 	bus := &deploymentEventRecorder{}
 	var queuedPrompts []string
 	eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
@@ -577,12 +574,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	}}
 	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
 
-	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{
-		Action:     "chunk_failed",
-		ChunkID:    "c1",
-		DispatchID: "vanadis-c1-turn-1",
-		Reason:     "execution error",
-	}, nil, nil, false)
+	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Reason: "execution error"}, nil, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, statusFailed, out.BuildStatus)
 	assert.True(t, out.State.TerminalNotified)
@@ -591,13 +583,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	assert.Len(t, bus.events, 1)
 
 	// Second run with terminalNotified=true does not duplicate notification
-	queuedPrompts = nil
-	bus.events = nil
-	out2, err2 := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{
-		Action:     "chunk_failed",
-		ChunkID:    "c1",
-		DispatchID: "vanadis-c1-turn-1",
-	}, nil, nil, true)
+	queuedPrompts, bus.events = nil, nil
+	out2, err2 := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1"}, nil, nil, true)
 	assert.NoError(t, err2)
 	assert.Equal(t, statusFailed, out2.BuildStatus)
 	assert.Empty(t, queuedPrompts)
@@ -606,40 +593,49 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	// 2. FailMutation retry logic: returns nil when !failed but chunk was already failed and accepted
 	bldAlreadyFailed := model.VanadisBuild{ID: "b-fail", Status: statusFailed}
 	chkAlreadyFailed := model.VanadisChunk{ID: "c1", BuildID: "b-fail", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
-	storeRetryOk, _ := dbScript{
-		buildRow: &mockRow{b: &bldAlreadyFailed},
-		chunks:   []model.VanadisChunk{chkAlreadyFailed},
-		row:      failRow(statusFailed, statusFailed, 1),
-	}.open()
+	storeRetryOk, _ := dbScript{buildRow: &mockRow{b: &bldAlreadyFailed}, chunks: []model.VanadisChunk{chkAlreadyFailed}, row: failRow(statusFailed, statusFailed, 1)}.open()
 	boFailRetry := NewBuildObject("", nil).WithAuthority(storeRetryOk, nil)
-	err = boFailRetry.failMutation(context.Background(), "b-fail", &BuildMutationRequest{
-		Action:     "chunk_failed",
-		ChunkID:    "c1",
-		DispatchID: "vanadis-c1-turn-1",
-	})
+	err = boFailRetry.failMutation(context.Background(), "b-fail", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1"})
 	assert.NoError(t, err)
 
 	// 3. FailChunk second journaled step failure propagates before ClearState
-	eriFail := &mockEriClient{
-		promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") },
-	}
+	eriFail := &mockEriClient{promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") }}
 	execFail := executor.NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", nil)
 	bRunning := model.VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
 	cAction := model.VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
-	storeFailChunk, _ := dbScript{
-		buildRow: &mockRow{b: &bRunning},
-		chunks:   []model.VanadisChunk{cAction},
-		row:      failRow("running", "running"),
-	}.open()
-	boFailChunk := NewBuildObject("", nil).WithAuthority(storeFailChunk, execFail)
+	storeFailChunk, _ := dbScript{buildRow: &mockRow{b: &bRunning}, chunks: []model.VanadisChunk{cAction}, row: failRow("running", "running")}.open()
 	fakeRT := newFakeObjectRuntime("b-running")
-	boFailChunk.runtimeFactory = func(restate.ObjectContext) objectRuntime {
-		return fakeRT
-	}
+	boFailChunk := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRT }).WithAuthority(storeFailChunk, execFail)
 	ctxMock := makeObjectMockContext(t, "b-running")
 	_, fErr := boFailChunk.FailChunk(ctxMock, model.FailChunkRequest{ChunkID: "c1", Reason: "hard error"})
 	assert.Error(t, fErr)
 	assert.False(t, fakeRT.cleared, "ClearState must not be called when notification step fails")
+
+	// 4. FailChunk success on failed build leaves fakeRT.cleared false (non-terminal failed state)
+	eriSuccess := &mockEriClient{}
+	execSuccess := executor.NewExecutor(t.TempDir(), eriSuccess, pubsub.NewMemoryBus(), "token", nil)
+	cRunningPR := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: "pr", Repo: "aerial", Status: "running"}
+	failPRRow := &genericMockRow{scanFn: func(dest ...any) error {
+		now := time.Now()
+		return scanValues(dest,
+			"c1", "b-failed", 0, "pr", "aerial", "Fail Chunk Title", "Instructions", []string{}, []string{}, "medium", []string{}, "running", 101, sql.NullTime{Time: now, Valid: true}, sql.NullTime{Time: now, Valid: true}, now, now, 0,
+			"b-failed", "th-1", 2, "Test failure", "Test failure", "Context", statusFailed, "msg-1", now, now,
+		)
+	}}
+	storeFailChunkOk, _ := dbScript{
+		routes:   []sqlRoute{{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b-failed")}, {match: "WHERE c.id = $1", row: failPRRow}},
+		buildRow: &mockRow{b: &bFailed},
+		chunks:   []model.VanadisChunk{cRunningPR},
+		execTag:  "UPDATE 1",
+	}.open()
+	fakeRTOk := newFakeObjectRuntime("b-failed")
+	boFailChunkOk := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRTOk }).WithAuthority(storeFailChunkOk, execSuccess)
+	ctxMockOk := makeObjectMockContext(t, "b-failed")
+	respOk, fErrOk := boFailChunkOk.FailChunk(ctxMockOk, model.FailChunkRequest{ChunkID: "c1", Reason: "hard error"})
+	assert.NoError(t, fErrOk)
+	assert.True(t, respOk.Failed)
+	assert.Equal(t, statusFailed, respOk.BuildStatus)
+	assert.False(t, fakeRTOk.cleared, "ClearState must not be called when FailChunk succeeds on failed build")
 }
 
 type deploymentStartStore struct {
