@@ -116,18 +116,19 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 	runningBuild := model.VanadisBuild{ID: "b-trans", Title: "Build", Status: "running", ThreadID: "th-1"}
 
 	tests := []struct {
-		name        string
-		build       model.VanadisBuild
-		chunks      []model.VanadisChunk
-		buildErr    bool
-		notFound    bool
-		nilStore    bool
-		mutation    *BuildMutationRequest
-		stateLaunch map[string]bool
-		wantStatus  string
-		wantChunks  []string
-		wantErr     bool
-		wantCleared bool
+		name         string
+		build        model.VanadisBuild
+		chunks       []model.VanadisChunk
+		buildErr     bool
+		notFound     bool
+		nilStore     bool
+		mutation     *BuildMutationRequest
+		stateLaunch  map[string]bool
+		wantStatus   string
+		wantChunks   []string
+		wantLaunched map[string]bool
+		wantErr      bool
+		wantCleared  bool
 	}{
 		{
 			name:  "successful_reconcile_running",
@@ -155,6 +156,18 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			wantStatus:  statusCompleted,
 			wantErr:     false,
 			wantCleared: true,
+		},
+		{
+			name:  "reconcile_failed_preserves_state_and_launched",
+			build: model.VanadisBuild{ID: "b-trans", Title: "Build", Status: statusFailed, ThreadID: "th-1"},
+			chunks: []model.VanadisChunk{
+				{ID: "c1", BuildID: "b-trans", Status: statusFailed, Repo: "aerial", Mode: "pr"},
+			},
+			stateLaunch:  map[string]bool{"c0": true},
+			wantStatus:   statusFailed,
+			wantLaunched: map[string]bool{"c0": true},
+			wantErr:      false,
+			wantCleared:  false,
 		},
 		{
 			name:  "terminal_cancelled_clears_state",
@@ -221,6 +234,9 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, res.Status)
 			assert.Equal(t, tc.wantChunks, res.LaunchedChunks)
 			assert.Equal(t, tc.wantCleared, rt.cleared)
+			if tc.wantLaunched != nil {
+				assert.Equal(t, tc.wantLaunched, rt.launched)
+			}
 		})
 	}
 }

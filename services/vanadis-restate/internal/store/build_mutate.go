@@ -59,8 +59,8 @@ func (s *Store) UpdateBuild(ctx context.Context, buildID string, req UpdateBuild
 		}
 		return nil, fmt.Errorf("check build status: %w", checkErr)
 	}
-	if currentStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, currentStatus)
+	if currentStatus != statusRunning && currentStatus != statusFailed {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running or failed)", ErrBuildConflict, buildID, currentStatus)
 	}
 
 	const updateQ = `UPDATE vanadis_builds SET title = CASE WHEN $2 != '' THEN $2 ELSE title END, objective = CASE WHEN $3 != '' THEN $3 ELSE objective END, shared_context = CASE WHEN $4 != '' THEN $4 ELSE shared_context END, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
@@ -220,8 +220,8 @@ func (s *Store) UpdateChunk(ctx context.Context, buildID, chunkRef string, req U
 		}
 		return nil, fmt.Errorf("lock build for update chunk: %w", bErr)
 	}
-	if buildStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, buildStatus)
+	if buildStatus != statusRunning && buildStatus != statusFailed {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running or failed)", ErrBuildConflict, buildID, buildStatus)
 	}
 
 	cRows, err := tx.Query(ctx, SelectChunksForUpdateSQL, buildID)
@@ -358,8 +358,8 @@ func (s *Store) AppendChunks(ctx context.Context, buildID string, inputs []Creat
 		}
 		return nil, fmt.Errorf("lock build for append chunks: %w", bErr)
 	}
-	if buildStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, buildStatus)
+	if buildStatus != statusRunning && buildStatus != statusFailed {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running or failed)", ErrBuildConflict, buildID, buildStatus)
 	}
 
 	cRows, err := tx.Query(ctx, SelectChunksForUpdateSQL, buildID)
@@ -473,8 +473,8 @@ func lockBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) ([]model
 		}
 		return nil, fmt.Errorf("lock build: %w", bErr)
 	}
-	if buildStatus != statusRunning {
-		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, buildStatus)
+	if buildStatus != statusRunning && buildStatus != statusFailed {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running or failed)", ErrBuildConflict, buildID, buildStatus)
 	}
 
 	cRows, err := tx.Query(ctx, SelectChunksForUpdateSQL, buildID)

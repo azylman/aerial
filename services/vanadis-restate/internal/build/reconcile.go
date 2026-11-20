@@ -116,7 +116,7 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
 	}
 
-	if stepOut.BuildStatus == statusCompleted || stepOut.BuildStatus == statusFailed || stepOut.BuildStatus == statusCancelled || stepOut.BuildStatus == statusNotFound {
+	if stepOut.BuildStatus == statusCompleted || stepOut.BuildStatus == statusCancelled || stepOut.BuildStatus == statusNotFound {
 		rt.ClearState()
 		// Keep only the delivery marker across terminal invocations. The journaled
 		// step result restores it on replay after a crash before SetState.
@@ -464,9 +464,16 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		return reconcileStepOutput{}, nErr
 	}
 	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
+		launchedMap := cloneLaunchedMap(priorLaunched)
 		return reconcileStepOutput{
 			BuildStatus: build.Status,
-			State:       &model.BuildObjectState{Build: *build, Chunks: chunks, TerminalNotified: terminalNotified},
+			LaunchedMap: launchedMap,
+			State: &model.BuildObjectState{
+				Build:            *build,
+				Chunks:           chunks,
+				Launched:         launchedMap,
+				TerminalNotified: terminalNotified,
+			},
 		}, nil
 	}
 
