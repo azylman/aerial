@@ -318,6 +318,26 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 	return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 }
 
+// PRObjectServiceName returns the Restate PR Virtual Object name for botID.
+// Empty or "aerial" defaults to "PRObject"; any other name is lowercased and formatted as "PRObject-<name>".
+func PRObjectServiceName(botID string) string {
+	name := strings.ToLower(strings.TrimSpace(botID))
+	if name == "" || name == "aerial" {
+		return "PRObject"
+	}
+	return "PRObject-" + name
+}
+
+// RepoObjectServiceName returns the Restate Repo Virtual Object name for botID.
+// Empty or "aerial" defaults to "RepoObject"; any other name is lowercased and formatted as "RepoObject-<name>".
+func RepoObjectServiceName(botID string) string {
+	name := strings.ToLower(strings.TrimSpace(botID))
+	if name == "" || name == "aerial" {
+		return "RepoObject"
+	}
+	return "RepoObject-" + name
+}
+
 func buildConfig(fileCfg RouterYAMLConfig) Config {
 	legacy, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows)
 	if err != nil {
@@ -372,8 +392,8 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		EriURL:               strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		NATSURL:              model.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
 		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
-		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), "PRObject"),
-		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), "RepoObject"),
+		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), PRObjectServiceName(botID)),
+		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), RepoObjectServiceName(botID)),
 		RestateAuthoritative: fileCfg.RestateAuthoritative,
 		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:         os.Getenv("DISCORD_TOKEN"),

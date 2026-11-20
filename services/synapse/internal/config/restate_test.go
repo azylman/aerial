@@ -23,6 +23,8 @@ func TestLoadConfig_RestateInvoker(t *testing.T) {
 		{name: "no env var injects restate endpoint", yaml: "port: \"4020\"\n", env: map[string]string{"RESTATE_URL": "http://evil:8080"}, wantURL: "", wantPRService: "PRObject", wantRepoService: "RepoObject"},
 		{name: "authoritative cutover defaults off", yaml: "restate_url: \"http://restate.aerial:8080\"\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoService: "RepoObject"},
 		{name: "authoritative cutover flips from yaml", yaml: "restate_url: \"http://restate.aerial:8080\"\nrestate_authoritative: true\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoService: "RepoObject", wantAuthoritative: true},
+		{name: "scoped services for suletta bot_id", yaml: "restate_url: \"http://restate.aerial:8080\"\nbot_id: \"suletta\"\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject-suletta", wantRepoService: "RepoObject-suletta"},
+		{name: "scoped services for miorine bot_id", yaml: "restate_url: \"http://restate.aerial:8080\"\nbot_id: \"miorine\"\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject-miorine", wantRepoService: "RepoObject-miorine"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -34,6 +36,7 @@ func TestLoadConfig_RestateInvoker(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			t.Setenv("CONFIG_PATH", "")
+			t.Setenv("AERIAL_BOT_ID", "")
 			cfg := LoadConfig(path)
 			if cfg.RestateURL != tc.wantURL {
 				t.Errorf("RestateURL = %q, want %q", cfg.RestateURL, tc.wantURL)

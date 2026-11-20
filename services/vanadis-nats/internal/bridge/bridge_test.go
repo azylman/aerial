@@ -731,7 +731,7 @@ func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqCount++
 		capturedKey = r.Header.Get("Idempotency-Key")
-		capturedPath = r.URL.Path
+		capturedPath = r.URL.EscapedPath()
 		capturedBody, _ = io.ReadAll(r.Body)
 
 		if tc.serverStatus != 0 {
@@ -807,6 +807,18 @@ func TestHandleWidgetSyncEvent(t *testing.T) {
 			wantRequests: 1,
 			wantPath:     "/Build/build-987/Reconcile/send",
 			wantKey:      "widget:build:build-987",
+			wantReconcile: map[string]string{
+				"reason": "widget_sync",
+			},
+			wantErr: false,
+		},
+		{
+			name:         "special characters in build_id are path-escaped",
+			msgData:      `{"build_id":"build/987#special"}`,
+			serverStatus: http.StatusOK,
+			wantRequests: 1,
+			wantPath:     "/Build/build%2F987%23special/Reconcile/send",
+			wantKey:      "widget:build:build/987#special",
 			wantReconcile: map[string]string{
 				"reason": "widget_sync",
 			},

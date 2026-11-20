@@ -9,6 +9,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ func (b *NATSBridge) buildRouterServiceName() string {
 }
 
 func (b *NATSBridge) restateObjectSendPath(buildID, handler string) string {
-	return "/" + b.buildServiceName() + "/" + buildID + "/" + handler + "/send"
+	return "/" + b.buildServiceName() + "/" + url.PathEscape(buildID) + "/" + handler + "/send"
 }
 
 func (b *NATSBridge) restateRouterSendPath(handler string) string {
