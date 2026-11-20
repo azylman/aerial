@@ -300,11 +300,13 @@ type client struct {
 	HTTPClient *http.Client
 }
 
+const defaultServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
 func defaultTokenPath() string {
 	if p := os.Getenv("AERIAL_SA_TOKEN_PATH"); p != "" {
 		return p
 	}
-	return "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	return defaultServiceAccountTokenPath
 }
 
 func newClient(baseURL string) *client {

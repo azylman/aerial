@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1031,6 +1032,12 @@ func TestTraceProxy_StreamsSSE_Shaped(t *testing.T) {
 	close(streamDone)
 }
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 type bearerTokenStep struct {
 	advanceClock time.Duration
 	updateToken  string
@@ -1039,10 +1046,10 @@ type bearerTokenStep struct {
 }
 
 type bearerTokenCase struct {
-	name       string
-	tokenSetup string
-	tokenPath  string
-	steps      []bearerTokenStep
+	name        string
+	tokenSetup  string
+	upstreamURL string
+	steps       []bearerTokenStep
 }
 
 func TestTraceProxy_BearerToken(t *testing.T) {
@@ -1111,9 +1118,9 @@ func TestTraceProxy_BearerToken(t *testing.T) {
 			},
 		},
 		{
-			name:       "default token path when unset in config",
-			tokenSetup: "__MISSING__",
-			tokenPath:  "__DEFAULT__",
+			name:        "external upstream does not receive bearer token",
+			tokenSetup:  "initial-token-123",
+			upstreamURL: "https://mcp.cloudflare.com/mcp",
 			steps: []bearerTokenStep{
 				{
 					inboundAuth: "",
@@ -1141,11 +1148,6 @@ func runBearerTokenCase(t *testing.T, tc bearerTokenCase) {
 		}
 	}
 
-	cfgPath := filePath
-	if tc.tokenPath == "__DEFAULT__" {
-		cfgPath = ""
-	}
-
 	var lastSeenAuth string
 	var mu sync.Mutex
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1158,11 +1160,28 @@ func runBearerTokenCase(t *testing.T, tc bearerTokenCase) {
 	defer upstream.Close()
 
 	clock := &manualClock{now: time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)}
+	targetUpstream := upstream.URL
+	var customTransport http.RoundTripper
+	if tc.upstreamURL != "" {
+		targetUpstream = tc.upstreamURL
+		customTransport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			mu.Lock()
+			lastSeenAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":{}}`)),
+			}, nil
+		})
+	}
+
 	proxy := mcp.NewTraceProxy(mcp.TraceProxyConfig{
-		Upstreams: upstreamMap{"discord/test": upstream.URL},
+		Upstreams: upstreamMap{"discord/test": targetUpstream},
 		Turns:     runner.NewActiveTurnRegistry(),
 		Clock:     clock.Now,
-		TokenPath: cfgPath,
+		TokenPath: filePath,
+		Transport: customTransport,
 	})
 	mux := http.NewServeMux()
 	proxy.Register(mux)
@@ -1204,5 +1223,54 @@ func executeBearerTokenStep(t *testing.T, srv *httptest.Server, clock *manualClo
 
 	if seen != st.wantAuth {
 		t.Errorf("step %d: got auth %q, want %q", i, seen, st.wantAuth)
+	}
+}
+
+func TestTraceProxy_DefaultTokenPath(t *testing.T) {
+	t.Parallel()
+	proxy := mcp.NewTraceProxy(mcp.TraceProxyConfig{})
+	if proxy.TokenPathForTest() != mcp.DefaultServiceAccountTokenPath {
+		t.Fatalf("got default token path %q, want %q", proxy.TokenPathForTest(), mcp.DefaultServiceAccountTokenPath)
+	}
+}
+
+func TestIsClusterInternalUpstream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{url: "http://coven.aerial/mcp", want: true},
+		{url: "http://haro.aerial:4025/mcp", want: true},
+		{url: "http://coven.lan/mcp", want: true},
+		{url: "http://coven.local/mcp", want: true},
+		{url: "http://coven.default.svc.cluster.local/mcp", want: true},
+		{url: "http://localhost:8080/mcp", want: true},
+		{url: "http://127.0.0.1:8080/mcp", want: true},
+		{url: "http://[::1]:8080/mcp", want: true},
+		{url: "https://mcp.cloudflare.com/mcp", want: false},
+		{url: "https://mcp.ubereats.com/eats-3p-dev/mcp", want: false},
+		{url: "https://evil.aerial.com/mcp", want: false},
+		{url: "https://example.com/mcp", want: false},
+		{url: "https://1.1.1.1/mcp", want: false},
+		{url: "", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.url, func(t *testing.T) {
+			t.Parallel()
+			var u *url.URL
+			if tc.url != "" {
+				parsed, err := url.Parse(tc.url)
+				if err != nil {
+					t.Fatalf("parse url %q: %v", tc.url, err)
+				}
+				u = parsed
+			}
+			if got := mcp.IsClusterInternalUpstream(u); got != tc.want {
+				t.Errorf("IsClusterInternalUpstream(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
 	}
 }

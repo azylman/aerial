@@ -1014,38 +1014,28 @@ func TestClient_GetJSON_BearerToken(t *testing.T) {
 	tests := []struct {
 		name       string
 		tokenSetup string
-		customPath bool
-		envVar     string
+		envVar     bool
 		wantAuth   string
 	}{
 		{
 			name:       "valid token file injects authorization bearer",
 			tokenSetup: "test-sa-jwt-token-xyz\n",
-			customPath: true,
 			wantAuth:   "Bearer test-sa-jwt-token-xyz",
 		},
 		{
 			name:       "empty token file does not set authorization header",
 			tokenSetup: "   \n\t  ",
-			customPath: true,
 			wantAuth:   "",
 		},
 		{
 			name:       "missing token file falls back gracefully without header",
 			tokenSetup: "__MISSING__",
-			customPath: true,
-			wantAuth:   "",
-		},
-		{
-			name:       "empty tokenPath field does not set authorization header",
-			tokenSetup: "some-token",
-			customPath: false,
 			wantAuth:   "",
 		},
 		{
 			name:       "default token path respects AERIAL_SA_TOKEN_PATH env var",
 			tokenSetup: "env-injected-token",
-			envVar:     "__USE_FILE__",
+			envVar:     true,
 			wantAuth:   "Bearer env-injected-token",
 		},
 	}
@@ -1072,18 +1062,14 @@ func TestClient_GetJSON_BearerToken(t *testing.T) {
 			defer server.Close()
 
 			var c *client
-			if tc.envVar != "" {
+			if tc.envVar {
 				t.Setenv("AERIAL_SA_TOKEN_PATH", filePath)
 				c = newClient(server.URL)
 				c.HTTPClient = server.Client()
 			} else {
-				tokenPath := ""
-				if tc.customPath {
-					tokenPath = filePath
-				}
 				c = &client{
 					BaseURL:    server.URL,
-					TokenPath:  tokenPath,
+					TokenPath:  filePath,
 					HTTPClient: server.Client(),
 				}
 			}
@@ -1103,4 +1089,19 @@ func TestClient_GetJSON_BearerToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultTokenPath(t *testing.T) {
+	t.Run("default constant", func(t *testing.T) {
+		t.Setenv("AERIAL_SA_TOKEN_PATH", "")
+		if got := defaultTokenPath(); got != defaultServiceAccountTokenPath {
+			t.Fatalf("got default token path %q, want %q", got, defaultServiceAccountTokenPath)
+		}
+	})
+	t.Run("env override", func(t *testing.T) {
+		t.Setenv("AERIAL_SA_TOKEN_PATH", "/custom/path/token")
+		if got := defaultTokenPath(); got != "/custom/path/token" {
+			t.Fatalf("got default token path %q, want %q", got, "/custom/path/token")
+		}
+	})
 }

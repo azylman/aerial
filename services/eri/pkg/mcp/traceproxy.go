@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -361,15 +362,8 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if hasPolicy && r.Method == http.MethodPost {
-		if blocked, reqID, toolName := IsBlockedToolCall(body, policy); blocked {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			if _, err := w.Write(BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled.", toolName))); err != nil {
-				return
-			}
-			return
-		}
+	if checkBlockedToolCall(w, body, policy, hasPolicy, r.Method) {
+		return
 	}
 
 	attrs := tracing.MCPRequestAttrs(body)
@@ -385,19 +379,7 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) { //nolint:contextcheck // pr.Out.Context() is the inbound request's context
-			u := *upstream
-			pr.Out.URL = &u
-			pr.Out.Host = ""
-			pr.Out.Header.Del(env.DaemonHeader)
-			if hasActivePolicy(policy) {
-				pr.Out.Header.Del("Accept-Encoding")
-			}
-			if tok := p.token(); tok != "" && pr.Out.Header.Get("Authorization") == "" {
-				pr.Out.Header.Set("Authorization", "Bearer "+tok)
-			}
-			if span != nil {
-				propagation.TraceContext{}.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
-			}
+			p.rewriteRequest(pr, upstream, policy, span)
 		},
 		Transport:     p.transport,
 		FlushInterval: -1,
@@ -424,6 +406,38 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	out.Body = io.NopCloser(bytes.NewReader(body))
 	out.ContentLength = int64(len(body))
 	rp.ServeHTTP(w, out)
+}
+
+func checkBlockedToolCall(w http.ResponseWriter, body []byte, policy env.ServerPolicy, hasPolicy bool, method string) bool {
+	if !hasPolicy || method != http.MethodPost {
+		return false
+	}
+	blocked, reqID, toolName := IsBlockedToolCall(body, policy)
+	if !blocked {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled.", toolName))); err != nil {
+		return true
+	}
+	return true
+}
+
+func (p *TraceProxy) rewriteRequest(pr *httputil.ProxyRequest, upstream *url.URL, policy env.ServerPolicy, span trace.Span) {
+	u := *upstream
+	pr.Out.URL = &u
+	pr.Out.Host = ""
+	pr.Out.Header.Del(env.DaemonHeader)
+	if hasActivePolicy(policy) {
+		pr.Out.Header.Del("Accept-Encoding")
+	}
+	if tok := p.token(); tok != "" && pr.Out.Header.Get("Authorization") == "" && IsClusterInternalUpstream(upstream) {
+		pr.Out.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if span != nil {
+		propagation.TraceContext{}.Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
+	}
 }
 
 // parentSpan resolves the span a proxied request's client span starts under: for tools/call,
@@ -503,4 +517,30 @@ func mcpMethodAndTool(attrs []attribute.KeyValue) (method, tool string) {
 		}
 	}
 	return method, tool
+}
+
+// IsClusterInternalUpstream reports whether an upstream URL points to a cluster-internal
+// service (e.g. .aerial, .lan, .local, .cluster.local, localhost, or loopback IP) that
+// may receive the Kubernetes ServiceAccount token. External or third-party upstreams return false.
+func IsClusterInternalUpstream(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	if host == "aerial" || strings.HasSuffix(host, ".aerial") ||
+		host == "lan" || strings.HasSuffix(host, ".lan") ||
+		host == "local" || strings.HasSuffix(host, ".local") ||
+		host == "cluster.local" || strings.HasSuffix(host, ".cluster.local") {
+		return true
+	}
+	return false
 }
