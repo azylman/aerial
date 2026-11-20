@@ -5,14 +5,18 @@ unset OPENAI_API_KEY || true
 
 # Root bootstrap at container start
 chmod 0755 /root
-mkdir -p /root/.roborev /root/.claude/projects /root/.config/muse /root/.docker/buildx/instances /home/ubuntu /home/ubuntu/.config
+mkdir -p /root/.roborev /root/.claude/projects /root/.config/muse/sessions /root/.local/share /root/.docker/buildx/instances /home/ubuntu /home/ubuntu/.config /home/ubuntu/.local/share
 for item in roborev claude claude.json docker; do
   ln -sfn "/root/.${item}" "/home/ubuntu/.${item}"
 done
 ln -sfn /root/.config/muse /home/ubuntu/.config/muse
+ln -sfn /root/.config/muse /root/.local/share/muse
+ln -sfn /root/.config/muse /home/ubuntu/.local/share/muse
 
 find /root/.claude/projects -type f -mtime +14 -delete 2>/dev/null || true
 find /root/.claude/projects -mindepth 1 -type d -empty -delete 2>/dev/null || true
+find /root/.config/muse/sessions -type f -mtime +14 -delete 2>/dev/null || true
+find /root/.config/muse/sessions -mindepth 1 -type d -empty -delete 2>/dev/null || true
 chmod 0700 /root/.roborev /root/.claude /root/.config/muse
 
 # Pre-populate Claude configuration and deny rules
@@ -35,12 +39,16 @@ cat > /root/.claude/settings.json <<'EOF'
       "Read(//root/.claude/**)",
       "Read(/root/.config/muse/**)",
       "Read(//root/.config/muse/**)",
+      "Read(/root/.local/share/muse/**)",
+      "Read(//root/.local/share/muse/**)",
       "Read(/home/ubuntu/.roborev/**)",
       "Read(//home/ubuntu/.roborev/**)",
       "Read(/home/ubuntu/.claude/**)",
       "Read(//home/ubuntu/.claude/**)",
       "Read(/home/ubuntu/.config/muse/**)",
       "Read(//home/ubuntu/.config/muse/**)",
+      "Read(/home/ubuntu/.local/share/muse/**)",
+      "Read(//home/ubuntu/.local/share/muse/**)",
       "Read(/actions-runner/.env)",
       "Read(//actions-runner/.env)"
     ]

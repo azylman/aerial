@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27.3-bookworm AS go-builder
+FROM golang:1.27.4-bookworm AS go-builder
 
 RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install golang.org/x/tools/cmd/deadcode@v0.52.0 && \
     GOBIN=/out/bin CGO_ENABLED=0 go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 && \
     git clone https://github.com/azylman/roborev.git /tmp/roborev && \
-    (cd /tmp/roborev && git checkout 1c927ea53e3b5988323538cab5255143658b2e9f && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
+    (cd /tmp/roborev && git checkout dd816f9c3f87489334c45a165ac569842594f9ba && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
     mv /out/bin/roborev /out/bin/roborev.real && \
     rm -rf /tmp/roborev && \
     rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
@@ -87,7 +87,7 @@ RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.f
     chmod 0755 /usr/local/bin/muse && \
     /usr/local/bin/muse --version
 
-# Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
+# Pre-baked toolchain: Go 1.27.4, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /out/bin/* /usr/local/bin/
 COPY --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev
