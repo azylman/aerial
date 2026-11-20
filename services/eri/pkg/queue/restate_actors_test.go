@@ -1269,19 +1269,39 @@ func TestAtLeastOnceRecovery(t *testing.T) {
 	})
 }
 
-func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
-	_, _ = store.InsertDispatch(context.Background(), db.Dispatch{ID: "d-proc", Status: db.StatusProcessing})
-	_, _ = store.InsertDispatch(context.Background(), db.Dispatch{ID: "d-done", Status: db.StatusCompleted})
+type cancelCheckStore struct {
+	*dbtest.FakeStore
+}
 
+func (s *cancelCheckStore) GetMessage(ctx context.Context, id string) (*db.Message, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.FakeStore.GetMessage(ctx, id)
+}
+
+func (s *cancelCheckStore) GetDispatch(ctx context.Context, id string) (*db.Dispatch, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.FakeStore.GetDispatch(ctx, id)
+}
+
+func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
+	baseStore := dbtest.NewFakeStore()
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
+	_, _ = baseStore.InsertDispatch(context.Background(), db.Dispatch{ID: "d-proc", Status: db.StatusProcessing})
+	_, _ = baseStore.InsertDispatch(context.Background(), db.Dispatch{ID: "d-done", Status: db.StatusCompleted})
+
+	store := &cancelCheckStore{FakeStore: baseStore}
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
 
 	tests := []struct {
 		name       string
 		te         *turnExecution
 		failStore  string
+		cancelCtx  bool
 		wantResult bool
 	}{
 		{
@@ -1334,11 +1354,13 @@ func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
 		{
 			name:       "caller context canceled does not prevent check from returning false for completed dispatch",
 			te:         &turnExecution{pool: pool, dispatch: &db.Dispatch{ID: "d-done"}},
+			cancelCtx:  true,
 			wantResult: false,
 		},
 		{
 			name:       "caller context canceled does not prevent check from returning false for completed burst",
 			te:         &turnExecution{pool: pool, burst: []db.Message{{ID: "m-done"}}},
+			cancelCtx:  true,
 			wantResult: false,
 		},
 	}
@@ -1346,10 +1368,10 @@ func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.failStore != "" {
-				store.FailNext(tc.failStore, errors.New("simulated db err"))
+				baseStore.FailNext(tc.failStore, errors.New("simulated db err"))
 			}
 			ctx := context.Background()
-			if strings.Contains(tc.name, "caller context canceled") {
+			if tc.cancelCtx {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
@@ -1361,54 +1383,61 @@ func TestTurnExecution_IsRowStillProcessing(t *testing.T) {
 }
 
 func TestWorkerPool_CheckTurnCompletionError(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
-	_ = store.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
+	baseStore := dbtest.NewFakeStore()
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-done", Status: db.StatusCompleted})
+	_ = baseStore.InsertMessage(context.Background(), db.Message{ID: "m-proc", Status: db.StatusProcessing})
 
+	store := &cancelCheckStore{FakeStore: baseStore}
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
 	abortErr := errors.New("abort error")
 
 	tests := []struct {
-		name      string
-		finalized bool
-		burst     []db.Message
-		cancelCtx bool
-		wantErr   error
+		name        string
+		finalized   bool
+		interrupted bool
+		burst       []db.Message
+		cancelCtx   bool
+		wantErr     error
 	}{
 		{
-			name:      "finalized and completed row returns nil even when context is canceled",
-			finalized: true,
-			burst:     []db.Message{{ID: "m-done"}},
-			cancelCtx: true,
-			wantErr:   nil,
+			name:        "finalized and completed row returns nil even when context is canceled",
+			finalized:   true,
+			interrupted: false,
+			burst:       []db.Message{{ID: "m-done"}},
+			cancelCtx:   true,
+			wantErr:     nil,
 		},
 		{
-			name:      "finalized but row still processing returns abort error",
-			finalized: true,
-			burst:     []db.Message{{ID: "m-proc"}},
-			cancelCtx: false,
-			wantErr:   abortErr,
+			name:        "finalized but row still processing returns abort error",
+			finalized:   true,
+			interrupted: false,
+			burst:       []db.Message{{ID: "m-proc"}},
+			cancelCtx:   false,
+			wantErr:     abortErr,
 		},
 		{
-			name:      "not finalized returns abort error",
-			finalized: false,
-			burst:     []db.Message{{ID: "m-done"}},
-			cancelCtx: false,
-			wantErr:   abortErr,
+			name:        "not finalized returns abort error",
+			finalized:   false,
+			interrupted: false,
+			burst:       []db.Message{{ID: "m-done"}},
+			cancelCtx:   false,
+			wantErr:     abortErr,
 		},
 		{
-			name:      "interrupted skips abort error",
-			finalized: false,
-			burst:     []db.Message{{ID: "m-proc"}},
-			cancelCtx: false,
-			wantErr:   nil,
+			name:        "interrupted skips abort error",
+			finalized:   false,
+			interrupted: true,
+			burst:       []db.Message{{ID: "m-proc"}},
+			cancelCtx:   false,
+			wantErr:     nil,
 		},
 		{
-			name:      "interrupted skips caller context error",
-			finalized: false,
-			burst:     []db.Message{{ID: "m-done"}},
-			cancelCtx: true,
-			wantErr:   nil,
+			name:        "interrupted skips caller context error",
+			finalized:   false,
+			interrupted: true,
+			burst:       []db.Message{{ID: "m-done"}},
+			cancelCtx:   true,
+			wantErr:     nil,
 		},
 	}
 
@@ -1419,9 +1448,7 @@ func TestWorkerPool_CheckTurnCompletionError(t *testing.T) {
 				burst: tc.burst,
 			}
 			te.finalized.Store(tc.finalized)
-			if strings.HasPrefix(tc.name, "interrupted") {
-				te.interrupted.Store(true)
-			}
+			te.interrupted.Store(tc.interrupted)
 
 			ctx := context.Background()
 			if tc.cancelCtx {
