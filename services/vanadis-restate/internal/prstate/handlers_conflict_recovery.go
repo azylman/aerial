@@ -79,10 +79,15 @@ func RecordConflictPublished(s *PRState, ev PREvent) (ConflictPublishedOutcome, 
 }
 
 // ResolveCIRecovery computes whether the PR is CI-failed for the event head
-// SHA from the Restate-owned failure slots. It records nothing.
+// SHA from the Restate-owned failure slots. Same-epoch terminal states
+// absorb with no recovery, matching the conflict and deploy verdicts: a
+// merged or closed PR never reopens CI recovery. It records nothing.
 func ResolveCIRecovery(s *PRState, ev PREvent) (CIRecoveryDecision, error) {
 	if s == nil {
 		return CIRecoveryDecision{Disposition: DispositionDropStale}, errNilPRState
+	}
+	if s.Terminal.Absorbing() && ev.ReopenEpoch <= s.ReopenEpoch {
+		return CIRecoveryDecision{Disposition: DispositionAbsorbTerminal}, nil
 	}
 	return CIRecoveryDecision{Disposition: DispositionApply, CIFailed: s.IsCIFailedForSHA(ev.HeadSHA)}, nil
 }

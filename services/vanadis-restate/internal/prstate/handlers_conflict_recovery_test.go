@@ -214,16 +214,20 @@ func TestIsCIFailedForSHA(t *testing.T) {
 func TestResolveCIRecovery(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		nilState  bool
-		failedSHA string
-		querySHA  string
-		want      bool
-		wantErr   bool
+		name            string
+		nilState        bool
+		terminal        TerminalState
+		failedSHA       string
+		querySHA        string
+		want            bool
+		wantDisposition EventDisposition
+		wantErr         bool
 	}{
-		{name: "failed sha recovers", failedSHA: "aaa111", querySHA: "aaa111", want: true},
-		{name: "sha mismatch does not recover", failedSHA: "aaa111", querySHA: "bbb222"},
-		{name: "clean state does not recover", querySHA: "aaa111"},
+		{name: "failed sha recovers", failedSHA: "aaa111", querySHA: "aaa111", want: true, wantDisposition: DispositionApply},
+		{name: "sha mismatch does not recover", failedSHA: "aaa111", querySHA: "bbb222", wantDisposition: DispositionApply},
+		{name: "clean state does not recover", querySHA: "aaa111", wantDisposition: DispositionApply},
+		{name: "merged terminal absorbs recorded failure", terminal: TerminalMerged, failedSHA: "aaa111", querySHA: "aaa111", wantDisposition: DispositionAbsorbTerminal},
+		{name: "closed terminal absorbs recorded failure", terminal: TerminalClosed, failedSHA: "aaa111", querySHA: "aaa111", wantDisposition: DispositionAbsorbTerminal},
 		{name: "nil state errors", nilState: true, querySHA: "aaa111", wantErr: true},
 	}
 	for _, tc := range tests {
@@ -232,6 +236,9 @@ func TestResolveCIRecovery(t *testing.T) {
 			var s *PRState
 			if !tc.nilState {
 				s = recoveryState(7, tc.failedSHA, "", nil, false)
+				if tc.terminal != TerminalNone {
+					s.MarkTerminal(tc.terminal)
+				}
 			}
 			ev := PREvent{Event: "check_success", Repo: "aerial", PRNumber: 7, HeadSHA: tc.querySHA}
 			got, err := ResolveCIRecovery(s, ev)
@@ -244,8 +251,8 @@ func TestResolveCIRecovery(t *testing.T) {
 			if !tc.wantErr && got.CIFailed != tc.want {
 				t.Fatalf("CIFailed = %v, want %v", got.CIFailed, tc.want)
 			}
-			if !tc.wantErr && got.Disposition != DispositionApply {
-				t.Fatalf("Disposition = %q, want %q", got.Disposition, DispositionApply)
+			if !tc.wantErr && got.Disposition != tc.wantDisposition {
+				t.Fatalf("Disposition = %q, want %q", got.Disposition, tc.wantDisposition)
 			}
 		})
 	}
