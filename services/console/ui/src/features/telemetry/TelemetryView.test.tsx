@@ -80,11 +80,11 @@ afterEach(() => {
 
 describe('ServiceCard states', () => {
   it.each([
-    { name: 'aerial-eri', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: '1h 0m' },
+    { name: 'aerial-eri', wantDot: 'pulse-dot healthy', wantBadge: undefined, wantText: undefined, wantUptime: '1h 0m' },
     { name: 'aerial-vision', wantDot: 'pulse-dot degraded', wantBadge: 'badge degraded', wantText: 'DEGRADED', wantUptime: '12h 11m' },
     { name: 'aerial-kernel-mcp', wantDot: 'pulse-dot down', wantBadge: 'badge down', wantText: 'DOWN', wantUptime: '0s' },
-    { name: 'aerial-console', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: '2m 5s' },
-  ])('$name renders $wantText', ({ name, wantDot, wantBadge, wantText, wantUptime }) => {
+    { name: 'aerial-console', wantDot: 'pulse-dot healthy', wantBadge: undefined, wantText: undefined, wantUptime: '2m 5s' },
+  ])('$name renders badge $wantText', ({ name, wantDot, wantBadge, wantText, wantUptime }) => {
     render(<ServicesGrid />);
     seed(cluster());
     const card = screen.getByRole('button', { name: `${name} diagnostics` });
