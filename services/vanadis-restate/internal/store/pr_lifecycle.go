@@ -54,7 +54,7 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 		}
 		evidence = data
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled' AND (b.status != 'failed' OR c.status = 'completed');`, evidence, chunkID)
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled';`, evidence, chunkID)
 	if err != nil {
 		return fmt.Errorf("complete pr deployment: %w", err)
 	}
@@ -235,7 +235,7 @@ func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deployi
 	if len(repos) == 0 {
 		return nil, nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'failed', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
+	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
 	}
@@ -463,7 +463,7 @@ WHERE c.id = $1
   AND b.id = c.build_id
   AND c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed', 'failed', 'cancelled')
   AND COALESCE(c.ci_checks->>'_merge_sha', '') = ''
-  AND b.status NOT IN ('completed', 'failed', 'cancelled')
+  AND b.status != 'cancelled'
   AND ($3::boolean OR $2 = '' OR COALESCE(c.ci_checks->>'_head_sha', '') = '' OR LOWER(c.ci_checks->>'_head_sha') = LOWER($2));`
 	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead, PrHeadVerifiedFromContext(ctx))
 	if err != nil {

@@ -1212,6 +1212,13 @@ func TestCompletePRDeploymentMutation_SweepsEarlierChunks(t *testing.T) {
 			wantCompleted: []string{"deploying", "earlier"},
 		},
 		{
+			name:          "failed build still completes deploying and earlier merged chunks",
+			buildStatus:   statusFailed,
+			chunks:        newChunks(),
+			deployID:      "deploying",
+			wantCompleted: []string{"deploying", "earlier"},
+		},
+		{
 			name:          "cancelled build completes nothing",
 			buildStatus:   statusCancelled,
 			chunks:        newChunks(),

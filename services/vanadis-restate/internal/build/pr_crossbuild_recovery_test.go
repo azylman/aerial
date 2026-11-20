@@ -42,6 +42,12 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 			wantDeployJobs: []string{"eri"},
 		},
 		{
+			name: "failed foreign build publishes chunk completion and syncs widget without re-failing build", deployJobs: []string{"eri"},
+			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			foreignStatus: statusFailed, foreignChunkStatus: statusMerged,
+			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
+		},
+		{
 			name:          "mutation rollout jobs overlay onto stale deploying snapshot",
 			mutationJobs:  []string{"eri"},
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},

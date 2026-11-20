@@ -159,10 +159,7 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	if deploying.Mode == "action" && deploying.PRNumber == 0 {
 		return b.completeActionDeploymentMutation(ctx, mutation)
 	}
-	if deploying.Status == statusFailed || deploying.Status == statusCancelled || build.Status == statusCancelled || (build.Status == statusFailed && deploying.Status != statusCompleted) {
-		return nil
-	}
-	if build.Status == statusCancelled {
+	if deploying.Status == statusFailed || deploying.Status == statusCancelled || build.Status == statusCancelled {
 		return nil
 	}
 	if err := b.store.CompletePRDeployment(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
@@ -195,17 +192,6 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	return nil
 }
 
-// isTerminalBuildStatus reports whether a build already reached a terminal
-// outcome, in which case re-notifying would duplicate its completion.
-func isTerminalBuildStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusCompleted, statusFailed, statusCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
 // completeCrossBuildSweptDeployments completes eligible earlier chunks in
 // other builds superseded by the deploying chunk's landed commit, including
 // already-completed chunks re-derived for retry recovery. Skewed or
@@ -229,7 +215,7 @@ func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, de
 		if getErr != nil {
 			return getErr
 		}
-		if build == nil || isTerminalBuildStatus(build.Status) {
+		if build == nil || build.Status == statusCancelled || build.Status == statusCompleted {
 			continue
 		}
 		if b.executor != nil {
@@ -238,6 +224,10 @@ func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, de
 					slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
 				}
 			}
+		}
+		if build.Status == statusFailed {
+			b.refreshFailedPRWidget(ctx, buildID)
+			continue
 		}
 		if _, evalErr := b.evaluateBuildTerminalStatus(ctx, build, foreignChunks); evalErr != nil {
 			return evalErr
@@ -351,7 +341,7 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 		}
 		return false, eventErr
 	}
-	b.refreshFailedPRWidget(rc, buildID, event)
+	b.refreshFailedPRWidget(rc, buildID)
 	if event != "deploy_success" && ev.RolloutState != nil {
 		if rErr := b.store.RecordPRRolloutState(rc, chunkID, rolloutStatus, ev.RolloutState); rErr != nil {
 			if event == prEventDeployStarted {
@@ -359,6 +349,7 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 			}
 			slog.WarnContext(rc, "[vanadis-restate] record rollout state warning", "error", rErr)
 		}
+		b.refreshFailedPRWidget(rc, buildID)
 	}
 	return true, nil
 }
@@ -507,8 +498,8 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 }
 
 // Failed parents return from reconciliation before its normal widget sync.
-func (b *BuildObject) refreshFailedPRWidget(ctx context.Context, buildID, event string) {
-	if b.executor == nil || (event != prEventOpened && event != "synchronize") {
+func (b *BuildObject) refreshFailedPRWidget(ctx context.Context, buildID string) {
+	if b.executor == nil {
 		return
 	}
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
@@ -516,7 +507,7 @@ func (b *BuildObject) refreshFailedPRWidget(ctx context.Context, buildID, event 
 		slog.WarnContext(ctx, "[vanadis-restate] recovery widget read warning", "error", err)
 		return
 	}
-	if build.Status != statusFailed {
+	if build == nil || build.Status != statusFailed {
 		return
 	}
 	if _, err = b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build failed"); err != nil {
