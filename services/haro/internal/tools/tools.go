@@ -130,6 +130,7 @@ type ScheduleRecurringArgs struct {
 	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"Title prefix for spawned threads (e.g. 'Weekly Meal Plan')."`
 	Timezone       string `json:"timezone,omitempty"     jsonschema:"Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
 	Effort         string `json:"effort,omitempty"       jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model). Defaults to 'medium'."`
+	Agent          string `json:"agent,omitempty"        jsonschema:"Target agent namespace (defaults to caller agent)."`
 }
 
 type ScheduleRecurringOutput struct {
@@ -167,6 +168,7 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 	sched := model.CronSchedule{
 		ID: id, TargetID: args.ChannelID, TitlePrefix: args.TitlePrefix, CronExpr: args.CronExpression,
 		Prompt: args.Prompt, Timezone: args.Timezone, NextRunAt: nextRun, Enabled: true, CreatedAt: now, Effort: args.Effort,
+		Agent: model.NormalizeAgent(args.Agent),
 	}
 	if err := store.InsertCronSchedule(ctx, database, sched); err != nil {
 		return ScheduleRecurringOutput{}, fmt.Errorf("failed to persist recurring schedule: %w", err)
@@ -196,6 +198,7 @@ type ScheduleOnceArgs struct {
 	Prompt   string `json:"prompt"              jsonschema:"Content/instructions of the reminder."`
 	Timezone string `json:"timezone,omitempty"  jsonschema:"Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
 	Effort   string `json:"effort,omitempty"    jsonschema:"Effort tier: 'low' (lightweight low-effort model), 'medium' (medium-effort model), or 'high' (primary high-effort model). Defaults to 'medium'."`
+	Agent    string `json:"agent,omitempty"     jsonschema:"Target agent namespace (defaults to caller agent)."`
 }
 
 type ScheduleOnceOutput struct {
@@ -232,7 +235,15 @@ func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnce
 
 	effort := store.NormalizeScheduleEffort(args.Effort)
 	id := uuid.New().String()
-	sched := model.OneShotSchedule{ID: id, ThreadID: targetID, Prompt: args.Prompt, RunAt: targetTime, CreatedAt: now, Effort: effort}
+	sched := model.OneShotSchedule{
+		ID:        id,
+		ThreadID:  targetID,
+		Prompt:    args.Prompt,
+		RunAt:     targetTime,
+		CreatedAt: now,
+		Effort:    effort,
+		Agent:     model.NormalizeAgent(args.Agent),
+	}
 	if err := store.InsertOneShotSchedule(ctx, database, sched); err != nil {
 		return ScheduleOnceOutput{}, fmt.Errorf("failed to persist one-shot schedule: %w", err)
 	}
@@ -254,6 +265,7 @@ func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (
 
 type ListSchedulesArgs struct {
 	TargetID string `json:"target_id,omitempty" jsonschema:"Optional Discord Channel or Thread ID to filter schedules."`
+	Agent    string `json:"agent,omitempty"     jsonschema:"Optional agent filter."`
 }
 
 type ListSchedulesOutput struct {
@@ -284,15 +296,15 @@ func FormatSchedulesSummary(out ListSchedulesOutput) string {
 // ListSchedules lists recurring, one-shot, and heartbeat schedules with prompts redacted.
 func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs) (ListSchedulesOutput, error) {
 	targetID := strings.TrimSpace(args.TargetID)
-	crons, err := store.ListCronSchedules(ctx, h.DB, targetID)
+	crons, err := store.ListCronSchedules(ctx, h.DB, targetID, args.Agent)
 	if err != nil {
 		return ListSchedulesOutput{}, fmt.Errorf("failed to query recurring schedules: %w", err)
 	}
-	oneShots, err := store.ListOneShotSchedules(ctx, h.DB, targetID)
+	oneShots, err := store.ListOneShotSchedules(ctx, h.DB, targetID, args.Agent)
 	if err != nil {
 		return ListSchedulesOutput{}, fmt.Errorf("failed to query one-shot schedules: %w", err)
 	}
-	heartbeats, err := store.ListHeartbeatSchedules(ctx, h.DB, targetID)
+	heartbeats, err := store.ListHeartbeatSchedules(ctx, h.DB, targetID, args.Agent)
 	if err != nil {
 		return ListSchedulesOutput{}, fmt.Errorf("failed to query heartbeat schedules: %w", err)
 	}

@@ -323,15 +323,15 @@ func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
 	})
 
 	t.Run("constructor with restate opts", func(t *testing.T) {
-		d := NewHTTPPromptDispatcher("http://eri:8080", "http://restate:8080/", "miorine")
+		d := NewHTTPPromptDispatcher("http://eri:8080", "http://restate:8080/", "agent-alpha")
 		if d.brainURL != "http://eri:8080" {
 			t.Errorf("brainURL = %q, want http://eri:8080", d.brainURL)
 		}
 		if d.restateURL != "http://restate:8080" {
 			t.Errorf("restateURL = %q, want http://restate:8080", d.restateURL)
 		}
-		if d.agentName != "miorine" {
-			t.Errorf("agentName = %q, want miorine", d.agentName)
+		if d.agentName != "agent-alpha" {
+			t.Errorf("agentName = %q, want agent-alpha", d.agentName)
 		}
 
 		d.SetRestateConfig("http://restate2:8080/", "")
@@ -357,8 +357,8 @@ func TestServiceNameHelpers(t *testing.T) {
 		{"aerial", "ThreadSession", "DispatchSession"},
 		{"AERIAL", "ThreadSession", "DispatchSession"},
 		{"  aerial  ", "ThreadSession", "DispatchSession"},
-		{"miorine", "ThreadSession-miorine", "DispatchSession-miorine"},
-		{"Suletta", "ThreadSession-suletta", "DispatchSession-suletta"},
+		{"agent-alpha", "ThreadSession-agent-alpha", "DispatchSession-agent-alpha"},
+		{"Agent-Beta", "ThreadSession-agent-beta", "DispatchSession-agent-beta"},
 		{"agent-1_test", "ThreadSession-agent-1_test", "DispatchSession-agent-1_test"},
 		{"invalid/name", "ThreadSession", "DispatchSession"},
 		{"../traversal", "ThreadSession", "DispatchSession"},
@@ -653,19 +653,35 @@ func TestHTTPPromptDispatcher_RestatePrompt(t *testing.T) {
 			wantChannelID:   "ch-123",
 		},
 		{
-			name:           "dispatch prompt miorine custom agent and empty body",
+			name:           "dispatch prompt custom agent from dispatcher and empty body",
 			serverStatus:   http.StatusOK,
 			serverResponse: ``,
-			agent:          "miorine",
+			agent:          "agent-alpha",
 			reqPrompt: PromptDispatchRequest{
 				ChannelID: "ch-456",
 				MessageID: "msg-456",
-				Prompt:    "hello miorine",
+				Prompt:    "hello alpha",
 			},
-			wantPath:        "/ThreadSession-miorine/ch-456/Enqueue",
+			wantPath:        "/ThreadSession-agent-alpha/ch-456/Enqueue",
 			wantIdempotency: "prompt:ch-456:msg-456",
 			wantStatus:      "accepted",
 			wantChannelID:   "ch-456",
+		},
+		{
+			name:           "dispatch prompt per-request agent override",
+			serverStatus:   http.StatusOK,
+			serverResponse: `{"status":"accepted","channel_id":"ch-789","message_id":"msg-789"}`,
+			agent:          "aerial",
+			reqPrompt: PromptDispatchRequest{
+				ChannelID: "ch-789",
+				MessageID: "msg-789",
+				Prompt:    "hello beta",
+				Agent:     "agent-beta",
+			},
+			wantPath:        "/ThreadSession-agent-beta/ch-789/Enqueue",
+			wantIdempotency: "prompt:ch-789:msg-789",
+			wantStatus:      "accepted",
+			wantChannelID:   "ch-789",
 		},
 		{
 			name:           "dispatch prompt auto-generated message id",
@@ -827,19 +843,35 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			wantDispatchID:  "disp-1",
 		},
 		{
-			name:           "dispatch task fallback session key from id suletta agent",
+			name:           "dispatch task fallback session key from id agent-alpha",
 			serverStatus:   http.StatusOK,
 			serverResponse: ``,
-			agent:          "suletta",
+			agent:          "agent-alpha",
 			reqDispatch: DispatchRequest{
 				ID:     "disp-2",
 				Source: "vanadis",
 				Prompt: "build chunk",
 			},
-			wantPath:        "/DispatchSession-suletta/dispatch-disp-2/Enqueue",
+			wantPath:        "/DispatchSession-agent-alpha/dispatch-disp-2/Enqueue",
 			wantIdempotency: "disp-2",
 			wantStatus:      "accepted",
 			wantDispatchID:  "disp-2",
+		},
+		{
+			name:           "dispatch task per-request agent override",
+			serverStatus:   http.StatusOK,
+			serverResponse: `{"status":"accepted","dispatch_id":"disp-3"}`,
+			agent:          "aerial",
+			reqDispatch: DispatchRequest{
+				ID:     "disp-3",
+				Source: "heartbeat",
+				Prompt: "build chunk override",
+				Agent:  "agent-beta",
+			},
+			wantPath:        "/DispatchSession-agent-beta/dispatch-disp-3/Enqueue",
+			wantIdempotency: "disp-3",
+			wantStatus:      "accepted",
+			wantDispatchID:  "disp-3",
 		},
 		{
 			name:           "dispatch task auto id generated when empty",

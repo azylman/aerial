@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/haro/internal/config"
@@ -40,6 +42,11 @@ import (
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
+type cacheEntry struct {
+	expiresAt time.Time
+	resp      *model.SchedulesResponse
+}
+
 // Server serves the haro MCP endpoint and schedule inspection HTTP routes.
 // The handler field is the Layer-3 tool handler (DB/Cfg access); the
 // dispatcher defaults from Cfg.EriURL and may carry a JetStream event bus.
@@ -49,18 +56,17 @@ type Server struct {
 	mcpServer      *mcp.Server
 	opts           *mcp.StreamableHTTPOptions
 	streamHandler  http.Handler
+	auth           *k8sauth.Authenticator
 	schedulesCache struct {
-		mu        sync.Mutex
-		expiresAt time.Time
-		resp      *model.SchedulesResponse
+		mu      sync.Mutex
+		entries map[string]cacheEntry
 	}
 }
 
 // InvalidateSchedulesCache flushes the cached schedules response.
 func (s *Server) InvalidateSchedulesCache() {
 	s.schedulesCache.mu.Lock()
-	s.schedulesCache.resp = nil
-	s.schedulesCache.expiresAt = time.Time{}
+	s.schedulesCache.entries = make(map[string]cacheEntry)
 	s.schedulesCache.mu.Unlock()
 }
 
@@ -99,12 +105,19 @@ func NewServer(handler *tools.ToolHandler, dispatcher ...dispatch.PromptDispatch
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
+	var auth *k8sauth.Authenticator
+	if handler.Cfg != nil && handler.Cfg.Auth.Enabled {
+		auth = k8sauth.NewAuthenticator(handler.Cfg.Auth)
+	}
+
 	s := &Server{
 		handler:    handler,
 		dispatcher: disp,
 		mcpServer:  mcpServer,
 		opts:       opts,
+		auth:       auth,
 	}
+	s.schedulesCache.entries = make(map[string]cacheEntry)
 	s.registerTools()
 
 	s.streamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
@@ -114,23 +127,71 @@ func NewServer(handler *tools.ToolHandler, dispatcher ...dispatch.PromptDispatch
 	return s
 }
 
+func (s *Server) authEnabled() bool {
+	return s.auth != nil && s.auth.Enabled()
+}
+
+func (s *Server) wrapAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authEnabled() {
+			s.auth.Middleware("/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush")(next).ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeAuthError(w http.ResponseWriter, err error) {
+	if valErr, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, valErr.Error()), http.StatusBadRequest)
+		return
+	}
+	if unauthErr, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, unauthErr.Error()), http.StatusUnauthorized)
+		return
+	}
+	if forbErr, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, forbErr.Error()), http.StatusForbidden)
+		return
+	}
+	http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+}
+
+func (s *Server) authorizeScheduleTarget(ctx context.Context, agent string) (string, error) {
+	if !s.authEnabled() {
+		return agent, nil
+	}
+	caller, _ := k8sauth.CallerFromContext(ctx)
+	return s.auth.AuthorizeTarget(ctx, caller, "schedules", "create", agent)
+}
+
+func (s *Server) authorizeScheduleVerb(ctx context.Context, verb, agent string) error {
+	if !s.authEnabled() {
+		return nil
+	}
+	caller, _ := k8sauth.CallerFromContext(ctx)
+	return s.auth.Authorize(ctx, caller, "schedules", verb, agent)
+}
+
 func (s *Server) registerTools() {
+	s.registerScheduleCreationTools()
+	s.registerScheduleUpdateTools()
+	s.registerScheduleCancelTool()
+	s.registerScheduleQueryTools()
+	s.registerEventTools()
+}
+
+func (s *Server) registerScheduleCreationTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "schedule_recurring",
 		Description: "Register a persistent recurring schedule for unconditional user-facing messages on every tick. Fresh Discord threads will be created in the target channel on each run.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.ScheduleRecurringArgs) (*mcp.CallToolResult, tools.ScheduleRecurringOutput, error) {
-		out, err := s.handler.ScheduleRecurring(ctx, args)
-		if err == nil {
-			s.InvalidateSchedulesCache()
+		resolved, err := s.authorizeScheduleTarget(ctx, args.Agent)
+		if err != nil {
+			return nil, tools.ScheduleRecurringOutput{}, err
 		}
-		return nil, out, err
-	})
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "update_cron_schedule",
-		Description: "Update an existing recurring cron schedule's effort tier, cron expression, prompt, title prefix, or timezone.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.UpdateCronScheduleArgs) (*mcp.CallToolResult, tools.UpdateCronScheduleOutput, error) {
-		out, err := s.handler.UpdateCronSchedule(ctx, args)
+		args.Agent = resolved
+		out, err := s.handler.ScheduleRecurring(ctx, args)
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -141,7 +202,51 @@ func (s *Server) registerTools() {
 		Name:        "schedule_once",
 		Description: "Register a persistent one-shot reminder that triggers once at a designated time or relative duration for one-time delayed reminders.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.ScheduleOnceArgs) (*mcp.CallToolResult, tools.ScheduleOnceOutput, error) {
-		out, err := s.handler.ScheduleOnce(ctx, args)
+		targetAgent, authErr := s.authorizeScheduleTarget(ctx, args.Agent)
+		if authErr != nil {
+			return nil, tools.ScheduleOnceOutput{}, authErr
+		}
+		args.Agent = targetAgent
+		res, opErr := s.handler.ScheduleOnce(ctx, args)
+		if opErr != nil {
+			return nil, tools.ScheduleOnceOutput{}, opErr
+		}
+		s.InvalidateSchedulesCache()
+		return nil, res, nil
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "schedule_heartbeat",
+		Description: "Register a persistent heartbeat monitoring schedule evaluated periodically by Haro for silent background polling and edge-triggered state tracking (such as flight status, permit updates, or external API watches) that only messages Discord when state materially changes, whereas schedule_recurring is for unconditional user-facing messages on every tick and schedule_once is for one-time delayed reminders.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.ScheduleHeartbeatArgs) (*mcp.CallToolResult, any, error) {
+		resolved, err := s.authorizeScheduleTarget(ctx, args.Agent)
+		if err != nil {
+			return nil, nil, err
+		}
+		args.Agent = resolved
+		res, err := tools.HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap())
+		if err == nil {
+			s.InvalidateSchedulesCache()
+		}
+		return res, nil, err
+	})
+}
+
+func (s *Server) registerScheduleUpdateTools() {
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "update_cron_schedule",
+		Description: "Update an existing recurring cron schedule's effort tier, cron expression, prompt, title prefix, or timezone.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.UpdateCronScheduleArgs) (*mcp.CallToolResult, tools.UpdateCronScheduleOutput, error) {
+		if s.authEnabled() {
+			sched, err := store.GetCronSchedule(ctx, s.handler.DB, strings.TrimSpace(args.ScheduleID))
+			if err != nil {
+				return nil, tools.UpdateCronScheduleOutput{}, err
+			}
+			if err := s.authorizeScheduleVerb(ctx, "update", sched.Agent); err != nil {
+				return nil, tools.UpdateCronScheduleOutput{}, err
+			}
+		}
+		out, err := s.handler.UpdateCronSchedule(ctx, args)
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -149,9 +254,60 @@ func (s *Server) registerTools() {
 	})
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "update_heartbeat",
+		Description: "Update an existing heartbeat monitoring schedule.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.UpdateHeartbeatArgs) (*mcp.CallToolResult, any, error) {
+		if s.authEnabled() {
+			id := strings.TrimSpace(args.ScheduleID)
+			if id == "" {
+				id = strings.TrimSpace(args.ID)
+			}
+			sched, err := store.GetHeartbeatSchedule(ctx, s.handler.DB, id)
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := s.authorizeScheduleVerb(ctx, "update", sched.Agent); err != nil {
+				return nil, nil, err
+			}
+		}
+		res, err := tools.HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap())
+		if err == nil {
+			s.InvalidateSchedulesCache()
+		}
+		return res, nil, err
+	})
+}
+
+func (s *Server) registerScheduleCancelTool() {
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "cancel_schedule",
+		Description: "Cancel and delete an existing schedule by schedule ID.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.CancelScheduleArgs) (*mcp.CallToolResult, tools.CancelScheduleOutput, error) {
+		if s.authEnabled() {
+			agent, err := store.GetScheduleAgent(ctx, s.handler.DB, strings.TrimSpace(args.ScheduleID))
+			if err != nil {
+				return nil, tools.CancelScheduleOutput{}, err
+			}
+			if err := s.authorizeScheduleVerb(ctx, "delete", agent); err != nil {
+				return nil, tools.CancelScheduleOutput{}, err
+			}
+		}
+		out, err := s.handler.CancelSchedule(ctx, args)
+		if err == nil {
+			s.InvalidateSchedulesCache()
+		}
+		return nil, out, err
+	})
+}
+
+func (s *Server) registerScheduleQueryTools() {
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "list_schedules",
 		Description: "List all active recurring schedules and pending reminders. Note: event watches are listed via list_event_watches.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.ListSchedulesArgs) (*mcp.CallToolResult, tools.ListSchedulesOutput, error) {
+		if err := s.authorizeScheduleVerb(ctx, "list", args.Agent); err != nil {
+			return nil, tools.ListSchedulesOutput{}, err
+		}
 		out, err := s.handler.ListSchedules(ctx, args)
 		if err != nil {
 			return nil, out, err
@@ -168,47 +324,24 @@ func (s *Server) registerTools() {
 		Name:        "get_schedule",
 		Description: "Get full details (including prompt) for a single recurring, one-shot, or heartbeat schedule by schedule ID.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.GetScheduleArgs) (*mcp.CallToolResult, tools.GetScheduleOutput, error) {
+		if err := s.authorizeScheduleVerb(ctx, "get", ""); err != nil {
+			return nil, tools.GetScheduleOutput{}, err
+		}
 		out, err := s.handler.GetSchedule(ctx, args)
 		return nil, out, err
 	})
+}
 
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "cancel_schedule",
-		Description: "Cancel and delete an existing schedule by schedule ID.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.CancelScheduleArgs) (*mcp.CallToolResult, tools.CancelScheduleOutput, error) {
-		out, err := s.handler.CancelSchedule(ctx, args)
-		if err == nil {
-			s.InvalidateSchedulesCache()
-		}
-		return nil, out, err
-	})
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "schedule_heartbeat",
-		Description: "Register a persistent heartbeat monitoring schedule evaluated periodically by Haro for silent background polling and edge-triggered state tracking (such as flight status, permit updates, or external API watches) that only messages Discord when state materially changes, whereas schedule_recurring is for unconditional user-facing messages on every tick and schedule_once is for one-time delayed reminders.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.ScheduleHeartbeatArgs) (*mcp.CallToolResult, any, error) {
-		res, err := tools.HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap())
-		if err == nil {
-			s.InvalidateSchedulesCache()
-		}
-		return res, nil, err
-	})
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "update_heartbeat",
-		Description: "Update an existing heartbeat monitoring schedule.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.UpdateHeartbeatArgs) (*mcp.CallToolResult, any, error) {
-		res, err := tools.HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap())
-		if err == nil {
-			s.InvalidateSchedulesCache()
-		}
-		return res, nil, err
-	})
-
+func (s *Server) registerEventTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "watch_event",
 		Description: "Register a deterministic one-shot event watch trigger fired when an external event occurs.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.WatchEventArgs) (*mcp.CallToolResult, any, error) {
+		resolved, err := s.authorizeScheduleTarget(ctx, args.Agent)
+		if err != nil {
+			return nil, nil, err
+		}
+		args.Agent = resolved
 		var extraSources []string
 		if s.handler != nil && s.handler.Cfg != nil {
 			extraSources = s.handler.Cfg.ExtraEventSources
@@ -221,6 +354,9 @@ func (s *Server) registerTools() {
 		Name:        "list_event_watches",
 		Description: "List active deterministic event watch triggers.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.ListEventWatchesArgs) (*mcp.CallToolResult, any, error) {
+		if err := s.authorizeScheduleVerb(ctx, "list", args.Agent); err != nil {
+			return nil, nil, err
+		}
 		res, err := tools.HandleListEventWatches(ctx, s.handler.DB, args.ToMap())
 		return res, nil, err
 	})
@@ -229,6 +365,22 @@ func (s *Server) registerTools() {
 		Name:        "cancel_event_watch",
 		Description: "Cancel an active deterministic event watch trigger by watch ID.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args tools.CancelEventWatchArgs) (*mcp.CallToolResult, any, error) {
+		if s.authEnabled() {
+			id := strings.TrimSpace(args.WatchID)
+			if id == "" {
+				id = strings.TrimSpace(args.ID)
+			}
+			if id == "" {
+				id = strings.TrimSpace(args.ScheduleID)
+			}
+			trig, err := store.GetEventTrigger(ctx, s.handler.DB, id)
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := s.authorizeScheduleVerb(ctx, "delete", trig.Agent); err != nil {
+				return nil, nil, err
+			}
+		}
 		res, err := tools.HandleCancelEventWatch(ctx, s.handler.DB, args.ToMap())
 		return res, nil, err
 	})
@@ -237,6 +389,8 @@ func (s *Server) registerTools() {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("haro"))
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/schedules", s.handleSchedules)
@@ -247,7 +401,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/sse", mcpBridge)
 	mux.Handle("/", mcpBridge)
 
-	return mux
+	return s.wrapAuth(mux)
 }
 
 func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -257,8 +411,8 @@ func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	// If GET /health hits root handler
-	if r.URL.Path == "/health" {
+	// If GET /health, /healthz, or /readyz hits root handler
+	if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 		s.handleHealth(w, r)
 		return
 	}
@@ -294,10 +448,20 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	agentFilter := strings.TrimSpace(r.URL.Query().Get("agent"))
+
+	if s.authEnabled() {
+		caller, _ := k8sauth.CallerFromContext(r.Context())
+		if err := s.auth.Authorize(r.Context(), caller, "schedules", "list", agentFilter); err != nil {
+			writeAuthError(w, err)
+			return
+		}
+	}
+
 	s.schedulesCache.mu.Lock()
 	now := time.Now().UTC()
-	if s.schedulesCache.resp != nil && now.Before(s.schedulesCache.expiresAt) {
-		cached := *s.schedulesCache.resp
+	if entry, ok := s.schedulesCache.entries[agentFilter]; ok && entry.resp != nil && now.Before(entry.expiresAt) {
+		cached := *entry.resp
 		cached.SystemTime = now
 		s.schedulesCache.mu.Unlock()
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -309,25 +473,25 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	db := s.handler.DB
 
-	summary, err := store.GetScheduleSummaryMetrics(ctx, db)
+	summary, err := store.GetScheduleSummaryMetrics(ctx, db, agentFilter)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{model.FieldError: err.Error()})
 		return
 	}
 
-	crons, err := store.ListCronSchedules(ctx, db, "")
+	crons, err := store.ListCronSchedules(ctx, db, "", agentFilter)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{model.FieldError: err.Error()})
 		return
 	}
 
-	heartbeats, err := store.ListHeartbeatSchedules(ctx, db, "")
+	heartbeats, err := store.ListHeartbeatSchedules(ctx, db, "", agentFilter)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{model.FieldError: err.Error()})
 		return
 	}
 
-	oneshots, err := store.ListOneShotSchedules(ctx, db, "")
+	oneshots, err := store.ListOneShotSchedules(ctx, db, "", agentFilter)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{model.FieldError: err.Error()})
 		return
@@ -343,8 +507,13 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.schedulesCache.mu.Lock()
-	s.schedulesCache.resp = &resp
-	s.schedulesCache.expiresAt = now.Add(5 * time.Second)
+	if s.schedulesCache.entries == nil {
+		s.schedulesCache.entries = make(map[string]cacheEntry)
+	}
+	s.schedulesCache.entries[agentFilter] = cacheEntry{
+		resp:      &resp,
+		expiresAt: now.Add(5 * time.Second),
+	}
 	s.schedulesCache.mu.Unlock()
 
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -364,6 +533,16 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	agentFilter := strings.TrimSpace(q.Get("agent"))
+
+	if s.authEnabled() {
+		caller, _ := k8sauth.CallerFromContext(r.Context())
+		if err := s.auth.Authorize(r.Context(), caller, "schedules", "list", agentFilter); err != nil {
+			writeAuthError(w, err)
+			return
+		}
+	}
+
 	limit := 50
 	if lStr := q.Get("limit"); lStr != "" {
 		if l, err := strconv.Atoi(lStr); err == nil {
@@ -379,7 +558,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	scheduleID := strings.TrimSpace(q.Get("schedule_id"))
 	status := strings.TrimSpace(q.Get("status"))
 
-	runs, total, err := store.GetScheduleRunsPaginated(r.Context(), s.handler.DB, limit, offset, scheduleID, status)
+	runs, total, err := store.GetScheduleRunsPaginated(r.Context(), s.handler.DB, limit, offset, scheduleID, status, agentFilter)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{model.FieldError: err.Error()})
 		return
@@ -438,7 +617,11 @@ func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg
 		return errors.New("database not initialized")
 	}
 
-	var args pubsub.HaroOneShotJobArgs
+	var args struct {
+		pubsub.HaroOneShotJobArgs
+
+		Agent string `json:"agent,omitempty"`
+	}
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
 		log.Printf("[Haro] warning: failed to unmarshal one-shot job: %v", err)
 		return nil
@@ -463,6 +646,7 @@ func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg
 		Effort:    store.NormalizeScheduleEffort(args.Effort),
 		RunAt:     args.RunAt.UTC(),
 		CreatedAt: time.Now().UTC(),
+		Agent:     model.NormalizeAgent(args.Agent),
 	}
 
 	if err := store.InsertOneShotSchedule(ctx, dbHandle, sched); err != nil {
@@ -504,6 +688,7 @@ func (s *Server) fireClaimedTrigger(ctx context.Context, trig model.EventTrigger
 			MessageID: msgID,
 			Prompt:    prompt,
 			Effort:    trig.Effort,
+			Agent:     trig.Agent,
 		})
 	})
 	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeEventWatch, time.Since(start).Seconds())

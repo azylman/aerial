@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS cron_schedules (
 	id TEXT PRIMARY KEY,
+	agent TEXT NOT NULL DEFAULT 'aerial',
 	target_id TEXT NOT NULL,
 	title_prefix TEXT NOT NULL DEFAULT '',
 	cron_expr TEXT NOT NULL,
@@ -14,6 +15,7 @@ CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enab
 
 CREATE TABLE IF NOT EXISTS one_shot_schedules (
 	id TEXT PRIMARY KEY,
+	agent TEXT NOT NULL DEFAULT 'aerial',
 	thread_id TEXT NOT NULL,
 	prompt TEXT NOT NULL,
 	run_at TIMESTAMP NOT NULL,
@@ -24,6 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(r
 
 CREATE TABLE IF NOT EXISTS heartbeat_schedules (
 	id TEXT PRIMARY KEY,
+	agent TEXT NOT NULL DEFAULT 'aerial',
 	target_id TEXT NOT NULL,
 	title_prefix TEXT NOT NULL DEFAULT '',
 	cron_expr TEXT NOT NULL,
@@ -39,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_heartbeat_schedules_next_run ON heartbeat_schedul
 
 CREATE TABLE IF NOT EXISTS schedule_runs (
 	id TEXT PRIMARY KEY,
+	agent TEXT NOT NULL DEFAULT 'aerial',
 	schedule_id TEXT NOT NULL,
 	schedule_type TEXT NOT NULL,
 	message_id TEXT NOT NULL DEFAULT '',
@@ -58,6 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started
 
 CREATE TABLE IF NOT EXISTS event_triggers (
 	id TEXT PRIMARY KEY,
+	agent TEXT NOT NULL DEFAULT 'aerial',
 	channel_id TEXT NOT NULL,
 	source TEXT NOT NULL,
 	target TEXT NOT NULL,
@@ -75,7 +80,12 @@ CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel
 ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';
 ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';
 ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';
+ALTER TABLE cron_schedules ADD COLUMN agent TEXT NOT NULL DEFAULT 'aerial';
 ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';
+ALTER TABLE one_shot_schedules ADD COLUMN agent TEXT NOT NULL DEFAULT 'aerial';
 ALTER TABLE heartbeat_schedules ADD COLUMN last_completed_at TIMESTAMP;
+ALTER TABLE heartbeat_schedules ADD COLUMN agent TEXT NOT NULL DEFAULT 'aerial';
+ALTER TABLE schedule_runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'aerial';
 ALTER TABLE event_triggers ADD COLUMN persistent BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE event_triggers ADD COLUMN updated_at TIMESTAMP;
+ALTER TABLE event_triggers ADD COLUMN agent TEXT NOT NULL DEFAULT 'aerial';

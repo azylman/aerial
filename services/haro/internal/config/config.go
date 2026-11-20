@@ -3,11 +3,13 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
@@ -36,14 +38,15 @@ func ResolveConfigPath(fallbackPath string) string {
 // Config represents the runtime configuration for the scheduler MCP server.
 type Config struct {
 	DatabaseURL       string
-	Timezone          string   `yaml:"timezone"`
-	Port              string   `yaml:"port"`
-	EriURL            string   `yaml:"eri_url"`
-	VanadisURL        string   `yaml:"vanadis_url"`
-	NATSURL           string   `yaml:"nats_url"`
-	RestateURL        string   `yaml:"restate_url"`
-	AgentName         string   `yaml:"agent_name"`
-	ExtraEventSources []string `yaml:"extra_event_sources"`
+	Timezone          string         `yaml:"timezone"`
+	Port              string         `yaml:"port"`
+	EriURL            string         `yaml:"eri_url"`
+	VanadisURL        string         `yaml:"vanadis_url"`
+	NATSURL           string         `yaml:"nats_url"`
+	RestateURL        string         `yaml:"restate_url"`
+	AgentName         string         `yaml:"agent_name"`
+	ExtraEventSources []string       `yaml:"extra_event_sources"`
+	Auth              k8sauth.Config `yaml:"auth"`
 }
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
@@ -64,17 +67,18 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 
 	var ycfg struct {
-		Port              string   `yaml:"port"`
-		Timezone          string   `yaml:"timezone"`
-		EriURL            string   `yaml:"eri_url"`
-		VanadisURL        string   `yaml:"vanadis_url"`
-		NATSURL           string   `yaml:"nats_url"`
-		RestateURL        string   `yaml:"restate_url"`
-		AgentName         string   `yaml:"agent_name"`
-		ExtraEventSources []string `yaml:"extra_event_sources"`
+		Port              string         `yaml:"port"`
+		Timezone          string         `yaml:"timezone"`
+		EriURL            string         `yaml:"eri_url"`
+		VanadisURL        string         `yaml:"vanadis_url"`
+		NATSURL           string         `yaml:"nats_url"`
+		RestateURL        string         `yaml:"restate_url"`
+		AgentName         string         `yaml:"agent_name"`
+		ExtraEventSources []string       `yaml:"extra_event_sources"`
+		Auth              k8sauth.Config `yaml:"auth"`
 	}
-	if err := yaml.Unmarshal(data, &ycfg); err != nil {
-		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
+	if unmarshalErr := yaml.Unmarshal(data, &ycfg); unmarshalErr != nil {
+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, unmarshalErr)
 	}
 
 	port := strings.TrimSpace(ycfg.Port)
@@ -115,39 +119,13 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	vanadisURL = strings.TrimRight(vanadisURL, "/")
 
-	var extraSources []string
-	seenSources := make(map[string]struct{}, len(ycfg.ExtraEventSources))
-	for _, raw := range ycfg.ExtraEventSources {
-		if s := strings.ToLower(strings.TrimSpace(raw)); s != "" {
-			if _, ok := seenSources[s]; !ok {
-				seenSources[s] = struct{}{}
-				extraSources = append(extraSources, s)
-			}
-		}
-	}
-
-	natsURL := os.Getenv("NATS_URL")
-	if natsURL == "" {
-		natsURL = ycfg.NATSURL
-	}
-	natsURL = strings.TrimSpace(natsURL)
-	if natsURL == "" {
-		natsURL = "nats://nats.aerial:4222"
-	}
-
-	restateURL := os.Getenv("RESTATE_INGRESS_URL")
-	if restateURL == "" {
-		restateURL = ycfg.RestateURL
-	}
-	restateURL = strings.TrimRight(strings.TrimSpace(restateURL), "/")
-
-	agentName := os.Getenv("AGENT_NAME")
-	if agentName == "" {
-		agentName = ycfg.AgentName
-	}
-	agentName = strings.TrimSpace(agentName)
-	if agentName == "" {
-		agentName = "aerial"
+	extraSources := resolveExtraSources(ycfg.ExtraEventSources)
+	natsURL := resolveEnvOrDefault("NATS_URL", ycfg.NATSURL, "nats://nats.aerial:4222")
+	restateURL := strings.TrimRight(resolveEnvOrDefault("RESTATE_INGRESS_URL", ycfg.RestateURL, ""), "/")
+	agentName := resolveEnvOrDefault("AGENT_NAME", ycfg.AgentName, "aerial")
+	authCfg, err := resolveAuthConfig(ycfg.Auth)
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &Config{
@@ -160,9 +138,48 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		RestateURL:        restateURL,
 		AgentName:         agentName,
 		ExtraEventSources: extraSources,
+		Auth:              authCfg,
 	}
 	RegisterConfigTokens(cfg)
 	return cfg, nil
+}
+
+func resolveExtraSources(sources []string) []string {
+	var extraSources []string
+	seenSources := make(map[string]struct{}, len(sources))
+	for _, raw := range sources {
+		if s := strings.ToLower(strings.TrimSpace(raw)); s != "" {
+			if _, ok := seenSources[s]; !ok {
+				seenSources[s] = struct{}{}
+				extraSources = append(extraSources, s)
+			}
+		}
+	}
+	return extraSources
+}
+
+func resolveEnvOrDefault(envKey, fileVal, defaultVal string) string {
+	val := os.Getenv(envKey)
+	if val == "" {
+		val = fileVal
+	}
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return defaultVal
+	}
+	return val
+}
+
+func resolveAuthConfig(base k8sauth.Config) (k8sauth.Config, error) {
+	authCfg := base
+	if envVal := strings.TrimSpace(os.Getenv("K8S_AUTH_ENABLED")); envVal != "" {
+		enabled, err := strconv.ParseBool(envVal)
+		if err != nil {
+			return authCfg, fmt.Errorf("config: invalid K8S_AUTH_ENABLED value %q: %w", envVal, err)
+		}
+		authCfg.Enabled = enabled
+	}
+	return authCfg, nil
 }
 
 // RegisterConfigTokens registers sensitive tokens from Haro's configuration,
