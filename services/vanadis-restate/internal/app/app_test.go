@@ -20,25 +20,34 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/widget"
 )
 
 func TestConfig_LoadConfigFromEnv(t *testing.T) {
 	t.Setenv("RESTATE_PORT", "9999")
 	t.Setenv("HEALTH_PORT", "4444")
 	t.Setenv("VANADIS_URL", "http://test-vanadis:4025/")
+	t.Setenv("RESTATE_INGRESS_URL", "http://test-restate:8080/")
+	t.Setenv("DISCORD_TOKEN", "test-token")
 	cfg := LoadConfigFromEnv()
 	assert.Equal(t, "9999", cfg.RestatePort)
 	assert.Equal(t, "4444", cfg.HealthPort)
 	assert.Equal(t, "http://test-vanadis:4025", cfg.VanadisURL)
+	assert.Equal(t, "http://test-restate:8080", cfg.RestateIngressURL)
+	assert.Equal(t, "test-token", cfg.DiscordToken)
 
 	t.Setenv("RESTATE_PORT", "")
 	t.Setenv("PORT", "9191")
 	t.Setenv("HEALTH_PORT", "")
 	t.Setenv("VANADIS_URL", "")
+	t.Setenv("RESTATE_INGRESS_URL", "")
+	t.Setenv("DISCORD_TOKEN", "")
 	cfgDefault := LoadConfigFromEnv()
 	assert.Equal(t, "9191", cfgDefault.RestatePort)
 	assert.Equal(t, "4026", cfgDefault.HealthPort)
 	assert.Equal(t, "http://vanadis.aerial:4025", cfgDefault.VanadisURL)
+	assert.Equal(t, "http://restate.aerial:8080", cfgDefault.RestateIngressURL)
+	assert.Equal(t, "", cfgDefault.DiscordToken)
 
 	t.Setenv("PORT", "")
 	cfgFallback := LoadConfigFromEnv()
@@ -87,11 +96,12 @@ func TestRunApp_Shutdown(t *testing.T) {
 	_ = lRestate.Close()
 
 	cfg := Config{
-		HealthPort:  healthPort,
-		RestatePort: restatePort,
-		VanadisURL:  "http://127.0.0.1:4025",
-		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
-		NATSURL:     "nats://mock:4222",
+		HealthPort:   healthPort,
+		RestatePort:  restatePort,
+		VanadisURL:   "http://127.0.0.1:4025",
+		PostgresURL:  "postgres://mock:mock@localhost:5432/mock",
+		NATSURL:      "nats://mock:4222",
+		DiscordToken: "test-token",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -160,6 +170,56 @@ func TestRunApp_ErrorCases(t *testing.T) {
 		NATSURL:     "nats://mock:4222",
 	})
 	assert.Error(t, errRestate)
+
+	// 3. Widget deliverer constructor error logs warning without failing RunApp
+	origDeliverer := newDiscordWidgetDelivererFn
+	defer func() { newDiscordWidgetDelivererFn = origDeliverer }()
+	newDiscordWidgetDelivererFn = func(string, ...string) (*widget.DiscordWidgetDeliverer, error) {
+		return nil, errors.New("mock deliverer fail")
+	}
+
+	lHealth2, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	healthPort2 := strings.TrimPrefix(lHealth2.Addr().String(), "127.0.0.1:")
+	_ = lHealth2.Close()
+
+	lRestate2, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	restatePort2 := strings.TrimPrefix(lRestate2.Addr().String(), "127.0.0.1:")
+	_ = lRestate2.Close()
+
+	ctxDeliverer, cancelDeliverer := context.WithCancel(context.Background())
+	delivererDone := make(chan error, 1)
+	go func() {
+		delivererDone <- RunApp(ctxDeliverer, Config{
+			HealthPort:  healthPort2,
+			RestatePort: restatePort2,
+			VanadisURL:  "http://127.0.0.1:4025",
+			PostgresURL: "postgres://mock:mock@localhost:5432/mock",
+			NATSURL:     "nats://mock:4222",
+		})
+	}()
+
+	healthURL2 := "http://127.0.0.1:" + healthPort2 + "/healthz"
+	require.Eventually(t, func() bool {
+		resp, hErr := http.Get(healthURL2)
+		if hErr == nil && resp.StatusCode == http.StatusOK {
+			_ = resp.Body.Close()
+			return true
+		}
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return false
+	}, 3*time.Second, 50*time.Millisecond)
+
+	cancelDeliverer()
+	select {
+	case err := <-delivererDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunApp with deliverer failure failed to stop within 5s")
+	}
 }
 
 // discoveryManifest is the minimal Restate endpoint-manifest shape the
@@ -234,8 +294,10 @@ func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
 	t.Setenv("VANADIS_URL", "http://vanadis.local:4025")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
 	t.Setenv("ERI_URL", "http://eri.local")
+	t.Setenv("RESTATE_INGRESS_URL", "http://restate.local:8080")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("GITHUB_TOKEN", "token-xyz")
+	t.Setenv("DISCORD_TOKEN", "discord-xyz")
 	t.Setenv("SHARE_ROOT", "/tmp/share")
 	t.Setenv("POSTGRES_DB", "")
 
@@ -245,8 +307,10 @@ func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
 	assert.Equal(t, "http://vanadis.local:4025", cfg.VanadisURL)
 	assert.Equal(t, "postgres://user:pass@localhost:5432/db", cfg.PostgresURL)
 	assert.Equal(t, "http://eri.local", cfg.EriURL)
+	assert.Equal(t, "http://restate.local:8080", cfg.RestateIngressURL)
 	assert.Equal(t, "nats://localhost:4222", cfg.NATSURL)
 	assert.Equal(t, "token-xyz", cfg.GitHubToken)
+	assert.Equal(t, "discord-xyz", cfg.DiscordToken)
 	assert.Equal(t, "/tmp/share", cfg.ShareRoot)
 
 	t.Setenv("DATABASE_URL", "")

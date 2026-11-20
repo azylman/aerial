@@ -21,27 +21,34 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/widget"
 )
 
-var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
-	return pubsub.NewJetStreamBus(ctx, url, nats.RetryOnFailedConnect(false), nats.Timeout(5*time.Second))
-}
+var (
+	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+		return pubsub.NewJetStreamBus(ctx, url, nats.RetryOnFailedConnect(false), nats.Timeout(5*time.Second))
+	}
+	newDiscordWidgetDelivererFn = widget.NewDiscordWidgetDeliverer
+)
 
 // Config holds runtime configuration for the vanadis-restate worker service.
 type Config struct {
-	RestatePort string
-	HealthPort  string
-	VanadisURL  string
-	PostgresURL string
-	EriURL      string
-	NATSURL     string
-	GitHubToken string
-	ShareRoot   string
-	AgentName   string
+	RestatePort       string
+	HealthPort        string
+	VanadisURL        string
+	PostgresURL       string
+	EriURL            string
+	RestateIngressURL string
+	NATSURL           string
+	GitHubToken       string
+	DiscordToken      string
+	ShareRoot         string
+	AgentName         string
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -66,21 +73,25 @@ func LoadConfigFromEnv() Config {
 
 	pgURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
 	eriURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
+	restateIngressURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), "http://restate.aerial:8080")), "/")
 	natsURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
 	ghToken := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
+	discordToken := strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
 	shareRoot := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("SHARE_ROOT"), executor.DefaultShareRoot))
 	agentName := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
-		RestatePort: restatePort,
-		HealthPort:  healthPort,
-		VanadisURL:  vanadisURL,
-		PostgresURL: pgURL,
-		EriURL:      eriURL,
-		NATSURL:     natsURL,
-		GitHubToken: ghToken,
-		ShareRoot:   shareRoot,
-		AgentName:   agentName,
+		RestatePort:       restatePort,
+		HealthPort:        healthPort,
+		VanadisURL:        vanadisURL,
+		PostgresURL:       pgURL,
+		EriURL:            eriURL,
+		RestateIngressURL: restateIngressURL,
+		NATSURL:           natsURL,
+		GitHubToken:       ghToken,
+		DiscordToken:      discordToken,
+		ShareRoot:         shareRoot,
+		AgentName:         agentName,
 	}
 }
 
@@ -152,7 +163,18 @@ func RunApp(ctx context.Context, cfg Config) error {
 	}()
 
 	// Internal clients propagate traceparent; GitHub calls record spans without leaking headers.
-	eriClient := executor.NewHTTPEriClient(cfg.EriURL, tracing.Client(&http.Client{Timeout: 30 * time.Second}))
+	var widgetDeliverer ericlient.StatusWidgetDeliverer
+	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.DiscordToken); dErr != nil {
+		log.Printf("[vanadis-restate] warning: failed to construct discord widget deliverer: %v", dErr)
+	} else {
+		widgetDeliverer = deliverer
+	}
+
+	eriHTTPClient := tracing.Client(&http.Client{Timeout: 30 * time.Second})
+	eriClient := ericlient.NewRestateEriClient(cfg.RestateIngressURL, cfg.EriURL, cfg.AgentName, eriHTTPClient, widgetDeliverer)
+	if strings.TrimSpace(cfg.DiscordToken) != "" {
+		eriClient.SetDiscordAuth(true)
+	}
 	exec := executor.NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}))
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
