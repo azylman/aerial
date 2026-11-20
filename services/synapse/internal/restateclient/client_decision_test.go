@@ -18,7 +18,9 @@ func TestInvokePREvent(t *testing.T) {
 	tests := []struct {
 		name              string
 		handler           string
+		repo              string
 		prNumber          int
+		nilOut            bool
 		unconfigured      bool
 		status            int
 		body              string
@@ -27,14 +29,16 @@ func TestInvokePREvent(t *testing.T) {
 		wantShouldPublish bool
 		wantDeduped       bool
 	}{
-		{name: "decision round-trips", handler: "HandleDeployDispatched", prNumber: 7, status: 202, body: decisionBody, wantRequests: 1, wantShouldPublish: true},
-		{name: "deduped decision round-trips", handler: "HandleDeployDispatched", prNumber: 7, status: 202, body: `{"disposition":"apply","should_publish":false,"deduped":true,"effect_key":"k"}`, wantRequests: 1, wantDeduped: true},
-		{name: "unknown handler rejected without request", handler: "HandleNope", prNumber: 7, status: 202, body: decisionBody, wantErrSub: "unknown pr handler", wantRequests: 0},
-		{name: "unconfigured client fails closed", handler: "HandleDeployDispatched", prNumber: 7, unconfigured: true, wantErrSub: "not configured", wantRequests: 0},
-		{name: "ingress 500 surfaces", handler: "HandleDeployDispatched", prNumber: 7, status: 500, body: "boom", wantErrSub: "status 500", wantRequests: 1},
-		{name: "malformed json surfaces decode error", handler: "HandleDeployDispatched", prNumber: 7, status: 202, body: "not-json{", wantErrSub: "decode restate response", wantRequests: 1},
-		{name: "missing pr number rejected", handler: "HandleDeployDispatched", prNumber: 0, status: 202, body: decisionBody, wantErrSub: "pr_number is required", wantRequests: 0},
-		{name: "ack handler allowed", handler: "HandleDeploySuccessPublished", prNumber: 7, status: 202, body: `{"disposition":"apply","effect_key":"k","recorded":true,"deduped":false}`, wantRequests: 1},
+		{name: "decision round-trips", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 7, status: 202, body: decisionBody, wantRequests: 1, wantShouldPublish: true},
+		{name: "deduped decision round-trips", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 7, status: 202, body: `{"disposition":"apply","should_publish":false,"deduped":true,"effect_key":"k"}`, wantRequests: 1, wantDeduped: true},
+		{name: "unknown handler rejected without request", handler: "HandleNope", repo: "azylman/aerial", prNumber: 7, status: 202, body: decisionBody, wantErrSub: "unknown pr handler", wantRequests: 0},
+		{name: "unconfigured client fails closed", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 7, unconfigured: true, wantErrSub: "not configured", wantRequests: 0},
+		{name: "ingress 500 surfaces", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 7, status: 500, body: "boom", wantErrSub: "status 500", wantRequests: 1},
+		{name: "malformed json surfaces decode error", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 7, status: 202, body: "not-json{", wantErrSub: "decode restate response", wantRequests: 1},
+		{name: "missing pr number rejected", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 0, status: 202, body: decisionBody, wantErrSub: "pr_number is required", wantRequests: 0},
+		{name: "empty repo rejected", handler: "HandleDeployDispatched", repo: "", prNumber: 7, status: 202, body: decisionBody, wantErrSub: "repo is required", wantRequests: 0},
+		{name: "nil output rejected", handler: "HandleDeployDispatched", repo: "azylman/aerial", prNumber: 7, nilOut: true, status: 202, body: decisionBody, wantErrSub: "output is required", wantRequests: 0},
+		{name: "ack handler allowed", handler: "HandleDeploySuccessPublished", repo: "azylman/aerial", prNumber: 7, status: 202, body: `{"disposition":"apply","effect_key":"k","recorded":true,"deduped":false}`, wantRequests: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,7 +56,11 @@ func TestInvokePREvent(t *testing.T) {
 			}
 			c := NewClient(baseURL, "", "", nil)
 			var got DeployDispatchDecision
-			err := c.InvokePREvent(t.Context(), tc.handler, PREvent{Repo: "azylman/aerial", PRNumber: tc.prNumber, HeadSHA: "sha123", JobName: "brain"}, &got)
+			var out any = &got
+			if tc.nilOut {
+				out = nil
+			}
+			err := c.InvokePREvent(t.Context(), tc.handler, PREvent{Repo: tc.repo, PRNumber: tc.prNumber, HeadSHA: "sha123", JobName: "brain"}, out)
 			if tc.wantErrSub == "" {
 				if err != nil {
 					t.Fatalf("InvokePREvent() = %v, want nil", err)

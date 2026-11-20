@@ -29,16 +29,22 @@ func marshalKeys(t *testing.T, v any) string {
 }
 
 type recordedRequest struct {
-	method string
-	path   string
-	body   string
+	method         string
+	path           string
+	body           string
+	idempotencyKey string
 }
 
 func newRecordedServer(t *testing.T, status int, truncate bool, recs *[]recordedRequest) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		*recs = append(*recs, recordedRequest{method: r.Method, path: r.URL.EscapedPath(), body: string(body)})
+		*recs = append(*recs, recordedRequest{
+			method:         r.Method,
+			path:           r.URL.EscapedPath(),
+			body:           string(body),
+			idempotencyKey: r.Header.Get("Idempotency-Key"),
+		})
 		if truncate {
 			w.Header().Set("Content-Length", "100")
 			w.WriteHeader(status)
@@ -85,7 +91,7 @@ func TestClient(t *testing.T) {
 	}
 }
 
-func checkSendResult(t *testing.T, err error, recs []recordedRequest, wantErr, wantPath string, wantBodySubs []string, wantRequests int) {
+func checkSendResult(t *testing.T, err error, recs []recordedRequest, wantErr, wantPath string, wantBodySubs []string, wantRequests int, wantIdempotencyKey string) {
 	t.Helper()
 	if wantErr == "" && err != nil {
 		t.Fatalf("send() = %v, want nil", err)
@@ -104,6 +110,9 @@ func checkSendResult(t *testing.T, err error, recs []recordedRequest, wantErr, w
 	}
 	if recs[0].path != wantPath {
 		t.Errorf("path = %q, want %q", recs[0].path, wantPath)
+	}
+	if recs[0].idempotencyKey != wantIdempotencyKey {
+		t.Errorf("idempotencyKey = %q, want %q", recs[0].idempotencyKey, wantIdempotencyKey)
 	}
 	for _, sub := range wantBodySubs {
 		if !strings.Contains(recs[0].body, sub) {
@@ -125,18 +134,21 @@ func resolveBaseURL(srv *httptest.Server, override string) string {
 func TestSendPREvent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		baseURL      string
-		handler      string
-		event        PREvent
-		serverStatus int
-		truncate     bool
-		wantErr      string
-		wantPath     string
-		wantBodySubs []string
-		wantRequests int
+		name               string
+		baseURL            string
+		handler            string
+		event              PREvent
+		serverStatus       int
+		truncate           bool
+		idempotencyKey     string
+		wantErr            string
+		wantPath           string
+		wantBodySubs       []string
+		wantRequests       int
+		wantIdempotencyKey string
 	}{
 		{name: "owned check failed routes to PRObject", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`}, wantRequests: 1},
+		{name: "idempotency key propagated when set", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, idempotencyKey: "test-idem-key-1", serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed", wantBodySubs: []string{`"head_sha":"abc123"`}, wantRequests: 1, wantIdempotencyKey: "test-idem-key-1"},
 		{name: "bare repo normalizes with owner prefix", handler: "HandleCheckPassed", event: PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1},
 		{name: "owned merged carries merge sha", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1},
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
@@ -156,8 +168,12 @@ func TestSendPREvent(t *testing.T) {
 			srv := newRecordedServer(t, tc.serverStatus, tc.truncate, &recs)
 			defer srv.Close()
 			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
-			err := c.SendPREvent(t.Context(), tc.handler, tc.event)
-			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests)
+			ctx := t.Context()
+			if tc.idempotencyKey != "" {
+				ctx = WithIdempotencyKey(ctx, tc.idempotencyKey)
+			}
+			err := c.SendPREvent(ctx, tc.handler, tc.event)
+			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests, tc.wantIdempotencyKey)
 		})
 	}
 }
@@ -165,17 +181,20 @@ func TestSendPREvent(t *testing.T) {
 func TestSendRepoEvent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		baseURL      string
-		handler      string
-		event        RepoEvent
-		serverStatus int
-		wantErr      string
-		wantPath     string
-		wantBodySubs []string
-		wantRequests int
+		name               string
+		baseURL            string
+		handler            string
+		event              RepoEvent
+		serverStatus       int
+		idempotencyKey     string
+		wantErr            string
+		wantPath           string
+		wantBodySubs       []string
+		wantRequests       int
+		wantIdempotencyKey string
 	}{
 		{name: "main push routes to RepoObject", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1},
+		{name: "idempotency key propagated when set", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, idempotencyKey: "repo-idem-key-1", serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1, wantIdempotencyKey: "repo-idem-key-1"},
 		{name: "unconfigured endpoint sends nothing", baseURL: "unconfigured", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
 		{name: "fanout carries pr and head sha", handler: "HandleFanout", event: RepoEvent{Repo: "azylman/mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/RepoObject/azylman%2Fmirrormere/HandleFanout", wantBodySubs: []string{`"pr_number":7`, `"head_sha":"def456"`}, wantRequests: 1},
 		{name: "kustomization status routes to RepoObject", handler: "HandleKustomizationStatus", event: RepoEvent{Repo: "aerial", Generation: 3, PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleKustomizationStatus", wantBodySubs: []string{`"generation":3`}, wantRequests: 1},
@@ -190,8 +209,12 @@ func TestSendRepoEvent(t *testing.T) {
 			srv := newRecordedServer(t, tc.serverStatus, false, &recs)
 			defer srv.Close()
 			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
-			err := c.SendRepoEvent(t.Context(), tc.handler, tc.event)
-			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests)
+			ctx := t.Context()
+			if tc.idempotencyKey != "" {
+				ctx = WithIdempotencyKey(ctx, tc.idempotencyKey)
+			}
+			err := c.SendRepoEvent(ctx, tc.handler, tc.event)
+			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests, tc.wantIdempotencyKey)
 		})
 	}
 }
