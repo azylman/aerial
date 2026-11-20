@@ -320,6 +320,9 @@ func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, r
 		IsPrompt:     true,
 	}
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
+	if req.SkipIfActive {
+		idempotencyKey = ""
+	}
 	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
 	if err != nil {
 		return "", err
@@ -339,7 +342,11 @@ func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient,
 		Model:          strings.TrimSpace(req.Model),
 		SkipIfActive:   req.SkipIfActive,
 	}
-	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, dispatchID)
+	idempotencyKey := dispatchID
+	if req.SkipIfActive {
+		idempotencyKey = ""
+	}
+	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, idempotencyKey)
 	if err != nil {
 		return "", err
 	}
