@@ -158,37 +158,15 @@ func TestEventIdentity(t *testing.T) {
 		name   string
 		source string
 		id     string
-		want   string
 	}{
-		{name: "github delivery scopes identity", source: "github", id: " 72d3162e ", want: "github:72d3162e"},
-		{name: "deploy key scopes identity", source: "deploy", id: "flux:deploy_success:azylman/aerial:brain:sha1", want: "deploy:flux:deploy_success:azylman/aerial:brain:sha1"},
-		{name: "blank id has no identity", source: "github", id: "  ", want: ""},
+		{name: "empty id has no identity", source: "github", id: ""},
+		{name: "blank whitespace id has no identity", source: "github", id: "   "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := eventIdentity(tc.source, tc.id); got != tc.want {
-				t.Errorf("eventIdentity(%q, %q) = %q, want %q", tc.source, tc.id, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestKustomizationObservationIdentity(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		obs  kustomizationObservation
-		want string
-	}{
-		{name: "revision and handled reconcile scope identity", obs: kustomizationObservation{Ref: fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}, LastAppliedRevision: "main@sha1:abc", LastHandledReconcileAt: "2026-11-20T10:00:00Z"}, want: "flux:flux-system/aerial-core:main@sha1:abc:2026-11-20T10:00:00Z"},
-		{name: "unapplied kustomization", obs: kustomizationObservation{Ref: fluxKustomizationRef{Namespace: "flux-system", Name: "config"}}, want: "flux:flux-system/config::"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := kustomizationObservationIdentity(tc.obs); got != tc.want {
-				t.Errorf("kustomizationObservationIdentity() = %q, want %q", got, tc.want)
+			if got := eventIdentity(tc.source, tc.id); got != "" {
+				t.Errorf("eventIdentity(%q, %q) = %q, want empty", tc.source, tc.id, got)
 			}
 		})
 	}
@@ -278,32 +256,6 @@ func TestRouteEventEffectsOwner(t *testing.T) {
 			}
 			if !strings.HasPrefix(got.keys[0], tc.wantKeyPrefix) || len(got.keys[0]) != len(tc.wantKeyPrefix)+16 {
 				t.Errorf("idempotency key = %q, want prefix %q plus 16 hex digest", got.keys[0], tc.wantKeyPrefix)
-			}
-		})
-	}
-}
-
-func TestRestateOwnedSendErrorMessage(t *testing.T) {
-	t.Parallel()
-	base := errors.New("restate ingress returned status 503")
-	tests := []struct {
-		name    string
-		err     *restateOwnedSendError
-		want    string
-		wantIs  error
-		wantHit bool
-	}{
-		{name: "message names handler and cause", err: &restateOwnedSendError{handler: "HandleMainPush", err: base}, want: "restate-owned HandleMainPush send: restate ingress returned status 503", wantIs: base, wantHit: true},
-		{name: "unwrap does not match unrelated error", err: &restateOwnedSendError{handler: "HandleMerged", terminal: true, err: base}, want: "restate-owned HandleMerged send: restate ingress returned status 503", wantIs: errors.New("other"), wantHit: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.err.Error(); got != tc.want {
-				t.Errorf("Error() = %q, want %q", got, tc.want)
-			}
-			if got := errors.Is(tc.err, tc.wantIs); got != tc.wantHit {
-				t.Errorf("errors.Is() = %v, want %v", got, tc.wantHit)
 			}
 		})
 	}

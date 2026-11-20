@@ -111,8 +111,6 @@ func (e *restateOwnedSendError) Error() string {
 	return fmt.Sprintf("restate-owned %s send: %v", e.handler, e.err)
 }
 
-func (e *restateOwnedSendError) Unwrap() error { return e.err }
-
 // restateOwnedFailure classifies one restate-owned send failure, logging
 // terminal rejections at error level because the job is dropped.
 func restateOwnedFailure(ctx context.Context, handler string, err error) error {
