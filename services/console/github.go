@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -31,6 +32,9 @@ type GitHubRun struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	HTMLURL    string    `json:"html_url"`
+	// MergedFromBranch is the head branch of the pull request a push-to-main
+	// run merged, resolved by the poller so the run shares its PR's card.
+	MergedFromBranch string `json:"-"`
 }
 
 type GitHubJob struct {
@@ -70,12 +74,24 @@ type GitHubPoller struct {
 	cachedRunsByRepo map[string][]GitHubRun
 	cachedRuns       []GitHubRun
 	cachedJobs       map[int64][]GitHubJob
-	lastPollTime     time.Time
-	lastError        error
-	stopCh           chan struct{}
+	// mergedBranchBySHA caches commit -> merged PR head branch lookups.
+	// Commits are immutable, so negative ("") results are cached too.
+	mergedBranchBySHA map[string]string
+	lastPollTime      time.Time
+	lastError         error
+	stopCh            chan struct{}
 }
 
 var globalGHPoller *GitHubPoller
+
+const defaultGitHubAPIBaseURL = "https://api.github.com"
+
+func (p *GitHubPoller) apiBase() string {
+	if p.apiBaseURL != "" {
+		return p.apiBaseURL
+	}
+	return defaultGitHubAPIBaseURL
+}
 
 func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	var cleaned []string
@@ -93,13 +109,14 @@ func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	}
 
 	return &GitHubPoller{
-		repo:             primary,
-		repos:            cleaned,
-		token:            token,
-		runsETagMap:      make(map[string]string),
-		jobsETagMap:      make(map[int64]string),
-		cachedRunsByRepo: make(map[string][]GitHubRun),
-		cachedJobs:       make(map[int64][]GitHubJob),
+		repo:              primary,
+		repos:             cleaned,
+		token:             token,
+		runsETagMap:       make(map[string]string),
+		jobsETagMap:       make(map[int64]string),
+		cachedRunsByRepo:  make(map[string][]GitHubRun),
+		cachedJobs:        make(map[int64][]GitHubJob),
+		mergedBranchBySHA: make(map[string]string),
 		client: &http.Client{
 			Timeout: 4 * time.Second,
 			Transport: &http.Transport{
@@ -230,6 +247,15 @@ func (p *GitHubPoller) commitPolledRunsAndPruneJobs(repos []string, allActiveRun
 			delete(p.jobsETagMap, id)
 		}
 	}
+	liveSHAs := make(map[string]bool, len(allRuns))
+	for _, r := range allRuns {
+		liveSHAs[normalizeSHA(r.HeadSHA)] = true
+	}
+	for sha := range p.mergedBranchBySHA {
+		if !liveSHAs[sha] {
+			delete(p.mergedBranchBySHA, sha)
+		}
+	}
 	p.mu.Unlock()
 
 	return hasActive
@@ -245,10 +271,7 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 		return false
 	}
 
-	baseURL := p.apiBaseURL
-	if baseURL == "" {
-		baseURL = "https://api.github.com"
-	}
+	baseURL := p.apiBase()
 	allActiveRunIDs := make(map[int64]bool)
 	hasActive := false
 
@@ -286,7 +309,125 @@ func sanitizeWorkflowRunCommits(runs []GitHubRun, repo string) {
 	}
 }
 
+func isRecentOrActiveRun(r GitHubRun) bool {
+	return r.Status == statusInProgress || r.Status == statusQueued || time.Since(r.UpdatedAt) < 10*time.Minute
+}
+
+func isMainPushRun(r GitHubRun) bool {
+	return r.Event == "push" && (r.HeadBranch == "main" || r.HeadBranch == "master")
+}
+
+// mergedPullRequest is the subset of GET /repos/{repo}/commits/{sha}/pulls we read.
+type mergedPullRequest struct {
+	MergedAt *time.Time `json:"merged_at"`
+	Head     struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+}
+
+// parseMergedPullHeadRef returns the head branch of the first merged pull
+// request in a commits/{sha}/pulls response, or "" when none was merged.
+func parseMergedPullHeadRef(body []byte) (string, error) {
+	var pulls []mergedPullRequest
+	if err := json.Unmarshal(body, &pulls); err != nil {
+		return "", fmt.Errorf("decode commit pulls: %w", err)
+	}
+	for _, pr := range pulls {
+		if pr.MergedAt != nil && pr.Head.Ref != "" {
+			return pr.Head.Ref, nil
+		}
+	}
+	return "", nil
+}
+
+// fetchMergedFromBranch looks up which pull request a main commit merged.
+func (p *GitHubPoller) fetchMergedFromBranch(ctx context.Context, repo, sha string) (string, error) {
+	baseURL := p.apiBase()
+	reqURL := fmt.Sprintf("%s/repos/%s/commits/%s/pulls", baseURL, repo, sha)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+	if err != nil {
+		return "", fmt.Errorf("build commit pulls request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("query commit pulls: %w", err)
+	}
+	defer resp.Body.Close()
+	defer drainAndClose(resp.Body, "commit pulls response body")
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("query commit pulls: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read commit pulls: %w", err)
+	}
+	return parseMergedPullHeadRef(body)
+}
+
+// resolveMergedFromBranches fills MergedFromBranch on push-to-main runs from the
+// per-SHA cache, looking up uncached active/recent runs. Lookup errors are
+// logged and leave the run SHA-keyed; they are retried on the next poll.
+func (p *GitHubPoller) resolveMergedFromBranches(ctx context.Context, repo string, runs []GitHubRun) {
+	for i := range runs {
+		if !isMainPushRun(runs[i]) || runs[i].HeadSHA == "" {
+			continue
+		}
+		sha := normalizeSHA(runs[i].HeadSHA)
+		p.mu.RLock()
+		branch, cached := p.mergedBranchBySHA[sha]
+		p.mu.RUnlock()
+		if !cached {
+			if !isRecentOrActiveRun(runs[i]) {
+				continue
+			}
+			var err error
+			branch, err = p.fetchMergedFromBranch(ctx, repo, sha)
+			if err != nil {
+				log.Printf("[Console:GitHub] Warning: merged PR lookup for %s@%s failed: %v", repo, shortenSHA(sha), err)
+				continue
+			}
+			p.mu.Lock()
+			if p.mergedBranchBySHA == nil {
+				p.mergedBranchBySHA = make(map[string]string)
+			}
+			p.mergedBranchBySHA[sha] = branch
+			p.mu.Unlock()
+		}
+		runs[i].MergedFromBranch = branch
+	}
+}
+
+// retryMergedFromBranchLookups re-resolves cached runs on a 304 poll so a
+// lookup that failed earlier is retried without waiting for a new ETag.
+func (p *GitHubPoller) retryMergedFromBranchLookups(ctx context.Context, repo string) {
+	p.mu.RLock()
+	cached := p.cachedRunsByRepo[repo]
+	runs := make([]GitHubRun, len(cached))
+	copy(runs, cached)
+	p.mu.RUnlock()
+	needsLookup := false
+	for _, r := range runs {
+		if isMainPushRun(r) && r.MergedFromBranch == "" {
+			needsLookup = true
+			break
+		}
+	}
+	if !needsLookup {
+		return
+	}
+	p.resolveMergedFromBranches(ctx, repo, runs)
+	p.mu.Lock()
+	p.cachedRunsByRepo[repo] = runs
+	p.mu.Unlock()
+}
+
 func (p *GitHubPoller) processPolledWorkflowRuns(ctx context.Context, repo, newETag string, runs []GitHubRun, allActiveRunIDs map[int64]bool) bool {
+	p.resolveMergedFromBranches(ctx, repo, runs)
 	p.mu.Lock()
 	if newETag != "" {
 		p.runsETagMap[repo] = newETag
@@ -300,7 +441,7 @@ func (p *GitHubPoller) processPolledWorkflowRuns(ctx context.Context, repo, newE
 	hasActive := false
 	for _, r := range runs {
 		allActiveRunIDs[r.ID] = true
-		if r.Status == statusInProgress || r.Status == statusQueued || time.Since(r.UpdatedAt) < 10*time.Minute {
+		if isRecentOrActiveRun(r) {
 			p.fetchJobsForRun(ctx, r.ID, repo)
 		}
 		if r.Status == statusInProgress || r.Status == statusQueued {
@@ -345,6 +486,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 	defer drainAndClose(resp.Body, "runs response body")
 
 	if resp.StatusCode == http.StatusNotModified {
+		p.retryMergedFromBranchLookups(ctx, repo)
 		hasActive := false
 		p.mu.RLock()
 		for _, r := range p.cachedRunsByRepo[repo] {
@@ -378,10 +520,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 }
 
 func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optionalRepo ...string) {
-	baseURL := p.apiBaseURL
-	if baseURL == "" {
-		baseURL = "https://api.github.com"
-	}
+	baseURL := p.apiBase()
 	repo := ""
 	if len(optionalRepo) > 0 && optionalRepo[0] != "" {
 		repo = optionalRepo[0]

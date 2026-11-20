@@ -62,7 +62,28 @@ func gitHubPollAndDecodeCases() []githubPollTestCase {
 		]
 	}`
 
+	mainPushRunJSON := fmt.Sprintf(`{
+		"total_count": 1,
+		"workflow_runs": [
+			{
+				"id": 9100,
+				"name": "Continuous Delivery",
+				"head_branch": "main",
+				"head_sha": "de22ef4a238e56b6f9fb67cb7eb676f39d6596c3",
+				"event": "push",
+				"status": "completed",
+				"conclusion": "success",
+				"created_at": "%s",
+				"updated_at": "%s"
+			}
+		]
+	}`, time.Now().Add(-3*time.Minute).UTC().Format(time.RFC3339), time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339))
+
 	branchCases := gitHubPollAndDecodeBranchCases()
+	branchCases = append(branchCases,
+		githubPollTestCase{name: "MainPushResolvesMergedPRBranch", repos: []string{"azylman/aerial"}, runsBody: mainPushRunJSON, pullsBody: `[{"merged_at":"2026-11-20T10:00:00Z","head":{"ref":"feat/pr-cards"}}]`, wantRunCount: 1, wantRunID: 9100, wantMergedFrom: "feat/pr-cards"},
+		githubPollTestCase{name: "MainPushLookupErrorFallsBackToSHA", repos: []string{"azylman/aerial"}, runsBody: mainPushRunJSON, pullsStatus: http.StatusInternalServerError, pullsBody: `{"message":"boom"}`, wantRunCount: 1, wantRunID: 9100},
+	)
 	cases := make([]githubPollTestCase, 0, 5+len(branchCases))
 	cases = append(cases, gitHubPollAndDecodePrimaryCases(runID, prRunJSON)...)
 	return append(cases, branchCases...)
@@ -265,6 +286,9 @@ func assertPollAndDecodeRuns(t *testing.T, runs []GitHubRun, tc githubPollTestCa
 	if tc.wantEvent != "" && runs[0].Event != tc.wantEvent {
 		t.Errorf("expected event %q, got %q", tc.wantEvent, runs[0].Event)
 	}
+	if runs[0].MergedFromBranch != tc.wantMergedFrom {
+		t.Errorf("expected MergedFromBranch %q, got %q", tc.wantMergedFrom, runs[0].MergedFromBranch)
+	}
 }
 
 func assertPollAndDecodeJobs(t *testing.T, poller *GitHubPoller, jobs map[int64][]GitHubJob, tc githubPollTestCase) {
@@ -306,6 +330,9 @@ type githubPollTestCase struct {
 	wantJobCount     int
 	wantRepoName     string
 	wantEvent        string
+	pullsStatus      int
+	pullsBody        string
+	wantMergedFrom   string
 }
 
 func runPollAndDecodeSpecialPoller(ctx context.Context, t *testing.T, tc githubPollTestCase, mockGH *httptest.Server) (*GitHubPoller, bool) {
@@ -378,6 +405,13 @@ func runGitHubPollAndDecodeCase(t *testing.T, tc githubPollTestCase) {
 		}
 		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
 			handleMockRunsEndpointWithQuery(w, r, tc, &queriedQuery)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/commits/") && strings.HasSuffix(r.URL.Path, "/pulls") && tc.pullsBody != "" {
+			if tc.pullsStatus != 0 {
+				w.WriteHeader(tc.pullsStatus)
+			}
+			_, _ = w.Write([]byte(tc.pullsBody))
 			return
 		}
 		http.NotFound(w, r)
@@ -694,5 +728,32 @@ func runGetActiveReposEdgeCases(t *testing.T) {
 	emptyPoller := &GitHubPoller{}
 	if got := emptyPoller.getActiveRepos(); got != nil {
 		t.Errorf("expected nil for empty poller, got %v", got)
+	}
+}
+
+func TestParseMergedPullHeadRef_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{name: "MergedPRPresent", body: `[{"merged_at":null,"head":{"ref":"feat/open"}},{"merged_at":"2026-11-20T10:00:00Z","head":{"ref":"feat/merged"}}]`, want: "feat/merged"},
+		{name: "UnmergedOnly", body: `[{"merged_at":null,"head":{"ref":"feat/open"}}]`, want: ""},
+		{name: "EmptyList", body: `[]`, want: ""},
+		{name: "MalformedJSON", body: `{not json`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseMergedPullHeadRef([]byte(tc.body))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseMergedPullHeadRef() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("parseMergedPullHeadRef() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
