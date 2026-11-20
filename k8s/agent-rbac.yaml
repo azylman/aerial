@@ -1,0 +1,491 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: default
+automountServiceAccountToken: false
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: eri-aerial
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: vanadis
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: vanadis-restate
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: vanadis-nats
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: haro
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: coven
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: transcripts
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: synapse
+  namespace: default
+---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: console
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aerial-agent
+rules:
+  - apiGroups:
+      - aerial.io
+    resources:
+      - memories
+    verbs:
+      - get
+      - list
+      - create
+  - apiGroups:
+      - aerial.io
+    resources:
+      - transcripts
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - aerial.io
+    resources:
+      - schedules
+      - builds
+    verbs:
+      - get
+      - list
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - aerial.io
+    resources:
+      - prs
+    verbs:
+      - get
+      - list
+      - create
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aerial-supervisor
+rules:
+  - apiGroups:
+      - aerial.io
+    resources:
+      - builds
+      - builds/all
+      - schedules
+      - schedules/all
+      - prs
+      - prs/all
+      - transcripts
+      - transcripts/all
+      - memories
+      - memories/all
+    verbs:
+      - get
+      - list
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aerial-auth-delegator
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aerial-k8s-reader
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - persistentvolumeclaims
+      - persistentvolumes
+      - events
+      - namespaces
+      - nodes
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+      - controllerrevisions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+      - httproutes
+      - grpcroutes
+      - referencegrants
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resources:
+      - kustomizations
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - helm.toolkit.fluxcd.io
+    resources:
+      - helmreleases
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - source.toolkit.fluxcd.io
+    resources:
+      - gitrepositories
+      - helmrepositories
+      - ocirepositories
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - operator.victoriametrics.com
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - restate.dev
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - external-secrets.io
+      - generators.external-secrets.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerial-supervisors
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-supervisor
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+  - kind: ServiceAccount
+    name: vanadis
+    namespace: default
+  - kind: ServiceAccount
+    name: vanadis-restate
+    namespace: default
+  - kind: ServiceAccount
+    name: vanadis-nats
+    namespace: default
+  - kind: ServiceAccount
+    name: haro
+    namespace: default
+  - kind: ServiceAccount
+    name: coven
+    namespace: default
+  - kind: ServiceAccount
+    name: transcripts
+    namespace: default
+  - kind: ServiceAccount
+    name: console
+    namespace: default
+  - kind: ServiceAccount
+    name: console-sa
+    namespace: default
+  - kind: ServiceAccount
+    name: synapse
+    namespace: default
+  - kind: ServiceAccount
+    name: synapse-sa
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerial-auth-delegators
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+  - kind: ServiceAccount
+    name: vanadis
+    namespace: default
+  - kind: ServiceAccount
+    name: vanadis-restate
+    namespace: default
+  - kind: ServiceAccount
+    name: vanadis-nats
+    namespace: default
+  - kind: ServiceAccount
+    name: haro
+    namespace: default
+  - kind: ServiceAccount
+    name: coven
+    namespace: default
+  - kind: ServiceAccount
+    name: transcripts
+    namespace: default
+  - kind: ServiceAccount
+    name: console
+    namespace: default
+  - kind: ServiceAccount
+    name: console-sa
+    namespace: default
+  - kind: ServiceAccount
+    name: synapse
+    namespace: default
+  - kind: ServiceAccount
+    name: synapse-sa
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerial-agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-agent
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerial-k8s-readers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-k8s-reader
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerial-kubernetes-mcp-eri-aerial
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-kubernetes-mcp
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aerial-kubernetes-mcp-flux-eri-aerial
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aerial-kubernetes-mcp-flux
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aerial-kubernetes-mcp-exec-eri-aerial
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aerial-kubernetes-mcp-exec
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aerial-victoriametrics-eri-aerial
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: victoriametrics-sa
+subjects:
+  - kind: ServiceAccount
+    name: eri-aerial
+    namespace: default
