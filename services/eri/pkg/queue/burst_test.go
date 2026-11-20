@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -570,4 +571,91 @@ func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTryPruneIdleThread_And_ResetTimer(t *testing.T) {
+	t.Parallel()
+	timer := time.NewTimer(time.Hour)
+	resetTimer(timer, 10*time.Millisecond)
+	<-timer.C
+	resetTimer(timer, 50*time.Millisecond)
+	timer.Stop()
+
+	pool := New(nil, WorkerPoolConfig{})
+	state := &threadWorkerState{ch: make(chan queueItem, 2)}
+	pool.threadChs["scope-1"] = state
+
+	// Empty queue & zero enqueuers -> pruned
+	if !pool.tryPruneIdleThread("scope-1", state) {
+		t.Errorf("expected tryPruneIdleThread to return true for idle state")
+	}
+
+	// Active enqueuers -> not pruned
+	state.activeEnqueuers = 1
+	pool.threadChs["scope-2"] = state
+	if pool.tryPruneIdleThread("scope-2", state) {
+		t.Errorf("expected tryPruneIdleThread to return false when activeEnqueuers > 0")
+	}
+
+	// Non-empty channel -> not pruned
+	state.activeEnqueuers = 0
+	state.ch <- queueItem{}
+	if pool.tryPruneIdleThread("scope-2", state) {
+		t.Errorf("expected tryPruneIdleThread to return false when channel not empty")
+	}
+}
+
+func TestWaitForNextQueueItem(t *testing.T) {
+	t.Parallel()
+
+	// 1. Context cancelled
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pool := &WorkerPool{ctx: ctx}
+	state := &threadWorkerState{ch: make(chan queueItem, 1)}
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+
+	item, keepRunning := pool.waitForNextQueueItem("scope-1", state, timer, time.Hour)
+	if item != nil || keepRunning {
+		t.Errorf("expected nil, false on cancelled context")
+	}
+
+	// 2. Closed channel
+	pool2 := &WorkerPool{ctx: context.Background()}
+	close(state.ch)
+	item, keepRunning = pool2.waitForNextQueueItem("scope-1", state, timer, time.Hour)
+	if item != nil || keepRunning {
+		t.Errorf("expected nil, false on closed channel")
+	}
+
+	// 3. Popped item
+	state3 := &threadWorkerState{ch: make(chan queueItem, 1)}
+	d := db.Dispatch{ID: "d-1"}
+	state3.ch <- queueItem{dispatch: &d}
+	item, keepRunning = pool2.waitForNextQueueItem("scope-1", state3, timer, time.Hour)
+	if !keepRunning || item == nil || item.dispatch == nil || item.dispatch.ID != "d-1" {
+		t.Errorf("expected dispatch d-1, true")
+	}
+
+	// 4. Timer expired & pruneable
+	pool4 := New(nil, WorkerPoolConfig{})
+	state4 := &threadWorkerState{ch: make(chan queueItem, 1)}
+	pool4.threadChs["scope-4"] = state4
+	expTimer := time.NewTimer(0)
+	item, keepRunning = pool4.waitForNextQueueItem("scope-4", state4, expTimer, time.Millisecond)
+	if item != nil || keepRunning {
+		t.Errorf("expected nil, false on pruned idle worker")
+	}
+
+	// 5. Timer expired & not pruneable
+	pool5 := New(nil, WorkerPoolConfig{})
+	state5 := &threadWorkerState{ch: make(chan queueItem, 1), activeEnqueuers: 1}
+	pool5.threadChs["scope-5"] = state5
+	expTimer5 := time.NewTimer(0)
+	item, keepRunning = pool5.waitForNextQueueItem("scope-5", state5, expTimer5, time.Millisecond)
+	if item != nil || !keepRunning {
+		t.Errorf("expected nil, true on unpruned idle worker")
+	}
+	expTimer5.Stop()
 }

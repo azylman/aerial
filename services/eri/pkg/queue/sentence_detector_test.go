@@ -25,7 +25,9 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 		{"double newline paragraph break", []string{"Here is the first paragraph with no period\n\nAnd here is the second paragraph."}, []string{"Here is the first paragraph with no period", "And here is the second paragraph."}, 0},
 		{"unpunctuated text emitted on flush", []string{"Incomplete sentence with no ending punctuation"}, []string{"Incomplete sentence with no ending punctuation"}, 0},
 		{"empty chunks, whitespace, and isolated punctuation", []string{"", "   ", "First sentence.   ", "", "  ", ".", "  "}, []string{"First sentence."}, 0},
+		{"double newline with trailing space", []string{"Paragraph one\n\n   Paragraph two."}, []string{"Paragraph one", "Paragraph two."}, 0},
 		{"soft ceiling run on clause split", []string{strings.Repeat("word ", 26) + ", " + "this is a very long run-on clause that just keeps going and going and going without any period"}, nil, 2},
+		{"soft ceiling no punctuation", []string{strings.Repeat("abcdefghij ", 20)}, []string{strings.TrimSpace(strings.Repeat("abcdefghij ", 20))}, 0},
 	}
 
 	for _, tc := range tests {
