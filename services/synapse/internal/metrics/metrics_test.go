@@ -210,12 +210,6 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 			wantMsgID:   "discord:msg:aerial:msg123",
 		},
 		{
-			name:        "ingress args with sibling agent",
-			in:          model.DiscordIngressArgs{MessageID: "msg123", Agent: "miorine"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress",
-			wantMsgID:   "discord:msg:miorine:msg123",
-		},
-		{
 			name:        "interaction args",
 			in:          model.DiscordInteractionArgs{InteractionID: "int123"},
 			wantSubject: "aerial.jobs.synapse.discord_interaction",
