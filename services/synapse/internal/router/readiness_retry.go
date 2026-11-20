@@ -6,6 +6,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/synapse/internal/model"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 type readinessRetryStore = model.ReadinessRetryStore
@@ -45,5 +46,11 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 		httpkit.WriteJSON(w, 503, map[string]string{fieldError: err.Error()})
 		return
 	}
+	// Readiness retry never mints a new generation and never clears effect
+	// keys: the shadow mirror carries the expected merge SHA so Restate can
+	// drop it as stale when the gate already advanced.
+	s.shadowPREvent(r.Context(), "HandleReadinessRetry", restateclient.PREvent{
+		Repo: req.Repo, PRNumber: req.Number, MergeSHA: req.Merge,
+	})
 	httpkit.WriteJSON(w, 202, map[string]string{"status": "readiness_pending"})
 }

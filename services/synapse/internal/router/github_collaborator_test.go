@@ -597,84 +597,92 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	mockDisp := &mockOutboundDispatcher{}
-	srvWithDisp := &RouterServer{dispatcher: mockDisp}
-	sharedDedup := &sync.Map{}
-
 	tests := []struct {
-		name      string
-		srv       *RouterServer
-		dedup     *sync.Map
-		channelID string
-		sha       string
+		name          string
+		nilServer     bool
+		nilDispatcher bool
+		channelID     string
+		sha           string
+		wantDispatch  bool
 	}{
 		{
-			name:      "nil server returns nil",
-			srv:       nil,
-			dedup:     sharedDedup,
-			channelID: "111111111111111111",
-			sha:       "abcdef1",
+			name:         "nil server returns nil",
+			nilServer:    true,
+			channelID:    "111111111111111111",
+			sha:          "abcdef1",
+			wantDispatch: false,
 		},
 		{
-			name:      "nil dispatcher returns nil",
-			srv:       &RouterServer{},
-			dedup:     sharedDedup,
-			channelID: "111111111111111111",
-			sha:       "abcdef1",
+			name:          "nil dispatcher returns nil",
+			nilDispatcher: true,
+			channelID:     "111111111111111111",
+			sha:           "abcdef1",
+			wantDispatch:  false,
 		},
 		{
-			name:      "empty channel id returns nil without dispatch",
-			srv:       srvWithDisp,
-			dedup:     sharedDedup,
-			channelID: "",
-			sha:       "abcdef1",
+			name:         "empty channel id returns nil without dispatch",
+			channelID:    "",
+			sha:          "abcdef1",
+			wantDispatch: false,
 		},
 		{
-			name:      "empty sha returns nil without dispatch",
-			srv:       srvWithDisp,
-			dedup:     sharedDedup,
-			channelID: "111111111111111111",
-			sha:       "",
+			name:         "empty sha returns nil without dispatch",
+			channelID:    "111111111111111111",
+			sha:          "",
+			wantDispatch: false,
 		},
 		{
-			name:      "zero sha returns nil without dispatch",
-			srv:       srvWithDisp,
-			dedup:     sharedDedup,
-			channelID: "111111111111111111",
-			sha:       "0000000000000000000000000000000000000000",
+			name:         "zero sha returns nil without dispatch",
+			channelID:    "111111111111111111",
+			sha:          "0000000000000000000000000000000000000000",
+			wantDispatch: false,
 		},
 		{
-			name:      "successful dispatch records dedup",
-			srv:       srvWithDisp,
-			dedup:     &sync.Map{},
-			channelID: "111111111111111111",
-			sha:       "abcdef1",
+			name:         "successful dispatch records dedup",
+			channelID:    "111111111111111111",
+			sha:          "abcdef1",
+			wantDispatch: true,
 		},
 	}
 
+	// Every subtest owns its dispatcher mock: the guards assert exact dispatch
+	// counts, so sharing one mock across parallel subtests would attribute a
+	// concurrent successful dispatch to a guard case.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			beforeCalls := len(mockDisp.DirectMessageCalls())
-			if err := tc.srv.dispatchCollaboratorDM(ctx, tc.dedup, "repo", 1, tc.sha, tc.channelID, "msg"); err != nil {
+			mockDisp := &mockOutboundDispatcher{}
+			srv := &RouterServer{dispatcher: mockDisp}
+			if tc.nilServer {
+				srv = nil
+			}
+			if tc.nilDispatcher {
+				srv = &RouterServer{}
+			}
+			if err := srv.dispatchCollaboratorDM(ctx, &sync.Map{}, "repo", 1, tc.sha, tc.channelID, "msg"); err != nil {
 				t.Errorf("dispatchCollaboratorDM error = %v, want nil", err)
 			}
-			afterCalls := len(mockDisp.DirectMessageCalls())
-			if tc.name != "successful dispatch records dedup" && afterCalls != beforeCalls {
-				t.Errorf("expected no direct message dispatches for invalid guard input, got %d", afterCalls-beforeCalls)
+			want := 0
+			if tc.wantDispatch {
+				want = 1
+			}
+			if got := len(mockDisp.DirectMessageCalls()); got != want {
+				t.Errorf("direct message dispatches = %d, want %d", got, want)
 			}
 		})
 	}
 
+	dupDisp := &mockOutboundDispatcher{}
+	dupSrv := &RouterServer{dispatcher: dupDisp}
 	customDedup := &sync.Map{}
-	if err := srvWithDisp.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+	if err := dupSrv.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	beforeCalls := len(mockDisp.DirectMessageCalls())
-	if err := srvWithDisp.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+	beforeCalls := len(dupDisp.DirectMessageCalls())
+	if err := dupSrv.dispatchCollaboratorDM(ctx, customDedup, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
 		t.Fatalf("unexpected error on duplicate: %v", err)
 	}
-	if len(mockDisp.DirectMessageCalls()) != beforeCalls {
+	if len(dupDisp.DirectMessageCalls()) != beforeCalls {
 		t.Errorf("expected duplicate dispatch to be suppressed by dedup")
 	}
 
