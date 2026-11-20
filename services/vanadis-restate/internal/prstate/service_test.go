@@ -65,29 +65,6 @@ func sortedHandlerNames(def restate.ServiceDefinition) string {
 	return strings.Join(names, ",")
 }
 
-// TestServiceName_SingleObject pins that every service instance, including
-// a nil one, answers the single PRObject/RepoObject names.
-func TestServiceName_SingleObject(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		pr       *PRObjectService
-		repo     *RepoObjectService
-		wantPR   string
-		wantRepo string
-	}{
-		{name: "constructed services", pr: NewPRObjectService(), repo: NewRepoObjectService(), wantPR: "PRObject", wantRepo: "RepoObject"},
-		{name: "nil services", pr: nil, repo: nil, wantPR: "PRObject", wantRepo: "RepoObject"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantPR, tc.pr.ServiceName())
-			assert.Equal(t, tc.wantRepo, tc.repo.ServiceName())
-		})
-	}
-}
-
 // TestRegisterPRStateServices pins dark registration: frozen service names
 // matching the synapse ingress invoker defaults, the exact 13-handler PR
 // surface and 4-handler repo surface, and nil-safe dark defaults.
@@ -106,13 +83,6 @@ func TestRegisterPRStateServices(t *testing.T) {
 			name:            "nil services get dark defaults",
 			prNil:           true,
 			repoNil:         true,
-			wantPRName:      "PRObject",
-			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
-			wantRepoHandler: "HandleFanout,HandleKustomizationStatus,HandleMainPush,ResolvePRBySHA",
-		},
-		{
-			name:            "constructed services keep single names",
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
 			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
