@@ -313,12 +313,16 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
 	cfg := s.cfgSrc.Current()
 	meta := ParseAerialPRMetadata(pr.GetBody())
-	shouldRegister := true
-	if meta.BotID != "" && cfg.BotID != "" && !strings.EqualFold(meta.BotID, cfg.BotID) {
-		shouldRegister = false
-	} else if meta.BotID == "" && !cfg.DefaultOwner {
-		shouldRegister = false
+	var cfgBotID string
+	var defaultOwner bool
+	if cfg != nil {
+		cfgBotID = cfg.BotID
+		defaultOwner = cfg.DefaultOwner
 	}
+	if isForeignBotPR(meta, cfgBotID) {
+		return nil
+	}
+	shouldRegister := meta.BotID != "" || defaultOwner
 	targetID := meta.TargetID
 	if IsHeadlessSessionKey(targetID) {
 		targetID = s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)

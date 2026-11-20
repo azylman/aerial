@@ -31,6 +31,7 @@ type PRRegisterRequest struct {
 	TargetID string `json:"target_id"`
 	Title    string `json:"title,omitempty"`
 	Metadata string `json:"metadata,omitempty"`
+	BotID    string `json:"bot_id,omitempty"`
 }
 
 // PRBuildLifecycle is the registry lifecycle fence image-build consumers read
