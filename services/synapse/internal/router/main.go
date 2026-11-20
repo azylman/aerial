@@ -311,6 +311,14 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	rawTargetID := strings.TrimSpace(req.TargetID)
 	req.TargetID = model.NormalizeDiscordTargetID(rawTargetID)
 	req.Title = strings.TrimSpace(req.Title)
+	req.BotID = strings.TrimSpace(req.BotID)
+
+	if req.BotID != "" && s.cfgSrc != nil {
+		if cfg := s.cfgSrc.Current(); cfg != nil && strings.TrimSpace(cfg.BotID) != "" && !strings.EqualFold(req.BotID, strings.TrimSpace(cfg.BotID)) {
+			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{fieldError: "bot_id mismatch for local pr_registry"})
+			return
+		}
+	}
 
 	if req.Repo == "" {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "repo cannot be empty"})

@@ -1092,6 +1092,7 @@ func TestHandlePRRegister(t *testing.T) {
 
 	tests := []struct {
 		name       string
+		cfgBotID   string
 		useNilReg  bool
 		regErr     error
 		body       string
@@ -1149,19 +1150,59 @@ func TestHandlePRRegister(t *testing.T) {
 			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
 			wantStatus: http.StatusInternalServerError,
 		},
+		{
+			name:       "foreign bot_id returns 409 conflict",
+			cfgBotID:   "aerial",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"suletta"}`,
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name:       "matching bot_id succeeds",
+			cfgBotID:   "aerial",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"aerial"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "case-insensitive matching bot_id succeeds",
+			cfgBotID:   "aerial",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"AERIAL"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "empty bot_id in request succeeds when config has bot_id",
+			cfgBotID:   "aerial",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":""}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "bot_id in request succeeds when config has empty bot_id",
+			cfgBotID:   "",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"suletta"}`,
+			wantStatus: http.StatusOK,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var reg PRRegistryUpdater
+			var mockReg *mockPRRegistry
 			if !tc.useNilReg {
-				reg = &mockPRRegistry{registerErr: tc.regErr}
+				mockReg = &mockPRRegistry{registerErr: tc.regErr}
+				reg = mockReg
 			}
-			srv := newTestRouter(Config{SystemChannelID: "100000000000000001"}, nil, reg, &mockOutboundDispatcher{})
+			srv := newTestRouter(Config{SystemChannelID: "100000000000000001", BotID: tc.cfgBotID}, nil, reg, &mockOutboundDispatcher{})
 			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusConflict {
+				if !strings.Contains(rec.Body.String(), "bot_id mismatch for local pr_registry") {
+					t.Errorf("body = %s, want substr 'bot_id mismatch for local pr_registry'", rec.Body.String())
+				}
+				if mockReg != nil && len(mockReg.registerCalls) > 0 {
+					t.Errorf("registerCalls = %d, want 0 when bot_id mismatches", len(mockReg.registerCalls))
+				}
 			}
 		})
 	}

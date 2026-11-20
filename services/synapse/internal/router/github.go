@@ -366,11 +366,7 @@ func (*RouterServer) processGitHubPingEvent(delivery string, body []byte, res *R
 	return res, nil
 }
 
-func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
-	var p GitHubPullRequestPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
-	}
+func populatePullRequestEvent(p *GitHubPullRequestPayload, res *ResolvedGitHubEvent) {
 	res.Repo = p.Repository.FullName
 	res.Action = p.Action
 	res.PRNumber = p.Number
@@ -386,7 +382,30 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 	}
 	res.Sender = p.Sender.Login
 	res.ResolutionSource = "pull_request_payload"
+}
+
+func (s *RouterServer) isForeignBotEvent(meta AerialPRMetadata) bool {
+	if s == nil || s.cfgSrc == nil {
+		return false
+	}
+	cfg := s.cfgSrc.Current()
+	if cfg == nil {
+		return false
+	}
+	return isForeignBotPR(meta, cfg.BotID)
+}
+
+func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+	var p GitHubPullRequestPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
+	}
+	populatePullRequestEvent(&p, res)
 	slog.InfoContext(ctx, "[synapse] [github] [pull_request] event", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "branch", res.Branch, "merged", p.PullRequest.Merged, "sender", res.Sender, "delivery", delivery)
+
+	if s.isForeignBotEvent(ParseAerialPRMetadata(p.PullRequest.GetBody())) {
+		return res, nil
+	}
 
 	s.handleDependabotPROpen(ctx, res, p)
 
