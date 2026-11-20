@@ -56,6 +56,75 @@ type DeployOutcome struct {
 	Deduped          bool
 }
 
+// DeployDispatchDecision is the synapse deploy_success publish verdict. The
+// PRObject computes it from the deploy_dispatch effect key plus both
+// WasDispatched slots; it never records anything, so a publish failure
+// leaves the next invocation returning ShouldPublish again (at-least-once)
+// and only the publish-recorded ack completes the dispatch.
+type DeployDispatchDecision struct {
+	Disposition   EventDisposition `json:"disposition"`
+	ShouldPublish bool             `json:"should_publish"`
+	Deduped       bool             `json:"deduped"`
+	EffectKey     string           `json:"effect_key"`
+}
+
+// DeployPublishedOutcome is the result of one publish-recorded ack. The ack
+// marks the dispatch key and both dedup slots, so it is idempotent: a
+// redelivered ack replays as already recorded.
+type DeployPublishedOutcome struct {
+	Disposition EventDisposition `json:"disposition"`
+	EffectKey   string           `json:"effect_key"`
+	Recorded    bool             `json:"recorded"`
+	Deduped     bool             `json:"deduped"`
+}
+
+// ResolveDeployDispatchDecision computes the deploy_success publish verdict
+// without recording anything. Stale SHAs drop and same-epoch terminal states
+// absorb with no publish. A dispatch is fully deduped only when the
+// deploy_dispatch effect key is recorded and a WasDispatched slot hits;
+// every other applied dispatch must publish, so an unrecorded publish is
+// always retried instead of lost.
+func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecision, error) {
+	if s == nil {
+		return DeployDispatchDecision{Disposition: DispositionDropStale}, errNilPRState
+	}
+	if disp := s.ApplyEvent(ev); disp != DispositionApply {
+		return DeployDispatchDecision{Disposition: disp}, nil
+	}
+	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
+	out := DeployDispatchDecision{Disposition: DispositionApply, EffectKey: key.String()}
+	if s.WasEffectDispatched(key) && WasDispatched(s, ev.Repo, ev.JobName, ev.HeadSHA, ev.PRNumber) {
+		out.Deduped = true
+		return out, nil
+	}
+	out.ShouldPublish = true
+	return out, nil
+}
+
+// RecordDeployPublished marks one confirmed deploy_success publish: the
+// deploy_dispatch effect key plus the PR-keyed and job-plus-SHA dedup slots,
+// and the observed head SHA for later staleness checks. Stale SHAs drop and
+// same-epoch terminal states absorb with nothing recorded.
+func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, error) {
+	if s == nil {
+		return DeployPublishedOutcome{Disposition: DispositionDropStale}, errNilPRState
+	}
+	if disp := s.ApplyEvent(ev); disp != DispositionApply {
+		return DeployPublishedOutcome{Disposition: disp}, nil
+	}
+	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
+	out := DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: key.String()}
+	out.Deduped = s.WasEffectDispatched(key)
+	s.MarkEffectDispatched(key)
+	s.RecordDeployedPR()
+	if cleanJob, cleanHead := strings.TrimSpace(ev.JobName), strings.TrimSpace(ev.HeadSHA); cleanJob != "" && cleanHead != "" && !IsZeroSHA(cleanHead) {
+		s.RecordDeployedSHAJob(cleanJob, cleanHead)
+	}
+	syncHeadSHA(s, ev.HeadSHA)
+	out.Recorded = true
+	return out, nil
+}
+
 // errNilPRState reports a nil state, which can never apply an event.
 var errNilPRState = errors.New("prstate: nil PRState")
 

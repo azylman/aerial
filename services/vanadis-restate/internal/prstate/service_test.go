@@ -84,7 +84,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictResolved,HandleDeployDispatched,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
+			wantPRHandlers:  "HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
 			wantRepoHandler: "HandleFanout,HandleKustomizationStatus,HandleMainPush,ResolvePRBySHA",
 		},
 	}

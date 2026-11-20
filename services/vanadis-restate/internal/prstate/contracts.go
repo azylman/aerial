@@ -236,7 +236,8 @@ type PRObject interface {
 	HandleReopened(ctx context.Context, ev PREvent) error
 	HandleReadinessRetry(ctx context.Context, ev PREvent) error
 	HandleRolloutProgress(ctx context.Context, ev PREvent) error
-	HandleDeployDispatched(ctx context.Context, ev PREvent) error
+	HandleDeployDispatched(ctx context.Context, ev PREvent) (DeployDispatchDecision, error)
+	HandleDeploySuccessPublished(ctx context.Context, ev PREvent) (DeployPublishedOutcome, error)
 	HandleKustomizationRequested(ctx context.Context, ev PREvent) error
 }
 
@@ -267,7 +268,14 @@ func (PRObjectStub) HandleClosed(context.Context, PREvent) error              { 
 func (PRObjectStub) HandleReopened(context.Context, PREvent) error            { return nil }
 func (PRObjectStub) HandleReadinessRetry(context.Context, PREvent) error      { return nil }
 func (PRObjectStub) HandleRolloutProgress(context.Context, PREvent) error     { return nil }
-func (PRObjectStub) HandleDeployDispatched(context.Context, PREvent) error    { return nil }
+func (PRObjectStub) HandleDeployDispatched(context.Context, PREvent) (DeployDispatchDecision, error) {
+	return DeployDispatchDecision{}, nil
+}
+
+func (PRObjectStub) HandleDeploySuccessPublished(context.Context, PREvent) (DeployPublishedOutcome, error) {
+	return DeployPublishedOutcome{}, nil
+}
+
 func (PRObjectStub) HandleKustomizationRequested(context.Context, PREvent) error {
 	return nil
 }

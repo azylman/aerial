@@ -823,6 +823,9 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 			return &evt, nil
 		}
 
+		if s.restateAuthoritative() && evt.PRNumber > 0 {
+			return s.publishUnownedDeploySuccessAuthoritative(ctx, evt)
+		}
 		if evt.PRNumber > 0 {
 			// Journal before the suppress check: the journal is the ordered
 			// record and Restate dedups the repeat; the suppress check below
@@ -835,7 +838,7 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 			slog.InfoContext(ctx, "[synapse] [deploy] suppressing duplicate deploy_success", "repo", evt.Repo, "job", evt.JobName, "pr", evt.PRNumber, "commit", evt.CommitSHA)
 			return &evt, nil
 		}
-		if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed"); err != nil {
+		if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", statusDeployed); err != nil {
 			return &evt, err
 		}
 		if evt.PRNumber > 0 {
@@ -892,7 +895,7 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 	if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
 		return err
 	}
-	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed"); err != nil {
+	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", statusDeployed); err != nil {
 		return err
 	}
 	return nil

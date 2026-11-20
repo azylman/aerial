@@ -323,6 +323,9 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 // deployed dispatches the success wake. Only a failed registry update is returned: once the PR is
 // deployed it leaves the deploying set, so a re-list could not retry a failed wake anyway.
 func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr DeployingPR, name string) error {
+	if s.restateAuthoritative() {
+		return s.completeKustomizationRequestAuthoritative(ctx, pr, name)
+	}
 	var (
 		transitioned bool
 		err          error
@@ -382,7 +385,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		HeadSHA:      pr.HeadSHA,
 		MergeSHA:     pr.MergeSHA,
 		TargetID:     targetID,
-		Status:       "deployed",
+		Status:       statusDeployed,
 		JobName:      name,
 		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
 		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
@@ -395,10 +398,77 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		return err
 	}
 	if s.registry != nil {
-		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, "deployed", map[string]any{"deploy_success_pending": false}); err != nil {
+		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, statusDeployed, map[string]any{"deploy_success_pending": false}); err != nil {
 			slog.WarnContext(ctx, "[synapse] [flux-watch] error clearing deploy_success_pending", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
 			return fmt.Errorf("clear deploy_success_pending for %s#%d: %w", pr.Repo, pr.PRNumber, err)
 		}
+	}
+	return nil
+}
+
+// completeKustomizationRequestAuthoritative publishes one deploy_success
+// decided by the Restate PRObject. The Postgres projection is synced after
+// the confirmed publish but never decides the publish: no transition return
+// value gates it and IsPRDeployed is never consulted here. A deduped or
+// stale verdict skips the publish and only converges the projection; any
+// failure before the ack surfaces so the watcher retry re-resolves and
+// republishes instead of losing the signal.
+func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Context, pr DeployingPR, name string) error {
+	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
+	targetID := pr.TargetID
+	if targetID == "" {
+		if resolved, rErr := s.ResolveThreadForPR(ctx, pr.Repo, pr.PRNumber); rErr == nil {
+			targetID = resolved
+		}
+	}
+	decision, err := s.resolveDeployDispatch(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber)
+	if err != nil {
+		return err
+	}
+	if decision.ShouldPublish {
+		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+			return err
+		}
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        eventDeploySuccess,
+			Repo:         pr.Repo,
+			PRNumber:     pr.PRNumber,
+			HeadSHA:      pr.HeadSHA,
+			MergeSHA:     pr.MergeSHA,
+			TargetID:     targetID,
+			Status:       statusDeployed,
+			JobName:      name,
+			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
+			slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+			return err
+		}
+		if err := s.recordDeployPublished(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber); err != nil {
+			return err
+		}
+	}
+	return s.syncDeployedProjection(ctx, pr, name)
+}
+
+// syncDeployedProjection converges the read-only pr_registry projection after
+// an authoritative deploy decision: the kustomizations read deployed and any
+// pending flag clears. Deduped redeliveries converge a projection that
+// lagged an earlier attempt.
+func (s *RouterServer) syncDeployedProjection(ctx context.Context, pr DeployingPR, name string) error {
+	if s.registry == nil {
+		return nil
+	}
+	if _, err := s.registry.MarkKustomizationsDeployed(ctx, pr.Repo, pr.PRNumber, []string{name}); err != nil {
+		return fmt.Errorf("mark %s deployed for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
+	}
+	if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, statusDeployed, map[string]any{"deploy_success_pending": false}); err != nil {
+		slog.WarnContext(ctx, "[synapse] [flux-watch] error clearing deploy_success_pending", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+		return fmt.Errorf("clear deploy_success_pending for %s#%d: %w", pr.Repo, pr.PRNumber, err)
 	}
 	return nil
 }

@@ -142,9 +142,41 @@ func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PR
 	return s.applyPREvent(ctx, ev)
 }
 
-// HandleDeployDispatched applies one deploy event dark.
-func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectContext, ev PREvent) error {
-	return s.applyPREvent(ctx, ev)
+// HandleDeployDispatched resolves the deploy_success publish verdict without
+// recording anything, so a publish failure leaves the next invocation
+// returning ShouldPublish again. The verdict is the sole authority for the
+// synapse publish; only HandleDeploySuccessPublished completes the dispatch.
+func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectContext, ev PREvent) (DeployDispatchDecision, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return DeployDispatchDecision{}, err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	return ResolveDeployDispatchDecision(st, ev)
+}
+
+// HandleDeploySuccessPublished records one confirmed deploy_success publish:
+// the dispatch key plus both dedup slots. The ack is idempotent and the
+// commit point for the dispatch; an ack failure surfaces so redelivery
+// re-resolves and republishes instead of losing the signal.
+func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext, ev PREvent) (DeployPublishedOutcome, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return DeployPublishedOutcome{}, err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	out, recErr := RecordDeployPublished(st, ev)
+	if recErr != nil {
+		return out, recErr
+	}
+	if out.Disposition == DispositionApply {
+		restate.Set(ctx, s.stateKey, st)
+	}
+	return out, nil
 }
 
 // HandleKustomizationRequested applies one kustomization request dark.

@@ -167,6 +167,76 @@ func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName,
 	})
 }
 
+// resolveDeployDispatch asks the Restate PRObject whether synapse must
+// publish deploy_success. The PRObject verdict is the sole authority when
+// restate_authoritative is on: the Postgres deployed projection is never
+// consulted here. The verdict records nothing, so a publish failure leaves
+// the next invocation returning ShouldPublish again (at-least-once). A
+// transport or decode failure surfaces so the caller retries. Off the
+// authoritative path it returns the zero verdict without emitting a request.
+func (s *RouterServer) resolveDeployDispatch(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int) (restateclient.DeployDispatchDecision, error) {
+	if !s.restateAuthoritative() {
+		return restateclient.DeployDispatchDecision{}, nil
+	}
+	if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
+		return restateclient.DeployDispatchDecision{}, nil
+	}
+	r := s.restateShadow()
+	if !r.Enabled() {
+		return restateclient.DeployDispatchDecision{}, fmt.Errorf("restate authoritative with no restate_url configured")
+	}
+	var decision restateclient.DeployDispatchDecision
+	if err := r.client.InvokePREvent(ctx, "HandleDeployDispatched", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
+	}, &decision); err != nil {
+		r.sendErrors.Add(1)
+		metrics.RecordRestateShadowSend("HandleDeployDispatched", "authoritative_error")
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] authoritative deploy decision failed",
+			"repo", repo, "pr", prNumber, "job", jobName, "error", err)
+		return restateclient.DeployDispatchDecision{}, err
+	}
+	r.sends.Add(1)
+	metrics.RecordRestateShadowSend("HandleDeployDispatched", "authoritative_sent")
+	return decision, nil
+}
+
+// recordDeployPublished acks one confirmed deploy_success publish to the
+// Restate PRObject, completing the dispatch. The ack surfaces failures so a
+// lost ack redelivers: the next resolve re-resolves and republishes rather
+// than losing the signal. Off the authoritative path it is a no-op.
+func (s *RouterServer) recordDeployPublished(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int) error {
+	if !s.restateAuthoritative() {
+		return nil
+	}
+	if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
+		return nil
+	}
+	return s.routePREvent(ctx, "HandleDeploySuccessPublished", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
+	})
+}
+
+// publishUnownedDeploySuccessAuthoritative publishes one unowned
+// deploy_success decided by the Restate PRObject. The deployed projection is
+// never consulted here; a deduped or stale verdict suppresses the publish,
+// and an ack failure surfaces so redelivery re-resolves and republishes.
+func (s *RouterServer) publishUnownedDeploySuccessAuthoritative(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
+	decision, err := s.resolveDeployDispatch(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
+	if err != nil {
+		return &evt, err
+	}
+	if !decision.ShouldPublish {
+		return &evt, nil
+	}
+	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", statusDeployed); err != nil {
+		return &evt, err
+	}
+	if err := s.recordDeployPublished(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
+		return &evt, err
+	}
+	return &evt, nil
+}
+
 // routeRolloutProgress journals one kustomization progress observation.
 // Like shadowRolloutProgress, deploy failures have no frozen PRObject
 // handler, so only progress and dispatch observations route.
