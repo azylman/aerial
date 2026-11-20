@@ -25,6 +25,7 @@ type Config struct {
 	RestateURL           string
 	RestatePRService     string
 	RestateRepoService   string
+	RestateAuthoritative bool
 	PostgresURL          string
 	FluxReceiverURL      string
 	BrainURL             string
@@ -48,14 +49,23 @@ type CollaboratorCIAlertRule struct {
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow     `yaml:"legacy_build_workflows"`
-	Port                 string                    `yaml:"port"`
-	FluxReceiverURL      string                    `yaml:"flux_receiver_url"`
-	EriURL               string                    `yaml:"eri_url"`
-	NATSURL              string                    `yaml:"nats_url"`
-	RestateURL           string                    `yaml:"restate_url"`
-	RestatePRService     string                    `yaml:"restate_pr_service"`
-	RestateRepoService   string                    `yaml:"restate_repo_service"`
+	LegacyBuildWorkflows []LegacyBuildWorkflow `yaml:"legacy_build_workflows"`
+	Port                 string                `yaml:"port"`
+	FluxReceiverURL      string                `yaml:"flux_receiver_url"`
+	EriURL               string                `yaml:"eri_url"`
+	NATSURL              string                `yaml:"nats_url"`
+	RestateURL           string                `yaml:"restate_url"`
+	RestatePRService     string                `yaml:"restate_pr_service"`
+	RestateRepoService   string                `yaml:"restate_repo_service"`
+	// RestateAuthoritative flips github/deploy consumer ownership to the
+	// Restate PRObject/RepoObject journal. Rollback is a YAML rebind
+	// (restate_authoritative: false) with no code revert and no restart:
+	// the flag is read live per request, so it is deliberately absent from
+	// RestartRequired. The rebind rollback window is one deploy soak
+	// (about 48h); it stays valid only until the first Restate-committed
+	// external effect, after which rollback is forward-fix only because
+	// the journal owns effects legacy state cannot replay.
+	RestateAuthoritative bool                      `yaml:"restate_authoritative"`
 	SystemChannelID      string                    `yaml:"system_channel_id"`
 	SystemChannel        string                    `yaml:"system_channel"`
 	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
@@ -126,6 +136,8 @@ func LoadConfigFromEnvStrict() (*Config, error) {
 // field that is bound once at startup (listener, database pool, Discord
 // gateway session, outbound dispatcher and registry clients) and therefore
 // can only take effect through a graceful process restart.
+// RestateAuthoritative is deliberately excluded: the consumer cutover and
+// its YAML-rebind rollback take effect on the next request without restart.
 func RestartRequired(old, next *Config) bool {
 	if old == nil || next == nil {
 		return true
@@ -362,6 +374,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
 		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), "PRObject"),
 		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), "RepoObject"),
+		RestateAuthoritative: fileCfg.RestateAuthoritative,
 		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:         os.Getenv("DISCORD_TOKEN"),
 		AutoUpdatePRAuthors:  autoUpdateAuthors,

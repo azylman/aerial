@@ -548,22 +548,29 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 		sha = resolvedPR.Head.SHA
 	}
 	prNum := resolvedPR.Number
-	if !s.ghState.MarkCollaboratorConflict(repo, prNum, sha) {
-		return nil
-	}
 	branch := pr.Head.Ref
 	if resolvedPR.Head.Ref != "" {
 		branch = resolvedPR.Head.Ref
+	}
+	// Journal first, even on a dedup hit: marks prove legacy sent the DM,
+	// not that Restate journaled the event — pre-flip marks predate any
+	// journal. Restate dedups the repeat via stale-drop, the per-SHA mark,
+	// and the journaled effect key. The mark check below still suppresses
+	// the duplicate DM.
+	if err := s.routePREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
+		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
+		Title: resolvedPR.Title, Unmanaged: true,
+	}); err != nil {
+		return err
+	}
+	if !s.ghState.MarkCollaboratorConflict(repo, prNum, sha) {
+		return nil
 	}
 	msg := formatCollaboratorConflictMessage(mention, repo, prNum, resolvedPR.Title, branch, sha)
 	if err := s.dispatchCollaboratorDM(ctx, nil, repo, prNum, sha, channelID, msg); err != nil {
 		s.ghState.ClearCollaboratorConflict(repo, prNum, sha)
 		return err
 	}
-	s.shadowPREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
-		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
-		Title: resolvedPR.Title, Unmanaged: true,
-	})
 	return nil
 }
 
@@ -580,6 +587,14 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 	}
 	branch := firstNonEmpty(resolvedPR.Head.Ref, res.Branch)
 	sha := firstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
+	// Journal first, matching the conflict notifier above: dedup hits skip
+	// the DM below, never the journal.
+	if err := s.routePREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
+		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
+	}); err != nil {
+		return err
+	}
 	if !s.ghState.MarkCollaboratorAlerted(res.Repo, resolvedPR.Number, sha) {
 		return nil
 	}
@@ -588,10 +603,6 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 		s.ghState.ClearCollaboratorAlerted(res.Repo, resolvedPR.Number, sha)
 		return err
 	}
-	s.shadowPREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
-		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
-		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
-	})
 	return nil
 }
 

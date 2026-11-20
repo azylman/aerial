@@ -329,6 +329,11 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		}
 	}
 	if !transitioned {
+		// Journal before the legacy publish: a journal failure leaves no
+		// rollout_updated behind, so the watcher tick retries cleanly.
+		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+			return err
+		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        "rollout_updated",
 			Repo:         pr.Repo,
@@ -343,7 +348,6 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		}); err != nil {
 			return err
 		}
-		s.shadowRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name)
 		return nil
 	}
 	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
@@ -352,6 +356,16 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		if resolved, rErr := s.ResolveThreadForPR(ctx, pr.Repo, pr.PRNumber); rErr == nil {
 			targetID = resolved
 		}
+	}
+	// Journal even on a suppress hit: a pre-flip dispatched mark proves the
+	// legacy publish already happened, not that Restate journaled it.
+	// Restate dedups the repeat; the guard below still skips duplicate
+	// publishes and prompts.
+	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber); err != nil {
+		return err
+	}
+	if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+		return err
 	}
 	if !s.wasDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber) {
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -374,8 +388,6 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			return err
 		}
 		s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
-		s.shadowDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber)
-		s.shadowRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name)
 	}
 	if s.registry != nil {
 		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, "deployed", map[string]any{"deploy_success_pending": false}); err != nil {

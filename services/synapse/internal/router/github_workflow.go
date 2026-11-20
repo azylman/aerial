@@ -32,6 +32,12 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if deferred, err := s.deferPRToWatcher(ctx, repo, prNum); deferred || err != nil {
 		return err
 	}
+	// Journal before the legacy publish and dedup mark: a journal failure
+	// leaves nothing recorded, so the redelivery retries the journal
+	// instead of tripping the suppress guard with the journal forever lost.
+	if err := s.routeDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum); err != nil {
+		return err
+	}
 	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        eventDeploySuccess,
 		Repo:         repo,
@@ -47,7 +53,6 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		return err
 	}
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
-	s.shadowDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum)
 	return nil
 }
 
@@ -173,6 +178,16 @@ func (s *RouterServer) handleFinalAttemptDeployFailure(ctx context.Context, repo
 }
 
 func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, refs []fluxKustomizationRef, trackPR, finalAttempt bool) error {
+	// Journal before recording or reconciling: a journal failure leaves
+	// nothing recorded, so redelivery re-journals (idempotent) and retries
+	// the record/reconcile instead of repeating an unjournaled effect.
+	if trackPR {
+		if err := s.routePREvent(ctx, "HandleKustomizationRequested", restateclient.PREvent{
+			Repo: repo, PRNumber: prNum, HeadSHA: headSHA, Branch: headBranch,
+		}); err != nil {
+			return err
+		}
+	}
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
@@ -188,11 +203,6 @@ func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, rep
 			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
 		}
 		return err
-	}
-	if trackPR {
-		s.shadowPREvent(ctx, "HandleKustomizationRequested", restateclient.PREvent{
-			Repo: repo, PRNumber: prNum, HeadSHA: headSHA, Branch: headBranch,
-		})
 	}
 	return nil
 }
@@ -379,23 +389,34 @@ func (s *RouterServer) rerunWorkflowRunFailedJobs(ctx context.Context, repo stri
 	return fmt.Errorf("rerun-failed-jobs returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
-func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent) bool {
+func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent) (bool, error) {
 	if p.Action != ghStatusCompleted || p.WorkflowRun.ID <= 0 || p.WorkflowRun.RunAttempt != 1 ||
 		s.isStaleOrIgnoredCIFailure(ctx, res) ||
 		(!isMainBranch(p.WorkflowRun.HeadBranch) && !s.isMergeSHAFailure(ctx, res)) ||
 		!s.ownsWorkflowRunEvent(ctx, res.Repo, res.PRNumber) {
-		return false
+		return false, nil
+	}
+	// Journal before the external rerun: a journal failure fires nothing,
+	// so redelivery retries the journal. A rerun failure after a committed
+	// journal also returns an error when authoritative, so the webhook is
+	// answered 5xx and redelivery re-journals (idempotent) and retries the
+	// rerun. No success ack or dedup mark lands until the rerun succeeds;
+	// legacy mode keeps the deploy_failed fallback.
+	if err := s.routePREvent(ctx, "HandleCheckRerunRequested", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
+		MergeSHA: res.MergeSHA, CheckName: res.CheckName, Branch: res.Branch,
+	}); err != nil {
+		return false, err
 	}
 	if err := s.rerunWorkflowRunFailedJobs(ctx, res.Repo, p.WorkflowRun.ID); err != nil {
 		slog.WarnContext(ctx, "[synapse] [github] failed auto-rerunning failed jobs for workflow run", "run_id", p.WorkflowRun.ID, "repo", res.Repo, "error", err)
-		return false
+		if s.restateAuthoritative() {
+			return false, fmt.Errorf("rerun failed jobs for workflow run %d: %w", p.WorkflowRun.ID, err)
+		}
+		return false, nil
 	}
 	slog.InfoContext(ctx, "[synapse] [github] successfully triggered rerun-failed-jobs for workflow run (attempt 1)", "run_id", p.WorkflowRun.ID, "repo", res.Repo)
-	s.shadowPREvent(ctx, "HandleCheckRerunRequested", restateclient.PREvent{
-		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
-		MergeSHA: res.MergeSHA, CheckName: res.CheckName, Branch: res.Branch,
-	})
-	return true
+	return true, nil
 }
 
 func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
@@ -414,7 +435,11 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	slog.InfoContext(ctx, "[synapse] [github] [workflow_run] event", "repo", res.Repo, "workflow", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
 
 	s.handleWorkflowRunBuildMetadata(ctx, p, res)
-	if s.tryRerunFailedMainWorkflowRun(ctx, p, res) {
+	rerunHandled, err := s.tryRerunFailedMainWorkflowRun(ctx, p, res)
+	if err != nil {
+		return nil, err
+	}
+	if rerunHandled {
 		return res, nil
 	}
 
@@ -422,7 +447,9 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
 		return nil, err
 	}
-	s.shadowCheckOutcome(ctx, res)
+	if err := s.routeCheckOutcome(ctx, res); err != nil {
+		return nil, err
+	}
 	if p.Action == ghStatusCompleted && p.WorkflowRun.Status == ghStatusCompleted {
 		if err := s.dispatchWorkflowRunImages(ctx, res.Repo, workflowRunEvent{ID: p.WorkflowRun.ID, Attempt: p.WorkflowRun.RunAttempt, HeadSHA: res.HeadSHA}, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.TargetID, res.PRNumber); err != nil {
 			return nil, err

@@ -162,6 +162,7 @@ type ghEventCase struct {
 	botID                   string
 	wantNoCommitSHACache    bool
 	wantErr                 bool
+	authoritative           bool
 	wantRepo                string
 	wantAction              string
 	wantPR                  int
@@ -324,6 +325,11 @@ var prAndPushTestCases = []ghEventCase{
 		payload: `{"ref":"refs/heads/main","after":"pushsha999","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"pushsha999","message":"feat: merge pr"}}`,
 		reg:     &mockPRRegistry{backfillTargetID: "target-backfill"},
 		wantPR:  522, wantMergeSHA: "pushsha999", wantBackfillCalls: 1, wantAdvanceCalls: 1,
+	},
+	{
+		name: "authoritative push journal failure surfaces", event: "push", delivery: "del-push-auth",
+		payload:       `{"ref":"refs/heads/main","before":"prev111","after":"squash123","deleted":false,"head_commit":{"id":"squash123","message":"feat: merged feature (#999)"},"repository":{"full_name":"azylman/aerial"}}`,
+		authoritative: true, wantErr: true,
 	},
 	{
 		name: "push to main falls back to squash commit message when SHA lookup misses", event: "push", delivery: "del-push-msg-fallback",
@@ -682,7 +688,7 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	if tc.disp != nil {
 		disp = tc.disp
 	}
-	cfg := legacyFixtureConfig(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner, BotID: tc.botID})
+	cfg := legacyFixtureConfig(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner, BotID: tc.botID, RestateAuthoritative: tc.authoritative})
 	srv := newTestRouter(cfg, legacyFixtureClient(mockServer.Client()), reg, disp, inserters...)
 	srv.onProcessed = func(string, string) {}
 	if tc.priorEvent != nil {

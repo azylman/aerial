@@ -445,6 +445,11 @@ var checkRunTestCases = []ghEventCase{
 		autoUpdateAuthors: []string{"trusted-author"}, wantPR: 543, wantHeadSHA: "head543", wantUpdatedBranchHit: "/repos/azylman/aerial/pulls/543/update-branch",
 	},
 	{
+		name: "authoritative check_run journal failure surfaces", event: "check_run", delivery: "del-cr-auth",
+		payload:       `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"CI Gate","head_sha":"head543","status":"completed","conclusion":"success","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]}}`,
+		authoritative: true, wantErr: true,
+	},
+	{
 		name: "check_run gate aggregator success handles conflict check error cleanly", event: "check_run", delivery: "del-cr-gate-success-err",
 		payload:           `{"action":"completed","repository":{"full_name":"azylman/unknown-repo"},"check_run":{"name":"CI Gate","head_sha":"head999","status":"completed","conclusion":"success","pull_requests":[{"number":999,"head":{"ref":"feat/unknown","sha":"head999"}}]}}`,
 		autoUpdateAuthors: []string{"trusted-author"}, wantPR: 999, wantHeadSHA: "head999", wantErr: false,
@@ -512,6 +517,11 @@ func TestProcessGitHubEvent_WorkflowRun(t *testing.T) {
 			name: "workflow_run with PR array", event: "workflow_run", delivery: "del-wf-1",
 			payload: `{"action":"completed","workflow_run":{"id":333,"name":"Continuous Delivery","head_sha":"headsha333","head_branch":"feat/cd","status":"completed","conclusion":"success","pull_requests":[{"number":516,"head":{"ref":"feat/cd","sha":"headsha333"}}]},"repository":{"full_name":"azylman/aerial"}}`,
 			wantPR:  516, wantBranch: "feat/cd", wantSource: "workflow_run_payload",
+		},
+		{
+			name: "authoritative workflow_run journal failure surfaces", event: "workflow_run", delivery: "del-wf-auth",
+			payload:       `{"action":"completed","workflow_run":{"id":333,"name":"Continuous Delivery","head_sha":"headsha333","head_branch":"feat/cd","status":"completed","conclusion":"success","pull_requests":[{"number":516,"head":{"ref":"feat/cd","sha":"headsha333"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			authoritative: true, wantErr: true,
 		},
 		{
 			name: "workflow_run fallback to commit lookup", event: "workflow_run", delivery: "del-wf-2",

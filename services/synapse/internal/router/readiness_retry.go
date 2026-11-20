@@ -47,10 +47,15 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// Readiness retry never mints a new generation and never clears effect
-	// keys: the shadow mirror carries the expected merge SHA so Restate can
-	// drop it as stale when the gate already advanced.
-	s.shadowPREvent(r.Context(), "HandleReadinessRetry", restateclient.PREvent{
+	// keys: the route carries the expected merge SHA so Restate can
+	// drop it as stale when the gate already advanced. A route failure
+	// reports 503; the legacy reconcile above already ran, and the
+	// operator retry safely re-triggers it without minting a generation.
+	if err := s.routePREvent(r.Context(), "HandleReadinessRetry", restateclient.PREvent{
 		Repo: req.Repo, PRNumber: req.Number, MergeSHA: req.Merge,
-	})
+	}); err != nil {
+		httpkit.WriteJSON(w, 503, map[string]string{fieldError: err.Error()})
+		return
+	}
 	httpkit.WriteJSON(w, 202, map[string]string{"status": "readiness_pending"})
 }

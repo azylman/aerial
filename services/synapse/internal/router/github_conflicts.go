@@ -29,6 +29,14 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	}
 	normHeadSHA := strings.TrimSpace(headSHA)
 	if updated {
+		// Journal before the legacy publish and conflict mark: a journal
+		// failure leaves nothing recorded, so the redelivery retries the
+		// journal instead of returning early via WasConflictPublished.
+		if err := s.routePREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
+			Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
+		}); err != nil {
+			return false, err
+		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        prConflict,
 			Repo:         repo,
@@ -46,9 +54,6 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		if normHeadSHA != "" {
 			s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
 		}
-		s.shadowPREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
-			Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
-		})
 		return true, nil
 	}
 	tid := targetID
@@ -59,6 +64,15 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	}
 	if tid == "" {
 		return false, nil
+	}
+	// Journal even on a WasConflictPublished hit: a pre-flip mark proves
+	// the legacy publish happened, not that Restate journaled it.
+	// Restate dedups the repeat; the check below still skips the
+	// duplicate legacy publish.
+	if err := s.routePREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
+	}); err != nil {
+		return false, err
 	}
 	if s.ghState.WasConflictPublished(repo, prNumber, normHeadSHA) {
 		return true, nil
@@ -80,9 +94,6 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	if normHeadSHA != "" {
 		s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
 	}
-	s.shadowPREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
-	})
 	return true, nil
 }
 
@@ -237,6 +248,15 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		// Journal before the legacy publish: a journal failure leaves no
+		// merged event behind, so the redelivery retries the journal
+		// instead of duplicating the publish.
+		if err := s.routePREvent(ctx, "HandleMerged", restateclient.PREvent{
+			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
+			MergeSHA: res.MergeSHA, Branch: res.Branch,
+		}); err != nil {
+			return err
+		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        prMerged,
 			Repo:         res.Repo,
@@ -252,10 +272,6 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		}); err != nil {
 			return err
 		}
-		s.shadowPREvent(ctx, "HandleMerged", restateclient.PREvent{
-			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
-			MergeSHA: res.MergeSHA, Branch: res.Branch,
-		})
 		return nil
 	}
 	targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
@@ -263,6 +279,12 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		return err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	// Journal before the legacy publish, matching the merged branch above.
+	if err := s.routePREvent(ctx, "HandleClosed", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
+	}); err != nil {
+		return err
+	}
 	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        prClosedUnmerged,
 		Repo:         res.Repo,
@@ -277,9 +299,6 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 	}); err != nil {
 		return err
 	}
-	s.shadowPREvent(ctx, "HandleClosed", restateclient.PREvent{
-		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
-	})
 	return nil
 }
 
@@ -361,7 +380,9 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 			return err
 		}
 		if shadowWasConflict {
-			s.shadowConflictResolved(ctx, res)
+			if err := s.routeConflictResolved(ctx, res); err != nil {
+				return err
+			}
 		}
 	case "auto_merge_disabled":
 		return s.handlePRAutoMergeDisabledAction(ctx, res, pr)

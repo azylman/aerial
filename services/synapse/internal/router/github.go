@@ -423,10 +423,12 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 		}
 	}
 	if res.Action == "reopened" && res.PRNumber > 0 && strings.TrimSpace(res.HeadSHA) != "" {
-		s.shadowPREvent(ctx, "HandleReopened", restateclient.PREvent{
+		if err := s.routePREvent(ctx, "HandleReopened", restateclient.PREvent{
 			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
 			Branch: res.Branch, Title: p.PullRequest.Title,
-		})
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if res.Action == ghActionOpened && res.PRNumber > 0 {
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -546,13 +548,22 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
 		return nil, err
 	}
+	if err := s.reportCheckRunGateSuccess(ctx, p, res, recovered); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// reportCheckRunGateSuccess re-checks open-PR conflicts when a gate check
+// (or a recovered success) lands, then journals the check outcome to the
+// Restate journal in authoritative mode or the shadow mirror otherwise.
+func (s *RouterServer) reportCheckRunGateSuccess(ctx context.Context, p GitHubCheckRunPayload, res *ResolvedGitHubEvent, recovered bool) error {
 	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && (isGateAggregatorCheck(res.CheckName) || isRoboRevCheck(res.CheckName) || recovered) && res.PRNumber > 0 {
 		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
 			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on gate success", "repo", res.Repo, "error", err)
 		}
 	}
-	s.shadowCheckOutcome(ctx, res)
-	return res, nil
+	return s.routeCheckOutcome(ctx, res)
 }
 
 func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPushPayload) error {
@@ -574,6 +585,14 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		// Journal before the legacy publish: a journal failure leaves no
+		// merged event behind, so the redelivery retries the journal.
+		if err := s.routePREvent(ctx, "HandleMerged", restateclient.PREvent{
+			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
+			MergeSHA: res.MergeSHA, Branch: res.Branch,
+		}); err != nil {
+			return err
+		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        prMerged,
 			Repo:         res.Repo,
@@ -589,10 +608,6 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 		}); err != nil {
 			return err
 		}
-		s.shadowPREvent(ctx, "HandleMerged", restateclient.PREvent{
-			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
-			MergeSHA: res.MergeSHA, Branch: res.Branch,
-		})
 	}
 	return nil
 }
@@ -622,6 +637,16 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 		return res, nil
 	}
 
+	// Journal before every legacy side effect on the push path
+	// (backfill, conflict checks, git_push dispatch): a journal failure
+	// leaves nothing behind, so the redelivery retries the journal instead
+	// of re-emitting the dispatch or duplicating downstream work.
+	if err := s.routeRepoEvent(ctx, "HandleMainPush", restateclient.RepoEvent{
+		Repo: res.Repo, MainSHA: res.HeadSHA,
+	}); err != nil {
+		return nil, err
+	}
+
 	if err := s.resolveAndBackfillPushPR(ctx, res, p); err != nil {
 		return nil, err
 	}
@@ -633,9 +658,6 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 		return nil, err
 	}
-	s.shadowRepoEvent(ctx, "HandleMainPush", restateclient.RepoEvent{
-		Repo: res.Repo, MainSHA: res.HeadSHA,
-	})
 	return res, nil
 }
 
