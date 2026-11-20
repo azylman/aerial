@@ -114,25 +114,6 @@ func NewServer(handler *tools.ToolHandler, dispatcher ...dispatch.PromptDispatch
 	return s
 }
 
-// eventBusSetter is the dispatcher seam for JetStream event-bus wiring: the
-// concrete dispatch.HTTPPromptDispatcher carries it, and ConfigureEventBus
-// asserts it internally so package main never touches Server internals.
-type eventBusSetter interface {
-	SetEventBus(bus pubsub.Bus)
-}
-
-// ConfigureEventBus wires the JetStream event bus into the dispatcher when it
-// supports it. It is a no-op for nil servers, nil dispatchers, and
-// dispatchers without the seam.
-func (s *Server) ConfigureEventBus(bus pubsub.Bus) {
-	if s == nil || s.dispatcher == nil {
-		return
-	}
-	if eb, ok := s.dispatcher.(eventBusSetter); ok {
-		eb.SetEventBus(bus)
-	}
-}
-
 func (s *Server) registerTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "schedule_recurring",

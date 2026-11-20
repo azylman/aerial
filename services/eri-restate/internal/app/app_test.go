@@ -67,7 +67,7 @@ func TestNewEriRestateServer(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
-	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
+	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -119,7 +119,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/discover", http.NoBody)
 	require.NoError(t, err)
-	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
+	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
 
 	resp, err := h2cClient.Do(req)
 	require.NoError(t, err)

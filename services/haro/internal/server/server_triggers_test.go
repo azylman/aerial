@@ -23,32 +23,6 @@ import (
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
-// stubEventDispatcher implements dispatch.PromptDispatcher without the
-// event-bus seam; ConfigureEventBus must ignore it.
-type stubEventDispatcher struct{}
-
-func (stubEventDispatcher) DispatchPrompt(context.Context, dispatch.PromptDispatchRequest) (dispatch.PromptDispatchResponse, error) {
-	return dispatch.PromptDispatchResponse{}, nil
-}
-
-func (stubEventDispatcher) Dispatch(context.Context, dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
-	return dispatch.DispatchResponse{}, nil
-}
-
-// stubBusDispatcher implements dispatch.PromptDispatcher plus the
-// SetEventBus seam so ConfigureEventBus wiring is observable.
-type stubBusDispatcher struct{ bus pubsub.Bus }
-
-func (*stubBusDispatcher) DispatchPrompt(context.Context, dispatch.PromptDispatchRequest) (dispatch.PromptDispatchResponse, error) {
-	return dispatch.PromptDispatchResponse{}, nil
-}
-
-func (*stubBusDispatcher) Dispatch(context.Context, dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
-	return dispatch.DispatchResponse{}, nil
-}
-
-func (s *stubBusDispatcher) SetEventBus(bus pubsub.Bus) { s.bus = bus }
-
 func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
 	server, ts := setupTestServer(t)
 	defer ts.Close()
@@ -177,48 +151,6 @@ func TestServer_Metrics_Table(t *testing.T) {
 				if !strings.Contains(body, sub) {
 					t.Errorf("expected body to contain %q, body:\n%s", sub, body)
 				}
-			}
-		})
-	}
-}
-
-func TestServer_ConfigureEventBus(t *testing.T) {
-	_, ts := setupTestServer(t)
-	defer ts.Close()
-
-	memBus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = memBus.Close() })
-
-	tests := []struct {
-		name    string
-		server  *Server
-		bus     pubsub.Bus
-		wantBus pubsub.Bus
-	}{
-		{"nil server is a no-op", nil, nil, nil},
-		{"nil dispatcher is a no-op", NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, nil)), memBus, nil},
-		{"dispatcher without bus seam ignores bus", NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:", EriURL: ""}, nil), stubEventDispatcher{}), memBus, nil},
-		{"dispatcher with bus seam receives bus", NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:", EriURL: ""}, nil), &stubBusDispatcher{}), memBus, memBus},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.server.ConfigureEventBus(tc.bus)
-			if tc.server == nil {
-				return
-			}
-			d, ok := tc.server.dispatcher.(*stubBusDispatcher)
-			if tc.wantBus == nil {
-				if ok && d.bus != nil {
-					t.Errorf("expected no bus wired, got %v", d.bus)
-				}
-				return
-			}
-			if !ok {
-				t.Fatal("expected dispatcher with bus seam")
-			}
-			if d.bus != tc.wantBus {
-				t.Errorf("wired bus = %v, want exact sentinel %v", d.bus, tc.wantBus)
 			}
 		})
 	}
