@@ -37,7 +37,7 @@ export const ServiceCard = memo(function ServiceCard({ name }: { readonly name: 
       <div className="status-badge-container">
         <span className="service-uptime">{formatUptime(svc.uptime_seconds)}</span>
         <span className={`pulse-dot ${svc.status}`} />
-        <span className={`badge ${svc.status}`}>{svc.status.toUpperCase()}</span>
+        {svc.status !== 'healthy' && <span className={`badge ${svc.status}`}>{svc.status.toUpperCase()}</span>}
       </div>
     </div>
   );

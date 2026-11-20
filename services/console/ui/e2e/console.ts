@@ -131,7 +131,8 @@ const DEPLOY_TIMERS_TICKED: CountExpectation = { selector: '#telemetry-view .dep
 const TELEMETRY_COUNTS: readonly CountExpectation[] = [
   DEPLOY_TIMERS_TICKED,
   { selector: '#telemetry-view .service-card', count: 18 },
-  { selector: '#telemetry-view .badge.healthy', count: 15 },
+  // Healthy services show only the green dot; the text badge is reserved for degraded/down.
+  { selector: '#telemetry-view .badge.healthy', count: 0 },
   { selector: '#telemetry-view .badge.degraded', count: 2 },
   { selector: '#telemetry-view .badge.down', count: 1 },
   // 6 deployments: index 0 renders full; eri (live, index 1) and every later index render compact.
