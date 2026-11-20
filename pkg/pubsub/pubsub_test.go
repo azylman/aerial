@@ -785,21 +785,6 @@ func TestContracts_JSONWireFormat(t *testing.T) {
 			wantJSON: `{"message_sid":"m1","from_number":"+1","to_number":"+2","body":"hi"}`,
 		},
 		{
-			name:     "EriPromptJobArgs",
-			payload:  EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true},
-			wantJSON: `{"channel_id":"c1","prompt":"p1","silent":true}`,
-		},
-		{
-			name:     "EriDispatchJobArgs",
-			payload:  EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"},
-			wantJSON: `{"source":"s","target_id":"t1","prompt":"p1"}`,
-		},
-		{
-			name:     "EriDiscordMessageJobArgs",
-			payload:  EriDiscordMessageJobArgs{ChannelID: "c1", Content: "msg"},
-			wantJSON: `{"channel_id":"c1","content":"msg"}`,
-		},
-		{
 			name:     "HaroOneShotJobArgs",
 			payload:  HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime},
 			wantJSON: `{"thread_id":"t1","prompt":"p1","run_at":"2026-11-14T16:00:00Z"}`,
