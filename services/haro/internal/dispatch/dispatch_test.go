@@ -499,6 +499,10 @@ func TestServiceNameHelpers(t *testing.T) {
 		{"  aerial  ", "ThreadSession", "DispatchSession"},
 		{"miorine", "ThreadSession-miorine", "DispatchSession-miorine"},
 		{"Suletta", "ThreadSession-suletta", "DispatchSession-suletta"},
+		{"agent-1_test", "ThreadSession-agent-1_test", "DispatchSession-agent-1_test"},
+		{"invalid/name", "ThreadSession", "DispatchSession"},
+		{"../traversal", "ThreadSession", "DispatchSession"},
+		{"a@b#c", "ThreadSession", "DispatchSession"},
 	}
 	for _, tc := range tests {
 		t.Run("agent_"+tc.agent, func(t *testing.T) {
@@ -697,12 +701,14 @@ type restatePromptTestCase struct {
 func runRestatePromptTest(t *testing.T, tc restatePromptTestCase) {
 	t.Helper()
 	var gotPath, gotIdempotency string
+	var gotBody PromptDispatchRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotIdempotency = r.Header.Get("Idempotency-Key")
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
 		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(tc.serverStatus)
 		_, _ = w.Write([]byte(tc.serverResponse))
 	}))
@@ -733,6 +739,12 @@ func runRestatePromptTest(t *testing.T, tc restatePromptTestCase) {
 	}
 	if tc.wantChannelID != "" && resp.ChannelID != tc.wantChannelID {
 		t.Errorf("resp.ChannelID = %q, want %q", resp.ChannelID, tc.wantChannelID)
+	}
+	if resp.ChannelID != "" && gotBody.ChannelID != resp.ChannelID {
+		t.Errorf("gotBody.ChannelID = %q, want %q", gotBody.ChannelID, resp.ChannelID)
+	}
+	if resp.MessageID != "" && gotBody.MessageID != resp.MessageID {
+		t.Errorf("gotBody.MessageID = %q, want %q", gotBody.MessageID, resp.MessageID)
 	}
 }
 

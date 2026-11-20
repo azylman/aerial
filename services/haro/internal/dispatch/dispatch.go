@@ -27,9 +27,22 @@ const (
 	statusAccepted   = "accepted"
 )
 
-// NormalizeAgentName trims and lowercases an agent name.
+func isSafeAgentChar(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+}
+
+// NormalizeAgentName trims and lowercases an agent name, ensuring it contains only safe identifier characters.
 func NormalizeAgentName(agent string) string {
-	return strings.ToLower(strings.TrimSpace(agent))
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" {
+		return ""
+	}
+	for _, c := range clean {
+		if !isSafeAgentChar(c) {
+			return defaultAgentName
+		}
+	}
+	return clean
 }
 
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
@@ -342,7 +355,11 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 	endpoint := d.restateURL + "/" + svc + "/" + url.PathEscape(channelID) + "/Enqueue"
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
 
-	respBytes, err := d.postRestateJSON(ctx, endpoint, idempotencyKey, "prompt dispatch", req)
+	payload := req
+	payload.ChannelID = channelID
+	payload.MessageID = msgID
+
+	respBytes, err := d.postRestateJSON(ctx, endpoint, idempotencyKey, "prompt dispatch", payload)
 	if err != nil {
 		return PromptDispatchResponse{}, err
 	}
