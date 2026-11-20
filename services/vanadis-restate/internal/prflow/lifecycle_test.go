@@ -43,6 +43,7 @@ type checkStatusSpyStore struct {
 	bannerErr       error
 	failErr         error
 	skipFailApply   bool
+	failBanner      string
 }
 
 func (s *checkStatusSpyStore) chunk(chunkID string) *model.VanadisChunk {
@@ -109,7 +110,14 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 	if s.failErr != nil {
 		return nil, nil, false, s.failErr
 	}
-	return &model.VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
+	c := s.chunk(chunkID)
+	banner := c.Banner
+	if s.failBanner != "" {
+		banner = s.failBanner
+	} else if !s.skipFailApply && banner == "" {
+		banner = "Chunk 1 failed: " + reason
+	}
+	return &model.VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -267,7 +275,9 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 		prEvent       pubsub.PRLifecycleEvent
 		bannerErr     error
 		failErr       error
+		promptErr     error
 		skipFailApply bool
+		failBanner    string
 		wantErr       bool
 		wantFailed    []string
 		wantBanners   []string
@@ -300,6 +310,24 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			prEvent:       pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
 			skipFailApply: true,
 			wantFailed:    []string{"c1:pr_closed_unmerged"},
+		},
+		{
+			name:          "closed_unmerged retry with matching banner completes notifications",
+			event:         "closed_unmerged",
+			prEvent:       pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			skipFailApply: true,
+			failBanner:    "Chunk 1 failed: pr_closed_unmerged",
+			wantFailed:    []string{"c1:pr_closed_unmerged"},
+			wantPromptIn:  "[VANADIS BUILD FAILED]",
+		},
+		{
+			name:         "closed_unmerged notification error propagates",
+			event:        "closed_unmerged",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			promptErr:    errors.New("prompt unavailable"),
+			wantErr:      true,
+			wantFailed:   []string{"c1:pr_closed_unmerged"},
+			wantPromptIn: "[VANADIS BUILD FAILED]",
 		},
 		{
 			name:       "closed_unmerged fail chunk error propagates",
@@ -348,8 +376,12 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 				bannerErr:     tc.bannerErr,
 				failErr:       tc.failErr,
 				skipFailApply: tc.skipFailApply,
+				failBanner:    tc.failBanner,
 			}
 			eri := &mockEriClient{}
+			if tc.promptErr != nil {
+				eri.promptFn = func(context.Context, string, string) error { return tc.promptErr }
+			}
 			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
 			f := NewFlow(spy, exec)
 
@@ -459,6 +491,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		dispatchErr        error
 		notifyErr          error
 		skipFailApply      bool
+		failBanner         string
 		headSHA            string
 		remediatedSHA      string
 		wantErr            bool
@@ -483,7 +516,8 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "ci_failed increment count error after accepted dispatch propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantSkipIfActive: &falseVal},
 		{name: "ci_failed increment count error at cap propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
 		{name: "ci_failed exceeding cap marks chunk failed and sends alert message", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed exceeding cap preserves chunk failure despite notification errors", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: dbErr, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed exceeding cap preserves chunk failure and propagates notification error", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed exceeding cap retry with matching banner completes notifications", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, skipFailApply: true, failBanner: "Chunk 1 failed: ci_remediation_cap_reached", wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
 		{name: "ci_failed exceeding cap fail chunk error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
 		{name: "ci_failed at cap with unapplied fail chunk skips cap without cancelling", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, skipFailApply: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
 		{name: "ci_failed on new head_sha dispatches with SkipIfActive false and records RemediatedSHA", event: "ci_failed", prEvent: ciFailEv("unit-tests", "new-head-sha"), remediatedSHA: "old-head-sha", wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-new-head-sha-1", wantSkipIfActive: &falseVal, wantRemediatedSHA: "new-head-sha"},
@@ -506,6 +540,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 				failCount:     tc.failCount,
 				failCountErr:  tc.failCountErr,
 				skipFailApply: tc.skipFailApply,
+				failBanner:    tc.failBanner,
 			}
 			if tc.headSHA != "" {
 				c := spy.chunk("c1")

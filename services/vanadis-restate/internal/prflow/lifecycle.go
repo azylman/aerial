@@ -192,6 +192,10 @@ func (f *Flow) dispatchSilentThreadWakePrompt(ctx context.Context, buildID, chun
 	return nil
 }
 
+func isFailureNotificationEligible(chk *model.VanadisChunk, failed bool, reason string) bool {
+	return failed || (chk != nil && chk.Status == statusFailed && strings.HasSuffix(strings.TrimSpace(chk.Banner), ": "+reason))
+}
+
 // HandleCIRemediationCapReached fails the chunk once CI remediation attempts
 // are exhausted and fans out the human-review alert.
 func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
@@ -199,17 +203,19 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if err != nil {
 		return err
 	}
-	if !failed || bld == nil || f.Exec == nil {
+	if !isFailureNotificationEligible(chk, failed, "ci_remediation_cap_reached") || bld == nil || f.Exec == nil {
 		return nil
 	}
 	if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
+	var msgErr error
 	if !bld.Quiet {
 		targetID := strings.TrimSpace(bld.ThreadID)
 		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
 		if mErr := f.Exec.DispatchDirectMessage(ctx, targetID, content); mErr != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] direct alert message warning", "error", mErr)
+			msgErr = mErr
 		}
 	}
 	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
@@ -217,8 +223,10 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if chk != nil {
 		chunks = append(chunks, *chk)
 	}
+	var widgetErr error
 	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, capBanner); sErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
+		widgetErr = sErr
 	}
 	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunkID}, "ci_remediation_cap_reached"); pErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
@@ -226,7 +234,7 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_build", "failed", []string{bld.ID}, "ci_remediation_cap_reached"); pErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
 	}
-	return nil
+	return errors.Join(msgErr, widgetErr)
 }
 
 // HandleConflictEvent marks the chunk conflicted and dispatches a
@@ -343,11 +351,11 @@ func (f *Flow) HandleClosedPREvent(ctx context.Context, chunkID string, ev pubsu
 	if ev.Status == "merged" || f.Store == nil {
 		return nil
 	}
-	bld, _, failed, fErr := f.Store.FailChunk(ctx, chunkID, "pr_closed_unmerged", "")
+	bld, chk, failed, fErr := f.Store.FailChunk(ctx, chunkID, "pr_closed_unmerged", "")
 	if fErr != nil {
 		return fErr
 	}
-	if failed && bld != nil && bld.Status == statusFailed && f.Exec != nil {
+	if isFailureNotificationEligible(chk, failed, "pr_closed_unmerged") && bld != nil && bld.Status == statusFailed && f.Exec != nil {
 		if err := f.NotifyChunkFailure(ctx, *bld, chunkID, "pr_closed_unmerged"); err != nil {
 			return err
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -93,7 +94,7 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string, mutation *BuildMutationRequest) (ReconcileBuildResult, error) {
 	buildID := strings.TrimSpace(rt.Key())
 	if buildID == "" {
-		err := restate.TerminalErrorf("build_id cannot be empty")
+		err := restate.ToTerminalError(fmt.Errorf("%w: build_id cannot be empty", store.ErrInvalidBuildInput), restate.WithErrorCode(http.StatusBadRequest))
 		RecordReconcileError(stepName, err)
 		return ReconcileBuildResult{}, err
 	}

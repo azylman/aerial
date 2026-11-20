@@ -2,6 +2,8 @@ package deploygate
 
 import (
 	"context"
+	"errors"
+	"net/http"
 
 	restate "github.com/restatedev/sdk-go"
 
@@ -25,8 +27,8 @@ func (g *Gate) RetryDeployment(rt Runtime, req RetryRequest) (RetryOutcome, erro
 		if err != nil {
 			return StepOutput{}, err
 		}
-		if build == nil || build.Status != statusRunning {
-			return StepOutput{}, restate.TerminalErrorf("deployment build not running")
+		if build == nil || (build.Status != statusRunning && build.Status != statusFailed) {
+			return StepOutput{}, restate.ToTerminalError(errors.New("deployment build not running"), restate.WithErrorCode(http.StatusConflict))
 		}
 		found := false
 		for i := range chunks {
@@ -36,9 +38,11 @@ func (g *Gate) RetryDeployment(rt Runtime, req RetryRequest) (RetryOutcome, erro
 			}
 		}
 		if !found {
-			return StepOutput{}, restate.TerminalErrorf("deployment chunk not retryable")
+			return StepOutput{}, restate.ToTerminalError(errors.New("deployment chunk not retryable"), restate.WithErrorCode(http.StatusConflict))
 		}
-		return StepOutput{State: &model.BuildObjectState{Build: *build, Chunks: chunks}}, nil
+		outBuild := *build
+		outBuild.Status = statusRunning
+		return StepOutput{State: &model.BuildObjectState{Build: outBuild, Chunks: chunks}}, nil
 	})
 	if err != nil {
 		return RetryOutcome{}, err
