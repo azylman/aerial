@@ -203,7 +203,7 @@ Two Virtual Objects calling each other synchronously (`restate.Object[T](ctx, ..
 
 ---
 
-## 5. Two-Phase Side Effects & Generation Fencing
+## 5. Two-Phase Side Effects, Idempotency Keys & Generation Fencing
 
 ### 5.1 Two-Phase Side Effects Pattern
 When modifying external systems (e.g. creating GitHub PRs, dispatching agent processes, or triggering deployments):
@@ -221,6 +221,43 @@ To prevent zombie workers or out-of-order delayed timer events from acting on ob
 - Tag dispatches with monotonic fencing tokens: `(Revision, Generation)` or `ExpectedDispatchID`.
 - When an outcome arrives (e.g. `OnDispatchOutcome` or webhook callback), verify that the incoming token matches the currently active dispatch.
 - If the token is stale, log a warning and discard the outcome cleanly without mutating state.
+
+### 5.4 Idempotency Key Design: Logical Granularity & Failure Modes
+When invoking Restate ingress over HTTP (`Idempotency-Key` header) or assigning downstream dispatch/message identifiers, the idempotency key must map 1:1 to the **logical identity of the intended operation**—neither coarser nor more specific.
+
+#### Core Invariant: Never Omit or Randomize `Idempotency-Key` Per Attempt
+- **Always send an `Idempotency-Key`** on HTTP calls to Restate ingress. Omitting the header or generating a fresh random UUID (`uuid.New()`) inside a retry loop or redelivery handler disables ingress deduplication: if an HTTP call times out after reaching Restate or an upstream event is redelivered, the retry launches a duplicate execution.
+- Derive keys deterministically using canonical structured strings or `uuid.NewSHA1(uuid.NameSpaceOID, []byte(canonicalTuple))`.
+
+#### Failure Mode 1: Under-Specificity & State-Dependent Early Returns (`SkipIfActive` Memoization)
+Restate memoizes a handler's return value under its `Idempotency-Key` for the service's `idempotency_retention` window (default 24 hours)—**even when the handler takes a state-dependent no-op early return** (e.g., returning `skipped_active` because a session or worker is currently busy when `SkipIfActive: true`).
+- **Symptom**: If the caller reuses a static or under-specified key across future attempts that are meant to re-evaluate whether the target is now idle (such as periodic heartbeat polls or a subsequent retry cycle on the same state snapshot), Restate short-circuits at ingress and replays the cached `skipped_active` response for 24 hours without invoking the handler.
+- **Resolution**: Include the logical occurrence or attempt boundary in the key whenever distinct evaluations over time are valid:
+  - **Scheduled ticks & periodic heartbeats**: Key on `(scheduleType, scheduleID, dueAt)` so transport retries of the *same* tick deduplicate, while the *next* scheduled tick gets a fresh key and re-evaluates live state.
+  - **Bounded retry / remediation loops**: Include the monotonic attempt ordinal `(entityID, stateVersion, attemptOrdinal)` so attempt $k+1$ is not blocked by a memoized response from attempt $k$.
+
+#### Failure Mode 2: Over-Specificity & Ephemeral Delivery Metadata
+Including transport-layer noise or wall-clock publish timestamps in an idempotency key makes the key too specific, causing logically identical operations to bypass deduplication.
+- **Wall-Clock Publish Timestamps (`OccurredAt: time.Now()`)**: Upstream event publishers often stamp `OccurredAt` at publish time. Hashing or appending `OccurredAt` into an idempotency key gives every webhook redelivery, NATS republish, or retry a brand-new key.
+- **Per-Call Random UUIDs in Scheduled/Event Workers**: Generating `uuid.NewString()` inside a cron ticker or event-trigger dispatcher (instead of deriving the ID from the schedule's `dueAt` or the upstream `eventID`) generates a fresh key whenever a timed-out trigger is recovered and re-queued.
+- **Fan-Out Noise on Single-Execution State Transitions**:
+  - When an operation can only logically execute **once per state version** (because completing the operation produces a new state version, such as rebasing a branch to a new commit SHA), keying on anything beyond `(entityID, stateVersion)` allows duplicate notifications to trigger redundant runs.
+  - When multiple concurrent signals in the same wave (e.g., parallel check failures on the same commit) should coalesce into a single ordinal remediation attempt $k$, including individual sub-event names or URLs in the key causes parallel executions instead of coalescing on `(entityID, stateVersion, attemptOrdinal)`.
+
+#### Canonical Keying Recipes by Operation Shape
+
+| Operation Shape | Canonical Key Tuple | Why |
+| :--- | :--- | :--- |
+| **External message / webhook ingress** | `(source, externalMessageID)` | Deduplicates upstream webhook or gateway retries of the exact same message. |
+| **Scheduled cron / one-shot / heartbeat tick** | `(scheduleType, scheduleID, dueAtUTC)` | Deduplicates retries of the same due tick while giving future ticks a fresh key (preventing 24h `skipped_active` starvation). |
+| **Event-watch trigger firing** | `(triggerID, upstreamEventID)` | Ensures recovered/redelivered triggers deduplicate on the exact upstream event firing. |
+| **One-per-version transition** *(resolution produces a new version/SHA)* | `(entityID, stateVersion)` | At most one execution is logically valid per version; strips timestamps and duplicate detector notifications. |
+| **Ordinal retry loop on a version** *(up to $N$ attempts per version)* | `(entityID, stateVersion, attemptOrdinal)` | Coalesces concurrent failure signals in wave $k$ into one attempt while giving attempt $k+1$ a distinct key. |
+| **Content-addressed alert / wake** *(wake once per unique condition)* | `(entityID, sha256(canonicalPayload))` | Deduplicates repeated alerts for the same underlying failure payload by excluding wall-clock publish timestamps. |
+
+#### Defense-in-Depth: Storage Idempotency & Context-Safe Finalization
+1. **Pair Ingress Keys with Atomic Storage Guards**: Combine Restate `Idempotency-Key` headers with downstream database idempotency (`INSERT ... ON CONFLICT (id) DO NOTHING`) and idempotent async wake signals (`restate.ObjectSend`), ensuring at-least-once safety even across key rotation or retention expiry.
+2. **Protect Post-Execution Finalization Checks from Stream Timeout Cancellation**: If a long-running invocation hits an ingress or stream `inactivity_timeout` right after committing its side effects and database state, the handler's `ctx` (`callerCtx`) will be canceled during post-turn cleanup. Any finalization check that queries storage using the canceled `ctx` will fail with `context canceled`, causing the handler to return a retriable error and triggering a duplicate replay storm. Always wrap post-commit finalization verification queries in `context.WithoutCancel(ctx)` with a bounded query timeout.
 
 ---
 
@@ -265,9 +302,10 @@ func BuildServiceName(agent string) string {
 }
 ```
 
-### 7.2 Startup Timeout Reconciliation
-Restate assigns default inactivity and abort timeouts to services. Long-running agent tasks or builds require extended timeouts (e.g. 1 hour).
-Reconcile service timeouts programmatically during startup via the Restate Admin API (`PATCH /services/<service_name>`):
+### 7.2 Service Timeout Declaration & Startup Reconciliation
+Restate assigns default inactivity and abort timeouts (1 minute) to newly discovered service revisions. Long-running agent tasks or builds require extended timeouts (e.g. 1 hour).
+1. **Declare timeouts natively in `restate.Reflect` options**: Always pass `restate.WithInactivityTimeout(time.Hour)` and `restate.WithAbortTimeout(time.Hour)` directly when reflecting services and Virtual Objects so Restate service re-discovery on new revisions never resets timeouts back to the 1-minute default.
+2. **Reconcile service timeouts programmatically during startup** via the Restate Admin API (`PATCH /services/<service_name>`):
 ```go
 reqURL := fmt.Sprintf("%s/services/%s", adminURL, url.PathEscape(serviceName))
 payload := []byte(`{"inactivity_timeout":"1h","abort_timeout":"1h"}`)
