@@ -4,8 +4,9 @@
 
 -- Messages Table
 CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    row_id BIGSERIAL UNIQUE,
+    id TEXT,
+    row_id BIGSERIAL,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     thread_id TEXT NOT NULL DEFAULT '',
     guild_id TEXT NOT NULL DEFAULT '',
     author_id TEXT NOT NULL DEFAULT '',
@@ -40,31 +41,36 @@ CREATE TABLE IF NOT EXISTS messages (
     total_tokens INTEGER NOT NULL DEFAULT 0,
     traceparent TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent, id),
+    CONSTRAINT uq_messages_agent_row_id UNIQUE (agent, row_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_messages_agent_status_created_at ON messages(agent, status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_messages_agent_thread_row_id ON messages(agent, thread_id, row_id);
+CREATE INDEX IF NOT EXISTS idx_messages_agent_row_id ON messages(agent, row_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
-CREATE INDEX IF NOT EXISTS idx_messages_thread_row_id ON messages(thread_id, row_id);
-CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_messages_row_id ON messages(row_id);
 CREATE INDEX IF NOT EXISTS idx_messages_admin_completed ON messages(status, is_admin, updated_at);
 
 -- Sessions Table
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
+    session_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL DEFAULT '',
     previous_conversation_id TEXT NOT NULL DEFAULT '',
     turn_count INTEGER NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
     last_summarized_message_id TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent, session_id)
 );
 
 -- Dispatches Table
 CREATE TABLE IF NOT EXISTS dispatches (
     id TEXT PRIMARY KEY,
-    row_id BIGSERIAL UNIQUE,
+    row_id BIGSERIAL,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     source TEXT NOT NULL DEFAULT '',
     session_id TEXT NOT NULL DEFAULT '',
     conversation_id TEXT NOT NULL DEFAULT '',
@@ -87,12 +93,13 @@ CREATE TABLE IF NOT EXISTS dispatches (
     total_tokens INTEGER NOT NULL DEFAULT 0,
     traceparent TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_dispatches_agent_row_id UNIQUE (agent, row_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_dispatches_status_created_at ON dispatches(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_dispatches_agent_status_created_at ON dispatches(agent, status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_dispatches_session_status ON dispatches(session_id, status);
-CREATE INDEX IF NOT EXISTS idx_dispatches_session_row_id ON dispatches(session_id, row_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_agent_session_row_id ON dispatches(agent, session_id, row_id);
 
 -- Extraction Watermarks Table
 CREATE TABLE IF NOT EXISTS extraction_watermarks (
@@ -107,6 +114,7 @@ CREATE TABLE IF NOT EXISTS extraction_watermarks (
 -- One-Shot Schedules Table
 CREATE TABLE IF NOT EXISTS one_shot_schedules (
     id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     thread_id TEXT NOT NULL,
     prompt TEXT NOT NULL,
     run_at TIMESTAMPTZ NOT NULL,
@@ -114,11 +122,12 @@ CREATE TABLE IF NOT EXISTS one_shot_schedules (
     effort TEXT NOT NULL DEFAULT 'low'
 );
 
-CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_agent_run_at ON one_shot_schedules(agent, run_at);
 
 -- Cron Schedules Table
 CREATE TABLE IF NOT EXISTS cron_schedules (
     id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     target_id TEXT NOT NULL,
     title_prefix TEXT NOT NULL DEFAULT '',
     cron_expr TEXT NOT NULL,
@@ -130,11 +139,12 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_cron_schedules_agent_next_run ON cron_schedules(agent, enabled, next_run_at);
 
 -- Heartbeat Schedules Table
 CREATE TABLE heartbeat_schedules (
     id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     target_id TEXT NOT NULL,
     title_prefix TEXT NOT NULL DEFAULT '',
     cron_expr TEXT NOT NULL,
@@ -147,11 +157,12 @@ CREATE TABLE heartbeat_schedules (
     last_completed_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
+CREATE INDEX idx_heartbeat_schedules_agent_next_run ON heartbeat_schedules(agent, enabled, next_run_at);
 
 -- Schedule Runs Table
 CREATE TABLE IF NOT EXISTS schedule_runs (
     id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     schedule_id TEXT NOT NULL,
     schedule_type TEXT NOT NULL,
     message_id TEXT NOT NULL DEFAULT '',
@@ -173,6 +184,8 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started ON schedule_runs(s
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_status_started ON schedule_runs(status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message_id);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_id ON schedule_runs(schedule_id);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_agent_schedule_started ON schedule_runs(agent, schedule_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_agent_status_started ON schedule_runs(agent, status, started_at DESC);
 
 -- Facts Table
 CREATE TABLE IF NOT EXISTS facts (
@@ -237,6 +250,7 @@ CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool_kind ON transcript_steps(to
 -- Pull Request and Deployment Registry Table
 CREATE TABLE IF NOT EXISTS pr_registry (
     id BIGSERIAL PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     repo TEXT NOT NULL,
     pr_number INTEGER NOT NULL,
     branch TEXT NOT NULL,
@@ -255,6 +269,7 @@ CREATE INDEX IF NOT EXISTS idx_pr_registry_head_sha ON pr_registry (repo, head_s
 CREATE INDEX IF NOT EXISTS idx_pr_registry_merge_sha ON pr_registry (repo, merge_sha);
 CREATE INDEX IF NOT EXISTS idx_pr_registry_status ON pr_registry (status);
 CREATE INDEX IF NOT EXISTS idx_pr_registry_target_id ON pr_registry (target_id);
+CREATE INDEX IF NOT EXISTS idx_pr_registry_agent_status ON pr_registry(agent, status);
 
 -- Production Code Coverage Table
 CREATE TABLE IF NOT EXISTS production_code_coverage (
@@ -274,6 +289,7 @@ CREATE INDEX IF NOT EXISTS idx_production_coverage_service ON production_code_co
 -- Vanadis Builds Table
 CREATE TABLE IF NOT EXISTS vanadis_builds (
     id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     thread_id TEXT NOT NULL,
     tier INTEGER NOT NULL DEFAULT 2,
     title TEXT NOT NULL DEFAULT '',
@@ -288,6 +304,7 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
 
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_status ON vanadis_builds (status);
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_thread_id ON vanadis_builds (thread_id);
+CREATE INDEX IF NOT EXISTS idx_vanadis_builds_agent_status ON vanadis_builds(agent, status);
 
 -- Vanadis Chunks Table
 CREATE TABLE IF NOT EXISTS vanadis_chunks (
@@ -348,6 +365,7 @@ CREATE INDEX IF NOT EXISTS idx_procedural_candidates_agent_thread ON procedural_
 -- Event Triggers Table
 CREATE TABLE IF NOT EXISTS event_triggers (
     id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL DEFAULT 'aerial',
     channel_id TEXT NOT NULL,
     source TEXT NOT NULL,
     target TEXT NOT NULL,
@@ -359,8 +377,8 @@ CREATE TABLE IF NOT EXISTS event_triggers (
     updated_at TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
-CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_event_triggers_agent_lookup ON event_triggers (agent, source, target, event_type);
+CREATE INDEX IF NOT EXISTS idx_event_triggers_agent_channel ON event_triggers (agent, channel_id, created_at ASC);
 
 -- Prospera Voice Subsystem Tables (owned exclusively by services/prospera)
 CREATE TABLE IF NOT EXISTS voice_calls (

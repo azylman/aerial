@@ -1,4 +1,4 @@
-h1:DWkYxPixL/kpNnIlWNmq80J+75EJGfncy94lUT/trtQ=
+h1:yes0zEI0RcN+0a2KXexbUTLwn3dKIEsWPxqmHYf9Tfs=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -38,3 +38,4 @@ h1:DWkYxPixL/kpNnIlWNmq80J+75EJGfncy94lUT/trtQ=
 20261119001239_transcript_role_ownership.sql h1:iqdMYl/wD60cq2LwomE8MBnrwMXx3uRDbpBBSShOqwY=
 20261119223000_watermark_pk_per_stack.sql h1:oEdS48Ynx+FweG61bmbEExpDP/qErD18w/ZzLtBIPF8=
 20261120172927_phase1_transcripts_coven.sql h1:0UkwnBphRwgbFELmERSfAD4UwvAZ7Jtd9DQJPtlyniQ=
+20261120174500_phase2_core_multiagent.sql h1:XnXdVeE7QLl7Lx/kt4q0FZ8BotjUGgNe8JE5tnz0mOY=

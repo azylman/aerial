@@ -35,8 +35,8 @@ func (s *SQLStore) ResolveThreadForSession(ctx context.Context, sessionID string
 
 	var thread sql.NullString
 	err := s.db.QueryRowContext(queryCtx,
-		`SELECT session_id FROM sessions WHERE conversation_id = $1 OR previous_conversation_id = $1 ORDER BY updated_at DESC LIMIT 1`,
-		strings.TrimSpace(sessionID)).Scan(&thread)
+		`SELECT session_id FROM sessions WHERE agent = $1 AND (conversation_id = $2 OR previous_conversation_id = $2) ORDER BY updated_at DESC LIMIT 1`,
+		s.effectiveAgent(), strings.TrimSpace(sessionID)).Scan(&thread)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

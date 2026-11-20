@@ -528,7 +528,7 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 	}
 }
 
-func initDefaultStores(cfg *config.Config, cur *config.ConfigData) (db.Store, db.TranscriptStore, func(), error) {
+func initDefaultStores(cfg *config.Config, cur *config.ConfigData, agentName string) (db.Store, db.TranscriptStore, func(), error) {
 	database, err := openDefaultDB(cfg)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to initialize database: %w", err)
@@ -538,7 +538,7 @@ func initDefaultStores(cfg *config.Config, cur *config.ConfigData) (db.Store, db
 		_ = database.Close()
 		return nil, nil, nil, fmt.Errorf("failed to resolve transcript stack: %w", err)
 	}
-	store := db.NewSQLStore(database)
+	store := db.NewSQLStore(database).WithAgent(db.ResolveAgentName(agentName))
 	txStore := db.NewSQLTranscriptStore(database, stack)
 	cleanup := func() {
 		for _, s := range []any{txStore, store} {
@@ -557,7 +557,7 @@ func resolveBrainStores(cfg *config.Config, cur *config.ConfigData, opts brainAp
 	if opts.store != nil {
 		return opts.store, opts.txStore, nil, nil
 	}
-	return initDefaultStores(cfg, cur)
+	return initDefaultStores(cfg, cur, opts.agentName)
 }
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {

@@ -895,7 +895,7 @@ func TestInitDatabaseAndStores(t *testing.T) {
 				Transcripts: config.TranscriptsConfig{Stack: tc.stack},
 			})
 			cur := appCfg.Current()
-			dbConn, s, tx, err := initDatabaseAndStores(context.Background(), appCfg, cur)
+			dbConn, s, tx, err := initDatabaseAndStores(context.Background(), appCfg, cur, "")
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)

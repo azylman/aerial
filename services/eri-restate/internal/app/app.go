@@ -445,12 +445,12 @@ var (
 	reconcileMaxAttempts = 3
 )
 
-func initDatabaseAndStores(_ context.Context, appCfg *config.Config, cur *config.ConfigData) (*sql.DB, db.Store, db.TranscriptStore, error) {
+func initDatabaseAndStores(_ context.Context, appCfg *config.Config, cur *config.ConfigData, agentName string) (*sql.DB, db.Store, db.TranscriptStore, error) {
 	database, err := openDefaultDB(appCfg)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
-	store := db.NewSQLStore(database)
+	store := db.NewSQLStore(database).WithAgent(db.ResolveAgentName(agentName))
 	stack, err := db.ResolveTranscriptStack(cur.DatabaseURL, cur.Transcripts.Stack)
 	if err != nil {
 		_ = database.Close()
@@ -603,7 +603,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	store := appOpts.store
 	txStore := appOpts.txStore
 	if store == nil {
-		database, s, tx, err := initDatabaseAndStores(ctx, appCfg, cur)
+		database, s, tx, err := initDatabaseAndStores(ctx, appCfg, cur, cfg.AgentName)
 		if err != nil {
 			return err
 		}

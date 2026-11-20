@@ -12,6 +12,7 @@ import (
 type Dispatch struct {
 	ID              string `json:"id"`
 	RowID           int64  `json:"row_id,omitempty"`
+	Agent           string `json:"agent,omitempty"`
 	Source          string `json:"source"`
 	SessionID       string `json:"session_id,omitempty"`
 	ConversationID  string `json:"conversation_id,omitempty"`
@@ -38,13 +39,13 @@ type Dispatch struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-const dispatchSelectCols = "id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, COALESCE(target_id, '') AS target_id, COALESCE(vanadis_chunk_id, '') AS vanadis_chunk_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
+const dispatchSelectCols = "agent, id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, COALESCE(target_id, '') AS target_id, COALESCE(vanadis_chunk_id, '') AS vanadis_chunk_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
 
 func scanDispatch(scanner interface{ Scan(dest ...any) error }) (Dispatch, error) {
 	var d Dispatch
 	var errMsg, respText sql.NullString
 	if err := scanner.Scan(
-		&d.ID, &d.RowID, &d.Source, &d.SessionID, &d.ConversationID,
+		&d.Agent, &d.ID, &d.RowID, &d.Source, &d.SessionID, &d.ConversationID,
 		&d.TargetID, &d.VanadisChunkID,
 		&d.Prompt, &d.Summary, &d.Effort, &d.Model, &d.Status,
 		&d.RetryCount, &d.RestartCount, &errMsg, &respText,
@@ -91,6 +92,11 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 	if strings.TrimSpace(d.ID) == "" {
 		return false, fmt.Errorf("dispatch id cannot be empty")
 	}
+	agent := strings.TrimSpace(d.Agent)
+	if agent == "" {
+		agent = s.effectiveAgent()
+	}
+	d.Agent = agent
 	if d.Status == "" {
 		d.Status = StatusPending
 	}
@@ -106,7 +112,7 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 	}
 
 	query := `INSERT INTO dispatches (
-		id, source, session_id, conversation_id,
+		id, agent, source, session_id, conversation_id,
 		target_id, vanadis_chunk_id,
 		prompt, summary, effort, model, status,
 		retry_count, restart_count, error_message, response_text,
@@ -114,17 +120,17 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 		thinking_tokens, cache_read_tokens, total_tokens, traceparent,
 		created_at, updated_at
 	) VALUES (
-		$1, $2, $3, $4,
-		$5, $6,
-		$7, $8, $9, $10, $11,
-		$12, $13, $14, $15,
-		$16, $17, $18,
-		$19, $20, $21, $22,
-		$23, $24
+		$1, $2, $3, $4, $5,
+		$6, $7,
+		$8, $9, $10, $11, $12,
+		$13, $14, $15, $16,
+		$17, $18, $19,
+		$20, $21, $22, $23,
+		$24, $25
 	) ON CONFLICT (id) DO NOTHING;`
 
 	res, err := s.execResultWithTimeout(ctx, query,
-		d.ID, d.Source, d.SessionID, d.ConversationID,
+		d.ID, d.Agent, d.Source, d.SessionID, d.ConversationID,
 		d.TargetID, d.VanadisChunkID,
 		d.Prompt, d.Summary, d.Effort, d.Model, d.Status,
 		d.RetryCount, d.RestartCount, d.ErrorMessage, d.ResponseText,
@@ -149,8 +155,8 @@ func (s *SQLStore) GetDispatch(ctx context.Context, id string) (*Dispatch, error
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf("SELECT %s FROM dispatches WHERE id = $1", dispatchSelectCols)
-	row := s.db.QueryRowContext(queryCtx, query, strings.TrimSpace(id))
+	query := fmt.Sprintf("SELECT %s FROM dispatches WHERE agent = $1 AND id = $2", dispatchSelectCols)
+	row := s.db.QueryRowContext(queryCtx, query, s.effectiveAgent(), strings.TrimSpace(id))
 	d, err := scanDispatch(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -168,9 +174,9 @@ func (s *SQLStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, e
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `UPDATE dispatches SET status = 'PROCESSING', updated_at = $1 WHERE id = $2 AND status = 'PENDING' RETURNING id`
+	query := `UPDATE dispatches SET status = 'PROCESSING', updated_at = $1 WHERE agent = $2 AND id = $3 AND status = 'PENDING' RETURNING id`
 	var claimedID string
-	err := s.db.QueryRowContext(queryCtx, query, time.Now().UTC(), strings.TrimSpace(id)).Scan(&claimedID)
+	err := s.db.QueryRowContext(queryCtx, query, time.Now().UTC(), s.effectiveAgent(), strings.TrimSpace(id)).Scan(&claimedID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -181,35 +187,39 @@ func (s *SQLStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, e
 }
 
 func (s *SQLStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error {
+	agent := s.effectiveAgent()
 	now := time.Now().UTC()
 	if len(telemetry) > 0 {
 		t := telemetry[0]
-		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE id = $10`,
-			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE agent = $10 AND id = $11`,
+			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
 	}
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, now, id)
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, updated_at = $3 WHERE agent = $4 AND id = $5`, status, errorMsg, now, agent, id)
 }
 
 func (s *SQLStore) UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error {
+	agent := s.effectiveAgent()
 	now := time.Now().UTC()
 	var t TurnTelemetry
 	if len(telemetry) > 0 {
 		t = telemetry[0]
 	}
 	if strings.TrimSpace(conversationID) != "" {
-		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, conversation_id = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE id = $10`,
-			responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, conversation_id = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE agent = $10 AND id = $11`,
+			responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
 	}
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, error_message = '', duration_ms = $2, input_tokens = $3, output_tokens = $4, thinking_tokens = $5, cache_read_tokens = $6, total_tokens = $7, updated_at = $8 WHERE id = $9`,
-		responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, error_message = '', duration_ms = $2, input_tokens = $3, output_tokens = $4, thinking_tokens = $5, cache_read_tokens = $6, total_tokens = $7, updated_at = $8 WHERE agent = $9 AND id = $10`,
+		responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
 }
 
 func (s *SQLStore) IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error {
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET retry_count = retry_count + 1, error_message = $1, updated_at = $2 WHERE id = $3`, errorMsg, time.Now().UTC(), id)
+	agent := s.effectiveAgent()
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET retry_count = retry_count + 1, error_message = $1, updated_at = $2 WHERE agent = $3 AND id = $4`, errorMsg, time.Now().UTC(), agent, id)
 }
 
 func (s *SQLStore) ResetDispatchToPendingWithRestart(ctx context.Context, id, reason string) error {
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2 WHERE id = $3 AND status = 'PROCESSING'`, reason, time.Now().UTC(), id)
+	agent := s.effectiveAgent()
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2 WHERE agent = $3 AND id = $4 AND status = 'PROCESSING'`, reason, time.Now().UTC(), agent, id)
 }
 
 func (s *SQLStore) GetPendingOrProcessingDispatches(ctx context.Context, limit int) ([]Dispatch, error) {
@@ -219,8 +229,8 @@ func (s *SQLStore) GetPendingOrProcessingDispatches(ctx context.Context, limit i
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf("SELECT %s FROM dispatches WHERE status IN ('PENDING', 'PROCESSING') ORDER BY created_at ASC", dispatchSelectCols)
-	rows, err := s.db.QueryContext(queryCtx, query)
+	query := fmt.Sprintf("SELECT %s FROM dispatches WHERE agent = $1 AND status IN ('PENDING', 'PROCESSING') ORDER BY created_at ASC", dispatchSelectCols)
+	rows, err := s.db.QueryContext(queryCtx, query, s.effectiveAgent())
 	if err != nil {
 		return nil, err
 	}
@@ -244,8 +254,8 @@ func (s *SQLStore) GetRecentSessionDispatches(ctx context.Context, sessionID str
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf("SELECT %s FROM (SELECT %s FROM dispatches WHERE session_id = $1 AND status = 'COMPLETED' ORDER BY created_at DESC LIMIT $2) recent ORDER BY created_at ASC", dispatchSelectCols, dispatchSelectCols)
-	rows, err := s.db.QueryContext(queryCtx, query, strings.TrimSpace(sessionID), limit)
+	query := fmt.Sprintf("SELECT %s FROM (SELECT %s FROM dispatches WHERE agent = $1 AND session_id = $2 AND status = 'COMPLETED' ORDER BY created_at DESC LIMIT $3) recent ORDER BY created_at ASC", dispatchSelectCols, dispatchSelectCols)
+	rows, err := s.db.QueryContext(queryCtx, query, s.effectiveAgent(), strings.TrimSpace(sessionID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query recent session dispatches: %w", err)
 	}
@@ -266,11 +276,12 @@ func (s *SQLStore) HasActiveDispatchTurn(ctx context.Context, sessionID, id stri
 
 	query := `SELECT EXISTS(
 		SELECT 1 FROM dispatches
-		WHERE status IN ('PENDING', 'PROCESSING')
-		  AND (($1 != '' AND session_id = $1) OR ($2 != '' AND id = $2))
+		WHERE agent = $1
+		  AND status IN ('PENDING', 'PROCESSING')
+		  AND (($2 != '' AND session_id = $2) OR ($3 != '' AND id = $3))
 	)`
 	var exists bool
-	err := s.db.QueryRowContext(queryCtx, query, sID, tID).Scan(&exists)
+	err := s.db.QueryRowContext(queryCtx, query, s.effectiveAgent(), sID, tID).Scan(&exists)
 	return exists, err
 }
 
@@ -296,21 +307,22 @@ func (s *SQLStore) CancelPendingDispatches(ctx context.Context, dispatchID, buil
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	agent := s.effectiveAgent()
 	query := `UPDATE dispatches
 	SET status = 'FAILED', error_message = $1, updated_at = $2
-	WHERE status IN ('PENDING', 'PROCESSING') AND (
-		($3 != '' AND id = $3) OR
-		($4 != '' AND (
-			prompt LIKE '%' || $4 || '%' OR
-			session_id LIKE $5 OR
-			prompt LIKE '%' || $6 || '%' OR
-			COALESCE(vanadis_chunk_id, '') = $7 OR
-			session_id = $8
+	WHERE agent = $3 AND status IN ('PENDING', 'PROCESSING') AND (
+		($4 != '' AND id = $4) OR
+		($5 != '' AND (
+			prompt LIKE '%' || $5 || '%' OR
+			session_id LIKE $6 OR
+			prompt LIKE '%' || $7 || '%' OR
+			COALESCE(vanadis_chunk_id, '') = $8 OR
+			session_id = $9
 		))
 	)
 	RETURNING id;`
 
-	rows, err := s.db.QueryContext(queryCtx, query, reason, time.Now().UTC(), dID, buildPattern, sessionPattern, chunkPattern, bID, "vanadis-"+bID)
+	rows, err := s.db.QueryContext(queryCtx, query, reason, time.Now().UTC(), agent, dID, buildPattern, sessionPattern, chunkPattern, bID, "vanadis-"+bID)
 	if err != nil {
 		return nil, err
 	}
