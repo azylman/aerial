@@ -22,14 +22,18 @@ if [ -d "$USER_HOMEPAGE_DIR" ]; then
         cp -f "$USER_HOMEPAGE_DIR"/*."$ext" /app/config/ 2>/dev/null || true
     done
 fi
-rm -f /app/config/custom.css /config/custom.css 2>/dev/null || true
 
 # Execute config preparation with explicit raw-copy fallback
 if ! NODE_PATH=/app/node_modules node "$CORE_HOMEPAGE_DIR"/prepare-config.js; then
     echo "🚨 [Homepage Entrypoint] Config preparation failed! Falling back to raw core baseline..." >&2
     cp -rf "$CORE_HOMEPAGE_DIR"/config/. /config/ 2>/dev/null || true
     cp -rf "$CORE_HOMEPAGE_DIR"/config/. /app/config/ 2>/dev/null || true
-    rm -f /app/config/custom.css /config/custom.css 2>/dev/null || true
+    # Keep the shared palette and theme sync in the raw baseline: custom.css/custom.js need the
+    # shared tokens/script prepended to work.
+    for dir in /config /app/config; do
+        cat "$CORE_HOMEPAGE_DIR"/config/aerial-tokens.css "$CORE_HOMEPAGE_DIR"/config/custom.css > "$dir/custom.css" 2>/dev/null || true
+        cat "$CORE_HOMEPAGE_DIR"/config/aerial-theme.js "$CORE_HOMEPAGE_DIR"/config/custom.js > "$dir/custom.js" 2>/dev/null || true
+    done
 fi
 
 # Chown config directory for node user if running as root
