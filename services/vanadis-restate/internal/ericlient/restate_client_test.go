@@ -13,60 +13,67 @@ func TestServiceNaming(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		agent      string
-		wantNorm   string
-		wantThread string
-		wantDisp   string
-		wantVoice  string
+		name           string
+		agent          string
+		wantNorm       string
+		wantSessionMgr string
+		wantThread     string
+		wantDisp       string
+		wantVoice      string
 	}{
 		{
-			name:       "empty defaults to aerial",
-			agent:      "",
-			wantNorm:   "",
-			wantThread: "ThreadSession",
-			wantDisp:   "DispatchSession",
-			wantVoice:  "VoiceSession",
+			name:           "empty defaults to aerial",
+			agent:          "",
+			wantNorm:       "",
+			wantSessionMgr: "SessionManager",
+			wantThread:     "ThreadSession",
+			wantDisp:       "DispatchSession",
+			wantVoice:      "VoiceSession",
 		},
 		{
-			name:       "aerial explicit",
-			agent:      "aerial",
-			wantNorm:   "aerial",
-			wantThread: "ThreadSession",
-			wantDisp:   "DispatchSession",
-			wantVoice:  "VoiceSession",
+			name:           "aerial explicit",
+			agent:          "aerial",
+			wantNorm:       "aerial",
+			wantSessionMgr: "SessionManager",
+			wantThread:     "ThreadSession",
+			wantDisp:       "DispatchSession",
+			wantVoice:      "VoiceSession",
 		},
 		{
-			name:       "miorine lowercase",
-			agent:      "miorine",
-			wantNorm:   "miorine",
-			wantThread: "ThreadSession-miorine",
-			wantDisp:   "DispatchSession-miorine",
-			wantVoice:  "VoiceSession-miorine",
+			name:           "agent-alpha lowercase",
+			agent:          "agent-alpha",
+			wantNorm:       "agent-alpha",
+			wantSessionMgr: "SessionManager-agent-alpha",
+			wantThread:     "ThreadSession-agent-alpha",
+			wantDisp:       "DispatchSession-agent-alpha",
+			wantVoice:      "VoiceSession-agent-alpha",
 		},
 		{
-			name:       "suletta uppercase trimmed",
-			agent:      "  Suletta  ",
-			wantNorm:   "suletta",
-			wantThread: "ThreadSession-suletta",
-			wantDisp:   "DispatchSession-suletta",
-			wantVoice:  "VoiceSession-suletta",
+			name:           "agent-beta uppercase trimmed",
+			agent:          "  agent-beta  ",
+			wantNorm:       "agent-beta",
+			wantSessionMgr: "SessionManager-agent-beta",
+			wantThread:     "ThreadSession-agent-beta",
+			wantDisp:       "DispatchSession-agent-beta",
+			wantVoice:      "VoiceSession-agent-beta",
 		},
 		{
-			name:       "unsafe characters fallback",
-			agent:      "bad/agent@name!",
-			wantNorm:   "aerial",
-			wantThread: "ThreadSession",
-			wantDisp:   "DispatchSession",
-			wantVoice:  "VoiceSession",
+			name:           "unsafe characters fallback",
+			agent:          "bad/agent@name!",
+			wantNorm:       "aerial",
+			wantSessionMgr: "SessionManager",
+			wantThread:     "ThreadSession",
+			wantDisp:       "DispatchSession",
+			wantVoice:      "VoiceSession",
 		},
 		{
-			name:       "safe hyphens and underscores",
-			agent:      "bot-1_test",
-			wantNorm:   "bot-1_test",
-			wantThread: "ThreadSession-bot-1_test",
-			wantDisp:   "DispatchSession-bot-1_test",
-			wantVoice:  "VoiceSession-bot-1_test",
+			name:           "safe hyphens and underscores",
+			agent:          "bot-1_test",
+			wantNorm:       "bot-1_test",
+			wantSessionMgr: "SessionManager-bot-1_test",
+			wantThread:     "ThreadSession-bot-1_test",
+			wantDisp:       "DispatchSession-bot-1_test",
+			wantVoice:      "VoiceSession-bot-1_test",
 		},
 	}
 
@@ -75,6 +82,9 @@ func TestServiceNaming(t *testing.T) {
 			t.Parallel()
 			if got := NormalizeAgentName(tc.agent); got != tc.wantNorm {
 				t.Errorf("NormalizeAgentName(%q) = %q, want %q", tc.agent, got, tc.wantNorm)
+			}
+			if got := SessionManagerServiceName(tc.agent); got != tc.wantSessionMgr {
+				t.Errorf("SessionManagerServiceName(%q) = %q, want %q", tc.agent, got, tc.wantSessionMgr)
 			}
 			if got := ThreadSessionServiceName(tc.agent); got != tc.wantThread {
 				t.Errorf("ThreadSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantThread)

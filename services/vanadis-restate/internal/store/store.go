@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 const (
 	chunkModeAction  = "action"
+	defaultAgent     = "aerial"
 	defaultRepoOwner = "azylman"
 	effortLow        = "low"
 	effortMedium     = "medium"
@@ -29,7 +31,7 @@ const (
 )
 
 // BuildColumns is the canonical build-row select list.
-const BuildColumns = `id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
+const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
 
 // PgxQueryExecer abstracts the pgx query surface used by the store.
 type PgxQueryExecer interface {
@@ -255,8 +257,14 @@ func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 
 // ScanBuild scans a single build row.
 func ScanBuild(s rowScanner) (model.VanadisBuild, error) {
+	if s == nil {
+		return model.VanadisBuild{}, errors.New("row scanner is nil")
+	}
 	var b model.VanadisBuild
-	err := s.Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
+	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
+	if err == nil && strings.TrimSpace(b.Agent) == "" {
+		b.Agent = defaultAgent
+	}
 	return b, err
 }
 

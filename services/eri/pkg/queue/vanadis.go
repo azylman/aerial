@@ -116,7 +116,12 @@ func (p *WorkerPool) flushActiveStepToRestateIngress(ctx context.Context, buildI
 
 func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, buildID string, body []byte) error {
 	vanadisURL := p.resolveVanadisAPIURL()
-	targetURL := fmt.Sprintf("%s/builds/%s/active-step", vanadisURL, url.PathEscape(buildID))
+	var targetURL string
+	if trimmed := strings.TrimSpace(buildID); trimmed != "" {
+		targetURL = fmt.Sprintf("%s/builds/%s/active-step", vanadisURL, url.PathEscape(trimmed))
+	} else {
+		targetURL = vanadisURL + "/chunks/active-step"
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -144,7 +149,7 @@ func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, buildID st
 // When RestateIngressURL is explicitly configured on PoolConfig and VanadisURL is empty,
 // it falls back to direct Restate ingress (<ingressURL>/<BuildServiceName>/<buildID>/UpdateActiveStep/send)
 // for backward compatibility and hermetic unit tests. Otherwise, it routes through the vanadis
-// HTTP API (<vanadisURL>/builds/<buildID>/active-step) using a ServiceAccount Bearer token.
+// HTTP API (<vanadisURL>/builds/<buildID>/active-step or <vanadisURL>/chunks/active-step) using a ServiceAccount Bearer token.
 func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID, chunkID, step string) error {
 	trimmedChunkID := strings.TrimSpace(chunkID)
 	if trimmedChunkID == "" {
@@ -152,7 +157,8 @@ func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID,
 	}
 
 	trimmedBuildID := strings.TrimSpace(buildID)
-	if trimmedBuildID == "" {
+	isDirectRestate := p != nil && strings.TrimSpace(p.cfg.RestateIngressURL) != "" && strings.TrimSpace(p.cfg.VanadisURL) == ""
+	if isDirectRestate && trimmedBuildID == "" {
 		err := errors.New("missing build_id for chunk active step update")
 		log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, err)
 		return err
@@ -168,7 +174,7 @@ func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID,
 		return err
 	}
 
-	if p != nil && strings.TrimSpace(p.cfg.RestateIngressURL) != "" && strings.TrimSpace(p.cfg.VanadisURL) == "" {
+	if isDirectRestate {
 		if flushErr := p.flushActiveStepToRestateIngress(ctx, trimmedBuildID, body); flushErr != nil {
 			log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, flushErr)
 			return flushErr

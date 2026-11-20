@@ -60,12 +60,15 @@ type RowScanner interface {
 
 // BuildColumns is the vanadis_builds SELECT list ScanBuild consumes, in its destination order.
 // Every query whose rows go through ScanBuild must select exactly these columns.
-const BuildColumns = `id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
+const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
 
 // ScanBuild scans one row selected with BuildColumns.
 func ScanBuild(s RowScanner) (model.VanadisBuild, error) {
 	var b model.VanadisBuild
-	err := s.Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
+	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
+	if err == nil && strings.TrimSpace(b.Agent) == "" {
+		b.Agent = "aerial"
+	}
 	return b, err
 }
 

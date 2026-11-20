@@ -343,10 +343,14 @@ func fillBuildDest(b model.VanadisBuild, dest []any) error {
 	if len(dest) == 7 {
 		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
 	}
-	if len(dest) != 11 {
-		return fmt.Errorf("scan build: %d destinations, want 11", len(dest))
+	if len(dest) != 12 {
+		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
 	}
-	return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
+	agent := b.Agent
+	if agent == "" {
+		agent = "aerial"
+	}
+	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
 }
 
 func (r *mockRow) Scan(dest ...any) error {
@@ -385,7 +389,7 @@ func (r *mockRows) Next() bool {
 	return false
 }
 
-func (r *mockRows) scan11(dest []any) error {
+func (r *mockRows) scan12(dest []any) error {
 	if len(r.builds) > 0 && r.idx > 0 && r.idx <= len(r.builds) {
 		return fillBuildDest(r.builds[r.idx-1], dest)
 	}
@@ -433,8 +437,8 @@ func (r *mockRows) Scan(dest ...any) error {
 			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
 		}
 		return nil
-	case 11:
-		return r.scan11(dest)
+	case 12:
+		return r.scan12(dest)
 	case 10:
 		return r.scan10(dest)
 	case 18:

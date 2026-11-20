@@ -877,13 +877,13 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantBuildID: "",
 		},
 		{
-			name: "explicit chunk id and build id in prompt",
+			name: "explicit chunk id with no build id structure",
 			d: &db.Dispatch{
 				VanadisChunkID: "chunk-explicit-1",
 				Prompt:         "Build ID: build-prompt-1\nSome instruction",
 			},
 			wantChunkID: "chunk-explicit-1",
-			wantBuildID: "build-prompt-1",
+			wantBuildID: "",
 		},
 		{
 			name: "chunk prefix in target id and session id",

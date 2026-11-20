@@ -198,7 +198,7 @@ func TestPostgresVanadisStore_UpdateBuild_Errors(t *testing.T) {
 			db: dbScript{
 				routes: []sqlRoute{
 					{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
-					{match: "SELECT id, thread_id", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "running"}}},
+					{match: "FROM vanadis_builds WHERE id = $1", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "running"}}},
 				},
 				commitErr: errors.New("commit fail"),
 			},
@@ -212,7 +212,7 @@ func TestPostgresVanadisStore_UpdateBuild_Errors(t *testing.T) {
 			db: dbScript{
 				routes: []sqlRoute{
 					{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
-					{match: "SELECT id, thread_id", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "running"}}},
+					{match: "FROM vanadis_builds WHERE id = $1", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "running"}}},
 				},
 			},
 			wantErr: false,
@@ -224,7 +224,7 @@ func TestPostgresVanadisStore_UpdateBuild_Errors(t *testing.T) {
 			db: dbScript{
 				routes: []sqlRoute{
 					{match: "SELECT status FROM vanadis_builds", row: valuesRow("failed")},
-					{match: "SELECT id, thread_id", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "failed"}}},
+					{match: "FROM vanadis_builds WHERE id = $1", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: "failed"}}},
 				},
 			},
 			wantErr: false,
@@ -567,7 +567,7 @@ func TestBuildMutateBranches(t *testing.T) {
 		{name: "remove reindex error", op: "remove", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Mode: "action", Status: "pending", DependsOn: []string{}}, {ID: "c2", Mode: "action", Status: "pending", DependsOn: []string{}}}, execTag: "DELETE 1", failExec: "SET chunk_index", execErr: errors.New("exec fail")}, wantSubstr: "reindex chunk"},
 		{name: "remove dag invalid", op: "remove", chunkRef: "c3", db: dbScript{row: valuesRow("running"), chunks: []model.VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending", TargetFiles: []string{"a.go"}, DependsOn: []string{}}, {ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", TargetFiles: []string{"a.go"}, DependsOn: []string{}}, {ID: "c3", Mode: "action", Status: "pending", DependsOn: []string{}}}}, wantSubstr: "invalid DAG"},
 		{name: "update build check status error", op: "updateBuild", db: dbScript{routes: []sqlRoute{{match: "SELECT status FROM vanadis_builds", row: errRow(errors.New("boom"))}}}, wantSubstr: "check build status"},
-		{name: "update build fetch error", op: "updateBuild", db: dbScript{routes: []sqlRoute{{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")}, {match: "SELECT id, thread_id", row: errRow(errors.New("boom"))}}}, wantSubstr: "fetch updated build"},
+		{name: "update build fetch error", op: "updateBuild", db: dbScript{routes: []sqlRoute{{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")}, {match: "FROM vanadis_builds WHERE id = $1", row: errRow(errors.New("boom"))}}}, wantSubstr: "fetch updated build"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

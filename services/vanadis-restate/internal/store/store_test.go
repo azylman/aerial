@@ -242,12 +242,12 @@ func (r stubScanRow) Scan(dest ...any) error {
 func TestScanBuild(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	row := stubScanRow{vals: []any{"b1", "thread-1", 2, "Title", "Objective", "ctx", "running", "msg-1", true, now, now}}
+	row := stubScanRow{vals: []any{"b1", "aerial", "thread-1", 2, "Title", "Objective", "ctx", "running", "msg-1", true, now, now}}
 	got, err := ScanBuild(row)
 	if err != nil {
 		t.Fatalf("ScanBuild unexpected error: %v", err)
 	}
-	if got.ID != "b1" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet {
+	if got.ID != "b1" || got.Agent != "aerial" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet {
 		t.Errorf("ScanBuild decoded %+v", got)
 	}
 	if _, err := ScanBuild(stubScanRow{err: errors.New("scan boom")}); err == nil {

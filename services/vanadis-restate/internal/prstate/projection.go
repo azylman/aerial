@@ -65,6 +65,7 @@ const ProjectionStatusOpen = "open"
 type ProjectionSnapshot struct {
 	Repo       string
 	PRNumber   int
+	Agent      string
 	Branch     string
 	HeadSHA    string
 	MergeSHA   string
@@ -118,7 +119,12 @@ func ProjectionStatus(s *PRState) string {
 // only the state it is given and never consults the projection, so the
 // projection can never feed back into a transition decision.
 func BuildProjection(s *PRState, branch, title, targetID, mergeSHA string) ProjectionSnapshot {
+	agent := DefaultAgent
+	if s != nil && strings.TrimSpace(s.Agent) != "" {
+		agent = strings.TrimSpace(s.Agent)
+	}
 	snap := ProjectionSnapshot{
+		Agent:    agent,
 		Branch:   strings.TrimSpace(branch),
 		Title:    strings.TrimSpace(title),
 		TargetID: strings.TrimSpace(targetID),
@@ -166,25 +172,29 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 	if err != nil {
 		metaBytes = []byte("{}")
 	}
+	agent := strings.TrimSpace(snap.Agent)
+	if agent == "" {
+		agent = DefaultAgent
+	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
-		NormalizeRepo(snap.Repo), snap.PRNumber,
+	fmt.Fprintf(&sb, "%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
+		agent, NormalizeRepo(snap.Repo), snap.PRNumber,
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.Title),
 		strings.TrimSpace(snap.TargetID), strings.TrimSpace(snap.Status),
 		snap.Generation, snap.MetaEpoch, metaBytes)
 	sum := sha256.Sum256([]byte(sb.String()))
-	return fmt.Sprintf("%s#%d@%s:gen%d:epoch%d:%s:%x",
-		NormalizeRepo(snap.Repo), snap.PRNumber,
+	return fmt.Sprintf("projection:%s:%s:%d@%s:gen%d:epoch%d:%x",
+		agent, NormalizeRepo(snap.Repo), snap.PRNumber,
 		strings.TrimSpace(snap.HeadSHA), snap.Generation, snap.MetaEpoch,
-		ProjectionKind, sum[:8])
+		sum[:8])
 }
 
 // ownedChecksMerge builds the per-key merge expression for the owned
 // ci_checks key over base: banner removed, a missing key defaulting to an
 // empty object so the merge can never null the blob.
 func ownedChecksMerge(base string) string {
-	return `jsonb_set(` + base + ` - 'banner', '{ci_checks}', COALESCE($9::jsonb->'ci_checks', '{}'::jsonb), true)`
+	return `jsonb_set(` + base + ` - 'banner', '{ci_checks}', COALESCE($10::jsonb->'ci_checks', '{}'::jsonb), true)`
 }
 
 // ProjectionUpsertQuery builds the real pr_registry upsert: column writes for
@@ -202,9 +212,14 @@ func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 	if err != nil {
 		metaBytes = []byte("{}")
 	}
-	query := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, merge_sha, target_id, title, status, metadata, created_at, updated_at) ` +
-		`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ` + ownedChecksMerge(`'{}'::jsonb`) + `, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
+	agent := strings.TrimSpace(snap.Agent)
+	if agent == "" {
+		agent = DefaultAgent
+	}
+	query := `INSERT INTO pr_registry (repo, pr_number, agent, branch, head_sha, merge_sha, target_id, title, status, metadata, created_at, updated_at) ` +
+		`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ` + ownedChecksMerge(`'{}'::jsonb`) + `, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
 		`ON CONFLICT (repo, pr_number) DO UPDATE SET ` +
+		`agent = CASE WHEN EXCLUDED.agent != '' THEN EXCLUDED.agent ELSE pr_registry.agent END, ` +
 		`branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, ` +
 		`head_sha = CASE WHEN EXCLUDED.head_sha != '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, ` +
 		`merge_sha = CASE WHEN EXCLUDED.merge_sha != '' THEN EXCLUDED.merge_sha ELSE pr_registry.merge_sha END, ` +
@@ -215,6 +230,7 @@ func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 		`updated_at = CURRENT_TIMESTAMP;`
 	args := []any{
 		NormalizeRepo(snap.Repo), snap.PRNumber,
+		agent,
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.TargetID),
 		strings.TrimSpace(snap.Title), strings.TrimSpace(snap.Status),

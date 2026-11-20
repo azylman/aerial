@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,37 +10,39 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/vanadis/internal/dag"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
 )
 
 const (
-	chunkModeAction    = "action"
-	fieldBuild         = "build"
-	fieldStatus        = "status"
-	fieldBuildID       = "build_id"
-	fieldChunks        = "chunks"
-	fieldChunk         = "chunk"
-	statusUpdated      = "updated"
-	statusCIFailed     = "ci_failed"
-	statusFailed       = "failed"
-	statusDeployed     = "deployed"
-	statusDeploying    = "deploying"
-	statusSynced       = "synced"
-	statusConflict     = "conflict"
-	statusMerged       = "merged"
-	statusOpen         = "open"
-	statusRunning      = "running"
-	statusPending      = "pending"
-	statusCompleted    = "completed"
-	statusCancelled    = "cancelled"
-	statusQueued       = "queued"
-	statusCoding       = "coding"
-	statusPROpened     = "pr_opened"
-	statusDeployFailed = "deploy_failed"
-	statusPassed       = "passed"
-	statusNotFound     = "not_found"
+	chunkModeAction          = "action"
+	errMissingCallerIdentity = "unauthorized: missing caller identity"
+	fieldBuild               = "build"
+	fieldStatus              = "status"
+	fieldBuildID             = "build_id"
+	fieldChunks              = "chunks"
+	fieldChunk               = "chunk"
+	statusUpdated            = "updated"
+	statusCIFailed           = "ci_failed"
+	statusFailed             = "failed"
+	statusDeployed           = "deployed"
+	statusDeploying          = "deploying"
+	statusSynced             = "synced"
+	statusConflict           = "conflict"
+	statusMerged             = "merged"
+	statusOpen               = "open"
+	statusRunning            = "running"
+	statusPending            = "pending"
+	statusCompleted          = "completed"
+	statusCancelled          = "cancelled"
+	statusQueued             = "queued"
+	statusCoding             = "coding"
+	statusPROpened           = "pr_opened"
+	statusDeployFailed       = "deploy_failed"
+	statusPassed             = "passed"
+	statusNotFound           = "not_found"
 )
 
 // VanadisChunkSummary captures a lightweight view of a chunk for advancement outputs.
@@ -155,6 +158,108 @@ var (
 	parseCreateBuildChunks = dag.ParseCreateBuildChunks
 )
 
+func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, agent string) error {
+	if !s.authEnabled() {
+		return nil
+	}
+	caller, ok := k8sauth.CallerFromContext(ctx)
+	if !ok {
+		return &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity}
+	}
+	if agent == "" {
+		agent = "aerial"
+	}
+	return s.auth.Authorize(ctx, caller, "builds", "update", agent)
+}
+
+func (s *VanadisServer) authorizeBuildMutation(w http.ResponseWriter, r *http.Request, buildID string) bool {
+	build, _, err := s.store.GetBuild(r.Context(), buildID)
+	if err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return false
+	}
+	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
+		writeAuthErr(w, err)
+		return false
+	}
+	return true
+}
+
+func (s *VanadisServer) mutateBuildObject(ctx context.Context, buildID, handler string, req, out any) error {
+	return s.callRestateIngress(ctx, s.restateObjectPath(buildID, handler), req, out)
+}
+
+func (s *VanadisServer) forwardActiveStep(ctx context.Context, buildID string, req UpdateActiveStepRequest) error {
+	path := s.restateObjectPath(buildID, "UpdateActiveStep") + "/send"
+	return s.callRestateIngress(ctx, path, req, nil)
+}
+
+func (s *VanadisServer) processActiveStepUpdate(w http.ResponseWriter, r *http.Request, build *VanadisBuild, req UpdateActiveStepRequest) {
+	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
+		writeAuthErr(w, err)
+		return
+	}
+	if err := s.forwardActiveStep(r.Context(), build.ID, req); err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
+}
+
+func (s *VanadisServer) handleChunksActiveStep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.store == nil {
+		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+		return
+	}
+	var req UpdateActiveStepRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ChunkID) == "" {
+		writeErr(w, http.StatusBadRequest, "chunk_id is required")
+		return
+	}
+	_, build, err := s.store.GetChunk(r.Context(), req.ChunkID)
+	if err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+	if build == nil {
+		writeStoreErr(r.Context(), w, ErrBuildNotFound)
+		return
+	}
+	s.processActiveStepUpdate(w, r, build, req)
+}
+
+func (s *VanadisServer) handleBuildActiveStep(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.store == nil {
+		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+		return
+	}
+	var req UpdateActiveStepRequest
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ChunkID) == "" {
+		writeErr(w, http.StatusBadRequest, "chunk_id is required")
+		return
+	}
+	build, _, err := s.store.GetBuild(r.Context(), id)
+	if err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+	s.processActiveStepUpdate(w, r, build, req)
+}
+
 func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
@@ -162,6 +267,10 @@ func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) 
 	}
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
+		writeAuthErr(w, err)
 		return
 	}
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/chunks/"), "/")
@@ -282,8 +391,11 @@ func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request
 		writeStoreErr(r.Context(), w, fmt.Errorf("%w: at least one of title, objective, or shared_context must be provided", ErrInvalidBuildInput))
 		return
 	}
+	if !s.authorizeBuildMutation(w, r, buildID) {
+		return
+	}
 	var updated VanadisBuild
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "UpdateBuild"), req, &updated); err != nil {
+	if err := s.mutateBuildObject(r.Context(), buildID, "UpdateBuild", req, &updated); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -293,6 +405,10 @@ func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request
 func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+		return
+	}
+	if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
+		writeAuthErr(w, err)
 		return
 	}
 	build, chunks, err := s.store.GetBuild(r.Context(), buildID)
@@ -318,6 +434,9 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	req.ChunkRef = chunkRef
+	if !s.authorizeBuildMutation(w, r, buildID) {
+		return
+	}
 	var updated VanadisChunk
 	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "UpdateChunk"), req, &updated); err != nil {
 		writeStoreErr(r.Context(), w, err)
@@ -335,8 +454,11 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		writeStoreErr(r.Context(), w, fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput))
 		return
 	}
+	if !s.authorizeBuildMutation(w, r, buildID) {
+		return
+	}
 	var appended []VanadisChunk
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "AppendChunks"), req, &appended); err != nil {
+	if err := s.mutateBuildObject(r.Context(), buildID, "AppendChunks", req, &appended); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -348,11 +470,18 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
 		return
 	}
+	build, chs, err := s.store.GetBuild(r.Context(), buildID)
+	if err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
+		writeAuthErr(w, err)
+		return
+	}
 	removedID := chunkRef
-	if _, chs, err := s.store.GetBuild(r.Context(), buildID); err == nil {
-		if idx := resolveChunkRef(chs, chunkRef); idx >= 0 {
-			removedID = chs[idx].ID
-		}
+	if idx := resolveChunkRef(chs, chunkRef); idx >= 0 {
+		removedID = chs[idx].ID
 	}
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
 	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "RemoveChunk"), req, nil); err != nil {

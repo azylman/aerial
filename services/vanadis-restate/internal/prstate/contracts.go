@@ -41,6 +41,9 @@ const (
 	EffectDeployDispatch     = "deploy_dispatch"
 )
 
+// DefaultAgent is the fallback agent identifier.
+const DefaultAgent = "aerial"
+
 // MaxMainPushIndex bounds the RepoObject main-push SHA history.
 const MaxMainPushIndex = 50
 
@@ -198,6 +201,7 @@ type PREvent struct {
 	Event          string `json:"event"`
 	Repo           string `json:"repo"`
 	PRNumber       int    `json:"pr_number"`
+	Agent          string `json:"agent,omitempty"`
 	HeadSHA        string `json:"head_sha"`
 	MergeSHA       string `json:"merge_sha"`
 	CheckName      string `json:"check_name"`

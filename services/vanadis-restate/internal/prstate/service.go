@@ -44,7 +44,7 @@ const (
 // PRObjectServiceNameForAgent derives the Restate PRObject Virtual Object name for an agent.
 func PRObjectServiceNameForAgent(agent string) string {
 	norm := strings.ToLower(strings.TrimSpace(agent))
-	if norm == "" || norm == "aerial" {
+	if norm == "" || norm == DefaultAgent {
 		return PRObjectServiceName
 	}
 	return PRObjectServiceName + "-" + norm
@@ -53,7 +53,7 @@ func PRObjectServiceNameForAgent(agent string) string {
 // RepoObjectServiceNameForAgent derives the Restate RepoObject Virtual Object name for an agent.
 func RepoObjectServiceNameForAgent(agent string) string {
 	norm := strings.ToLower(strings.TrimSpace(agent))
-	if norm == "" || norm == "aerial" {
+	if norm == "" || norm == DefaultAgent {
 		return RepoObjectServiceName
 	}
 	return RepoObjectServiceName + "-" + norm
@@ -95,16 +95,29 @@ func (s *PRObjectService) ServiceName() string {
 	return PRObjectServiceNameForAgent(s.agentName)
 }
 
+func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, ev PREvent) (*PRState, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	if agent := strings.TrimSpace(ev.Agent); agent != "" {
+		st.Agent = agent
+	} else if strings.TrimSpace(st.Agent) == "" {
+		st.Agent = DefaultAgent
+	}
+	return st, nil
+}
+
 func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return err
-	}
-	if st == nil {
-		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
 	if st.ApplyEvent(ev) != DispositionApply {
 		return nil
@@ -171,12 +184,9 @@ func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev 
 // returning ShouldPublish again. The verdict is the sole authority for the
 // synapse republish; only HandleConflictPublished completes the dispatch.
 func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext, ev PREvent) (ConflictDispatchDecision, error) {
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return ConflictDispatchDecision{}, err
-	}
-	if st == nil {
-		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
 	return ResolveConflictDispatchDecision(st, ev)
 }
@@ -189,12 +199,9 @@ func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev 
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return ConflictPublishedOutcome{}, nil
 	}
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return ConflictPublishedOutcome{}, err
-	}
-	if st == nil {
-		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
 	out, recErr := RecordConflictPublished(st, ev)
 	if recErr != nil {
@@ -211,12 +218,9 @@ func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev 
 // records nothing, so it never disturbs the failure state a later success
 // event clears.
 func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectSharedContext, ev PREvent) (CIRecoveryDecision, error) {
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return CIRecoveryDecision{}, err
-	}
-	if st == nil {
-		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
 	return ResolveCIRecovery(st, ev)
 }
@@ -270,25 +274,11 @@ func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PR
 // returning ShouldPublish again. The verdict is the sole authority for the
 // synapse publish; only HandleDeploySuccessPublished completes the dispatch.
 func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext, ev PREvent) (DeployDispatchDecision, error) {
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return DeployDispatchDecision{}, err
 	}
-	if st == nil {
-		st = NewPRState(ev.Repo, ev.PRNumber)
-	}
 	return ResolveDeployDispatchDecision(st, ev)
-}
-
-func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, repo string, prNumber int) (*PRState, error) {
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
-	if err != nil {
-		return nil, err
-	}
-	if st == nil {
-		st = NewPRState(repo, prNumber)
-	}
-	return st, nil
 }
 
 // HandleDeploySuccessPublished records one confirmed deploy_success publish:
@@ -299,7 +289,7 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return DeployPublishedOutcome{}, nil
 	}
-	st, err := s.loadOrCreatePRState(ctx, ev.Repo, ev.PRNumber)
+	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return DeployPublishedOutcome{}, err
 	}

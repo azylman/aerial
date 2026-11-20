@@ -64,13 +64,13 @@ func (s *Store) UpdateBuild(ctx context.Context, buildID string, req UpdateBuild
 	}
 
 	const updateQ = `UPDATE vanadis_builds SET title = CASE WHEN $2 != '' THEN $2 ELSE title END, objective = CASE WHEN $3 != '' THEN $3 ELSE objective END, shared_context = CASE WHEN $4 != '' THEN $4 ELSE shared_context END, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-	if _, err := tx.Exec(ctx, updateQ, buildID, title, obj, sharedCtx); err != nil {
-		return nil, fmt.Errorf("update build %s: %w", buildID, err)
+	if _, execErr := tx.Exec(ctx, updateQ, buildID, title, obj, sharedCtx); execErr != nil {
+		return nil, fmt.Errorf("update build %s: %w", buildID, execErr)
 	}
 
-	var updated model.VanadisBuild
 	fetchQ := `SELECT ` + BuildColumns + ` FROM vanadis_builds WHERE id = $1;`
-	if err := tx.QueryRow(ctx, fetchQ, buildID).Scan(&updated.ID, &updated.ThreadID, &updated.Tier, &updated.Title, &updated.Objective, &updated.SharedContext, &updated.Status, &updated.StatusMessageID, &updated.Quiet, &updated.CreatedAt, &updated.UpdatedAt); err != nil {
+	updated, err := ScanBuild(tx.QueryRow(ctx, fetchQ, buildID))
+	if err != nil {
 		return nil, fmt.Errorf("fetch updated build: %w", err)
 	}
 

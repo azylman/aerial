@@ -65,6 +65,9 @@ func (h *Handler) RetryActionChunk(ctx context.Context, req RetryActionChunkRequ
 	if err := validateRetryActionRequest(req); err != nil {
 		return nil, err
 	}
+	if err := h.authorizeBuildMutation(ctx, req.BuildID); err != nil {
+		return nil, err
+	}
 	if h == nil || !h.RestateEnabled || h.Restate == nil || strings.TrimSpace(h.Restate.IngressURL()) == "" {
 		return nil, ErrRetryIngressUnavailable
 	}

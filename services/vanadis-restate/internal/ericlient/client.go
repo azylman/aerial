@@ -28,6 +28,7 @@ var ErrDispatchActive = errors.New("dispatch active; reconciliation deferred")
 // BrainDispatchRequest represents the JSON payload dispatched to Eri's POST /dispatch endpoint.
 type BrainDispatchRequest struct {
 	ID             string `json:"id,omitempty"`
+	Agent          string `json:"agent,omitempty"`
 	Source         string `json:"source"`
 	SessionID      string `json:"session_id,omitempty"`
 	TargetID       string `json:"target_id,omitempty"`
@@ -56,6 +57,7 @@ type StatusWidgetChunk struct {
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
 type StatusWidgetRequest struct {
+	Agent     string              `json:"agent,omitempty"`
 	ChannelID string              `json:"channel_id"`
 	MessageID string              `json:"message_id,omitempty"`
 	ID        string              `json:"id"`

@@ -111,6 +111,7 @@ type cachedChannelMeta struct {
 type DiscordWidgetDeliverer struct {
 	session               *discordgo.Session
 	sender                DiscordWidgetSender
+	agentSenders          map[string]DiscordWidgetSender
 	configPath            string
 	nowFn                 func() time.Time
 	channelPolicyResolver func(channelID string) (noBuildUpdates bool, systemChannel string)
@@ -130,41 +131,123 @@ type DiscordWidgetDeliverer struct {
 	channelLocks sync.Map
 }
 
+func discoverAgentTokens() map[string]string {
+	tokens := make(map[string]string)
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, val := parts[0], strings.TrimSpace(parts[1])
+		if val == "" {
+			continue
+		}
+		if rawAgent, ok := strings.CutPrefix(key, "DISCORD_TOKEN_"); ok {
+			agent := strings.ToLower(strings.ReplaceAll(rawAgent, "_", "-"))
+			if agent != "" {
+				tokens[agent] = val
+			}
+		}
+	}
+	if _, ok := tokens[defaultAgent]; !ok {
+		if t := strings.TrimSpace(os.Getenv("DISCORD_TOKEN")); t != "" {
+			tokens[defaultAgent] = t
+		} else if t := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); t != "" {
+			tokens[defaultAgent] = t
+		}
+	}
+	return tokens
+}
+
 // NewDiscordWidgetDeliverer constructs a DiscordWidgetDeliverer using the provided token or DISCORD_TOKEN env.
 func NewDiscordWidgetDeliverer(token string, configPath ...string) (*DiscordWidgetDeliverer, error) {
+	tokens := discoverAgentTokens()
 	cleanToken := strings.TrimSpace(token)
-	if cleanToken == "" {
-		cleanToken = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
+	if cleanToken != "" {
+		tokens[defaultAgent] = cleanToken
 	}
 	cfgPath := "/share/aerial-config/config.yaml"
 	if len(configPath) > 0 && strings.TrimSpace(configPath[0]) != "" {
 		cfgPath = strings.TrimSpace(configPath[0])
 	}
 
-	var sess *discordgo.Session
-	if cleanToken != "" {
-		botToken := cleanToken
+	agentSenders := make(map[string]DiscordWidgetSender)
+	var defaultSess *discordgo.Session
+	for agent, tok := range tokens {
+		botToken := tok
 		if !strings.HasPrefix(botToken, "Bot ") {
 			botToken = "Bot " + botToken
 		}
-		var err error
-		sess, err = discordgo.New(botToken)
+		sess, err := discordgo.New(botToken)
 		if err != nil {
-			return nil, fmt.Errorf("create discord session: %w", err)
+			continue
+		}
+		agentSenders[agent] = sess
+		if agent == defaultAgent {
+			defaultSess = sess
 		}
 	}
 
 	var sender DiscordWidgetSender
-	if sess != nil {
-		sender = sess
+	if defaultSess != nil {
+		sender = defaultSess
 	}
 	return &DiscordWidgetDeliverer{
-		session:          sess,
+		session:          defaultSess,
 		sender:           sender,
+		agentSenders:     agentSenders,
 		configPath:       cfgPath,
 		resolvedChannels: make(map[string]cachedResolvedChannel),
 		channelMetaCache: make(map[string]cachedChannelMeta),
 	}, nil
+}
+
+func (d *DiscordWidgetDeliverer) senderForAgent(agent string) DiscordWidgetSender {
+	if d == nil {
+		return nil
+	}
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" {
+		clean = defaultAgent
+	}
+	d.configMu.RLock()
+	s, ok := d.agentSenders[clean]
+	d.configMu.RUnlock()
+	if ok && !isNilSender(s) {
+		return s
+	}
+	if clean != defaultAgent {
+		d.configMu.RLock()
+		s, ok = d.agentSenders[defaultAgent]
+		d.configMu.RUnlock()
+		if ok && !isNilSender(s) {
+			return s
+		}
+	}
+	if !isNilSender(d.sender) {
+		return d.sender
+	}
+	if !isNilSender(d.session) {
+		return d.session
+	}
+	return nil
+}
+
+// SetAgentSender sets or overrides the DiscordWidgetSender for a specific agent.
+func (d *DiscordWidgetDeliverer) SetAgentSender(agent string, s DiscordWidgetSender) {
+	if d == nil {
+		return
+	}
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" {
+		clean = defaultAgent
+	}
+	d.configMu.Lock()
+	defer d.configMu.Unlock()
+	if d.agentSenders == nil {
+		d.agentSenders = make(map[string]DiscordWidgetSender)
+	}
+	d.agentSenders[clean] = s
 }
 
 // shouldSinkWidget reports whether the status widget messageID is buried enough to re-post: either
@@ -489,10 +572,7 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	if d == nil {
 		return "", errors.New("discord widget deliverer is nil")
 	}
-	sender := d.sender
-	if isNilSender(sender) && !isNilSender(d.session) {
-		sender = d.session
-	}
+	sender := d.senderForAgent(req.Agent)
 	if isNilSender(sender) {
 		return "", errors.New("discord widget sender is nil")
 	}
@@ -514,15 +594,12 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	return DeliverStatusWidget(sender, req, now, opts...)
 }
 
-// DeliverDirectMessage delivers a direct plain-text channel alert message to Discord REST.
-func (d *DiscordWidgetDeliverer) DeliverDirectMessage(ctx context.Context, channelID, content string) error {
+// DeliverDirectMessageWithAgent delivers a direct plain-text channel alert message using the specified agent sender.
+func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Context, agent, channelID, content string) error {
 	if d == nil {
 		return errors.New("discord widget deliverer is nil")
 	}
-	sender := d.sender
-	if isNilSender(sender) && !isNilSender(d.session) {
-		sender = d.session
-	}
+	sender := d.senderForAgent(agent)
 	if isNilSender(sender) {
 		return errors.New("discord widget sender is nil")
 	}
@@ -555,6 +632,11 @@ func (d *DiscordWidgetDeliverer) DeliverDirectMessage(ctx context.Context, chann
 		return fmt.Errorf("failed to send direct discord message: %w", err)
 	}
 	return nil
+}
+
+// DeliverDirectMessage delivers a direct plain-text channel alert message to Discord REST.
+func (d *DiscordWidgetDeliverer) DeliverDirectMessage(ctx context.Context, channelID, content string) error {
+	return d.DeliverDirectMessageWithAgent(ctx, defaultAgent, channelID, content)
 }
 
 func isNotFoundError(err error) bool {
