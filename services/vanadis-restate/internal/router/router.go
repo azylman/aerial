@@ -227,11 +227,17 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 			if err == nil && bID != "" {
 				return bID, nil
 			}
+			if err != nil && !isLookupNotFound(err) {
+				return "", err
+			}
 		}
 		if req.Repo != "" {
 			bID, _, err := s.store.LookupPRChunk(rc, req.Repo, req.PRNumber)
 			if err == nil && bID != "" {
 				return bID, nil
+			}
+			if err != nil && !isLookupNotFound(err) {
+				return "", err
 			}
 		}
 		return build.GenerateBuildID(), nil

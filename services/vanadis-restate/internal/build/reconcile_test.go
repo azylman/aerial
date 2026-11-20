@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,8 +105,18 @@ func TestBuildObject_ValidationFailures(t *testing.T) {
 			bo.runtimeFactory = func(_ restate.ObjectContext) objectRuntime { return rt }
 			_, err := bo.Reconcile(nil, ReconcileBuildRequest{})
 			assert.Error(t, err)
+			if tc.emptyKey {
+				var term restate.TerminalError
+				require.ErrorAs(t, err, &term)
+				assert.Equal(t, http.StatusBadRequest, int(term.Code()))
+			}
 			_, err = bo.Mutate(nil, BuildMutationRequest{})
 			assert.Error(t, err)
+			if tc.emptyKey {
+				var term restate.TerminalError
+				require.ErrorAs(t, err, &term)
+				assert.Equal(t, http.StatusBadRequest, int(term.Code()))
+			}
 		})
 	}
 }

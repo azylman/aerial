@@ -499,7 +499,7 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req store.UpdateBui
 			_, chunks, gErr := b.store.GetBuild(rc, buildID)
 			if gErr == nil {
 				if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *updated, chunks, "Build updated: "+updated.Title); sErr != nil {
-					slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", sErr)
+					slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
 				}
 			}
 		}
@@ -541,14 +541,14 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		if b.executor != nil {
 			for _, c := range chunks {
 				if cErr := b.executor.CancelChunkDispatch(rc, c.ID); cErr != nil {
-					slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
+					slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
 				}
 			}
 			if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", sErr)
+				slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
 			}
 			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
+				slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
 			}
 		}
 		return *bld, nil
@@ -639,7 +639,7 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 		}
 		if b.executor != nil && removedChunk != nil {
 			if cErr := b.executor.CancelChunkDispatch(rc, removedChunk.ID); cErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", removedChunk.ID, "error", cErr)
+				slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", removedChunk.ID, "error", cErr)
 			}
 		}
 		return true, nil
