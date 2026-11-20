@@ -1099,15 +1099,16 @@ func (te *turnExecution) isRowStillProcessing(ctx context.Context) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	queryCtx := context.WithoutCancel(ctx)
 	if te.isDispatch() {
 		if te.dispatch == nil {
 			return false
 		}
-		d, err := te.pool.cfg.Store.GetDispatch(ctx, te.dispatch.ID)
+		d, err := te.pool.cfg.Store.GetDispatch(queryCtx, te.dispatch.ID)
 		return err != nil || (d != nil && d.Status == db.StatusProcessing)
 	}
 	for _, m := range te.burst {
-		msg, err := te.pool.cfg.Store.GetMessage(ctx, m.ID)
+		msg, err := te.pool.cfg.Store.GetMessage(queryCtx, m.ID)
 		if err != nil || (msg != nil && msg.Status == db.StatusProcessing) {
 			return true
 		}
@@ -1127,6 +1128,9 @@ func (p *WorkerPool) acquireScopeLock(scopeKey string) func() {
 }
 
 func (p *WorkerPool) checkTurnCompletionError(ctx context.Context, te *turnExecution, abortErr error) error {
+	if te.finalized.Load() && !te.isRowStillProcessing(ctx) {
+		return nil
+	}
 	if (!te.finalized.Load() || te.isRowStillProcessing(ctx)) && !te.isInterrupted() {
 		return abortErr
 	}
