@@ -261,6 +261,11 @@ run_deadcode() {
         fi
         return 0
     fi
+    if [ "$svc" = "services/eri" ]; then
+        # services/eri exports shared worker packages (pkg/env, pkg/runner, pkg/mcp) to services/eri-restate.
+        # Standalone deadcode on services/eri alone falsely flags these shared library packages as dead.
+        return 0
+    fi
     if [ -d "$svc" ]; then
         if [ "$MODE" != "staged" ]; then
             echo "   [deadcode] Checking $svc for unreachable code (production graph)..."

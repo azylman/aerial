@@ -308,13 +308,15 @@ jobs:
             (
               cd "$svc"
               golangci-lint run --path-prefix="$svc/" --config "$GITHUB_WORKSPACE/.golangci.yml" ./...
-              MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
-              if [ -n "$MAIN_PKGS" ]; then
-                DEAD_PROD=$(deadcode $MAIN_PKGS)
-                if [ -n "$DEAD_PROD" ]; then
-                  echo "::error::Unreachable production code or compiled-in test hooks detected in $svc:"
-                  echo "$DEAD_PROD"
-                  exit 1
+              if [ "$svc" != "services/eri" ]; then
+                MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
+                if [ -n "$MAIN_PKGS" ]; then
+                  DEAD_PROD=$(deadcode $MAIN_PKGS)
+                  if [ -n "$DEAD_PROD" ]; then
+                    echo "::error::Unreachable production code or compiled-in test hooks detected in $svc:"
+                    echo "$DEAD_PROD"
+                    exit 1
+                  fi
                 fi
               fi
             )

@@ -333,18 +333,7 @@ func TestSessionLifecycle(t *testing.T) {
 	// 4. External conversation mapping
 	_ = store.SaveSessionID(ctx, "ext-1", "int-1")
 
-	// 5. Unrotated sessions
-	for range 10 {
-		_, _ = store.IncrementSessionTurnCount(ctx, "th-1")
-	}
-	if unrotated, err := store.FindUnrotatedSessions(ctx, 5); err != nil || len(unrotated) != 1 || unrotated[0].ThreadID != "th-1" {
-		t.Errorf("FindUnrotatedSessions = %+v, %v", unrotated, err)
-	}
-	_, _ = store.FindUnrotatedSessions(ctx, 0)
-	_, _ = store.FindUnrotatedSessions(ctx, 5, time.Hour)
-	_, _ = store.FindUnrotatedSessions(ctx, 5, -1)
-
-	// 6. Table-driven ParseDBTime
+	// 5. Table-driven ParseDBTime
 	now := time.Now().Truncate(time.Second).UTC()
 	timeTests := []struct {
 		name   string

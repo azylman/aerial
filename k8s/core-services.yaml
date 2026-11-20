@@ -178,18 +178,6 @@ spec:
               readOnly: true
             - mountPath: /share
               name: share
-            - mountPath: /local/antigravity-oauth-token
-              name: oauth-token
-              readOnly: true
-              subPath: antigravity-oauth-token
-            - mountPath: /local/codex-auth.json
-              name: codex-auth
-              readOnly: true
-              subPath: codex-auth.json
-            - mountPath: /local/muse-auth.json
-              name: muse-auth
-              readOnly: true
-              subPath: muse-auth.json
             - mountPath: /secrets
               name: shared-secrets
               readOnly: true
@@ -309,30 +297,6 @@ spec:
                       path: namespace
         - emptyDir: {}
           name: share
-        - name: oauth-token
-          secret:
-            defaultMode: 384
-            items:
-              - key: ANTIGRAVITY_OAUTH_TOKEN
-                path: antigravity-oauth-token
-            optional: true
-            secretName: eri-secret
-        - name: codex-auth
-          secret:
-            defaultMode: 384
-            items:
-              - key: CODEX_AUTH_JSON
-                path: codex-auth.json
-            optional: true
-            secretName: eri-secret
-        - name: muse-auth
-          secret:
-            defaultMode: 384
-            items:
-              - key: MUSE_AUTH_JSON
-                path: muse-auth.json
-            optional: true
-            secretName: eri-secret
         - name: shared-secrets
           secret:
             defaultMode: 256

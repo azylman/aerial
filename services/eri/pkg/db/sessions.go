@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // DiscordSessionID normalizes a raw numeric Discord snowflake into 'discord-<id>'
@@ -102,23 +100,6 @@ type SessionInfo struct {
 	TurnCount         int
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
-}
-
-func scanSessionInfo(scanner interface{ Scan(dest ...any) error }) (SessionInfo, error) {
-	var (
-		info                       SessionInfo
-		rawCreatedAt, rawUpdatedAt any
-	)
-	if err := scanner.Scan(&info.ThreadID, &info.InternalSessionID, &info.PreviousSessionID, &info.TurnCount, &rawCreatedAt, &rawUpdatedAt); err != nil {
-		return SessionInfo{}, err
-	}
-	if t, ok := ParseDBTime(rawCreatedAt); ok {
-		info.CreatedAt = t
-	}
-	if t, ok := ParseDBTime(rawUpdatedAt); ok {
-		info.UpdatedAt = t
-	}
-	return info, nil
 }
 
 // SaveSessionID associates an internal session ID with a thread ID.
@@ -248,48 +229,4 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 		stats.LastCompletedMessageCreatedAt = t
 	}
 	return stats, nil
-}
-
-// DefaultUnrotatedSessionMaxAge defines the default recency horizon (2 hours) for detecting
-// unrotated runaway sessions. Dormant sessions older than this horizon are excluded from alerting.
-const DefaultUnrotatedSessionMaxAge = 2 * time.Hour
-
-// FindUnrotatedSessions returns sessions whose turn count strictly exceeds minTurns (defaulting to session.DefaultMaxSessionTurns if minTurns <= 0)
-// and were updated within maxAge (defaulting to DefaultUnrotatedSessionMaxAge if maxAge is empty; pass <= 0 to disable age filtering), ordered by turn_count DESC.
-func (s *SQLStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	if minTurns <= 0 {
-		minTurns = session.DefaultMaxSessionTurns
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	limitAge := DefaultUnrotatedSessionMaxAge
-	if len(maxAge) > 0 {
-		limitAge = maxAge[0]
-	}
-
-	query, args := `SELECT session_id, conversation_id, COALESCE(previous_conversation_id, ''), turn_count, created_at, updated_at FROM sessions WHERE turn_count > $1`, []any{minTurns}
-	if limitAge > 0 {
-		query += ` AND updated_at >= $2`
-		args = append(args, time.Now().UTC().Add(-limitAge))
-	}
-
-	rows, err := s.db.QueryContext(queryCtx, query+` ORDER BY turn_count DESC`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var sessions []SessionInfo
-	for rows.Next() {
-		info, err := scanSessionInfo(rows)
-		if err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, info)
-	}
-	return sessions, rows.Err()
 }

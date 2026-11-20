@@ -80,7 +80,6 @@ type SessionStore interface {
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)
-	FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error)
 }
 
 // SessionSummary encapsulates macro-level session summaries, embeddings, and sync metadata.

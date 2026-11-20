@@ -55,7 +55,6 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c2(s.GetThreadSummary(ctx, "t")), "GetThreadSummary")
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
-	requireErr(t, c1(s.FindUnrotatedSessions(ctx, 8)), "FindUnrotatedSessions")
 	requireErr(t, c1(s.AcquireLeaderLock(ctx)), "AcquireLeaderLock")
 }
 
@@ -394,22 +393,8 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 
 func assertFakeStoreUnrotatedSessions(ctx context.Context, t *testing.T, s *FakeStore, now time.Time) {
 	t.Helper()
-	for range 8 {
-		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")
-	}
-	for range 12 {
-		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated-2")
-	}
-	s.SetSessionUpdatedAt("th-unrotated", time.Now().UTC().Add(-2*time.Hour))
-	s.SetSessionUpdatedAt("th-unrotated-2", time.Now().UTC().Add(-2*time.Hour))
-	if unrot, _ := s.FindUnrotatedSessions(ctx, 5); len(unrot) != 0 {
-		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrot))
-	}
-	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 2 {
-		t.Errorf("expected 2 unrotated sessions within 4h, got %d", len(unrotLong))
-	}
-
 	s.SetSessionInfo(db.SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
+	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
 	if sessID, _ := s.GetSessionID(ctx, "th-helper"); sessID != "sess-helper" {
 		t.Errorf("SetSessionInfo: sessID=%q", sessID)
 	}
@@ -1016,7 +1001,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	}
 
 	// 3. Update status & retry
-	mustOK(t, s.UpdateDispatchStatus(ctx, "disp-f1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
+	mustOK(t, s.UpdateDispatchStatus(ctx, "disp-f1", "PROCESSING", "in flight", db.TurnTelemetry{DurationMs: 120, TotalTokens: 50}), "UpdateDispatchStatus")
 	mustOK(t, s.IncrementDispatchRetry(ctx, "disp-f1", "network error"), "IncrementDispatchRetry")
 	got, _ = s.GetDispatch(ctx, "disp-f1")
 	if got.RetryCount != 1 || got.ErrorMessage != "network error" {

@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,70 +23,12 @@ import (
 	"github.com/bwmarrin/discordgo"
 	_ "modernc.org/sqlite"
 
-	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
-	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
-
-func TestSyncBrainEnvironment(t *testing.T) {
-	tests := []struct {
-		name                     string
-		precreateCLIConfigAsFile bool
-		wantErr                  bool
-	}{
-		{
-			name:    "success fresh and idempotent",
-			wantErr: false,
-		},
-		{
-			name:                     "conflict file in cli parent",
-			precreateCLIConfigAsFile: true,
-			wantErr:                  true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var cfg *config.Config
-			tmpDir := t.TempDir()
-			if tc.precreateCLIConfigAsFile {
-				conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-				_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
-				_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
-				cfg = newTestConfig(func(d *config.ConfigData) {
-					d.DataDir = tmpDir
-					d.GeminiHomeDir = tmpDir
-				})
-			} else {
-				cfg = newTestConfig(func(d *config.ConfigData) {
-					d.Model = "gemini-2.5-flash"
-					d.GeminiHomeDir = t.TempDir()
-					d.DataDir = t.TempDir()
-					d.APIKey = "test-api-key"
-					d.SystemPrompt = "test prompt"
-				})
-			}
-			provisioner, err := env.NewFromConfig(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = syncBrainEnvironment(context.Background(), provisioner, cfg)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("wantErr=%v, got err=%v", tc.wantErr, err)
-			}
-			if tc.name == "success fresh and idempotent" {
-				if err = syncBrainEnvironment(context.Background(), provisioner, cfg); err != nil {
-					t.Fatalf("unexpected error on idempotent second call: %v", err)
-				}
-			}
-		})
-	}
-}
 
 func WithReloadSupplier(fn func(active *config.Config) error) ReloadOption {
 	return func(o *reloadConfigOptions) {
@@ -228,14 +169,14 @@ func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConf
 func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("invalid YAML with alert", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(t.Context(), newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			return errors.New("simulated invalid YAML error")
 		}), WithSkipEnvironmentSync())("TestReload")
 	})
 
 	t.Run("supplier success updating model", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(t.Context(), newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			active.Update(&config.ConfigData{
 				CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, Model: "gemini-2.5-flash",
 			})
@@ -252,7 +193,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			d.APIKey = "test-api-key"
 			d.SystemPrompt = "test system prompt"
 		})
-		reloadFn := CreateReloadConfigFunc(t.Context(), cfg, WithReloadSupplier(func(active *config.Config) error { return nil }))
+		reloadFn := CreateReloadConfigFunc(cfg, WithReloadSupplier(func(active *config.Config) error { return nil }))
 		reloadFn("TestSource")
 
 		blockerHome := filepath.Join(tmpDir, "blocked_home")
@@ -263,194 +204,50 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		reloadFn("TestErrorSource")
 	})
 
-	t.Run("provisioner error", func(t *testing.T) {
-		cfg := newTestConfig()
-		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
-		_ = os.WriteFile(tmpFile, []byte("file"), 0o644)
-		cfg.Update(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, GeminiHomeDir: tmpFile})
-		CreateReloadConfigFunc(t.Context(), cfg,
-			WithReloadSupplier(func(active *config.Config) error { return nil }),
-			WithProvisioner(testProvisioner(t, cfg)),
-		)("test-provisioner-error")
-	})
-
-	t.Run("with worker pool and claude engine propagation", func(t *testing.T) {
+	t.Run("fingerprint gated reload preserves config unless changes occur", func(t *testing.T) {
 		cfg := newTestConfig(func(d *config.ConfigData) {
-			d.LowEffortModel = "gpt-oss-120b-medium"
-		})
-		var spawnedModel, spawnedEngine, spawnedClaudeBin string
-		spawner := &mockMainDaemonSpawner{
-			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-				spawnedModel = dCfg.Model
-				spawnedEngine = dCfg.Engine
-				spawnedClaudeBin = dCfg.ClaudeBin
-				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
-			},
-		}
-		ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
-		defer func() { _ = ephemPool.Close() }()
-
-		var workerSpawnedEngine, workerSpawnedClaudeBin string
-		workerSpawner := &mockMainDaemonSpawner{
-			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-				workerSpawnedEngine = dCfg.Engine
-				workerSpawnedClaudeBin = dCfg.ClaudeBin
-				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
-			},
-		}
-		mockDiscordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, workerSpawner)
-		defer func() { _ = mockDiscordPool.Close() }()
-		wp := queue.New(cfg, queue.WorkerPoolConfig{
-			Pools: map[queue.PoolKey]runner.AgentPool{
-				{Ephemeral: false, Effort: "high"}: mockDiscordPool,
-			},
+			d.Model = "gemini-3.8-flash-low"
+			d.LowEffortModel = "gemini-3.8-flash-low"
 		})
 
-		CreateReloadConfigFunc(t.Context(), cfg,
-			WithSkipEnvironmentSync(),
-			WithReloadSupplier(func(active *config.Config) error {
-				active.Update(&config.ConfigData{
-					CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}},
-					Engine:            "claude",
-					ClaudeBin:         "/opt/anthropic/bin/claude",
-					LowEffortModel:    "gpt-oss-120b-medium",
-				})
-				return nil
-			}),
+		wp := queue.New(cfg, queue.WorkerPoolConfig{})
+		supplierCandidateMutator := func(candidate *config.Config) error { return nil }
+
+		reloadFn := CreateReloadConfigFunc(cfg,
 			WithWorkerPool(wp),
-			WithEphemeralPool(ephemPool),
-		)("TestWithWorkerPool")
+			WithReloadSupplier(func(candidate *config.Config) error {
+				return supplierCandidateMutator(candidate)
+			}),
+		)
 
-		_, _ = ephemPool.GetOrCreate(context.Background(), "ephemeral:worker-0", "")
-		if spawnedModel != "gpt-oss-120b-medium" {
-			t.Fatalf("expected ephemeralPool model updated to gpt-oss-120b-medium, got %q", spawnedModel)
+		// 1. Unchanged reload
+		reloadFn("UnchangedReload")
+
+		// 2. Change model
+		supplierCandidateMutator = func(candidate *config.Config) error {
+			cur := candidate.Current()
+			cur.Model = "gemini-2.5-pro"
+			candidate.Update(cur)
+			return nil
 		}
-		if spawnedEngine != "claude" || spawnedClaudeBin != "/opt/anthropic/bin/claude" {
-			t.Fatalf("expected ephemeralPool engine claude and bin /opt/anthropic/bin/claude, got %q, %q", spawnedEngine, spawnedClaudeBin)
+		reloadFn("ModelChangeReload")
+		if cfg.Current().Model != "gemini-2.5-pro" {
+			t.Fatalf("expected reloaded model gemini-2.5-pro, got %s", cfg.Current().Model)
 		}
 
-		_, _ = mockDiscordPool.GetOrCreate(context.Background(), "discord:worker-0", "")
-		if workerSpawnedEngine != "claude" || workerSpawnedClaudeBin != "/opt/anthropic/bin/claude" {
-			t.Fatalf("expected worker pool engine claude and bin /opt/anthropic/bin/claude, got %q, %q", workerSpawnedEngine, workerSpawnedClaudeBin)
+		// 3. Change engine
+		supplierCandidateMutator = func(candidate *config.Config) error {
+			cur := candidate.Current()
+			cur.Engine = "claude"
+			cur.ClaudeBin = "/usr/local/bin/claude"
+			candidate.Update(cur)
+			return nil
+		}
+		reloadFn("EngineChangeReload")
+		if cfg.Current().GetEngine() != "claude" {
+			t.Fatalf("expected reloaded engine claude, got %s", cfg.Current().GetEngine())
 		}
 	})
-
-	t.Run("fingerprint gated reload preserves idle daemons unless config or assets change", func(t *testing.T) {
-		testFingerprintGatedDaemonReload(t)
-	})
-}
-
-func assertDaemonDirtyState(t *testing.T, ephem, discord *runner.StreamingDaemon, wantDirty bool, step string) {
-	t.Helper()
-	if ephem.IsDirty() != wantDirty {
-		t.Errorf("[%s] ephem daemon dirty=%v, want %v", step, ephem.IsDirty(), wantDirty)
-	}
-	if discord.IsDirty() != wantDirty {
-		t.Errorf("[%s] discord daemon dirty=%v, want %v", step, discord.IsDirty(), wantDirty)
-	}
-}
-
-func getTestDaemons(t *testing.T, ephemPool, discordPool *runner.UnifiedProcessPool) (*runner.StreamingDaemon, *runner.StreamingDaemon) {
-	t.Helper()
-	dEphem, err := ephemPool.GetOrCreate(t.Context(), "ephemeral:worker-0", "")
-	if err != nil {
-		t.Fatalf("failed to spawn ephem daemon: %v", err)
-	}
-	dDiscord, err := discordPool.GetOrCreate(t.Context(), "discord:worker-0", "")
-	if err != nil {
-		t.Fatalf("failed to spawn discord daemon: %v", err)
-	}
-	return dEphem, dDiscord
-}
-
-func testFingerprintGatedDaemonReload(t *testing.T) {
-	t.Helper()
-	homeDir := t.TempDir()
-	dataDir := t.TempDir()
-	credFile := filepath.Join(homeDir, "oauth-token.json")
-	if err := os.WriteFile(credFile, []byte(`{"token":"initial"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := newTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = homeDir
-		d.DataDir = dataDir
-		d.Model = "gemini-3.8-flash-low"
-		d.LowEffortModel = "gemini-3.8-flash-low"
-		d.CredentialSources.OAuth = config.CredentialSource{Path: credFile}
-	})
-
-	prov, err := env.NewFromConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	spawner := newMockMainDaemonSpawner()
-	ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
-	defer func() { _ = ephemPool.Close() }()
-
-	workerSpawner := newMockMainDaemonSpawner()
-	mockDiscordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, workerSpawner)
-	defer func() { _ = mockDiscordPool.Close() }()
-
-	wp := queue.New(cfg, queue.WorkerPoolConfig{
-		Pools: map[queue.PoolKey]runner.AgentPool{
-			{Ephemeral: false, Effort: "high"}: mockDiscordPool,
-		},
-	})
-
-	dEphem, dDiscord := getTestDaemons(t, ephemPool, mockDiscordPool)
-	supplierCandidateMutator := func(candidate *config.Config) error { return nil }
-
-	reloadFn := CreateReloadConfigFunc(t.Context(), cfg,
-		WithProvisioner(prov),
-		WithWorkerPool(wp),
-		WithEphemeralPool(ephemPool),
-		WithReloadSupplier(func(candidate *config.Config) error {
-			return supplierCandidateMutator(candidate)
-		}),
-	)
-
-	// 1. Unchanged reload: preserves existing idle daemons without marking them dirty
-	reloadFn("UnchangedReload")
-	assertDaemonDirtyState(t, dEphem, dDiscord, false, "UnchangedReload")
-	if ephemDaemon, ok := ephemPool.Get("ephemeral:worker-0"); !ok || ephemDaemon != dEphem {
-		t.Errorf("expected ephem daemon preserved, got ok=%v, match=%v", ok, ephemDaemon == dEphem)
-	}
-	if discordDaemon, ok := mockDiscordPool.Get("discord:worker-0"); !ok || discordDaemon != dDiscord {
-		t.Errorf("expected discord daemon preserved, got ok=%v, match=%v", ok, discordDaemon == dDiscord)
-	}
-
-	// 2. Change model: marks daemons dirty
-	supplierCandidateMutator = func(candidate *config.Config) error {
-		cur := candidate.Current()
-		cur.Model = "gemini-2.5-pro"
-		candidate.Update(cur)
-		return nil
-	}
-	reloadFn("ModelChangeReload")
-	assertDaemonDirtyState(t, dEphem, dDiscord, true, "ModelChangeReload")
-
-	// 3. Change engine: marks daemons dirty
-	dEphem2, dDiscord2 := getTestDaemons(t, ephemPool, mockDiscordPool)
-	supplierCandidateMutator = func(candidate *config.Config) error {
-		cur := candidate.Current()
-		cur.Engine = "claude"
-		cur.ClaudeBin = "/usr/local/bin/claude"
-		candidate.Update(cur)
-		return nil
-	}
-	reloadFn("EngineChangeReload")
-	assertDaemonDirtyState(t, dEphem2, dDiscord2, true, "EngineChangeReload")
-
-	// 4. Change credential file: marks daemons dirty
-	dEphem3, dDiscord3 := getTestDaemons(t, ephemPool, mockDiscordPool)
-	supplierCandidateMutator = func(candidate *config.Config) error { return nil }
-	if err := os.WriteFile(credFile, []byte(`{"token":"rotated-secret"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	reloadFn("CredentialChangeReload")
-	assertDaemonDirtyState(t, dEphem3, dDiscord3, true, "CredentialChangeReload")
 }
 
 func TestRegisterGitSyncReload(t *testing.T) {
@@ -600,16 +397,6 @@ func TestDefaultPaths(t *testing.T) {
 	if dir := DefaultDataDir(); dir == "" {
 		t.Errorf("expected non-empty data dir, got empty")
 	}
-
-	// 5. resolveBrainModelDefaults tests
-	lowD, medD := resolveBrainModelDefaults(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}})
-	if lowD != "gemini-3.8-flash-low" || medD != "gemini-3.8-flash-medium" {
-		t.Errorf("expected default models, got %s, %s", lowD, medD)
-	}
-	lowC, medC := resolveBrainModelDefaults(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, LowEffortModel: "custom-low", MediumEffortModel: "custom-med"})
-	if lowC != "custom-low" || medC != "custom-med" {
-		t.Errorf("expected custom models, got %s, %s", lowC, medC)
-	}
 }
 
 func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOption) (string, context.CancelFunc, func() error) {
@@ -637,9 +424,6 @@ func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOpt
 		}
 	}
 	var effectiveOpts []BrainAppOption
-	if checkOpts.processSpawner == nil {
-		effectiveOpts = append(effectiveOpts, WithProcessSpawner(newMockMainDaemonSpawner()))
-	}
 	if checkOpts.store == nil {
 		effectiveOpts = append(effectiveOpts, WithStore(dbtest.NewFakeStore()))
 	}
@@ -791,111 +575,31 @@ func (*mockErrProcessHandle) Pid() int    { return 99999 }
 func (*mockErrProcessHandle) Kill() error { return errors.New("simulated kill error") }
 func (*mockErrProcessHandle) Wait() error { return nil }
 
-func newTrackingSpawner(mu *sync.Mutex, seen map[string]runner.DaemonConfig, allSpawned chan struct{}) *mockMainDaemonSpawner {
-	var once sync.Once
-	baseMock := newMockMainDaemonSpawner()
-	return &mockMainDaemonSpawner{
-		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			mu.Lock()
-			seen[dCfg.ThreadID] = dCfg
-			if seen["ephemeral:worker-0"].ThreadID != "" && seen["ephemeral:worker-1"].ThreadID != "" &&
-				seen["discord:worker-0"].ThreadID != "" && seen["discord:worker-1"].ThreadID != "" &&
-				seen["discord:medium-worker-0"].ThreadID != "" && seen["discord:medium-worker-1"].ThreadID != "" {
-				once.Do(func() { close(allSpawned) })
-			}
-			mu.Unlock()
-			return baseMock.Spawn(ctx, dCfg)
-		},
-	}
-}
-
-func runBrainAppLifecyclePrewarmedWorkers(t *testing.T, cfg *config.Config, expectedEphemeralHome, expectedDiscordHome string) {
+func runBrainAppLifecyclePrewarmedWorkers(t *testing.T, cfg *config.Config) {
 	t.Helper()
-	var mu sync.Mutex
-	seen := make(map[string]runner.DaemonConfig)
-	allSpawned := make(chan struct{})
-	trackingSpawner := newTrackingSpawner(&mu, seen, allSpawned)
-
-	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(trackingSpawner))
+	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg)
 	resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(`{"prompt":"Hello test prompt","channel_id":"1542423172400291873","message_id":"msg-1"}`))
 	if err == nil {
 		_ = resp.Body.Close()
 	}
 
-	select {
-	case <-allSpawned:
-	case <-time.After(2 * time.Second):
-	}
-
 	cancel()
 	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected error waiting for server shutdown: %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	for _, target := range []string{"ephemeral:worker-0", "ephemeral:worker-1"} {
-		if !hasEnv(seen[target].Env, "HOME="+expectedEphemeralHome) {
-			t.Errorf("%s expected HOME=%q, got %v", target, expectedEphemeralHome, seen[target].Env)
-		}
-		if !hasEnv(seen[target].Env, "AERIAL_BOT_ID=aerial-main") {
-			t.Errorf("%s expected AERIAL_BOT_ID=aerial-main, got %v", target, seen[target].Env)
-		}
-		if !hasEnv(seen[target].Env, "SYNAPSE_URL=http://synapse.local:4020") {
-			t.Errorf("%s expected SYNAPSE_URL=http://synapse.local:4020, got %v", target, seen[target].Env)
-		}
-		if !hasEnv(seen[target].Env, "VANADIS_URL=http://vanadis.local:4025") {
-			t.Errorf("%s expected VANADIS_URL=http://vanadis.local:4025, got %v", target, seen[target].Env)
-		}
-		if seen[target].MemoryRetriever != nil {
-			t.Errorf("%s expected nil MemoryRetriever, got non-nil", target)
-		}
-	}
-	for _, target := range []string{"discord:worker-0", "discord:worker-1", "discord:medium-worker-0", "discord:medium-worker-1"} {
-		if !hasEnv(seen[target].Env, "HOME="+expectedDiscordHome) {
-			t.Errorf("%s expected HOME=%q, got %v", target, expectedDiscordHome, seen[target].Env)
-		}
-		if seen[target].MemoryRetriever == nil {
-			t.Errorf("%s expected non-nil MemoryRetriever, got nil", target)
-		}
-	}
-	if seen["discord:medium-worker-0"].ThreadID == "" || seen["discord:medium-worker-1"].ThreadID == "" {
-		t.Errorf("medium workers not spawned: %+v", seen)
 	}
 }
 
 func runBrainAppLifecycleClaudeEngine(t *testing.T, cfg *config.Config) {
 	t.Helper()
-	var mu sync.Mutex
-	seen := make(map[string]runner.DaemonConfig)
-	allSpawned := make(chan struct{})
-	trackingSpawner := newTrackingSpawner(&mu, seen, allSpawned)
-
-	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(trackingSpawner))
+	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg)
 	resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(`{"prompt":"Hello test prompt","channel_id":"1542423172400291873","message_id":"msg-1"}`))
 	if err == nil {
 		_ = resp.Body.Close()
 	}
 
-	select {
-	case <-allSpawned:
-	case <-time.After(2 * time.Second):
-	}
-
 	cancel()
 	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected error waiting for server shutdown: %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	for _, target := range []string{"ephemeral:worker-0", "ephemeral:worker-1", "discord:worker-0", "discord:worker-1", "discord:medium-worker-0", "discord:medium-worker-1"} {
-		if seen[target].Engine != "claude" {
-			t.Errorf("%s expected Engine=claude, got %q", target, seen[target].Engine)
-		}
-		if seen[target].ClaudeBin != "/usr/local/bin/claude" {
-			t.Errorf("%s expected ClaudeBin=/usr/local/bin/claude, got %q", target, seen[target].ClaudeBin)
-		}
 	}
 }
 
@@ -921,7 +625,7 @@ func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string
 
 func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	t.Run("PrewarmedWorkers", func(t *testing.T) {
-		tmpDir, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
+		_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
 			d.DiscordToken = "mock-discord-token"
 			d.HarnessAPIKey = "gemini-test-key"
 			d.DataDir = d.GeminiHomeDir
@@ -942,7 +646,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			}
 		})
 
-		runBrainAppLifecyclePrewarmedWorkers(t, cfg, filepath.Join(tmpDir, "runtimes", "ephemeral"), filepath.Join(tmpDir, "runtimes", "discord"))
+		runBrainAppLifecyclePrewarmedWorkers(t, cfg)
 	})
 
 	t.Run("SIGHUP", func(t *testing.T) {
@@ -1078,69 +782,6 @@ func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
 	}
 }
 
-func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	oldNewBus := newBusFn
-	newBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return memBus, nil
-	}
-	defer func() { newBusFn = oldNewBus }()
-
-	batchCh := make(chan transcriptwire.TranscriptStepBatch, 1)
-	_, _ = memBus.Subscribe(context.Background(), pubsub.SubjectTranscriptsSteps("run-brain-app-sess"), "test-verify-runbrainapp", func(_ context.Context, msg pubsub.Message) error {
-		var b transcriptwire.TranscriptStepBatch
-		if err := json.Unmarshal(msg.Data(), &b); err == nil {
-			select {
-			case batchCh <- b:
-			default:
-			}
-		}
-		return nil
-	})
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"sessions":          map[string]int{"run-brain-app-sess": 0},
-			"last_indexed_step": 0,
-		})
-	}))
-	defer srv.Close()
-
-	_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
-		d.NATSURL = "nats://127.0.0.1:4222"
-		d.Transcripts.IndexerURL = srv.URL
-	})
-
-	p := filepath.Join(cfg.DataDir(), "brain", "run-brain-app-sess", "transcript.jsonl")
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	_ = os.WriteFile(p, []byte("{\"step_index\":0,\"type\":\"PLANNER_RESPONSE\",\"content\":\"step 0 indexed\"}\n{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"content\":\"step 1 unindexed\"}\n"), 0o644)
-
-	_, cancel, wait := runBrainAppUntilReady(t, cfg)
-	defer func() {
-		cancel()
-		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("unexpected error from RunBrainApp: %v", err)
-		}
-	}()
-
-	select {
-	case b := <-batchCh:
-		if b.SessionID != "run-brain-app-sess" {
-			t.Errorf("b.SessionID = %q, want %q", b.SessionID, "run-brain-app-sess")
-		}
-		if len(b.Steps) != 1 || b.Steps[0].StepIndex != 1 {
-			t.Errorf("published steps = %+v, want only delta step 1 (step 0 covered by watermark)", b.Steps)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for TranscriptStepBatch from RunBrainApp startup resend")
-	}
-}
-
-func hasEnv(envs []string, target string) bool {
-	return slices.Contains(envs, target)
-}
-
 func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	var opts brainAppOptions
 	store := dbtest.NewFakeStore()
@@ -1174,137 +815,97 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	}
 }
 
-func testProvisioner(t *testing.T, cfg *config.Config) *env.Provisioner {
-	t.Helper()
-	p, err := env.NewFromConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-type legacyReloadPool struct {
-	runner.AgentPool
-
-	engine, claudeBin string
-}
-
-func (p *legacyReloadPool) UpdateEngine(engine, claudeBin string) {
-	p.engine, p.claudeBin = engine, claudeBin
-}
-
-func TestReloadCredentialCandidate(t *testing.T) {
+func TestReloadCandidateModelUpdate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
-		missing   bool
+		mutate    func(candidate *config.Config)
 		wantModel string
 	}{
-		{"reject unreadable candidate", true, "old-model"},
-		{"publish readable candidate", false, "new-model"},
+		{
+			name: "update model directly",
+			mutate: func(candidate *config.Config) {
+				cur := candidate.Current()
+				cur.Model = "new-model"
+				candidate.Update(cur)
+			},
+			wantModel: "new-model",
+		},
+		{
+			name: "leave model unchanged",
+			mutate: func(candidate *config.Config) {
+				cur := candidate.Current()
+				cur.SystemPrompt = "updated prompt"
+				candidate.Update(cur)
+			},
+			wantModel: "old-model",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), "oauth")
-			if !tc.missing {
-				if err := os.WriteFile(path, []byte("fake-token"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" })
-			ephemeral, worker := &legacyReloadPool{}, &legacyReloadPool{}
-			pool := queue.New(cfg, queue.WorkerPoolConfig{Pools: map[queue.PoolKey]runner.AgentPool{
-				{Ephemeral: false, Effort: "high"}: worker,
-			}})
-			reload := CreateReloadConfigFunc(t.Context(), cfg, WithSkipEnvironmentSync(), WithEphemeralPool(ephemeral), WithWorkerPool(pool), WithReloadSupplier(func(candidate *config.Config) error {
-				cur := candidate.Current()
-				cur.Model = "new-model"
-				cur.Engine, cur.ClaudeBin = "claude", "/test/claude"
-				cur.CredentialSources.OAuth = config.CredentialSource{Path: path}
-				candidate.Update(cur)
+			reload := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(candidate *config.Config) error {
+				tc.mutate(candidate)
 				return nil
 			}))
 			reload("test")
-			wantEngine, wantBin := "claude", "/test/claude"
-			if tc.missing {
-				wantEngine, wantBin = "", ""
-			}
-			for _, p := range []*legacyReloadPool{ephemeral, worker} {
-				if p.engine != wantEngine || p.claudeBin != wantBin {
-					t.Fatalf("pool engine=%q bin=%q, want %q %q", p.engine, p.claudeBin, wantEngine, wantBin)
-				}
-			}
 			if got := cfg.Current().Model; got != tc.wantModel {
 				t.Fatalf("model=%q want %q", got, tc.wantModel)
-			}
-			if tc.missing && !cfg.Current().CredentialSources.OAuth.Disabled {
-				t.Fatal("rejected source published")
-			}
-			if !tc.missing && cfg.Current().CredentialSources.OAuth.Path != path {
-				t.Fatal("accepted source not published")
 			}
 		})
 	}
 }
 
-func TestInitializeEnvironment(t *testing.T) {
+func TestPrepareReloadCandidate(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name      string
-		invalid   bool
-		blockHome bool
-		wantErr   bool
-	}{
-		{"required sources rejected", true, false, true},
-		{"filesystem warning tolerated", false, true, false},
+	cfg := newTestConfig()
+	if err := prepareReloadCandidate(cfg, nil); err != nil {
+		t.Fatalf("unexpected error with nil options: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			home := t.TempDir()
-			if tc.blockHome {
-				home = filepath.Join(home, "blocker")
-				if err := os.WriteFile(home, []byte("blocker"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			cfg := newTestConfig(func(d *config.ConfigData) {
-				d.GeminiHomeDir = home
-				d.DataDir = t.TempDir()
-				if tc.invalid {
-					d.CredentialSources = config.CredentialSources{}
-				}
-			})
-			_, err := initializeEnvironment(t.Context(), cfg, nil)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
-			}
-		})
+	called := false
+	opt := &reloadConfigOptions{
+		reloadSupplier: func(c *config.Config) error {
+			called = true
+			return nil
+		},
+	}
+	if err := prepareReloadCandidate(cfg, opt); err != nil || !called {
+		t.Fatalf("prepareReloadCandidate failed or didn't invoke supplier: %v", err)
 	}
 }
 
 // Global config and process environment require serial execution here.
-func TestDefaultReloadCredentialCandidate(t *testing.T) {
+func TestDefaultReloadCandidate(t *testing.T) {
 	original := config.ActiveConfig().Current()
 	t.Cleanup(func() { config.ActiveConfig().Update(original) })
-	tests := []struct{ name, sources, wantModel string }{
-		{"omitted", "", "old-model"},
-		{"unreadable", "credential_sources:\n  oauth:\n    path: %s\n  codex:\n    disabled: true\n", "old-model"},
-		{"accepted", "credential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n", "new-model"},
+	tests := []struct {
+		name           string
+		mutateSupplier bool
+		wantModel      string
+	}{
+		{name: "supplier error retains lkgc", mutateSupplier: true, wantModel: "old-model"},
+		{name: "successful reload updates model", mutateSupplier: false, wantModel: "new-model"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte("model: new-model\nchannels:\n  default: {mode: disabled}\n"+strings.ReplaceAll(tc.sources, "%s", filepath.Join(t.TempDir(), "missing"))), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte("model: new-model\nchannels:\n  default: {mode: disabled}\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("CONFIG_PATH", path)
 			cfg := config.ActiveConfig()
 			cfg.Update(newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" }).Current())
-			CreateReloadConfigFunc(t.Context(), cfg, WithSkipEnvironmentSync())("test")
-			if cfg.Current().Model != tc.wantModel || config.ActiveConfig().Current().Model != tc.wantModel {
-				t.Fatalf("cfg=%q global=%q want=%q", cfg.Current().Model, config.ActiveConfig().Current().Model, tc.wantModel)
+			var opts []ReloadOption
+			opts = append(opts, WithSkipEnvironmentSync())
+			if tc.mutateSupplier {
+				opts = append(opts, WithReloadSupplier(func(candidate *config.Config) error {
+					return errors.New("forced reload failure")
+				}))
+			}
+			CreateReloadConfigFunc(cfg, opts...)("test")
+			if cfg.Current().Model != tc.wantModel {
+				t.Fatalf("cfg=%q want=%q", cfg.Current().Model, tc.wantModel)
 			}
 		})
 	}

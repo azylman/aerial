@@ -146,29 +146,3 @@ func defaultDataDir(isTesting bool) string {
 	}
 	return "/data"
 }
-
-func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) runner.PoolConfig, discordHome, highModel, medModel, lowModel string, spawner runner.DaemonSpawner) (map[queue.PoolKey]runner.AgentPool, []runner.AgentPool) {
-	pools := make(map[queue.PoolKey]runner.AgentPool, 5)
-	ordered := make([]runner.AgentPool, 0, len(queue.AllValidPoolKeys()))
-	for _, k := range queue.AllValidPoolKeys() {
-		model := highModel
-		switch k.Effort {
-		case config.EffortMedium:
-			model = medModel
-		case config.EffortLow:
-			model = lowModel
-		}
-		var p runner.AgentPool
-		switch {
-		case !k.Ephemeral:
-			p = runner.NewUnifiedProcessPool(basePoolCfg(discordHome, model, nil), spawner)
-		case k.Effort == config.EffortMedium:
-			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker", false)
-		default:
-			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker", false)
-		}
-		pools[k] = p
-		ordered = append(ordered, p)
-	}
-	return pools, ordered
-}

@@ -20,7 +20,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 // TestSetupTracing mutates the global propagator, so it is not parallel.
@@ -144,9 +143,9 @@ channels:
 	}
 }
 
-// TestBrainHandler_SkipsServerSpansForMCPProxy mutates the global tracer provider, so it is
+// TestBrainHandler_ServerSpans mutates the global tracer provider, so it is
 // not parallel.
-func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
+func TestBrainHandler_ServerSpans(t *testing.T) {
 	tests := []struct {
 		name      string
 		path      string
@@ -154,9 +153,6 @@ func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
 	}{
 		{name: "ordinary route gets a server span", path: "/prompt", wantSpans: 1},
 		{name: "health probe is untraced", path: "/health", wantSpans: 0},
-		{name: "MCP proxy route is left to the proxy", path: "/internal/mcp-proxy/discord/docket", wantSpans: 0},
-		{name: "OTel logs route is left to the receiver", path: "/internal/otel/v1/logs", wantSpans: 0},
-		{name: "OTel logs target route is left to the receiver", path: "/internal/otel/v1/logs/voice", wantSpans: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,46 +176,6 @@ func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
 			}
 			if serverSpans != tc.wantSpans {
 				t.Errorf("server spans = %d, want %d", serverSpans, tc.wantSpans)
-			}
-		})
-	}
-}
-
-func TestRegisterMCPTraceProxy(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		enabled    bool
-		wantPort   string
-		wantStatus int
-	}{
-		{name: "tracing enabled mounts the proxy", enabled: true, wantPort: "8080", wantStatus: http.StatusAccepted},
-		{name: "tracing disabled mounts nothing", wantStatus: http.StatusNotFound},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			routes, port := mcpTraceRoutes(tc.enabled, "8080")
-			if port != tc.wantPort || (routes != nil) != tc.enabled {
-				t.Fatalf("mcpTraceRoutes = %v, %q; want routes %v, port %q", routes, port, tc.enabled, tc.wantPort)
-			}
-			mux := http.NewServeMux()
-			registerMCPTraceProxy(mux, routes, runner.NewActiveTurnRegistry())
-			req := httptest.NewRequest(http.MethodPost, "/internal/mcp-proxy/announce", strings.NewReader(`{"daemon_id":"p1/discord-1","server":"docket","tool":"create"}`))
-			req.RemoteAddr = "127.0.0.1:4000"
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-			if w.Code != tc.wantStatus {
-				t.Errorf("announce status = %d, want %d", w.Code, tc.wantStatus)
-			}
-
-			// OTel log receiver is mounted in both cases
-			otelReq := httptest.NewRequest(http.MethodPost, "/internal/otel/v1/logs", strings.NewReader(`{}`))
-			otelReq.RemoteAddr = "127.0.0.1:4000"
-			otelW := httptest.NewRecorder()
-			mux.ServeHTTP(otelW, otelReq)
-			if otelW.Code != http.StatusOK {
-				t.Errorf("otel logs status = %d, want %d", otelW.Code, http.StatusOK)
 			}
 		})
 	}
