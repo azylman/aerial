@@ -58,6 +58,8 @@ type RouterServer struct {
 	discordIngressMaxAge     time.Duration
 	alertTracker             alerts.Tracker
 	ghState                  github.StateTracker
+	shadowMu                 sync.Mutex
+	shadowRestate            *shadowRestateReporter
 }
 
 func (s *RouterServer) GHState() *github.StateTracker {
@@ -158,6 +160,17 @@ func (s *RouterServer) Dispatcher() OutboundDispatcher                 { return 
 func (s *RouterServer) SetQueueStats(q ConsumerStatsQuerier)           { s.queueStats = q }
 func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration)    { s.gatewayLatencyFn = fn }
 func (s *RouterServer) SetOnProcessed(fn func(event, delivery string)) { s.onProcessed = fn }
+
+// SetRestateShadow injects the dark shadow reporter (tests and wiring only;
+// production lazily builds one from YAML config on first use).
+func (s *RouterServer) SetRestateShadow(r *shadowRestateReporter) {
+	if s == nil {
+		return
+	}
+	s.shadowMu.Lock()
+	defer s.shadowMu.Unlock()
+	s.shadowRestate = r
+}
 
 // Config returns the current configuration snapshot, implementing discord.IngressServer.
 func (s *RouterServer) Config() *config.Config {
@@ -821,12 +834,14 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 		}
 		if evt.PRNumber > 0 {
 			s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+			s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 			return &evt, nil
 		}
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
 			return &evt, err
 		}
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+		s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 		return &evt, nil
 	case eventDeployRollback, eventDeployFailed:
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
@@ -877,6 +892,7 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 		return err
 	}
 	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+	s.shadowDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 	return nil
 }
 

@@ -737,13 +737,6 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req store.A
 		if err != nil {
 			return model.AttachChunkPRResponse{}, ToTerminalErr(err)
 		}
-		if exec := b.executor; exec != nil {
-			if bld, chunks, gErr := st.GetBuild(rc, bID); gErr == nil && bld != nil {
-				if _, sErr := exec.SyncBuildWidget(rc, st, *bld, chunks, ""); sErr != nil {
-					slog.ErrorContext(ctx, "[vanadis-restate] sync widget error on attach pr", "error", sErr)
-				}
-			}
-		}
 		return model.AttachChunkPRResponse{
 			Status:   "attached",
 			BuildID:  bID,

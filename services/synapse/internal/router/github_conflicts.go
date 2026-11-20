@@ -9,6 +9,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/github"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
@@ -45,6 +46,9 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		if normHeadSHA != "" {
 			s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
 		}
+		s.shadowPREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
+			Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
+		})
 		return true, nil
 	}
 	tid := targetID
@@ -76,6 +80,9 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 	if normHeadSHA != "" {
 		s.ghState.MarkConflictPublished(repo, prNumber, normHeadSHA)
 	}
+	s.shadowPREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
+	})
 	return true, nil
 }
 
@@ -117,6 +124,8 @@ func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNum
 			Event:        prClosedUnmerged,
 			Repo:         repo,
 			PRNumber:     prNumber,
+			Branch:       fetched.Head.Ref,
+			HeadSHA:      fetched.Head.SHA,
 			TargetID:     targetID,
 			Status:       prClosedUnmerged,
 			RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
@@ -228,7 +237,7 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        prMerged,
 			Repo:         res.Repo,
 			PRNumber:     res.PRNumber,
@@ -240,14 +249,21 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 			Quiet:        isDependabotBranch(res.Branch),
 			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		s.shadowPREvent(ctx, "HandleMerged", restateclient.PREvent{
+			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
+			MergeSHA: res.MergeSHA, Branch: res.Branch,
 		})
+		return nil
 	}
 	targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
 	if err != nil {
 		return err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
-	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        prClosedUnmerged,
 		Repo:         res.Repo,
 		PRNumber:     res.PRNumber,
@@ -258,7 +274,13 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 		Quiet:        isDependabotBranch(res.Branch),
 		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	s.shadowPREvent(ctx, "HandleClosed", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
 	})
+	return nil
 }
 
 func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
@@ -313,6 +335,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	case ghActionClosed:
 		return s.handlePRClosedAction(ctx, res, pr.Merged)
 	case ghActionSynchronize:
+		shadowWasConflict := s.shadowPreSyncConflict(ctx, res.Repo, res.PRNumber)
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return err
@@ -332,6 +355,9 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 			OccurredAt:   time.Now().UTC(),
 		}); err != nil {
 			return err
+		}
+		if shadowWasConflict {
+			s.shadowConflictResolved(ctx, res)
 		}
 	case "auto_merge_disabled":
 		return s.handlePRAutoMergeDisabledAction(ctx, res, pr)

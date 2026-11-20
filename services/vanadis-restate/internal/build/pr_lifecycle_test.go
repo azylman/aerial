@@ -582,7 +582,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 		ChunkID:    "c1",
 		DispatchID: "vanadis-c1-turn-1",
 		Reason:     "execution error",
-	}, nil, false)
+	}, nil, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, statusFailed, out.BuildStatus)
 	assert.True(t, out.State.TerminalNotified)
@@ -597,7 +597,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 		Action:     "chunk_failed",
 		ChunkID:    "c1",
 		DispatchID: "vanadis-c1-turn-1",
-	}, nil, true)
+	}, nil, nil, true)
 	assert.NoError(t, err2)
 	assert.Equal(t, statusFailed, out2.BuildStatus)
 	assert.Empty(t, queuedPrompts)

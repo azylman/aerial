@@ -124,7 +124,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
 	// and use-after-close on database shutdown.
-	dispatcher := dispatch.NewHTTPPromptDispatcher(cfg.EriURL)
+	dispatcher := dispatch.NewHTTPPromptDispatcher(cfg.EriURL, cfg.RestateURL, cfg.AgentName)
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	var tickerWg sync.WaitGroup
 	tickerWg.Go(func() {
