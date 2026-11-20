@@ -269,19 +269,23 @@ test('browser runtime set()', async (t) => {
 });
 
 test('browser runtime live updates', async (t) => {
+  // The shared cookie starts dark; cookieNow is what this tab reads when the event lands (a
+  // storage event can arrive before the renderer sees the cookie another tab just wrote).
   const tests = [
-    { name: 'storage event for the shared key', event: 'storage', payload: { key: 'aerial-theme' }, want: ['light'] },
-    { name: 'storage event for another key is ignored', event: 'storage', payload: { key: 'other' }, want: [] },
-    { name: 'tab focus re-reads the cookie', event: 'focus', payload: {}, want: ['light'] },
-    { name: 'tab becoming visible re-reads the cookie', event: 'visibilitychange', payload: {}, want: ['light'] },
+    { name: 'storage event for the shared key', event: 'storage', payload: { key: 'aerial-theme', newValue: 'light' }, cookieNow: 'light', want: ['light'] },
+    { name: 'storage event trusts its value while the cookie is still stale', event: 'storage', payload: { key: 'aerial-theme', newValue: 'light' }, cookieNow: 'dark', want: ['light'] },
+    { name: 'storage event repeating the current theme is ignored', event: 'storage', payload: { key: 'aerial-theme', newValue: 'dark' }, cookieNow: 'dark', want: [] },
+    { name: 'storage event without a theme value re-reads the cookie', event: 'storage', payload: { key: 'aerial-theme', newValue: null }, cookieNow: 'light', want: ['light'] },
+    { name: 'storage event for another key is ignored', event: 'storage', payload: { key: 'other', newValue: 'light' }, cookieNow: 'light', want: [] },
+    { name: 'tab focus re-reads the cookie', event: 'focus', payload: {}, cookieNow: 'light', want: ['light'] },
+    { name: 'tab becoming visible re-reads the cookie', event: 'visibilitychange', payload: {}, cookieNow: 'light', want: ['light'] },
   ];
   for (const tc of tests) {
     await t.test(tc.name, () => {
       const b = fakeBrowser('console.example.com', 'https:', [{ name: 'theme', value: 'dark', domain: 'example.com' }], ['com']);
       const notified = [];
       b.api.subscribe((v) => notified.push(v));
-      // Another app on a sibling subdomain flips the shared cookie.
-      b.document.cookie = 'theme=light; path=/; domain=example.com';
+      b.document.cookie = `theme=${tc.cookieNow}; path=/; domain=example.com`;
       for (const fn of b.listeners[tc.event] || []) fn(tc.payload);
       assert.deepEqual(notified, tc.want);
     });
