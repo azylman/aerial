@@ -13,18 +13,7 @@ import (
 )
 
 func resolveJetStreamJobCoords(args any) (string, string) {
-	switch a := normalizeJobArgs(args).(type) {
-	case GitHubWebhookArgs:
-		return "aerial.jobs.synapse.github", "github:" + a.Delivery
-	case DeployWebhookArgs:
-		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
-	case DiscordIngressArgs:
-		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
-	case DiscordInteractionArgs:
-		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
-	default:
-		return metrics.ResolveJetStreamJobCoords(args)
-	}
+	return metrics.ResolveJetStreamJobCoords(args)
 }
 
 const (

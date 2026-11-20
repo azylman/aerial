@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -302,6 +303,14 @@ func ResolveJobQueueAndKind(args any) (string, string) {
 	}
 }
 
+func discordDedupID(prefix, agent, id string) string {
+	agent = strings.TrimSpace(agent)
+	if agent != "" {
+		return prefix + agent + ":" + id
+	}
+	return prefix + id
+}
+
 // ResolveJetStreamJobCoords returns the JetStream subject and deduplication message ID for a job payload.
 func ResolveJetStreamJobCoords(args any) (string, string) {
 	switch a := NormalizeJobArgs(args).(type) {
@@ -310,9 +319,9 @@ func ResolveJetStreamJobCoords(args any) (string, string) {
 	case model.DeployWebhookArgs:
 		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
 	case model.DiscordIngressArgs:
-		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
+		return "aerial.jobs.synapse.discord_ingress", discordDedupID("discord:msg:", a.Agent, a.MessageID)
 	case model.DiscordInteractionArgs:
-		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
+		return "aerial.jobs.synapse.discord_interaction", discordDedupID("discord:ix:", a.Agent, a.InteractionID)
 	default:
 		return "", ""
 	}

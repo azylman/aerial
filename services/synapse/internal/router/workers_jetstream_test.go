@@ -85,6 +85,18 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 			wantPrefix:  "discord:msg:msg-888",
 		},
 		{
+			name:        "DiscordIngressArgs with agent",
+			args:        DiscordIngressArgs{MessageID: "msg-999", Agent: "aerial"},
+			wantSubject: "aerial.jobs.synapse.discord_ingress",
+			wantPrefix:  "discord:msg:aerial:msg-999",
+		},
+		{
+			name:        "*DiscordIngressArgs with sibling agent",
+			args:        &DiscordIngressArgs{MessageID: "msg-999", Agent: "miorine"},
+			wantSubject: "aerial.jobs.synapse.discord_ingress",
+			wantPrefix:  "discord:msg:miorine:msg-999",
+		},
+		{
 			name:        "DiscordInteractionArgs",
 			args:        DiscordInteractionArgs{InteractionID: "ix-111"},
 			wantSubject: "aerial.jobs.synapse.discord_interaction",
@@ -95,6 +107,12 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 			args:        &DiscordInteractionArgs{InteractionID: "ix-222"},
 			wantSubject: "aerial.jobs.synapse.discord_interaction",
 			wantPrefix:  "discord:ix:ix-222",
+		},
+		{
+			name:        "DiscordInteractionArgs with agent",
+			args:        DiscordInteractionArgs{InteractionID: "ix-111", Agent: "suletta"},
+			wantSubject: "aerial.jobs.synapse.discord_interaction",
+			wantPrefix:  "discord:ix:suletta:ix-111",
 		},
 	}
 	for _, tc := range tests {
