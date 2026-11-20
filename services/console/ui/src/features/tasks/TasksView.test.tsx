@@ -133,6 +133,26 @@ describe('TaskQueue', () => {
       },
     ]);
   });
+
+  it('renders agent badges and filters by selectedAgent', () => {
+    const { container } = render(<TaskQueue />);
+    const tasksWithAgents: readonly ActiveTaskStatus[] = [
+      task('1', { agent: 'aerial' }),
+      task('2', { agent: 'miorine' }),
+      task('3', { agent: 'suletta' }),
+    ];
+    seed(tasksWithAgents);
+
+    const badges = [...container.querySelectorAll('.agent-badge')].map((el) => el.textContent?.trim());
+    expect(badges).toEqual(['aerial', 'miorine', 'suletta']);
+
+    act(() => useConsoleStore.getState().setSelectedAgent('miorine'));
+    const filteredBadges = [...container.querySelectorAll('.agent-badge')].map((el) => el.textContent?.trim());
+    expect(filteredBadges).toEqual(['miorine']);
+
+    act(() => useConsoleStore.getState().setSelectedAgent('all'));
+    expect([...container.querySelectorAll('.agent-badge')]).toHaveLength(3);
+  });
 });
 
 describe('task render isolation', () => {

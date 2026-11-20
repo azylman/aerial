@@ -14,16 +14,53 @@ import { formatGitSyncDelta, parseValidTimestampMs } from '../lib/formatters';
 // Pure derivations for the app shell. Components select the raw (reconciled) snapshot and pass it
 // here, so an unchanged poll yields the same primitive and React bails out of the render.
 
+/** Filter items by agent attribution. When selectedAgent === 'all', all items match. Otherwise, item.agent (defaulting to 'aerial') must match. */
+export function matchAgent<T extends { readonly agent?: string }>(item: T, selectedAgent: string): boolean {
+  if (!selectedAgent || selectedAgent === 'all') return true;
+  return (item.agent || 'aerial') === selectedAgent;
+}
+
+export function filterByAgent<T extends { readonly agent?: string }>(
+  items: readonly T[] | null | undefined,
+  selectedAgent: string,
+): readonly T[] {
+  if (!items || items.length === 0) return [];
+  if (!selectedAgent || selectedAgent === 'all') return items;
+  return items.filter((item) => (item.agent || 'aerial') === selectedAgent);
+}
+
 /** Tab badge counts shown next to each tab label. */
-export const tasksBadgeCount = (cluster: ClusterResponse | null): number => cluster?.active_tasks.length ?? 0;
+export const tasksBadgeCount = (cluster: ClusterResponse | null, agent: string = 'all'): number => {
+  if (!cluster) return 0;
+  if (!agent || agent === 'all') return cluster.active_tasks.length;
+  return cluster.active_tasks.filter((t) => (t.agent || 'aerial') === agent).length;
+};
 
-export const schedulesBadgeCount = (schedules: SchedulesAPIResponse | null): number =>
-  schedules === null ? 0 : schedules.summary.total_active;
+export const schedulesBadgeCount = (schedules: SchedulesAPIResponse | null, agent: string = 'all'): number => {
+  if (schedules === null) return 0;
+  if (!agent || agent === 'all') return schedules.summary.total_active;
+  const crons = schedules.crons.filter((c) => c.enabled && (c.agent || 'aerial') === agent).length;
+  const oneShots = schedules.one_shots.filter((o) => (o.agent || 'aerial') === agent).length;
+  return crons + oneShots;
+};
 
-export const memoryBadgeCount = (facts: FactsAPIResponse | null): number => facts?.total ?? 0;
+export const memoryBadgeCount = (facts: FactsAPIResponse | null, agent: string = 'all'): number => {
+  if (facts === null) return 0;
+  if (!agent || agent === 'all') return facts.total;
+  if (!facts.facts || facts.facts.length === 0) return 0;
+  return facts.facts.filter((f) => (f.agent || 'aerial') === agent).length;
+};
 
-export const buildsBadgeCount = (builds: BuildsAPIResponse | null): number =>
-  builds === null ? 0 : builds.running_count + builds.queued_count;
+export const buildsBadgeCount = (builds: BuildsAPIResponse | null, agent: string = 'all'): number => {
+  if (builds === null) return 0;
+  if (!agent || agent === 'all') return builds.running_count + builds.queued_count;
+  if (!builds.builds || builds.builds.length === 0) return 0;
+  return builds.builds.filter((b) => {
+    if ((b.agent || 'aerial') !== agent) return false;
+    const s = b.status?.toLowerCase();
+    return s === 'running' || s === 'queued' || s === 'pending';
+  }).length;
+};
 
 /**
  * The build a detail payload describes (`build`, or the legacy `entry` key), only when it is the

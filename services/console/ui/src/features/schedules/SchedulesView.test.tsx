@@ -316,7 +316,7 @@ describe('SchedulesView content', () => {
     expect([...container.querySelectorAll('.schedule-card')].map(card)).toEqual([
       {
         className: 'schedule-card cron-card',
-        badges: ['CRON', 'UTC'],
+        badges: ['CRON', 'aerial', 'UTC'],
         dot: 'pulse-dot healthy',
         countdown: ['in 10m 0s'],
         title: ['Morning standup digest'],
@@ -328,7 +328,7 @@ describe('SchedulesView content', () => {
       },
       {
         className: 'schedule-card cron-card',
-        badges: ['CRON', 'America/Los_Angeles'],
+        badges: ['CRON', 'aerial', 'America/Los_Angeles'],
         dot: 'pulse-dot healthy',
         countdown: ['in 10m 0s'],
         title: ['Garden check'],
@@ -340,7 +340,7 @@ describe('SchedulesView content', () => {
       },
       {
         className: 'schedule-card cron-card',
-        badges: ['CRON', 'UTC'],
+        badges: ['CRON', 'aerial', 'UTC'],
         dot: 'pulse-dot unhealthy',
         countdown: ['in 10m 0s'],
         title: ['RECURRING ROUTINE'],
@@ -352,7 +352,7 @@ describe('SchedulesView content', () => {
       },
       {
         className: 'schedule-card oneshot-card',
-        badges: ['ONE-SHOT'],
+        badges: ['ONE-SHOT', 'aerial'],
         dot: 'pulse-dot healthy',
         countdown: ['in 30m 0s'],
         title: ['ONE-TIME REMINDER'],
@@ -364,7 +364,7 @@ describe('SchedulesView content', () => {
       },
       {
         className: 'schedule-card oneshot-card',
-        badges: ['ONE-SHOT'],
+        badges: ['ONE-SHOT', 'aerial'],
         dot: 'pulse-dot healthy',
         countdown: ['in 30m 0s'],
         title: ['ONE-TIME REMINDER'],
@@ -432,6 +432,19 @@ describe('SchedulesView content', () => {
     const { container } = render(<SchedulesView />);
     seed(schedules([], []), null);
     expect(texts(container, '#schedules-next-trigger')).toEqual(['NO UPCOMING']);
+  });
+
+  it('filters summary metrics by selectedAgent', () => {
+    const { container } = render(<SchedulesView />);
+    const crons = [cron('cron-a', { agent: 'aerial' }), cron('cron-b', { agent: 'miorine' })];
+    const oneShots = [once('once-a', { agent: 'aerial' }), once('once-b', { agent: 'miorine' })];
+    seed(schedules(crons, oneShots), runs(RUNS, 10));
+    expect(texts(container, '.summary-card .value')).toEqual(['2', '2', 'in 10m 0s', '94.0%']);
+
+    act(() => {
+      useConsoleStore.getState().setSelectedAgent('miorine');
+    });
+    expect(texts(container, '.summary-card .value')).toEqual(['1', '1', 'in 10m 0s', '94.0%']);
   });
 });
 

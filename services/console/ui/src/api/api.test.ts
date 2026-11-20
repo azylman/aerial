@@ -53,12 +53,23 @@ describe('typed fetchers', () => {
       wantURL: '/console/api/schedules/runs?limit=50&offset=0',
     },
     { name: 'fetchBuilds', fetcher: 'fetchBuilds' as const, pathname: '/console/next/builds', wantURL: '/console/api/builds' },
-  ])('$name requests $wantURL', async ({ fetcher, pathname, wantURL }) => {
+    { name: 'fetchStatus with agent', fetcher: 'fetchStatus' as const, pathname: '/console/next/', agent: 'miorine', wantURL: '/console/api/status?agent=miorine' },
+    { name: 'fetchFacts with agent', fetcher: 'fetchFacts' as const, pathname: '/console/next/', agent: 'suletta', wantURL: '/console/api/facts?agent=suletta' },
+    { name: 'fetchSchedules with agent', fetcher: 'fetchSchedules' as const, pathname: '/console/next/', agent: 'aerial', wantURL: '/console/api/schedules?agent=aerial' },
+    {
+      name: 'fetchScheduleRuns with agent',
+      fetcher: 'fetchScheduleRuns' as const,
+      pathname: '/console/next/',
+      agent: 'miorine',
+      wantURL: '/console/api/schedules/runs?limit=50&offset=0&agent=miorine',
+    },
+    { name: 'fetchBuilds with agent', fetcher: 'fetchBuilds' as const, pathname: '/console/next/builds', agent: 'suletta', wantURL: '/console/api/builds?agent=suletta' },
+  ])('$name requests $wantURL', async ({ fetcher, pathname, agent, wantURL }) => {
     window.history.replaceState(null, '', pathname);
     const fetchMock = stubFetch(200, OK_BODY);
     const controller = new AbortController();
 
-    await expect(FETCHERS[fetcher](controller.signal)).resolves.toEqual({ status: 'ok' });
+    await expect(FETCHERS[fetcher](controller.signal, agent)).resolves.toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(wantURL, { signal: controller.signal });
   });
 

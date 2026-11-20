@@ -118,9 +118,9 @@ describe('BuildsView lifecycle', () => {
     expect([text('#builds-running-count'), text('#builds-queued-count'), text('#builds-completed-count')]).toEqual(['1', '1', '2']);
     expect([...document.querySelectorAll('.cat-pill')].map((p) => p.textContent)).toEqual(['ALL 4', 'RUNNING 1', 'QUEUED 1', 'COMPLETED 2']);
     expect(titles()).toEqual(['Kiosk refresh', 'Synapse hooks', 'Docs pass', 'Kiosk widgets']);
-    expect(text('[data-build-id="b-run"]')).toBe('RUNNING 50m 0sKiosk refreshSTART: 11/8 11:10am1 / 2 CHUNKS50%');
-    expect(text('[data-build-id="b-q"]')).toBe('QUEUED --Synapse hooksSTART: 11/8 10:00am0 / 1 CHUNKS0%');
-    expect(text('[data-build-id="b-done"]')).toBe('COMPLETED 18m 0sDocs passSTART: 11/8 9:10amEND: 9:28am1 / 1 CHUNKS100%');
+    expect(text('[data-build-id="b-run"]')).toBe('RUNNINGaerial 50m 0sKiosk refreshSTART: 11/8 11:10am1 / 2 CHUNKS50%');
+    expect(text('[data-build-id="b-q"]')).toBe('QUEUEDaerial --Synapse hooksSTART: 11/8 10:00am0 / 1 CHUNKS0%');
+    expect(text('[data-build-id="b-done"]')).toBe('COMPLETEDaerial 18m 0sDocs passSTART: 11/8 9:10amEND: 9:28am1 / 1 CHUNKS100%');
     expect(card('b-fail').querySelector('.build-status-badge')?.className).toBe('build-status-badge status-failed');
     expect((card('b-run').querySelector('.build-progress-bar-fill') as HTMLElement).style.width).toBe('50%');
   });

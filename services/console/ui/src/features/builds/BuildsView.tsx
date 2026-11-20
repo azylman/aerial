@@ -5,6 +5,7 @@ import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
 import { useTabActive } from '../../hooks/useTabActive';
+import { filterByAgent } from '../../store/selectors';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import '../../styles/sections.css';
@@ -83,9 +84,20 @@ function MetricCard({ label, value, sub, id, className = 'value' }: {
 
 /** The four summary cards (updateBuildsMetrics). */
 const BuildsMetrics = memo(function BuildsMetrics({ index }: { readonly index: readonly IndexedBuild[] }) {
-  const running = useConsoleStore((s) => selectData(s)?.running_count ?? 0);
-  const queued = useConsoleStore((s) => selectData(s)?.queued_count ?? 0);
-  const completed = useConsoleStore((s) => selectData(s)?.completed_count ?? 0);
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const data = useConsoleStore(selectData);
+  const running = useMemo(() => {
+    if (selectedAgent === 'all') return data?.running_count ?? 0;
+    return index.filter((b) => b.state === 'running').length;
+  }, [data, index, selectedAgent]);
+  const queued = useMemo(() => {
+    if (selectedAgent === 'all') return data?.queued_count ?? 0;
+    return index.filter((b) => b.state === 'queued').length;
+  }, [data, index, selectedAgent]);
+  const completed = useMemo(() => {
+    if (selectedAgent === 'all') return data?.completed_count ?? 0;
+    return index.filter((b) => b.state === 'completed').length;
+  }, [data, index, selectedAgent]);
   return (
     <section className="summary-bar">
       <MetricCard label="RUNNING BUILDS" value={running} sub="ACTIVE PIPELINES" id="builds-running-count" />
@@ -163,8 +175,18 @@ interface PillsProps {
 
 /** Queue-state pills with their counts. */
 const BuildsPills = memo(function BuildsPills({ index, filter, onSelect }: PillsProps) {
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
   const data = useConsoleStore(selectData);
-  const counts = pillCounts(data, index);
+  const counts = useMemo(() => {
+    if (selectedAgent === 'all') return pillCounts(data, index);
+    const c: Record<BuildFilter, number> = { ALL: index.length, RUNNING: 0, QUEUED: 0, COMPLETED: 0 };
+    for (const b of index) {
+      if (b.state === 'running') c.RUNNING++;
+      else if (b.state === 'queued') c.QUEUED++;
+      else if (b.state === 'completed') c.COMPLETED++;
+    }
+    return c;
+  }, [data, index, selectedAgent]);
   return (
     <div className="category-pills-bar" role="toolbar" aria-label="Build Queue Filter Pills">
       {BUILD_FILTERS.map((pill) => (
@@ -248,7 +270,9 @@ export default function BuildsView() {
   const clearSearch = useCallback(() => setSearch(''), []);
   useSearchShortcutTarget('builds', inputRef, clearSearch);
 
-  const builds = useConsoleStore(selectBuilds);
+  const rawBuilds = useConsoleStore(selectBuilds);
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const builds = useMemo(() => filterByAgent(rawBuilds, selectedAgent), [rawBuilds, selectedAgent]);
   const index = useMemo(() => indexBuilds(builds), [builds]);
   const visible = useMemo(() => filterBuilds(index, filter, query), [index, filter, query]);
 

@@ -28,12 +28,16 @@ function PromptBox({ text }: { readonly text: string }) {
 }
 
 export const CronCard = memo(function CronCard({ cron }: { readonly cron: CronSchedule }) {
+  const agent = (cron.agent || 'aerial').toLowerCase();
   return (
     <div className="schedule-card cron-card">
       <div className="schedule-card-header">
         <div className="schedule-badge-group">
           <span className="schedule-type-badge cron">
             <Glyph name="alarm" /> CRON
+          </span>
+          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
+            {agent}
           </span>
           <span className="schedule-tz-badge">{cron.timezone || 'UTC'}</span>
         </div>
@@ -77,12 +81,16 @@ function ThreadRef({ threadId }: { readonly threadId: string }) {
 }
 
 export const OneShotCard = memo(function OneShotCard({ oneShot }: { readonly oneShot: OneShotSchedule }) {
+  const agent = (oneShot.agent || 'aerial').toLowerCase();
   return (
     <div className="schedule-card oneshot-card">
       <div className="schedule-card-header">
         <div className="schedule-badge-group">
           <span className="schedule-type-badge oneshot">
             <Glyph name="bolt" /> ONE-SHOT
+          </span>
+          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
+            {agent}
           </span>
         </div>
         <div className="schedule-status-group">

@@ -66,6 +66,12 @@
     align-items: center;
 }
 
+.fact-header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
 .fact-category-tag {
     font-size: 0.68rem;
     font-weight: 800;

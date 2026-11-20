@@ -52,7 +52,7 @@ describe('fault', () => {
 });
 
 type SliceName = keyof ConsoleState;
-const SLICES: readonly SliceName[] = ['status', 'schedules', 'memory', 'builds', 'docket', 'drawer', 'ui'];
+const SLICES: readonly SliceName[] = ['status', 'schedules', 'memory', 'builds', 'docket', 'drawer', 'ui', 'selectedAgent'];
 
 const CLUSTER = { system_time: 't1', services: [{ name: 'eri', status: 'healthy' }] };
 const RUNS = { status: 'ok', total: 1, limit: 50, offset: 0, runs: [{ id: 'r1', status: 'success' }] };
@@ -112,6 +112,8 @@ const actionRows: ActionRow[] = [
   { name: 'closeDrawer when closed is silent', seed: {}, action: 'closeDrawer', arg: undefined, wantNotified: false, wantSlice: 'drawer', wantValue: { kind: 'closed' } },
   { name: 'setActiveTab', seed: {}, action: 'setActiveTab', arg: 'memory', wantNotified: true, wantSlice: 'ui', wantValue: { activeTab: 'memory' } },
   { name: 'setActiveTab same tab is silent', seed: {}, action: 'setActiveTab', arg: 'telemetry', wantNotified: false, wantSlice: 'ui', wantValue: { activeTab: 'telemetry' } },
+  { name: 'setSelectedAgent', seed: {}, action: 'setSelectedAgent', arg: 'miorine', wantNotified: true, wantSlice: 'selectedAgent', wantValue: 'miorine' },
+  { name: 'setSelectedAgent same agent is silent', seed: { selectedAgent: 'all' }, action: 'setSelectedAgent', arg: 'all', wantNotified: false, wantSlice: 'selectedAgent', wantValue: 'all' },
 ];
 
 describe('useConsoleStore actions', () => {
@@ -140,8 +142,8 @@ describe('useConsoleStore actions', () => {
   });
 
   it('starts on telemetry with every resource empty and the drawer closed', () => {
-    const { status, schedules, memory, builds, docket, drawer, ui } = useConsoleStore.getState();
-    expect({ status, schedules, memory, builds, docket, drawer, ui }).toEqual({
+    const { status, schedules, memory, builds, docket, drawer, ui, selectedAgent } = useConsoleStore.getState();
+    expect({ status, schedules, memory, builds, docket, drawer, ui, selectedAgent }).toEqual({
       status: { cluster: { data: null, error: null } },
       schedules: { list: { data: null, error: null }, runs: { data: null, error: null } },
       memory: { facts: { data: null, error: null } },
@@ -149,6 +151,7 @@ describe('useConsoleStore actions', () => {
       docket: { list: { data: null, error: null }, search: { data: null, error: null }, detail: { data: null, error: null } },
       drawer: { kind: 'closed' },
       ui: { activeTab: 'telemetry' },
+      selectedAgent: 'all',
     });
   });
 });

@@ -7,6 +7,7 @@ import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
 import { useTabActive } from '../../hooks/useTabActive';
 import { HighlightQuery } from '../../lib/search';
+import { filterByAgent } from '../../store/selectors';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import '../../styles/sections.css';
@@ -45,7 +46,6 @@ const selectRuns = (s: ConsoleState): readonly ScheduleRun[] => s.schedules.runs
 const selectRunsLoaded = (s: ConsoleState): boolean => s.schedules.runs.data !== null;
 const selectListError = (s: ConsoleState): string | null => s.schedules.list.error;
 const selectScheduleCount = (s: ConsoleState): number => selectCrons(s).length + selectOneShots(s).length;
-const selectRunsPillCount = (s: ConsoleState): number => s.schedules.runs.data?.total || selectRuns(s).length;
 
 /**
  * Lifecycle of the schedules list (fetchSchedules): skeleton until the first answer, the error
@@ -74,6 +74,7 @@ function useManualSync(): () => void {
 
 /** The four summary cards; subscribes to the summary and the schedule lists only. */
 const ScheduleMetrics = memo(function ScheduleMetrics() {
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
   const summary = useConsoleStore(selectSummary);
   const crons = useConsoleStore(selectCrons);
   const oneShots = useConsoleStore(selectOneShots);
@@ -85,7 +86,11 @@ const ScheduleMetrics = memo(function ScheduleMetrics() {
         <div className="card-glow" />
         <span className="label">ACTIVE CRONS</span>{' '}
         <span className="value" id="schedules-crons-count">
-          {summary === null ? '--' : (summary.cron_count ?? crons.length)}
+          {summary === null
+            ? '--'
+            : selectedAgent === 'all'
+              ? (summary.cron_count ?? crons.length)
+              : filterByAgent(crons, selectedAgent).length}
         </span>{' '}
         <span className="sub-label">RECURRING ROUTINES</span>
       </div>
@@ -93,7 +98,11 @@ const ScheduleMetrics = memo(function ScheduleMetrics() {
         <div className="card-glow" />
         <span className="label">PENDING ONCE</span>{' '}
         <span className="value" id="schedules-oneshot-count">
-          {summary === null ? '--' : (summary.one_shot_count ?? oneShots.length)}
+          {summary === null
+            ? '--'
+            : selectedAgent === 'all'
+              ? (summary.one_shot_count ?? oneShots.length)
+              : filterByAgent(oneShots, selectedAgent).length}
         </span>{' '}
         <span className="sub-label">ONE-SHOT REMINDERS</span>
       </div>
@@ -121,15 +130,24 @@ interface PillsProps {
 
 /** Category pills with their counts. */
 const SchedulePills = memo(function SchedulePills({ filter, onSelect }: PillsProps) {
-  const crons = useConsoleStore((s) => selectCrons(s).length);
-  const oneShots = useConsoleStore((s) => selectOneShots(s).length);
-  const runs = useConsoleStore(selectRunsPillCount);
-  const counts: Readonly<Record<ScheduleFilter, number>> = {
-    ALL: crons + oneShots,
-    CRON: crons,
-    ONE_SHOT: oneShots,
-    RUNS: runs,
-  };
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const rawCrons = useConsoleStore(selectCrons);
+  const rawOneShots = useConsoleStore(selectOneShots);
+  const rawRuns = useConsoleStore(selectRuns);
+  const totalRuns = useConsoleStore((s) => s.schedules.runs.data?.total || 0);
+
+  const counts: Readonly<Record<ScheduleFilter, number>> = useMemo(() => {
+    const crons = filterByAgent(rawCrons, selectedAgent).length;
+    const oneShots = filterByAgent(rawOneShots, selectedAgent).length;
+    const runs = selectedAgent === 'all' ? (totalRuns || rawRuns.length) : filterByAgent(rawRuns, selectedAgent).length;
+    return {
+      ALL: crons + oneShots,
+      CRON: crons,
+      ONE_SHOT: oneShots,
+      RUNS: runs,
+    };
+  }, [rawCrons, rawOneShots, rawRuns, totalRuns, selectedAgent]);
+
   return (
     <div className="category-pills-bar" role="toolbar" aria-label="Schedule Category Filters">
       {SCHEDULE_FILTERS.map((pill) => (
@@ -148,7 +166,17 @@ const SchedulePills = memo(function SchedulePills({ filter, onSelect }: PillsPro
 });
 
 const ActiveBadge = memo(function ActiveBadge() {
-  const total = useConsoleStore((s) => selectSummary(s)?.total_active ?? 0);
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const summary = useConsoleStore(selectSummary);
+  const rawCrons = useConsoleStore(selectCrons);
+  const rawOneShots = useConsoleStore(selectOneShots);
+  const total = useMemo(() => {
+    if (selectedAgent === 'all') return summary?.total_active ?? 0;
+    return (
+      filterByAgent(rawCrons, selectedAgent).filter((c) => c.enabled).length +
+      filterByAgent(rawOneShots, selectedAgent).length
+    );
+  }, [summary, rawCrons, rawOneShots, selectedAgent]);
   return <span className="section-badge">{total} ACTIVE</span>;
 });
 
@@ -357,9 +385,13 @@ export default function SchedulesView() {
   useSearchShortcutTarget('schedules', inputRef, clearSearch);
 
   const phase = useConsoleStore(listPhase);
-  const crons = useConsoleStore(selectCrons);
-  const oneShots = useConsoleStore(selectOneShots);
-  const runs = useConsoleStore(selectRuns);
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const rawCrons = useConsoleStore(selectCrons);
+  const rawOneShots = useConsoleStore(selectOneShots);
+  const rawRuns = useConsoleStore(selectRuns);
+  const crons = useMemo(() => filterByAgent(rawCrons, selectedAgent), [rawCrons, selectedAgent]);
+  const oneShots = useMemo(() => filterByAgent(rawOneShots, selectedAgent), [rawOneShots, selectedAgent]);
+  const runs = useMemo(() => filterByAgent(rawRuns, selectedAgent), [rawRuns, selectedAgent]);
   const visibleCrons = useMemo(() => filterCrons(crons, filter, query), [crons, filter, query]);
   const visibleOneShots = useMemo(() => filterOneShots(oneShots, filter, query), [oneShots, filter, query]);
   const visibleRuns = useMemo(() => filterRuns(runs, query), [runs, query]);

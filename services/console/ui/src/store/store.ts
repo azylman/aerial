@@ -44,6 +44,7 @@ export interface ConsoleState {
   };
   readonly drawer: DrawerState;
   readonly ui: { readonly activeTab: TabId };
+  readonly selectedAgent: string;
 }
 
 export interface ConsoleActions {
@@ -68,6 +69,7 @@ export interface ConsoleActions {
   readonly openDrawer: (drawer: Exclude<DrawerState, { kind: 'closed' }>) => void;
   readonly closeDrawer: () => void;
   readonly setActiveTab: (tab: TabId) => void;
+  readonly setSelectedAgent: (agent: string) => void;
 }
 
 export type ConsoleStore = ConsoleState & ConsoleActions;
@@ -115,6 +117,7 @@ export const useConsoleStore = create<ConsoleStore>()((set) => {
     docket: { list: EMPTY_RESOURCE, search: EMPTY_RESOURCE, detail: EMPTY_RESOURCE },
     drawer: CLOSED_DRAWER,
     ui: { activeTab: 'telemetry' },
+    selectedAgent: 'all',
 
     setCluster: (data) => patchSlice('status', 'cluster', (prev) => settle(prev, data)),
     failCluster: (error) => patchSlice('status', 'cluster', (prev) => fault(prev, error)),
@@ -138,5 +141,7 @@ export const useConsoleStore = create<ConsoleStore>()((set) => {
     openDrawer: (drawer) => set((state) => (sameDrawer(state.drawer, drawer) ? state : { drawer })),
     closeDrawer: () => set((state) => (state.drawer.kind === 'closed' ? state : { drawer: CLOSED_DRAWER })),
     setActiveTab: (tab) => set((state) => (state.ui.activeTab === tab ? state : { ui: { ...state.ui, activeTab: tab } })),
+    setSelectedAgent: (selectedAgent) =>
+      set((state) => (state.selectedAgent === selectedAgent ? state : { selectedAgent })),
   };
 });
