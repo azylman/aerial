@@ -13,75 +13,113 @@ import (
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/server"
 
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
-// NewEriRestateServer binds the Eri Virtual Objects and returns a Restate server handler.
-func NewEriRestateServer(pool *queue.WorkerPool, agentName string) *server.Restate {
-	threadSession := queue.NewThreadSessionObject(pool, agentName)
-	dispatchSession := queue.NewDispatchSessionObject(pool, agentName)
-	voiceSession := queue.NewVoiceSessionObject(pool, agentName)
-	sessionManager := queue.NewSessionManagerService(pool, agentName)
-
-	return server.NewRestate().
-		Bind(restate.Reflect(threadSession)).
-		Bind(restate.Reflect(dispatchSession)).
-		Bind(restate.Reflect(voiceSession)).
-		Bind(restate.Reflect(sessionManager))
+// RemoteQuotaProvider fetches quota telemetry from eri-restate over HTTP.
+type RemoteQuotaProvider struct {
+	eriRestateURL string
+	httpClient    *http.Client
 }
 
-type serviceTimeoutPayload struct {
-	InactivityTimeout string `json:"inactivity_timeout"`
-	AbortTimeout      string `json:"abort_timeout"`
-}
-
-// ReconcileRestateServiceTimeouts sets 1h timeouts on Eri services via the Restate admin API.
-func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent string, httpClient ...*http.Client) error {
-	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	if adminURL == "" {
-		adminURL = "http://restate.aerial:9070"
+// NewRemoteQuotaProvider creates a RemoteQuotaProvider querying eriRestateURL.
+func NewRemoteQuotaProvider(eriRestateURL string, httpClient ...*http.Client) *RemoteQuotaProvider {
+	eriRestateURL = strings.TrimRight(strings.TrimSpace(eriRestateURL), "/")
+	if eriRestateURL == "" {
+		eriRestateURL = "http://eri-restate-health:4028"
 	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	if len(httpClient) > 0 && httpClient[0] != nil {
 		client = httpClient[0]
 	}
-
-	services := []string{
-		queue.ThreadSessionServiceName(agent),
-		queue.DispatchSessionServiceName(agent),
-		queue.VoiceSessionServiceName(agent),
+	return &RemoteQuotaProvider{
+		eriRestateURL: eriRestateURL,
+		httpClient:    client,
 	}
+}
 
-	body, err := json.Marshal(serviceTimeoutPayload{
-		InactivityTimeout: "1h",
-		AbortTimeout:      "1h",
-	})
+// LatestQuotaGroups calls GET /internal/quota on eri-restate, returning []metrics.QuotaGroup or empty on error.
+func (p *RemoteQuotaProvider) LatestQuotaGroups() []metrics.QuotaGroup {
+	if p == nil || p.httpClient == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.eriRestateURL+"/internal/quota", http.NoBody)
 	if err != nil {
-		return fmt.Errorf("marshal timeout payload: %w", err)
+		return nil
 	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var groups []metrics.QuotaGroup
+	if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+		return nil
+	}
+	return groups
+}
 
-	for _, svc := range services {
-		reqURL := fmt.Sprintf("%s/services/%s", adminURL, url.PathEscape(svc))
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(body))
-		if reqErr != nil {
-			return fmt.Errorf("create timeout reconcile request for %s: %w", svc, reqErr)
+// ProviderFunc returns a function conforming to interactions.QuotaProvider.
+func (p *RemoteQuotaProvider) ProviderFunc() func() []metrics.QuotaGroup {
+	return p.LatestQuotaGroups
+}
+
+// NewRemoteEphemeralLLMFunc creates a runner.LLMFunc that delegates ephemeral LLM generation to eri-restate over HTTP.
+func NewRemoteEphemeralLLMFunc(eriRestateURL string, httpClient ...*http.Client) runner.LLMFunc {
+	eriRestateURL = strings.TrimRight(strings.TrimSpace(eriRestateURL), "/")
+	if eriRestateURL == "" {
+		eriRestateURL = "http://eri-restate-health:4028"
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	if len(httpClient) > 0 && httpClient[0] != nil {
+		client = httpClient[0]
+	}
+	return func(ctx context.Context, model, prompt string) (string, error) {
+		reqBody, err := json.Marshal(map[string]string{
+			"prompt": prompt,
+			"model":  model,
+		})
+		if err != nil {
+			return "", fmt.Errorf("marshal internal llm request: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, eriRestateURL+"/internal/llm", bytes.NewReader(reqBody))
+		if err != nil {
+			return "", fmt.Errorf("create internal llm request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-
-		resp, doErr := client.Do(req)
-		if doErr != nil {
-			return fmt.Errorf("patch service %s timeouts: %w", svc, doErr)
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("post internal llm request: %w", err)
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("patch service %s timeouts failed with status %d", svc, resp.StatusCode)
+		const maxInternalLLMResponseBytes = 1 << 20
+		respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxInternalLLMResponseBytes+1))
+		if err != nil {
+			return "", fmt.Errorf("read internal llm response: %w", err)
 		}
+		if len(respBytes) > maxInternalLLMResponseBytes {
+			return "", errors.New("internal llm response body exceeds 1MiB limit")
+		}
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("internal llm returned status %d: %s", resp.StatusCode, string(respBytes))
+		}
+		var out struct {
+			Response string `json:"response"`
+		}
+		if err := json.Unmarshal(respBytes, &out); err != nil {
+			return "", fmt.Errorf("unmarshal internal llm response: %w", err)
+		}
+		return out.Response, nil
 	}
-	return nil
 }
 
 // RestateIngressClient delivers HTTP invocations to Eri actors via Restate Ingress.
@@ -245,10 +283,17 @@ func (c *RestateIngressClient) CancelDispatchImmediate(ctx context.Context, req 
 	return resp, err
 }
 
-// darkLaunchRestateAnchor preserves dark-launched Restate actors and ingress client from deadcode analysis.
+// darkLaunchRestateAnchor preserves dark-launched Restate actors and ingress client from deadcode analysis
+// within the services/eri module while their runtime server registration lives in services/eri-restate.
 var _ = []any{
-	NewEriRestateServer,
-	ReconcileRestateServiceTimeouts,
+	restate.Reflect(queue.NewThreadSessionObject(nil, "")),
+	restate.Reflect(queue.NewDispatchSessionObject(nil, "")),
+	restate.Reflect(queue.NewVoiceSessionObject(nil, "")),
+	restate.Reflect(queue.NewSessionManagerService(nil, "")),
+	NewRemoteQuotaProvider,
+	(*RemoteQuotaProvider).LatestQuotaGroups,
+	(*RemoteQuotaProvider).ProviderFunc,
+	NewRemoteEphemeralLLMFunc,
 	NewRestateIngressClient,
 	(*RestateIngressClient).postJSON,
 	(*RestateIngressClient).EnqueueThread,

@@ -572,6 +572,7 @@ func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) 
 	te.turnStatus = turnStatus
 	te.turnError = sanitizedErr
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	te.finalized.Store(true)
 	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, outcomeFailed, sanitizedErr, model, true, false)
 }
 

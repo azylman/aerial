@@ -366,6 +366,8 @@ func (t *ThreadSessionObject) EnqueuePrompt(ctx restate.ObjectSharedContext, req
 	return t.Enqueue(ctx, req)
 }
 
+const maxCoalescedBurstMessages = 5
+
 type burstStepResult struct {
 	ClaimedCount int `json:"claimed_count"`
 }
@@ -377,7 +379,26 @@ func (t *ThreadSessionObject) claimPendingBurst(ctx context.Context, threadID st
 	}
 	var burst []db.Message
 	for _, m := range msgs {
-		if m.ThreadID != threadID || m.Status != db.StatusPending {
+		if m.ThreadID != threadID {
+			continue
+		}
+		if m.Status == db.StatusProcessing {
+			if rErr := t.pool.cfg.Store.ResetMessageToPendingWithRestart(ctx, m.ID, "recovering in-flight message on restate step retry"); rErr != nil {
+				continue
+			}
+			claimed, cErr := t.pool.cfg.Store.ClaimPendingMessage(ctx, m.ID)
+			if cErr != nil || !claimed {
+				continue
+			}
+			m.Status = db.StatusProcessing
+			m.RestartCount++
+			burst = append(burst, m)
+			if len(burst) >= maxCoalescedBurstMessages {
+				break
+			}
+			continue
+		}
+		if m.Status != db.StatusPending {
 			continue
 		}
 		claimed, cErr := t.pool.cfg.Store.ClaimPendingMessage(ctx, m.ID)
@@ -386,7 +407,7 @@ func (t *ThreadSessionObject) claimPendingBurst(ctx context.Context, threadID st
 		}
 		m.Status = db.StatusProcessing
 		burst = append(burst, m)
-		if len(burst) >= 5 {
+		if len(burst) >= maxCoalescedBurstMessages {
 			break
 		}
 	}
@@ -418,8 +439,12 @@ func (t *ThreadSessionObject) RunTurn(ctx restate.ObjectContext, req ThreadTurnR
 				return burstStepResult{ClaimedCount: 0}, nil
 			}
 
-			if execErr := t.pool.executeClaimedBurst(burst, threadID); execErr != nil {
+			if execErr := t.pool.executeClaimedBurst(burst, threadID, rc); execErr != nil {
 				log.Printf("[ThreadSession] Error executing claimed burst for %s: %v", threadID, execErr)
+				return burstStepResult{}, execErr
+			}
+			if rc.Err() != nil {
+				return burstStepResult{}, rc.Err()
 			}
 			return burstStepResult{ClaimedCount: len(burst)}, nil
 		}, restate.WithName("claim-and-execute-burst"))
@@ -712,6 +737,11 @@ func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Bra
 		return DispatchEnqueueResponse{}, rErr
 	}
 
+	// 3. Fire restate.ObjectSend(ctx, svcName, sessionKey, 'RunTurn').Send(req) ALWAYS,
+	// even when the row already exists, so retrying an unjournaled enqueue wakes RunTurn.
+	svcName := d.ServiceName()
+	_ = restate.ObjectSend(ctx, svcName, sessionKey, "RunTurn").Send(req)
+
 	if !insertRes.Inserted && callerSuppliedID {
 		return DispatchEnqueueResponse{
 			Status:     "already_exists",
@@ -719,10 +749,6 @@ func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Bra
 			SessionID:  sessionKey,
 		}, nil
 	}
-
-	// 3. Fire restate.ObjectSend(ctx, svcName, sessionKey, 'RunTurn').Send(req).
-	svcName := d.ServiceName()
-	_ = restate.ObjectSend(ctx, svcName, sessionKey, "RunTurn").Send(req)
 
 	return DispatchEnqueueResponse{
 		Status:     statusAccepted,
@@ -748,10 +774,22 @@ func (d *DispatchSessionObject) claimNextDispatch(ctx context.Context, sessionKe
 		return db.Dispatch{}, false, err
 	}
 	for _, item := range disps {
-		if item.Status != db.StatusPending {
+		if !matchesDispatchSession(item, sessionKey, reqID) {
 			continue
 		}
-		if !matchesDispatchSession(item, sessionKey, reqID) {
+		if item.Status == db.StatusProcessing {
+			if rErr := d.pool.cfg.Store.ResetDispatchToPendingWithRestart(ctx, item.ID, "recovering in-flight dispatch on restate step retry"); rErr != nil {
+				continue
+			}
+			claimed, cErr := d.pool.cfg.Store.ClaimPendingDispatch(ctx, item.ID)
+			if cErr != nil || !claimed {
+				continue
+			}
+			item.Status = db.StatusProcessing
+			item.RestartCount++
+			return item, true, nil
+		}
+		if item.Status != db.StatusPending {
 			continue
 		}
 		claimed, cErr := d.pool.cfg.Store.ClaimPendingDispatch(ctx, item.ID)
@@ -789,8 +827,12 @@ func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDisp
 			if !found {
 				return dispatchDrainStepResult{ClaimedCount: 0}, nil
 			}
-			if err := d.pool.executeClaimedDispatch(claimed, sessionKey); err != nil {
-				log.Printf("[DispatchSession] Error executing claimed dispatch for %s: %v", sessionKey, err)
+			if execErr := d.pool.executeClaimedDispatch(claimed, sessionKey, rc); execErr != nil {
+				log.Printf("[DispatchSession] Error executing claimed dispatch for %s: %v", sessionKey, execErr)
+				return dispatchDrainStepResult{}, execErr
+			}
+			if rc.Err() != nil {
+				return dispatchDrainStepResult{}, rc.Err()
 			}
 			return dispatchDrainStepResult{ClaimedCount: 1}, nil
 		}, restate.WithName("execute-dispatch"))
@@ -1025,15 +1067,31 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 	return res, nil
 }
 
-// executeClaimedBurst runs a single coalesced turnExecution for an atomically claimed burst.
-func (p *WorkerPool) executeClaimedBurst(burst []db.Message, threadID string) error {
-	if len(burst) == 0 {
-		return nil
+//nolint:contextcheck
+func (te *turnExecution) isRowStillProcessing(ctx context.Context) bool {
+	if te == nil || te.pool == nil || te.pool.cfg.Store == nil {
+		return false
 	}
-	metrics.ActiveWorkers.Inc()
-	defer metrics.ActiveWorkers.Dec()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if te.isDispatch() {
+		if te.dispatch == nil {
+			return false
+		}
+		d, err := te.pool.cfg.Store.GetDispatch(ctx, te.dispatch.ID)
+		return err != nil || (d != nil && d.Status == db.StatusProcessing)
+	}
+	for _, m := range te.burst {
+		msg, err := te.pool.cfg.Store.GetMessage(ctx, m.ID)
+		if err != nil || (msg != nil && msg.Status == db.StatusProcessing) {
+			return true
+		}
+	}
+	return false
+}
 
-	scopeKey := threadID
+func (p *WorkerPool) acquireScopeLock(scopeKey string) func() {
 	lockVal, _ := p.scopeLocks.LoadOrStore(scopeKey, &sync.Mutex{})
 	scopeLock, ok := lockVal.(*sync.Mutex)
 	if !ok {
@@ -1041,7 +1099,50 @@ func (p *WorkerPool) executeClaimedBurst(burst []db.Message, threadID string) er
 		p.scopeLocks.Store(scopeKey, scopeLock)
 	}
 	scopeLock.Lock()
-	defer scopeLock.Unlock()
+	return scopeLock.Unlock
+}
+
+func (p *WorkerPool) checkTurnCompletionError(ctx context.Context, te *turnExecution, abortErr error) error {
+	if (!te.finalized.Load() || te.isRowStillProcessing(ctx)) && !te.isInterrupted() {
+		return abortErr
+	}
+	if ctx != nil && ctx.Err() != nil && !te.isInterrupted() {
+		return ctx.Err()
+	}
+	if p.ctx.Err() != nil && !te.isInterrupted() {
+		return p.ctx.Err()
+	}
+	return nil
+}
+
+func (te *turnExecution) shouldRunBurstTurn() bool {
+	if !te.resolveTurnPolicy() {
+		return false
+	}
+	if te.evaluateAmbientWake() {
+		return false
+	}
+	if te.turnCount > session.DefaultMaxSessionTurns {
+		metrics.RecordUnrotatedSessionTurn()
+	}
+	return true
+}
+
+// executeClaimedBurst runs a single coalesced turnExecution for an atomically claimed burst.
+func (p *WorkerPool) executeClaimedBurst(burst []db.Message, threadID string, execCtx ...context.Context) error {
+	if len(burst) == 0 {
+		return nil
+	}
+	var callerCtx context.Context
+	if len(execCtx) > 0 && execCtx[0] != nil {
+		callerCtx = execCtx[0]
+	}
+	metrics.ActiveWorkers.Inc()
+	defer metrics.ActiveWorkers.Dec()
+
+	scopeKey := threadID
+	unlockScope := p.acquireScopeLock(scopeKey)
+	defer unlockScope()
 
 	execStart := time.Now().UTC()
 	triggerType := resolveBurstTriggerType(burst[0])
@@ -1078,19 +1179,13 @@ func (p *WorkerPool) executeClaimedBurst(burst []db.Message, threadID string) er
 		}
 	}()
 
-	if !te.resolveTurnPolicy() {
-		return nil
-	}
-	if te.evaluateAmbientWake() {
+	if !te.shouldRunBurstTurn() {
 		return nil
 	}
 
-	if te.turnCount > session.DefaultMaxSessionTurns {
-		metrics.RecordUnrotatedSessionTurn()
-	}
-
+	abortErr := fmt.Errorf("burst execution aborted unfinalized for thread %s", threadID)
 	if !te.acquirePoolAndLease() {
-		return nil
+		return p.checkTurnCompletionError(callerCtx, te, abortErr)
 	}
 	defer func() {
 		if te.lease != nil {
@@ -1112,22 +1207,21 @@ func (p *WorkerPool) executeClaimedBurst(burst []db.Message, threadID string) er
 	promptSpan.End()
 	te.executeWithRetries()
 	te.refreshThreadSummaryAtTurnEnd(te.turnCtxValue())
-	return nil
+
+	return p.checkTurnCompletionError(callerCtx, te, abortErr)
 }
 
 // executeClaimedDispatch runs a single turnExecution for an atomically claimed dispatch.
-func (p *WorkerPool) executeClaimedDispatch(d db.Dispatch, scopeKey string) error {
+func (p *WorkerPool) executeClaimedDispatch(d db.Dispatch, scopeKey string, execCtx ...context.Context) error {
+	var callerCtx context.Context
+	if len(execCtx) > 0 && execCtx[0] != nil {
+		callerCtx = execCtx[0]
+	}
 	metrics.ActiveWorkers.Inc()
 	defer metrics.ActiveWorkers.Dec()
 
-	lockVal, _ := p.scopeLocks.LoadOrStore(scopeKey, &sync.Mutex{})
-	scopeLock, ok := lockVal.(*sync.Mutex)
-	if !ok {
-		scopeLock = &sync.Mutex{}
-		p.scopeLocks.Store(scopeKey, scopeLock)
-	}
-	scopeLock.Lock()
-	defer scopeLock.Unlock()
+	unlockScope := p.acquireScopeLock(scopeKey)
+	defer unlockScope()
 
 	isEphem := strings.TrimSpace(d.SessionID) == ""
 	leaseKey := d.SessionID
@@ -1170,8 +1264,9 @@ func (p *WorkerPool) executeClaimedDispatch(d db.Dispatch, scopeKey string) erro
 		}
 	}()
 
+	abortErr := fmt.Errorf("dispatch execution aborted unfinalized for %s", scopeKey)
 	if !te.acquirePoolAndLease() {
-		return nil
+		return p.checkTurnCompletionError(callerCtx, te, abortErr)
 	}
 	defer te.releaseActivePoolLease()
 	markTurnInactive := te.markTurnActive()
@@ -1182,7 +1277,8 @@ func (p *WorkerPool) executeClaimedDispatch(d db.Dispatch, scopeKey string) erro
 	te.turnPrompt = te.buildDispatchPrompt(promptCtx)
 	promptSpan.End()
 	te.executeWithRetries()
-	return nil
+
+	return p.checkTurnCompletionError(callerCtx, te, abortErr)
 }
 
 // SessionManagerService provides unkeyed control operations that run concurrently without blocking on Virtual Object key locks.
