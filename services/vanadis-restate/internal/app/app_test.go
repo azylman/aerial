@@ -241,15 +241,32 @@ func TestBindRestateServices(t *testing.T) {
 		agent      string
 		wantBuild  string
 		wantRouter string
+		wantPR     string
+		wantRepo   string
 	}{
-		{name: "default agent binds dark services", agent: "", wantBuild: "Build", wantRouter: "BuildRouter"},
+		{
+			name:       "default agent binds dark services",
+			agent:      "",
+			wantBuild:  "Build",
+			wantRouter: "BuildRouter",
+			wantPR:     "PRObject",
+			wantRepo:   "RepoObject",
+		},
+		{
+			name:       "scoped agent binds dark services",
+			agent:      "marida",
+			wantBuild:  "Build-marida",
+			wantRouter: "BuildRouter-marida",
+			wantPR:     "PRObject-marida",
+			wantRepo:   "RepoObject-marida",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
 			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
-			srv := bindRestateServices(restateObj, routerSvc)
+			srv := bindRestateServices(restateObj, routerSvc, tc.agent)
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -271,19 +288,19 @@ func TestBindRestateServices(t *testing.T) {
 				types[svc.Name] = svc.Ty
 			}
 			require.Len(t, byName, 4)
-			for _, want := range []string{tc.wantBuild, tc.wantRouter, "PRObject", "RepoObject"} {
+			for _, want := range []string{tc.wantBuild, tc.wantRouter, tc.wantPR, tc.wantRepo} {
 				require.Contains(t, byName, want)
 			}
-			require.Len(t, byName["PRObject"], 16)
-			require.True(t, byName["PRObject"]["HandleCheckFailed"])
-			require.True(t, byName["PRObject"]["HandleDeploySuccessPublished"])
-			require.True(t, byName["PRObject"]["HandleConflictDetected"])
-			require.True(t, byName["PRObject"]["HandleConflictPublished"])
-			require.True(t, byName["PRObject"]["HandleCIRecovery"])
-			require.Equal(t, "VIRTUAL_OBJECT", types["PRObject"])
-			require.Len(t, byName["RepoObject"], 4)
-			require.True(t, byName["RepoObject"]["ResolvePRBySHA"])
-			require.Equal(t, "VIRTUAL_OBJECT", types["RepoObject"])
+			require.Len(t, byName[tc.wantPR], 16)
+			require.True(t, byName[tc.wantPR]["HandleCheckFailed"])
+			require.True(t, byName[tc.wantPR]["HandleDeploySuccessPublished"])
+			require.True(t, byName[tc.wantPR]["HandleConflictDetected"])
+			require.True(t, byName[tc.wantPR]["HandleConflictPublished"])
+			require.True(t, byName[tc.wantPR]["HandleCIRecovery"])
+			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantPR])
+			require.Len(t, byName[tc.wantRepo], 4)
+			require.True(t, byName[tc.wantRepo]["ResolvePRBySHA"])
+			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantRepo])
 		})
 	}
 }
