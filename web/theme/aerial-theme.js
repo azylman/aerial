@@ -218,8 +218,16 @@
     if (current !== lastNotified) notify(current);
   }
 
+  // Chrome can deliver the storage event before this tab sees the cookie the other tab just
+  // wrote, so re-reading the cookie here would miss the change. Trust the signalled value.
   function onStorage(event) {
-    if (event.key === STORAGE_KEY) recheck();
+    if (event.key !== STORAGE_KEY) return;
+    var signalled = normalizeTheme(event.newValue);
+    if (signalled === null) {
+      recheck();
+      return;
+    }
+    if (signalled !== lastNotified) notify(signalled);
   }
 
   function onVisibility() {
