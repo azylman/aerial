@@ -418,19 +418,11 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discord widget deliverer is nil")
 
-	errDeliverMsg := nilDeliverer.DeliverDirectMessage(context.Background(), "c1", "alert")
-	require.Error(t, errDeliverMsg)
-	assert.Contains(t, errDeliverMsg.Error(), "discord widget deliverer is nil")
-
 	d, nErr := NewDiscordWidgetDeliverer("")
 	require.NoError(t, nErr)
 	_, dErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
 	require.Error(t, dErr)
 	assert.Contains(t, dErr.Error(), "discord widget sender is nil")
-
-	dErrDeliverMsg := d.DeliverDirectMessage(context.Background(), "c1", "alert")
-	require.Error(t, dErrDeliverMsg)
-	assert.Contains(t, dErrDeliverMsg.Error(), "discord widget sender is nil")
 
 	assert.Equal(t, "", d.redirectChannelIfNoBuildUpdates(""))
 	assert.Equal(t, "fallback", d.resolveChannelID("", "fallback"))

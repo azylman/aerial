@@ -564,6 +564,7 @@ type widgetTestCase struct {
 	wantErr     bool
 	errContain  string
 	testMessage bool
+	wantEriHit  bool
 }
 
 func assertExpectedError(t *testing.T, err error, wantErr bool, errContain string) bool {
@@ -583,15 +584,27 @@ func assertExpectedError(t *testing.T, err error, wantErr bool, errContain strin
 	return true
 }
 
-func verifyWidgetMessageCall(t *testing.T, client *RestateEriClient, mockDel *mockDeliverer, tc widgetTestCase) {
+func verifyWidgetMessageCall(t *testing.T, client *RestateEriClient, mockDel *mockDeliverer, eriHits *int, tc widgetTestCase) {
 	t.Helper()
 	err := client.Message(context.Background(), "ch-1", "test content")
 	if assertExpectedError(t, err, tc.wantErr, tc.errContain) {
 		return
 	}
+	if tc.wantEriHit {
+		if eriHits == nil || *eriHits != 1 {
+			t.Errorf("eriHits = %v, want 1", eriHits)
+		}
+		if mockDel != nil && (mockDel.lastChannel != "" || mockDel.lastContent != "") {
+			t.Errorf("mockDeliverer was unexpectedly called: channel=%q, content=%q", mockDel.lastChannel, mockDel.lastContent)
+		}
+		return
+	}
 	if tc.hasDeliver && tc.envToken != "" && tc.restateURL != "" && mockDel != nil {
 		if mockDel.lastChannel != "ch-1" || mockDel.lastContent != "test content" {
 			t.Errorf("mockDeliverer got channel=%q content=%q, want ch-1 / test content", mockDel.lastChannel, mockDel.lastContent)
+		}
+		if eriHits != nil && *eriHits != 0 {
+			t.Errorf("eriHits = %d, want 0 when direct deliverer active", *eriHits)
 		}
 	}
 }
@@ -599,9 +612,11 @@ func verifyWidgetMessageCall(t *testing.T, client *RestateEriClient, mockDel *mo
 func runWidgetTest(t *testing.T, tc widgetTestCase) {
 	t.Helper()
 	t.Setenv("DISCORD_TOKEN", tc.envToken)
+	var eriHits int
 	var eriURL string
 	if tc.eriBody != "" {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			eriHits++
 			w.WriteHeader(tc.eriStatus)
 			_, _ = w.Write([]byte(tc.eriBody))
 		}))
@@ -618,7 +633,7 @@ func runWidgetTest(t *testing.T, tc widgetTestCase) {
 
 	client := NewRestateEriClient(tc.restateURL, eriURL, "aerial", nil, deliverer)
 	if tc.testMessage {
-		verifyWidgetMessageCall(t, client, mockDel, tc)
+		verifyWidgetMessageCall(t, client, mockDel, &eriHits, tc)
 		return
 	}
 
@@ -691,6 +706,7 @@ func TestRestateEriClient_WidgetAndMessage(t *testing.T) {
 			eriStatus:   http.StatusOK,
 			eriBody:     `{"status":"ok"}`,
 			testMessage: true,
+			wantEriHit:  true,
 		},
 		{
 			name:        "message falls back to eri when restate url empty",
@@ -700,6 +716,7 @@ func TestRestateEriClient_WidgetAndMessage(t *testing.T) {
 			eriStatus:   http.StatusOK,
 			eriBody:     `{"status":"ok"}`,
 			testMessage: true,
+			wantEriHit:  true,
 		},
 		{
 			name:        "message unconfigured returns error",
@@ -714,6 +731,7 @@ func TestRestateEriClient_WidgetAndMessage(t *testing.T) {
 			eriStatus:   http.StatusOK,
 			eriBody:     `{"status":"ok"}`,
 			testMessage: true,
+			wantEriHit:  true,
 		},
 	}
 
