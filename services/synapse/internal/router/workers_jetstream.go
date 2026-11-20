@@ -43,17 +43,15 @@ type consumerSpec struct {
 }
 
 // jobConsumerSpecs lists every AERIAL_JOBS durable synapse subscribes: github,
-// deploy, the legacy drain-only shared Discord durables, then one ingress and
+// deploy, then one ingress and
 // one interaction durable per agent in sorted order. Filter subjects are exact
 // (no wildcards), so they never overlap on the WorkQueue stream.
 func (s *RouterServer) jobConsumerSpecs(routing metrics.DiscordRouting) []consumerSpec {
 	agents := routing.Agents()
-	specs := make([]consumerSpec, 0, 4+2*len(agents))
+	specs := make([]consumerSpec, 0, 2+2*len(agents))
 	specs = append(specs,
 		consumerSpec{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
 		consumerSpec{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
-		consumerSpec{metrics.LegacyDiscordIngressSubject, metrics.LegacyDiscordIngressDurable, s.HandleDiscordIngressJob},
-		consumerSpec{metrics.LegacyDiscordInteractionSubject, metrics.LegacyDiscordInteractionDurable, s.HandleDiscordInteractionJob},
 	)
 	for _, agent := range agents {
 		specs = append(specs,
