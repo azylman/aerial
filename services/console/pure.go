@@ -480,35 +480,6 @@ func ExtractAerialServiceName(c DockerContainerJSON) (string, bool) {
 	return extractServiceNameFromNames(c.Names)
 }
 
-// IsCoreAerialContainer determines whether a container is part of the core Aerial stack.
-func IsCoreAerialContainer(c DockerContainerJSON) bool {
-	svcName, _ := ExtractAerialServiceName(c)
-	svcName = strings.ToLower(svcName)
-
-	switch svcName {
-	case serviceAgentsview, "watchtower", "autoheal", serviceOllama:
-		return false
-	}
-
-	img := strings.ToLower(c.Image)
-	if strings.Contains(img, "watchtower") ||
-		strings.Contains(img, "autoheal") ||
-		strings.Contains(img, "ollama") ||
-		strings.Contains(img, "agentsview") {
-		return false
-	}
-
-	if c.Labels != nil {
-		if src, ok := c.Labels["org.opencontainers.image.source"]; ok && src != "" {
-			if !strings.Contains(strings.ToLower(src), "azylman/aerial") {
-				return false
-			}
-		}
-	}
-
-	return true
-}
-
 // containsWordToken returns true if token matches any discrete word token in s
 // when splitting on non-alphanumeric/non-hyphen characters.
 func containsWordToken(s, token string) bool {
@@ -726,19 +697,6 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 	}
 
 	return chips
-}
-
-// GetContainerCommit extracts and truncates the 7-character commit SHA from container labels.
-func GetContainerCommit(containers []DockerContainerJSON) string {
-	for _, c := range containers {
-		if !IsCoreAerialContainer(c) {
-			continue
-		}
-		if sha := ExtractSingleContainerCommit(c); sha != "" {
-			return shortenSHA(sha)
-		}
-	}
-	return ""
 }
 
 // MatchesETag implements RFC 7232 §2.3.2 / RFC 9110 §13.1.2 weak comparison.

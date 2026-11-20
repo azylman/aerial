@@ -31,6 +31,9 @@ type pipelineEntry struct {
 	key string
 	// latestRunAt is the CreatedAt of the newest run applied to the card.
 	latestRunAt time.Time
+	// rolloutDecided marks cards whose stage came from Kubernetes image tags, so
+	// commit-grouped container heuristics must not override it.
+	rolloutDecided bool
 }
 
 type pipelineRegistry struct {
@@ -178,21 +181,146 @@ func hasActiveContainerBuildJob(runJobs []GitHubJob) bool {
 	return false
 }
 
-func detectRecentContainerSwap(run GitHubRun, shortSHA, currentCommit string, aerialContainers []DockerContainerJSON) bool {
-	if currentCommit != "" && (currentCommit == shortSHA || strings.HasPrefix(run.HeadSHA, currentCommit)) {
-		return true
-	}
-	containerCommit := GetContainerCommit(aerialContainers)
-	if containerCommit != "" && (containerCommit == shortSHA || strings.HasPrefix(run.HeadSHA, containerCommit)) {
-		return true
-	}
+// detectRecentContainerSwap reports whether any container already runs the run's commit.
+func detectRecentContainerSwap(run GitHubRun, aerialContainers []DockerContainerJSON) bool {
+	runSHA := normalizeSHA(run.HeadSHA)
 	for _, c := range aerialContainers {
-		createdAt := time.Unix(c.Created, 0).UTC()
-		if createdAt.After(run.CreatedAt.Add(-30*time.Second)) || (c.Health != nil && c.Health.Status == healthStarting) {
+		if shasMatchPrefix(normalizeSHA(ExtractSingleContainerCommit(c)), runSHA) {
 			return true
 		}
 	}
 	return false
+}
+
+const (
+	labelCommitSHA         = "aerial.commit_sha"
+	labelImage             = "aerial.image"
+	buildPushGHCRJobPrefix = "Build & Push Images to GHCR ("
+)
+
+// builtImages maps successful docker-publish.yml matrix jobs
+// ("Build & Push Images to GHCR (<service>)") to their image names ("aerial-<service>").
+func builtImages(jobs []GitHubJob) []string {
+	var out []string
+	for _, j := range jobs {
+		if j.Conclusion != conclusionSuccess {
+			continue
+		}
+		rest, ok := strings.CutPrefix(j.Name, buildPushGHCRJobPrefix)
+		if !ok {
+			continue
+		}
+		inner, _, _ := strings.Cut(rest, ")")
+		svc, _, _ := strings.Cut(inner, ",")
+		svc = strings.TrimSpace(svc)
+		if svc == "" {
+			continue
+		}
+		img := "aerial-" + svc
+		if !slices.Contains(out, img) {
+			out = append(out, img)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hasImageTaggedContainers reports whether containers were synthesized from
+// Kubernetes Deployments with image metadata.
+func hasImageTaggedContainers(containers []DockerContainerJSON) bool {
+	for _, c := range containers {
+		if c.Labels[labelImage] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func isAerialRepo(repo string) bool {
+	return repo == "" || strings.HasSuffix(repo, "/aerial")
+}
+
+// newerMainRunSHAs returns head SHAs of push-to-main runs in the same repository
+// created after run.
+func newerMainRunSHAs(run GitHubRun, runs []GitHubRun) []string {
+	var out []string
+	for _, r := range runs {
+		if isPRRun(r) || r.Repository != run.Repository || !r.CreatedAt.After(run.CreatedAt) {
+			continue
+		}
+		if sha := normalizeSHA(r.HeadSHA); sha != "" {
+			out = append(out, sha)
+		}
+	}
+	return out
+}
+
+// rolloutContainers returns containers running one of the built images whose
+// commit is known from the image tag.
+func rolloutContainers(built []string, containers []DockerContainerJSON) []DockerContainerJSON {
+	var out []DockerContainerJSON
+	for _, c := range containers {
+		if c.Labels[labelCommitSHA] == "" || !slices.Contains(built, c.Labels[labelImage]) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// evaluateImageRollout derives a card stage and progress from Kubernetes Deployment
+// image tags: live once every container running a built image is on runSHA (or a
+// newer main SHA) and healthy; swapping while the rollout is underway; degraded when
+// any is unhealthy; awaiting_pull while none has started moving.
+func evaluateImageRollout(runSHA string, newerSHAs []string, matching []DockerContainerJSON) (string, int) {
+	if len(matching) == 0 {
+		return stageLive, 100
+	}
+	runSHA = normalizeSHA(runSHA)
+	var starting, degraded bool
+	rolled, rolledHealthy := 0, 0
+	for _, c := range matching {
+		healthy := false
+		switch {
+		case c.Health != nil && c.Health.Status == healthStarting:
+			starting = true
+		case c.State != containerStateRunning || (c.Health != nil && c.Health.Status == healthUnhealthy):
+			degraded = true
+		default:
+			healthy = true
+		}
+		commit := normalizeSHA(c.Labels[labelCommitSHA])
+		onTarget := shasMatchPrefix(commit, runSHA)
+		for _, n := range newerSHAs {
+			onTarget = onTarget || shasMatchPrefix(commit, n)
+		}
+		if onTarget {
+			rolled++
+			if healthy {
+				rolledHealthy++
+			}
+		}
+	}
+	swapProgress := 60 + int(float64(rolledHealthy)/float64(len(matching))*25)
+	switch {
+	case degraded:
+		return statusDegraded, 85
+	case starting:
+		return stageSwapping, swapProgress
+	case rolled == len(matching):
+		return stageLive, 100
+	case rolled > 0:
+		return stageSwapping, swapProgress
+	default:
+		return stageAwaitingPull, 55
+	}
+}
+
+// isImageRolloutDecided reports whether a run's card stage is decided by
+// Kubernetes image tags: a successful aerial main run whose jobs are known.
+func isImageRolloutDecided(run GitHubRun, runJobs []GitHubJob, containers []DockerContainerJSON) bool {
+	return run.Status == statusCompleted && run.Conclusion == conclusionSuccess && !isPRRun(run) &&
+		isAerialRepo(run.Repository) && len(runJobs) > 0 && hasImageTaggedContainers(containers)
 }
 
 func isPRRun(run GitHubRun) bool {
@@ -268,7 +396,7 @@ func dropSupersededCancelledMainRuns(runs []GitHubRun) []GitHubRun {
 func evaluateSuccessfulCIRun(
 	run GitHubRun,
 	runJobs []GitHubJob,
-	shortSHA, currentCommit string,
+	runs []GitHubRun,
 	gitSync GitSyncStatusResponse,
 	aerialContainers []DockerContainerJSON,
 	refTime time.Time,
@@ -277,28 +405,38 @@ func evaluateSuccessfulCIRun(
 		return "", "", "", 0, true
 	}
 	hasContainerBuilds := hasActiveContainerBuildJob(runJobs)
-	hasRecentContainerSwap := detectRecentContainerSwap(run, shortSHA, currentCommit, aerialContainers)
-	if run.Repository != "" && !strings.HasSuffix(run.Repository, "/aerial") && !hasContainerBuilds {
+	if len(runJobs) > 0 && !hasContainerBuilds {
+		return stageLive, statusCompleted, "", 100, false
+	}
+	if isImageRolloutDecided(run, runJobs, aerialContainers) {
+		matching := rolloutContainers(builtImages(runJobs), aerialContainers)
+		stage, progress := evaluateImageRollout(run.HeadSHA, newerMainRunSHAs(run, runs), matching)
+		return stage, statusCompleted, "", progress, false
+	}
+	hasRecentContainerSwap := detectRecentContainerSwap(run, aerialContainers)
+	if !isAerialRepo(run.Repository) && !hasContainerBuilds {
 		hasRecentContainerSwap = true
 	}
-	isHangarActive := gitSync.Reconciliation != nil && gitSync.Reconciliation.Active
+	// The 120s timeout only applies to Docker/Hangar mode; in k8s mode the card
+	// waits in awaiting_pull until the rollout is observed.
+	isHangarMode := gitSync.Reconciliation != nil
+	isHangarActive := isHangarMode && gitSync.Reconciliation.Active
 	ciElapsed := refTime.Sub(run.UpdatedAt)
 	if ciElapsed < 0 {
 		ciElapsed = refTime.Sub(run.CreatedAt)
 	}
-	if len(runJobs) > 0 && !hasContainerBuilds {
-		return stageLive, statusCompleted, "", 100, false
-	}
-	if hasContainerBuilds && !hasRecentContainerSwap && !isHangarActive && ciElapsed > 120*time.Second {
-		return statusFailed, statusCompleted, "Hangar reconciliation timed out (>120s)", 55, false
+	if hasContainerBuilds && isHangarMode && !hasRecentContainerSwap && !isHangarActive && ciElapsed > 120*time.Second {
+		return statusFailed, statusCompleted, hangarTimeoutMsg, 55, false
 	}
 	return stageAwaitingPull, statusCompleted, "", 55, false
 }
 
+const hangarTimeoutMsg = "Hangar reconciliation timed out (>120s)"
+
 func evaluateCompletedCIRun(
 	run GitHubRun,
 	runJobs []GitHubJob,
-	shortSHA, currentCommit string,
+	runs []GitHubRun,
 	gitSync GitSyncStatusResponse,
 	aerialContainers []DockerContainerJSON,
 	refTime time.Time,
@@ -310,7 +448,7 @@ func evaluateCompletedCIRun(
 	case conclusionFailure, "cancelled":
 		return statusFailed, statusFailed, "", 40, false
 	case conclusionSuccess:
-		return evaluateSuccessfulCIRun(run, runJobs, shortSHA, currentCommit, gitSync, aerialContainers, refTime)
+		return evaluateSuccessfulCIRun(run, runJobs, runs, gitSync, aerialContainers, refTime)
 	default:
 		return "", statusPending, "", 0, false
 	}
@@ -320,7 +458,7 @@ func evaluateCIRunStage(
 	run GitHubRun,
 	runJobs []GitHubJob,
 	ciChips []MatrixJobChip,
-	shortSHA, currentCommit string,
+	runs []GitHubRun,
 	gitSync GitSyncStatusResponse,
 	aerialContainers []DockerContainerJSON,
 	refTime time.Time,
@@ -342,7 +480,7 @@ func evaluateCIRunStage(
 		return stageBuilding, statusActive, "", progress
 	case statusCompleted:
 		stage, ciStatus, commitMsgOverride, progress, skip := evaluateCompletedCIRun(
-			run, runJobs, shortSHA, currentCommit, gitSync, aerialContainers, refTime,
+			run, runJobs, runs, gitSync, aerialContainers, refTime,
 		)
 		if skip {
 			return "", "", "", 0
@@ -399,17 +537,24 @@ func applyCIRunToDeployment(
 	switch {
 	case stage == stageAwaitingPull:
 		hangarStatus = statusActive
-	case stage == statusFailed && commitMsg == "Hangar reconciliation timed out (>120s)":
+	case stage == statusFailed && commitMsg == hangarTimeoutMsg:
 		hangarStatus = statusFailed
-	case stage == stageLive:
+	case stage == stageLive || stage == stageSwapping || stage == statusDegraded:
 		hangarStatus = statusCompleted
 	}
 
 	step4Status := statusPending
 	step5Status := statusPending
-	if stage == stageLive {
+	switch stage {
+	case stageLive:
 		step4Status = statusCompleted
 		step5Status = statusCompleted
+	case stageSwapping:
+		step4Status = statusActive
+		step5Status = statusActive
+	case statusDegraded:
+		step4Status = statusCompleted
+		step5Status = statusFailed
 	}
 
 	dep.Stage = stage
@@ -433,15 +578,16 @@ func resetDeploymentForRun(entry *pipelineEntry, normSHA string, runCreatedAt ti
 	dep.Commit = shortenSHA(normSHA)
 	entry.canonical = normSHA
 	entry.latestRunAt = runCreatedAt
+	entry.rolloutDecided = false
 }
 
 func ingestGitHubRun(
 	reg *pipelineRegistry,
 	run GitHubRun,
+	runs []GitHubRun,
 	jobs map[int64][]GitHubJob,
 	gitSync GitSyncStatusResponse,
 	aerialContainers []DockerContainerJSON,
-	currentCommit string,
 	refTime time.Time,
 ) {
 	normSHA := normalizeSHA(run.HeadSHA)
@@ -471,7 +617,7 @@ func ingestGitHubRun(
 	ciChips := ParseMatrixJobChips(runJobs, refTime)
 
 	stage, ciStatus, commitMsgOverride, progress := evaluateCIRunStage(
-		run, runJobs, ciChips, shortSHA, currentCommit, gitSync, aerialContainers, refTime,
+		run, runJobs, ciChips, runs, gitSync, aerialContainers, refTime,
 	)
 	if stage == "" && !prKeyed {
 		return
@@ -500,6 +646,11 @@ func ingestGitHubRun(
 	if isNewer || shouldUpdateDeploymentFromRun(dep, stage, run.CreatedAt) {
 		applyCIRunToDeployment(dep, run, shortSHA, commitMsg, commitTime, stage, ciStatus, progress, ciChips, cardID)
 		entry.canonical = normSHA
+		entry.rolloutDecided = isImageRolloutDecided(run, runJobs, aerialContainers)
+		if entry.rolloutDecided && stage != stageLive {
+			matching := rolloutContainers(builtImages(runJobs), aerialContainers)
+			dep.MatrixJobs = append(dep.MatrixJobs, BuildContainerChips(matching, refTime)...)
+		}
 	}
 }
 
@@ -611,6 +762,10 @@ func ingestHangarReconciliation(
 
 func resolveContainerCommit(c DockerContainerJSON, recon *ReconciliationStatus, currentCommit string) string {
 	commit := ExtractSingleContainerCommit(c)
+	if c.Labels[labelImage] != "" {
+		// Kubernetes image tags are authoritative: no tag commit means unknown, not current.
+		return commit
+	}
 	svc, isStackContainer := ExtractAerialServiceName(c)
 	if commit == "" && recon != nil && len(recon.TargetServices) > 0 && svc != "" {
 		if slices.Contains(recon.TargetServices, svc) {
@@ -752,6 +907,7 @@ func applyContainerGroupState(
 	refTime time.Time,
 ) {
 	latestCreatedAt, minUptimeSec, hasStarting, hasDegraded, healthyCount := summarizeContainerGroup(groupContainers, refTime)
+	imageTagged := hasImageTaggedContainers(groupContainers)
 	if dep.StartedAt.IsZero() {
 		dep.StartedAt = latestCreatedAt
 	}
@@ -764,13 +920,15 @@ func applyContainerGroupState(
 	case hasDegraded:
 		applyGroupDegradedState(dep)
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
-	case hasStarting || minUptimeSec < 120 || isHangarSwapping:
+	case hasStarting || (!imageTagged && minUptimeSec < 120) || isHangarSwapping:
 		applyGroupSwappingState(dep, healthyCount, len(groupContainers))
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
 	case isHangarPulling:
 		applyGroupPullingState(dep)
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
-	case minUptimeSec < 600:
+	case imageTagged || minUptimeSec < 600:
+		// Kubernetes readiness is authoritative: a fully healthy image-tagged group
+		// is live regardless of uptime.
 		applyGroupLiveGraceState(dep, groupContainers, gitSync, refTime)
 	}
 }
@@ -813,7 +971,7 @@ func MergeClusterDeploymentsWithHangar(
 
 	// 1. Ingest GitHub Actions CI runs
 	for _, run := range dropSupersededCancelledMainRuns(runs) {
-		ingestGitHubRun(reg, run, jobs, gitSync, aerialContainers, currentCommit, refTime)
+		ingestGitHubRun(reg, run, runs, jobs, gitSync, aerialContainers, refTime)
 	}
 
 	// 2. Ingest Hangar Reconciliation
@@ -823,9 +981,9 @@ func MergeClusterDeploymentsWithHangar(
 	groupsByCommit := groupContainersByCommit(aerialContainers, gitSync, currentCommit)
 	for groupSHA, groupContainers := range groupsByCommit {
 		entry := reg.find(groupSHA)
-		if entry == nil || entry.dep.Stage == "" {
+		if entry == nil || entry.dep.Stage == "" || entry.rolloutDecided {
 			// Strictly top-down invariant: Unparented containers NEVER synthesize deployment cards,
-			// and hidden PR cards are never resurrected.
+			// hidden PR cards are never resurrected, and image-tag rollout verdicts are authoritative.
 			continue
 		}
 		applyContainerGroupState(entry.dep, groupSHA, groupContainers, gitSync, refTime)
