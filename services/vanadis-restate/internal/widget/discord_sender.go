@@ -126,6 +126,8 @@ type DiscordWidgetDeliverer struct {
 
 	channelMetaMu    sync.RWMutex
 	channelMetaCache map[string]cachedChannelMeta
+
+	channelLocks sync.Map
 }
 
 // NewDiscordWidgetDeliverer constructs a DiscordWidgetDeliverer using the provided token or DISCORD_TOKEN env.
@@ -501,6 +503,12 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	var opts []discordgo.RequestOption
 	if ctx != nil {
 		opts = append(opts, discordgo.WithContext(ctx))
+	}
+
+	lockVal, _ := d.channelLocks.LoadOrStore(req.ChannelID, &sync.Mutex{})
+	if chLock, ok := lockVal.(*sync.Mutex); ok && chLock != nil {
+		chLock.Lock()
+		defer chLock.Unlock()
 	}
 
 	return DeliverStatusWidget(sender, req, now, opts...)
