@@ -111,19 +111,28 @@ func TestRouterJournalLookupErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			router := &BuildRouterService{store: &metadataMutationStore{err: tc.storageErr}}
+			inv := &mockInvoker{}
+			router := &BuildRouterService{
+				store:          &metadataMutationStore{err: tc.storageErr},
+				invokerFactory: func(restate.Context) BuildObjectInvoker { return inv },
+			}
 			prContext := mocks.NewMockContext(t)
 			observeJournalCallback(t, prContext, tc.callbackErr, 0)
 			prErr := router.RoutePREvent(restate.WithMockContext(prContext), pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1})
 			dispatchContext := mocks.NewMockContext(t)
 			observeJournalCallback(t, dispatchContext, tc.callbackErr, 0)
 			dispatchErr := router.RouteDispatchOutcome(restate.WithMockContext(dispatchContext), pubsub.DispatchOutcomeEvent{VanadisChunkID: "chunk"})
+			attachContext := mocks.NewMockContext(t)
+			observeJournalCallback(t, attachContext, tc.callbackErr, 0)
+			_, attachErr := router.RouteAttachPR(restate.WithMockContext(attachContext), store.AttachChunkPRRequest{ChunkID: "chunk", Repo: "owner/repo", PRNumber: 1})
 			if tc.callbackErr == nil {
 				assert.NoError(t, prErr)
 				assert.NoError(t, dispatchErr)
+				assert.NoError(t, attachErr)
 			} else {
 				assert.Error(t, prErr)
 				assert.Error(t, dispatchErr)
+				assert.Error(t, attachErr)
 			}
 		})
 	}

@@ -3,9 +3,11 @@ package deploygate
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
+	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -344,12 +346,20 @@ func TestDeploymentDeadlineRetryMutation(t *testing.T) {
 		wantError      bool
 		resetErr       error
 		stateErr       error
+		buildStatus    string
+		nilBuild       bool
+		chunkID        string
+		wantCode       int
 	}{
-		{"same revision retry", "sha", 1, 2, false, nil, nil},
-		{"stale generation", "sha", 0, 1, true, nil, nil},
-		{"stale revision", "old", 1, 1, true, nil, nil},
-		{"durable reset unavailable", "sha", 1, 1, true, errors.New("write unavailable"), nil},
-		{"attempt state unavailable", "sha", 1, 1, true, nil, errors.New("state unavailable")},
+		{name: "same revision retry", revision: "sha", generation: 1, wantGeneration: 2, wantError: false},
+		{name: "stale generation", revision: "sha", generation: 0, wantGeneration: 1, wantError: true, wantCode: http.StatusConflict},
+		{name: "stale revision", revision: "old", generation: 1, wantGeneration: 1, wantError: true, wantCode: http.StatusConflict},
+		{name: "durable reset unavailable", revision: "sha", generation: 1, wantGeneration: 1, wantError: true, resetErr: errors.New("write unavailable")},
+		{name: "attempt state unavailable", revision: "sha", generation: 1, wantGeneration: 1, wantError: true, stateErr: errors.New("state unavailable")},
+		{name: "failed build retry accepted", revision: "sha", generation: 1, wantGeneration: 2, wantError: false, buildStatus: statusFailed},
+		{name: "terminal build retry rejected", revision: "sha", generation: 1, wantGeneration: 1, wantError: true, buildStatus: statusCompleted, wantCode: http.StatusConflict},
+		{name: "nil build retry rejected", revision: "sha", generation: 1, wantGeneration: 1, wantError: true, nilBuild: true, wantCode: http.StatusConflict},
+		{name: "missing chunk retry rejected", revision: "sha", generation: 1, wantGeneration: 1, wantError: true, chunkID: "missing", wantCode: http.StatusConflict},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,18 +368,32 @@ func TestDeploymentDeadlineRetryMutation(t *testing.T) {
 			rt.now = now
 			rt.getErr = tc.stateErr
 			rt.attempts = map[string]Attempt{"c": {ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1, Deadline: now.Add(-time.Minute), Delivered: true}}
-			st := &fakeStore{bannerErr: tc.resetErr, chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}
+			st := &fakeStore{
+				buildStatus: tc.buildStatus,
+				nilBuild:    tc.nilBuild,
+				bannerErr:   tc.resetErr,
+				chunks:      []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}},
+			}
 			g := NewGate(st, nil)
-			_, err := g.RetryDeployment(rt, RetryRequest{ChunkID: "c", Revision: tc.revision, Generation: tc.generation})
+			chunkID := "c"
+			if tc.chunkID != "" {
+				chunkID = tc.chunkID
+			}
+			_, err := g.RetryDeployment(rt, RetryRequest{ChunkID: chunkID, Revision: tc.revision, Generation: tc.generation})
 			require.Equal(t, tc.wantError, err != nil)
 			require.Equal(t, tc.wantGeneration, rt.attempts["c"].Generation)
 			require.Equal(t, tc.wantError, rt.attempts["c"].Delivered)
+			if tc.wantCode != 0 {
+				var term restate.TerminalError
+				require.ErrorAs(t, err, &term)
+				require.Equal(t, tc.wantCode, int(term.Code()))
+			}
 			if !tc.wantError {
 				require.Equal(t, now.Add(15*time.Minute), rt.attempts["c"].Deadline)
 				require.Equal(t, statusDeploying, st.chunks[0].Status)
 				require.Empty(t, st.chunks[0].Banner)
 				require.True(t, rt.reconcileScheduled)
-			} else {
+			} else if len(st.chunks) > 0 {
 				require.Equal(t, statusDeployFailed, st.chunks[0].Status)
 				require.Equal(t, "expired", st.chunks[0].Banner)
 			}
