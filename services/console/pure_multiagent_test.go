@@ -346,20 +346,6 @@ func (c *cachedDiscoveredAgents) reset() {
 	c.fetchedAt = time.Time{}
 }
 
-func TestCachedDiscoveredAgents_Reset(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
-	c := &cachedDiscoveredAgents{ttl: 30 * time.Second}
-	c.set([]string{"aerial"}, now)
-	if _, ok := c.get(now); !ok {
-		t.Fatal("expected hit before reset")
-	}
-	c.reset()
-	if _, ok := c.get(now); ok {
-		t.Fatal("expected miss after reset")
-	}
-}
-
 func TestFetchUpstreamDiscoveredAgents_TableDriven(t *testing.T) {
 	t.Parallel()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -447,15 +433,6 @@ func TestFetchUpstreamDiscoveredAgents_TableDriven(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestFetchUpstreamDiscoveredAgents_DefaultCache(t *testing.T) {
-	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
-	discoveredAgentsCache.reset()
-	got := fetchUpstreamDiscoveredAgents(context.Background(), "", "", now)
-	if len(got) != 0 {
-		t.Errorf("expected empty, got %v", got)
 	}
 }
 

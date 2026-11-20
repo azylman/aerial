@@ -1,5 +1,6 @@
 import { memo } from 'react';
 import type { FactItem } from '../../api/types';
+import { AgentBadge } from '../../components/AgentBadge';
 import { CopyButton } from '../../components/CopyButton';
 import { Glyph } from '../../components/Glyph';
 import { formatTimeAgo } from '../../lib/formatters';
@@ -22,15 +23,12 @@ export interface FactCardProps {
  * an index into the filtered list.
  */
 export const FactCard = memo(function FactCard({ fact, count, query, now }: FactCardProps) {
-  const agent = (fact.agent || 'aerial').toLowerCase();
   return (
     <div className={count >= 2 ? 'fact-card high-importance' : 'fact-card'}>
       <div className="fact-card-header">
         <div className="fact-header-left">
           <span className="fact-category-tag cat-system_config">NODE #{String(fact.id || 0)}</span>
-          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
-            {agent}
-          </span>
+          <AgentBadge agent={fact.agent} />
         </div>
         <div className="fact-importance-gauge">
           <span>

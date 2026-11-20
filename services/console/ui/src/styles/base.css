@@ -40,6 +40,7 @@
     --accent-amber: var(--ae-warn);
     --accent-crimson: var(--ae-danger);
     --accent-indigo: var(--ae-info);
+    --accent-sapphire: var(--ae-info);
 
     /* Semantic Surface & Component Tokens */
     --brand-bg: #cba6f7;
@@ -92,6 +93,7 @@
 
     /* Canonical Semantic Accents */
     --accent-indigo: #4f46e5;
+    --accent-sapphire: #2563eb;
 
     /* Semantic Surface & Component Tokens */
     --brand-bg: #0f172a;
