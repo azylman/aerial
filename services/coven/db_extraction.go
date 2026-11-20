@@ -106,7 +106,7 @@ func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID st
 
 	var lastRowID int64
 	var factExtractedAt FactTime
-	query := `SELECT COALESCE(last_extracted_rowid, 0), fact_extracted_at FROM extraction_watermarks WHERE stack = $1 AND thread_id = $2`
+	query := `SELECT COALESCE(last_extracted_rowid, 0), fact_extracted_at FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2`
 	err := s.db.QueryRowContext(queryCtx, query, s.effectiveStack(), threadID).Scan(&lastRowID, &factExtractedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -196,9 +196,9 @@ func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO extraction_watermarks (stack, thread_id, last_extracted_rowid, fact_extracted_at, updated_at)
+	query := `INSERT INTO extraction_watermarks (agent, thread_id, last_extracted_rowid, fact_extracted_at, updated_at)
 	VALUES ($1, $2, $3, $4, $5)
-	ON CONFLICT (stack, thread_id) DO UPDATE SET
+	ON CONFLICT (agent, thread_id) DO UPDATE SET
 	  last_extracted_rowid = GREATEST(extraction_watermarks.last_extracted_rowid, EXCLUDED.last_extracted_rowid),
 	  fact_extracted_at = EXCLUDED.fact_extracted_at,
 	  updated_at = EXCLUDED.updated_at`
@@ -513,6 +513,11 @@ func (s *SQLStore) InsertProceduralCandidate(ctx context.Context, cand Procedura
 		status = "pending"
 	}
 
+	agent := strings.TrimSpace(cand.Agent)
+	if agent == "" {
+		agent = s.effectiveStack()
+	}
+
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -521,8 +526,8 @@ func (s *SQLStore) InsertProceduralCandidate(ctx context.Context, cand Procedura
 		prNum = cand.PRNumber
 	}
 
-	query := `INSERT INTO procedural_candidates (thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, pr_number)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	query := `INSERT INTO procedural_candidates (thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, pr_number, agent)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	RETURNING id`
 
 	var id int64
@@ -536,6 +541,7 @@ func (s *SQLStore) InsertProceduralCandidate(ctx context.Context, cand Procedura
 		pgvector.NewVector(cand.Embedding),
 		status,
 		prNum,
+		agent,
 	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("failed to insert procedural candidate: %w", err)
 	}
@@ -550,7 +556,7 @@ func (s *SQLStore) GetPendingProceduralCandidates(ctx context.Context) ([]Proced
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, COALESCE(pr_number, 0), created_at
+	query := `SELECT id, thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, COALESCE(pr_number, 0), created_at, COALESCE(agent, 'aerial')
 	FROM procedural_candidates
 	WHERE status = 'pending'
 	ORDER BY created_at ASC, id ASC
@@ -583,6 +589,7 @@ func (s *SQLStore) GetPendingProceduralCandidates(ctx context.Context) ([]Proced
 			&cand.Status,
 			&cand.PRNumber,
 			&createdAt,
+			&cand.Agent,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan procedural candidate: %w", err)
 		}

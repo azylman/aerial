@@ -185,7 +185,7 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 	cutoff := nowFn().UTC().Add(-s.cfg.IdleThreshold)
 	scanLimit := s.cfg.BatchLimit * 4
 	rows, err := s.store.db.QueryContext(queryCtx,
-		`SELECT stack, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
+		`SELECT agent, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
 		 WHERE summary_step_watermark < last_indexed_step
 		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $1))
 		 ORDER BY updated_at ASC LIMIT $2`, s.cfg.MinStepDelta, scanLimit)
@@ -273,7 +273,7 @@ func (s *Summarizer) storeSummary(ctx context.Context, cand summaryCandidate, su
 	defer cancel()
 	if _, err := s.store.db.ExecContext(queryCtx,
 		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, updated_at = CURRENT_TIMESTAMP
-		 WHERE stack = $3 AND session_id = $4`,
+		 WHERE agent = $3 AND session_id = $4`,
 		summary, cand.lastIndexed, cand.agent, cand.sessionID); err != nil {
 		return fmt.Errorf("store session summary: %w", err)
 	}

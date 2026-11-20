@@ -34,7 +34,7 @@ func TestSearchSessions(t *testing.T) {
 			if _, err := store.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 2, false, false)); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
-			if _, err := store.db.ExecContext(ctx, `UPDATE session_summaries SET summary = 'debugged indexer' WHERE stack = 'aerial' AND session_id = 'sess-a'`); err != nil {
+			if _, err := store.db.ExecContext(ctx, `UPDATE session_summaries SET summary = 'debugged indexer' WHERE agent = 'aerial' AND session_id = 'sess-a'`); err != nil {
 				t.Fatalf("seed summary text: %v", err)
 			}
 			got, err := store.SearchSessions(ctx, tc.stack, tc.query, 20)
@@ -102,7 +102,7 @@ func TestBuildStepsQuery(t *testing.T) {
 	}{
 		{"sqlite keeps like scan", "", "hello", "", "", 20, false, time.Time{}, "t.content LIKE '%' || $1 || '%'", "fts_tokens", []any{"hello", 20}},
 		{"postgres uses fts index", "", "hello", "", "", 20, true, time.Time{}, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
-		{"postgres keeps filter placeholders", "aerial", "hello", "sess-a", "bash", 10, true, time.Time{}, "t.stack = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
+		{"postgres keeps filter placeholders", "aerial", "hello", "sess-a", "bash", 10, true, time.Time{}, "t.agent = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
 		{"comma-separated sessions in IN clause", "", "hello", "sess-a,sess-b", "", 20, false, time.Time{}, "t.session_id IN ($2, $3)", "fts_tokens", []any{"hello", "sess-a", "sess-b", 20}},
 		{"since clause added", "", "hello", "", "", 20, false, epoch, "t.created_at >= $2", "fts_tokens", []any{"hello", epoch, 20}},
 	}
@@ -359,7 +359,7 @@ func TestCollectReadRowsScanError(t *testing.T) {
 	if _, err := store.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 0, false, false)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := collectReadRows(ctx, store, "op", `SELECT stack, session_id, last_indexed_step, last_mtime FROM session_summaries`, failingRowScan); err == nil {
+	if _, err := collectReadRows(ctx, store, "op", `SELECT agent, session_id, last_indexed_step, last_mtime FROM session_summaries`, failingRowScan); err == nil {
 		t.Errorf("expected scan error")
 	}
 }

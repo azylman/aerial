@@ -14,7 +14,7 @@ import (
 )
 
 const transcriptsTestSchema = `CREATE TABLE session_summaries (
-    stack TEXT NOT NULL,
+    agent TEXT NOT NULL,
     session_id TEXT NOT NULL,
     engine TEXT NOT NULL DEFAULT '',
     thread_id TEXT NOT NULL DEFAULT '',
@@ -25,10 +25,10 @@ const transcriptsTestSchema = `CREATE TABLE session_summaries (
     is_settled BOOLEAN NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (stack, session_id)
+    PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE transcript_steps (
-    stack TEXT NOT NULL,
+    agent TEXT NOT NULL,
     session_id TEXT NOT NULL,
     step_index INT NOT NULL,
     step_type TEXT NOT NULL DEFAULT '',
@@ -37,7 +37,7 @@ CREATE TABLE transcript_steps (
     tool_call_id TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (stack, session_id, step_index)
+    PRIMARY KEY (agent, session_id, step_index)
 );`
 
 func newTestStore(t *testing.T, stack string) *Store {
@@ -391,7 +391,7 @@ func TestApplyBatchToolCallID(t *testing.T) {
 		t.Fatalf("steps = %+v, want 1 step", steps)
 	}
 	var toolCallID string
-	if err := store.db.QueryRowContext(context.Background(), `SELECT tool_call_id FROM transcript_steps WHERE stack = 'aerial' AND session_id = 'sess-tools' AND step_index = 0`).Scan(&toolCallID); err != nil {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT tool_call_id FROM transcript_steps WHERE agent = 'aerial' AND session_id = 'sess-tools' AND step_index = 0`).Scan(&toolCallID); err != nil {
 		t.Fatalf("query tool_call_id: %v", err)
 	}
 	if toolCallID != "call-9" {

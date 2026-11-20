@@ -204,7 +204,7 @@ func lockSessionCursor(ctx context.Context, tx *sql.Tx, db *sql.DB, stack, sessi
 	var rawMtime any
 	var lastStep sql.NullInt64
 	var isSettled sql.NullBool
-	row := tx.QueryRowContext(ctx, `SELECT last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE stack = $1 AND session_id = $2`+forUpdateClause(db), stack, sessionID)
+	row := tx.QueryRowContext(ctx, `SELECT last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE agent = $1 AND session_id = $2`+forUpdateClause(db), stack, sessionID)
 	switch scanErr := row.Scan(&rawMtime, &lastStep, &isSettled); {
 	case scanErr == nil:
 		cur.found = true
@@ -240,13 +240,13 @@ func applyBatchDecision(ctx context.Context, tx *sql.Tx, stack, sessionID string
 }
 
 func applyResetBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, batch transcriptwire.TranscriptStepBatch) (int, error) {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM transcript_steps WHERE stack = $1 AND session_id = $2`, stack, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM transcript_steps WHERE agent = $1 AND session_id = $2`, stack, sessionID); err != nil {
 		return 0, fmt.Errorf("reset transcript steps: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO session_summaries (stack, session_id, engine, thread_id, last_indexed_step, last_mtime, is_settled, updated_at)
+		`INSERT INTO session_summaries (agent, session_id, engine, thread_id, last_indexed_step, last_mtime, is_settled, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-		 ON CONFLICT (stack, session_id) DO UPDATE SET engine = EXCLUDED.engine, thread_id = EXCLUDED.thread_id,
+		 ON CONFLICT (agent, session_id) DO UPDATE SET engine = EXCLUDED.engine, thread_id = EXCLUDED.thread_id,
 		 last_indexed_step = EXCLUDED.last_indexed_step, last_mtime = EXCLUDED.last_mtime, is_settled = EXCLUDED.is_settled,
 		 updated_at = CURRENT_TIMESTAMP`,
 		stack, sessionID, strings.TrimSpace(batch.Engine), strings.TrimSpace(batch.ThreadID),
@@ -258,9 +258,9 @@ func applyResetBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, b
 
 func applyInsertBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, batch transcriptwire.TranscriptStepBatch) (int, error) {
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO session_summaries (stack, session_id, engine, thread_id, last_indexed_step, last_mtime, is_settled, updated_at)
+		`INSERT INTO session_summaries (agent, session_id, engine, thread_id, last_indexed_step, last_mtime, is_settled, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-		 ON CONFLICT (stack, session_id) DO NOTHING`,
+		 ON CONFLICT (agent, session_id) DO NOTHING`,
 		stack, sessionID, strings.TrimSpace(batch.Engine), strings.TrimSpace(batch.ThreadID),
 		batch.LastStep, batch.FileMtime.UTC(), batch.Final); err != nil {
 		return 0, fmt.Errorf("insert session summary: %w", err)
@@ -270,7 +270,7 @@ func applyInsertBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, is_settled = is_settled OR $4, updated_at = CURRENT_TIMESTAMP WHERE stack = $1 AND session_id = $2`,
+		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, is_settled = is_settled OR $4, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND session_id = $2`,
 		stack, sessionID, batch.LastStep, batch.Final); err != nil {
 		return 0, fmt.Errorf("advance session summary: %w", err)
 	}
@@ -287,7 +287,7 @@ func applyAppendBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		mtime = cur.lastMtime
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, last_mtime = $4, is_settled = is_settled OR $5, engine = CASE WHEN $6 <> '' THEN $6 ELSE engine END, thread_id = CASE WHEN $7 <> '' THEN $7 ELSE thread_id END, updated_at = CURRENT_TIMESTAMP WHERE stack = $1 AND session_id = $2`,
+		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, last_mtime = $4, is_settled = is_settled OR $5, engine = CASE WHEN $6 <> '' THEN $6 ELSE engine END, thread_id = CASE WHEN $7 <> '' THEN $7 ELSE thread_id END, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND session_id = $2`,
 		stack, sessionID, batch.LastStep, mtime, batch.Final, strings.TrimSpace(batch.Engine), strings.TrimSpace(batch.ThreadID)); err != nil {
 		return 0, fmt.Errorf("advance session summary: %w", err)
 	}
@@ -323,9 +323,9 @@ func insertBatchSteps(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		}
 		createdAt := parseStepCreatedAt(st.CreatedAt)
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO transcript_steps (stack, session_id, step_index, step_type, tool_name, tool_kind, tool_call_id, content, created_at)
+			`INSERT INTO transcript_steps (agent, session_id, step_index, step_type, tool_name, tool_kind, tool_call_id, content, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			 ON CONFLICT (stack, session_id, step_index) DO NOTHING`,
+			 ON CONFLICT (agent, session_id, step_index) DO NOTHING`,
 			stack, sessionID, st.StepIndex, strings.TrimSpace(st.Type), strings.TrimSpace(st.ToolName),
 			"", toolCallID, sanitizeTranscriptText(st.Content), createdAt)
 		if err != nil {

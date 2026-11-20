@@ -71,7 +71,7 @@ func seedSummarizerSession(t *testing.T, store *Store, session, thread string, f
 func presetSummaryWatermark(t *testing.T, store *Store, session string, watermark int, summary string) {
 	t.Helper()
 	if _, err := store.db.ExecContext(context.Background(),
-		`UPDATE session_summaries SET summary_step_watermark = $1, summary = $2 WHERE stack = 'aerial' AND session_id = $3`,
+		`UPDATE session_summaries SET summary_step_watermark = $1, summary = $2 WHERE agent = 'aerial' AND session_id = $3`,
 		watermark, summary, session); err != nil {
 		t.Fatalf("preset watermark: %v", err)
 	}
@@ -80,7 +80,7 @@ func presetSummaryWatermark(t *testing.T, store *Store, session string, watermar
 func readSummaryRow(t *testing.T, store *Store, session string) (summary string, watermark int, settled bool) {
 	t.Helper()
 	if err := store.db.QueryRowContext(context.Background(),
-		`SELECT summary, summary_step_watermark, is_settled FROM session_summaries WHERE stack = 'aerial' AND session_id = $1`,
+		`SELECT summary, summary_step_watermark, is_settled FROM session_summaries WHERE agent = 'aerial' AND session_id = $1`,
 		session).Scan(&summary, &watermark, &settled); err != nil {
 		t.Fatalf("read summary row: %v", err)
 	}
@@ -172,14 +172,14 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) *Store {
 	if tc.recentMtime {
 		testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
 		if _, err := store.db.ExecContext(context.Background(),
-			`UPDATE session_summaries SET last_mtime = $1 WHERE stack = 'aerial' AND session_id = 'sess-1'`,
+			`UPDATE session_summaries SET last_mtime = $1 WHERE agent = 'aerial' AND session_id = 'sess-1'`,
 			testNow.Add(-5*time.Minute)); err != nil {
 			t.Fatalf("preset recent mtime: %v", err)
 		}
 	}
 	if tc.deleteSteps {
 		if _, err := store.db.ExecContext(context.Background(),
-			`DELETE FROM transcript_steps WHERE stack = 'aerial' AND session_id = 'sess-1'`); err != nil {
+			`DELETE FROM transcript_steps WHERE agent = 'aerial' AND session_id = 'sess-1'`); err != nil {
 			t.Fatalf("delete steps: %v", err)
 		}
 	}
@@ -615,7 +615,7 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 	var sumAlpha string
 	var markAlpha int
 	if err := store.db.QueryRowContext(context.Background(),
-		`SELECT summary, summary_step_watermark FROM session_summaries WHERE stack = 'agent-alpha' AND session_id = 'sess-alpha'`).Scan(&sumAlpha, &markAlpha); err != nil {
+		`SELECT summary, summary_step_watermark FROM session_summaries WHERE agent = 'agent-alpha' AND session_id = 'sess-alpha'`).Scan(&sumAlpha, &markAlpha); err != nil {
 		t.Fatalf("read agent-alpha summary: %v", err)
 	}
 	if markAlpha != 2 || sumAlpha != "multi-agent summary" {
