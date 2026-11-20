@@ -19,7 +19,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
-	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -544,72 +543,16 @@ func TestTurnExecution_FailureResetsActiveSessionID(t *testing.T) {
 }
 
 type dispatchExecutionHeadlessCase struct {
-	name               string
-	source             string
-	sessionID          string
-	prompt             string
-	respJSON           string
-	wantStatus         string
-	wantRespText       string
-	seedWidget         bool
-	coldWidgetSync     bool
-	seedOutdatedWidget bool
-	emitStep           bool
-	wantSyncedRepo     string
-	wantSyncedPRNumber int
+	name         string
+	source       string
+	sessionID    string
+	prompt       string
+	respJSON     string
+	wantStatus   string
+	wantRespText string
 }
 
-type headlessSyncedPayload struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
-}
-
-func seedHeadlessWidget(pool *WorkerPool, seedOutdated bool) {
-	seedStatus := "running"
-	seedChunkID := "chunk-step-live"
-	if seedOutdated {
-		seedStatus = "pr_opened"
-		seedChunkID = "build-streaming-live-chunk-1"
-	}
-	_, _ = pool.DeliverStatusWidget(discord.StatusWidgetRequest{
-		ChannelID: "chan-build",
-		ID:        "build-streaming-live",
-		Status:    "running",
-		Chunks: []discord.StatusWidgetChunk{
-			{ID: seedChunkID, Index: 0, Title: "Step Streaming", Status: seedStatus},
-		},
-	})
-}
-
-func assertDeliveredWidgetsStep(t *testing.T, deliveredWidgets []discord.StatusWidgetRequest) {
-	t.Helper()
-	stepsSeen := 0
-	hasFinalClear := false
-	for i, w := range deliveredWidgets {
-		t.Logf("widget[%d]: Chunks=%+v", i, w.Chunks)
-		if len(w.Chunks) == 0 {
-			continue
-		}
-		if strings.Contains(w.Chunks[0].ActiveStep, "Executing `git`") {
-			stepsSeen++
-		}
-		if stepsSeen > 0 && w.Chunks[0].ActiveStep == "" {
-			hasFinalClear = true
-		}
-	}
-	if stepsSeen == 0 {
-		summaries := make([]string, 0, len(deliveredWidgets))
-		for _, w := range deliveredWidgets {
-			summaries = append(summaries, fmt.Sprintf("(Chunks=%+v)", w.Chunks))
-		}
-		t.Fatalf("expected at least one widget delivery with active step 'Executing `git`', saw %d widget updates: %s", len(deliveredWidgets), strings.Join(summaries, "; "))
-	}
-	if !hasFinalClear {
-		t.Fatalf("expected final widget clear with ActiveStep='', saw %d widget updates", len(deliveredWidgets))
-	}
-}
-
-func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, deliveredWidgetsMu *sync.Mutex, deliveredWidgets *[]discord.StatusWidgetRequest, activeStepDeliveredCh chan struct{}, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
+func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
 	t.Helper()
 	return NewWorkerPool(WorkerPoolConfig{
 		Store:          store,
@@ -623,43 +566,14 @@ func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, sto
 			t.Errorf("unexpected Discord TypingFunc call for headless dispatch")
 			return func() {}
 		},
-		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-			deliveredWidgetsMu.Lock()
-			*deliveredWidgets = append(*deliveredWidgets, req)
-			deliveredWidgetsMu.Unlock()
-			if len(req.Chunks) > 0 && strings.Contains(req.Chunks[0].ActiveStep, "Executing `git`") {
-				select {
-				case activeStepDeliveredCh <- struct{}{}:
-				default:
-				}
-			}
-			if req.MessageID != "" {
-				return req.MessageID, nil
-			}
-			return "widget-msg-seed", nil
-		},
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			if tc.emitStep && opts.StepUpdateHandler != nil {
-				opts.StepUpdateHandler(&runner.StepUpdateEvent{
-					Type:     "tool_call",
-					ToolName: "run_command",
-					ToolInfo: &runner.StepToolInfo{
-						Parameters: runner.StepToolParameters{CommandLine: "git status"},
-					},
-				})
-				select {
-				case <-activeStepDeliveredCh:
-				case <-time.After(5 * time.Second):
-					t.Errorf("timeout waiting for Executing `git` active-step widget delivery")
-				}
-			}
 			defer close(doneCh)
 			return tc.respJSON, "", 0, nil
 		},
 	})
 }
 
-func assertHeadlessDispatchResult(t *testing.T, store db.Store, dispID string, tc dispatchExecutionHeadlessCase, syncedPayload headlessSyncedPayload) {
+func assertHeadlessDispatchResult(t *testing.T, store db.Store, dispID string, tc dispatchExecutionHeadlessCase) {
 	t.Helper()
 	d, err := store.GetDispatch(context.Background(), dispID)
 	if err != nil || d == nil {
@@ -671,20 +585,12 @@ func assertHeadlessDispatchResult(t *testing.T, store db.Store, dispID string, t
 	if d.ResponseText != tc.wantRespText {
 		t.Fatalf("response text mismatch: got %q, want %q", d.ResponseText, tc.wantRespText)
 	}
-
-	if tc.wantSyncedRepo != "" && (syncedPayload.Repo != tc.wantSyncedRepo || syncedPayload.PRNumber != tc.wantSyncedPRNumber) {
-		t.Fatalf("syncedPayload = %+v, want repo=%q pr=%d", syncedPayload, tc.wantSyncedRepo, tc.wantSyncedPRNumber)
-	}
 }
 
 func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadlessCase) {
 	t.Helper()
 	store := dbtest.NewFakeStore()
 	doneCh := make(chan struct{})
-	var deliveredWidgetsMu sync.Mutex
-	var deliveredWidgets []discord.StatusWidgetRequest
-	activeStepDeliveredCh := make(chan struct{}, 8)
-	var syncedPayload headlessSyncedPayload
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -692,37 +598,8 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 		t.Fatalf("EnsureCoreStreams: %v", err)
 	}
 
-	var pool *WorkerPool
-	if tc.coldWidgetSync {
-		_, err := memBus.Subscribe(context.Background(), "aerial.coalesced.>", "test-headless-sub", func(ctx context.Context, msg pubsub.Message) error {
-			var args pubsub.WidgetSyncJobArgs
-			_ = json.Unmarshal(msg.Data(), &args)
-			syncedPayload.Repo = args.Repo
-			syncedPayload.PRNumber = args.PRNumber
-			if pool != nil {
-				_, _ = pool.DeliverStatusWidgetWithContext(ctx, discord.StatusWidgetRequest{
-					ChannelID: "chan-build",
-					ID:        "build-streaming-live",
-					MessageID: "widget-msg-seed",
-					Status:    "running",
-					Chunks: []discord.StatusWidgetChunk{
-						{ID: "build-streaming-live-chunk-1", Index: 0, Title: "Step Streaming", Status: "failed", PRNumber: 733},
-					},
-				})
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("Subscribe: %v", err)
-		}
-	}
-
-	pool = setupHeadlessWorkerPool(t, tc, store, &deliveredWidgetsMu, &deliveredWidgets, activeStepDeliveredCh, doneCh, memBus)
+	pool := setupHeadlessWorkerPool(t, tc, store, doneCh, memBus)
 	defer pool.Stop()
-
-	if tc.seedWidget || tc.seedOutdatedWidget {
-		seedHeadlessWidget(pool, tc.seedOutdatedWidget)
-	}
 
 	disp := db.Dispatch{
 		ID:        uuid.New().String(),
@@ -745,15 +622,7 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 	waitPoolIdle(t, pool, 3*time.Second)
 	pool.Stop()
 
-	assertHeadlessDispatchResult(t, store, disp.ID, tc, syncedPayload)
-
-	if tc.emitStep {
-		deliveredWidgetsMu.Lock()
-		copiedWidgets := make([]discord.StatusWidgetRequest, len(deliveredWidgets))
-		copy(copiedWidgets, deliveredWidgets)
-		deliveredWidgetsMu.Unlock()
-		assertDeliveredWidgetsStep(t, copiedWidgets)
-	}
+	assertHeadlessDispatchResult(t, store, disp.ID, tc)
 }
 
 func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
@@ -778,32 +647,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			wantRespText: "all systems normal",
 		},
 		{
-			name:         "vanadis chunk step streaming to build card widget",
-			source:       "vanadis",
-			sessionID:    "vanadis-chunk-step-live",
-			prompt:       "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-streaming-live\nChunk ID: chunk-step-live\n=== Active Chunk (Chunk 1 of 1) ===\nImplement step streaming",
-			respJSON:     `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"step streaming succeeded"}`,
-			wantStatus:   db.StatusCompleted,
-			wantRespText: "step streaming succeeded",
-			seedWidget:   true,
-			emitStep:     true,
-		},
-		{
-			name:               "cold widget cache on PR CI remediation lazily syncs widget and streams steps",
-			source:             "webhook",
-			sessionID:          "vanadis-build-streaming-live-chunk-1",
-			prompt:             "❌ **GitHub Check Failed (`build`)** on azylman/mirrormere (commit: abc1234, PR #733, branch: `feat/test`).\n\nChunk ID: build-streaming-live-chunk-1",
-			respJSON:           `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"remediated"}`,
-			wantStatus:         db.StatusCompleted,
-			wantRespText:       "remediated",
-			coldWidgetSync:     true,
-			seedOutdatedWidget: true,
-			emitStep:           true,
-			wantSyncedRepo:     "azylman/mirrormere",
-			wantSyncedPRNumber: 733,
-		},
-		{
-			name:         "cold widget cache handles unreachable router and invalid URL gracefully",
+			name:         "vanadis chunk execution completes successfully",
 			source:       "vanadis",
 			sessionID:    "vanadis-chunk-step-err",
 			prompt:       "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-err\nChunk ID: chunk-step-err",

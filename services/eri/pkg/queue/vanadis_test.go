@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type trackingBus struct {
@@ -173,7 +177,20 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 
 			poolCtx, cancelPool := context.WithCancel(context.Background())
 			defer cancelPool()
-			pool := &WorkerPool{ctx: poolCtx, cancel: cancelPool, eventBus: trackBus, cfg: WorkerPoolConfig{EventBus: trackBus}}
+			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer restateSrv.Close()
+
+			pool := &WorkerPool{
+				ctx:      poolCtx,
+				cancel:   cancelPool,
+				eventBus: trackBus,
+				cfg: WorkerPoolConfig{
+					EventBus:          trackBus,
+					RestateIngressURL: restateSrv.URL,
+				},
+			}
 
 			disp := outcomeDispatch(tc.dispatchID, tc.source, tc.chunkID)
 			te := &turnExecution{
@@ -281,6 +298,11 @@ func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
 			poolCtx, cancelPool := context.WithCancel(context.Background())
 			defer cancelPool()
 
+			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer restateSrv.Close()
+
 			pool := &WorkerPool{
 				ctx:      poolCtx,
 				cancel:   cancelPool,
@@ -288,6 +310,7 @@ func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
 				cfg: WorkerPoolConfig{
 					EventBus:           failingBus,
 					RetryDelayOverride: 1 * time.Millisecond,
+					RestateIngressURL:  restateSrv.URL,
 				},
 			}
 
@@ -330,6 +353,388 @@ func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
 					t.Fatalf("delivered count = %d, want %d", len(delivered), len(tc.wantPublishes))
 				}
 			}
+		})
+	}
+}
+
+func TestBuildServiceName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		agent     string
+		wantBuild string
+	}{
+		{name: "empty agent defaults to Build", agent: "", wantBuild: "Build"},
+		{name: "aerial agent defaults to Build", agent: "aerial", wantBuild: "Build"},
+		{name: "trimmed and upper aerial defaults to Build", agent: "  AERIAL  ", wantBuild: "Build"},
+		{name: "miorine stack agent", agent: "miorine", wantBuild: "Build-miorine"},
+		{name: "trimmed upper miorine", agent: "  MIORINE  ", wantBuild: "Build-miorine"},
+		{name: "suletta stack agent", agent: "suletta", wantBuild: "Build-suletta"},
+		{name: "custom agent identifier", agent: "custom-worker", wantBuild: "Build-custom-worker"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := BuildServiceName(tc.agent)
+			if got != tc.wantBuild {
+				t.Fatalf("BuildServiceName(%q) = %q, want %q", tc.agent, got, tc.wantBuild)
+			}
+		})
+	}
+}
+
+type flushActiveStepTestCase struct {
+	name            string
+	agentName       string
+	buildID         string
+	chunkID         string
+	step            string
+	serverStatus    int
+	serverBody      string
+	expectErr       bool
+	expectErrSubstr string
+	wantURI         string
+	wantActiveStep  string
+	wantChunkID     string
+	skipServer      bool
+}
+
+func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
+	t.Helper()
+
+	var capturedReq updateActiveStepPayload
+	var capturedURI string
+	var capturedMu sync.Mutex
+
+	var serverURL string
+	if !tc.skipServer {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedMu.Lock()
+			capturedURI = r.URL.RequestURI()
+			_ = json.NewDecoder(r.Body).Decode(&capturedReq)
+			capturedMu.Unlock()
+
+			w.WriteHeader(tc.serverStatus)
+			_, _ = w.Write([]byte(tc.serverBody))
+		}))
+		defer srv.Close()
+		serverURL = srv.URL
+	}
+
+	pool := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			AgentName:         tc.agentName,
+			RestateIngressURL: serverURL,
+		},
+	}
+
+	err := pool.FlushChunkActiveStepToRestate(context.Background(), tc.buildID, tc.chunkID, tc.step)
+	if tc.expectErr {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", tc.expectErrSubstr)
+		}
+		if !strings.Contains(err.Error(), tc.expectErrSubstr) {
+			t.Fatalf("error %q does not contain %q", err.Error(), tc.expectErrSubstr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.skipServer {
+		return
+	}
+
+	capturedMu.Lock()
+	gotURI, gotReq := capturedURI, capturedReq
+	capturedMu.Unlock()
+
+	if gotURI != tc.wantURI {
+		t.Errorf("request URI = %q, want %q", gotURI, tc.wantURI)
+	}
+	if gotReq.ChunkID != tc.wantChunkID {
+		t.Errorf("chunk_id = %q, want %q", gotReq.ChunkID, tc.wantChunkID)
+	}
+	if gotReq.ActiveStep != tc.wantActiveStep {
+		t.Errorf("active_step = %q, want %q", gotReq.ActiveStep, tc.wantActiveStep)
+	}
+}
+
+func TestWorkerPool_FlushChunkActiveStepToRestate(t *testing.T) {
+	t.Parallel()
+
+	tests := []flushActiveStepTestCase{
+		{
+			name:           "successful step update default agent",
+			agentName:      "",
+			buildID:        "build-101",
+			chunkID:        "chunk-live-1",
+			step:           "Executing `git status`",
+			serverStatus:   http.StatusOK,
+			serverBody:     `{"status":"ok"}`,
+			wantURI:        "/Build/build-101/UpdateActiveStep/send",
+			wantChunkID:    "chunk-live-1",
+			wantActiveStep: "Executing `git status`",
+		},
+		{
+			name:           "successful step update custom agent",
+			agentName:      "miorine",
+			buildID:        "build-202",
+			chunkID:        "chunk-live-2",
+			step:           "Compiling binaries...",
+			serverStatus:   http.StatusOK,
+			serverBody:     `{"status":"ok"}`,
+			wantURI:        "/Build-miorine/build-202/UpdateActiveStep/send",
+			wantChunkID:    "chunk-live-2",
+			wantActiveStep: "Compiling binaries...",
+		},
+		{
+			name:           "step text trimming and special characters in buildID",
+			agentName:      "suletta",
+			buildID:        "build/special:1",
+			chunkID:        "chunk-trim",
+			step:           "   Running tests...   \n",
+			serverStatus:   http.StatusOK,
+			serverBody:     `{"status":"ok"}`,
+			wantURI:        "/Build-suletta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
+			wantChunkID:    "chunk-trim",
+			wantActiveStep: "Running tests...",
+		},
+		{
+			name:           "empty step clears active step",
+			agentName:      "aerial",
+			buildID:        "build-clear",
+			chunkID:        "chunk-clear-1",
+			step:           "",
+			serverStatus:   http.StatusOK,
+			serverBody:     `{"status":"ok"}`,
+			wantURI:        "/Build/build-clear/UpdateActiveStep/send",
+			wantChunkID:    "chunk-clear-1",
+			wantActiveStep: "",
+		},
+		{
+			name:       "empty chunkID is a no-op",
+			buildID:    "build-noop",
+			chunkID:    "",
+			step:       "anything",
+			skipServer: true,
+		},
+		{
+			name:            "missing buildID with non-empty chunkID fails loud",
+			buildID:         "",
+			chunkID:         "chunk-missing-build",
+			step:            "anything",
+			expectErr:       true,
+			expectErrSubstr: "missing build_id",
+			skipServer:      true,
+		},
+		{
+			name:            "restate server 500 error fails loud",
+			agentName:       "aerial",
+			buildID:         "build-err-500",
+			chunkID:         "chunk-err-500",
+			step:            "failing step",
+			serverStatus:    http.StatusInternalServerError,
+			serverBody:      `{"error":"restate internal failure"}`,
+			expectErr:       true,
+			expectErrSubstr: "restate returned status 500",
+			wantURI:         "/Build/build-err-500/UpdateActiveStep/send",
+			wantChunkID:     "chunk-err-500",
+			wantActiveStep:  "failing step",
+		},
+		{
+			name:            "restate server 404 error fails loud",
+			agentName:       "aerial",
+			buildID:         "build-err-404",
+			chunkID:         "chunk-err-404",
+			step:            "not found step",
+			serverStatus:    http.StatusNotFound,
+			serverBody:      `{"error":"build not found"}`,
+			expectErr:       true,
+			expectErrSubstr: "restate returned status 404",
+			wantURI:         "/Build/build-err-404/UpdateActiveStep/send",
+			wantChunkID:     "chunk-err-404",
+			wantActiveStep:  "not found step",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runFlushActiveStepCase(t, tc)
+		})
+	}
+}
+
+type setupDispatchActiveStepCase struct {
+	name             string
+	source           string
+	chunkID          string
+	prompt           string
+	dispatchStatus   string
+	serverStatus     int
+	emitToolCommand  string
+	expectUpdater    bool
+	expectDirtyAfter bool
+	wantFlushes      []string
+}
+
+func verifyUpdaterStep(t *testing.T, u *StatusUpdater, cmd string, expectDirty bool) {
+	t.Helper()
+	if cmd == "" {
+		return
+	}
+	u.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool",
+		ToolName: "run_command",
+		State:    "ACTIVE",
+		ToolInfo: &runner.StepToolInfo{
+			Parameters: runner.StepToolParameters{CommandLine: cmd},
+		},
+	})
+	u.flush()
+	if !expectDirty {
+		return
+	}
+	u.mu.Lock()
+	dirty := u.dirty
+	u.mu.Unlock()
+	if !dirty {
+		t.Error("expected statusUpdater to remain dirty after server error")
+	}
+}
+
+func runSetupDispatchActiveStepCase(t *testing.T, tc setupDispatchActiveStepCase) {
+	t.Helper()
+
+	var flushedSteps []string
+	var flushedMu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p updateActiveStepPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		flushedMu.Lock()
+		flushedSteps = append(flushedSteps, p.ActiveStep)
+		flushedMu.Unlock()
+
+		status := tc.serverStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pool := &WorkerPool{
+		ctx:    ctx,
+		cancel: cancel,
+		cfg: WorkerPoolConfig{
+			RestateIngressURL: srv.URL,
+		},
+	}
+
+	disp := db.Dispatch{
+		ID:             "disp-" + strings.ReplaceAll(tc.name, " ", "-"),
+		Source:         tc.source,
+		SessionID:      tc.source + "-sess",
+		VanadisChunkID: tc.chunkID,
+		Prompt:         tc.prompt,
+		Status:         tc.dispatchStatus,
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
+	}
+
+	te := &turnExecution{
+		pool:        pool,
+		dispatch:    &disp,
+		threadID:    "dispatch-" + disp.ID,
+		triggerType: "dispatch:" + tc.source,
+		turnCtx:     ctx,
+	}
+
+	cleanup := pool.setupDispatchTurn(disp, te)
+	if !tc.expectUpdater {
+		if te.statusUpdater != nil {
+			t.Fatal("expected statusUpdater to be nil for non-vanadis dispatch")
+		}
+	} else {
+		if te.statusUpdater == nil {
+			t.Fatal("expected statusUpdater to be non-nil")
+		}
+		verifyUpdaterStep(t, te.statusUpdater, tc.emitToolCommand, tc.expectDirtyAfter)
+	}
+
+	cleanup()
+
+	flushedMu.Lock()
+	got := append([]string(nil), flushedSteps...)
+	flushedMu.Unlock()
+
+	if len(got) != len(tc.wantFlushes) {
+		t.Fatalf("flushed steps = %v (len %d), want %v (len %d)", got, len(got), tc.wantFlushes, len(tc.wantFlushes))
+	}
+	for i, want := range tc.wantFlushes {
+		if !strings.Contains(got[i], want) {
+			t.Errorf("flush[%d] = %q, want substring %q", i, got[i], want)
+		}
+	}
+}
+
+func TestWorkerPool_SetupDispatchTurn_ActiveStepLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []setupDispatchActiveStepCase{
+		{
+			name:            "live step forwarding and turn cleanup clearing",
+			source:          "vanadis",
+			chunkID:         "chunk-step-1",
+			prompt:          "Build ID: build-lifecycle\nChunk ID: chunk-step-1",
+			dispatchStatus:  db.StatusPending,
+			emitToolCommand: "git commit -m tweak",
+			expectUpdater:   true,
+			wantFlushes:     []string{"Executing `git`", ""},
+		},
+		{
+			name:            "resumed dispatch turn extracts chunk info and forwards steps",
+			source:          "vanadis",
+			chunkID:         "",
+			prompt:          "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-resumed-99\nChunk ID: chunk-resumed-99\nResume turn",
+			dispatchStatus:  db.StatusProcessing,
+			emitToolCommand: "go test -v ./...",
+			expectUpdater:   true,
+			wantFlushes:     []string{"Executing `go`", ""},
+		},
+		{
+			name:             "http error on live step logs and marks dirty for retry",
+			source:           "vanadis",
+			chunkID:          "chunk-err-retry",
+			prompt:           "Build ID: build-retry\nChunk ID: chunk-err-retry",
+			dispatchStatus:   db.StatusPending,
+			serverStatus:     http.StatusInternalServerError,
+			emitToolCommand:  "verify.sh",
+			expectUpdater:    true,
+			expectDirtyAfter: true,
+			wantFlushes:      []string{"Executing `verify.sh`", ""},
+		},
+		{
+			name:           "heartbeat dispatch without chunk info skips status updater",
+			source:         "heartbeat",
+			chunkID:        "",
+			prompt:         "regular heartbeat check",
+			dispatchStatus: db.StatusPending,
+			expectUpdater:  false,
+			wantFlushes:    nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSetupDispatchActiveStepCase(t, tc)
 		})
 	}
 }

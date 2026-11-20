@@ -27,7 +27,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
-	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -107,7 +106,7 @@ type WorkerPoolConfig struct {
 	DeliveryFunc                     func(s *discordgo.Session, channelID, text string) error
 	DeliveryWithAttachmentsFunc      func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
 	ReplyDeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment, replyToMessageID string) error
-	WidgetDeliveryFunc               func(req discord.StatusWidgetRequest) (string, error)
+	RestateIngressURL                string
 	TypingFunc                       func(s *discordgo.Session, channelID string) (stop func())
 	OnMessageCompleted               func(msg db.Message, finalStatus string)
 	ResolveChannelPolicy             func(channelID, channelName string) config.ChannelPolicy
@@ -143,37 +142,27 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	appCfg               *config.Config
-	hasExplicitAppCfg    bool
-	overrideModel        string
-	cfg                  WorkerPoolConfig
-	sessionMgr           *session.Manager
-	mu                   sync.Mutex
-	threadChs            map[string]*threadWorkerState
-	activeTurns          map[string]*turnExecution
-	wg                   sync.WaitGroup
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	stopped, leaderHold  bool
-	quotaLockedUntil     atomic.Int64
-	scopeLocks           sync.Map
-	webhookDispatcher    WebhookDispatcher
-	summaryGroup         singleflight.Group
-	pools                map[PoolKey]runner.AgentPool
-	voiceProcessPool     runner.AgentPool
-	eventBus             pubsub.Bus
-	createThreadFn       func(channelID, title string) (string, error)
-	widgetDeliveryMu     sync.Mutex
-	widgetLockHolder     atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
-	widgetChannelLocks   sync.Map                       // channelID string -> *widgetChannelLock
-	widgetMu             sync.Mutex
-	widgetsByID          map[string]discord.StatusWidgetRequest
-	widgetOrder          []string
-	chunkToBuildID       map[string]string
-	activeChunkSteps     map[string]string
-	activeChunkTurns     map[string]string
-	lastStepFlushByBuild map[string]time.Time
-	startedAt            time.Time // anchors queue.wait for rows resumed after a restart
+	appCfg              *config.Config
+	hasExplicitAppCfg   bool
+	overrideModel       string
+	cfg                 WorkerPoolConfig
+	sessionMgr          *session.Manager
+	mu                  sync.Mutex
+	threadChs           map[string]*threadWorkerState
+	activeTurns         map[string]*turnExecution
+	wg                  sync.WaitGroup
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	stopped, leaderHold bool
+	quotaLockedUntil    atomic.Int64
+	scopeLocks          sync.Map
+	webhookDispatcher   WebhookDispatcher
+	summaryGroup        singleflight.Group
+	pools               map[PoolKey]runner.AgentPool
+	voiceProcessPool    runner.AgentPool
+	eventBus            pubsub.Bus
+	createThreadFn      func(channelID, title string) (string, error)
+	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
 
 	TranscriptStore         db.TranscriptStore
 	TranscriptsIndexerURL   string
@@ -530,10 +519,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
 		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
-		widgetsByID:      make(map[string]discord.StatusWidgetRequest),
-		chunkToBuildID:   make(map[string]string),
-		activeChunkSteps: make(map[string]string),
-		activeChunkTurns: make(map[string]string),
 
 		TranscriptStore: cfg.TranscriptStore, TranscriptsIndexerURL: cfg.TranscriptsIndexerURL, TranscriptRecheckDelay: cfg.TranscriptRecheckDelay,
 		transcriptPublishCh: make(chan TranscriptPublishJob, 256), transcriptPublishSem: make(chan struct{}, 1), transcriptPending: make(map[string]bool),
@@ -1063,7 +1048,7 @@ func matchesDispatchTarget(d *db.Dispatch, dispatchID, buildID string) bool {
 	if targetID == buildID || strings.HasPrefix(chunkID, buildID+"-chunk-") || chunkID == buildID || sessionID == "vanadis-"+buildID {
 		return true
 	}
-	cID, bID, _ := extractVanadisDispatchInfo(d)
+	cID, bID := extractVanadisDispatchInfo(d)
 	return bID == buildID || cID == buildID
 }
 

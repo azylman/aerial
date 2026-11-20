@@ -977,7 +977,7 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 		if dispTarget := runner.NormalizeEnvTargetID(te.dispatch.TargetID); dispTarget != "" {
 			targetID = dispTarget
 		}
-		chunkID, _, _ := extractVanadisDispatchInfo(te.dispatch)
+		chunkID, _ := extractVanadisDispatchInfo(te.dispatch)
 		vanadisChunkID = chunkID
 	}
 	te.turnModel = currentModel

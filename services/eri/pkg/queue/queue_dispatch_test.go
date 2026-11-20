@@ -861,3 +861,75 @@ func TestTurnExecution_ClaimPendingBurst_TransientErrorRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractVanadisDispatchInfo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		d           *db.Dispatch
+		wantChunkID string
+		wantBuildID string
+	}{
+		{
+			name:        "nil dispatch returns empty",
+			d:           nil,
+			wantChunkID: "",
+			wantBuildID: "",
+		},
+		{
+			name: "explicit chunk id and build id in prompt",
+			d: &db.Dispatch{
+				VanadisChunkID: "chunk-explicit-1",
+				Prompt:         "Build ID: build-prompt-1\nSome instruction",
+			},
+			wantChunkID: "chunk-explicit-1",
+			wantBuildID: "build-prompt-1",
+		},
+		{
+			name: "chunk prefix in target id and session id",
+			d: &db.Dispatch{
+				TargetID:  "build-t1-chunk-1",
+				SessionID: "vanadis-build-s1-chunk-2",
+			},
+			wantChunkID: "build-t1-chunk-1",
+			wantBuildID: "build-t1",
+		},
+		{
+			name: "vanadis session prefix fallback",
+			d: &db.Dispatch{
+				SessionID: "vanadis-chunk-sess-only",
+			},
+			wantChunkID: "chunk-sess-only",
+			wantBuildID: "",
+		},
+		{
+			name: "standalone PR remediation pattern 1",
+			d: &db.Dispatch{
+				Prompt: "Remediate PR #42 on azylman/aerial please",
+			},
+			wantChunkID: "pr-azylman/aerial-42",
+			wantBuildID: "pr-azylman/aerial-42",
+		},
+		{
+			name: "standalone PR remediation pattern 2",
+			d: &db.Dispatch{
+				Prompt: "Fix for repo azylman/mirrormere (PR #99)",
+			},
+			wantChunkID: "pr-azylman/mirrormere-99",
+			wantBuildID: "pr-azylman/mirrormere-99",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotChunk, gotBuild := extractVanadisDispatchInfo(tc.d)
+			if gotChunk != tc.wantChunkID {
+				t.Errorf("chunkID = %q, want %q", gotChunk, tc.wantChunkID)
+			}
+			if gotBuild != tc.wantBuildID {
+				t.Errorf("buildID = %q, want %q", gotBuild, tc.wantBuildID)
+			}
+		})
+	}
+}
