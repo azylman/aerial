@@ -991,20 +991,6 @@ func TestReloadTrigger_ContextCanceledEarly(t *testing.T) {
 	}
 }
 
-func TestAppOptions_DiscordAndEventBus(t *testing.T) {
-	t.Parallel()
-	var opts appOptions
-	s := &discordgo.Session{}
-	bus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = bus.Close() })
-
-	WithDiscordSession(s)(&opts)
-	assert.Equal(t, s, opts.discordSession)
-
-	WithEventBus(bus)(&opts)
-	assert.Equal(t, bus, opts.eventBus)
-}
-
 func TestWrapDiscoveryTimeoutReconciler_NonDiscoverPath(t *testing.T) {
 	t.Parallel()
 	called := false
@@ -1041,10 +1027,15 @@ func TestWireOutboundIntegrations(t *testing.T) {
 		eventBus:       bus,
 	})
 	assert.Nil(t, closeFn)
+	assert.Equal(t, s, pool.DiscordSession())
+	assert.Equal(t, bus, pool.EventBus())
 
 	// 2. With token and NATS URL
-	closeFn2 := wireOutboundIntegrations(context.Background(), cur, pool, appOptions{})
+	pool2 := queue.New(nil, queue.WorkerPoolConfig{})
+	closeFn2 := wireOutboundIntegrations(context.Background(), cur, pool2, appOptions{})
+	assert.NotNil(t, pool2.DiscordSession())
 	if closeFn2 != nil {
+		assert.NotNil(t, pool2.EventBus())
 		closeFn2()
 	}
 }

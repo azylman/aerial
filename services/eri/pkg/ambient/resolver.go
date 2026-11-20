@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
@@ -90,13 +89,9 @@ func (r *Resolver) Resolve(ctx context.Context, ambCfg *config.AmbientContextCon
 		if pErr != nil {
 			return "", fmt.Errorf("failed to create ambient provider: %w", pErr)
 		}
-		go func() {
-			primeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-			if err := prov.Prime(primeCtx); err != nil {
-				log.Printf("[Ambient] Ambient context prime warning: %v", err)
-			}
-		}()
+		if err := prov.Prime(ctx); err != nil {
+			log.Printf("[Ambient] Ambient context prime warning: %v", err)
+		}
 		r.providers.Store(key, prov)
 	}
 	return prov.Retrieve(ctx)

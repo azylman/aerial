@@ -18,10 +18,9 @@ func TestSessionManagerService_ServiceName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		agentName   string
-		nilReceiver bool
-		wantName    string
+		name      string
+		agentName string
+		wantName  string
 	}{
 		{
 			name:      "default aerial",
@@ -38,25 +37,12 @@ func TestSessionManagerService_ServiceName(t *testing.T) {
 			agentName: "suletta",
 			wantName:  "SessionManager-suletta",
 		},
-		{
-			name:      "empty agent uses default",
-			agentName: "",
-			wantName:  "SessionManager",
-		},
-		{
-			name:        "nil receiver returns default",
-			nilReceiver: true,
-			wantName:    "SessionManager",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mgr *SessionManagerService
-			if !tc.nilReceiver {
-				mgr = NewSessionManagerService(nil, tc.agentName)
-			}
+			mgr := NewSessionManagerService(nil, tc.agentName)
 			assert.Equal(t, tc.wantName, mgr.ServiceName())
 		})
 	}

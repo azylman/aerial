@@ -832,12 +832,10 @@ func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDisp
 	invID := ctx.Request().ID
 	restate.Set(ctx, "active_invocation_id", invID)
 	registerActiveInvocation(sessionKey, invID)
-	defer func() {
-		unregisterActiveInvocation(sessionKey, invID)
-		restate.ClearAll(ctx)
-	}()
+	defer unregisterActiveInvocation(sessionKey, invID)
 
 	if d.pool == nil || d.pool.cfg.Store == nil {
+		restate.ClearAll(ctx)
 		return DispatchTurnResult{Status: statusCompleted}, nil
 	}
 
@@ -870,6 +868,7 @@ func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDisp
 		executedCount += step.ClaimedCount
 	}
 
+	restate.ClearAll(ctx)
 	return DispatchTurnResult{
 		Status:             statusCompleted,
 		DispatchesExecuted: executedCount,
