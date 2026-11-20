@@ -91,9 +91,41 @@ func (s *RouterServer) routeEvent(ctx context.Context, handler string, journal f
 	return nil
 }
 
+func (s *RouterServer) resolvePRAgent(ctx context.Context, repo string, prNum int) string {
+	if agent := s.resolveRegisteredPRAgent(ctx, repo, prNum); agent != "" {
+		return agent
+	}
+	if s != nil && s.cfgSrc != nil {
+		if cfg := s.cfgSrc.Current(); cfg != nil {
+			return cfg.DefaultOwnerAgent()
+		}
+	}
+	return "aerial"
+}
+
+func (s *RouterServer) resolveRegisteredPRAgent(ctx context.Context, repo string, prNum int) string {
+	if s == nil || s.registry == nil || prNum <= 0 {
+		return ""
+	}
+	meta, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
+	if err != nil || len(meta) == 0 {
+		return ""
+	}
+	if a, ok := meta["agent"].(string); ok && strings.TrimSpace(a) != "" {
+		return strings.ToLower(strings.TrimSpace(a))
+	}
+	if b, ok := meta["bot_id"].(string); ok && strings.TrimSpace(b) != "" {
+		return strings.ToLower(strings.TrimSpace(b))
+	}
+	return ""
+}
+
 // routePREvent journals one PRObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev restateclient.PREvent) error {
+	if ev.Agent == "" {
+		ev.Agent = s.resolvePRAgent(ctx, ev.Repo, ev.PRNumber)
+	}
 	return s.routeEvent(ctx, handler,
 		func(r *shadowRestateReporter, ctx context.Context) error {
 			return r.client.SendPREvent(ctx, handler, ev)
@@ -106,6 +138,16 @@ func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev rest
 // routeRepoEvent journals one RepoObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routeRepoEvent(ctx context.Context, handler string, ev restateclient.RepoEvent) error {
+	if ev.Agent == "" {
+		switch {
+		case ev.PRNumber > 0:
+			ev.Agent = s.resolvePRAgent(ctx, ev.Repo, ev.PRNumber)
+		case s != nil && s.cfgSrc != nil && s.cfgSrc.Current() != nil:
+			ev.Agent = s.cfgSrc.Current().DefaultOwnerAgent()
+		default:
+			ev.Agent = "aerial"
+		}
+	}
 	return s.routeEvent(ctx, handler,
 		func(r *shadowRestateReporter, ctx context.Context) error {
 			return r.client.SendRepoEvent(ctx, handler, ev)

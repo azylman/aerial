@@ -1,22 +1,26 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/synapse/internal/config"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // --- Shared Test Mocks & Helpers ---
@@ -133,6 +137,7 @@ type prStatusCall struct {
 }
 
 type mockPRRegistry struct {
+	rawMetadata            map[string]any
 	recordedBuildMetadata  []BuildMetadata
 	recordBuildMetadataErr error
 	buildLifecycle         PRBuildLifecycle
@@ -530,600 +535,31 @@ func doHTTPRequest(handler http.Handler, method, path string, body io.Reader, he
 	return rec
 }
 
-func mkDeployEvt(event, job, repo, sha string, pr int, targetID, status, details string) DeployEvent {
-	return DeployEvent{Event: event, JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status, Details: details}
-}
-
-func mkKustomizationEvt(event, job, repo, sha string, pr int, targetID, status string) DeployEvent {
-	return DeployEvent{Event: event, SourceKind: "Kustomization", JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status}
-}
-
-// --- 4. Deploy Event Processing ---
-
 type fixedConfigSource struct{ cfg Config }
 
 func (f *fixedConfigSource) Current() *Config { return &f.cfg }
 
 func fixedConfig(cfg Config) ConfigSource { return &fixedConfigSource{cfg: cfg} }
 
-func scanBuildChecksRow(dest []any, status, checksJSON string) error {
-	if len(dest) < 2 {
-		return nil
-	}
-	if s, ok := dest[0].(*string); ok {
-		*s = status
-	}
-	if b, ok := dest[1].(*[]byte); ok {
-		*b = []byte(checksJSON)
-	}
-	return nil
+type handlePRRegisterCase struct {
+	name            string
+	cfgBotID        string
+	cfgBots         map[string]config.BotConfig
+	useNilReg       bool
+	authEnabled     bool
+	authHeader      string
+	tokenReviewResp string
+	sarResp         string
+	sarPrsAllDeny   bool
+	sarUpdateDeny   bool
+	rawMetadata     map[string]any
+	regErr          error
+	body            string
+	wantStatus      int
 }
 
-func newMockBuildChecksPgRegistry(status string, checksJSON string, extraRowFns ...func(sql string) pgx.Row) *PostgresPRRegistry {
-	return NewPostgresPRRegistry(&mockSynapsePgxPool{
-		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-			if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-					return scanBuildChecksRow(dest, status, checksJSON)
-				}}
-			}
-			for _, fn := range extraRowFns {
-				if row := fn(sql); row != nil {
-					return row
-				}
-			}
-			return mockSynapsePgxRow{}
-		},
-		execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-			return pgconn.NewCommandTag("UPDATE 1"), nil
-		},
-	})
-}
-
-type processDeployEventCase struct {
-	name               string
-	evt                DeployEvent
-	extraEvts          []DeployEvent
-	sysChan            string
-	reg                *mockPRRegistry
-	pgReg              *PostgresPRRegistry
-	disp               *mockOutboundDispatcher
-	bus                *mockEventBus
-	wantErr            bool
-	wantPR             int
-	wantTargetID       string
-	wantDeployingCalls int
-	wantAdvanceCalls   int
-	wantPrompts        int
-	wantDispatches     int
-	wantDMs            int
-	wantDMSubstr       string
-	wantPromptSubs     []string
-	wantRequested      []string
-	wantReconciles     []fluxKustomizationRef
-	wantPublished      []wantPREvent
-}
-
-func processDeployEventBasicCases() []processDeployEventCase {
-	return []processDeployEventCase{
-		{
-			name: "deploy_started ignored without PR number or targetID",
-			evt:  mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha-test", 0, "", "started", ""),
-		},
-		{
-			name: "deploy_success ignored without PR number or targetID",
-			evt:  mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-test", 0, "", "success", ""),
-		},
-		{
-			name: "deploy_failed ignored without PR number or targetID",
-			evt:  mkDeployEvt("deploy_failed", "brain", "azylman/aerial", "sha-test", 0, "", "failed", ""),
-		},
-		{
-			name: "deploy_rollback ignored without PR number or targetID",
-			evt:  mkDeployEvt("deploy_rollback", "brain", "azylman/aerial", "sha-test", 0, "", "rollback", ""),
-		},
-		{
-			name:               "deploy_started resolves SHA and transitions deploying",
-			evt:                mkDeployEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
-			reg:                &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99"},
-			wantPR:             99,
-			wantTargetID:       "target-99",
-			wantDeployingCalls: 1,
-		},
-		{
-			name:         "deploy_started tolerates registry error",
-			evt:          mkDeployEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
-			reg:          &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99", deployingErr: errors.New("db error")},
-			wantPR:       99,
-			wantTargetID: "target-99",
-		},
-		{
-			name:         "deploy_success transitions state",
-			evt:          mkDeployEvt("deploy_success", "webhooks-router", "azylman/aerial", "", 99, "target-99", "success", "deployment completed"),
-			wantPR:       99,
-			wantTargetID: "target-99",
-		},
-		{
-			name:         "deploy_rollback transitions state",
-			evt:          mkDeployEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "", 99, "target-99", "rollback", "rolled back"),
-			wantPR:       99,
-			wantTargetID: "target-99",
-		},
-		{
-			name:         "deploy_failed transitions state",
-			evt:          mkDeployEvt("deploy_failed", "webhooks-router", "azylman/aerial", "", 99, "target-99", "failed", "deploy unhealthy"),
-			wantPR:       99,
-			wantTargetID: "target-99",
-		},
-		{
-			name:         "deploy_started valid snowflake",
-			evt:          mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha1234", 527, "100000000000000001", "started", ""),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       527,
-			wantTargetID: "100000000000000001",
-		},
-		{
-			name:         "deploy_success valid snowflake",
-			evt:          mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "100000000000000001", "success", ""),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       528,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-		{
-			name:          "deploy_started then deploy_success publish lifecycle events to the bus",
-			evt:           mkDeployEvt("deploy_started", "eri", "azylman/aerial", "sha-dep", 42, "123456789012345678", "", ""),
-			extraEvts:     []DeployEvent{mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha-dep", 42, "123456789012345678", "", "")},
-			sysChan:       "123456789012345678",
-			reg:           &mockPRRegistry{resolveTargetID: "123456789012345678"},
-			disp:          &mockOutboundDispatcher{},
-			bus:           &mockEventBus{},
-			wantPR:        42,
-			wantTargetID:  "123456789012345678",
-			wantPublished: []wantPREvent{{Event: "deploy_started", PRNumber: 42, MergeSHA: "sha-dep", Status: "deploying"}, {Event: "deploy_success", PRNumber: 42, MergeSHA: "sha-dep", Status: "deployed"}},
-		},
-		{
-			name:           "deploy_rollback valid snowflake",
-			evt:            mkDeployEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "shafail", 529, "100000000000000001", "rollback", strings.Repeat("error detail line\n", 50)),
-			reg:            &mockPRRegistry{deployFailedUpdated: true},
-			disp:           &mockOutboundDispatcher{},
-			wantPR:         529,
-			wantTargetID:   "100000000000000001",
-			wantDispatches: 0,
-		},
-		{
-			name:           "deploy_failed valid snowflake",
-			evt:            mkDeployEvt("deploy_failed", "hangar", "azylman/aerial", "shabroken", 530, "100000000000000001", "failed", "exit status 1"),
-			reg:            &mockPRRegistry{deployFailedUpdated: true},
-			disp:           &mockOutboundDispatcher{},
-			wantPR:         530,
-			wantTargetID:   "100000000000000001",
-			wantDispatches: 0,
-		},
-		{
-			name:    "deploy_failed prompt error reverts state and returns error",
-			evt:     mkDeployEvt("deploy_failed", "eri", "azylman/aerial", "", 0, "100000000000000001", "failed", "exit status 1"),
-			reg:     &mockPRRegistry{deployFailedUpdated: true},
-			disp:    &mockOutboundDispatcher{promptErr: errors.New("eri 502 bad gateway")},
-			wantErr: true,
-		},
-		{
-			name:           "deploy_rollback without targetID falls back to system_channel name",
-			evt:            mkDeployEvt("deploy_rollback", "eri", "azylman/aerial", "shafail", 532, "", "rollback", "dotenv parse error"),
-			sysChan:        "aerial-dev",
-			reg:            &mockPRRegistry{deployFailedUpdated: true},
-			disp:           &mockOutboundDispatcher{},
-			wantPR:         532,
-			wantTargetID:   "aerial-dev",
-			wantDispatches: 0,
-		},
-	}
-}
-
-func processDeployEventSyncCases() []processDeployEventCase {
-	return []processDeployEventCase{
-		{
-			name: "sync_success without PR number",
-			evt:  mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha999", 0, "100000000000000001", "", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{},
-		},
-		{
-			name:         "sync_failed with details",
-			evt:          mkDeployEvt("sync_failed", "", "azylman/aerial-config", "sha888", 0, "100000000000000001", "", "merge conflict in rules/persona"),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantDMs:      1,
-			wantPrompts:  1,
-			wantDMSubstr: "⚠️ **(repo: aerial-config)** Git file sync failed. Following up...",
-			wantPromptSubs: []string{
-				"Git sync failed",
-				"merge conflict in rules/persona",
-				"Please investigate and fix",
-			},
-		},
-		{
-			name: "deploy_success invalid snowflake ignored",
-			evt:  mkDeployEvt("deploy_success", "hangar", "", "", 0, "not-a-snowflake", "", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{},
-		},
-		{
-			name: "deploy_started invalid snowflake ignored",
-			evt:  mkDeployEvt("deploy_started", "hangar", "", "", 0, "not-a-snowflake", "", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{},
-		},
-		{
-			name:             "sync_success late resolution via ResolvePRBySHA",
-			evt:              mkDeployEvt("sync_success", "", "azylman/aerial-config", "dccc646186d7bf7d17efa6cac6f730d17f66125b", 0, "", "", ""),
-			reg:              &mockPRRegistry{resolvePRNum: 241, resolveTargetID: "100000000000000001"},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           241,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-			wantPrompts:      0,
-		},
-		{
-			name:         "deploy_success on aerial-config",
-			evt:          mkDeployEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "100000000000000001", "success", ""),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       242,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-		{
-			name:         "sync_failed with PR number",
-			evt:          mkDeployEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "100000000000000001", "failed", "merge conflict in rules/foo.md"),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       542,
-			wantTargetID: "100000000000000001",
-		},
-		{
-			name:               "deploy_started skipped when job already deployed",
-			evt:                mkDeployEvt("deploy_started", "coven", "azylman/aerial", "bc1d3ef", 971, "100000000000000001", "started", ""),
-			reg:                &mockPRRegistry{skipDeployingTransition: true},
-			disp:               &mockOutboundDispatcher{},
-			wantPR:             971,
-			wantTargetID:       "100000000000000001",
-			wantDeployingCalls: 1,
-		},
-		{
-			name: "deploy_started with expected_jobs records expected sibling jobs before transition",
-			evt: DeployEvent{
-				Event: "deploy_started", JobName: "db-migrate", ExpectedJobs: []string{"coven", "db-migrate"},
-				Repo: "azylman/aerial", CommitSHA: "bc1d3ef", PRNumber: 972, TargetID: "100000000000000001", Status: "started",
-			},
-			reg:                &mockPRRegistry{recordExpectedErr: errors.New("record expected warn")},
-			disp:               &mockOutboundDispatcher{},
-			wantPR:             972,
-			wantTargetID:       "100000000000000001",
-			wantDeployingCalls: 1,
-		},
-	}
-}
-
-func processDeployEventFluxWatcherCases() []processDeployEventCase {
-	return []processDeployEventCase{
-		{
-			name:         "deploy_success on aerial-core with build checks in metadata and merged status handles sync success",
-			evt:          mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-aerial-sync", 893, "100000000000000001", "success"),
-			pgReg:        newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`),
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       893,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-		{
-			name: "deploy_started on aerial-core skipped when waiting for image build",
-			evt:  mkKustomizationEvt("deploy_started", "aerial-core", "azylman/aerial", "sha-aerial-started", 89894, "100000000000000001", "started"),
-			pgReg: newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-				func(sql string) pgx.Row {
-					if strings.Contains(sql, "SET status = 'deploying'") || strings.Contains(sql, "SELECT target_id, title, status") {
-						return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-							if len(dest) > 0 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "100000000000000001"
-								}
-							}
-							return nil
-						}}
-					}
-					return nil
-				},
-			),
-			wantPR:       89894,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-		{
-			name:         "sync_success on git-sync with ci_checks build jobs stays in synced without firing deploy prompt",
-			evt:          mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha-aerial-sync-pending", 89895, "100000000000000001", "success", ""),
-			pgReg:        newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`),
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       89895,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-		{
-			name:         "Kustomization deploy_success never completes a watcher-tracked PR",
-			evt:          mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-pr-1485", 1485, "100000000000000001", "success"),
-			reg:          &mockPRRegistry{hasKustomizationReqs: true, resolveTargetID: "100000000000000001"},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       1485,
-			wantTargetID: "100000000000000001",
-		},
-		{
-			name:         "CI job deploy_success never completes a watcher-tracked PR",
-			evt:          mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha-pr-1485", 1485, "100000000000000001", "success", ""),
-			reg:          &mockPRRegistry{hasKustomizationReqs: true, resolveTargetID: "100000000000000001"},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       1485,
-			wantTargetID: "100000000000000001",
-		},
-		{
-			name:         "Kustomization deploy_failed alert defers to the watcher for a tracked PR",
-			evt:          mkKustomizationEvt("deploy_failed", "aerial-core", "azylman/aerial", "sha-pr-1485", 1485, "100000000000000001", "failed"),
-			reg:          &mockPRRegistry{hasKustomizationReqs: true, deployFailedUpdated: true, resolveTargetID: "100000000000000001"},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       1485,
-			wantTargetID: "100000000000000001",
-		},
-		{
-			name:         "untracked PR keeps legacy Kustomization deploy_success completion",
-			evt:          mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-legacy", 1300, "100000000000000001", "success"),
-			reg:          &mockPRRegistry{resolveTargetID: "100000000000000001"},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       1300,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-		{
-			name:         "tracked-PR lookup error falls back to legacy completion",
-			evt:          mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha-legacy", 1301, "100000000000000001", "success", ""),
-			reg:          &mockPRRegistry{hasKustomizationReqsErr: errors.New("db down"), resolveTargetID: "100000000000000001"},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       1301,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-	}
-}
-
-func processDeployEventFluxDiscoveryCases() []processDeployEventCase {
-	return []processDeployEventCase{
-		{
-			name: "sync_success on a Flux-sourced repo defers completion to the kustomization watcher",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only", 1640, "100000000000000001", "success", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
-				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}, {Namespace: "flux-system", Name: "aerial-config-apps"}},
-			}},
-			wantPR:             1640,
-			wantTargetID:       "100000000000000001",
-			wantDeployingCalls: 1,
-			wantRequested:      []string{"aerial-config", "aerial-config-apps"},
-			wantReconciles:     []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}, {Namespace: "flux-system", Name: "aerial-config-apps"}},
-		},
-		{
-			name: "sync_success with empty targetID on a Flux-sourced repo defers kustomization watcher",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only-2", 1641, "", "success", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
-				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
-			}},
-			wantPR:             1641,
-			wantDeployingCalls: 1,
-			wantRequested:      []string{"aerial-config"},
-			wantReconciles:     []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}},
-		},
-		{
-			name: "sync_success on a repo with no Flux source completes as deployed",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/mirrormere", "sha-no-flux", 1642, "100000000000000001", "success", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
-				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
-			}},
-			wantPR:           1642,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-			wantPrompts:      0,
-		},
-		{
-			name:         "sync_success with image build pending stays synced without discovering kustomizations",
-			evt:          DeployEvent{Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"}, Repo: "azylman/aerial", CommitSHA: "sha-image-pending", PRNumber: 1643, TargetID: "100000000000000001", Status: "success"},
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{repoDiscoverErr: errors.New("unexpected discovery while images are pending")},
-			wantPR:       1643,
-			wantTargetID: "100000000000000001",
-		},
-		{
-			name:    "sync_success kustomization discovery error propagates",
-			evt:     mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-discover-err", 1644, "100000000000000001", "success", ""),
-			reg:     &mockPRRegistry{},
-			disp:    &mockOutboundDispatcher{repoDiscoverErr: errors.New("kube api down")},
-			wantErr: true,
-		},
-		{
-			name: "sync_success kustomization request record error propagates",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-record-err", 1645, "100000000000000001", "success", ""),
-			reg:  &mockPRRegistry{kustomizationRequestErr: errors.New("db down")},
-			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
-				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "sync_success deploying transition error propagates",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-deploying-err", 1646, "100000000000000001", "success", ""),
-			reg:  &mockPRRegistry{deployingErr: errors.New("db down")},
-			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
-				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "sync_success reconcile patch error propagates after requests are recorded",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-patch-err", 1647, "100000000000000001", "success", ""),
-			reg:  &mockPRRegistry{},
-			disp: &mockOutboundDispatcher{
-				repoKustomizations: map[string][]fluxKustomizationRef{"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}}},
-				reconcileErrs:      map[string]error{"aerial-config": errors.New("patch forbidden")},
-			},
-			wantErr: true,
-		},
-	}
-}
-
-func processDeployEventFluxCases() []processDeployEventCase {
-	return append(processDeployEventFluxWatcherCases(), processDeployEventFluxDiscoveryCases()...)
-}
-
-func processDeployEventCases() []processDeployEventCase {
-	basic := processDeployEventBasicCases()
-	syncCases := processDeployEventSyncCases()
-	flux := processDeployEventFluxCases()
-	all := make([]processDeployEventCase, 0, len(basic)+len(syncCases)+len(flux))
-	all = append(all, basic...)
-	all = append(all, syncCases...)
-	all = append(all, flux...)
-	return all
-}
-
-func TestProcessDeployEvent(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	for _, tc := range processDeployEventCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runProcessDeployEventCase(ctx, t, tc)
-		})
-	}
-}
-
-func runProcessDeployEventCase(ctx context.Context, t *testing.T, tc processDeployEventCase) {
-	t.Helper()
-	var reg PRRegistryUpdater
-	switch {
-	case tc.pgReg != nil:
-		reg = tc.pgReg
-	case tc.reg != nil:
-		reg = tc.reg
-	default:
-		reg = &mockPRRegistry{}
-	}
-	var disp OutboundDispatcher
-	if tc.disp != nil {
-		disp = tc.disp
-	}
-	cfg := Config{SystemChannelID: tc.sysChan}
-	client := &http.Client{Transport: &zeroCallTransport{}}
-	srv := newTestRouter(cfg, client, reg, disp)
-	if tc.bus != nil {
-		srv.SetEventBus(tc.bus)
-	}
-	res, err := srv.ProcessDeployEvent(ctx, tc.evt)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("ProcessDeployEvent() err = %v, wantErr %v", err, tc.wantErr)
-	}
-	for _, extra := range tc.extraEvts {
-		if _, err := srv.ProcessDeployEvent(ctx, extra); err != nil {
-			t.Fatalf("ProcessDeployEvent(extra) err = %v", err)
-		}
-	}
-	if tc.wantErr {
-		return
-	}
-	if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
-		t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
-	}
-	if tc.wantTargetID != "" && res.TargetID != tc.wantTargetID {
-		t.Errorf("TargetID = %q, want %q", res.TargetID, tc.wantTargetID)
-	}
-	assertDeployEventRegResults(t, tc)
-	assertDeployEventDispResults(t, tc)
-	if tc.bus != nil {
-		assertPREvents(t, tc.bus, tc.wantPublished)
-	}
-}
-
-func assertDeployEventRegResults(t *testing.T, tc processDeployEventCase) {
-	t.Helper()
-	if tc.reg == nil {
-		return
-	}
-	if tc.wantDeployingCalls > 0 && len(tc.reg.deployingCalls) != tc.wantDeployingCalls {
-		t.Errorf("deployingCalls = %d, want %d", len(tc.reg.deployingCalls), tc.wantDeployingCalls)
-	}
-	var requested []string
-	for _, call := range tc.reg.kustomizationRequestCalls {
-		for name := range call {
-			requested = append(requested, name)
-		}
-	}
-	slices.Sort(requested)
-	if !slices.Equal(requested, tc.wantRequested) {
-		t.Errorf("recorded kustomization requests = %v, want %v", requested, tc.wantRequested)
-	}
-}
-
-func assertDeployEventDispResults(t *testing.T, tc processDeployEventCase) {
-	t.Helper()
-	if tc.disp == nil {
-		return
-	}
-	if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
-		t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
-	}
-	dms := tc.disp.DirectMessageCalls()
-	if len(dms) != tc.wantDMs {
-		t.Errorf("DMs = %d, want %d", len(dms), tc.wantDMs)
-	}
-	if tc.wantDMSubstr != "" && (len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr)) {
-		t.Errorf("DM = %v, want substr %q", dms, tc.wantDMSubstr)
-	}
-	dispatches := tc.disp.DispatchCalls()
-	if len(dispatches) != tc.wantDispatches {
-		t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
-	}
-	if tc.wantDispatches > 0 && len(dispatches) > 0 {
-		last := dispatches[len(dispatches)-1].Prompt
-		for _, sub := range tc.wantPromptSubs {
-			if !strings.Contains(last, sub) {
-				t.Errorf("dispatch = %v, want substr %q", dispatches, sub)
-			}
-		}
-	}
-	prompts := tc.disp.PromptCalls()
-	if len(prompts) != tc.wantPrompts {
-		t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
-	}
-	if tc.wantPrompts > 0 && len(prompts) > 0 {
-		last := prompts[len(prompts)-1].Prompt
-		for _, sub := range tc.wantPromptSubs {
-			if !strings.Contains(last, sub) {
-				t.Errorf("prompt = %v, want substr %q", prompts, sub)
-			}
-		}
-	}
-}
-
-func TestHandlePRRegister(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		cfgBotID   string
-		useNilReg  bool
-		regErr     error
-		body       string
-		wantStatus int
-	}{
+func handlePRRegisterCases() []handlePRRegisterCase {
+	return append([]handlePRRegisterCase{
 		{
 			name:       "nil registry returns 500",
 			useNilReg:  true,
@@ -1183,6 +619,12 @@ func TestHandlePRRegister(t *testing.T) {
 			wantStatus: http.StatusConflict,
 		},
 		{
+			name:       "foreign bot_id with cfg.Bots returns 409 conflict",
+			cfgBots:    map[string]config.BotConfig{"aerial": {}},
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"foreign"}`,
+			wantStatus: http.StatusConflict,
+		},
+		{
 			name:       "matching bot_id succeeds",
 			cfgBotID:   "aerial",
 			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"aerial"}`,
@@ -1206,19 +648,117 @@ func TestHandlePRRegister(t *testing.T) {
 			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"suletta"}`,
 			wantStatus: http.StatusOK,
 		},
-	}
+	}, handlePRRegisterAuthCases()...)
+}
 
-	for _, tc := range tests {
+func handlePRRegisterAuthCases() []handlePRRegisterCase {
+	return []handlePRRegisterCase{
+		{
+			name:        "k8sauth missing bearer token returns 401",
+			authEnabled: true,
+			body:        `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus:  http.StatusUnauthorized,
+		},
+		{
+			name:            "k8sauth invalid bearer token returns 401",
+			authEnabled:     true,
+			authHeader:      "Bearer invalid-token",
+			tokenReviewResp: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`,
+			body:            `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus:      http.StatusUnauthorized,
+		},
+		{
+			name:            "k8sauth forbidden target agent returns 403",
+			authEnabled:     true,
+			authHeader:      "Bearer tok",
+			tokenReviewResp: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+			sarResp:         `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false}}`,
+			body:            `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"suletta"}`,
+			wantStatus:      http.StatusForbidden,
+		},
+		{
+			name:            "k8sauth mismatched bot_id denied on prs/all returns 403",
+			authEnabled:     true,
+			authHeader:      "Bearer tok",
+			tokenReviewResp: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
+			sarResp:         `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+			sarPrsAllDeny:   true,
+			body:            `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial","bot_id":"suletta"}`,
+			wantStatus:      http.StatusForbidden,
+		},
+		{
+			name:            "k8sauth mismatched existing agent denied on prs/update returns 403",
+			authEnabled:     true,
+			authHeader:      "Bearer tok",
+			tokenReviewResp: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
+			sarResp:         `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+			sarUpdateDeny:   true,
+			rawMetadata:     map[string]any{"agent": "suletta"},
+			body:            `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial"}`,
+			wantStatus:      http.StatusForbidden,
+		},
+		{
+			name:            "k8sauth authorized matching agent succeeds",
+			authEnabled:     true,
+			authHeader:      "Bearer tok",
+			tokenReviewResp: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
+			sarResp:         `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+			body:            `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial"}`,
+			wantStatus:      http.StatusOK,
+		},
+		{
+			name:            "k8sauth non-default agent registering brand-new PR succeeds without prs:update on default agent",
+			authEnabled:     true,
+			authHeader:      "Bearer tok",
+			tokenReviewResp: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+			sarResp:         `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+			sarUpdateDeny:   true,
+			rawMetadata:     nil,
+			body:            `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"miorine"}`,
+			wantStatus:      http.StatusOK,
+		},
+	}
+}
+
+func TestHandlePRRegister(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range handlePRRegisterCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var reg PRRegistryUpdater
 			var mockReg *mockPRRegistry
 			if !tc.useNilReg {
-				mockReg = &mockPRRegistry{registerErr: tc.regErr}
+				mockReg = &mockPRRegistry{registerErr: tc.regErr, rawMetadata: tc.rawMetadata}
 				reg = mockReg
 			}
-			srv := newTestRouter(Config{SystemChannelID: "100000000000000001", BotID: tc.cfgBotID}, nil, reg, &mockOutboundDispatcher{})
-			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
+			srv := newTestRouter(Config{
+				SystemChannelID: "100000000000000001",
+				BotID:           tc.cfgBotID,
+				Bots:            tc.cfgBots,
+			}, nil, reg, &mockOutboundDispatcher{})
+			if tc.authEnabled {
+				tokenFile := filepath.Join(t.TempDir(), "token")
+				_ = os.WriteFile(tokenFile, []byte("sa-token"), 0o600)
+				rt := &cannedAuthRoundTripper{
+					tokenReviewResp: tc.tokenReviewResp,
+					sarResp:         tc.sarResp,
+					sarPrsAllDeny:   tc.sarPrsAllDeny,
+					sarUpdateDeny:   tc.sarUpdateDeny,
+				}
+				auth := k8sauth.NewAuthenticator(k8sauth.Config{
+					Enabled:      true,
+					APIServerURL: "https://k8s.local",
+					HTTPClient:   &http.Client{Transport: rt},
+					TokenPath:    tokenFile,
+				})
+				srv.SetAuthenticator(auth)
+			}
+			var headers map[string]string
+			if tc.authHeader != "" {
+				headers = map[string]string{"Authorization": tc.authHeader}
+			}
+			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), headers)
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
 			}
@@ -1286,7 +826,10 @@ func (m *mockPRRegistry) LoadPRBuildLifecycle(context.Context, string, int) (PRB
 	return m.buildLifecycle, m.buildLifecycleErr
 }
 
-func (*mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[string]any, error) {
+func (m *mockPRRegistry) LoadRawPRMetadata(context.Context, string, int) (map[string]any, error) {
+	if m != nil && m.rawMetadata != nil {
+		return m.rawMetadata, nil
+	}
 	return map[string]any{}, nil
 }
 
@@ -1295,4 +838,325 @@ func (m *mockPRRegistry) IsPRDeployed(context.Context, string, int) (bool, error
 		return false, nil
 	}
 	return m.deployedRes, m.deployedErr
+}
+
+type cannedAuthRoundTripper struct {
+	tokenReviewResp    string
+	sarResp            string
+	sarPrsAllDeny      bool
+	sarUpdateDeny      bool
+	sarUpdateDenyAgent string
+}
+
+func (c *cannedAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body string
+	switch {
+	case strings.Contains(req.URL.Path, "tokenreviews"):
+		body = c.tokenReviewResp
+	case strings.Contains(req.URL.Path, "subjectaccessreviews"):
+		var reqBytes []byte
+		if req.Body != nil {
+			reqBytes, _ = io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(reqBytes))
+		}
+		reqStr := string(reqBytes)
+		switch {
+		case c.sarPrsAllDeny && strings.Contains(reqStr, `"resource":"prs/all"`):
+			body = `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"prs/all denied"}}`
+		case c.sarUpdateDeny && strings.Contains(reqStr, `"verb":"update"`):
+			if c.sarUpdateDenyAgent == "" || strings.Contains(reqStr, `"name":"`+c.sarUpdateDenyAgent+`"`) {
+				body = `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"update denied"}}`
+			} else {
+				body = c.sarResp
+			}
+		default:
+			body = c.sarResp
+		}
+	default:
+		body = `{}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Request:    req,
+	}, nil
+}
+
+func TestWriteAuthError_And_ServerAccessors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{
+			name:       "validation error returns 400",
+			err:        &k8sauth.ValidationError{Message: "invalid token format"},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "unauthorized error returns 401",
+			err:        &k8sauth.UnauthorizedError{Message: "invalid bearer token"},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "forbidden error returns 403",
+			err:        &k8sauth.ForbiddenError{Message: "caller not allowed"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "generic error returns 500",
+			err:        errors.New("unexpected internal error"),
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := httptest.NewRecorder()
+			writeAuthError(w, tc.err)
+			if w.Code != tc.wantStatus {
+				t.Errorf("writeAuthError status = %d, want %d", w.Code, tc.wantStatus)
+			}
+		})
+	}
+
+	srv := &RouterServer{}
+	reg := &mockPRRegistry{}
+	disp := &mockOutboundDispatcher{}
+	srv.SetRegistry(reg)
+	srv.SetDispatcher(disp)
+	if srv.Registry() != reg {
+		t.Errorf("srv.Registry() mismatch")
+	}
+	if srv.Dispatcher() != disp {
+		t.Errorf("srv.Dispatcher() mismatch")
+	}
+	var called bool
+	srv.SetOnProcessed(func(event, delivery string) { called = true })
+	if srv.onProcessed != nil {
+		srv.onProcessed("test", "deliv")
+		if !called {
+			t.Errorf("onProcessed was not invoked")
+		}
+	}
+}
+
+func TestDefaultOutboundDispatcher_DiscordTo(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer ts.Close()
+
+	disp := NewDefaultOutboundDispatcher(ts.URL, ts.Client())
+	ctx := context.Background()
+	if err := disp.DispatchDiscordMessageTo(ctx, ts.URL, DiscordMessageIngressRequest{
+		BotUserID: "b1",
+		Message:   &discordgo.Message{ID: "m1", Content: "hi"},
+	}); err != nil {
+		t.Errorf("DispatchDiscordMessageTo err = %v", err)
+	}
+	if err := disp.DispatchDiscordInteractionTo(ctx, ts.URL, &discordgo.Interaction{
+		ID: "ix1",
+	}); err != nil {
+		t.Errorf("DispatchDiscordInteractionTo err = %v", err)
+	}
+}
+
+func TestProcessDiscordIngress_Routing(t *testing.T) {
+	t.Parallel()
+	disp := &mockOutboundDispatcher{}
+	cfg := Config{
+		Bots: map[string]config.BotConfig{
+			"miorine": {EriURL: "http://eri-miorine:8080"},
+		},
+	}
+	srv := newTestRouter(cfg, nil, nil, disp)
+	ctx := context.Background()
+
+	// Dispatch with matching agent in bots
+	err := srv.ProcessDiscordIngress(ctx, DiscordIngressArgs{
+		Agent:   "miorine",
+		Message: &discordgo.Message{ID: "m1", Content: "hello"},
+	})
+	if err != nil {
+		t.Fatalf("ProcessDiscordIngress err = %v", err)
+	}
+
+	// Dispatch without matching agent (falls back to default dispatch)
+	err = srv.ProcessDiscordIngress(ctx, DiscordIngressArgs{
+		Agent:   "unknown",
+		Message: &discordgo.Message{ID: "m2", Content: "hello2"},
+	})
+	if err != nil {
+		t.Fatalf("ProcessDiscordIngress err = %v", err)
+	}
+}
+
+func TestProcessDiscordInteraction_Routing(t *testing.T) {
+	t.Parallel()
+	disp := &mockOutboundDispatcher{}
+	cfg := Config{
+		Bots: map[string]config.BotConfig{
+			"miorine": {EriURL: "http://eri-miorine:8080"},
+		},
+	}
+	srv := newTestRouter(cfg, nil, nil, disp)
+	ctx := context.Background()
+
+	// Dispatch with matching agent in bots
+	err := srv.ProcessDiscordInteraction(ctx, DiscordInteractionArgs{
+		Agent:       "miorine",
+		Interaction: &discordgo.Interaction{ID: "ix1"},
+	})
+	if err != nil {
+		t.Fatalf("ProcessDiscordInteraction err = %v", err)
+	}
+
+	// Dispatch without matching agent
+	err = srv.ProcessDiscordInteraction(ctx, DiscordInteractionArgs{
+		Agent:       "unknown",
+		Interaction: &discordgo.Interaction{ID: "ix2"},
+	})
+	if err != nil {
+		t.Fatalf("ProcessDiscordInteraction err = %v", err)
+	}
+}
+
+func TestStartDiscordGatewayWrapper(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	// len(Bots) > 0
+	srv := newTestRouter(Config{
+		Bots: map[string]config.BotConfig{
+			"aerial": {DiscordToken: ""},
+		},
+	}, nil, nil, nil)
+	stopFn, err := startDiscordGateway(ctx, srv, "")
+	if err != nil {
+		t.Fatalf("startDiscordGateway err = %v", err)
+	}
+	if stopFn != nil {
+		stopFn()
+	}
+
+	// len(Bots) == 0
+	srvLegacy := newTestRouter(Config{}, nil, nil, nil)
+	stopFn, err = startDiscordGateway(ctx, srvLegacy, "")
+	if err != nil {
+		t.Fatalf("startDiscordGateway legacy err = %v", err)
+	}
+	if stopFn != nil {
+		stopFn()
+	}
+}
+
+func TestRouter_EdgeCasesCoverage(t *testing.T) {
+	t.Parallel()
+
+	// Authenticator() accessor
+	srv := &RouterServer{}
+	if srv.Authenticator() != nil {
+		t.Errorf("expected nil authenticator")
+	}
+	srv.SetAuthenticator(&k8sauth.Authenticator{})
+	if srv.Authenticator() == nil {
+		t.Errorf("expected non-nil authenticator")
+	}
+
+	// NewRouterServer with Auth.Enabled == true
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token")
+	_ = os.WriteFile(tokenFile, []byte("tok"), 0o600)
+	cfgSrc := fixedConfig(Config{
+		Auth: k8sauth.Config{
+			Enabled:   true,
+			TokenPath: tokenFile,
+		},
+	})
+	server := NewRouterServer(cfgSrc, nil)
+	if server.Authenticator() == nil {
+		t.Errorf("expected initialized authenticator")
+	}
+
+	// AgentName() coverage
+	if got := (AerialPRMetadata{Agent: "Suletta"}).AgentName(); got != "suletta" {
+		t.Errorf("AgentName() = %q, want suletta", got)
+	}
+	if got := (AerialPRMetadata{BotID: "Miorine"}).AgentName(); got != "miorine" {
+		t.Errorf("AgentName() = %q, want miorine", got)
+	}
+	if got := (AerialPRMetadata{}).AgentName(); got != "" {
+		t.Errorf("AgentName() = %q, want empty", got)
+	}
+
+	// resolvePRAgent with LoadRawPRMetadata returning agent or bot_id
+	mockReg := &mockPRRegistry{
+		rawMetadata: map[string]any{"agent": "suletta"},
+	}
+	srv = &RouterServer{registry: mockReg}
+	if got := srv.resolvePRAgent(context.Background(), "repo", 42); got != "suletta" {
+		t.Errorf("resolvePRAgent() = %q, want suletta", got)
+	}
+	mockReg.rawMetadata = map[string]any{"bot_id": "miorine"}
+	if got := srv.resolvePRAgent(context.Background(), "repo", 42); got != "miorine" {
+		t.Errorf("resolvePRAgent() = %q, want miorine", got)
+	}
+
+	// routeRepoEvent fallback branches
+	srvNilCfg := &RouterServer{}
+	_ = srvNilCfg.routeRepoEvent(context.Background(), "test", restateclient.RepoEvent{})
+
+	// isForeignBotEvent coverage
+	var nilSrv *RouterServer
+	if nilSrv.isForeignBotEvent(AerialPRMetadata{}) {
+		t.Errorf("expected false for nil server")
+	}
+	srvNoCfg := &RouterServer{}
+	if srvNoCfg.isForeignBotEvent(AerialPRMetadata{}) {
+		t.Errorf("expected false for nil cfgSrc")
+	}
+	srvEmptyCfg := &RouterServer{cfgSrc: fixedConfig(Config{})}
+	if srvEmptyCfg.isForeignBotEvent(AerialPRMetadata{}) {
+		t.Errorf("expected false for empty meta")
+	}
+	srvBots := &RouterServer{cfgSrc: fixedConfig(Config{
+		Bots: map[string]config.BotConfig{
+			"aerial": {},
+		},
+	})}
+	if srvBots.isForeignBotEvent(AerialPRMetadata{Agent: "aerial"}) {
+		t.Errorf("expected false for matching bot in cfg.Bots")
+	}
+	if !srvBots.isForeignBotEvent(AerialPRMetadata{Agent: "unknown"}) {
+		t.Errorf("expected true for foreign bot in cfg.Bots")
+	}
+
+	// resolveJobQueueAndKind and normalizeJobArgs coverage
+	q, k := resolveJobQueueAndKind(DeployWebhookArgs{})
+	if q != queueDefault || k != "deploy_webhook" {
+		t.Errorf("resolveJobQueueAndKind(DeployWebhookArgs) = %s, %s", q, k)
+	}
+	deployPtr := &DeployWebhookArgs{}
+	q, k = resolveJobQueueAndKind(deployPtr)
+	if q != queueDefault || k != "deploy_webhook" {
+		t.Errorf("resolveJobQueueAndKind(&DeployWebhookArgs) = %s, %s", q, k)
+	}
+	ghPtr := &GitHubWebhookArgs{}
+	_ = normalizeJobArgs(ghPtr)
+	var nilGH *GitHubWebhookArgs
+	_ = normalizeJobArgs(nilGH)
+	discPtr := &DiscordIngressArgs{}
+	_ = normalizeJobArgs(discPtr)
+	var nilDisc *DiscordIngressArgs
+	_ = normalizeJobArgs(nilDisc)
+	actPtr := &DiscordInteractionArgs{}
+	_ = normalizeJobArgs(actPtr)
+	var nilAct *DiscordInteractionArgs
+	_ = normalizeJobArgs(nilAct)
 }

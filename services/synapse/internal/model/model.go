@@ -32,6 +32,7 @@ type PRRegisterRequest struct {
 	Title    string `json:"title,omitempty"`
 	Metadata string `json:"metadata,omitempty"`
 	BotID    string `json:"bot_id,omitempty"`
+	Agent    string `json:"agent,omitempty"`
 }
 
 // PRBuildLifecycle is the registry lifecycle fence image-build consumers read
@@ -279,6 +280,7 @@ type DiscordMessageIngressRequest struct {
 	BotUserID string             `json:"bot_user_id,omitempty"`
 	RoleNames map[string]string  `json:"role_names,omitempty"`
 	Message   *discordgo.Message `json:"message"`
+	Agent     string             `json:"agent,omitempty"`
 }
 
 // DiscordIngressArgs contains payload data for JetStream queueing of Discord message ingress events.
@@ -287,12 +289,14 @@ type DiscordIngressArgs struct {
 	BotUserID string             `json:"bot_user_id,omitempty"`
 	RoleNames map[string]string  `json:"role_names,omitempty"`
 	Message   *discordgo.Message `json:"message"`
+	Agent     string             `json:"agent,omitempty"`
 }
 
 // DiscordInteractionArgs contains payload data for JetStream queueing of Discord interaction events.
 type DiscordInteractionArgs struct {
 	InteractionID string                 `json:"interaction_id"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
+	Agent         string                 `json:"agent,omitempty"`
 }
 
 type GitPushEventRequest struct {
@@ -348,6 +352,8 @@ type OutboundDispatcher interface {
 	DispatchBackground(ctx context.Context, req DispatchRequest) error
 	DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error
 	DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error
+	DispatchDiscordMessageTo(ctx context.Context, eriURL string, req DiscordMessageIngressRequest) error
+	DispatchDiscordInteractionTo(ctx context.Context, eriURL string, interaction *discordgo.Interaction) error
 }
 
 type GitHubPRRef struct {
@@ -377,4 +383,5 @@ type GitHubPullRequest struct {
 type AerialPRMetadata struct {
 	TargetID string `json:"target_id,omitempty"`
 	BotID    string `json:"bot_id,omitempty"`
+	Agent    string `json:"agent,omitempty"`
 }

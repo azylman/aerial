@@ -54,40 +54,6 @@ func TestAlertsWebhook_InvalidTargetChannel(t *testing.T) {
 	}
 }
 
-func TestEventsWebhook_ForwardToPeers(t *testing.T) {
-	t.Parallel()
-
-	peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer peerServer.Close()
-
-	bus := &mockEventBus{}
-	cfg := Config{
-		WebhookForwardURLs: map[string]string{"peer": peerServer.URL},
-	}
-	srv := newTestRouter(cfg, peerServer.Client(), nil, nil, bus)
-
-	body := `{"source":"ci","event_type":"build","target":"api"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/events", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.handleEventsWebhook(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleEventsWebhook code = %d, want %d", w.Code, http.StatusOK)
-	}
-
-	req2 := httptest.NewRequest(http.MethodPost, "/api/webhooks/events", bytes.NewBufferString(body))
-	req2.RequestURI = ""
-	req2.Header.Set("Content-Type", "application/json")
-	w2 := httptest.NewRecorder()
-	srv.handleEventsWebhook(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("handleEventsWebhook code = %d, want %d", w2.Code, http.StatusOK)
-	}
-}
-
 func TestEventsWebhook_ErrorCases(t *testing.T) {
 	t.Parallel()
 

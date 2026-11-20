@@ -69,6 +69,7 @@ var repoHandlers = map[string]bool{
 // imported here because it lives under another module's internal tree,
 // so TestPayloadJSONShape pins the key set against drift.
 type PREvent struct {
+	Agent          string `json:"agent,omitempty"`
 	Event          string `json:"event"`
 	Repo           string `json:"repo"`
 	PRNumber       int    `json:"pr_number"`
@@ -88,6 +89,7 @@ type PREvent struct {
 // dispatched-SHA tombstones, and fan-out sends only. JSON tags mirror
 // the frozen chunk-01 contract exactly.
 type RepoEvent struct {
+	Agent      string `json:"agent,omitempty"`
 	Repo       string `json:"repo"`
 	MainSHA    string `json:"main_sha"`
 	Generation uint64 `json:"generation"`

@@ -5,13 +5,25 @@ import (
 	"log"
 	"net"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
+
+// BotConfig holds configuration for one Discord bot application session.
+type BotConfig struct {
+	TokenEnv        string `yaml:"token_env"`
+	DiscordToken    string `yaml:"-"`
+	EriURL          string `yaml:"eri_url"`
+	SystemChannelID string `yaml:"system_channel_id"`
+	DefaultOwner    bool   `yaml:"default_owner"`
+}
 
 // Config holds runtime configuration for synapse.
 type Config struct {
@@ -36,7 +48,8 @@ type Config struct {
 	AutoUpdatePRAuthors  []string
 	BotID                string
 	DefaultOwner         bool
-	WebhookForwardURLs   map[string]string
+	Bots                 map[string]BotConfig
+	Auth                 k8sauth.Config
 	CollaboratorCIAlerts []CollaboratorCIAlertRule
 }
 
@@ -71,7 +84,8 @@ type RouterYAMLConfig struct {
 	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
 	BotID                string                    `yaml:"bot_id"`
 	DefaultOwner         bool                      `yaml:"default_owner"`
-	WebhookForwardURLs   map[string]string         `yaml:"webhook_forward_urls"`
+	Bots                 map[string]BotConfig      `yaml:"bots"`
+	Auth                 k8sauth.Config            `yaml:"auth"`
 	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
 }
 
@@ -153,7 +167,37 @@ func RestartRequired(old, next *Config) bool {
 		old.NATSURL != next.NATSURL ||
 		old.RestateURL != next.RestateURL ||
 		old.RestatePRService != next.RestatePRService ||
-		old.RestateRepoService != next.RestateRepoService
+		old.RestateRepoService != next.RestateRepoService ||
+		!reflect.DeepEqual(old.Bots, next.Bots)
+}
+
+const defaultAgentAerial = "aerial"
+
+// DefaultOwnerAgent returns the agent with DefaultOwner == true (fallback "aerial").
+func (c Config) DefaultOwnerAgent() string {
+	if len(c.Bots) == 0 {
+		return defaultAgentAerial
+	}
+	if len(c.Bots) == 1 {
+		for agent := range c.Bots {
+			return agent
+		}
+	}
+	if bot, ok := c.Bots[defaultAgentAerial]; ok && bot.DefaultOwner {
+		return defaultAgentAerial
+	}
+	var owner string
+	for agent, bot := range c.Bots {
+		if bot.DefaultOwner {
+			if owner == "" || agent < owner {
+				owner = agent
+			}
+		}
+	}
+	if owner != "" {
+		return owner
+	}
+	return defaultAgentAerial
 }
 
 // HasCollaboratorCIAlertsForRepo reports whether any collaborator alert rules are configured for repo.
@@ -191,24 +235,6 @@ func LookupCollaboratorCIAlert(cfg *Config, repo, author string) (channelID, men
 		}
 	}
 	return "", "", false
-}
-
-func NormalizeWebhookForwardURLs(raw map[string]string) map[string]string {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make(map[string]string)
-	for k, v := range raw {
-		key := strings.TrimSpace(k)
-		val := strings.TrimRight(strings.TrimSpace(v), "/")
-		if key != "" && val != "" {
-			out[key] = val
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func NormalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
@@ -338,6 +364,70 @@ func RepoObjectServiceName(botID string) string {
 	return "RepoObject-" + name
 }
 
+func resolveBotTokenEnv(agentKey, tokenEnv string) string {
+	cleanEnv := strings.TrimSpace(tokenEnv)
+	if cleanEnv != "" {
+		return cleanEnv
+	}
+	if agentKey == defaultAgentAerial {
+		return "DISCORD_TOKEN"
+	}
+	return "DISCORD_TOKEN_" + strings.ToUpper(agentKey)
+}
+
+func buildBotsConfig(fileCfg RouterYAMLConfig, botID, sysChan string) map[string]BotConfig {
+	if len(fileCfg.Bots) == 0 {
+		return synthesizeDefaultBotConfig(fileCfg, botID, sysChan)
+	}
+	bots := make(map[string]BotConfig, len(fileCfg.Bots))
+	for k, b := range fileCfg.Bots {
+		agentKey := strings.ToLower(strings.TrimSpace(k))
+		if agentKey == "" {
+			continue
+		}
+		tokenEnv := resolveBotTokenEnv(agentKey, b.TokenEnv)
+		eriURL := strings.TrimRight(strings.TrimSpace(b.EriURL), "/")
+		if eriURL == "" {
+			eriURL = strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
+		}
+		sysChanID := strings.TrimSpace(b.SystemChannelID)
+		if sysChanID == "" {
+			sysChanID = strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan))
+		}
+		bots[agentKey] = BotConfig{
+			TokenEnv:        tokenEnv,
+			DiscordToken:    os.Getenv(tokenEnv),
+			EriURL:          eriURL,
+			SystemChannelID: sysChanID,
+			DefaultOwner:    b.DefaultOwner,
+		}
+	}
+	return bots
+}
+
+func synthesizeDefaultBotConfig(fileCfg RouterYAMLConfig, botID, sysChan string) map[string]BotConfig {
+	agentKey := botID
+	if agentKey == "" {
+		agentKey = defaultAgentAerial
+	}
+	tokenEnv := resolveBotTokenEnv(agentKey, "")
+	discordToken := os.Getenv(tokenEnv)
+	if discordToken == "" {
+		discordToken = os.Getenv("DISCORD_TOKEN")
+	}
+	eriURL := strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
+	sysChanID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan))
+	return map[string]BotConfig{
+		agentKey: {
+			TokenEnv:        tokenEnv,
+			DiscordToken:    discordToken,
+			EriURL:          eriURL,
+			SystemChannelID: sysChanID,
+			DefaultOwner:    true,
+		},
+	}
+}
+
 func buildConfig(fileCfg RouterYAMLConfig) Config {
 	legacy, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows)
 	if err != nil {
@@ -351,7 +441,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
 	}
 
-	botID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, "aerial"))
+	botID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentAerial))
 	defaultOwner := fileCfg.DefaultOwner
 	if envVal := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
 		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
@@ -360,13 +450,13 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 	// Delegate local fallback DSN synthesis to httpkit.BuildPostgresDSN so config.go
 	// embeds zero plaintext default password literals (enforced by commit-safety-guard).
 	pgURL := model.FirstNonEmpty(
-		httpkit.BuildPostgresDSN(os.Getenv, "aerial"),
+		httpkit.BuildPostgresDSN(os.Getenv, defaultAgentAerial),
 		httpkit.BuildPostgresDSN(func(k string) string {
 			if k == "POSTGRES_HOST" {
 				return "127.0.0.1"
 			}
 			return ""
-		}, "aerial"),
+		}, defaultAgentAerial),
 	)
 
 	kubeServer := os.Getenv("KUBE_API_SERVER")
@@ -377,6 +467,15 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		}
 	}
 	kubeToken := os.Getenv("KUBE_TOKEN")
+
+	bots := buildBotsConfig(fileCfg, botID, sysChan)
+
+	authCfg := fileCfg.Auth
+	if envVal := strings.TrimSpace(os.Getenv("K8S_AUTH_ENABLED")); envVal != "" {
+		if enabled, err := strconv.ParseBool(envVal); err == nil {
+			authCfg.Enabled = enabled
+		}
+	}
 
 	return Config{
 		LegacyBuildWorkflows: legacy,
@@ -400,7 +499,8 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		AutoUpdatePRAuthors:  autoUpdateAuthors,
 		BotID:                botID,
 		DefaultOwner:         defaultOwner,
-		WebhookForwardURLs:   NormalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
+		Bots:                 bots,
+		Auth:                 authCfg,
 		CollaboratorCIAlerts: collaboratorAlerts,
 	}
 }

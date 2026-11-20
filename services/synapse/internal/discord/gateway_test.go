@@ -188,6 +188,178 @@ func TestStartDiscordGateway(t *testing.T) {
 	}
 }
 
+func TestStartDiscordGateway_MultiBot(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		isNilSrv   bool
+		cfg        *config.Config
+		openerErr  error
+		wantErr    bool
+		wantSubstr string
+	}{
+		{
+			name:     "nil server returns no-op",
+			isNilSrv: true,
+		},
+		{
+			name: "nil config returns no-op",
+			cfg:  nil,
+		},
+		{
+			name: "empty bots falls back to StartGateway with empty token",
+			cfg:  &config.Config{Bots: nil, DiscordToken: ""},
+		},
+		{
+			name: "bots map with empty token skips session and returns no-op",
+			cfg: &config.Config{
+				Bots: map[string]config.BotConfig{
+					"aerial": {DiscordToken: ""},
+				},
+			},
+		},
+		{
+			name: "bots map with opener error returns error",
+			cfg: &config.Config{
+				Bots: map[string]config.BotConfig{
+					"aerial": {DiscordToken: "token-1"},
+				},
+			},
+			openerErr:  errors.New("connection failed"),
+			wantErr:    true,
+			wantSubstr: "open discord gateway",
+		},
+		{
+			name: "bots map with multiple valid bots connects successfully and cleanup closes sessions",
+			cfg: &config.Config{
+				Bots: map[string]config.BotConfig{
+					"aerial":  {DiscordToken: "Bot token-aerial"},
+					"miorine": {DiscordToken: "token-miorine"},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanup := SetGatewayOpenerForTest(func(dg *discordgo.Session) error {
+				if tc.openerErr != nil {
+					return tc.openerErr
+				}
+				return nil
+			})
+			t.Cleanup(cleanup)
+
+			var srv IngressServer
+			if !tc.isNilSrv {
+				srv = &testIngressServer{cfg: tc.cfg}
+			}
+
+			stopFn, err := StartDiscordGateway(ctx, srv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("StartDiscordGateway() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+			if stopFn != nil {
+				stopFn()
+				stopFn() // verify idempotency
+			}
+		})
+	}
+}
+
+func TestCloseSessionsNil(t *testing.T) {
+	t.Parallel()
+	closeSessions([]*discordgo.Session{nil})
+}
+
+func TestAgentWatermarks(t *testing.T) {
+	ResetWatermarksForTest()
+	t.Cleanup(ResetWatermarksForTest)
+
+	tests := []struct {
+		name       string
+		agent      string
+		channelID  string
+		advanceID  string
+		wantBefore string
+		wantAfter  string
+	}{
+		{
+			name:       "empty channel returns empty",
+			agent:      "miorine",
+			channelID:  "",
+			advanceID:  "100",
+			wantBefore: "",
+			wantAfter:  "",
+		},
+		{
+			name:       "empty advance message ID returns before",
+			agent:      "miorine",
+			channelID:  "chan-1",
+			advanceID:  "",
+			wantBefore: "",
+			wantAfter:  "",
+		},
+		{
+			name:       "agent advance sets agent watermark",
+			agent:      "miorine",
+			channelID:  "chan-1",
+			advanceID:  "100",
+			wantBefore: "",
+			wantAfter:  "100",
+		},
+		{
+			name:       "smaller advance does not regress agent watermark",
+			agent:      "miorine",
+			channelID:  "chan-1",
+			advanceID:  "50",
+			wantBefore: "100",
+			wantAfter:  "100",
+		},
+		{
+			name:       "larger advance advances agent watermark",
+			agent:      "miorine",
+			channelID:  "chan-1",
+			advanceID:  "200",
+			wantBefore: "100",
+			wantAfter:  "200",
+		},
+		{
+			name:       "other agent watermark isolated from first agent",
+			agent:      "suletta",
+			channelID:  "chan-1",
+			advanceID:  "150",
+			wantBefore: "",
+			wantAfter:  "150",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := GetAgentChannelWatermark(tc.agent, tc.channelID)
+			if before != tc.wantBefore {
+				t.Errorf("before = %q, want %q", before, tc.wantBefore)
+			}
+			AdvanceAgentChannelWatermark(tc.agent, tc.channelID, tc.advanceID)
+			after := GetAgentChannelWatermark(tc.agent, tc.channelID)
+			if after != tc.wantAfter {
+				t.Errorf("after = %q, want %q", after, tc.wantAfter)
+			}
+		})
+	}
+
+	if got := GetAgentChannelWatermark("miorine", "chan-1"); got != "200" {
+		t.Errorf("miorine watermark = %q, want 200", got)
+	}
+	if got := GetAgentChannelWatermark("", "chan-1"); got != "" {
+		t.Errorf("unqualified watermark = %q, want empty", got)
+	}
+}
+
 type gatewayMessageCreateCase struct {
 	name            string
 	nilServer       bool
@@ -201,6 +373,9 @@ type gatewayMessageCreateCase struct {
 	busErr          bool
 	directErr       bool
 	hasRolesInState bool
+	serverHasConfig bool
+	agent           string
+	wantAgent       string
 	mentionRoles    []string
 	refRoles        []string
 	wantEnqueued    int
@@ -233,26 +408,100 @@ func buildGatewayMessage(tc gatewayMessageCreateCase) *discordgo.MessageCreate {
 	return mc
 }
 
+func initGatewayTestServer(nilServer, hasConfig bool, directErr error, hasBus, busErr bool, isInteraction bool) (IngressServer, *testIngressServer, *testEventBus) {
+	if nilServer {
+		return nil, nil, nil
+	}
+	testSrv := &testIngressServer{}
+	if hasConfig {
+		testSrv.cfg = &config.Config{
+			BotID: "aerial",
+			Bots: map[string]config.BotConfig{
+				"aerial": {DefaultOwner: true},
+			},
+		}
+	}
+	if directErr != nil {
+		if isInteraction {
+			testSrv.interactionErr = directErr
+		} else {
+			testSrv.ingressErr = directErr
+		}
+	}
+	var bus *testEventBus
+	if hasBus {
+		bus = &testEventBus{}
+		if busErr {
+			bus.err = errors.New("bus insert error")
+		}
+		testSrv.bus = bus
+	}
+	return testSrv, testSrv, bus
+}
+
+func assertGatewayBusOutput(ctx context.Context, t *testing.T, bus *testEventBus, wantEnqueued int, wantAgent string) {
+	t.Helper()
+	if bus == nil {
+		return
+	}
+	if len(bus.insertedJobs) != wantEnqueued {
+		t.Errorf("insertedJobs = %d, want %d", len(bus.insertedJobs), wantEnqueued)
+	}
+	for _, tp := range bus.publishedTraceparents {
+		assertRootTraceparent(ctx, t, tp)
+	}
+	if wantAgent == "" || len(bus.insertedJobs) == 0 {
+		return
+	}
+	switch arg := bus.insertedJobs[0].(type) {
+	case model.DiscordIngressArgs:
+		if arg.Agent != wantAgent {
+			t.Errorf("insertedJob Agent = %q, want %q", arg.Agent, wantAgent)
+		}
+	case model.DiscordInteractionArgs:
+		if arg.Agent != wantAgent {
+			t.Errorf("insertedJob Agent = %q, want %q", arg.Agent, wantAgent)
+		}
+	}
+}
+
+func assertProcessedIngress(t *testing.T, srv *testIngressServer, wantProcessed int, wantAgent string) {
+	t.Helper()
+	if srv == nil {
+		return
+	}
+	if len(srv.processedIngress) != wantProcessed {
+		t.Errorf("processedIngress = %d, want %d", len(srv.processedIngress), wantProcessed)
+	}
+	if wantAgent != "" && len(srv.processedIngress) > 0 {
+		if srv.processedIngress[0].Agent != wantAgent {
+			t.Errorf("processedIngress Agent = %q, want %q", srv.processedIngress[0].Agent, wantAgent)
+		}
+	}
+}
+
+func assertProcessedInteractions(t *testing.T, srv *testIngressServer, wantProcessed int, wantAgent string) {
+	t.Helper()
+	if srv == nil {
+		return
+	}
+	if len(srv.processedInteractions) != wantProcessed {
+		t.Errorf("processedInteractions = %d, want %d", len(srv.processedInteractions), wantProcessed)
+	}
+	if wantAgent != "" && len(srv.processedInteractions) > 0 {
+		if srv.processedInteractions[0].Agent != wantAgent {
+			t.Errorf("processedInteractions Agent = %q, want %q", srv.processedInteractions[0].Agent, wantAgent)
+		}
+	}
+}
+
 func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMessageCreateCase) {
 	t.Helper()
-	var srv IngressServer
-	var testSrv *testIngressServer
-	var bus *testEventBus
-
-	if !tc.nilServer {
-		testSrv = &testIngressServer{}
-		if tc.directErr {
-			testSrv.ingressErr = errors.New("dispatch direct error")
-		}
-		if tc.hasBus {
-			bus = &testEventBus{}
-			if tc.busErr {
-				bus.err = errors.New("bus insert error")
-			}
-			testSrv.bus = bus
-		}
-		srv = testSrv
+	var directErr error
+	if tc.directErr {
+		directErr = errors.New("dispatch direct error")
 	}
+	srv, testSrv, bus := initGatewayTestServer(tc.nilServer, tc.serverHasConfig, directErr, tc.hasBus, tc.busErr, false)
 
 	session, err := discordgo.New("Bot dummy-token")
 	if err != nil {
@@ -272,19 +521,12 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 	}
 
 	mc := buildGatewayMessage(tc)
-	HandleGatewayMessageCreate(ctx, srv, session, mc)
+	HandleAgentGatewayMessageCreate(ctx, srv, session, mc, tc.agent)
 
 	if tc.hasBus {
-		if len(bus.insertedJobs) != tc.wantEnqueued {
-			t.Errorf("insertedJobs = %d, want %d", len(bus.insertedJobs), tc.wantEnqueued)
-		}
-		for _, tp := range bus.publishedTraceparents {
-			assertRootTraceparent(ctx, t, tp)
-		}
+		assertGatewayBusOutput(ctx, t, bus, tc.wantEnqueued, tc.wantAgent)
 	} else if !tc.nilServer {
-		if len(testSrv.processedIngress) != tc.wantProcessed {
-			t.Errorf("processedIngress = %d, want %d", len(testSrv.processedIngress), tc.wantProcessed)
-		}
+		assertProcessedIngress(t, testSrv, tc.wantProcessed, tc.wantAgent)
 	}
 }
 
@@ -352,6 +594,22 @@ func TestHandleGatewayMessageCreate(t *testing.T) {
 			hasRolesInState: true,
 			wantProcessed:   1,
 		},
+		{
+			name:          "agent specified is propagated to direct dispatch",
+			botUserID:     "bot-id-123",
+			authorID:      "user-456",
+			agent:         "miorine",
+			wantAgent:     "miorine",
+			wantProcessed: 1,
+		},
+		{
+			name:            "agent unset defaults to default owner agent",
+			botUserID:       "bot-id-123",
+			authorID:        "user-456",
+			serverHasConfig: true,
+			wantAgent:       "aerial",
+			wantProcessed:   1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -370,30 +628,20 @@ type gatewayInteractionCreateCase struct {
 	hasBus          bool
 	busErr          bool
 	directErr       bool
+	serverHasConfig bool
+	agent           string
+	wantAgent       string
 	wantEnqueued    int
 	wantProcessed   int
 }
 
 func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatewayInteractionCreateCase) {
 	t.Helper()
-	var srv IngressServer
-	var testSrv *testIngressServer
-	var bus *testEventBus
-
-	if !tc.nilServer {
-		testSrv = &testIngressServer{}
-		if tc.directErr {
-			testSrv.interactionErr = errors.New("dispatch direct error")
-		}
-		if tc.hasBus {
-			bus = &testEventBus{}
-			if tc.busErr {
-				bus.err = errors.New("bus insert error")
-			}
-			testSrv.bus = bus
-		}
-		srv = testSrv
+	var directErr error
+	if tc.directErr {
+		directErr = errors.New("dispatch direct error")
 	}
+	srv, testSrv, bus := initGatewayTestServer(tc.nilServer, tc.serverHasConfig, directErr, tc.hasBus, tc.busErr, true)
 
 	var ic *discordgo.InteractionCreate
 	if !tc.nilInteraction {
@@ -405,19 +653,12 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 		}
 	}
 
-	HandleGatewayInteractionCreate(ctx, srv, ic)
+	HandleAgentGatewayInteractionCreate(ctx, srv, ic, tc.agent)
 
 	if tc.hasBus {
-		if len(bus.insertedJobs) != tc.wantEnqueued {
-			t.Errorf("insertedJobs = %d, want %d", len(bus.insertedJobs), tc.wantEnqueued)
-		}
-		for _, tp := range bus.publishedTraceparents {
-			assertRootTraceparent(ctx, t, tp)
-		}
+		assertGatewayBusOutput(ctx, t, bus, tc.wantEnqueued, tc.wantAgent)
 	} else if !tc.nilServer {
-		if len(testSrv.processedInteractions) != tc.wantProcessed {
-			t.Errorf("processedInteractions = %d, want %d", len(testSrv.processedInteractions), tc.wantProcessed)
-		}
+		assertProcessedInteractions(t, testSrv, tc.wantProcessed, tc.wantAgent)
 	}
 }
 
@@ -460,6 +701,20 @@ func TestHandleGatewayInteractionCreate(t *testing.T) {
 			name:            "direct dispatch error handled cleanly",
 			interactionType: discordgo.InteractionApplicationCommand,
 			directErr:       true,
+			wantProcessed:   1,
+		},
+		{
+			name:            "agent specified propagated to interaction",
+			interactionType: discordgo.InteractionApplicationCommand,
+			agent:           "suletta",
+			wantAgent:       "suletta",
+			wantProcessed:   1,
+		},
+		{
+			name:            "agent unset defaults to default owner agent",
+			interactionType: discordgo.InteractionApplicationCommand,
+			serverHasConfig: true,
+			wantAgent:       "aerial",
 			wantProcessed:   1,
 		},
 	}

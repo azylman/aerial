@@ -168,9 +168,11 @@ type loadConfigCase struct {
 	wantAuthors            []string
 	wantBotID              string
 	wantDefaultOwner       bool
-	wantForwardURLs        map[string]string
+	wantBots               map[string]BotConfig
+	wantDefaultOwnerAgent  string
 	wantCollaboratorAlerts []CollaboratorCIAlertRule
 	wantStrictErr          bool
+	wantAuthEnabled        *bool
 }
 
 func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
@@ -222,6 +224,32 @@ func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
 	return targetPath
 }
 
+func assertLoadedBots(t *testing.T, wantBots, gotBots map[string]BotConfig) {
+	t.Helper()
+	if wantBots == nil {
+		return
+	}
+	if len(gotBots) != len(wantBots) {
+		t.Errorf("Bots len = %d, want %d", len(gotBots), len(wantBots))
+	}
+	for k, wantBot := range wantBots {
+		gotBot, ok := gotBots[k]
+		if !ok {
+			t.Errorf("Bots[%q] missing", k)
+			continue
+		}
+		if wantBot.TokenEnv != "" && gotBot.TokenEnv != wantBot.TokenEnv {
+			t.Errorf("Bots[%q].TokenEnv = %q, want %q", k, gotBot.TokenEnv, wantBot.TokenEnv)
+		}
+		if wantBot.EriURL != "" && gotBot.EriURL != wantBot.EriURL {
+			t.Errorf("Bots[%q].EriURL = %q, want %q", k, gotBot.EriURL, wantBot.EriURL)
+		}
+		if gotBot.DefaultOwner != wantBot.DefaultOwner {
+			t.Errorf("Bots[%q].DefaultOwner = %v, want %v", k, gotBot.DefaultOwner, wantBot.DefaultOwner)
+		}
+	}
+}
+
 func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 	t.Helper()
 	for _, check := range []struct{ got, want, field string }{
@@ -239,15 +267,9 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 	if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
 		t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
 	}
-	if tc.wantForwardURLs != nil {
-		if len(cfg.WebhookForwardURLs) != len(tc.wantForwardURLs) {
-			t.Errorf("WebhookForwardURLs len = %d, want %d", len(cfg.WebhookForwardURLs), len(tc.wantForwardURLs))
-		}
-		for k, v := range tc.wantForwardURLs {
-			if cfg.WebhookForwardURLs[k] != v {
-				t.Errorf("WebhookForwardURLs[%q] = %q, want %q", k, cfg.WebhookForwardURLs[k], v)
-			}
-		}
+	assertLoadedBots(t, tc.wantBots, cfg.Bots)
+	if tc.wantDefaultOwnerAgent != "" && cfg.DefaultOwnerAgent() != tc.wantDefaultOwnerAgent {
+		t.Errorf("DefaultOwnerAgent() = %q, want %q", cfg.DefaultOwnerAgent(), tc.wantDefaultOwnerAgent)
 	}
 	if tc.wantAuthors != nil {
 		if len(cfg.AutoUpdatePRAuthors) != len(tc.wantAuthors) {
@@ -264,6 +286,9 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 		if !reflect.DeepEqual(cfg.CollaboratorCIAlerts, tc.wantCollaboratorAlerts) {
 			t.Errorf("CollaboratorCIAlerts = %+v, want %+v", cfg.CollaboratorCIAlerts, tc.wantCollaboratorAlerts)
 		}
+	}
+	if tc.wantAuthEnabled != nil && cfg.Auth.Enabled != *tc.wantAuthEnabled {
+		t.Errorf("Auth.Enabled = %v, want %v", cfg.Auth.Enabled, *tc.wantAuthEnabled)
 	}
 }
 
@@ -392,7 +417,7 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 		},
 		{
 			name:          "type-mismatched yaml keeps decoded fields, strict load errors",
-			localYAML:     "port: \"4099\"\nwebhook_forward_urls: [\"not-a-map\"]\n",
+			localYAML:     "port: \"4099\"\nbots: [\"not-a-map\"]\n",
 			wantPort:      "4099",
 			wantStrictErr: true,
 		},
@@ -417,11 +442,27 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 			wantDefaultOwner: false,
 		},
 		{
-			name:      "webhook_forward_urls normalized from yaml",
-			localYAML: "webhook_forward_urls:\n  \" eri-sub \": \" http://eri-sub:4020/ \"\n  \"\": \"http://empty-key:4020/\"\n  \"empty-val\": \"   \"\n",
-			wantForwardURLs: map[string]string{
-				"eri-sub": "http://eri-sub:4020",
+			name: "bots map loaded from yaml",
+			localYAML: `bots:
+  aerial:
+    eri_url: "http://eri-aerial:8080"
+    default_owner: true
+  miorine:
+    eri_url: "http://eri-miorine:8080"
+    token_env: "CUSTOM_MIO_TOKEN"
+`,
+			wantBots: map[string]BotConfig{
+				"aerial": {
+					TokenEnv:     "DISCORD_TOKEN",
+					EriURL:       "http://eri-aerial:8080",
+					DefaultOwner: true,
+				},
+				"miorine": {
+					TokenEnv: "CUSTOM_MIO_TOKEN",
+					EriURL:   "http://eri-miorine:8080",
+				},
 			},
+			wantDefaultOwnerAgent: "aerial",
 		},
 		{
 			name:             "env overrides for bot_id and default_owner",
@@ -462,6 +503,41 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 				},
 			},
 		},
+		{
+			name:            "k8s auth enabled parsed from env",
+			localYAML:       "port: \"4020\"\n",
+			env:             map[string]string{"K8S_AUTH_ENABLED": "true"},
+			wantPort:        "4020",
+			wantAuthEnabled: new(true),
+		},
+		{
+			name:            "k8s auth enabled invalid boolean leaves yaml value",
+			localYAML:       "port: \"4020\"\nauth:\n  enabled: true\n",
+			env:             map[string]string{"K8S_AUTH_ENABLED": "not-a-bool"},
+			wantPort:        "4020",
+			wantAuthEnabled: new(true),
+		},
+		{
+			name: "bots map with empty agent key and defaults",
+			localYAML: `bots:
+  "":
+    eri_url: "http://ignore:8080"
+  suletta:
+    eri_url: ""
+`,
+			wantBots: map[string]BotConfig{
+				"suletta": {
+					TokenEnv: "DISCORD_TOKEN_SULETTA",
+					EriURL:   "http://127.0.0.1:8088",
+				},
+			},
+		},
+		{
+			name:      "empty bot_id env and yaml falls back to aerial",
+			localYAML: "bot_id: \"\"\n",
+			env:       map[string]string{"AERIAL_BOT_ID": ""},
+			wantBotID: "aerial",
+		},
 	}
 }
 
@@ -475,61 +551,66 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 	}
 }
 
-func TestNormalizeWebhookForwardURLs(t *testing.T) {
+func TestDefaultOwnerAgent_And_Bots(t *testing.T) {
 	t.Parallel()
 
-	paddedKey := " bot1 "
-	whitespaceKey := "   "
-
 	tests := []struct {
-		name string
-		raw  map[string]string
-		want map[string]string
+		name      string
+		bots      map[string]BotConfig
+		wantOwner string
 	}{
 		{
-			name: "nil input returns nil",
-			raw:  nil,
-			want: nil,
+			name:      "empty bots returns aerial",
+			bots:      nil,
+			wantOwner: "aerial",
 		},
 		{
-			name: "empty input returns nil",
-			raw:  map[string]string{},
-			want: nil,
+			name: "single bot returns sole bot regardless of default owner flag",
+			bots: map[string]BotConfig{
+				"miorine": {DefaultOwner: false},
+			},
+			wantOwner: "miorine",
 		},
 		{
-			name: "all empty keys or values returns nil",
-			raw: map[string]string{
-				"":            "http://example.com",
-				whitespaceKey: "http://example.com",
-				"bot1":        "",
-				"bot2":        "   ",
+			name: "aerial marked default owner",
+			bots: map[string]BotConfig{
+				"aerial":  {DefaultOwner: true},
+				"miorine": {DefaultOwner: false},
 			},
-			want: nil,
+			wantOwner: "aerial",
 		},
 		{
-			name: "trims whitespace and trailing slashes",
-			raw: map[string]string{
-				paddedKey: " http://example.com/api/ ",
-				"bot2":    "http://example.org///",
+			name: "sibling marked default owner",
+			bots: map[string]BotConfig{
+				"aerial":  {DefaultOwner: false},
+				"miorine": {DefaultOwner: true},
 			},
-			want: map[string]string{
-				"bot1": "http://example.com/api",
-				"bot2": "http://example.org",
+			wantOwner: "miorine",
+		},
+		{
+			name: "multiple default owners picks alphabetical order",
+			bots: map[string]BotConfig{
+				"suletta": {DefaultOwner: true},
+				"miorine": {DefaultOwner: true},
 			},
+			wantOwner: "miorine",
+		},
+		{
+			name: "no default owner falls back to aerial",
+			bots: map[string]BotConfig{
+				"suletta": {DefaultOwner: false},
+				"miorine": {DefaultOwner: false},
+			},
+			wantOwner: "aerial",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := NormalizeWebhookForwardURLs(tc.raw)
-			if len(got) != len(tc.want) {
-				t.Fatalf("len(got) = %d, want %d: %v", len(got), len(tc.want), got)
-			}
-			for k, wantVal := range tc.want {
-				if gotVal, ok := got[k]; !ok || gotVal != wantVal {
-					t.Errorf("got[%q] = %q (ok=%v), want %q", k, gotVal, ok, wantVal)
-				}
+			cfg := Config{Bots: tc.bots}
+			if got := cfg.DefaultOwnerAgent(); got != tc.wantOwner {
+				t.Errorf("DefaultOwnerAgent() = %q, want %q", got, tc.wantOwner)
 			}
 		})
 	}
@@ -560,7 +641,7 @@ func TestRestartRequired(t *testing.T) {
 		KubeToken:           "kube",
 		SystemChannelID:     "111",
 		AutoUpdatePRAuthors: []string{"a"},
-		WebhookForwardURLs:  map[string]string{"marida": "http://marida:4020"},
+		Bots:                map[string]BotConfig{"aerial": {EriURL: "http://eri:8080"}},
 	}
 	tests := []struct {
 		name string
@@ -570,7 +651,6 @@ func TestRestartRequired(t *testing.T) {
 		{name: "identical config", next: base, want: false},
 		{name: "system channel changes live", next: withField(base, Config{SystemChannelID: "222"}), want: false},
 		{name: "auto-update authors change live", next: withField(base, Config{AutoUpdatePRAuthors: []string{"b"}}), want: false},
-		{name: "webhook forward urls change live", next: withField(base, Config{WebhookForwardURLs: map[string]string{"x": "http://x"}}), want: false},
 		{name: "default owner changes live", next: withField(base, Config{DefaultOwner: true}), want: false},
 		{name: "collaborator alerts change live", next: withField(base, Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/aerial", ChannelID: "111", Authors: map[string]string{"dev": "<@1>"}}}}), want: false},
 		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
@@ -582,6 +662,7 @@ func TestRestartRequired(t *testing.T) {
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
+		{name: "bots change requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"miorine": {EriURL: "http://mio:8080"}}}), want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

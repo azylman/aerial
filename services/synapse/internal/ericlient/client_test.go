@@ -33,6 +33,7 @@ type dispatchTestCase struct {
 	wantRetryRecorded bool
 	wantErr           bool
 	wantSubstr        string
+	customEriURL      string
 }
 
 func ericlientTestCases() []dispatchTestCase {
@@ -115,8 +116,7 @@ func ericlientPromptCases() []dispatchTestCase {
 	}
 }
 
-func ericlientNonPromptCases() []dispatchTestCase {
-	validSnowflake := "100000000000000001"
+func ericlientNonPromptDirectCases(validSnowflake string) []dispatchTestCase {
 	return []dispatchTestCase{
 		{
 			name:       "DispatchDirectMessage invalid snowflake",
@@ -201,6 +201,11 @@ func ericlientNonPromptCases() []dispatchTestCase {
 			wantErr:        true,
 			wantSubstr:     "request failed",
 		},
+	}
+}
+
+func ericlientNonPromptDispatchCases() []dispatchTestCase {
+	return []dispatchTestCase{
 		{
 			name:         "DispatchDiscordInteraction success 200",
 			callType:     "discord_interaction",
@@ -251,7 +256,39 @@ func ericlientNonPromptCases() []dispatchTestCase {
 			responseBody: `{"status":"ok"}`,
 			nilSubClient: true,
 		},
+		{
+			name:         "DispatchDiscordMessageTo custom URL success 200",
+			callType:     "discord_message_to",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"processed","message_id":"12345"}`,
+		},
+		{
+			name:         "DispatchDiscordInteractionTo custom URL success 200",
+			callType:     "discord_interaction_to",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"ok"}`,
+		},
+		{
+			name:       "DispatchDiscordMessageTo empty URLs error",
+			callType:   "discord_message_to",
+			noBrainURL: true,
+			wantErr:    true,
+			wantSubstr: "brain URL is not configured",
+		},
+		{
+			name:       "DispatchDiscordInteractionTo empty URLs error",
+			callType:   "discord_interaction_to",
+			noBrainURL: true,
+			wantErr:    true,
+			wantSubstr: "brain URL is not configured",
+		},
 	}
+}
+
+func ericlientNonPromptCases() []dispatchTestCase {
+	validSnowflake := "100000000000000001"
+	cases := ericlientNonPromptDirectCases(validSnowflake)
+	return append(cases, ericlientNonPromptDispatchCases()...)
 }
 
 func executeClientCall(ctx context.Context, client *Client, tc dispatchTestCase) error {
@@ -268,8 +305,27 @@ func executeClientCall(ctx context.Context, client *Client, tc dispatchTestCase)
 			RoleNames: map[string]string{"r1": "admin"},
 			Message:   &discordgo.Message{ID: "m1", Content: "hello"},
 		})
+	case "discord_message_to":
+		eriURL := tc.customEriURL
+		if eriURL == "" && !tc.noBrainURL {
+			eriURL = client.brainURL
+		}
+		return client.DispatchDiscordMessageTo(ctx, eriURL, model.DiscordMessageIngressRequest{
+			BotUserID: "bot1",
+			RoleNames: map[string]string{"r1": "admin"},
+			Message:   &discordgo.Message{ID: "m1", Content: "hello"},
+		})
 	case "discord_interaction":
 		return client.DispatchDiscordInteraction(ctx, &discordgo.Interaction{
+			ID:   "ix1",
+			Type: discordgo.InteractionApplicationCommand,
+		})
+	case "discord_interaction_to":
+		eriURL := tc.customEriURL
+		if eriURL == "" && !tc.noBrainURL {
+			eriURL = client.brainURL
+		}
+		return client.DispatchDiscordInteractionTo(ctx, eriURL, &discordgo.Interaction{
 			ID:   "ix1",
 			Type: discordgo.InteractionApplicationCommand,
 		})
@@ -418,6 +474,9 @@ func TestClientMarshalErrors(t *testing.T) {
 	}
 	if err := c.PostDiscordInternalJSON(context.Background(), nil, time.Second, "/discord", "req", "status", unmarshalable); err == nil {
 		t.Errorf("expected marshal error from postDiscordInternalJSON")
+	}
+	if err := PostDiscordInternalJSONTo(context.Background(), "http://localhost:8080", nil, time.Second, "/discord", "req", "status", map[string]string{}); err == nil {
+		t.Errorf("expected error from PostDiscordInternalJSONTo with nil client")
 	}
 }
 

@@ -163,14 +163,26 @@ func (c *Client) DispatchBackground(ctx context.Context, req model.DispatchReque
 
 // PostDiscordInternalJSON executes an HTTP POST to an Eri internal Discord webhook.
 func (c *Client) PostDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
-	if strings.TrimSpace(c.brainURL) == "" {
+	if client == nil && c != nil {
+		client = c.httpClient
+	}
+	return PostDiscordInternalJSONTo(ctx, c.brainURL, client, timeout, path, reqLabel, statusLabel, payload)
+}
+
+// PostDiscordInternalJSONTo executes an HTTP POST to a specified Eri baseURL's internal Discord webhook.
+func PostDiscordInternalJSONTo(ctx context.Context, baseURL string, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
+	if client == nil {
+		return errors.New("http client is required")
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.TrimSpace(baseURL) == "" {
 		return errors.New("brain URL is not configured")
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal %s request: %w", reqLabel, err)
 	}
-	endpoint := c.brainURL + path
+	endpoint := baseURL + path
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -180,11 +192,7 @@ func (c *Client) PostDiscordInternalJSON(ctx context.Context, client *http.Clien
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpClient := client
-	if httpClient == nil {
-		httpClient = c.httpClient
-	}
-	resp, err := httpClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("%s request failed: %w", reqLabel, err)
 	}
@@ -200,16 +208,38 @@ func (c *Client) PostDiscordInternalJSON(ctx context.Context, client *http.Clien
 	return nil
 }
 
-func (c *Client) postDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
-	return c.PostDiscordInternalJSON(ctx, client, timeout, path, reqLabel, statusLabel, payload)
-}
-
 // DispatchDiscordMessage sends an inbound Discord message payload to Eri's internal webhook.
 func (c *Client) DispatchDiscordMessage(ctx context.Context, req model.DiscordMessageIngressRequest) error {
-	return c.postDiscordInternalJSON(ctx, c.discordMsgClient, 20*time.Second, "/internal/discord/message", "discord message ingress", "discord ingress", req)
+	return c.DispatchDiscordMessageTo(ctx, c.brainURL, req)
+}
+
+// DispatchDiscordMessageTo sends an inbound Discord message payload to a specified Eri baseURL.
+func (c *Client) DispatchDiscordMessageTo(ctx context.Context, eriURL string, req model.DiscordMessageIngressRequest) error {
+	baseURL := strings.TrimRight(eriURL, "/")
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = c.brainURL
+	}
+	httpClient := c.discordMsgClient
+	if httpClient == nil {
+		httpClient = c.httpClient
+	}
+	return PostDiscordInternalJSONTo(ctx, baseURL, httpClient, 20*time.Second, "/internal/discord/message", "discord message ingress", "discord ingress", req)
 }
 
 // DispatchDiscordInteraction sends an inbound Discord interaction event payload to Eri's internal webhook.
 func (c *Client) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
-	return c.postDiscordInternalJSON(ctx, c.discordInteractionClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
+	return c.DispatchDiscordInteractionTo(ctx, c.brainURL, interaction)
+}
+
+// DispatchDiscordInteractionTo sends an inbound Discord interaction event payload to a specified Eri baseURL.
+func (c *Client) DispatchDiscordInteractionTo(ctx context.Context, eriURL string, interaction *discordgo.Interaction) error {
+	baseURL := strings.TrimRight(eriURL, "/")
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = c.brainURL
+	}
+	httpClient := c.discordInteractionClient
+	if httpClient == nil {
+		httpClient = c.httpClient
+	}
+	return PostDiscordInternalJSONTo(ctx, baseURL, httpClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
 }

@@ -258,13 +258,6 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		httpkit.WriteJSON(w, http.StatusUnauthorized, map[string]string{fieldError: "invalid github webhook signature"})
 		return
 	}
-	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.teeGitHubWebhook(r.Context(), reqPath, r, event, body)
-	}
 	if s.bus == nil {
 		slog.ErrorContext(r.Context(), "[synapse] [github] event bus not initialized")
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
@@ -395,6 +388,14 @@ func (s *RouterServer) isForeignBotEvent(meta AerialPRMetadata) bool {
 	cfg := s.cfgSrc.Current()
 	if cfg == nil {
 		return false
+	}
+	agent := meta.AgentName()
+	if agent == "" {
+		return false
+	}
+	if len(cfg.Bots) > 0 {
+		_, ok := cfg.Bots[agent]
+		return !ok
 	}
 	return isForeignBotPR(meta, cfg.BotID)
 }

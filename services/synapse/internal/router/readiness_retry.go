@@ -16,14 +16,44 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 		Repo   string `json:"repo"`
 		Number int    `json:"pr_number"`
 		Merge  string `json:"expected_merge_sha"`
+		Agent  string `json:"agent,omitempty"`
+		BotID  string `json:"bot_id,omitempty"`
 	}
 	if !readWebhookJSON(w, r, 1<<20, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Repo) == "" || req.Number <= 0 || strings.TrimSpace(req.Merge) == "" {
+	req.Repo = strings.TrimSpace(req.Repo)
+	req.Merge = strings.TrimSpace(req.Merge)
+	req.Agent = strings.TrimSpace(req.Agent)
+	req.BotID = strings.TrimSpace(req.BotID)
+
+	if req.Repo == "" || req.Number <= 0 || req.Merge == "" {
 		httpkit.WriteJSON(w, 400, map[string]string{fieldError: "repo, pr_number and expected_merge_sha required"})
 		return
 	}
+
+	targetAgent := req.Agent
+	if targetAgent == "" {
+		targetAgent = req.BotID
+	}
+	existingAgent := s.resolveRegisteredPRAgent(r.Context(), req.Repo, req.Number)
+	if targetAgent == "" {
+		if existingAgent != "" {
+			targetAgent = existingAgent
+		} else {
+			targetAgent = s.resolvePRAgent(r.Context(), req.Repo, req.Number)
+		}
+	}
+
+	if s.authenticator != nil && s.authenticator.Enabled() {
+		var err error
+		targetAgent, err = s.authorizePRAgent(r, "update", targetAgent, req.BotID, existingAgent)
+		if err != nil {
+			writeAuthError(w, err)
+			return
+		}
+	}
+
 	store, ok := s.registry.(readinessRetryStore)
 	if !ok || s.dispatcher == nil {
 		httpkit.WriteJSON(w, 503, map[string]string{fieldError: "readiness retry unavailable"})
@@ -52,7 +82,7 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 	// reports 503; the legacy reconcile above already ran, and the
 	// operator retry safely re-triggers it without minting a generation.
 	if err := s.routePREvent(r.Context(), "HandleReadinessRetry", restateclient.PREvent{
-		Repo: req.Repo, PRNumber: req.Number, MergeSHA: req.Merge,
+		Repo: req.Repo, PRNumber: req.Number, MergeSHA: req.Merge, Agent: targetAgent,
 	}); err != nil {
 		httpkit.WriteJSON(w, 503, map[string]string{fieldError: err.Error()})
 		return

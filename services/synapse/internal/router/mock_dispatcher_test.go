@@ -166,11 +166,19 @@ func (m *mockOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req
 	return err
 }
 
+func (m *mockOutboundDispatcher) DispatchDiscordMessageTo(ctx context.Context, eriURL string, req DiscordMessageIngressRequest) error {
+	return m.DispatchDiscordMessage(ctx, req)
+}
+
 func (m *mockOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
 	m.mu.Lock()
 	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
 	m.mu.Unlock()
 	return m.discordInteractionErr
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordInteractionTo(ctx context.Context, eriURL string, interaction *discordgo.Interaction) error {
+	return m.DispatchDiscordInteraction(ctx, interaction)
 }
 
 func (m *mockOutboundDispatcher) DiscordMessageCalls() []DiscordMessageIngressRequest {

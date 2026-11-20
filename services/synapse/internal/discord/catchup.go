@@ -5,7 +5,7 @@ import (
 	"log"
 	"log/slog"
 	"slices"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -16,7 +16,10 @@ import (
 
 const discordCatchUpStaleTTL = 30 * time.Minute
 
-var discordSweepRunning atomic.Bool
+var (
+	discordSweepMu       sync.Mutex
+	discordSweepsRunning = make(map[string]bool)
+)
 
 // FetchActiveGuildThreads retrieves active threads for a guild using dg.GuildThreadsActive.
 func FetchActiveGuildThreads(dg *discordgo.Session, guildID string) ([]*discordgo.Channel, error) {
@@ -155,19 +158,19 @@ func isCatchUpMessageEligible(m *discordgo.Message, botUserID, minSnowflake stri
 	return true
 }
 
-// CatchUpChannelMessages processes missed messages in a single Discord channel.
-func CatchUpChannelMessages(ctx context.Context, dg *discordgo.Session, server IngressServer, ch *discordgo.Channel, guildID, botUserID, minSnowflake string, now time.Time) {
+// CatchUpAgentChannelMessages processes missed messages in a single Discord channel for a specific agent.
+func CatchUpAgentChannelMessages(ctx context.Context, dg *discordgo.Session, server IngressServer, ch *discordgo.Channel, guildID, botUserID, minSnowflake, agent string, now time.Time) {
 	if ch == nil || ch.ID == "" || dg == nil || isNilServer(server) {
 		return
 	}
-	afterID := MaxDiscordSnowflake(GetChannelWatermark(ch.ID), minSnowflake)
+	afterID := MaxDiscordSnowflake(GetAgentChannelWatermark(agent, ch.ID), minSnowflake)
 	if ch.LastMessageID == "" || CompareDiscordSnowflakes(ch.LastMessageID, afterID) <= 0 {
 		return
 	}
 
 	fetched, err := dg.ChannelMessages(ch.ID, 50, "", afterID, "")
 	if err != nil {
-		slog.WarnContext(ctx, "[synapse] [discord] failed to fetch channel messages", "channel_id", ch.ID, "error", err)
+		slog.WarnContext(ctx, "[synapse] [discord] failed to fetch channel messages", "channel_id", ch.ID, "agent", agent, "error", err)
 		return
 	}
 
@@ -179,7 +182,7 @@ func CatchUpChannelMessages(ctx context.Context, dg *discordgo.Session, server I
 		if m == nil || m.ID == "" {
 			continue
 		}
-		AdvanceChannelWatermark(ch.ID, m.ID)
+		AdvanceAgentChannelWatermark(agent, ch.ID, m.ID)
 		if !isCatchUpMessageEligible(m, botUserID, minSnowflake, now) {
 			continue
 		}
@@ -189,18 +192,26 @@ func CatchUpChannelMessages(ctx context.Context, dg *discordgo.Session, server I
 		if m.ReferencedMessage != nil && m.ReferencedMessage.GuildID == "" {
 			m.ReferencedMessage.GuildID = m.GuildID
 		}
-		EnqueueDiscordMessage(ctx, server, dg, m, botUserID)
+		EnqueueAgentDiscordMessage(ctx, server, dg, m, botUserID, agent)
 	}
 
-	AdvanceChannelWatermark(ch.ID, ch.LastMessageID)
+	AdvanceAgentChannelWatermark(agent, ch.ID, ch.LastMessageID)
 }
 
-// RunCatchUpSweep performs a startup catch-up sweep across all available guilds and channels.
-func RunCatchUpSweep(ctx context.Context, dg *discordgo.Session, server IngressServer, now time.Time) {
-	if !discordSweepRunning.CompareAndSwap(false, true) {
+// RunStartupCatchup performs a startup catch-up sweep for a specific agent across all available guilds and channels.
+func RunStartupCatchup(ctx context.Context, dg *discordgo.Session, server IngressServer, agent string, now time.Time) {
+	discordSweepMu.Lock()
+	if discordSweepsRunning[agent] {
+		discordSweepMu.Unlock()
 		return
 	}
-	defer discordSweepRunning.Store(false)
+	discordSweepsRunning[agent] = true
+	discordSweepMu.Unlock()
+	defer func() {
+		discordSweepMu.Lock()
+		delete(discordSweepsRunning, agent)
+		discordSweepMu.Unlock()
+	}()
 
 	if dg == nil || isNilServer(server) {
 		return
@@ -229,7 +240,7 @@ func RunCatchUpSweep(ctx context.Context, dg *discordgo.Session, server IngressS
 			if ctx != nil && ctx.Err() != nil {
 				return
 			}
-			CatchUpChannelMessages(ctx, dg, server, ch, g.ID, botUserID, minSnowflake, now)
+			CatchUpAgentChannelMessages(ctx, dg, server, ch, g.ID, botUserID, minSnowflake, agent, now)
 		}
 	}
 }

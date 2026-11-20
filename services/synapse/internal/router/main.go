@@ -14,20 +14,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/alerts"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/discord"
-	"github.com/azylman/aerial/services/synapse/internal/ericlient"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/registry"
@@ -55,6 +53,7 @@ type RouterServer struct {
 	discordIngressRetryDelay time.Duration
 	discordIngressMaxAge     time.Duration
 	alertTracker             alerts.Tracker
+	authenticator            *k8sauth.Authenticator
 	shadowMu                 sync.Mutex
 	shadowRestate            *shadowRestateReporter
 }
@@ -134,10 +133,15 @@ func NewRouterServer(cfgSrc ConfigSource, client *http.Client) *RouterServer {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
+	var auth *k8sauth.Authenticator
+	if cfgSrc != nil && cfgSrc.Current() != nil && cfgSrc.Current().Auth.Enabled {
+		auth = k8sauth.NewAuthenticator(cfgSrc.Current().Auth)
+	}
 	return &RouterServer{
-		cfgSrc:       cfgSrc,
-		httpClient:   tracing.Client(client),
-		githubClient: tracing.ExternalClient(client),
+		cfgSrc:        cfgSrc,
+		httpClient:    tracing.Client(client),
+		githubClient:  tracing.ExternalClient(client),
+		authenticator: auth,
 	}
 }
 
@@ -150,6 +154,24 @@ func (s *RouterServer) Dispatcher() OutboundDispatcher                 { return 
 func (s *RouterServer) SetQueueStats(q ConsumerStatsQuerier)           { s.queueStats = q }
 func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration)    { s.gatewayLatencyFn = fn }
 func (s *RouterServer) SetOnProcessed(fn func(event, delivery string)) { s.onProcessed = fn }
+func (s *RouterServer) SetAuthenticator(a *k8sauth.Authenticator)      { s.authenticator = a }
+func (s *RouterServer) Authenticator() *k8sauth.Authenticator          { return s.authenticator }
+
+func writeAuthError(w http.ResponseWriter, err error) {
+	if valErr, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: valErr.Error()})
+		return
+	}
+	if unauthErr, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
+		httpkit.WriteJSON(w, http.StatusUnauthorized, map[string]string{fieldError: unauthErr.Error()})
+		return
+	}
+	if forbErr, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
+		httpkit.WriteJSON(w, http.StatusForbidden, map[string]string{fieldError: forbErr.Error()})
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
+}
 
 // SetRestateShadow injects the dark shadow reporter (tests and wiring only;
 // production lazily builds one from YAML config on first use).
@@ -175,6 +197,23 @@ func (s *RouterServer) PublishJob(ctx context.Context, args any) error {
 	return s.publishJetStreamJob(ctx, args)
 }
 
+func (s *RouterServer) resolveAgentEriURL(agent string) string {
+	if s == nil || s.cfgSrc == nil {
+		return ""
+	}
+	cfg := s.cfgSrc.Current()
+	if cfg == nil {
+		return ""
+	}
+	if agent == "" {
+		agent = cfg.DefaultOwnerAgent()
+	}
+	if bot, ok := cfg.Bots[agent]; ok && bot.EriURL != "" {
+		return bot.EriURL
+	}
+	return ""
+}
+
 // ProcessDiscordIngress dispatches a Discord message ingress request to Eri.
 func (s *RouterServer) ProcessDiscordIngress(ctx context.Context, args DiscordIngressArgs) error {
 	if s.dispatcher == nil {
@@ -184,6 +223,10 @@ func (s *RouterServer) ProcessDiscordIngress(ctx context.Context, args DiscordIn
 		BotUserID: args.BotUserID,
 		RoleNames: args.RoleNames,
 		Message:   args.Message,
+		Agent:     args.Agent,
+	}
+	if eriURL := s.resolveAgentEriURL(args.Agent); eriURL != "" {
+		return s.dispatcher.DispatchDiscordMessageTo(ctx, eriURL, req)
 	}
 	return s.dispatcher.DispatchDiscordMessage(ctx, req)
 }
@@ -193,11 +236,17 @@ func (s *RouterServer) ProcessDiscordInteraction(ctx context.Context, args Disco
 	if s.dispatcher == nil {
 		return errors.New("dispatcher not configured on server")
 	}
+	if eriURL := s.resolveAgentEriURL(args.Agent); eriURL != "" {
+		return s.dispatcher.DispatchDiscordInteractionTo(ctx, eriURL, args.Interaction)
+	}
 	return s.dispatcher.DispatchDiscordInteraction(ctx, args.Interaction)
 }
 
 // startDiscordGateway delegates gateway startup to the internal discord subpackage.
 func startDiscordGateway(ctx context.Context, server *RouterServer, token string) (func(), error) {
+	if server != nil && server.Config() != nil && len(server.Config().Bots) > 0 {
+		return discord.StartDiscordGateway(ctx, server)
+	}
 	return discord.StartGateway(ctx, server, token)
 }
 
@@ -284,6 +333,128 @@ func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo strin
 	return ""
 }
 
+var errBotIDMismatch = errors.New("bot_id mismatch for local pr_registry")
+
+func (s *RouterServer) authorizePRAgent(r *http.Request, verb, requestedAgent, botID, existingAgent string) (string, error) {
+	token, err := k8sauth.ExtractBearerToken(r)
+	if err != nil {
+		return "", err
+	}
+	caller, err := s.authenticator.Authenticate(r.Context(), token)
+	if err != nil {
+		return "", err
+	}
+
+	authorizedAgent, err := s.authenticator.AuthorizeTarget(r.Context(), caller, "prs", verb, requestedAgent)
+	if err != nil {
+		return "", err
+	}
+	if botID != "" && !strings.EqualFold(botID, authorizedAgent) {
+		if err := s.authenticator.Authorize(r.Context(), caller, "prs/all", verb, botID); err != nil {
+			return "", err
+		}
+	}
+	if existingAgent != "" && existingAgent != authorizedAgent {
+		if err := s.authenticator.Authorize(r.Context(), caller, "prs", "update", existingAgent); err != nil {
+			return "", err
+		}
+	}
+	return authorizedAgent, nil
+}
+
+func (s *RouterServer) authorizePRRegistration(r *http.Request, req *PRRegisterRequest) error {
+	requestedAgent := req.Agent
+	if requestedAgent == "" {
+		requestedAgent = req.BotID
+	}
+	existingAgent := s.resolveRegisteredPRAgent(r.Context(), req.Repo, req.PRNumber)
+
+	targetAgent, err := s.authorizePRAgent(r, "create", requestedAgent, req.BotID, existingAgent)
+	if err != nil {
+		return err
+	}
+	req.Agent = targetAgent
+	if req.BotID == "" {
+		req.BotID = targetAgent
+	}
+	return nil
+}
+
+func (s *RouterServer) validateBotIDConfig(botID string) error {
+	if s == nil || s.cfgSrc == nil || botID == "" {
+		return nil
+	}
+	cfg := s.cfgSrc.Current()
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Bots) > 0 {
+		if _, ok := cfg.Bots[strings.ToLower(botID)]; !ok {
+			return errBotIDMismatch
+		}
+		return nil
+	}
+	if configuredBot := strings.TrimSpace(cfg.BotID); configuredBot != "" && !strings.EqualFold(botID, configuredBot) {
+		return errBotIDMismatch
+	}
+	return nil
+}
+
+func (s *RouterServer) resolveUnauthenticatedPRAgent(req *PRRegisterRequest) error {
+	if err := s.validateBotIDConfig(req.BotID); err != nil {
+		return err
+	}
+	if req.Agent == "" {
+		if req.BotID != "" {
+			req.Agent = req.BotID
+		} else if s.cfgSrc != nil && s.cfgSrc.Current() != nil {
+			req.Agent = s.cfgSrc.Current().DefaultOwnerAgent()
+		}
+	}
+	return nil
+}
+
+func (s *RouterServer) validatePRRegisterRequest(ctx context.Context, rawTargetID string, req *PRRegisterRequest) string {
+	switch {
+	case req.Repo == "":
+		return "repo cannot be empty"
+	case req.PRNumber <= 0:
+		return "pr_number must be greater than 0"
+	case req.Branch == "":
+		return "branch cannot be empty"
+	case req.HeadSHA == "":
+		return "head_sha cannot be empty"
+	}
+	if rawTargetID == "" || (!isValidDiscordSnowflake(req.TargetID) && isHeadlessSessionKey(rawTargetID)) {
+		req.TargetID = s.resolveHeadlessPRTargetID(ctx, req.Repo, req.PRNumber)
+	}
+	if !isValidDiscordSnowflake(req.TargetID) {
+		return "target_id must be a valid Discord snowflake (17-20 digits)"
+	}
+	return ""
+}
+
+func buildPRRegisterMetadata(req *PRRegisterRequest) {
+	var metaMap map[string]any
+	if strings.TrimSpace(req.Metadata) != "" {
+		if err := json.Unmarshal([]byte(req.Metadata), &metaMap); err != nil {
+			metaMap = make(map[string]any)
+		}
+	}
+	if metaMap == nil {
+		metaMap = make(map[string]any)
+	}
+	if req.Agent != "" {
+		metaMap["agent"] = req.Agent
+	}
+	if req.BotID != "" {
+		metaMap["bot_id"] = req.BotID
+	}
+	if metaBytes, err := json.Marshal(metaMap); err == nil {
+		req.Metadata = string(metaBytes)
+	}
+}
+
 func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
 	if s == nil || s.registry == nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "registry not initialized"})
@@ -302,37 +473,26 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	req.TargetID = model.NormalizeDiscordTargetID(rawTargetID)
 	req.Title = strings.TrimSpace(req.Title)
 	req.BotID = strings.TrimSpace(req.BotID)
+	req.Agent = strings.TrimSpace(req.Agent)
 
-	if req.BotID != "" && s.cfgSrc != nil {
-		if cfg := s.cfgSrc.Current(); cfg != nil && strings.TrimSpace(cfg.BotID) != "" && !strings.EqualFold(req.BotID, strings.TrimSpace(cfg.BotID)) {
-			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{fieldError: "bot_id mismatch for local pr_registry"})
+	if s.authenticator != nil && s.authenticator.Enabled() {
+		if err := s.authorizePRRegistration(r, &req); err != nil {
+			writeAuthError(w, err)
+			return
+		}
+	} else {
+		if err := s.resolveUnauthenticatedPRAgent(&req); err != nil {
+			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{fieldError: err.Error()})
 			return
 		}
 	}
 
-	if req.Repo == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "repo cannot be empty"})
+	if errMsg := s.validatePRRegisterRequest(r.Context(), rawTargetID, &req); errMsg != "" {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: errMsg})
 		return
 	}
-	if req.PRNumber <= 0 {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "pr_number must be greater than 0"})
-		return
-	}
-	if req.Branch == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "branch cannot be empty"})
-		return
-	}
-	if req.HeadSHA == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "head_sha cannot be empty"})
-		return
-	}
-	if rawTargetID == "" || (!isValidDiscordSnowflake(req.TargetID) && isHeadlessSessionKey(rawTargetID)) {
-		req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
-	}
-	if !isValidDiscordSnowflake(req.TargetID) {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "target_id must be a valid Discord snowflake (17-20 digits)"})
-		return
-	}
+
+	buildPRRegisterMetadata(&req)
 
 	targetID, err := s.registry.RegisterPR(r.Context(), req)
 	if err != nil {
@@ -350,6 +510,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		"repo":        req.Repo,
 		fieldPRNumber: req.PRNumber,
 		"target_id":   targetID,
+		"agent":       req.Agent,
 	})
 }
 
@@ -947,13 +1108,6 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
-	}
 
 	var alert FluxAlertEvent
 	if err := json.Unmarshal(body, &alert); err != nil {
@@ -993,13 +1147,6 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	body, ok := readWebhookBody(w, r, 1<<20)
 	if !ok {
 		return
-	}
-	if s != nil && s.cfgSrc != nil && len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
 	}
 
 	var req EventWebhookRequest
@@ -1168,190 +1315,6 @@ func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error 
 	}
 	recordJobEnqueued(queue, kind, "enqueued")
 	return nil
-}
-
-type DefaultOutboundDispatcher struct {
-	fluxReceiverURL          string
-	brainURL                 string
-	kubeAPIServer            string
-	kubeToken                string
-	httpClient               *http.Client
-	discordMsgClient         *http.Client
-	discordInteractionClient *http.Client
-	retryDelay               time.Duration
-	maxAttempts              int
-
-	kubeClient *kube.Client
-	eriClient  *ericlient.Client
-}
-
-func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *DefaultOutboundDispatcher {
-	discordMsgClient := client
-	discordInteractionClient := client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
-		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
-	}
-	d := &DefaultOutboundDispatcher{
-		brainURL:                 strings.TrimRight(brainURL, "/"),
-		httpClient:               tracing.Client(client),
-		discordMsgClient:         tracing.Client(discordMsgClient),
-		discordInteractionClient: tracing.Client(discordInteractionClient),
-		retryDelay:               1500 * time.Millisecond,
-		maxAttempts:              6,
-	}
-	d.ensureClients()
-	return d
-}
-
-func (d *DefaultOutboundDispatcher) ensureClients() {
-	if d.kubeClient == nil {
-		d.kubeClient = kube.NewClient(d.httpClient)
-		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
-		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
-		d.kubeClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
-	}
-	if d.eriClient == nil {
-		d.eriClient = ericlient.NewClient(d.brainURL, d.httpClient)
-		d.eriClient.SetDiscordMsgClient(d.discordMsgClient)
-		d.eriClient.SetDiscordInteractionClient(d.discordInteractionClient)
-		d.eriClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
-	}
-}
-
-func isFluxEventServerRootURL(rawURL string) bool {
-	_, rest, ok := strings.Cut(strings.ToLower(strings.TrimSpace(rawURL)), "://")
-	if !ok {
-		return false
-	}
-	hostPort, path, _ := strings.Cut(rest, "/")
-	host, _, _ := strings.Cut(hostPort, ":")
-	return (host == "notification-controller" || strings.HasPrefix(host, "notification-controller.")) && strings.Trim(path, "/") == ""
-}
-
-func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(receiverURL string) {
-	trimmed := strings.TrimRight(strings.TrimSpace(receiverURL), "/")
-	if isFluxEventServerRootURL(trimmed) {
-		d.fluxReceiverURL = ""
-	} else {
-		d.fluxReceiverURL = trimmed
-	}
-	if d.kubeClient != nil {
-		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
-	}
-}
-
-func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {
-	d.kubeAPIServer = strings.TrimRight(apiServer, "/")
-	d.kubeToken = strings.TrimSpace(token)
-	if d.kubeClient != nil {
-		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
-	}
-}
-
-func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
-	d.retryDelay = delay
-	d.maxAttempts = maxAttempts
-	if d.kubeClient != nil {
-		d.kubeClient.SetRetryConfig(delay, maxAttempts)
-	}
-	if d.eriClient != nil {
-		d.eriClient.SetRetryConfig(delay, maxAttempts)
-	}
-}
-
-func (d *DefaultOutboundDispatcher) APIServer() string {
-	return d.kubeAPIServer
-}
-
-func (d *DefaultOutboundDispatcher) RetryDelay() time.Duration {
-	return d.retryDelay
-}
-
-func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	d.ensureClients()
-	return d.kubeClient.DispatchGitPush(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.PromoteImageTag(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error) {
-	d.ensureClients()
-	return d.kubeClient.ListKustomizationConfigMaps(ctx, ref)
-}
-
-func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref FluxKustomizationRef) ([]WorkloadRollout, error) {
-	d.ensureClients()
-	return d.kubeClient.ListKustomizationWorkloads(ctx, ref)
-}
-
-func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.ListFluxWorkloadsVersion(ctx, path)
-}
-
-func (d *DefaultOutboundDispatcher) WatchFluxWorkloads(ctx context.Context, path, resourceVersion string) (io.ReadCloser, error) {
-	d.ensureClients()
-	return d.kubeClient.WatchFluxWorkloads(ctx, path, resourceVersion)
-}
-
-func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]FluxKustomizationRef, error) {
-	d.ensureClients()
-	return d.kubeClient.DiscoverImageKustomizations(ctx, imageNames)
-}
-
-func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref FluxKustomizationRef, requestedAt string) error {
-	d.ensureClients()
-	return d.kubeClient.ReconcileKustomization(ctx, ref, requestedAt)
-}
-
-func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.ResolveFluxSourceRepo(ctx, obj)
-}
-
-func (d *DefaultOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]FluxKustomizationRef, error) {
-	d.ensureClients()
-	return d.kubeClient.DiscoverRepoKustomizations(ctx, repo)
-}
-
-func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, namespace string) ([]KustomizationObservation, string, error) {
-	d.ensureClients()
-	return d.kubeClient.ListKustomizations(ctx, namespace)
-}
-
-func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, namespace, resourceVersion string) (io.ReadCloser, error) {
-	d.ensureClients()
-	return d.kubeClient.WatchKustomizations(ctx, namespace, resourceVersion)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchPrompt(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchDirectMessage(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchBackground(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
-	d.ensureClients()
-	return d.eriClient.DispatchDiscordMessage(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
-	d.ensureClients()
-	return d.eriClient.DispatchDiscordInteraction(ctx, interaction)
 }
 
 func setupPostgres(ctx context.Context, server *RouterServer, postgresURL string) (*pgxpool.Pool, error) {

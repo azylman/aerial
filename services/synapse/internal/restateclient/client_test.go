@@ -262,8 +262,8 @@ func TestPayloadJSONShape(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
-		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `generation,head_sha,main_sha,pr_number,repo`},
+		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{Agent: "aerial"}), want: `agent,branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
+		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{Agent: "aerial"}), want: `agent,generation,head_sha,main_sha,pr_number,repo`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

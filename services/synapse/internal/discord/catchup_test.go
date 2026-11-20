@@ -688,6 +688,14 @@ func TestFetchActiveGuildThreads(t *testing.T) {
 	if _, err := FetchActiveGuildThreads(sessErr, "g-err"); err == nil {
 		t.Error("expected error for threadsErr")
 	}
+
+	// threads null response
+	transportNull := &mockDiscordTransport{threadsResp: map[string]*discordgo.ThreadsList{"g-null": nil}}
+	sessNull, _ := discordgo.New("Bot dummy")
+	sessNull.Client = &http.Client{Transport: transportNull}
+	if th, err := FetchActiveGuildThreads(sessNull, "g-null"); err != nil || th != nil {
+		t.Errorf("expected nil, nil for null threadsResp, got %v, %v", th, err)
+	}
 }
 
 func TestResolveCatchUpGuilds(t *testing.T) {
@@ -762,5 +770,41 @@ func TestCatchUpChannelMessages(t *testing.T) {
 
 	cCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	CatchUpChannelMessages(cCtx, sess, &testIngressServer{}, &discordgo.Channel{ID: "c1", LastMessageID: "999"}, "", "", "1", now)
+	CatchUpChannelMessages(cCtx, sess, &testIngressServer{}, &discordgo.Channel{ID: "chan-legacy-catchup", LastMessageID: "999"}, "", "", "1", now)
+}
+
+func TestCatchUpAgentChannelMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	sess, err := discordgo.New("Bot dummy")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	sess.Client = &http.Client{Transport: &mockDiscordTransport{}}
+
+	// Test nil server, nil session, nil channel
+	CatchUpAgentChannelMessages(ctx, nil, nil, nil, "", "", "", "miorine", now)
+	CatchUpAgentChannelMessages(ctx, sess, &testIngressServer{}, &discordgo.Channel{}, "", "", "", "miorine", now)
+
+	// Test with messagesResp
+	msg := &discordgo.Message{
+		ID:        "999",
+		ChannelID: "chan-agent-catchup",
+		Author:    &discordgo.User{ID: "u1"},
+		Timestamp: now.Add(-5 * time.Minute),
+	}
+	transport := &mockDiscordTransport{
+		messagesResp: map[string][]*discordgo.Message{"chan-agent-catchup": {msg}},
+	}
+	sess.Client = &http.Client{Transport: transport}
+	srv := &testIngressServer{}
+	CatchUpAgentChannelMessages(ctx, sess, srv, &discordgo.Channel{ID: "chan-agent-catchup", LastMessageID: "999"}, "g1", "bot", "1", "miorine", now)
+	if len(srv.processedIngress) != 1 {
+		t.Fatalf("processedIngress = %d, want 1", len(srv.processedIngress))
+	}
+	if srv.processedIngress[0].Agent != "miorine" {
+		t.Errorf("processedIngress[0].Agent = %q, want miorine", srv.processedIngress[0].Agent)
+	}
 }
