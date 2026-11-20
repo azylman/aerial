@@ -1,6 +1,7 @@
 package flux
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -572,6 +573,106 @@ func TestPRRolloutStatus(t *testing.T) {
 			done, failed, reason := PRRolloutStatus(PRRolloutInput{Workloads: tc.workloads, ConfigMaps: tc.configMaps, CommitSHA: tc.commitSHA, Since: since, Now: tc.now})
 			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
 				t.Errorf("PRRolloutStatus() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestImageServiceCandidates(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		image string
+		want  []string
+	}{
+		{name: "empty image", image: "", want: nil},
+		{name: "aerial prefix stripped", image: "ghcr.io/azylman/aerial-eri:sha-42", want: []string{"aerial-eri", "eri"}},
+		{name: "aerial-sidecar prefix stripped before aerial", image: "ghcr.io/azylman/aerial-sidecar-cast-watcher:sha-42", want: []string{"aerial-sidecar-cast-watcher", "cast-watcher"}},
+		{name: "mirrormere prefix stripped", image: "ghcr.io/azylman/mirrormere-kiosk:sha-42", want: []string{"mirrormere-kiosk", "kiosk"}},
+		{name: "mirrormere without hyphen keeps base", image: "ghcr.io/azylman/mirrormere:sha-42", want: []string{"mirrormere"}},
+		{name: "aerial without stripped suffix", image: "ghcr.io/azylman/aerial-:sha-42", want: []string{"aerial-"}},
+		{name: "short name without prefix", image: "eri:sha-42", want: []string{"eri"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ImageServiceCandidates(tc.image)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ImageServiceCandidates(%q) = %v, want %v", tc.image, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLinkManagedWorkloadsIdempotent(t *testing.T) {
+	t.Parallel()
+	cluster := model.WorkloadRollout{Kind: "RestateCluster", Namespace: "default", Name: "restate"}
+	sts := model.WorkloadRollout{Kind: "StatefulSet", Namespace: "default", Name: "restate"}
+	workloads := []model.WorkloadRollout{cluster, sts}
+
+	LinkManagedWorkloads(workloads)
+	if len(workloads[0].ManagedWorkloads) != 1 {
+		t.Fatalf("first call managed count = %d, want 1", len(workloads[0].ManagedWorkloads))
+	}
+
+	LinkManagedWorkloads(workloads)
+	if len(workloads[0].ManagedWorkloads) != 1 {
+		t.Fatalf("second call managed count = %d, want 1 (not duplicated)", len(workloads[0].ManagedWorkloads))
+	}
+}
+
+func TestReadyForCommitServices(t *testing.T) {
+	t.Parallel()
+	rolloutClock := func(hh, mm, ss int) time.Time {
+		return time.Date(2026, time.November, 8, hh, mm, ss, 0, time.UTC)
+	}
+	deployRollout := func(name, image string, gen, observed int64, replicas, updated, available, total int32, deadline bool) model.WorkloadRollout {
+		return model.WorkloadRollout{Kind: "Deployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, UpdatedReplicas: updated, AvailableReplicas: available, StatusReplicas: total, ProgressDeadlineExceeded: deadline}
+	}
+	withChange := func(w model.WorkloadRollout, changedAt time.Time, annotations map[string]string, configMapRefs ...string) model.WorkloadRollout {
+		w.ChangedAt, w.Annotations, w.ConfigMapRefs = changedAt, annotations, configMapRefs
+		return w
+	}
+
+	const rolloutSHA = "0123abcd"
+	const synapseImage = "ghcr.io/azylman/aerial-synapse:" + rolloutSHA
+	const eriImage = "ghcr.io/azylman/aerial-eri:" + rolloutSHA
+	const otherImage = "ghcr.io/azylman/aerial-haro:other-sha"
+	since := rolloutClock(10, 0, 0)
+	auto := map[string]string{"reloader.stakater.com/auto": "true"}
+
+	tests := []struct {
+		name       string
+		workloads  []model.WorkloadRollout
+		configMaps []model.ConfigMapChange
+		commitSHA  string
+		want       []string
+	}{
+		{name: "empty commitSHA returns nil", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false)}, commitSHA: "", want: nil},
+		{name: "empty workloads returns nil", workloads: nil, commitSHA: rolloutSHA, want: nil},
+		{name: "single ready returns candidate service names", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false)}, commitSHA: rolloutSHA, want: []string{"aerial-synapse", "synapse"}},
+		{name: "multi-workload same image partial ready returns unready", workloads: []model.WorkloadRollout{
+			deployRollout("eri-1", eriImage, 3, 3, 1, 1, 1, 1, false),
+			deployRollout("eri-2", eriImage, 3, 3, 1, 1, 0, 2, false),
+		}, commitSHA: rolloutSHA, want: nil},
+		{name: "multi-workload same image all ready returns candidates", workloads: []model.WorkloadRollout{
+			deployRollout("eri-1", eriImage, 3, 3, 1, 1, 1, 1, false),
+			deployRollout("eri-2", eriImage, 3, 3, 1, 1, 1, 1, false),
+		}, commitSHA: rolloutSHA, want: []string{"aerial-eri", "eri"}},
+		{name: "awaiting Reloader restart excluded", workloads: []model.WorkloadRollout{
+			withChange(deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), rolloutClock(9, 0, 0), auto, "synapse-config"),
+		}, configMaps: []model.ConfigMapChange{{Namespace: "default", Name: "synapse-config", ChangedAt: rolloutClock(10, 1, 0)}}, commitSHA: rolloutSHA, want: nil},
+		{name: "non-commit-SHA workload ignored", workloads: []model.WorkloadRollout{
+			deployRollout("haro", otherImage, 3, 3, 1, 1, 1, 1, false),
+			deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false),
+		}, commitSHA: rolloutSHA, want: []string{"aerial-synapse", "synapse"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ReadyForCommitServices(PRRolloutInput{Workloads: tc.workloads, ConfigMaps: tc.configMaps, CommitSHA: tc.commitSHA, Since: since, Now: rolloutClock(10, 5, 0)})
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ReadyForCommitServices() = %v, want %v", got, tc.want)
 			}
 		})
 	}

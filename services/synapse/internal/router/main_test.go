@@ -230,6 +230,9 @@ type mockPRRegistry struct {
 	markKustomizationsCalls []prCall
 	markKustomizationsRes   bool
 	markKustomizationsErr   error
+	markJobsCalls           []prCall
+	markJobsRes             bool
+	markJobsErr             error
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
 
@@ -392,6 +395,14 @@ func (m *mockPRRegistry) MarkKustomizationsDeployed(ctx context.Context, repo st
 	return m.markKustomizationsRes, nil
 }
 
+func (m *mockPRRegistry) MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	m.markJobsCalls = append(m.markJobsCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
+	if err := m.checkErr(m.markJobsErr); err != nil {
+		return false, err
+	}
+	return m.markJobsRes, nil
+}
+
 func (m *mockPRRegistry) HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error) {
 	if err := m.checkErr(m.hasKustomizationReqsErr); err != nil {
 		return false, err
@@ -507,6 +518,22 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 		srv.SetEventBus(bus[0])
 	}
 	return srv
+}
+
+func TestRouterServerAccessors(t *testing.T) {
+	t.Parallel()
+	reg := &mockPRRegistry{}
+	disp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(nil, nil)
+	srv.SetRegistry(reg)
+	srv.SetDispatcher(disp)
+	srv.SetOnProcessed(func(event, delivery string) {})
+	if srv.Registry() != reg {
+		t.Errorf("Registry() = %v, want %v", srv.Registry(), reg)
+	}
+	if srv.Dispatcher() != disp {
+		t.Errorf("Dispatcher() = %v, want %v", srv.Dispatcher(), disp)
+	}
 }
 
 func doHTTPRequest(handler http.Handler, method, path string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {

@@ -75,6 +75,7 @@ type PRRegistryUpdater interface {
 	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
 	RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]KustomizationRequest) error
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
+	MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
 	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error

@@ -259,16 +259,48 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	if err != nil {
 		return fmt.Errorf("resolve merge time of %s#%d: %w", pr.Repo, pr.PRNumber, err)
 	}
-	done, failed, reason := prRolloutStatus(prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()})
-	switch {
-	case failed:
+	in := prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()}
+	done, failed, reason := prRolloutStatus(in)
+	if failed {
 		return s.failKustomizationRollout(ctx, pr, name, reason)
-	case done:
-		return s.completeKustomizationRequest(ctx, pr, name)
-	default:
-		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
-		return nil
 	}
+	readyJobs := flux.ReadyForCommitServices(in)
+	if done {
+		readyJobs = append(readyJobs, name)
+	}
+	var jobsUpdated bool
+	if s.registry != nil && len(readyJobs) > 0 {
+		var err error
+		jobsUpdated, err = s.registry.MarkJobsDeployed(ctx, pr.Repo, pr.PRNumber, readyJobs)
+		if err != nil {
+			return fmt.Errorf("mark jobs deployed for %s#%d: %w", pr.Repo, pr.PRNumber, err)
+		}
+	}
+	if done {
+		return s.completeKustomizationRequest(ctx, pr, name)
+	}
+	if jobsUpdated {
+		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+			return err
+		}
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "rollout_updated",
+			Repo:         pr.Repo,
+			PRNumber:     pr.PRNumber,
+			HeadSHA:      pr.HeadSHA,
+			MergeSHA:     pr.MergeSHA,
+			TargetID:     pr.TargetID,
+			JobName:      name,
+			Status:       statusDeploying,
+			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
+	return nil
 }
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.
