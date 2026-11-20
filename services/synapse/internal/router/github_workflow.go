@@ -32,9 +32,8 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if deferred, err := s.deferPRToWatcher(ctx, repo, prNum); deferred || err != nil {
 		return err
 	}
-	// Journal before the legacy publish and dedup mark: a journal failure
-	// leaves nothing recorded, so the redelivery retries the journal
-	// instead of tripping the suppress guard with the journal forever lost.
+	// Journal before the legacy publish: a journal failure leaves nothing
+	// recorded, so the redelivery retries the journal.
 	if err := s.routeDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum); err != nil {
 		return err
 	}
@@ -52,7 +51,6 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}); err != nil {
 		return err
 	}
-	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
 	return nil
 }
 

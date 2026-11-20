@@ -327,7 +327,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if handled, err := s.handleMergeOrPromotionFailure(ctx, res, details); handled {
 		return err
 	}
-	emitAdditional, wasActive, hadPriorEverFailed := s.recordNonGateCheckFailureDetailed(res)
+	emitAdditional, wasActive, _ := s.recordNonGateCheckFailureDetailed(res)
 	var (
 		updated bool
 		err     error
@@ -338,7 +338,6 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		updated, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
 	}
 	if err != nil {
-		s.rollbackFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, wasActive, hadPriorEverFailed)
 		return err
 	}
 	if !updated && res.TargetID == "" {
@@ -346,7 +345,9 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 			return notifyErr
 		}
 	}
-	if res.PRNumber > 0 && res.HeadSHA != "" && s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA) {
+	// The registry atomic transition is the once-per-failure gate for the
+	// open-PR conflict cascade the deleted failed-CISHA mark used to own.
+	if updated {
 		if cascadeErr := s.checkOpenPRConflicts(ctx, res.Repo); cascadeErr != nil {
 			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on ci failure", "repo", res.Repo, "error", cascadeErr)
 		}
@@ -409,14 +410,6 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 
 	s.handleDependabotPROpen(ctx, res, p)
 
-	if s.registry == nil && res.Action == ghActionSynchronize && res.PRNumber > 0 {
-		s.clearFailedCISHA(res.Repo, res.PRNumber)
-	}
-
-	if res.PRNumber > 0 && res.HeadSHA != "" {
-		s.recordCommitSHAPR(res.Repo, res.HeadSHA, res.PRNumber, res.Branch)
-	}
-
 	if s.registry != nil && res.PRNumber > 0 {
 		if err := s.handlePullRequestRegistryAction(ctx, res, p.PullRequest); err != nil {
 			return nil, err
@@ -454,18 +447,12 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || (isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName)) {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(res.Status), "completed") && strings.EqualFold(strings.TrimSpace(res.Conclusion), "cancelled") {
-		s.ghState.RecordCancelledCheckSHA(res.Repo, res.PRNumber, res.HeadSHA)
-	}
 	if isDependabotBranch(res.Branch) {
 		return
 	}
 	checkState := classifyCheckState(res.Status, res.Conclusion)
 	if checkState == "" || checkState == statusFailed {
 		return
-	}
-	if checkState == statusPending {
-		s.clearActiveFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
 	if err != nil {
@@ -519,7 +506,6 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		}
 		recovered = true
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.populateMissingBranch(ctx, res)
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        ghActionSynchronize,
@@ -651,7 +637,6 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 		return nil, err
 	}
 
-	s.clearUpdatedPRsForMainCommit(res.Repo, res.HeadSHA)
 	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts", "repo", res.Repo, "error", err)
 	}

@@ -10,26 +10,20 @@ import (
 	"testing"
 )
 
-type failedCheckTrackerTestCase struct {
-	name                    string
-	nilServer               bool
-	repo                    string
-	prNumber                int
-	headSHA                 string
-	presetHeadSHA           string
-	presetCancelledSHA      string
-	presetFailedChecks      []string
-	presetClearChecks       []string
-	wantEmitAdditional      []bool
-	presetNonRoboRevBlocked bool
-	presetRegistryCIFailed  bool
-	presetRegistryHeadSHA   string
-	commentsBody            string
-	evalCheck               string
-	wantRecover             bool
+type checkRecoveryTestCase struct {
+	name                   string
+	nilServer              bool
+	repo                   string
+	prNumber               int
+	headSHA                string
+	presetRegistryCIFailed bool
+	presetRegistryHeadSHA  string
+	commentsBody           string
+	evalCheck              string
+	wantRecover            bool
 }
 
-func runFailedCheckTrackerCase(t *testing.T, tc failedCheckTrackerTestCase) {
+func runCheckRecoveryCase(t *testing.T, tc checkRecoveryTestCase) {
 	t.Helper()
 	t.Parallel()
 	var srv *RouterServer
@@ -60,39 +54,14 @@ func runFailedCheckTrackerCase(t *testing.T, tc failedCheckTrackerTestCase) {
 		}
 		srv = newTestRouter(cfg, client, reg, nil)
 	}
-	if srv != nil && tc.presetCancelledSHA != "" {
-		srv.GHState().RecordCancelledCheckSHA(tc.repo, tc.prNumber, tc.presetCancelledSHA)
-	}
-	if srv != nil && tc.presetNonRoboRevBlocked {
-		srv.GHState().RecordNonRoboRevFailedSHA(tc.repo, tc.prNumber, tc.presetHeadSHA)
-	}
-	if srv != nil && tc.presetHeadSHA != "" {
-		for i, c := range tc.presetFailedChecks {
-			emit := srv.recordFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
-			if i < len(tc.wantEmitAdditional) && emit != tc.wantEmitAdditional[i] {
-				t.Errorf("recordFailedCheckRun(%q) emitAdditional = %v, want %v", c, emit, tc.wantEmitAdditional[i])
-			}
-		}
-		for _, c := range tc.presetClearChecks {
-			srv.clearActiveFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
-		}
-	}
-	var got bool
-	switch {
-	case isGateAggregatorCheck(tc.evalCheck):
-		got = srv.canRecoverCheckSuccess(context.Background(), tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
-	case isRoboRevCheck(tc.evalCheck):
-		got = srv.canRecoverRoboRevSuccess(context.Background(), tc.repo, tc.prNumber, tc.headSHA)
-	default:
-		got = srv.canRecoverNonGateCheckSuccess(tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
-	}
+	got := srv.canRecoverCheckSuccess(context.Background(), tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
 	if got != tc.wantRecover {
 		t.Fatalf("canRecover(%q) = %v, want %v", tc.evalCheck, got, tc.wantRecover)
 	}
 }
 
-func failedCheckTrackerCasesPart1() []failedCheckTrackerTestCase {
-	return []failedCheckTrackerTestCase{
+func checkRecoveryCasesPart1() []checkRecoveryTestCase {
+	return []checkRecoveryTestCase{
 		{
 			name:        "nil server returns false",
 			nilServer:   true,
@@ -119,7 +88,7 @@ func failedCheckTrackerCasesPart1() []failedCheckTrackerTestCase {
 			wantRecover: false,
 		},
 		{
-			name:        "zero head sha returns false",
+			name:        "zero head sha without registry failure returns false",
 			repo:        "azylman/aerial",
 			prNumber:    10,
 			headSHA:     "0000000000000000000000000000000000000000",
@@ -144,22 +113,6 @@ func failedCheckTrackerCasesPart1() []failedCheckTrackerTestCase {
 			wantRecover: false,
 		},
 		{
-			name:        "invalid PR number returns false for roborev",
-			repo:        "azylman/aerial",
-			prNumber:    0,
-			headSHA:     "sha10",
-			evalCheck:   "roborev",
-			wantRecover: false,
-		},
-		{
-			name:        "empty head sha returns false for roborev",
-			repo:        "azylman/aerial",
-			prNumber:    10,
-			headSHA:     "",
-			evalCheck:   "roborev",
-			wantRecover: false,
-		},
-		{
 			name:        "nil server returns false for CI Gate",
 			nilServer:   true,
 			repo:        "azylman/aerial",
@@ -169,137 +122,40 @@ func failedCheckTrackerCasesPart1() []failedCheckTrackerTestCase {
 			wantRecover: false,
 		},
 		{
-			name:        "empty head sha returns false for CI Gate",
+			name:                   "non-gate success recovers on registry ci_failed",
+			repo:                   "azylman/aerial",
+			prNumber:               11,
+			headSHA:                "sha11",
+			presetRegistryCIFailed: true,
+			presetRegistryHeadSHA:  "sha11",
+			evalCheck:              "Unit Tests",
+			wantRecover:            true,
+		},
+		{
+			name:                   "non-gate success rejected when registry head sha differs",
+			repo:                   "azylman/aerial",
+			prNumber:               12,
+			headSHA:                "sha12-new",
+			presetRegistryCIFailed: true,
+			presetRegistryHeadSHA:  "sha12-stale",
+			evalCheck:              "Unit Tests",
+			wantRecover:            false,
+		},
+		{
+			name:        "non-gate success without registry failure returns false",
 			repo:        "azylman/aerial",
-			prNumber:    10,
-			headSHA:     "",
-			evalCheck:   "CI Gate",
+			prNumber:    13,
+			headSHA:     "sha13",
+			evalCheck:   "Lint",
 			wantRecover: false,
-		},
-		{
-			name:               "single check failure and rerun success recovers",
-			repo:               "azylman/aerial",
-			prNumber:           11,
-			headSHA:            "sha11",
-			presetHeadSHA:      "sha11",
-			presetFailedChecks: []string{"Unit Tests"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        true,
-		},
-		{
-			name:               "unrelated check that never failed returns false",
-			repo:               "azylman/aerial",
-			prNumber:           12,
-			headSHA:            "sha12",
-			presetHeadSHA:      "sha12",
-			presetFailedChecks: []string{"Unit Tests"},
-			evalCheck:          "Lint",
-			wantRecover:        false,
-		},
-		{
-			name:               "mismatched sha returns false",
-			repo:               "azylman/aerial",
-			prNumber:           13,
-			headSHA:            "sha13-new",
-			presetHeadSHA:      "sha13-old",
-			presetFailedChecks: []string{"Unit Tests"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        false,
 		},
 	}
 }
 
-func failedCheckTrackerCasesPart2() []failedCheckTrackerTestCase {
-	return []failedCheckTrackerTestCase{
+func checkRecoveryCasesPart2() []checkRecoveryTestCase {
+	return []checkRecoveryTestCase{
 		{
-			name:               "two checks failed: one cleared active and one succeeds recovers",
-			repo:               "azylman/aerial",
-			prNumber:           14,
-			headSHA:            "sha14",
-			presetHeadSHA:      "sha14",
-			presetFailedChecks: []string{"Lint", "Unit Tests"},
-			presetClearChecks:  []string{"Lint"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        true,
-		},
-		{
-			name:               "two checks failed: one still active prevents recovery",
-			repo:               "azylman/aerial",
-			prNumber:           15,
-			headSHA:            "sha15",
-			presetHeadSHA:      "sha15",
-			presetFailedChecks: []string{"Lint", "Unit Tests"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        false,
-		},
-		{
-			name:               "roborev failing first returns false, then unit tests returns emitAdditional true",
-			repo:               "azylman/aerial",
-			prNumber:           16,
-			headSHA:            "sha16",
-			presetHeadSHA:      "sha16",
-			presetFailedChecks: []string{"roborev", "Unit Tests"},
-			wantEmitAdditional: []bool{false, true},
-			evalCheck:          "Unit Tests",
-			wantRecover:        false,
-		},
-		{
-			name:               "duplicate check failure for unit tests returns emitAdditional false",
-			repo:               "azylman/aerial",
-			prNumber:           17,
-			headSHA:            "sha17",
-			presetHeadSHA:      "sha17",
-			presetFailedChecks: []string{"roborev", "Unit Tests", "Unit Tests"},
-			wantEmitAdditional: []bool{false, true, false},
-			evalCheck:          "Unit Tests",
-			wantRecover:        false,
-		},
-		{
-			name:                    "multi-check recovery: clearing roborev first leaves non-roborev active preventing roborev recovery",
-			repo:                    "azylman/aerial",
-			prNumber:                18,
-			headSHA:                 "sha18",
-			presetHeadSHA:           "sha18",
-			presetFailedChecks:      []string{"roborev", "Unit Tests"},
-			presetNonRoboRevBlocked: true,
-			evalCheck:               "roborev",
-			wantRecover:             false,
-		},
-		{
-			name:               "multi-check recovery: clearing non-roborev clears blocker and allows roborev recovery",
-			repo:               "azylman/aerial",
-			prNumber:           19,
-			headSHA:            "sha19",
-			presetHeadSHA:      "sha19",
-			presetFailedChecks: []string{"roborev", "Unit Tests"},
-			presetClearChecks:  []string{"Unit Tests"},
-			evalCheck:          "roborev",
-			wantRecover:        true,
-		},
-		{
-			name:                    "multi-check recovery: non-roborev succeeds after roborev cleared recovers",
-			repo:                    "azylman/aerial",
-			prNumber:                20,
-			headSHA:                 "sha20",
-			presetHeadSHA:           "sha20",
-			presetFailedChecks:      []string{"roborev", "Unit Tests"},
-			presetClearChecks:       []string{"roborev"},
-			presetNonRoboRevBlocked: true,
-			evalCheck:               "Unit Tests",
-			wantRecover:             true,
-		},
-		{
-			name:               "gate check success blocked when roborev has active failure",
-			repo:               "azylman/aerial",
-			prNumber:           21,
-			headSHA:            "sha21",
-			presetHeadSHA:      "sha21",
-			presetFailedChecks: []string{"roborev"},
-			evalCheck:          "CI Gate",
-			wantRecover:        false,
-		},
-		{
-			name:                   "ci gate recovery via preset registry ci failed",
+			name:                   "ci gate success recovers on registry ci failed",
 			repo:                   "azylman/aerial",
 			prNumber:               22,
 			headSHA:                "sha22",
@@ -307,6 +163,24 @@ func failedCheckTrackerCasesPart2() []failedCheckTrackerTestCase {
 			presetRegistryHeadSHA:  "sha22",
 			evalCheck:              "CI Gate",
 			wantRecover:            true,
+		},
+		{
+			name:                   "ci gate recovery rejected when registry head sha differs",
+			repo:                   "azylman/aerial",
+			prNumber:               24,
+			headSHA:                "sha24-new",
+			presetRegistryCIFailed: true,
+			presetRegistryHeadSHA:  "sha24-stale",
+			evalCheck:              "CI Gate",
+			wantRecover:            false,
+		},
+		{
+			name:        "ci gate success without registry failure returns false",
+			repo:        "azylman/aerial",
+			prNumber:    27,
+			headSHA:     "sha27",
+			evalCheck:   "CI Gate",
+			wantRecover: false,
 		},
 		{
 			name:                   "roborev recovery via preset registry ci failed",
@@ -319,17 +193,7 @@ func failedCheckTrackerCasesPart2() []failedCheckTrackerTestCase {
 			wantRecover:            true,
 		},
 		{
-			name:                   "ci gate recovery rejected when preset registry head sha differs",
-			repo:                   "azylman/aerial",
-			prNumber:               24,
-			headSHA:                "sha24-new",
-			presetRegistryCIFailed: true,
-			presetRegistryHeadSHA:  "sha24-stale",
-			evalCheck:              "CI Gate",
-			wantRecover:            false,
-		},
-		{
-			name:                   "roborev recovery rejected when preset registry head sha differs",
+			name:                   "roborev recovery rejected when registry head sha differs",
 			repo:                   "azylman/aerial",
 			prNumber:               25,
 			headSHA:                "sha25-new",
@@ -348,141 +212,24 @@ func failedCheckTrackerCasesPart2() []failedCheckTrackerTestCase {
 			wantRecover:  true,
 		},
 		{
-			name:               "ci gate recovery via cancelled check on same sha",
-			repo:               "azylman/aerial",
-			prNumber:           27,
-			headSHA:            "sha27",
-			presetCancelledSHA: "sha27",
-			evalCheck:          "CI Gate",
-			wantRecover:        true,
+			name:         "roborev without matching comment returns false",
+			repo:         "azylman/aerial",
+			prNumber:     28,
+			headSHA:      "sha28",
+			commentsBody: `[{"body":"unrelated chatter"}]`,
+			evalCheck:    "roborev",
+			wantRecover:  false,
 		},
 	}
 }
 
-func TestFailedCheckTrackerHelpers(t *testing.T) {
+func TestCheckRecoveryHelpers(t *testing.T) {
 	t.Parallel()
 
-	tests := append(failedCheckTrackerCasesPart1(), failedCheckTrackerCasesPart2()...)
+	tests := append(checkRecoveryCasesPart1(), checkRecoveryCasesPart2()...)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runFailedCheckTrackerCase(t, tc)
-		})
-	}
-}
-
-func TestIsCachedFailedCISHA(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		nilServer  bool
-		repo       string
-		prNumber   int
-		headSHA    string
-		presetMap  string
-		presetSHA  string
-		wantCached bool
-	}{
-		{
-			name:       "nil server returns false",
-			nilServer:  true,
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "empty repo returns false",
-			repo:       "",
-			prNumber:   10,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "invalid prNumber <= 0 returns false",
-			repo:       "azylman/aerial",
-			prNumber:   0,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "empty head sha returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "",
-			wantCached: false,
-		},
-		{
-			name:       "zero head sha returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "0000000000000000000000000000000000000000",
-			wantCached: false,
-		},
-		{
-			name:       "uncached pr returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "cached in failedCheckSHAs returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			presetMap:  "failedCheckSHAs",
-			presetSHA:  "sha10",
-			wantCached: true,
-		},
-		{
-			name:       "cached in nonRoboRevFailedSHAs returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			presetMap:  "nonRoboRevFailedSHAs",
-			presetSHA:  "sha10",
-			wantCached: true,
-		},
-		{
-			name:       "cached in cancelledCheckSHAs returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			presetMap:  "cancelledCheckSHAs",
-			presetSHA:  "sha10",
-			wantCached: true,
-		},
-		{
-			name:       "cached sha mismatch returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10-new",
-			presetMap:  "failedCheckSHAs",
-			presetSHA:  "sha10-old",
-			wantCached: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{}
-				switch tc.presetMap {
-				case "failedCheckSHAs":
-					srv.GHState().RecordFailedCISHA(tc.repo, tc.prNumber, tc.presetSHA)
-				case "nonRoboRevFailedSHAs":
-					srv.GHState().RecordNonRoboRevFailedSHA(tc.repo, tc.prNumber, tc.presetSHA)
-				case "cancelledCheckSHAs":
-					srv.GHState().RecordCancelledCheckSHA(tc.repo, tc.prNumber, tc.presetSHA)
-				}
-			}
-			got := srv.isCachedFailedCISHA(tc.repo, tc.prNumber, tc.headSHA)
-			if got != tc.wantCached {
-				t.Fatalf("isCachedFailedCISHA() = %v, want %v", got, tc.wantCached)
-			}
+			runCheckRecoveryCase(t, tc)
 		})
 	}
 }
@@ -582,42 +329,6 @@ func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 	}
 }
 
-func TestRecordFailedCISHA_Unit(t *testing.T) {
-	t.Parallel()
-	var nilSrv *RouterServer
-	if nilSrv.recordFailedCISHA("azylman/aerial", 42, "sha1") {
-		t.Errorf("expected false for nil server")
-	}
-	nilSrv.clearFailedCISHA("azylman/aerial", 42)
-
-	srv := &RouterServer{}
-	if srv.recordFailedCISHA("", 42, "sha1") {
-		t.Errorf("expected false for empty repo")
-	}
-	if srv.recordFailedCISHA("azylman/aerial", 0, "sha1") {
-		t.Errorf("expected false for pr <= 0")
-	}
-	if srv.recordFailedCISHA("azylman/aerial", 42, "") {
-		t.Errorf("expected false for empty sha")
-	}
-	if srv.recordFailedCISHA("azylman/aerial", 42, "0000000000000000000000000000000000000000") {
-		t.Errorf("expected false for zero sha")
-	}
-
-	if !srv.recordFailedCISHA("azylman/aerial", 42, "sha1") {
-		t.Errorf("expected true on initial record")
-	}
-	if srv.recordFailedCISHA("azylman/aerial", 42, "sha1") {
-		t.Errorf("expected false on duplicate record")
-	}
-
-	srv.clearFailedCISHA("azylman/aerial", 0)
-	srv.clearFailedCISHA("azylman/aerial", 42)
-	if srv.isCachedFailedCISHA("azylman/aerial", 42, "sha1") {
-		t.Errorf("expected sha1 to be cleared")
-	}
-}
-
 func TestPublishDeployLifecycleEvent_Unit(t *testing.T) {
 	t.Parallel()
 	bus := &mockEventBus{}
@@ -631,98 +342,6 @@ func TestPublishDeployLifecycleEvent_Unit(t *testing.T) {
 	}
 	if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].JobName != "git-sync" {
 		t.Errorf("expected jobName git-sync, got %v", bus.publishedPREvents)
-	}
-}
-
-func TestFailedCheckRunTracking_Validation(t *testing.T) {
-	t.Parallel()
-	srv := &RouterServer{}
-	repo := "azylman/aerial"
-	pr := 42
-	sha1 := "abc1234"
-
-	var nilSrv *RouterServer
-	nilSrv.recordFailedCheckRun(repo, pr, sha1, "lint")
-	if nilSrv.hasActiveRoboRevFailure(repo, pr, sha1) {
-		t.Errorf("expected false for nil server hasActiveRoboRevFailure")
-	}
-	if srv.hasActiveRoboRevFailure("", pr, sha1) {
-		t.Errorf("expected false for empty repo")
-	}
-	if srv.hasActiveRoboRevFailure(repo, 0, sha1) {
-		t.Errorf("expected false for pr <= 0")
-	}
-	if srv.hasActiveRoboRevFailure(repo, pr, "") {
-		t.Errorf("expected false for empty sha")
-	}
-	if srv.hasActiveRoboRevFailure(repo, pr, sha1) {
-		t.Errorf("expected false before any failures recorded")
-	}
-
-	srv.recordFailedCheckRun("", pr, sha1, "lint")
-	srv.recordFailedCheckRun(repo, 0, sha1, "lint")
-	srv.recordFailedCheckRun(repo, pr, "", "lint")
-	srv.recordFailedCheckRun(repo, pr, "0000000000000000000000000000000000000000", "lint")
-	srv.recordFailedCheckRun(repo, pr, sha1, "")
-}
-
-func TestFailedCheckRunTracking_Flow(t *testing.T) {
-	t.Parallel()
-	srv := &RouterServer{}
-	repo := "azylman/aerial"
-	pr := 42
-	sha1 := "abc1234"
-	sha2 := "def5678"
-
-	if srv.recordFailedCheckRun(repo, pr, sha1, "roborev") {
-		t.Errorf("expected false for first failure on sha1")
-	}
-	if !srv.hasActiveRoboRevFailure(repo, pr, sha1) {
-		t.Errorf("expected true after recording roborev failure")
-	}
-	if !srv.recordFailedCheckRun(repo, pr, sha1, "lint") {
-		t.Errorf("expected true for second distinct failure on sha1")
-	}
-	if srv.recordFailedCheckRun(repo, pr, sha1, "lint") {
-		t.Errorf("expected false for duplicate failure")
-	}
-	if !srv.recordFailedCheckRun(repo, pr, sha1, "unit") {
-		t.Errorf("expected true for third distinct failure on sha1")
-	}
-
-	if !srv.GHState().HasActiveCheckRun(repo, pr, sha1, "lint") || !srv.GHState().HasActiveCheckRun(repo, pr, sha1, "unit") || !srv.GHState().HasActiveRoboRevFailure(repo, pr, sha1) {
-		t.Fatalf("expected state with 2 active non-roborev and roborev active failed")
-	}
-
-	srv.clearActiveFailedCheckRun(repo, pr, sha1, "roborev")
-	if srv.hasActiveRoboRevFailure(repo, pr, sha1) {
-		t.Errorf("expected false after clearing roborev active failure")
-	}
-	srv.clearActiveFailedCheckRun(repo, pr, sha1, "lint")
-	srv.clearActiveFailedCheckRun(repo, pr, sha1, "")
-	srv.clearActiveFailedCheckRun(repo, pr, "other-sha", "unit")
-
-	if srv.canRecoverNonGateCheckSuccess(repo, pr, "", sha1) {
-		t.Errorf("expected false for empty check")
-	}
-	if srv.canRecoverNonGateCheckSuccess(repo, pr, "non-existent", sha1) {
-		t.Errorf("expected false for never-failed check")
-	}
-	if !srv.canRecoverNonGateCheckSuccess(repo, pr, "unit", sha1) {
-		t.Errorf("expected true recovering last active failed check")
-	}
-
-	srv.recordFailedCheckRun(repo, pr, sha2, "lint")
-	if !srv.GHState().HasActiveCheckRun(repo, pr, sha2, "lint") || srv.GHState().HasActiveCheckRun(repo, pr, sha2, "unit") {
-		t.Fatalf("expected reset state for sha2")
-	}
-
-	if srv.hasCancelledCheckForSHA(repo, pr, sha1) {
-		t.Errorf("expected false when no cancelled check")
-	}
-	srv.GHState().RecordCancelledCheckSHA(repo, pr, sha1)
-	if !srv.hasCancelledCheckForSHA(repo, pr, sha1) {
-		t.Errorf("expected true after storing cancelled check")
 	}
 }
 
@@ -858,14 +477,13 @@ func TestHasFailedCIForSHA_ResponseHandling(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name               string
-		status             int
-		body               string
-		repo               string
-		prNumber           int
-		headSHA            string
-		presetCachedFailed bool
-		wantResult         bool
+		name       string
+		status     int
+		body       string
+		repo       string
+		prNumber   int
+		headSHA    string
+		wantResult bool
 	}{
 		{
 			name:       "404 not found treats as not failed",
@@ -942,11 +560,6 @@ func TestHasFailedCIForSHA_ResponseHandling(t *testing.T) {
 			wantResult: false,
 		},
 		{
-			name:               "cached failed sha returns true",
-			presetCachedFailed: true,
-			wantResult:         true,
-		},
-		{
 			name:       "dedupe filters out empty check name and metadata checks",
 			status:     http.StatusOK,
 			body:       `{"check_runs":[{"name":"","status":"completed","conclusion":"failure"},{"name":"build-metadata","status":"completed","conclusion":"failure"},{"app":{"slug":"dependabot"},"name":"Dependabot Check","status":"completed","conclusion":"failure"},{"id":1,"name":"Unit Tests","status":"completed","conclusion":"success"}]}`,
@@ -979,9 +592,6 @@ func TestHasFailedCIForSHA_ResponseHandling(t *testing.T) {
 			}
 
 			srv := newTestRouter(Config{GitHubAPIURL: ts.URL}, ts.Client(), nil, nil)
-			if tc.presetCachedFailed {
-				srv.GHState().RecordFailedCISHA(repo, prNumber, headSHA)
-			}
 			got := srv.hasFailedCIForSHA(context.Background(), repo, prNumber, headSHA)
 			if got != tc.wantResult {
 				t.Errorf("hasFailedCIForSHA() = %v, want %v", got, tc.wantResult)
@@ -993,21 +603,17 @@ func TestHasFailedCIForSHA_ResponseHandling(t *testing.T) {
 func TestRouterServer_NilGuards(t *testing.T) {
 	t.Parallel()
 	var nilSrv *RouterServer
-	nilSrv.rollbackFailedCheckRun("repo", 1, "sha", "check", false, false)
-	nilSrv.clearActiveFailedCheckRun("repo", 1, "sha", "check")
-	nilSrv.clearUpdatedPRsForMainCommit("repo", "sha")
-	if nilSrv.hasCancelledCheckForSHA("repo", 1, "sha") {
-		t.Errorf("expected false")
+	if emit, active, prior := nilSrv.recordFailedCheckRunDetailed("repo", 1, "sha", "check"); emit || active || prior {
+		t.Errorf("expected all false for nil server")
+	}
+	if emit, active, prior := nilSrv.recordNonGateCheckFailureDetailed(nil); emit || active || prior {
+		t.Errorf("expected all false for nil event")
 	}
 	if nilSrv.isAutoUpdateAuthorAllowed("author") {
 		t.Errorf("expected false")
 	}
-	nilSrv.recordCommitSHAPR("repo", "sha", 1, "main")
-	if _, _, ok := nilSrv.lookupCommitSHAPR("repo", "sha"); ok {
-		t.Errorf("expected false")
-	}
-	if nilSrv.GHState() != nil {
-		t.Errorf("expected nil GHState")
+	if _, _, err := nilSrv.resolvePRFromCommitSHA(context.Background(), "repo", "sha"); err == nil {
+		t.Errorf("expected error for nil client")
 	}
 	if err := nilSrv.completeCIFailureTransition(context.Background(), nil, "", ""); err != nil {
 		t.Errorf("expected nil err, got %v", err)
@@ -1017,9 +623,6 @@ func TestRouterServer_NilGuards(t *testing.T) {
 	}
 	if nilSrv.isPRRegistryCIFailed(context.Background(), "repo", 1) {
 		t.Errorf("expected false for nil server")
-	}
-	if recordCollaboratorSHAAlert(nil, "repo", 1, "sha") {
-		t.Errorf("expected false for nil map")
 	}
 	srv := &RouterServer{}
 	srv.handleStaleOpenPR(context.Background(), "repo", 1)

@@ -42,11 +42,11 @@ Probed `/healthz` and `/metrics` on all live instances:
    - `internal/buildmeta`: GitHub Actions workflow run build metadata consumer.
    - `internal/alerts`: VMAlert and event triggers tracker.
    - `internal/discord`: Discord Gateway consumer, catch-up sweeps, and watermarks.
-   - `internal/flux`: Flux rollout tracking, commit cache, and deploy dedup tracker.
-   - `internal/github`: GitHub webhook processing, status error classification, and state tracker.
+   - `internal/flux`: Flux rollout tracking and commit cache (the in-memory deploy dedup tracker was deleted in chunk 12; Restate and the deployed projection own dedup).
+   - `internal/github`: GitHub webhook processing and status error classification (the in-memory state tracker was deleted in chunk 12; Restate owns lifecycle authority).
    - Wired together by `internal/router` (`RouterServer`, HTTP routes, JetStream consumer).
 3. **Encapsulation & God-Struct Elimination**:
-   - Zero raw `sync.Map` fields remain on `RouterServer`. State tracking is fully delegated to encapsulated tracker structs (`alerts.Tracker`, `github.StateTracker`, `flux.DeployDedupTracker`, `flux.GitHistoryCache`).
+   - Zero raw `sync.Map` fields remain on `RouterServer`. State tracking is fully delegated to encapsulated structs (`alerts.Tracker`, `flux.GitHistoryCache`); the two legacy in-memory trackers named here were deleted in chunk 12.
    - Flat root sprawl completely eliminated; 11-subpackage DAG has zero circular imports.
 4. **Statement Coverage Floor Satisfied**:
    - Statement coverage stands at 96.11% (5,060 / 5,265 statements), exceeding the strict 95.0% floor.

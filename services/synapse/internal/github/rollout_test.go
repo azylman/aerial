@@ -563,47 +563,43 @@ func TestConflicts_PendingOrFailedChecks(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClient(srv.Client(), srv.URL, "token")
-	tracker := &StateTracker{}
 
 	// HasPendingOrFailedChecksForSHA guards
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "", 42, "head42") {
+	if HasPendingOrFailedChecksForSHA(context.Background(), client, "", 42, "head42") {
 		t.Errorf("expected false for empty repo")
 	}
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 0, "head42") {
+	if HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 0, "head42") {
 		t.Errorf("expected false for zero pr")
 	}
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 42, "") {
+	if HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 42, "") {
 		t.Errorf("expected false for empty sha")
 	}
-	if HasPendingOrFailedChecksForSHA(context.Background(), nil, tracker, "azylman/aerial", 42, "head42") {
+	if HasPendingOrFailedChecksForSHA(context.Background(), nil, "azylman/aerial", 42, "head42") {
 		t.Errorf("expected false for nil client")
 	}
 
 	// HasPendingOrFailedChecksForSHA (failing check)
-	hasFailed := HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 42, "head42")
+	hasFailed := HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 42, "head42")
 	if !hasFailed {
 		t.Errorf("expected hasFailed=true for failing check-run")
 	}
-	if !tracker.HasFailedCISHA("azylman/aerial", 42, "head42") {
-		t.Errorf("expected tracker to record failed CI SHA")
-	}
-	// Repeated call hits cache
-	if !HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 42, "head42") {
-		t.Errorf("expected cache hit to return true")
+	// Repeated call re-reads live check runs (no in-memory cache)
+	if !HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 42, "head42") {
+		t.Errorf("expected repeated call to return true")
 	}
 
 	// HasPendingOrFailedChecksForSHA (pending check)
-	hasPending := HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 50, "head-pending")
+	hasPending := HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 50, "head-pending")
 	if !hasPending {
 		t.Errorf("expected hasPending=true for in_progress check")
 	}
 
 	// 500 error returns true (!IsNotFound(err))
-	if !HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 51, "head-500") {
+	if !HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 51, "head-500") {
 		t.Errorf("expected true on 500 server error")
 	}
 	// 404 error returns false (!IsNotFound(err) is false)
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, tracker, "azylman/aerial", 52, "head-404") {
+	if HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 52, "head-404") {
 		t.Errorf("expected false on 404 not found")
 	}
 }
@@ -633,39 +629,32 @@ func TestConflicts_ResolvePRFromCommitSHA(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClient(srv.Client(), srv.URL, "token")
-	tracker := &StateTracker{}
 
 	// ResolvePRFromCommitSHA guards
-	if _, _, err := ResolvePRFromCommitSHA(context.Background(), client, tracker, "", "head42"); err == nil {
+	if _, _, err := ResolvePRFromCommitSHA(context.Background(), client, "", "head42"); err == nil {
 		t.Errorf("expected error for empty repo in ResolvePRFromCommitSHA")
 	}
-	if _, _, err := ResolvePRFromCommitSHA(context.Background(), client, tracker, "azylman/aerial", ""); err == nil {
+	if _, _, err := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", ""); err == nil {
 		t.Errorf("expected error for empty sha in ResolvePRFromCommitSHA")
 	}
-	if _, _, err := ResolvePRFromCommitSHA(context.Background(), nil, nil, "azylman/aerial", "head42"); err == nil {
-		t.Errorf("expected error for nil client without cached entry")
+	if _, _, err := ResolvePRFromCommitSHA(context.Background(), nil, "azylman/aerial", "head42"); err == nil {
+		t.Errorf("expected error for nil client")
 	}
 
 	// ResolvePRFromCommitSHA: selects closed PR 42 over open PR 40
-	prNum, branch, errResolve := ResolvePRFromCommitSHA(context.Background(), client, tracker, "azylman/aerial", "head42")
+	prNum, branch, errResolve := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head42")
 	if errResolve != nil || prNum != 42 || branch != "feat/branch" {
 		t.Errorf("ResolvePRFromCommitSHA failed: (%d, %q, %v)", prNum, branch, errResolve)
 	}
 
-	// Repeated resolution hits tracker cache
-	prCached, branchCached, errCached := ResolvePRFromCommitSHA(context.Background(), nil, tracker, "azylman/aerial", "head42")
-	if errCached != nil || prCached != 42 || branchCached != "feat/branch" {
-		t.Errorf("cached ResolvePRFromCommitSHA failed: (%d, %q, %v)", prCached, branchCached, errCached)
-	}
-
 	// Fallback to open PRs list when pulls endpoint is empty (finds PR 41)
-	prNumFb, branchFb, errFb := ResolvePRFromCommitSHA(context.Background(), client, tracker, "azylman/aerial", "head-fallback")
+	prNumFb, branchFb, errFb := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head-fallback")
 	if errFb != nil || prNumFb != 41 || branchFb != "feat/branch" {
 		t.Errorf("expected open PRs fallback to find PR 41: (%d, %q, %v)", prNumFb, branchFb, errFb)
 	}
 
 	// When neither endpoint finds any PR
-	if _, _, errEmpty := ResolvePRFromCommitSHA(context.Background(), client, tracker, "azylman/aerial", "head-empty"); errEmpty == nil {
+	if _, _, errEmpty := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head-empty"); errEmpty == nil {
 		t.Errorf("expected error when no PRs associated with commit")
 	}
 }

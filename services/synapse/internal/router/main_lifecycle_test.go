@@ -308,55 +308,6 @@ func runServerAppCase(t *testing.T, tc runServerLifecycleCase, cfgSrc *httpkit.R
 	}
 }
 
-func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, checkName string) bool {
-	emit, _, _ := s.recordFailedCheckRunDetailed(repo, prNumber, headSHA, checkName)
-	return emit
-}
-
-func (s *RouterServer) recordNonGateCheckFailure(res *ResolvedGitHubEvent) bool {
-	emit, _, _ := s.recordNonGateCheckFailureDetailed(res)
-	return emit
-}
-
-func TestRecordNonGateCheckFailure(t *testing.T) {
-	t.Parallel()
-	srv := &RouterServer{}
-	if srv.recordNonGateCheckFailure(nil) {
-		t.Errorf("expected false for nil event")
-	}
-	res1 := &ResolvedGitHubEvent{
-		Event:     ghEventCheckRun,
-		Repo:      "azylman/aerial",
-		PRNumber:  42,
-		HeadSHA:   "sha123",
-		CheckName: "build-service",
-	}
-	if srv.recordNonGateCheckFailure(res1) {
-		t.Errorf("expected false for initial check failure")
-	}
-	if sha, ok := srv.GHState().GetNonRoboRevFailedSHA("azylman/aerial", 42); !ok || sha != "sha123" {
-		t.Errorf("expected nonRoboRevFailedSHAs to record sha123, got %v", sha)
-	}
-	res2 := &ResolvedGitHubEvent{
-		Event:     ghEventCheckRun,
-		Repo:      "azylman/aerial",
-		PRNumber:  42,
-		HeadSHA:   "sha123",
-		CheckName: "test-service",
-	}
-	if !srv.recordNonGateCheckFailure(res2) {
-		t.Errorf("expected true for additional check failure")
-	}
-}
-
-func assertActiveCheckState(t *testing.T, srv *RouterServer, repo string, prNumber int, headSHA, checkName string, wantActive bool) {
-	t.Helper()
-	active := srv.GHState().HasActiveCheckRun(repo, prNumber, headSHA, checkName)
-	if active != wantActive {
-		t.Errorf("activeFailed[%s] = %v, want %v", checkName, active, wantActive)
-	}
-}
-
 func TestHandleCIFailureByHeadSHA_FallbackAndRollback(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -436,14 +387,12 @@ func TestHandleCIFailureByHeadSHA_FallbackAndRollback(t *testing.T) {
 				if handled {
 					t.Fatalf("expected handled = false on error")
 				}
-				assertActiveCheckState(t, srv, "azylman/aerial", 42, "sha-head", "test-check", false)
 				return
 			}
 			if tc.isCIFailed && tc.regPRNumber > 0 {
 				if !handled {
 					t.Fatalf("expected handled = true on success")
 				}
-				assertActiveCheckState(t, srv, "azylman/aerial", 42, "sha-head", "test-check", true)
 			}
 		})
 	}
@@ -671,66 +620,5 @@ func TestHandleCIFailureByPRNumber_Fallback(t *testing.T) {
 	handled, err := srv.handleCIFailureByPRNumber(ctx, res, "ci failed", "https://check.url", false, false)
 	if err != nil || !handled {
 		t.Fatalf("handleCIFailureByPRNumber() = (%v, %v), want (true, nil)", handled, err)
-	}
-}
-
-func TestRollbackFailedCheckRun(t *testing.T) {
-	t.Parallel()
-	srv := &RouterServer{}
-
-	// Guards handle invalid inputs without panic
-	srv.rollbackFailedCheckRun("azylman/aerial", 0, "sha123", "build", false, false)
-	srv.rollbackFailedCheckRun("azylman/aerial", 42, "sha123", "", false, false)
-	srv.rollbackFailedCheckRun("azylman/aerial", 42, "sha123", "build", true, false)
-	srv.rollbackFailedCheckRun("azylman/aerial", 42, "sha123", "build", false, false)
-
-	// Test roborev check rollback asserts activeFailed and everFailed state
-	resRR := &ResolvedGitHubEvent{
-		Event:     ghEventCheckRun,
-		Repo:      "azylman/aerial",
-		PRNumber:  42,
-		HeadSHA:   "sha123",
-		CheckName: "roborev",
-	}
-	srv.recordNonGateCheckFailureDetailed(resRR)
-	if !srv.GHState().HasActiveRoboRevFailure("azylman/aerial", 42, "sha123") || !srv.GHState().HasEverFailedCheckRun("azylman/aerial", 42, "sha123", "roborev") {
-		t.Fatalf("expected roborev activeFailed and everFailed before rollback")
-	}
-	srv.rollbackFailedCheckRun("azylman/aerial", 42, "sha123", "roborev", false, false)
-	if srv.GHState().HasActiveRoboRevFailure("azylman/aerial", 42, "sha123") || srv.GHState().HasEverFailedCheckRun("azylman/aerial", 42, "sha123", "roborev") {
-		t.Errorf("expected roborev activeFailed and everFailed cleared after rollback")
-	}
-
-	// Test non-roborev check rollback asserts activeFailed, everFailed, and nonRoboRevFailedSHAs state
-	resNonRR := &ResolvedGitHubEvent{
-		Event:     ghEventCheckRun,
-		Repo:      "azylman/aerial",
-		PRNumber:  43,
-		HeadSHA:   "sha123",
-		CheckName: "build",
-	}
-	srv.recordNonGateCheckFailureDetailed(resNonRR)
-	if !srv.GHState().HasActiveCheckRun("azylman/aerial", 43, "sha123", "build") || !srv.GHState().HasEverFailedCheckRun("azylman/aerial", 43, "sha123", "build") {
-		t.Fatalf("expected build activeFailed and everFailed before rollback")
-	}
-	if sha, ok := srv.GHState().GetNonRoboRevFailedSHA("azylman/aerial", 43); !ok || sha != "sha123" {
-		t.Fatalf("expected nonRoboRevFailedSHAs to record sha123 before rollback")
-	}
-	srv.rollbackFailedCheckRun("azylman/aerial", 43, "sha123", "build", false, false)
-	if srv.GHState().HasActiveCheckRun("azylman/aerial", 43, "sha123", "build") || srv.GHState().HasEverFailedCheckRun("azylman/aerial", 43, "sha123", "build") {
-		t.Errorf("expected build activeFailed and everFailed cleared after rollback")
-	}
-	if _, ok := srv.GHState().GetNonRoboRevFailedSHA("azylman/aerial", 43); ok {
-		t.Errorf("expected nonRoboRevFailedSHAs to be cleared after rolling back only active failure")
-	}
-
-	// Test hadPriorEverFailed preserves everFailed
-	srv.recordNonGateCheckFailureDetailed(resNonRR)
-	srv.rollbackFailedCheckRun("azylman/aerial", 43, "sha123", "build", false, true)
-	if srv.GHState().HasActiveCheckRun("azylman/aerial", 43, "sha123", "build") {
-		t.Errorf("expected activeFailed cleared on rollback")
-	}
-	if !srv.GHState().HasEverFailedCheckRun("azylman/aerial", 43, "sha123", "build") {
-		t.Errorf("expected everFailed preserved when hadPriorEverFailed was true")
 	}
 }

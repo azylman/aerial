@@ -45,10 +45,6 @@ type checkOpenPRConflictsTestCase struct {
 	wantDMs               int
 	wantUpdatedPRs        []string
 	checkRunsBySHA        map[string]string
-	presetFailedSHAs      map[int]string
-	presetUpdatedPRs      []int
-	wantCachedFailedSHAs  map[int]string
-	wantUncachedFailedPRs []int
 	prDetails             map[int]GitHubPullRequest
 	prDetailStatus        int
 }
@@ -179,17 +175,6 @@ func assertConflictCheckDispatcherCalls(t *testing.T, tc checkOpenPRConflictsTes
 
 func assertConflictCheckCacheAndPuts(t *testing.T, tc checkOpenPRConflictsTestCase, srv *RouterServer, putPaths []string) {
 	t.Helper()
-	for prNum, wantSHA := range tc.wantCachedFailedSHAs {
-		v, ok := srv.GHState().GetFailedCISHA("azylman/aerial", prNum)
-		if !ok || v != wantSHA {
-			t.Errorf("cached failedCheckSHAs[%d] = %v (ok=%v), want %q", prNum, v, ok, wantSHA)
-		}
-	}
-	for _, prNum := range tc.wantUncachedFailedPRs {
-		if v, ok := srv.GHState().GetFailedCISHA("azylman/aerial", prNum); ok {
-			t.Errorf("cached failedCheckSHAs[%d] = %v, want uncached", prNum, v)
-		}
-	}
 	if len(putPaths) != len(tc.wantUpdatedPRs) {
 		t.Fatalf("got updated PR paths %v, want %v", putPaths, tc.wantUpdatedPRs)
 	}
@@ -225,12 +210,6 @@ func runCheckOpenPRConflictsCase(ctx context.Context, t *testing.T, tc checkOpen
 		inserters = append(inserters, mockBus)
 	}
 	srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token", AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: true}, nil, mockReg, mockDisp, inserters...)
-	for prNum, sha := range tc.presetFailedSHAs {
-		srv.recordFailedCISHA("azylman/aerial", prNum, sha)
-	}
-	for _, prNum := range tc.presetUpdatedPRs {
-		srv.markUpdatedForCurrentMain("azylman/aerial", prNum)
-	}
 
 	err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
 	if (err != nil) != tc.wantErr {
@@ -526,19 +505,7 @@ func checkOpenPRConflictsCasesPart3() []checkOpenPRConflictsTestCase {
 			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
 		},
 		{
-			name:              "skips PR with in-memory failedCheckSHAs and updates next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			presetFailedSHAs:  map[int]string{550: "head550"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/failing", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
-			},
-			prResponses:    []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:  []int{http.StatusAccepted},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-		},
-		{
-			name:              "skips PR with failed check-run in API, caches failure, and updates next clean PR",
+			name:              "skips PR with failed check-run in API and updates next clean PR",
 			autoUpdateAuthors: []string{"trusted-author"},
 			checkRunsBySHA: map[string]string{
 				"head550": `{"check_runs":[{"name":"Unit Tests","status":"completed","conclusion":"failure"}]}`,
@@ -547,23 +514,23 @@ func checkOpenPRConflictsCasesPart3() []checkOpenPRConflictsTestCase {
 				makeTestOpenPR(550, "feat/failing-check", "head550", "trusted-author"),
 				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
 			},
-			prResponses:          []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:        []int{http.StatusAccepted},
-			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-			wantCachedFailedSHAs: map[int]string{550: "head550"},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
 		},
 		{
-			name:              "breaks without updating when leading clean PR already updated for current main",
+			name:              "updates leading clean PR without updated-for-main memory",
 			autoUpdateAuthors: []string{"trusted-author"},
-			presetUpdatedPRs:  []int{550},
 			openPRs: []GitHubPullRequest{
 				makeTestOpenPR(550, "feat/in-flight", "head550", "trusted-author"),
 				makeTestOpenPR(551, "feat/waiting", "head551", "trusted-author"),
 			},
-			wantUpdatedPRs: nil,
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
 		},
 		{
-			name:              "skips PR with pending check-run without caching failure and updates next clean PR",
+			name:              "skips PR with pending check-run and updates next clean PR",
 			autoUpdateAuthors: []string{"trusted-author"},
 			checkRunsBySHA: map[string]string{
 				"head550": `{"check_runs":[{"name":"roborev","status":"in_progress","conclusion":""}]}`,
@@ -572,15 +539,13 @@ func checkOpenPRConflictsCasesPart3() []checkOpenPRConflictsTestCase {
 				makeTestOpenPR(550, "feat/pending-check", "head550", "trusted-author"),
 				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
 			},
-			prResponses:           []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:         []int{http.StatusAccepted},
-			wantUpdatedPRs:        []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-			wantUncachedFailedPRs: []int{550},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
 		},
 		{
-			name:              "breaks without updating when leading clean PR already updated for current main has pending checks",
+			name:              "skips leading PR with pending checks and updates next clean PR",
 			autoUpdateAuthors: []string{"trusted-author"},
-			presetUpdatedPRs:  []int{550},
 			checkRunsBySHA: map[string]string{
 				"head550": `{"check_runs":[{"name":"roborev","status":"in_progress","conclusion":""}]}`,
 			},
@@ -588,24 +553,9 @@ func checkOpenPRConflictsCasesPart3() []checkOpenPRConflictsTestCase {
 				makeTestOpenPR(550, "feat/in-flight", "head550", "trusted-author"),
 				makeTestOpenPR(551, "feat/waiting", "head551", "trusted-author"),
 			},
-			wantUpdatedPRs:        nil,
-			wantUncachedFailedPRs: []int{550},
-		},
-		{
-			name:              "advances to update next clean PR when leading PR updated for current main has failed checks",
-			autoUpdateAuthors: []string{"trusted-author"},
-			presetUpdatedPRs:  []int{550},
-			checkRunsBySHA: map[string]string{
-				"head550": `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"failure"}]}`,
-			},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/failed-in-flight", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
-			},
-			prResponses:          []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:        []int{http.StatusAccepted},
-			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-			wantCachedFailedSHAs: map[int]string{550: "head550"},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
 		},
 	}
 }
@@ -629,9 +579,8 @@ func checkOpenPRConflictsCasesPart4() []checkOpenPRConflictsTestCase {
 			checkRunsBySHA: map[string]string{
 				"head550": `{"check_runs":[{"name":".github/dependabot.yml","status":"queued","conclusion":"","app":{"slug":"github-actions"}}]}`,
 			},
-			openPRs:               []GitHubPullRequest{makeTestOpenPR(550, "feat/actions-check", "head550", "trusted-author")},
-			wantUpdatedPRs:        nil,
-			wantUncachedFailedPRs: []int{550},
+			openPRs:        []GitHubPullRequest{makeTestOpenPR(550, "feat/actions-check", "head550", "trusted-author")},
+			wantUpdatedPRs: nil,
 		},
 		{
 			name:              "skips PR with queued Dependabot job from github-actions alongside dependabot app check",
@@ -639,9 +588,8 @@ func checkOpenPRConflictsCasesPart4() []checkOpenPRConflictsTestCase {
 			checkRunsBySHA: map[string]string{
 				"head550": `{"check_runs":[{"name":".github/dependabot.yml","status":"queued","conclusion":"","app":{"slug":"dependabot"}},{"name":"Dependabot","status":"queued","conclusion":"","app":{"slug":"github-actions"}}]}`,
 			},
-			openPRs:               []GitHubPullRequest{makeTestOpenPR(550, "feat/dependabot-job", "head550", "trusted-author")},
-			wantUpdatedPRs:        nil,
-			wantUncachedFailedPRs: []int{550},
+			openPRs:        []GitHubPullRequest{makeTestOpenPR(550, "feat/dependabot-job", "head550", "trusted-author")},
+			wantUpdatedPRs: nil,
 		},
 		{
 			name:              "422 head ref does not exist ignores merged PR without closing and updates next clean PR",

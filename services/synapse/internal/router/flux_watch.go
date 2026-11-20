@@ -357,17 +357,16 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			targetID = resolved
 		}
 	}
-	// Journal even on a suppress hit: a pre-flip dispatched mark proves the
-	// legacy publish already happened, not that Restate journaled it.
-	// Restate dedups the repeat; the guard below still skips duplicate
-	// publishes and prompts.
+	// Journal before the suppress check: the journal is the ordered record
+	// and Restate dedups the repeat; the guard below still skips duplicate
+	// publishes and prompts via the deployed projection.
 	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber); err != nil {
 		return err
 	}
 	if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
 		return err
 	}
-	if !s.wasDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber) {
+	if !s.shouldSuppressDuplicateDeploySuccess(ctx, pr.Repo, name, commitSHA, pr.PRNumber) {
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        eventDeploySuccess,
 			Repo:         pr.Repo,
@@ -387,7 +386,6 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
 			return err
 		}
-		s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
 	}
 	if s.registry != nil {
 		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, "deployed", map[string]any{"deploy_success_pending": false}); err != nil {
