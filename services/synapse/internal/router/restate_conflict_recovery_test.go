@@ -38,7 +38,7 @@ func conflictRecoveryServer(t *testing.T, conflictCalls, ackCalls, recoveryCalls
 			conflictCalls.Add(1)
 			w.WriteHeader(decisionStatus)
 			_, _ = io.WriteString(w, decisionBody)
-		case strings.HasSuffix(r.URL.Path, "/HandleConflictPublished"):
+		case strings.HasSuffix(r.URL.Path, "/HandleConflictPublished/send"):
 			ackCalls.Add(1)
 			w.WriteHeader(ackStatus)
 		case strings.HasSuffix(r.URL.Path, "/HandleCIRecovery"):

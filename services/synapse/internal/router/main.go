@@ -454,9 +454,12 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		})
 		return
 	}
+	// One effect-owner snapshot per request: stamped into the job when
+	// queued, or bound into ctx when processed inline.
+	owner := newEventEffectsOwner()
+	idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 	if s.bus != nil {
-		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
-		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
+		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt, EffectsOwner: owner}); err != nil {
 			slog.ErrorContext(r.Context(), "[synapse] failed to publish job to jetstream", "origin", logPrefix, "error", err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 			return
@@ -469,7 +472,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		return
 	}
 
-	processed, err := s.ProcessDeployEvent(r.Context(), evt)
+	processed, err := s.ProcessDeployEvent(jobContext(r.Context(), owner, eventIdentity("deploy", idempotencyKey)), evt)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "[synapse] error processing event", "origin", logPrefix, "error", err)
 	}

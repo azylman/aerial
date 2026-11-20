@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,10 +20,12 @@ import (
 //
 // What flips: with restate_authoritative: true in YAML, each entrypoint
 // routes its frozen PRObject/RepoObject event to Restate first via the
-// route* helpers below. A Restate send failure returns an error (webhook
-// 5xx for GitHub redelivery, watcher tick retry, readiness 503) so no
-// event is silently lost: Restate journaled effect keys deduplicate the
-// redelivery. Shadow (fail-closed) sends only run when the flag is
+// route* helpers below. Lifecycle events are one-way ingress sends keyed by
+// a deterministic Idempotency-Key; only verdicts stay request-response. A
+// Restate send failure returns an error (job retry, watcher tick retry,
+// readiness 503) so no event is silently lost: the ingress idempotency key
+// and journaled effect keys deduplicate the redelivery. Restate-owned
+// events retry on a long backoff; terminal 4xx rejections drop the job. Shadow (fail-closed) sends only run when the flag is
 // off; authoritative and shadow sends never double-fire.
 //
 // What stays live: the registry-backed pipeline (registry atomic
@@ -55,6 +58,84 @@ import (
 // suppress check still journals when authoritative; Restate absorbs the
 // repeat via stale-drop and the journaled effect key.
 
+// Effect ownership per event: every event is stamped legacy or restate
+// exactly once when synapse first accepts it (into the JetStream job at
+// publish time, or once per watcher call / HTTP request) and the stamp
+// rides ctx through every branch. Branches read the stamp, never the live
+// config, so a hot reload mid-job cannot split one event's effects between
+// synapse and prstate.
+
+type effectsOwnerKey struct{}
+
+// newEventEffectsOwner is the single snapshot point for a newly accepted
+// event's effect owner. It is always legacy until the authority flip wires
+// it to config; prstate then only records intended effects.
+func newEventEffectsOwner() string {
+	return restateclient.EffectsOwnerLegacy
+}
+
+// withEffectsOwner binds a normalized effect-owner stamp into ctx.
+func withEffectsOwner(ctx context.Context, owner string) context.Context {
+	return context.WithValue(ctx, effectsOwnerKey{}, restateclient.NormalizeEffectsOwner(owner))
+}
+
+// stampEffectsOwner snapshots the effect owner into ctx unless an earlier
+// accept point already stamped it, so nested entrypoints never re-decide.
+func stampEffectsOwner(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(effectsOwnerKey{}).(string); ok {
+		return ctx
+	}
+	return withEffectsOwner(ctx, newEventEffectsOwner())
+}
+
+// effectsOwnerFromContext returns the stamp bound into ctx; unstamped
+// contexts are legacy.
+func effectsOwnerFromContext(ctx context.Context) string {
+	owner, ok := ctx.Value(effectsOwnerKey{}).(string)
+	if !ok {
+		return restateclient.EffectsOwnerLegacy
+	}
+	return restateclient.NormalizeEffectsOwner(owner)
+}
+
+// restateOwnedSendError is a Restate send failure on an effects_owner=restate
+// event. Nothing else performs the event's effects, so the job retries it
+// with the long restate backoff; a terminal failure drops the job instead.
+type restateOwnedSendError struct {
+	handler  string
+	terminal bool
+	err      error
+}
+
+func (e *restateOwnedSendError) Error() string {
+	return fmt.Sprintf("restate-owned %s send: %v", e.handler, e.err)
+}
+
+// restateOwnedFailure classifies one restate-owned send failure, logging
+// terminal rejections at error level because the job is dropped.
+func restateOwnedFailure(ctx context.Context, handler string, err error) error {
+	if restateclient.IsTerminal(err) {
+		metrics.RecordRestateShadowSend(handler, "authoritative_terminal")
+		slog.ErrorContext(ctx, "[synapse] [restate-cutover] restate-owned send rejected terminally; dropping",
+			"handler", handler, "error", err)
+		return &restateOwnedSendError{handler: handler, terminal: true, err: err}
+	}
+	metrics.RecordRestateShadowSend(handler, "authoritative_error")
+	slog.WarnContext(ctx, "[synapse] [restate-cutover] restate-owned send failed; retrying",
+		"handler", handler, "error", err)
+	return &restateOwnedSendError{handler: handler, err: err}
+}
+
+// restateOwnedSendFailure reports whether err carries a restate-owned send
+// failure, and whether it is terminal.
+func restateOwnedSendFailure(err error) (failed, terminal bool) {
+	var rerr *restateOwnedSendError
+	if !errors.As(err, &rerr) {
+		return false, false
+	}
+	return true, rerr.terminal
+}
+
 // restateAuthoritative reports whether the Restate PRObject/RepoObject
 // journal owns github/deploy consumer decisions. Nil-safe: a server without
 // config stays on the legacy path.
@@ -69,18 +150,28 @@ func (s *RouterServer) restateAuthoritative() bool {
 // routeRepoEvent: authoritative sends journal through the enabled reporter
 // with one shared metric/error mapping, while shadow mode runs the given
 // fail-closed mirror. One core keeps the two frozen event shapes from
-// drifting into near-duplicate bodies.
+// drifting into near-duplicate bodies. Failures on effects_owner=legacy
+// events keep today's mapping; failures on effects_owner=restate events are
+// classified as retryable or terminal for the job retry policy.
 func (s *RouterServer) routeEvent(ctx context.Context, handler string, journal func(r *shadowRestateReporter, ctx context.Context) error, shadow func(ctx context.Context)) error {
 	if !s.restateAuthoritative() {
 		shadow(ctx)
 		return nil
 	}
+	restateOwned := effectsOwnerFromContext(ctx) == restateclient.EffectsOwnerRestate
 	r := s.restateShadow()
 	if !r.Enabled() {
-		return fmt.Errorf("restate authoritative with no restate_url configured")
+		err := errors.New("restate authoritative with no restate_url configured")
+		if restateOwned {
+			return restateOwnedFailure(ctx, handler, err)
+		}
+		return err
 	}
 	if err := journal(r, ctx); err != nil {
 		r.sendErrors.Add(1)
+		if restateOwned {
+			return restateOwnedFailure(ctx, handler, err)
+		}
 		metrics.RecordRestateShadowSend(handler, "authoritative_error")
 		slog.WarnContext(ctx, "[synapse] [restate-cutover] authoritative send failed",
 			"handler", handler, "error", err)
@@ -94,6 +185,7 @@ func (s *RouterServer) routeEvent(ctx context.Context, handler string, journal f
 // routePREvent journals one PRObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev restateclient.PREvent) error {
+	ev.EffectsOwner = effectsOwnerFromContext(ctx)
 	if ev.Agent == "" {
 		if s.registry != nil && ev.Repo != "" && ev.PRNumber > 0 {
 			ev.Agent = s.resolveOwningAgent(ctx, ev.Repo, ev.PRNumber, "")
@@ -114,6 +206,7 @@ func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev rest
 // routeRepoEvent journals one RepoObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routeRepoEvent(ctx context.Context, handler string, ev restateclient.RepoEvent) error {
+	ev.EffectsOwner = effectsOwnerFromContext(ctx)
 	if ev.Agent == "" && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
 		ev.Agent = s.cfgSrc.Current().DefaultOwnerAgent()
 	}
@@ -194,6 +287,7 @@ func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName,
 // PR-less payloads (no PRObject key exists for them).
 func resolvePRVerdict[T any](ctx context.Context, s *RouterServer, handler string, ev restateclient.PREvent) (T, error) {
 	var zero T
+	ev.EffectsOwner = effectsOwnerFromContext(ctx)
 	err := s.routeEvent(ctx, handler,
 		func(r *shadowRestateReporter, ctx context.Context) error {
 			return r.client.InvokePREvent(ctx, handler, ev, &zero)

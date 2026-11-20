@@ -33,7 +33,7 @@ func decisionTestServer(t *testing.T, decisionCalls, ackCalls *atomic.Int64, dec
 			decisionCalls.Add(1)
 			w.WriteHeader(decisionStatus)
 			_, _ = io.WriteString(w, decisionBody)
-		case strings.HasSuffix(r.URL.Path, "/HandleDeploySuccessPublished"):
+		case strings.HasSuffix(r.URL.Path, "/HandleDeploySuccessPublished/send"):
 			ackCalls.Add(1)
 			w.WriteHeader(ackStatus)
 		default:

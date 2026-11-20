@@ -271,16 +271,22 @@ type StoppedChildObservation struct {
 }
 
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
+// EffectsOwner is stamped once at publish time (legacy or restate) so every
+// branch handling the job agrees on who performs its side effects even if
+// config hot-reloads mid-job; a missing stamp means legacy.
 type GitHubWebhookArgs struct {
-	Event    string `json:"event"`
-	Delivery string `json:"delivery"`
-	Body     []byte `json:"body"`
+	Event        string `json:"event"`
+	Delivery     string `json:"delivery"`
+	Body         []byte `json:"body"`
+	EffectsOwner string `json:"effects_owner,omitempty"`
 }
 
 // DeployWebhookArgs contains payload data for durable background processing of deployment webhooks.
+// EffectsOwner is stamped once at publish time; a missing stamp means legacy.
 type DeployWebhookArgs struct {
 	IdempotencyKey string      `json:"idempotency_key,omitempty"`
 	Event          DeployEvent `json:"event"`
+	EffectsOwner   string      `json:"effects_owner,omitempty"`
 }
 
 // DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.
