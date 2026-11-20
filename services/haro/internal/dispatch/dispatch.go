@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -109,29 +107,6 @@ type HTTPPromptDispatcher struct {
 	restateURL string
 	agentName  string
 	httpClient *http.Client
-	busMu      sync.RWMutex
-	bus        pubsub.Bus
-}
-
-func (d *HTTPPromptDispatcher) SetEventBus(bus pubsub.Bus) {
-	if d != nil {
-		d.busMu.Lock()
-		d.bus = bus
-		d.busMu.Unlock()
-	}
-}
-
-func (d *HTTPPromptDispatcher) EventBus() pubsub.Bus {
-	return d.getBus()
-}
-
-func (d *HTTPPromptDispatcher) getBus() pubsub.Bus {
-	if d == nil {
-		return nil
-	}
-	d.busMu.RLock()
-	defer d.busMu.RUnlock()
-	return d.bus
 }
 
 func NewHTTPPromptDispatcher(brainURL string, restateOpts ...string) *HTTPPromptDispatcher {
@@ -462,31 +437,5 @@ func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest
 	if strings.TrimSpace(d.restateURL) != "" {
 		return d.dispatchRestate(ctx, req)
 	}
-	bus := d.getBus()
-	if bus == nil {
-		return DispatchResponse{}, errors.New("event bus is not configured")
-	}
-	dispatchID := strings.TrimSpace(req.ID)
-	if dispatchID == "" {
-		dispatchID = uuid.New().String()
-	}
-	args := pubsub.EriDispatchJobArgs{
-		ID:           dispatchID,
-		Source:       req.Source,
-		SessionID:    req.SessionID,
-		TargetID:     req.TargetID,
-		Prompt:       req.Prompt,
-		Effort:       req.Effort,
-		SkipIfActive: req.SkipIfActive,
-	}
-	msgID := "eri:dispatch:" + dispatchID
-	if err := bus.Publish(ctx, pubsub.SubjectEriDispatchJob, msgID, args); err != nil {
-		return DispatchResponse{}, err
-	}
-	return DispatchResponse{
-		Status:     "accepted",
-		DispatchID: dispatchID,
-		MessageID:  dispatchID,
-		SessionID:  req.SessionID,
-	}, nil
+	return postBrainJSON[DispatchRequest, DispatchResponse](ctx, d, "/dispatch", "dispatch", req)
 }

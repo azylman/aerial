@@ -54,9 +54,6 @@ const (
 	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
 	SubjectProsperaVoicemailJob    = "aerial.jobs.prospera.voicemail"
 	SubjectProsperaSMSJob          = "aerial.jobs.prospera.sms"
-	SubjectEriPromptJob            = "aerial.jobs.eri.prompt"
-	SubjectEriDispatchJob          = "aerial.jobs.eri.dispatch"
-	SubjectEriDiscordMessageJob    = "aerial.jobs.eri.discord_message"
 	SubjectHaroOneShotJob          = "aerial.jobs.haro.oneshot"
 )
 
@@ -223,35 +220,6 @@ type ProsperaSMSJobArgs struct {
 	Body          string   `json:"body"`
 	MediaURLs     []string `json:"media_urls,omitempty"`
 	RelatedCallID string   `json:"related_call_id,omitempty"`
-}
-
-// EriPromptJobArgs contains arguments for asynchronous Eri prompt execution jobs.
-type EriPromptJobArgs struct {
-	ChannelID      string `json:"channel_id"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	Silent         bool   `json:"silent,omitempty"`
-	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	DispatchID     string `json:"dispatch_id,omitempty"`
-}
-
-// EriDispatchJobArgs contains arguments for asynchronous Eri dispatch execution jobs.
-type EriDispatchJobArgs struct {
-	ID             string `json:"id,omitempty"`
-	Source         string `json:"source"`
-	SessionID      string `json:"session_id,omitempty"`
-	TargetID       string `json:"target_id,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
-}
-
-// EriDiscordMessageJobArgs contains arguments for asynchronous Discord message delivery jobs.
-type EriDiscordMessageJobArgs struct {
-	ChannelID string `json:"channel_id"`
-	Content   string `json:"content"`
 }
 
 // HaroOneShotJobArgs contains arguments for durable one-shot scheduled execution jobs.

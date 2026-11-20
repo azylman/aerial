@@ -244,7 +244,6 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	defer workerCancel()
 
 	bus := initCovenJetStream(ctx, worker, cfg.NATSURL)
-	publisher.SetEventBus(bus)
 	defer func() {
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {

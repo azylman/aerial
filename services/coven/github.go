@@ -12,10 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 var validSkillRelPathRegex = regexp.MustCompile(`^custom-skills/(common|discord)/[a-z0-9-]+/SKILL\.md$`)
@@ -40,7 +37,6 @@ type GitHubSkillPublisherConfig struct {
 	BaseURL         string
 	HTTPClient      *http.Client
 	Now             func() time.Time
-	Bus             pubsub.Bus
 	EriURL          string
 }
 
@@ -54,27 +50,7 @@ type GitHubSkillPublisher struct {
 	baseURL         string
 	httpClient      *http.Client
 	now             func() time.Time
-	busMu           sync.RWMutex
-	bus             pubsub.Bus
 	eriURL          string
-}
-
-// SetEventBus updates the pubsub bus used for notifications.
-func (p *GitHubSkillPublisher) SetEventBus(bus pubsub.Bus) {
-	if p != nil {
-		p.busMu.Lock()
-		p.bus = bus
-		p.busMu.Unlock()
-	}
-}
-
-func (p *GitHubSkillPublisher) getBus() pubsub.Bus {
-	if p == nil {
-		return nil
-	}
-	p.busMu.RLock()
-	defer p.busMu.RUnlock()
-	return p.bus
 }
 
 // NewGitHubSkillPublisher initializes a GitHubSkillPublisher instance.
@@ -109,7 +85,6 @@ func NewGitHubSkillPublisher(cfg GitHubSkillPublisherConfig) *GitHubSkillPublish
 		baseURL:         baseURL,
 		httpClient:      httpClient,
 		now:             now,
-		bus:             cfg.Bus,
 		eriURL:          strings.TrimRight(strings.TrimSpace(cfg.EriURL), "/"),
 	}
 }
@@ -508,24 +483,15 @@ func (p *GitHubSkillPublisher) notifyShortFrictionHTTP(ctx context.Context, cont
 	return p.postJSON(ctx, p.eriURL+"/discord/message", "discord message", payload)
 }
 
-// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via Eri HTTP or fallback JetStream.
+// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via Eri HTTP.
 func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content string) error {
 	if p.systemChannelID == "" || strings.TrimSpace(content) == "" {
 		return nil
 	}
-	if p.eriURL != "" {
-		return p.notifyShortFrictionHTTP(ctx, content)
+	if p.eriURL == "" {
+		return errors.New("eri URL is not configured")
 	}
-	bus := p.getBus()
-	if bus == nil {
-		return errors.New("event bus is not configured")
-	}
-	msgID := fmt.Sprintf("coven:friction:%s:%d", p.systemChannelID, p.now().UnixNano())
-	payload := pubsub.EriDiscordMessageJobArgs{
-		ChannelID: p.systemChannelID,
-		Content:   content,
-	}
-	return bus.Publish(ctx, pubsub.SubjectEriDiscordMessageJob, msgID, payload)
+	return p.notifyShortFrictionHTTP(ctx, content)
 }
 
 func formatShortFrictionAlert(batch SkillConsolidationBatch) string {
