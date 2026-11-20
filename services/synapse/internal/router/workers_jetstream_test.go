@@ -538,12 +538,9 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	}
 
 	cases := []struct {
-		name string
-		args any
-		// rawSubject, when set, publishes straight to that subject instead of
-		// via publishJetStreamJob (simulates a job the pre-rollout pod published).
-		rawSubject string
-		signal     <-chan struct{}
+		name   string
+		args   any
+		signal <-chan struct{}
 	}{
 		{
 			name:   "github",
@@ -582,28 +579,10 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 			args:   DiscordInteractionArgs{InteractionID: "wire-ix-beta", Agent: "beta"},
 			signal: interactionCh,
 		},
-		{
-			name:       "legacy discord_ingress drain",
-			args:       DiscordIngressArgs{MessageID: "wire-ing-legacy", Agent: "beta", Message: &discordgo.Message{ID: "wire-ing-legacy"}},
-			rawSubject: "aerial.jobs.synapse.discord_ingress",
-			signal:     ingressCh,
-		},
-		{
-			name:       "legacy discord_interaction drain",
-			args:       DiscordInteractionArgs{InteractionID: "wire-ix-legacy", Agent: "beta"},
-			rawSubject: "aerial.jobs.synapse.discord_interaction",
-			signal:     interactionCh,
-		},
 	}
 
 	for _, tc := range cases {
-		var err error
-		if tc.rawSubject != "" {
-			err = memBus.Publish(ctx, tc.rawSubject, tc.name, tc.args)
-		} else {
-			err = srv.publishJetStreamJob(ctx, tc.args)
-		}
-		if err != nil {
+		if err := srv.publishJetStreamJob(ctx, tc.args); err != nil {
 			t.Fatalf("publish(%s) error: %v", tc.name, err)
 		}
 		select {
@@ -857,8 +836,6 @@ func TestJobConsumerSpecs(t *testing.T) {
 	static := []string{
 		"aerial.jobs.synapse.github synapse-github",
 		"aerial.jobs.synapse.deploy synapse-deploy",
-		"aerial.jobs.synapse.discord_ingress synapse-discord-ingress",
-		"aerial.jobs.synapse.discord_interaction synapse-discord-interaction",
 	}
 	tests := []struct {
 		name      string

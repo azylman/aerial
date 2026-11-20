@@ -82,7 +82,7 @@ var (
 
 	// DiscordAgentQueueDepth breaks the Discord queues down per bot. The
 	// aggregate stays on QueueDepth so existing dashboards and alerts are
-	// unchanged; legacy drain-only consumers count toward QueueDepth only.
+	// unchanged.
 	DiscordAgentQueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "synapse_discord_agent_queue_depth",
@@ -241,8 +241,6 @@ type synapseConsumerTarget struct {
 var synapseConsumerTargets = []synapseConsumerTarget{
 	{stream: pubsub.StreamAerialJobs, consumer: "synapse-github", queue: QueueDefault},
 	{stream: pubsub.StreamAerialJobs, consumer: "synapse-deploy", queue: QueueDefault},
-	{stream: pubsub.StreamAerialJobs, consumer: LegacyDiscordIngressDurable, queue: QueueDiscordIngress},
-	{stream: pubsub.StreamAerialJobs, consumer: LegacyDiscordInteractionDurable, queue: QueueDiscordInteraction},
 }
 
 // consumerTargetsFor returns the static targets followed by one ingress and
@@ -346,14 +344,12 @@ func discordDedupID(prefix, agent, id string) string {
 	return prefix + id
 }
 
-// Legacy shared Discord subjects and durables. They are drain-only: synapse
-// still consumes them so jobs published before the per-agent rollout deliver,
-// but never publishes to them.
+// Base subject and durable prefixes for the per-agent Discord builders.
 const (
-	LegacyDiscordIngressSubject     = "aerial.jobs.synapse.discord_ingress"
-	LegacyDiscordInteractionSubject = "aerial.jobs.synapse.discord_interaction"
-	LegacyDiscordIngressDurable     = "synapse-discord-ingress"
-	LegacyDiscordInteractionDurable = "synapse-discord-interaction"
+	discordBaseIngressSubject     = "aerial.jobs.synapse.discord_ingress"
+	discordBaseInteractionSubject = "aerial.jobs.synapse.discord_interaction"
+	discordBaseIngressDurable     = "synapse-discord-ingress"
+	discordBaseInteractionDurable = "synapse-discord-interaction"
 )
 
 // SanitizeDiscordAgent lowercases and trims agent and maps it to a single
@@ -371,22 +367,22 @@ func SanitizeDiscordAgent(agent string) string {
 
 // DiscordIngressSubject returns the per-agent Discord message job subject.
 func DiscordIngressSubject(agent string) string {
-	return LegacyDiscordIngressSubject + "." + agentToken(agent)
+	return discordBaseIngressSubject + "." + agentToken(agent)
 }
 
 // DiscordInteractionSubject returns the per-agent Discord interaction job subject.
 func DiscordInteractionSubject(agent string) string {
-	return LegacyDiscordInteractionSubject + "." + agentToken(agent)
+	return discordBaseInteractionSubject + "." + agentToken(agent)
 }
 
 // DiscordIngressDurable returns the per-agent Discord message consumer durable.
 func DiscordIngressDurable(agent string) string {
-	return LegacyDiscordIngressDurable + "-" + agentToken(agent)
+	return discordBaseIngressDurable + "-" + agentToken(agent)
 }
 
 // DiscordInteractionDurable returns the per-agent Discord interaction consumer durable.
 func DiscordInteractionDurable(agent string) string {
-	return LegacyDiscordInteractionDurable + "-" + agentToken(agent)
+	return discordBaseInteractionDurable + "-" + agentToken(agent)
 }
 
 func agentToken(agent string) string {
