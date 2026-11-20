@@ -84,7 +84,7 @@ const ThemeToggle = memo(function ThemeToggle() {
   );
 });
 
-const DEFAULT_AGENTS = ['all', 'aerial', 'miorine', 'suletta'] as const;
+const DEFAULT_AGENTS = ['all', 'aerial'] as const;
 
 export const AgentSelector = memo(function AgentSelector() {
   const selectedAgent = useConsoleStore((s) => s.selectedAgent);

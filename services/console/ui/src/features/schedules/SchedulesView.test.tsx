@@ -436,13 +436,13 @@ describe('SchedulesView content', () => {
 
   it('filters summary metrics by selectedAgent', () => {
     const { container } = render(<SchedulesView />);
-    const crons = [cron('cron-a', { agent: 'aerial' }), cron('cron-b', { agent: 'miorine' })];
-    const oneShots = [once('once-a', { agent: 'aerial' }), once('once-b', { agent: 'miorine' })];
+    const crons = [cron('cron-a', { agent: 'aerial' }), cron('cron-b', { agent: 'agent-alpha' })];
+    const oneShots = [once('once-a', { agent: 'aerial' }), once('once-b', { agent: 'agent-alpha' })];
     seed(schedules(crons, oneShots), runs(RUNS, 10));
     expect(texts(container, '.summary-card .value')).toEqual(['2', '2', 'in 10m 0s', '94.0%']);
 
     act(() => {
-      useConsoleStore.getState().setSelectedAgent('miorine');
+      useConsoleStore.getState().setSelectedAgent('agent-alpha');
     });
     expect(texts(container, '.summary-card .value')).toEqual(['1', '1', 'in 10m 0s', '94.0%']);
   });

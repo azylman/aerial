@@ -41,7 +41,7 @@ describe('tab badge counts', () => {
           {
             active_tasks: [
               { id: 't1', agent: 'aerial' },
-              { id: 't2', agent: 'miorine' },
+              { id: 't2', agent: 'agent-alpha' },
               { id: 't3' },
             ],
           } as unknown as ClusterResponse,
@@ -59,7 +59,7 @@ describe('tab badge counts', () => {
             summary: { total_active: 3 },
             crons: [
               { id: 'c1', enabled: true, agent: 'aerial' },
-              { id: 'c2', enabled: true, agent: 'suletta' },
+              { id: 'c2', enabled: true, agent: 'agent-beta' },
             ],
             one_shots: [{ id: 'o1', agent: 'aerial' }],
           } as unknown as SchedulesAPIResponse,
@@ -76,12 +76,12 @@ describe('tab badge counts', () => {
           {
             total: 10,
             facts: [
-              { id: 1, agent: 'miorine' },
+              { id: 1, agent: 'agent-alpha' },
               { id: 2, agent: 'aerial' },
               { id: 3 },
             ],
           } as unknown as FactsAPIResponse,
-          'miorine',
+          'agent-alpha',
         ),
       want: 1,
     },
@@ -96,7 +96,7 @@ describe('tab badge counts', () => {
             queued_count: 1,
             builds: [
               { id: 'b1', status: 'running', agent: 'aerial' },
-              { id: 'b2', status: 'queued', agent: 'suletta' },
+              { id: 'b2', status: 'queued', agent: 'agent-beta' },
               { id: 'b3', status: 'completed', agent: 'aerial' },
             ],
           } as unknown as BuildsAPIResponse,
@@ -115,21 +115,21 @@ describe('filterByAgent & matchAgent', () => {
     readonly agent?: string;
   }
   const itemAerial: TestItem = { id: 1, agent: 'aerial' };
-  const itemMiorine: TestItem = { id: 2, agent: 'miorine' };
+  const itemAlpha: TestItem = { id: 2, agent: 'agent-alpha' };
   const itemDefault: TestItem = { id: 3 };
-  const items: readonly TestItem[] = [itemAerial, itemMiorine, itemDefault];
+  const items: readonly TestItem[] = [itemAerial, itemAlpha, itemDefault];
 
   it('matchAgent defaults to aerial when agent is absent', () => {
     expect(matchAgent(itemAerial, 'aerial')).toBe(true);
-    expect(matchAgent(itemMiorine, 'aerial')).toBe(false);
+    expect(matchAgent(itemAlpha, 'aerial')).toBe(false);
     expect(matchAgent(itemDefault, 'aerial')).toBe(true);
-    expect(matchAgent(itemMiorine, 'all')).toBe(true);
+    expect(matchAgent(itemAlpha, 'all')).toBe(true);
   });
 
   it('filterByAgent filters by selected agent and returns all when "all"', () => {
     expect(filterByAgent(items, 'all')).toBe(items);
     expect(filterByAgent(items, 'aerial')).toEqual([itemAerial, itemDefault]);
-    expect(filterByAgent(items, 'miorine')).toEqual([itemMiorine]);
+    expect(filterByAgent(items, 'agent-alpha')).toEqual([itemAlpha]);
     expect(filterByAgent(null, 'aerial')).toEqual([]);
   });
 });

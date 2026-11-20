@@ -138,17 +138,17 @@ describe('TaskQueue', () => {
     const { container } = render(<TaskQueue />);
     const tasksWithAgents: readonly ActiveTaskStatus[] = [
       task('1', { agent: 'aerial' }),
-      task('2', { agent: 'miorine' }),
-      task('3', { agent: 'suletta' }),
+      task('2', { agent: 'agent-alpha' }),
+      task('3', { agent: 'agent-beta' }),
     ];
     seed(tasksWithAgents);
 
     const badges = [...container.querySelectorAll('.agent-badge')].map((el) => el.textContent?.trim());
-    expect(badges).toEqual(['aerial', 'miorine', 'suletta']);
+    expect(badges).toEqual(['aerial', 'agent-alpha', 'agent-beta']);
 
-    act(() => useConsoleStore.getState().setSelectedAgent('miorine'));
+    act(() => useConsoleStore.getState().setSelectedAgent('agent-alpha'));
     const filteredBadges = [...container.querySelectorAll('.agent-badge')].map((el) => el.textContent?.trim());
-    expect(filteredBadges).toEqual(['miorine']);
+    expect(filteredBadges).toEqual(['agent-alpha']);
 
     act(() => useConsoleStore.getState().setSelectedAgent('all'));
     expect([...container.querySelectorAll('.agent-badge')]).toHaveLength(3);

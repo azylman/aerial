@@ -4,14 +4,19 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/goleak"
+
+	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // spanRecorder captures every span the console records under test.
@@ -64,6 +69,21 @@ func wrapHermeticTransport() {
 
 func init() {
 	wrapHermeticTransport()
+	tokenPath := os.Getenv("AERIAL_SA_TOKEN_PATH")
+	if tokenPath == "" {
+		if f, err := os.CreateTemp("", "console-test-sa-token-*"); err == nil {
+			_, _ = f.WriteString("test-sa-token")
+			_ = f.Close()
+			tokenPath = f.Name()
+			_ = os.Setenv("AERIAL_SA_TOKEN_PATH", tokenPath)
+		}
+	}
+	if brainHTTPClient != nil && tokenPath != "" {
+		brainHTTPClient = tracing.Client(&http.Client{
+			Timeout:   5 * time.Second,
+			Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, tokenPath),
+		})
+	}
 }
 
 func TestMain(m *testing.M) {

@@ -112,7 +112,7 @@ const actionRows: ActionRow[] = [
   { name: 'closeDrawer when closed is silent', seed: {}, action: 'closeDrawer', arg: undefined, wantNotified: false, wantSlice: 'drawer', wantValue: { kind: 'closed' } },
   { name: 'setActiveTab', seed: {}, action: 'setActiveTab', arg: 'memory', wantNotified: true, wantSlice: 'ui', wantValue: { activeTab: 'memory' } },
   { name: 'setActiveTab same tab is silent', seed: {}, action: 'setActiveTab', arg: 'telemetry', wantNotified: false, wantSlice: 'ui', wantValue: { activeTab: 'telemetry' } },
-  { name: 'setSelectedAgent', seed: {}, action: 'setSelectedAgent', arg: 'miorine', wantNotified: true, wantSlice: 'selectedAgent', wantValue: 'miorine' },
+  { name: 'setSelectedAgent', seed: {}, action: 'setSelectedAgent', arg: 'agent-alpha', wantNotified: true, wantSlice: 'selectedAgent', wantValue: 'agent-alpha' },
   { name: 'setSelectedAgent same agent is silent', seed: { selectedAgent: 'all' }, action: 'setSelectedAgent', arg: 'all', wantNotified: false, wantSlice: 'selectedAgent', wantValue: 'all' },
 ];
 

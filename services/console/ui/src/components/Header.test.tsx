@@ -142,22 +142,16 @@ describe('Header', () => {
     render(<Header />);
     const all = screen.getByRole('button', { name: 'All' });
     const aerial = screen.getByRole('button', { name: 'Aerial' });
-    const miorine = screen.getByRole('button', { name: 'Miorine' });
-    const suletta = screen.getByRole('button', { name: 'Suletta' });
 
     expect(all.getAttribute('aria-pressed')).toBe('true');
     expect(all.className).toContain('active');
     expect(aerial.getAttribute('aria-pressed')).toBe('false');
 
-    act(() => miorine.click());
-    expect(useConsoleStore.getState().selectedAgent).toBe('miorine');
-    expect(miorine.getAttribute('aria-pressed')).toBe('true');
-    expect(miorine.className).toContain('active');
+    act(() => aerial.click());
+    expect(useConsoleStore.getState().selectedAgent).toBe('aerial');
+    expect(aerial.getAttribute('aria-pressed')).toBe('true');
+    expect(aerial.className).toContain('active');
     expect(all.getAttribute('aria-pressed')).toBe('false');
-
-    act(() => suletta.click());
-    expect(useConsoleStore.getState().selectedAgent).toBe('suletta');
-    expect(suletta.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('renders configured_agents from cluster status payload', () => {
@@ -165,13 +159,18 @@ describe('Header', () => {
     act(() => {
       useConsoleStore.getState().setCluster({
         ...CLUSTER,
-        configured_agents: ['aerial', 'miorine'],
+        configured_agents: ['aerial', 'agent-alpha'],
       });
     });
     expect(screen.getByRole('button', { name: 'All' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Aerial' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Miorine' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Suletta' })).toBeNull();
+    const alpha = screen.getByRole('button', { name: 'Agent-alpha' });
+    expect(alpha).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Agent-beta' })).toBeNull();
+
+    act(() => alpha.click());
+    expect(useConsoleStore.getState().selectedAgent).toBe('agent-alpha');
+    expect(alpha.getAttribute('aria-pressed')).toBe('true');
   });
 });
 
@@ -217,7 +216,7 @@ const isolationRows: IsolationRow[] = [
   },
   {
     name: 'selectedAgent change: agent selector and affected tab badges re-render',
-    update: () => useConsoleStore.getState().setSelectedAgent('miorine'),
+    update: () => useConsoleStore.getState().setSelectedAgent('agent-alpha'),
     wantIcons: ['brain:14', 'target:14'],
     wantCommits: 1,
   },

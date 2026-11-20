@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,8 @@ const (
 	containerStateRunning = "running"
 	serviceOllama         = "ollama"
 	serviceAgentsview     = "agentsview"
+	defaultAgentTenant    = "aerial"
+	agentFilterAll        = "all"
 )
 
 var sensitiveKeys = []string{
@@ -171,6 +174,10 @@ func applyFactsQueryParams(outQuery url.Values, inQuery url.Values) (int, int) {
 		}
 		outQuery.Set("q", search)
 	}
+
+	if agent := strings.TrimSpace(inQuery.Get("agent")); agent != "" && !strings.EqualFold(agent, agentFilterAll) {
+		outQuery.Set("agent", NormalizeAgent(agent))
+	}
 	return limit, offset
 }
 
@@ -190,16 +197,44 @@ func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL s
 }
 
 // BuildSchedulesUpstreamURL validates the base URL and constructs the upstream /schedules URL.
-func BuildSchedulesUpstreamURL(haroBaseURL string) (string, error) {
+func BuildSchedulesUpstreamURL(haroBaseURL string, inQuery ...url.Values) (string, error) {
 	target, err := parseUpstreamURL(haroBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", haroBaseURL), "/schedules")
 	if err != nil {
 		return "", err
 	}
+	if len(inQuery) > 0 && inQuery[0] != nil {
+		outQuery := target.Query()
+		if agent := strings.TrimSpace(inQuery[0].Get("agent")); agent != "" && !strings.EqualFold(agent, agentFilterAll) {
+			outQuery.Set("agent", NormalizeAgent(agent))
+			target.RawQuery = outQuery.Encode()
+		}
+	}
 	return target.String(), nil
 }
 
+func applyScheduleRunsQueryParams(outQuery, inQuery url.Values) (int, int) {
+	limit := 50
+	offset := 0
+	if n, ok := parsePositiveInt(inQuery.Get("limit")); ok && n <= 100 {
+		limit = n
+	}
+	if n, ok := parseNonNegativeInt(inQuery.Get("offset")); ok {
+		offset = n
+	}
+	if schedID := strings.TrimSpace(inQuery.Get("schedule_id")); schedID != "" {
+		outQuery.Set("schedule_id", schedID)
+	}
+	if status := strings.TrimSpace(inQuery.Get("status")); status != "" {
+		outQuery.Set("status", status)
+	}
+	if agent := strings.TrimSpace(inQuery.Get("agent")); agent != "" && !strings.EqualFold(agent, agentFilterAll) {
+		outQuery.Set("agent", NormalizeAgent(agent))
+	}
+	return limit, offset
+}
+
 // BuildScheduleRunsUpstreamURL validates the base URL and constructs the upstream
-// /schedules/runs URL with sanitized limit, offset, schedule_id, and status parameters.
+// /schedules/runs URL with sanitized limit, offset, schedule_id, status, and agent parameters.
 func BuildScheduleRunsUpstreamURL(haroBaseURL string, inQuery url.Values) (targetURL string, limit, offset int, err error) {
 	target, err := parseUpstreamURL(haroBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", haroBaseURL), "/schedules/runs")
 	if err != nil {
@@ -211,20 +246,7 @@ func BuildScheduleRunsUpstreamURL(haroBaseURL string, inQuery url.Values) (targe
 	offset = 0
 
 	if inQuery != nil {
-		if n, ok := parsePositiveInt(inQuery.Get("limit")); ok && n <= 100 {
-			limit = n
-		}
-
-		if n, ok := parseNonNegativeInt(inQuery.Get("offset")); ok {
-			offset = n
-		}
-
-		if schedID := strings.TrimSpace(inQuery.Get("schedule_id")); schedID != "" {
-			outQuery.Set("schedule_id", schedID)
-		}
-		if status := strings.TrimSpace(inQuery.Get("status")); status != "" {
-			outQuery.Set("status", status)
-		}
+		limit, offset = applyScheduleRunsQueryParams(outQuery, inQuery)
 	}
 
 	outQuery.Set("limit", strconv.Itoa(limit))
@@ -235,7 +257,7 @@ func BuildScheduleRunsUpstreamURL(haroBaseURL string, inQuery url.Values) (targe
 }
 
 // BuildVanadisBuildsUpstreamURL validates the base URL and constructs the upstream /builds URL
-// with clamped limit (1..100, default 50), and optional status and queue_state query parameters.
+// with clamped limit (1..100, default 50), and optional status, queue_state, and agent query parameters.
 func BuildVanadisBuildsUpstreamURL(vanadisBaseURL string, inQuery url.Values) (targetURL string, limit int, err error) {
 	target, err := parseUpstreamURL(vanadisBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", vanadisBaseURL), "/builds")
 	if err != nil {
@@ -255,6 +277,9 @@ func BuildVanadisBuildsUpstreamURL(vanadisBaseURL string, inQuery url.Values) (t
 		}
 		if queueState := strings.TrimSpace(inQuery.Get("queue_state")); queueState != "" {
 			outQuery.Set("queue_state", queueState)
+		}
+		if agent := strings.TrimSpace(inQuery.Get("agent")); agent != "" && !strings.EqualFold(agent, agentFilterAll) {
+			outQuery.Set("agent", NormalizeAgent(agent))
 		}
 	}
 
@@ -830,4 +855,144 @@ func ExtractSingleContainerCommit(c DockerContainerJSON) string {
 		return rev
 	}
 	return ""
+}
+
+// NormalizeAgent cleans an agent identifier to a lowercase DNS slug ([a-z0-9-]).
+func NormalizeAgent(agent string) string {
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	var sb strings.Builder
+	for _, r := range clean {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+// MatchAgent reports whether an item's agent matches filterAgent.
+// An empty filter or "all" matches any item agent.
+// An empty item agent is treated as defaultAgentTenant.
+func MatchAgent(itemAgent, filterAgent string) bool {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return true
+	}
+	item := NormalizeAgent(itemAgent)
+	if item == "" {
+		item = defaultAgentTenant
+	}
+	return item == f
+}
+
+// SortConfiguredAgents normalizes and sorts agent slugs, always placing defaultAgentTenant first
+// and sorting any additional agents alphabetically without duplicates.
+func SortConfiguredAgents(agents []string) []string {
+	seen := make(map[string]bool)
+	var others []string
+
+	for _, raw := range agents {
+		a := NormalizeAgent(raw)
+		if a == "" || a == agentFilterAll || seen[a] {
+			continue
+		}
+		seen[a] = true
+		if a != defaultAgentTenant {
+			others = append(others, a)
+		}
+	}
+	sort.Strings(others)
+	result := make([]string, 0, len(others)+1)
+	result = append(result, defaultAgentTenant)
+	result = append(result, others...)
+	return result
+}
+
+// FilterFactsByAgent filters facts to those matching filterAgent.
+func FilterFactsByAgent(facts []FactItem, filterAgent string) []FactItem {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return facts
+	}
+	out := make([]FactItem, 0, len(facts))
+	for _, item := range facts {
+		if MatchAgent(item.Agent, f) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// FilterCronsByAgent filters cron schedules to those matching filterAgent.
+func FilterCronsByAgent(crons []CronSchedule, filterAgent string) []CronSchedule {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return crons
+	}
+	out := make([]CronSchedule, 0, len(crons))
+	for _, item := range crons {
+		if MatchAgent(item.Agent, f) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// FilterOneShotsByAgent filters one-shot schedules to those matching filterAgent.
+func FilterOneShotsByAgent(oneshots []OneShotSchedule, filterAgent string) []OneShotSchedule {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return oneshots
+	}
+	out := make([]OneShotSchedule, 0, len(oneshots))
+	for _, item := range oneshots {
+		if MatchAgent(item.Agent, f) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// FilterScheduleRunsByAgent filters schedule runs to those matching filterAgent.
+func FilterScheduleRunsByAgent(runs []ScheduleRun, filterAgent string) []ScheduleRun {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return runs
+	}
+	out := make([]ScheduleRun, 0, len(runs))
+	for _, item := range runs {
+		if MatchAgent(item.Agent, f) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// FilterBuildsByAgent filters Vanadis builds to those matching filterAgent.
+func FilterBuildsByAgent(builds []VanadisBuildDTO, filterAgent string) []VanadisBuildDTO {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return builds
+	}
+	out := make([]VanadisBuildDTO, 0, len(builds))
+	for _, item := range builds {
+		if MatchAgent(item.Agent, f) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// FilterActiveTasksByAgent filters active tasks to those matching filterAgent.
+func FilterActiveTasksByAgent(tasks []ActiveTaskStatus, filterAgent string) []ActiveTaskStatus {
+	f := NormalizeAgent(filterAgent)
+	if f == "" || f == agentFilterAll {
+		return tasks
+	}
+	out := make([]ActiveTaskStatus, 0, len(tasks))
+	for _, item := range tasks {
+		if MatchAgent(item.Agent, f) {
+			out = append(out, item)
+		}
+	}
+	return out
 }

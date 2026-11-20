@@ -53,17 +53,17 @@ describe('typed fetchers', () => {
       wantURL: '/console/api/schedules/runs?limit=50&offset=0',
     },
     { name: 'fetchBuilds', fetcher: 'fetchBuilds' as const, pathname: '/console/next/builds', wantURL: '/console/api/builds' },
-    { name: 'fetchStatus with agent', fetcher: 'fetchStatus' as const, pathname: '/console/next/', agent: 'miorine', wantURL: '/console/api/status?agent=miorine' },
-    { name: 'fetchFacts with agent', fetcher: 'fetchFacts' as const, pathname: '/console/next/', agent: 'suletta', wantURL: '/console/api/facts?agent=suletta' },
+    { name: 'fetchStatus with agent', fetcher: 'fetchStatus' as const, pathname: '/console/next/', agent: 'agent-alpha', wantURL: '/console/api/status?agent=agent-alpha' },
+    { name: 'fetchFacts with agent', fetcher: 'fetchFacts' as const, pathname: '/console/next/', agent: 'agent-beta', wantURL: '/console/api/facts?agent=agent-beta' },
     { name: 'fetchSchedules with agent', fetcher: 'fetchSchedules' as const, pathname: '/console/next/', agent: 'aerial', wantURL: '/console/api/schedules?agent=aerial' },
     {
       name: 'fetchScheduleRuns with agent',
       fetcher: 'fetchScheduleRuns' as const,
       pathname: '/console/next/',
-      agent: 'miorine',
-      wantURL: '/console/api/schedules/runs?limit=50&offset=0&agent=miorine',
+      agent: 'agent-alpha',
+      wantURL: '/console/api/schedules/runs?limit=50&offset=0&agent=agent-alpha',
     },
-    { name: 'fetchBuilds with agent', fetcher: 'fetchBuilds' as const, pathname: '/console/next/builds', agent: 'suletta', wantURL: '/console/api/builds?agent=suletta' },
+    { name: 'fetchBuilds with agent', fetcher: 'fetchBuilds' as const, pathname: '/console/next/builds', agent: 'agent-beta', wantURL: '/console/api/builds?agent=agent-beta' },
   ])('$name requests $wantURL', async ({ fetcher, pathname, agent, wantURL }) => {
     window.history.replaceState(null, '', pathname);
     const fetchMock = stubFetch(200, OK_BODY);

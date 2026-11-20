@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -88,6 +89,7 @@ type ActiveTaskStatus struct {
 	TriggerType string    `json:"trigger_type"`
 	CreatedAt   time.Time `json:"created_at"`
 	StartedAt   time.Time `json:"started_at"`
+	Agent       string    `json:"agent,omitempty"`
 }
 
 type BrainTasksAPIResponse struct {
@@ -105,6 +107,7 @@ type BrainTasksAPIResponse struct {
 		TriggerType string    `json:"trigger_type"`
 		CreatedAt   time.Time `json:"created_at"`
 		UpdatedAt   time.Time `json:"updated_at"`
+		Agent       string    `json:"agent,omitempty"`
 	} `json:"tasks"`
 }
 
@@ -153,6 +156,7 @@ type ClusterResponse struct {
 	GitSync          GitSyncStatusResponse `json:"git_sync"`
 	OngoingDeploy    string                `json:"ongoing_deploy"`
 	IsDeploying      bool                  `json:"is_deploying"`
+	ConfiguredAgents []string              `json:"configured_agents,omitempty"`
 }
 
 // Singleton tuned HTTP client for upstream brain communication
@@ -275,12 +279,103 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	return services, rawContainers, nil
 }
 
-func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTaskStatus, error) {
+type cachedDiscoveredAgents struct {
+	mu        sync.RWMutex
+	agents    []string
+	fetchedAt time.Time
+	ttl       time.Duration
+}
+
+func (c *cachedDiscoveredAgents) get(now time.Time) ([]string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.fetchedAt.IsZero() && now.Sub(c.fetchedAt) < c.ttl && len(c.agents) > 0 {
+		out := make([]string, len(c.agents))
+		copy(out, c.agents)
+		return out, true
+	}
+	return nil, false
+}
+
+func (c *cachedDiscoveredAgents) set(agents []string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.agents = make([]string, len(agents))
+	copy(c.agents, agents)
+	c.fetchedAt = now
+}
+
+var discoveredAgentsCache = &cachedDiscoveredAgents{ttl: 30 * time.Second}
+
+var configuredAgentsDiscoveryFn func(ctx context.Context) ([]string, error)
+
+func fetchAgentsFromEndpoint(ctx context.Context, client *http.Client, endpointURL string, extract func(body io.Reader) []string) []string {
+	if strings.TrimSpace(endpointURL) == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, http.NoBody)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	defer drainAndClose(resp.Body, "agent discovery response body")
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	return extract(resp.Body)
+}
+
+func fetchAgentsFromSchedules(ctx context.Context, haroURL string) []string {
+	return fetchAgentsFromEndpoint(ctx, brainHTTPClient, strings.TrimRight(haroURL, "/")+"/schedules", func(r io.Reader) []string {
+		var data SchedulesAPIResponse
+		if err := json.NewDecoder(r).Decode(&data); err != nil {
+			return nil
+		}
+		var agents []string
+		for _, c := range data.Crons {
+			if c.Agent != "" {
+				agents = append(agents, c.Agent)
+			}
+		}
+		for _, o := range data.OneShots {
+			if o.Agent != "" {
+				agents = append(agents, o.Agent)
+			}
+		}
+		return agents
+	})
+}
+
+func fetchAgentsFromBuilds(ctx context.Context, vanadisURL string) []string {
+	return fetchAgentsFromEndpoint(ctx, vanadisHTTPClient, strings.TrimRight(vanadisURL, "/")+"/builds?limit=50", func(r io.Reader) []string {
+		var data BuildsAPIResponse
+		if err := json.NewDecoder(r).Decode(&data); err != nil {
+			return nil
+		}
+		var agents []string
+		for _, b := range data.Builds {
+			if b.Agent != "" {
+				agents = append(agents, b.Agent)
+			}
+		}
+		return agents
+	})
+}
+
+func fetchActiveTasksFromBrain(ctx context.Context, brainURL string, agent ...string) ([]ActiveTaskStatus, error) {
 	if brainURL == "" {
 		return []ActiveTaskStatus{}, nil
 	}
 
 	reqURL := strings.TrimRight(brainURL, "/") + "/tasks"
+	if len(agent) > 0 && strings.TrimSpace(agent[0]) != "" && !strings.EqualFold(agent[0], "all") {
+		reqURL += "?agent=" + url.QueryEscape(NormalizeAgent(agent[0]))
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return []ActiveTaskStatus{}, err
@@ -329,6 +424,7 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 			TriggerType: t.TriggerType,
 			CreatedAt:   t.CreatedAt,
 			StartedAt:   startedAt,
+			Agent:       t.Agent,
 		})
 	}
 	return tasks, nil
@@ -427,10 +523,80 @@ func resolveClusterState(ctx context.Context, kubeAPIServer, gitCommit string, g
 	return services, rawContainers, currentCommit, err
 }
 
+func fetchUpstreamDiscoveredAgentsWithCache(ctx context.Context, cache *cachedDiscoveredAgents, haroURL, vanadisURL string, now time.Time) []string {
+	if cache != nil {
+		if cached, ok := cache.get(now); ok {
+			return cached
+		}
+	}
+
+	var mu sync.Mutex
+	var upstreamAgents []string
+	var wg sync.WaitGroup
+
+	if haroURL != "" {
+		wg.Go(func() {
+			ags := fetchAgentsFromSchedules(ctx, haroURL)
+			if len(ags) > 0 {
+				mu.Lock()
+				upstreamAgents = append(upstreamAgents, ags...)
+				mu.Unlock()
+			}
+		})
+	}
+
+	if vanadisURL != "" {
+		wg.Go(func() {
+			ags := fetchAgentsFromBuilds(ctx, vanadisURL)
+			if len(ags) > 0 {
+				mu.Lock()
+				upstreamAgents = append(upstreamAgents, ags...)
+				mu.Unlock()
+			}
+		})
+	}
+
+	wg.Wait()
+	if cache != nil {
+		cache.set(upstreamAgents, now)
+	}
+	return upstreamAgents
+}
+
+func fetchUpstreamDiscoveredAgents(ctx context.Context, haroURL, vanadisURL string, now time.Time) []string {
+	return fetchUpstreamDiscoveredAgentsWithCache(ctx, discoveredAgentsCache, haroURL, vanadisURL, now)
+}
+
+func discoverConfiguredAgents(ctx context.Context, allTasks []ActiveTaskStatus, haroURL, vanadisURL string, now time.Time) []string {
+	var discovered []string
+	if configuredAgentsDiscoveryFn != nil {
+		if ags, err := configuredAgentsDiscoveryFn(ctx); err == nil && len(ags) > 0 {
+			discovered = append(discovered, ags...)
+		}
+	}
+	for _, t := range allTasks {
+		if t.Agent != "" {
+			discovered = append(discovered, t.Agent)
+		}
+	}
+	if haroURL != "" || vanadisURL != "" {
+		discovered = append(discovered, fetchUpstreamDiscoveredAgents(ctx, haroURL, vanadisURL, now)...)
+	}
+	return SortConfiguredAgents(discovered)
+}
+
 func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
 	kubeAPIServer := ""
 	if len(optionalAddrs) > 0 {
 		kubeAPIServer = strings.TrimSpace(optionalAddrs[0])
+	}
+	haroURL := ""
+	if len(optionalAddrs) > 1 {
+		haroURL = strings.TrimSpace(optionalAddrs[1])
+	}
+	vanadisURL := ""
+	if len(optionalAddrs) > 2 {
+		vanadisURL = strings.TrimSpace(optionalAddrs[2])
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -455,13 +621,21 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 			deployments = []DeploymentStatus{}
 		}
 
-		activeTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
+		agentParam := strings.TrimSpace(r.URL.Query().Get("agent"))
+		allTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
 		if taskErr != nil {
 			slog.WarnContext(ctx, "[Console] failed to fetch active tasks from brain", "brain_url", brainURL, "error", taskErr)
-			activeTasks = []ActiveTaskStatus{}
+			allTasks = []ActiveTaskStatus{}
 		}
-		if activeTasks == nil {
-			activeTasks = []ActiveTaskStatus{}
+		if allTasks == nil {
+			allTasks = []ActiveTaskStatus{}
+		}
+
+		configuredAgents := discoverConfiguredAgents(ctx, allTasks, haroURL, vanadisURL, now)
+
+		activeTasks := allTasks
+		if agentParam != "" && !strings.EqualFold(agentParam, "all") {
+			activeTasks = FilterActiveTasksByAgent(allTasks, agentParam)
 		}
 
 		quickLinks := loadQuickLaunchLinks(configPath)
@@ -500,6 +674,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 			GitSync:          gitSync,
 			OngoingDeploy:    ongoingDeploy,
 			IsDeploying:      isDeploying,
+			ConfiguredAgents: configuredAgents,
 		}
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		writeJSON(w, r, http.StatusOK, resp)
@@ -535,10 +710,11 @@ func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 	if haroURL == "" {
 		haroURL = cfg.BrainURL
 	}
+	vanadisURL := strings.TrimSpace(cfg.VanadisURL)
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/console/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
-	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
+	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/console/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))

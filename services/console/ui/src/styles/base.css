@@ -368,16 +368,28 @@ body::after {
     color: var(--accent-primary);
 }
 
-.agent-badge[data-agent="miorine"],
-.agent-badge.agent-miorine {
+.agent-badge[data-agent-palette="0"],
+.agent-badge.agent-palette-0 {
     border-color: rgba(166, 227, 161, 0.4);
     color: var(--accent-emerald);
 }
 
-.agent-badge[data-agent="suletta"],
-.agent-badge.agent-suletta {
+.agent-badge[data-agent-palette="1"],
+.agent-badge.agent-palette-1 {
     border-color: rgba(243, 139, 168, 0.4);
     color: var(--accent-crimson);
+}
+
+.agent-badge[data-agent-palette="2"],
+.agent-badge.agent-palette-2 {
+    border-color: rgba(137, 180, 250, 0.4);
+    color: var(--accent-sapphire);
+}
+
+.agent-badge[data-agent-palette="3"],
+.agent-badge.agent-palette-3 {
+    border-color: rgba(249, 226, 175, 0.4);
+    color: var(--accent-amber);
 }
 
 /* Primary View Tabs - Inline Segmented Control */

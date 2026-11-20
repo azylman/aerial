@@ -21,6 +21,25 @@ type FactItem struct {
 	ReinforceCount   int       `json:"reinforce_count"`
 	LastReinforcedAt time.Time `json:"last_reinforced_at,omitzero"`
 	CreatedAt        time.Time `json:"created_at"`
+	Agent            string    `json:"agent,omitempty"`
+}
+
+// UnmarshalJSON handles decoding facts reading source_agent as agent if agent is missing.
+func (f *FactItem) UnmarshalJSON(data []byte) error {
+	type Alias FactItem
+	var aux struct {
+		Alias
+
+		SourceAgent string `json:"source_agent,omitempty"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*f = FactItem(aux.Alias)
+	if f.Agent == "" && aux.SourceAgent != "" {
+		f.Agent = aux.SourceAgent
+	}
+	return nil
 }
 
 type FactsAPIResponse struct {
@@ -54,6 +73,7 @@ type CronSchedule struct {
 	NextRunAt       time.Time `json:"next_run_at"`
 	Enabled         bool      `json:"enabled"`
 	CreatedAt       time.Time `json:"created_at"`
+	Agent           string    `json:"agent,omitempty"`
 }
 
 // OneShotSchedule represents a one-time scheduled reminder
@@ -63,6 +83,7 @@ type OneShotSchedule struct {
 	Prompt    string    `json:"prompt"`
 	RunAt     time.Time `json:"run_at"`
 	CreatedAt time.Time `json:"created_at"`
+	Agent     string    `json:"agent,omitempty"`
 }
 
 // SchedulesAPIResponse represents the response payload for schedules and summary metrics
@@ -90,6 +111,7 @@ type ScheduleRun struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	DurationMs   int64      `json:"duration_ms"`
 	Error        string     `json:"error,omitempty"`
+	Agent        string     `json:"agent,omitempty"`
 }
 
 // ScheduleRunsAPIResponse represents paginated execution run logs
@@ -121,6 +143,7 @@ type VanadisChunkDTO struct {
 	CompletedAt        time.Time `json:"completed_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+	Agent              string    `json:"agent,omitempty"`
 }
 
 // VanadisBuildDTO represents a Vanadis build run or build entry.
@@ -142,6 +165,7 @@ type VanadisBuildDTO struct {
 	PendingChunks   int               `json:"pending_chunks,omitempty"`
 	FailedChunks    int               `json:"failed_chunks,omitempty"`
 	Chunks          []VanadisChunkDTO `json:"chunks,omitempty"`
+	Agent           string            `json:"agent,omitempty"`
 }
 
 // BuildsAPIResponse represents the response payload for listing Vanadis builds.
@@ -282,6 +306,9 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 				if d.Facts == nil {
 					d.Facts = []FactItem{}
 				}
+				if agent := r.URL.Query().Get("agent"); agent != "" && !strings.EqualFold(agent, "all") {
+					d.Facts = FilterFactsByAgent(d.Facts, agent)
+				}
 			},
 		)
 	}
@@ -289,7 +316,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 
 func schedulesHandler(haroBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		targetURL, err := BuildSchedulesUpstreamURL(haroBaseURL)
+		targetURL, err := BuildSchedulesUpstreamURL(haroBaseURL, r.URL.Query())
 		serveUpstreamGET(
 			w, r, brainHTTPClient, "brain", "Brain service unreachable. Retrying...", targetURL, err,
 			func(status, errMsg string) SchedulesAPIResponse {
@@ -314,6 +341,13 @@ func schedulesHandler(haroBaseURL string) http.HandlerFunc {
 				if d.OneShots == nil {
 					d.OneShots = []OneShotSchedule{}
 				}
+				if agent := r.URL.Query().Get("agent"); agent != "" && !strings.EqualFold(agent, "all") {
+					d.Crons = FilterCronsByAgent(d.Crons, agent)
+					d.OneShots = FilterOneShotsByAgent(d.OneShots, agent)
+					d.Summary.CronCount = len(d.Crons)
+					d.Summary.OneShotCount = len(d.OneShots)
+					d.Summary.TotalActive = d.Summary.CronCount + d.Summary.OneShotCount
+				}
 			},
 		)
 	}
@@ -337,6 +371,9 @@ func scheduleRunsHandler(haroBaseURL string) http.HandlerFunc {
 			func(d *ScheduleRunsAPIResponse) {
 				if d.Runs == nil {
 					d.Runs = []ScheduleRun{}
+				}
+				if agent := r.URL.Query().Get("agent"); agent != "" && !strings.EqualFold(agent, "all") {
+					d.Runs = FilterScheduleRunsByAgent(d.Runs, agent)
 				}
 			},
 		)
@@ -390,6 +427,9 @@ func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 						d.Builds[i].Chunks[j].AcceptanceCriteria = nil
 					}
 					ensureChunksDependsOn(d.Builds[i].Chunks)
+				}
+				if agent := r.URL.Query().Get("agent"); agent != "" && !strings.EqualFold(agent, "all") {
+					d.Builds = FilterBuildsByAgent(d.Builds, agent)
 				}
 			},
 		)
