@@ -127,6 +127,7 @@ type WorkerPoolConfig struct {
 	TranscriptStore                  db.TranscriptStore
 	TranscriptsIndexerURL            string
 	TranscriptRecheckDelay           time.Duration
+	ChunkStepFlushInterval           time.Duration
 }
 
 type queueItem struct {
@@ -142,36 +143,37 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	appCfg              *config.Config
-	hasExplicitAppCfg   bool
-	overrideModel       string
-	cfg                 WorkerPoolConfig
-	sessionMgr          *session.Manager
-	mu                  sync.Mutex
-	threadChs           map[string]*threadWorkerState
-	activeTurns         map[string]*turnExecution
-	wg                  sync.WaitGroup
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	stopped, leaderHold bool
-	quotaLockedUntil    atomic.Int64
-	scopeLocks          sync.Map
-	webhookDispatcher   WebhookDispatcher
-	summaryGroup        singleflight.Group
-	pools               map[PoolKey]runner.AgentPool
-	voiceProcessPool    runner.AgentPool
-	eventBus            pubsub.Bus
-	createThreadFn      func(channelID, title string) (string, error)
-	widgetDeliveryMu    sync.Mutex
-	widgetLockHolder    atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
-	widgetChannelLocks  sync.Map                       // channelID string -> *widgetChannelLock
-	widgetMu            sync.Mutex
-	widgetsByID         map[string]discord.StatusWidgetRequest
-	widgetOrder         []string
-	chunkToBuildID      map[string]string
-	activeChunkSteps    map[string]string
-	activeChunkTurns    map[string]string
-	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
+	appCfg               *config.Config
+	hasExplicitAppCfg    bool
+	overrideModel        string
+	cfg                  WorkerPoolConfig
+	sessionMgr           *session.Manager
+	mu                   sync.Mutex
+	threadChs            map[string]*threadWorkerState
+	activeTurns          map[string]*turnExecution
+	wg                   sync.WaitGroup
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	stopped, leaderHold  bool
+	quotaLockedUntil     atomic.Int64
+	scopeLocks           sync.Map
+	webhookDispatcher    WebhookDispatcher
+	summaryGroup         singleflight.Group
+	pools                map[PoolKey]runner.AgentPool
+	voiceProcessPool     runner.AgentPool
+	eventBus             pubsub.Bus
+	createThreadFn       func(channelID, title string) (string, error)
+	widgetDeliveryMu     sync.Mutex
+	widgetLockHolder     atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
+	widgetChannelLocks   sync.Map                       // channelID string -> *widgetChannelLock
+	widgetMu             sync.Mutex
+	widgetsByID          map[string]discord.StatusWidgetRequest
+	widgetOrder          []string
+	chunkToBuildID       map[string]string
+	activeChunkSteps     map[string]string
+	activeChunkTurns     map[string]string
+	lastStepFlushByBuild map[string]time.Time
+	startedAt            time.Time // anchors queue.wait for rows resumed after a restart
 
 	TranscriptStore         db.TranscriptStore
 	TranscriptsIndexerURL   string
@@ -379,6 +381,11 @@ func applyWorkerPoolTimingDefaults(cfg *WorkerPoolConfig) {
 	}
 	if cfg.BackoffBase <= 0 {
 		cfg.BackoffBase = 3 * time.Second
+	}
+	if cfg.ChunkStepFlushInterval == 0 {
+		cfg.ChunkStepFlushInterval = DefaultChunkStepFlushInterval
+	} else if cfg.ChunkStepFlushInterval < 0 {
+		cfg.ChunkStepFlushInterval = 0
 	}
 }
 

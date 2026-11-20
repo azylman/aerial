@@ -47,8 +47,9 @@ const (
 )
 
 type widgetChannelLock struct {
-	mu     sync.Mutex
-	holder atomic.Pointer[widgetLockPath]
+	mu             sync.Mutex
+	holder         atomic.Pointer[widgetLockPath]
+	deliverWaiters atomic.Int32
 }
 
 // startWidgetSpan opens a child of the turn or request span carried by ctx. Without one it records
@@ -78,6 +79,21 @@ func (p *WorkerPool) unlockWidgetDelivery() {
 	p.widgetDeliveryMu.Unlock()
 }
 
+func (p *WorkerPool) channelHasDeliverWaiter(channelID string) bool {
+	if p == nil || strings.TrimSpace(channelID) == "" {
+		return false
+	}
+	actual, ok := p.widgetChannelLocks.Load(channelID)
+	if !ok || actual == nil {
+		return false
+	}
+	chanLock, ok := actual.(*widgetChannelLock)
+	if !ok || chanLock == nil {
+		return false
+	}
+	return chanLock.deliverWaiters.Load() > 0
+}
+
 func (p *WorkerPool) lockChannelWidgetDelivery(ctx context.Context, channelID string, path widgetLockPath) func() {
 	if strings.TrimSpace(channelID) == "" {
 		p.lockWidgetDelivery(ctx, path)
@@ -96,7 +112,13 @@ func (p *WorkerPool) lockChannelWidgetDelivery(ctx context.Context, channelID st
 		attrs = append(attrs, attrWidgetLockHolder.String(string(*holder)))
 	}
 	_, span := p.startWidgetSpan(ctx, spanWidgetLockWait, attrs...)
+	if path == widgetLockDeliver {
+		chanLock.deliverWaiters.Add(1)
+	}
 	chanLock.mu.Lock()
+	if path == widgetLockDeliver {
+		chanLock.deliverWaiters.Add(-1)
+	}
 	span.End()
 	chanLock.holder.Store(&path)
 
@@ -197,6 +219,9 @@ func (p *WorkerPool) ensureWidgetMapsLocked() {
 	}
 	if p.activeChunkTurns == nil {
 		p.activeChunkTurns = make(map[string]string)
+	}
+	if p.lastStepFlushByBuild == nil {
+		p.lastStepFlushByBuild = make(map[string]time.Time)
 	}
 }
 
@@ -322,6 +347,7 @@ func (p *WorkerPool) evictOldestWidgetLocked() {
 	oldest := p.widgetOrder[0]
 	p.widgetOrder = p.widgetOrder[1:]
 	delete(p.widgetsByID, oldest)
+	delete(p.lastStepFlushByBuild, oldest)
 	for cID, bID := range p.chunkToBuildID {
 		if bID == oldest {
 			delete(p.chunkToBuildID, cID)
@@ -365,6 +391,7 @@ func (p *WorkerPool) syncWidgetDeliveryStateLocked(req *discord.StatusWidgetRequ
 	p.syncWidgetChunkStatesLocked(req, existingPtr, isTerminalBuild)
 
 	if isTerminalBuild {
+		delete(p.lastStepFlushByBuild, req.ID)
 		for cID, bID := range p.chunkToBuildID {
 			if bID == req.ID {
 				delete(p.activeChunkSteps, cID)
@@ -541,18 +568,31 @@ func (p *WorkerPool) FlushChunkActiveStep(ctx context.Context, chunkID, turnID, 
 		}
 
 		req, ok := p.prepareChunkStepDeliveryLocked(chunkID, turnID, stepText)
-		p.widgetMu.Unlock()
 		if !ok {
+			p.widgetMu.Unlock()
 			unlock()
 			return nil
 		}
+		if p.channelHasDeliverWaiter(channelID) || (strings.TrimSpace(stepText) != "" && p.cfg.ChunkStepFlushInterval > 0 && time.Since(p.lastStepFlushByBuild[req.ID]) < p.cfg.ChunkStepFlushInterval) {
+			p.widgetMu.Unlock()
+			unlock()
+			return nil
+		}
+		p.widgetMu.Unlock()
 		deliveryReq = req
 		break
 	}
 	defer unlock()
 
 	span.SetAttributes(widgetDeliverAttrs(*deliveryReq)...)
-	return p.deliverChunkStepWidget(ctx, *deliveryReq)
+	if err := p.deliverChunkStepWidget(ctx, *deliveryReq); err != nil {
+		return err
+	}
+	p.widgetMu.Lock()
+	p.ensureWidgetMapsLocked()
+	p.lastStepFlushByBuild[deliveryReq.ID] = time.Now()
+	p.widgetMu.Unlock()
+	return nil
 }
 
 // deliverChunkStepWidget delivers a step edit and records the returned message ID so a sunk card stays tracked.
@@ -579,7 +619,20 @@ func (p *WorkerPool) finishChunkStepTurnLocked(chunkID, turnID string) (*discord
 	prevStep := p.activeChunkSteps[chunkID]
 	delete(p.activeChunkSteps, chunkID)
 
-	if prevStep == "" {
+	buildID := p.chunkToBuildID[chunkID]
+	var widgetHasStep bool
+	if buildID != "" {
+		if req, ok := p.widgetsByID[buildID]; ok {
+			for _, c := range req.Chunks {
+				if c.ID == chunkID && c.ActiveStep != "" {
+					widgetHasStep = true
+					break
+				}
+			}
+		}
+	}
+
+	if prevStep == "" && !widgetHasStep {
 		return nil, false
 	}
 

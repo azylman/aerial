@@ -43,8 +43,9 @@ const (
 	DefaultStatusDebounceDelay      = 1500 * time.Millisecond
 	DefaultStatusToolLatchDuration  = 2000 * time.Millisecond
 	DefaultStatusMinEditInterval    = 1000 * time.Millisecond
-	DefaultChunkStepTickerInterval  = 5000 * time.Millisecond
-	DefaultChunkStepMinEditInterval = 2500 * time.Millisecond
+	DefaultChunkStepTickerInterval  = 10000 * time.Millisecond
+	DefaultChunkStepMinEditInterval = 5000 * time.Millisecond
+	DefaultChunkStepFlushInterval   = 5000 * time.Millisecond
 	MaxStatusTextLength             = 100
 )
 
