@@ -434,6 +434,9 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	ignore(os.MkdirAll(canonicalBrain, 0o755))
 	ignore(os.MkdirAll(canonicalConversations, 0o755))
 	p.linkSharedSessionStorage(runtimeGemini, canonicalBrain, canonicalConversations)
+	if err := p.EnsureEngineHome(runtimeHome); err != nil {
+		log.Printf("[Env] Warning: failed to ensure engine home for %s: %v", runtimeHome, err)
+	}
 
 	// Unify claude projects across runtimes into shared storage
 	if p.dataDir != "" {

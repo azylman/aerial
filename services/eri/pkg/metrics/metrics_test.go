@@ -32,6 +32,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordChannelHistoryFetch("discord_api", "success", 150*time.Millisecond, 15)
 	RecordWebhookDispatch("on_wake", "success", 25*time.Millisecond)
 	RecordSessionRotation("pre_flight", "channel", "turns")
+	RecordUnrotatedSessionTurn()
 	RecordYieldTrap("resumed", "stderr_signature", "gemini-2.5-pro")
 	RecordVoiceTTFR("sse", "success", 380*time.Millisecond)
 	RecordVoiceTTFR("json", "success", 1200*time.Millisecond)
@@ -102,6 +103,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_webhooks_dispatched_total",
 		"aerial_brain_webhook_duration_seconds",
 		"aerial_brain_session_rotations_total",
+		"aerial_brain_unrotated_session_turns_total",
 		"aerial_brain_yield_trap_total",
 		"aerial_brain_voice_ttfr_duration_seconds",
 		"aerial_brain_build_info",

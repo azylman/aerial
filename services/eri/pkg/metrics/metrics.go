@@ -418,6 +418,14 @@ var (
 		[]string{"phase", "scope", labelReason},
 	)
 
+	// UnrotatedSessionTurnsTotal tracks turns executed on unrotated runaway sessions exceeding DefaultMaxSessionTurns.
+	UnrotatedSessionTurnsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_unrotated_session_turns_total",
+			Help: "Total count of turns executed on unrotated runaway sessions exceeding DefaultMaxSessionTurns.",
+		},
+	)
+
 	BuildInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_build_info",
@@ -501,6 +509,7 @@ func init() {
 		WebhooksDispatchedTotal,
 		WebhookDurationSeconds,
 		SessionRotationsTotal,
+		UnrotatedSessionTurnsTotal,
 		YieldTrapEventsTotal,
 		DaemonsActive,
 		DaemonSpawnsTotal,
@@ -809,6 +818,11 @@ func RecordSessionRotation(phase, scope, reason string) {
 	}
 	reason = NormalizeRotationReason(reason)
 	SessionRotationsTotal.WithLabelValues(phase, scope, reason).Inc()
+}
+
+// RecordUnrotatedSessionTurn increments the unrotated runaway session turn counter.
+func RecordUnrotatedSessionTurn() {
+	UnrotatedSessionTurnsTotal.Inc()
 }
 
 // RecordVoiceTTFR records time to first response latency for voice interactions categorized by mode (sse, json) and status (success, error).

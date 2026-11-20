@@ -42,6 +42,48 @@ type Provisioner struct {
 	mu sync.Mutex
 }
 
+// EnsureEngineHome links persistent engine assets for a runtime home, including symlinking
+// /data/runtimes/<rt>/.config to /data/brain/<rt>/.config so persistent configuration
+// (e.g. LINK_AUTH_FILE at .config/link-cli-nodejs/config.json) survives pod-local emptyDir rotations.
+func (p *Provisioner) EnsureEngineHome(runtimeHome string) error {
+	if p == nil {
+		return nil
+	}
+	cleanRuntimeHome := filepath.Clean(runtimeHome)
+	if cleanRuntimeHome == "" || cleanRuntimeHome == "." {
+		return nil
+	}
+	if p.dataDir == "" {
+		return nil
+	}
+
+	rt := filepath.Base(cleanRuntimeHome)
+	// Persistent canonical .config directory under /data/brain/<rt>/.config
+	canonicalConfig := filepath.Join(p.dataDir, "brain", rt, ".config")
+	if err := os.MkdirAll(canonicalConfig, 0o755); err != nil {
+		return fmt.Errorf("failed to create persistent config dir %q: %w", canonicalConfig, err)
+	}
+
+	runtimeConfig := filepath.Join(cleanRuntimeHome, ".config")
+	cleanCanonical := filepath.Clean(canonicalConfig)
+	if filepath.Clean(runtimeConfig) == cleanCanonical {
+		return nil
+	}
+
+	if prepareSharedTargetDir(runtimeConfig, cleanCanonical) {
+		return nil
+	}
+
+	if err := os.MkdirAll(cleanRuntimeHome, 0o755); err != nil {
+		return fmt.Errorf("failed to create runtime home %q: %w", cleanRuntimeHome, err)
+	}
+
+	if err := symlinkRuntimeAsset(canonicalConfig, runtimeConfig); err != nil {
+		return fmt.Errorf("failed to link persistent .config %s -> %s: %w", runtimeConfig, canonicalConfig, err)
+	}
+	return nil
+}
+
 var (
 	getEuid          = os.Geteuid
 	chownPath        = os.Lchown

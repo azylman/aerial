@@ -60,6 +60,8 @@ type UnifiedProcessPool struct {
 	targetMu       sync.Mutex
 	sf             singleflight.Group
 	bgWg           sync.WaitGroup
+	watchdogWg     sync.WaitGroup
+	watchdogOnce   sync.Once
 	closed         bool
 	closeOnce      sync.Once
 	closeErr       error
@@ -73,13 +75,16 @@ var (
 	_ AgentSession = (*StreamingDaemon)(nil)
 )
 
+// DefaultMaxIdle is the default maximum idle duration for unleased pre-warmed daemons before eviction.
+const DefaultMaxIdle = 15 * time.Minute
+
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
 func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProcessPool {
 	if spawner == nil {
 		spawner = &DefaultDaemonSpawner{}
 	}
 	if cfg.MaxIdle <= 0 {
-		cfg.MaxIdle = 24 * time.Hour
+		cfg.MaxIdle = DefaultMaxIdle
 	}
 	if cfg.WatchdogInterval <= 0 {
 		cfg.WatchdogInterval = DefaultWatchdogInterval
@@ -93,7 +98,7 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 		resolvedModel = cfg.DefaultModel
 	}
 	cfg.Model, cfg.DefaultModel = resolvedModel, resolvedModel
-	return &UnifiedProcessPool{
+	pool := &UnifiedProcessPool{
 		cfg:            cfg,
 		spawner:        spawner,
 		daemons:        make(map[string]*StreamingDaemon),
@@ -103,6 +108,55 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 		cancel:         cancel,
 		daemonIDPrefix: fmt.Sprintf("p%d", poolSeq.Add(1)),
 	}
+	if len(cfg.PrewarmedTargets) > 0 {
+		pool.startWatchdogLoop()
+	}
+	return pool
+}
+
+func (p *UnifiedProcessPool) startWatchdogLoop() {
+	p.watchdogOnce.Do(func() {
+		p.watchdogWg.Go(func() {
+			ticker := time.NewTicker(p.cfg.WatchdogInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-p.ctx.Done():
+					return
+				case <-ticker.C:
+					p.reapIdlePrewarmedDaemons()
+				}
+			}
+		})
+	})
+}
+
+// reapIdlePrewarmedDaemons evicts and terminates unleased daemons whose idle duration exceeds MaxIdle.
+// Active leased daemons (holding a target lock or running turns) are kept untouched.
+func (p *UnifiedProcessPool) reapIdlePrewarmedDaemons() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	maxIdle := p.cfg.MaxIdle
+	now := time.Now()
+	var toEvict []evictedEntry
+	for target, d := range p.daemons {
+		// A daemon is eligible for idle eviction only if it has zero in-flight turns,
+		// is not locked by an active session lease, and its last used time exceeds maxIdle.
+		if d != nil && d.InflightCount() == 0 && !p.isTargetLocked(target) {
+			lastUsed := d.LastUsed()
+			if !lastUsed.IsZero() && now.Sub(lastUsed) > maxIdle {
+				delete(p.daemons, target)
+				toEvict = append(toEvict, evictedEntry{targetKey: target, daemon: d})
+			}
+		}
+	}
+	p.bgWg.Add(len(toEvict))
+	p.mu.Unlock()
+
+	p.closeEvictedEntries(toEvict)
 }
 
 // mcpTarget is the runtime home's directory name (runtimes/<target>), which names the
@@ -237,7 +291,7 @@ func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string
 	if !acquired {
 		return nil
 	}
-	defer p.releaseTargetLock(trimmed, tl, true)
+	defer p.releaseTargetLock(trimmed, tl)
 	if d, ok := p.Get(trimmed); ok && !d.IsDirty() {
 		return nil
 	}
@@ -520,6 +574,7 @@ func (p *UnifiedProcessPool) Close() error {
 		if p.cancel != nil {
 			p.cancel()
 		}
+		p.watchdogWg.Wait()
 		p.bgWg.Wait()
 
 		var wg sync.WaitGroup
@@ -589,6 +644,9 @@ func (p *UnifiedProcessPool) UpdatePrewarmedTargets(targets []string) {
 		}
 	}
 	p.cfg.PrewarmedTargets = newTargets
+	if len(newTargets) > 0 {
+		p.startWatchdogLoop()
+	}
 }
 
 type evictedEntry struct {
@@ -656,17 +714,21 @@ func (p *UnifiedProcessPool) MarkDirty() {
 	toClose, toPrewarm := p.collectDirtyEvictionsAndPrewarmsLocked()
 	p.mu.Unlock()
 
-	for _, entry := range toClose {
+	p.closeEvictedEntries(toClose)
+
+	for _, target := range toPrewarm {
+		go p.rewarmTarget(p.ctx, target)
+	}
+}
+
+func (p *UnifiedProcessPool) closeEvictedEntries(entries []evictedEntry) {
+	for _, entry := range entries {
 		go func(e evictedEntry) {
 			defer p.bgWg.Done()
 			if err := e.daemon.Close(); err != nil {
 				log.Printf("[UnifiedProcessPool] Warning: error closing evicted daemon %q: %v", e.targetKey, err)
 			}
 		}(entry)
-	}
-
-	for _, target := range toPrewarm {
-		go p.rewarmTarget(p.ctx, target)
 	}
 }
 
@@ -937,8 +999,8 @@ func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey st
 	return tl, err
 }
 
-func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
-	releasePoolTargetLock(&p.targetMu, p.targetLocks, targetKey, tl, held)
+func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock) {
+	releasePoolTargetLock(&p.targetMu, p.targetLocks, targetKey, tl, true)
 }
 
 // AcquireLease blocks until the target lock is acquired and returns an exclusive SessionLease.
@@ -964,7 +1026,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 	}
 	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID, rec.TurnCount)
 	if dErr != nil {
-		p.releaseTargetLock(trimmedKey, tl, true)
+		p.releaseTargetLock(trimmedKey, tl)
 		return nil, fmt.Errorf("failed to get or create daemon for %s: %w", trimmedKey, dErr)
 	}
 
@@ -1231,16 +1293,23 @@ func (l *unifiedSessionLease) evaluateRotation() (bool, string) {
 	turnCount := l.turnCount
 	l.mu.RUnlock()
 
-	if cancelRot || strings.Contains(targetKey, "-ondemand-") || (d != nil && d.State() == StateClosed && !poolClosed) {
-		return false, ""
-	}
-	shouldRotate, reason := l.pool.ShouldRotate(d)
 	maxTurns := DefaultMaxSessionTurns
 	if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
 		maxTurns = l.pool.cfg.MaxSessionTurns
 	}
+
+	if cancelRot || strings.Contains(targetKey, "-ondemand-") || (d != nil && d.State() == StateClosed && !poolClosed) {
+		if turnCount > maxTurns {
+			metrics.RecordUnrotatedSessionTurn()
+		}
+		return false, ""
+	}
+	shouldRotate, reason := l.pool.ShouldRotate(d)
 	if !shouldRotate && turnCount >= maxTurns {
 		shouldRotate, reason = true, fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
+	}
+	if !shouldRotate && turnCount > maxTurns {
+		metrics.RecordUnrotatedSessionTurn()
 	}
 	return shouldRotate, reason
 }
@@ -1253,7 +1322,7 @@ func (l *unifiedSessionLease) ShouldRotate() bool {
 func (l *unifiedSessionLease) Release() error {
 	var releaseErr error
 	l.releaseOnce.Do(func() {
-		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
+		defer l.pool.releaseTargetLock(l.targetKey, l.lock)
 		shouldRotate, reason := l.evaluateRotation()
 		if !shouldRotate {
 			return
