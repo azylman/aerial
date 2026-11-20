@@ -400,7 +400,12 @@ func (d *StreamingDaemon) syncTurnEnvFile(turnCtx *TurnContext) error {
 	if err := os.MkdirAll(filepath.Dir(turnEnvFile), 0o755); err != nil {
 		return fmt.Errorf("failed creating turn env directory: %w", err)
 	}
-	content := FormatTurnEnvFileContent(targetID, vanadisChunkID)
+	saTokenDest := filepath.Join(filepath.Dir(turnEnvFile), "sa-token")
+	syncedTokenPath, syncErr := session.SyncTurnSATokenFile(os.Getenv("AERIAL_K8S_SA_TOKEN_SRC"), saTokenDest, getEuid(), os.Chown)
+	if syncErr != nil {
+		log.Printf("[StreamingDaemon] Warning: failed syncing SA token file %q: %v", saTokenDest, syncErr)
+	}
+	content := FormatTurnEnvFileContent(targetID, vanadisChunkID, syncedTokenPath)
 	if err := os.WriteFile(turnEnvFile, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed writing turn env file: %w", err)
 	}

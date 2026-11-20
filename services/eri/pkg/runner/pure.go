@@ -40,6 +40,7 @@ type AgyEnvInput struct {
 	TargetID       string
 	VanadisChunkID string
 	TurnEnvFile    string
+	SATokenPath    string
 	Timezone       string
 	// DaemonID is exported as ERI_DAEMON_ID when MCPProxyPort is set; it keys the daemon's
 	// turns in ActiveTurnRegistry.
@@ -234,6 +235,9 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	if turnEnvFile := strings.TrimSpace(input.TurnEnvFile); turnEnvFile != "" {
 		cmdEnv = append(cmdEnv, "BASH_ENV="+turnEnvFile)
 	}
+	if saTokenPath := strings.TrimSpace(input.SATokenPath); saTokenPath != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_SA_TOKEN_PATH="+saTokenPath)
+	}
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
@@ -312,8 +316,8 @@ func SanitizeDaemonTargetKey(targetKey string) string {
 
 // FormatTurnEnvFileContent formats the per-daemon turn environment file sourced by BASH_ENV.
 // It delegates to session.FormatTurnEnvFileContent.
-func FormatTurnEnvFileContent(targetID, vanadisChunkID string) string {
-	return session.FormatTurnEnvFileContent(targetID, vanadisChunkID)
+func FormatTurnEnvFileContent(targetID, vanadisChunkID string, saTokenPath ...string) string {
+	return session.FormatTurnEnvFileContent(targetID, vanadisChunkID, saTokenPath...)
 }
 
 // ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.

@@ -315,8 +315,8 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"AERIAL_TARGET_ID="},
 		},
 		{
-			AgyEnvInput{VanadisChunkID: "build-1794202576-chunk-2", TurnEnvFile: "/data/.gemini/turn_env/default.sh"},
-			[]string{"AERIAL_VANADIS_CHUNK_ID=build-1794202576-chunk-2", "BASH_ENV=/data/.gemini/turn_env/default.sh"},
+			AgyEnvInput{VanadisChunkID: "build-1794202576-chunk-2", TurnEnvFile: "/data/.gemini/turn_env/default.sh", SATokenPath: "/data/.gemini/turn_env/sa-token"},
+			[]string{"AERIAL_VANADIS_CHUNK_ID=build-1794202576-chunk-2", "BASH_ENV=/data/.gemini/turn_env/default.sh", "AERIAL_SA_TOKEN_PATH=/data/.gemini/turn_env/sa-token"},
 			nil,
 		},
 		{
