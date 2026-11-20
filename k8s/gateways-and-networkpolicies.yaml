@@ -665,6 +665,17 @@ spec:
                 values:
                   - restate-green
                   - restate
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
                   - restate-operator
       ports:
         - port: 9080
@@ -714,7 +725,22 @@ spec:
         - podSelector: {}
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: restate-operator
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - restate-operator
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: default
