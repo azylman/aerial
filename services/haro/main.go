@@ -40,15 +40,6 @@ func initHaroJetStream(ctx context.Context, srv *server.Server, database *sql.DB
 	return initHaroJetStreamWithFactory(ctx, srv, database, natsURL, newBusFn)
 }
 
-// configureServerEventBus wires the JetStream event bus into the server's
-// dispatcher via the exported internal/server seam.
-func configureServerEventBus(srv *server.Server, b pubsub.Bus) {
-	if srv == nil {
-		return
-	}
-	srv.ConfigureEventBus(b)
-}
-
 func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
@@ -76,7 +67,6 @@ func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, datab
 	} else {
 		log.Println("[Haro] Subscribed haro-oneshot queue consumer to " + pubsub.SubjectHaroOneShotJob)
 	}
-	configureServerEventBus(srv, b)
 	if srv != nil {
 		if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
 			var ev pubsub.ExternalEvent

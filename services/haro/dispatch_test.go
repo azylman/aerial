@@ -618,7 +618,7 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 		t.Error("expected non-nil bus despite Subscribe error")
 	}
 
-	// configureServerEventBus with dispatcher
+	// initHaroJetStreamWithFactory with dispatcher
 	dispSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer dispSrv.Close()
 	disp := dispatch.NewHTTPPromptDispatcher(dispSrv.URL, "http://restate:8080", "aerial")
@@ -629,9 +629,6 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 		return memBusInit, nil
 	}); bus == nil {
 		t.Error("expected non-nil bus")
-	}
-	if disp.EventBus() == nil {
-		t.Error("expected event bus to be configured on dispatcher")
 	}
 }
 
