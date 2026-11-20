@@ -70,6 +70,10 @@ func TestLoadConfig(t *testing.T) {
 	}{
 		{name: "missing file is disabled", want: Config{}},
 		{
+			name: "agent config key", content: "enabled: true\nendpoint: http://vt.aerial/insert/opentelemetry/v1/traces\nsample_ratio: 0.5\nagent: aerial\n",
+			want: Config{Enabled: true, Endpoint: "http://vt.aerial/insert/opentelemetry/v1/traces", SampleRatio: 0.5, Agent: "aerial"},
+		},
+		{
 			name: "valid", content: "enabled: true\nendpoint: http://vt.aerial/insert/opentelemetry/v1/traces\nsample_ratio: 0.5\nstack: aerial\n",
 			want: Config{Enabled: true, Endpoint: "http://vt.aerial/insert/opentelemetry/v1/traces", SampleRatio: 0.5, Stack: "aerial"},
 		},
@@ -325,6 +329,7 @@ func TestEnvOverrides(t *testing.T) {
 func TestNewResource(t *testing.T) {
 	tests := []struct {
 		name          string
+		agent         string
 		stack         string
 		env           map[string]string
 		want          map[string]string
@@ -333,37 +338,53 @@ func TestNewResource(t *testing.T) {
 		wantErr       bool
 	}{
 		{
-			name: "stack becomes service.namespace", stack: "miorine",
+			name: "agent becomes service.namespace and aerial.agent", agent: "miorine",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "miorine", "aerial.stack": "miorine",
+				"service.name": "haro", "service.namespace": "miorine", "aerial.agent": "miorine", "aerial.stack": "miorine",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "empty stack omits namespace",
-			want: map[string]string{"service.name": "haro", "aerial.stack": ""}, wantAbsent: []string{"service.namespace"},
+			name: "stack fallback becomes service.namespace and aerial.agent", stack: "miorine",
+			want: map[string]string{
+				"service.name": "haro", "service.namespace": "miorine", "aerial.agent": "miorine", "aerial.stack": "miorine",
+				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
+			},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "OTEL_RESOURCE_ATTRIBUTES added", stack: "aerial",
+			name: "agent takes precedence over stack", agent: "suletta", stack: "miorine",
+			want: map[string]string{
+				"service.name": "haro", "service.namespace": "suletta", "aerial.agent": "suletta", "aerial.stack": "suletta",
+				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
+			},
+			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+		{
+			name: "empty agent and stack omits namespace and aerial.agent",
+			want: map[string]string{"service.name": "haro", "aerial.stack": ""}, wantAbsent: []string{"service.namespace", "aerial.agent"},
+			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+		},
+		{
+			name: "OTEL_RESOURCE_ATTRIBUTES added", agent: "aerial",
 			env: map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,k8s.namespace.name=default,k8s.node.name=calibarn,service.version=v1.2.3"},
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "aerial", "k8s.pod.name": "haro-7d9",
+				"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9",
 				"k8s.namespace.name": "default", "k8s.node.name": "calibarn", "service.version": "v1.2.3",
 			},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "OTEL_SERVICE_NAME overrides service.name", stack: "suletta",
+			name: "OTEL_SERVICE_NAME overrides service.name", agent: "suletta",
 			env:           map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
-			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "suletta"},
+			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "suletta", "aerial.agent": "suletta", "aerial.stack": "suletta"},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "malformed attributes keep the rest", stack: "aerial",
+			name: "malformed attributes keep the rest", agent: "aerial",
 			env:     map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,broken"},
-			want:    map[string]string{"service.name": "haro", "service.namespace": "aerial", "k8s.pod.name": "haro-7d9"},
+			want:    map[string]string{"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9"},
 			wantErr: true, wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 	}
@@ -371,7 +392,7 @@ func TestNewResource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.env["OTEL_RESOURCE_ATTRIBUTES"])
 			t.Setenv("OTEL_SERVICE_NAME", tc.env["OTEL_SERVICE_NAME"])
-			res, err := newResource(context.Background(), "haro", Config{Stack: tc.stack})
+			res, err := newResource(context.Background(), "haro", Config{Agent: tc.agent, Stack: tc.stack})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("newResource err = %v, wantErr %v", err, tc.wantErr)
 			}

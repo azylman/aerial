@@ -120,7 +120,7 @@ type Authenticator struct {
 // NewAuthenticator constructs an Authenticator with sensible defaults.
 func NewAuthenticator(cfg Config) *Authenticator {
 	if cfg.TokenPath == "" {
-		cfg.TokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+		cfg.TokenPath = DefaultTokenPath
 	}
 	if cfg.AgentSAPrefix == "" {
 		cfg.AgentSAPrefix = "system:serviceaccount:default:eri-"

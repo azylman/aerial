@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// DefaultTokenPath is the standard mounted path for projected Kubernetes ServiceAccount tokens.
+const DefaultTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
 // TokenSource provides cached access to a Kubernetes ServiceAccount token with a 60-second reload TTL.
 type TokenSource struct {
 	tokenPath string

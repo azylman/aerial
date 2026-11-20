@@ -9,6 +9,7 @@ import (
 	"log"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -127,6 +128,9 @@ type WorkerPoolConfig struct {
 	TranscriptsIndexerURL            string
 	TranscriptRecheckDelay           time.Duration
 	ChunkStepFlushInterval           time.Duration
+	VanadisURL                       string
+	VanadisHTTPClient                *http.Client
+	SATokenPath                      string
 }
 
 type queueItem struct {
