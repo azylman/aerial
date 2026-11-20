@@ -383,6 +383,18 @@ resolve_vanadis_url() {
     return 1
 }
 
+get_vanadis_auth_args() {
+    local sa_token_path="${AERIAL_SA_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
+    VANADIS_AUTH_ARGS=()
+    if [ -r "$sa_token_path" ]; then
+        local sa_token
+        sa_token="$(tr -d '[:space:]' < "$sa_token_path" 2>/dev/null || true)"
+        if [ -n "$sa_token" ]; then
+            VANADIS_AUTH_ARGS=(-H "Authorization: Bearer ${sa_token}")
+        fi
+    fi
+}
+
 attach_pr_in_vanadis() {
     local vanadis_url="$1"
     local attach_payload="$2"
@@ -391,9 +403,11 @@ attach_pr_in_vanadis() {
     local delay="${AERIAL_VANADIS_ATTACH_RETRY_DELAY:-1}"
     local attempt=1
     local attach_resp=""
+    get_vanadis_auth_args
 
     while [ "$attempt" -le "$max_attempts" ]; do
         attach_resp=$(curl -s --connect-timeout 2 -m 15 -X POST \
+            ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} \
             -H "Content-Type: application/json" \
             -d "$attach_payload" \
             "${vanadis_url%/}/chunks/attach-pr" 2>/dev/null || true)
@@ -428,8 +442,9 @@ verify_vanadis_chunk_active() {
     if [ -z "$vanadis_base" ]; then
         return 0
     fi
+    get_vanadis_auth_args
     local resp=""
-    if resp=$(curl -sS --connect-timeout 2 --max-time 4 "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null); then
+    if resp=$(curl -sS --connect-timeout 2 --max-time 4 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null); then
         if [ -n "$resp" ] && echo "$resp" | jq -e '(.chunk.status == "cancelled" or .chunk.status == "merged" or .chunk.status == "deploying" or .chunk.status == "completed" or .build.status == "cancelled" or .build.status == "completed")' >/dev/null 2>&1; then
             echo "ERROR: Vanadis chunk ${chunk_id} (or parent build) is cancelled; aborting PR submission." >&2
             exit 1
@@ -453,10 +468,11 @@ format_vanadis_chunk_context() {
         return 0
     fi
 
+    get_vanadis_auth_args
     local chunk_resp=""
-    chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null || true)"
+    chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null || true)"
     if [ -z "$chunk_resp" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ] && [ "$vanadis_base" != "${VANADIS_FALLBACK_URL%/}" ]; then
-        chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${VANADIS_FALLBACK_URL%/}/chunks/${chunk_id}" 2>/dev/null || true)"
+        chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${VANADIS_FALLBACK_URL%/}/chunks/${chunk_id}" 2>/dev/null || true)"
         if [ -n "$chunk_resp" ]; then
             vanadis_base="${VANADIS_FALLBACK_URL%/}"
         fi
@@ -471,9 +487,9 @@ format_vanadis_chunk_context() {
 
     local build_resp=""
     if [ -n "$build_id" ]; then
-        build_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${vanadis_base}/builds/${build_id}" 2>/dev/null || true)"
+        build_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${vanadis_base}/builds/${build_id}" 2>/dev/null || true)"
         if [ -z "$build_resp" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ] && [ "$vanadis_base" != "${VANADIS_FALLBACK_URL%/}" ]; then
-            build_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${VANADIS_FALLBACK_URL%/}/builds/${build_id}" 2>/dev/null || true)"
+            build_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${VANADIS_FALLBACK_URL%/}/builds/${build_id}" 2>/dev/null || true)"
         fi
     fi
 
