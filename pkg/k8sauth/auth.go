@@ -31,17 +31,16 @@ type CallerIdentity struct {
 
 // Config specifies the configuration options for the Authenticator.
 type Config struct {
-	Enabled          bool              `json:"enabled"           yaml:"enabled"`
-	TokenPath        string            `json:"token_path"        yaml:"token_path"`
-	AgentSAPrefix    string            `json:"agent_sa_prefix"   yaml:"agent_sa_prefix"`
-	SAAgentAliases   map[string]string `json:"sa_agent_aliases"  yaml:"sa_agent_aliases"`
-	ConfiguredAgents []string          `json:"configured_agents" yaml:"configured_agents"`
-	CacheTTL         time.Duration     `json:"cache_ttl"         yaml:"cache_ttl"`
-	CacheMaxEntries  int               `json:"cache_max_entries" yaml:"cache_max_entries"`
-	APIServerURL     string            `json:"api_server_url"    yaml:"api_server_url"`
-	HTTPClient       *http.Client      `json:"-"                 yaml:"-"`
-	TokenSource      *TokenSource      `json:"-"                 yaml:"-"`
-	Now              func() time.Time  `json:"-"                 yaml:"-"`
+	Enabled         bool              `json:"enabled"           yaml:"enabled"`
+	TokenPath       string            `json:"token_path"        yaml:"token_path"`
+	AgentSAPrefix   string            `json:"agent_sa_prefix"   yaml:"agent_sa_prefix"`
+	SAAgentAliases  map[string]string `json:"sa_agent_aliases"  yaml:"sa_agent_aliases"`
+	CacheTTL        time.Duration     `json:"cache_ttl"         yaml:"cache_ttl"`
+	CacheMaxEntries int               `json:"cache_max_entries" yaml:"cache_max_entries"`
+	APIServerURL    string            `json:"api_server_url"    yaml:"api_server_url"`
+	HTTPClient      *http.Client      `json:"-"                 yaml:"-"`
+	TokenSource     *TokenSource      `json:"-"                 yaml:"-"`
+	Now             func() time.Time  `json:"-"                 yaml:"-"`
 }
 
 // ValidationError represents an HTTP 400 Bad Request error.
@@ -133,13 +132,6 @@ func NewAuthenticator(cfg Config) *Authenticator {
 		aliases := make(map[string]string, len(cfg.SAAgentAliases))
 		maps.Copy(aliases, cfg.SAAgentAliases)
 		cfg.SAAgentAliases = aliases
-	}
-	if len(cfg.ConfiguredAgents) == 0 {
-		cfg.ConfiguredAgents = []string{"aerial", "miorine", "suletta"}
-	} else {
-		agents := make([]string, len(cfg.ConfiguredAgents))
-		copy(agents, cfg.ConfiguredAgents)
-		cfg.ConfiguredAgents = agents
 	}
 	if cfg.CacheTTL <= 0 {
 		cfg.CacheTTL = 45 * time.Second
@@ -467,16 +459,35 @@ func isReadVerb(verb string) bool {
 	return v == "get" || v == "list"
 }
 
-func (a *Authenticator) isConfiguredAgent(agent string) bool {
-	return slices.Contains(a.cfg.ConfiguredAgents, agent)
+func isLowerAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
+// IsValidAgentSlug reports whether s is a valid agent slug: 1..63 characters
+// of lowercase ASCII letters, digits, or hyphens ([a-z0-9-]), starting and
+// ending with an ASCII letter or digit.
+func IsValidAgentSlug(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	if !isLowerAlnum(s[0]) || !isLowerAlnum(s[len(s)-1]) {
+		return false
+	}
+	for i := range len(s) {
+		b := s[i]
+		if !isLowerAlnum(b) && b != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveTargetAgent determines the target agent and the evaluated SAR resource string.
-func (a *Authenticator) ResolveTargetAgent(caller CallerIdentity, requestedTarget, baseResource, verb string) (targetAgent string, sarResource string, err error) {
+func (*Authenticator) ResolveTargetAgent(caller CallerIdentity, requestedTarget, baseResource, verb string) (targetAgent string, sarResource string, err error) {
 	if isReadVerb(verb) {
-		if requestedTarget != "" && requestedTarget != "*" && !a.isConfiguredAgent(requestedTarget) {
+		if requestedTarget != "" && requestedTarget != "*" && !IsValidAgentSlug(requestedTarget) {
 			return "", "", &ValidationError{
-				Message: fmt.Sprintf("unknown target agent %q", requestedTarget),
+				Message: fmt.Sprintf("invalid target agent %q", requestedTarget),
 			}
 		}
 		return requestedTarget, baseResource, nil
@@ -484,9 +495,9 @@ func (a *Authenticator) ResolveTargetAgent(caller CallerIdentity, requestedTarge
 
 	// Write verbs (create, update, patch, delete)
 	if caller.IsService {
-		if requestedTarget == "" || !a.isConfiguredAgent(requestedTarget) {
+		if requestedTarget == "" || !IsValidAgentSlug(requestedTarget) {
 			return "", "", &ValidationError{
-				Message: "missing or unknown target agent for service principal",
+				Message: fmt.Sprintf("missing or invalid target agent %q for service principal", requestedTarget),
 			}
 		}
 		return requestedTarget, baseResource + "/all", nil
@@ -496,9 +507,9 @@ func (a *Authenticator) ResolveTargetAgent(caller CallerIdentity, requestedTarge
 	if requestedTarget == "" {
 		targetAgent = caller.CallerAgent
 	} else {
-		if requestedTarget != "*" && !a.isConfiguredAgent(requestedTarget) {
+		if requestedTarget != "*" && !IsValidAgentSlug(requestedTarget) {
 			return "", "", &ValidationError{
-				Message: fmt.Sprintf("unknown target agent %q", requestedTarget),
+				Message: fmt.Sprintf("invalid target agent %q", requestedTarget),
 			}
 		}
 		targetAgent = requestedTarget
@@ -548,7 +559,7 @@ func (a *Authenticator) Middleware(exemptPaths ...string) func(http.Handler) htt
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !a.cfg.Enabled {
+			if !a.Enabled() {
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -212,26 +212,26 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 	}{
 		{
 			name:        "matching agent publishes coalesced job",
-			eventAgent:  "miorine",
+			eventAgent:  "agent-alpha",
 			threadID:    "th-1",
-			stack:       "miorine",
+			stack:       "agent-alpha",
 			wantPub:     true,
-			wantSubject: "aerial.coalesced.coven_extract.miorine.th-1",
+			wantSubject: "aerial.coalesced.coven_extract.agent-alpha.th-1",
 		},
 		{
 			name:        "fallback to event stack matches",
 			eventAgent:  "",
-			eventStack:  "suletta",
+			eventStack:  "agent-beta",
 			threadID:    "th-2",
-			stack:       "suletta",
+			stack:       "agent-beta",
 			wantPub:     true,
-			wantSubject: "aerial.coalesced.coven_extract.suletta.th-2",
+			wantSubject: "aerial.coalesced.coven_extract.agent-beta.th-2",
 		},
 		{
 			name:       "mismatched agent skips publishing",
 			eventAgent: "aerial",
 			threadID:   "th-3",
-			stack:      "miorine",
+			stack:      "agent-alpha",
 			wantPub:    false,
 		},
 	}

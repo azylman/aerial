@@ -310,6 +310,13 @@ func TestMsgID(t *testing.T) {
 			wantFirst: "transcript-batch:aerial:sess-1:0:9:1234567890000000123",
 			wantEqual: false,
 		},
+		{
+			name:      "empty agent and stack defaults to aerial in msg id",
+			first:     TranscriptStepBatch{SessionID: "sess-1", FirstStep: 0, LastStep: 9, FileMtime: base.FileMtime},
+			second:    TranscriptStepBatch{SessionID: "sess-1", FirstStep: 0, LastStep: 9, FileMtime: base.FileMtime},
+			wantFirst: "transcript-batch:aerial:sess-1:0:9:1234567890000000123",
+			wantEqual: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -322,6 +329,58 @@ func TestMsgID(t *testing.T) {
 			again := MsgID(tc.second)
 			if (again == got) != tc.wantEqual {
 				t.Errorf("second MsgID %q equal = %v, want equal = %v", again, again == got, tc.wantEqual)
+			}
+		})
+	}
+}
+
+func TestEffectiveAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		batch     TranscriptStepBatch
+		wantAgent string
+	}{
+		{
+			name: "agent specified wins over stack",
+			batch: TranscriptStepBatch{
+				Agent: "agent-alpha",
+				Stack: "aerial",
+			},
+			wantAgent: "agent-alpha",
+		},
+		{
+			name: "agent empty falls back to stack",
+			batch: TranscriptStepBatch{
+				Agent: "",
+				Stack: "agent-beta",
+			},
+			wantAgent: "agent-beta",
+		},
+		{
+			name: "both empty returns empty",
+			batch: TranscriptStepBatch{
+				Agent: "",
+				Stack: "",
+			},
+			wantAgent: "",
+		},
+		{
+			name: "whitespace trimmed correctly",
+			batch: TranscriptStepBatch{
+				Agent: "  agent-beta  ",
+				Stack: "aerial",
+			},
+			wantAgent: "agent-beta",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.batch.EffectiveAgent(); got != tc.wantAgent {
+				t.Errorf("EffectiveAgent() = %q, want %q", got, tc.wantAgent)
 			}
 		})
 	}

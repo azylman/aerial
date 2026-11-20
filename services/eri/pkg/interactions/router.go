@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -17,12 +20,21 @@ type Router struct {
 	deps           InteractionDeps
 	configCommitMu sync.Mutex
 	bgWg           sync.WaitGroup
+	memoryClient   *http.Client
 }
 
 // NewRouter creates a new interaction Router with injected dependencies.
 func NewRouter(deps InteractionDeps) *Router {
+	memClient := deps.MemoryClient
+	if memClient == nil {
+		memClient = &http.Client{
+			Timeout:   2 * time.Second,
+			Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, ""),
+		}
+	}
 	return &Router{
-		deps: deps,
+		deps:         deps,
+		memoryClient: memClient,
 	}
 }
 

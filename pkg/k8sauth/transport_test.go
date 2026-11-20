@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestTokenSource_EnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	envTokenFile := filepath.Join(dir, "env-token")
+	if err := os.WriteFile(envTokenFile, []byte("env-sa-token"), 0o600); err != nil {
+		t.Fatalf("failed to write env token: %v", err)
+	}
+
+	t.Setenv("AERIAL_SA_TOKEN_PATH", envTokenFile)
+	ts := NewTokenSource("", nil)
+	tok, err := ts.Token()
+	if err != nil {
+		t.Fatalf("Token() error = %v", err)
+	}
+	if tok != "env-sa-token" {
+		t.Fatalf("Token() = %q, want %q", tok, "env-sa-token")
+	}
+}
+
 func TestServiceAccountTransport_RoundTrip(t *testing.T) {
 	t.Parallel()
 

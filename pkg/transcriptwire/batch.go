@@ -45,6 +45,7 @@ type TranscriptStep struct {
 // Batches for a session publish strictly in order and share the session's
 // FileMtime epoch so the indexer can tell a rewrite from a duplicate.
 type TranscriptStepBatch struct {
+	Agent       string           `json:"agent,omitempty"`
 	Stack       string           `json:"stack"`
 	SessionID   string           `json:"session_id"`
 	ThreadID    string           `json:"thread_id,omitempty"`
@@ -60,12 +61,24 @@ type TranscriptStepBatch struct {
 	Steps       []TranscriptStep `json:"steps"`
 }
 
+// EffectiveAgent returns the active agent identifier, falling back to Stack or empty string.
+func (b TranscriptStepBatch) EffectiveAgent() string {
+	if a := strings.TrimSpace(b.Agent); a != "" {
+		return a
+	}
+	return strings.TrimSpace(b.Stack)
+}
+
 // MsgID returns the deduplication ID for a batch. It folds the file mtime's
 // unix nanos in so a rewrite of the same steps publishes under a new ID while
 // an identical republish deduplicates inside the stream's Duplicates window.
 func MsgID(b TranscriptStepBatch) string {
+	agent := b.EffectiveAgent()
+	if agent == "" {
+		agent = "aerial"
+	}
 	return fmt.Sprintf("transcript-batch:%s:%s:%d:%d:%d",
-		strings.TrimSpace(b.Stack), strings.TrimSpace(b.SessionID),
+		agent, strings.TrimSpace(b.SessionID),
 		b.FirstStep, b.LastStep, b.FileMtime.UnixNano())
 }
 

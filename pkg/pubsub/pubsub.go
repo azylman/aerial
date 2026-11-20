@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 
 const (
 	unknownSubjectToken = "unknown"
+	defaultAgent        = "aerial"
 )
 
 // Stream names across the cluster.
@@ -133,8 +135,8 @@ type ExternalEvent struct {
 // on aerial.turn.transcripts_indexed. The indexer publishes one event per ingested
 // batch; a duplicate Final batch re-publish is expected and safe.
 type TranscriptsIndexedEvent struct {
-	Stack        string    `json:"stack"`
 	Agent        string    `json:"agent,omitempty"`
+	Stack        string    `json:"stack"`
 	SessionID    string    `json:"session_id"`
 	ThreadID     string    `json:"thread_id,omitempty"`
 	FileMtime    time.Time `json:"file_mtime"`
@@ -145,17 +147,9 @@ type TranscriptsIndexedEvent struct {
 	IndexedAt    time.Time `json:"indexed_at"`
 }
 
-const defaultAgent = "aerial"
-
-// EffectiveAgent returns Agent if non-empty, falling back to Stack, defaulting to "aerial".
+// EffectiveAgent returns the active agent identifier, falling back to Stack or "aerial".
 func (e TranscriptsIndexedEvent) EffectiveAgent() string {
-	if a := strings.TrimSpace(e.Agent); a != "" {
-		return a
-	}
-	if s := strings.TrimSpace(e.Stack); s != "" {
-		return s
-	}
-	return defaultAgent
+	return firstNonEmpty(e.Agent, e.Stack, defaultAgent)
 }
 
 // TurnCompletedEvent represents an agent conversation turn completion on aerial.turn.completed.
@@ -179,15 +173,9 @@ type CovenExtractJobArgs struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// EffectiveAgent returns Agent if non-empty, falling back to Stack, defaulting to "aerial".
-func (c CovenExtractJobArgs) EffectiveAgent() string {
-	if a := strings.TrimSpace(c.Agent); a != "" {
-		return a
-	}
-	if s := strings.TrimSpace(c.Stack); s != "" {
-		return s
-	}
-	return defaultAgent
+// EffectiveAgent returns the active agent identifier, falling back to Stack or "aerial".
+func (a CovenExtractJobArgs) EffectiveAgent() string {
+	return firstNonEmpty(a.Agent, a.Stack, defaultAgent)
 }
 
 // WidgetSyncJobArgs contains arguments for coalesced widget sync jobs.
@@ -249,14 +237,72 @@ func cleanSubjectToken(token string) string {
 	return t
 }
 
+func sanitizeToken(token string) string {
+	t := cleanSubjectToken(token)
+	t = strings.ReplaceAll(t, ".", "-")
+	var b strings.Builder
+	b.Grow(len(t))
+	for i := range len(t) {
+		c := t[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	res := b.String()
+	for strings.Contains(res, "--") {
+		res = strings.ReplaceAll(res, "--", "-")
+	}
+	res = strings.Trim(res, "-_")
+	if res == "" {
+		return unknownSubjectToken
+	}
+	return res
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // SubjectTranscriptsSteps returns the step-batch subject for a session's transcript.
 func SubjectTranscriptsSteps(sessionID string) string {
-	t := cleanSubjectToken(sessionID)
-	t = strings.ReplaceAll(t, ".", "-")
-	if t == "" {
-		t = unknownSubjectToken
+	return SubjectTranscriptsStepsPrefix + sanitizeToken(sessionID)
+}
+
+// SubjectTranscriptsStepsForAgent returns the step-batch subject for a specific agent and session.
+func SubjectTranscriptsStepsForAgent(agent, sessionID string) string {
+	cleanAgent := sanitizeToken(agent)
+	if cleanAgent == unknownSubjectToken {
+		cleanAgent = defaultAgent
 	}
-	return SubjectTranscriptsStepsPrefix + t
+	cleanSessionID := sanitizeToken(sessionID)
+	return SubjectTranscriptsStepsPrefix + cleanAgent + "." + cleanSessionID
+}
+
+// ParseTranscriptsStepsSubject extracts the agent and session ID from an aerial transcripts steps subject.
+// It handles 5-token "aerial.transcripts.steps.<agent>.<session_id>" (returning agent, sessionID, true)
+// and legacy 4-token "aerial.transcripts.steps.<session_id>" (returning "", sessionID, true).
+func ParseTranscriptsStepsSubject(subject string) (agent, sessionID string, ok bool) {
+	tokens := strings.Split(subject, ".")
+	if len(tokens) == 5 && tokens[0] == "aerial" && tokens[1] == "transcripts" && tokens[2] == "steps" {
+		if tokens[3] == "" || tokens[4] == "" {
+			return "", "", false
+		}
+		return tokens[3], tokens[4], true
+	}
+	if len(tokens) == 4 && tokens[0] == "aerial" && tokens[1] == "transcripts" && tokens[2] == "steps" {
+		if tokens[3] == "" {
+			return "", "", false
+		}
+		return "", tokens[3], true
+	}
+	return "", "", false
 }
 
 // SubjectCovenExtractCoalesced returns the coalesced subject for a thread's fact extraction.
@@ -271,20 +317,15 @@ func SubjectCovenExtractCoalesced(threadID string) string {
 
 // SubjectCovenExtractCoalescedForAgent returns the coalesced extraction subject scoped by agent.
 func SubjectCovenExtractCoalescedForAgent(agent, threadID string) string {
-	a := cleanSubjectToken(agent)
-	if a == "" || a == unknownSubjectToken {
+	a := sanitizeToken(agent)
+	if a == unknownSubjectToken {
 		a = defaultAgent
 	}
 	t := strings.TrimSpace(threadID)
 	if t == ">" || t == "*" {
 		return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
 	}
-	t = cleanSubjectToken(t)
-	t = strings.ReplaceAll(t, ".", "-")
-	if t == "" {
-		t = unknownSubjectToken
-	}
-	return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
+	return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, sanitizeToken(t))
 }
 
 // SubjectBuildWidgetSyncCoalesced returns the coalesced subject for build widget sync.
@@ -393,9 +434,21 @@ func logConnClosed(nc *nats.Conn) {
 	log.Printf("[pubsub] ERROR: NATS connection permanently closed (last error: %v); bus is unhealthy until restart", nc.LastError())
 }
 
+// buildConnectOptions constructs the NATS connect options including user credentials and defaults.
+func buildConnectOptions(natsURL, user, pass string, extraOpts ...nats.Option) []nats.Option {
+	opts := make([]nats.Option, 0, len(extraOpts)+1)
+	opts = append(opts, extraOpts...)
+	if user != "" && pass != "" && !strings.Contains(natsURL, "@") {
+		opts = append(opts, nats.UserInfo(user, pass))
+	}
+	return jetStreamBusOptions(opts...)
+}
+
 // NewJetStreamBus connects to NATS with resilient reconnect options and initializes JetStream.
 func NewJetStreamBus(ctx context.Context, natsURL string, extraOpts ...nats.Option) (*JetStreamBus, error) {
-	nc, err := nats.Connect(natsURL, jetStreamBusOptions(extraOpts...)...)
+	user := os.Getenv("NATS_USER")
+	pass := os.Getenv("NATS_PASSWORD")
+	nc, err := nats.Connect(natsURL, buildConnectOptions(natsURL, user, pass, extraOpts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}

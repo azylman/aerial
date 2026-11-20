@@ -112,7 +112,11 @@ func (r *Router) fetchMemoryFactStatus(ctx context.Context) (int, string) {
 	if err != nil {
 		return factCount, latestFactStr
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := r.memoryClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return factCount, latestFactStr
 	}

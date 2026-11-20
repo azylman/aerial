@@ -2,6 +2,7 @@ package interactions
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -41,5 +42,6 @@ type InteractionDeps struct {
 	QuotaTimeProvider    QuotaTimeProvider
 	GitOpsChannelUpdater GitOpsChannelUpdater
 	MemoryURL            string
+	MemoryClient         *http.Client
 	HaroURL              string
 }

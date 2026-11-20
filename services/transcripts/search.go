@@ -12,6 +12,7 @@ import (
 
 // SessionResult is one indexed session in the read API.
 type SessionResult struct {
+	Agent           string    `json:"agent,omitempty"`
 	Stack           string    `json:"stack"`
 	SessionID       string    `json:"session_id"`
 	Engine          string    `json:"engine"`
@@ -23,6 +24,7 @@ type SessionResult struct {
 
 // StepResult is one indexed transcript step in the read API.
 type StepResult struct {
+	Agent     string    `json:"agent,omitempty"`
 	Stack     string    `json:"stack"`
 	SessionID string    `json:"session_id"`
 	Engine    string    `json:"engine"`
@@ -36,6 +38,7 @@ type StepResult struct {
 
 // StackStats counts indexed sessions and steps for one stack.
 type StackStats struct {
+	Agent    string `json:"agent,omitempty"`
 	Stack    string `json:"stack"`
 	Sessions int    `json:"sessions"`
 	Steps    int    `json:"steps"`
@@ -43,6 +46,7 @@ type StackStats struct {
 
 // SessionWatermark is the per-session ingest cursor consumers resume from.
 type SessionWatermark struct {
+	Agent           string    `json:"agent,omitempty"`
 	Stack           string    `json:"stack"`
 	SessionID       string    `json:"session_id"`
 	LastIndexedStep int       `json:"last_indexed_step"`
@@ -80,6 +84,7 @@ func scanSessionResult(r *sql.Rows) (SessionResult, error) {
 	if err := r.Scan(&out.Stack, &out.SessionID, &out.Engine, &out.ThreadID, &out.LastIndexedStep, &rawMtime, &out.IsSettled); err != nil {
 		return SessionResult{}, fmt.Errorf("scan session result: %w", err)
 	}
+	out.Agent = out.Stack
 	if t, ok := parseDBTime(rawMtime); ok {
 		out.LastMtime = t
 	}
@@ -92,6 +97,7 @@ func scanStepResult(r *sql.Rows) (StepResult, error) {
 	if err := r.Scan(&out.Stack, &out.SessionID, &out.Engine, &out.StepIndex, &out.StepType, &out.ToolName, &out.ToolKind, &out.Content, &rawCreatedAt); err != nil {
 		return StepResult{}, fmt.Errorf("scan step result: %w", err)
 	}
+	out.Agent = out.Stack
 	if t, ok := parseDBTime(rawCreatedAt); ok {
 		out.CreatedAt = t
 	}
@@ -103,6 +109,7 @@ func scanStackStat(r *sql.Rows) (StackStats, error) {
 	if err := r.Scan(&out.Stack, &out.Sessions, &out.Steps); err != nil {
 		return StackStats{}, fmt.Errorf("scan transcript stats: %w", err)
 	}
+	out.Agent = out.Stack
 	return out, nil
 }
 
@@ -112,6 +119,7 @@ func scanSessionWatermark(r *sql.Rows) (SessionWatermark, error) {
 	if err := r.Scan(&out.Stack, &out.SessionID, &out.LastIndexedStep, &rawMtime); err != nil {
 		return SessionWatermark{}, fmt.Errorf("scan watermark: %w", err)
 	}
+	out.Agent = out.Stack
 	if t, ok := parseDBTime(rawMtime); ok {
 		out.LastMtime = t
 	}

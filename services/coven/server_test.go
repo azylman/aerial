@@ -1018,11 +1018,10 @@ func newTestAuthConfig(t *testing.T, tr *staticAuthRoundTripper) k8sauth.Config 
 		t.Fatalf("failed to write host token: %v", err)
 	}
 	return k8sauth.Config{
-		Enabled:          true,
-		TokenPath:        tokenFile,
-		APIServerURL:     "https://k8s.local",
-		HTTPClient:       &http.Client{Transport: tr},
-		ConfiguredAgents: []string{"aerial", "miorine", "suletta"},
+		Enabled:      true,
+		TokenPath:    tokenFile,
+		APIServerURL: "https://k8s.local",
+		HTTPClient:   &http.Client{Transport: tr},
 	}
 }
 
@@ -1086,7 +1085,7 @@ func runAuthEndpointTests(t *testing.T, trDefault *staticAuthRoundTripper, tests
 func TestServer_Auth_Endpoints_ExemptAndUnauthorized(t *testing.T) {
 	trSuccess := &staticAuthRoundTripper{
 		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
 		sarStatus:  http.StatusOK,
 		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
 	}
@@ -1131,13 +1130,13 @@ func TestServer_Auth_Endpoints_ExemptAndUnauthorized(t *testing.T) {
 func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
 	trSuccess := &staticAuthRoundTripper{
 		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
 		sarStatus:  http.StatusOK,
 		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
 	}
 	trDenied := &staticAuthRoundTripper{
 		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
 		sarStatus:  http.StatusOK,
 		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"access denied by test policy"}}`,
 	}
@@ -1221,13 +1220,13 @@ func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
 func TestServer_Auth_MCPTools(t *testing.T) {
 	trSuccess := &staticAuthRoundTripper{
 		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
 		sarStatus:  http.StatusOK,
 		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
 	}
 	trDenied := &staticAuthRoundTripper{
 		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
 		sarStatus:  http.StatusOK,
 		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"operation forbidden"}}`,
 	}
@@ -1256,14 +1255,14 @@ func TestServer_Auth_MCPTools(t *testing.T) {
 		{
 			name:       "memory store allowed with target agent stamps source",
 			toolName:   "memory_store",
-			toolArgs:   `{"fact_text":"Durable test fact for miorine","target_agent":"miorine"}`,
+			toolArgs:   `{"fact_text":"Durable test fact for agent-alpha","target_agent":"agent-alpha"}`,
 			rt:         trSuccess,
 			wantSubstr: `"status":"success"`,
 		},
 		{
 			name:       "memory store denied returns error",
 			toolName:   "memory_store",
-			toolArgs:   `{"fact_text":"Durable test fact for miorine","target_agent":"miorine"}`,
+			toolArgs:   `{"fact_text":"Durable test fact for agent-alpha","target_agent":"agent-alpha"}`,
 			rt:         trDenied,
 			wantSubstr: "operation forbidden",
 		},

@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
 	"go.uber.org/goleak"
+
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 type hermeticTestTransport struct {
@@ -50,6 +53,14 @@ func wrapHermeticTransport() {
 
 func init() {
 	wrapHermeticTransport()
+	if os.Getenv("AERIAL_SA_TOKEN_PATH") == "" {
+		if f, err := os.CreateTemp("", "eri-test-sa-token-*"); err == nil {
+			_, _ = f.WriteString("test-sa-token")
+			_ = f.Close()
+			_ = os.Setenv("AERIAL_SA_TOKEN_PATH", f.Name())
+			transcriptsProxyHTTPClient.Transport = k8sauth.NewServiceAccountTransport(http.DefaultTransport, f.Name())
+		}
+	}
 }
 
 func TestMain(m *testing.M) {

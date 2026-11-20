@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -677,7 +678,8 @@ func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) 
 }
 
 var transcriptsProxyHTTPClient = &http.Client{
-	Timeout: 15 * time.Second,
+	Timeout:   15 * time.Second,
+	Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, ""),
 }
 
 func resolveTranscriptsIndexerURL(cfg *config.Config, pool *queue.WorkerPool) string {

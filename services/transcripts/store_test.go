@@ -111,12 +111,6 @@ func finalSeedBatch(session string, mtime time.Time) transcriptwire.TranscriptSt
 	return b
 }
 
-func crossStackBatch(session string, mtime time.Time) transcriptwire.TranscriptStepBatch {
-	b := testBatch(session, mtime, 0, 1, false, false)
-	b.Stack = "other"
-	return b
-}
-
 func rewrittenResetBatch(session string, mtime time.Time) transcriptwire.TranscriptStepBatch {
 	b := testBatch(session, mtime, 0, 2, false, true)
 	for i := range b.Steps {
@@ -206,6 +200,8 @@ func TestApplyBatch(t *testing.T) {
 func TestApplyBatchValidation(t *testing.T) {
 	t.Parallel()
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	badAgentBatch := testBatch("s", epoch, 0, 1, false, false)
+	badAgentBatch.Agent = "invalid_slug!"
 	tests := []struct {
 		name      string
 		storeKind string
@@ -215,7 +211,7 @@ func TestApplyBatchValidation(t *testing.T) {
 		{"nil database", "nildb", testBatch("s", epoch, 0, 1, false, false), "database is nil"},
 		{"empty stack is read-only", "nostack", testBatch("s", epoch, 0, 1, false, false), "cannot be empty for stack-scoped writes"},
 		{"empty session id", "ok", testBatch("", epoch, 0, 1, false, false), "session id cannot be empty"},
-		{"cross-stack batch rejected", "ok", crossStackBatch("s", epoch), "does not match store stack"},
+		{"invalid agent slug", "ok", badAgentBatch, "invalid transcript batch agent slug"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -589,5 +585,32 @@ func TestApplyBatchAppendEqualEpoch(t *testing.T) {
 	}
 	if outcome.Decision != DecisionAppend || outcome.StepsIndexed != 2 {
 		t.Errorf("outcome = %+v, want append of 2", outcome)
+	}
+}
+
+func TestApplyBatchMultiAgent(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	batchAlpha := testBatch("sess-alpha", epoch, 0, 2, false, false)
+	batchAlpha.Agent = "agent-alpha"
+	batchAlpha.Stack = "agent-alpha"
+
+	outcome, err := store.ApplyBatch(ctx, batchAlpha)
+	if err != nil {
+		t.Fatalf("ApplyBatch(agent-alpha) err = %v", err)
+	}
+	if outcome.Decision != DecisionInsert || outcome.StepsIndexed != 3 {
+		t.Fatalf("outcome = %+v, want insert of 3", outcome)
+	}
+
+	steps, err := store.GetSteps(ctx, "agent-alpha", "sess-alpha", 0, 5)
+	if err != nil {
+		t.Fatalf("GetSteps(agent-alpha) err = %v", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("got %d steps, want 3", len(steps))
 	}
 }

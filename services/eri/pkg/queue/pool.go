@@ -167,6 +167,7 @@ type WorkerPool struct {
 	eventBus            pubsub.Bus
 	createThreadFn      func(channelID, title string) (string, error)
 	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
+	agentName           string
 
 	TranscriptStore         db.TranscriptStore
 	TranscriptsIndexerURL   string
@@ -522,6 +523,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		eventBus:   cfg.EventBus,
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
 		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
+		agentName:         cfg.AgentName,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 
 		TranscriptStore: cfg.TranscriptStore, TranscriptsIndexerURL: cfg.TranscriptsIndexerURL, TranscriptRecheckDelay: cfg.TranscriptRecheckDelay,

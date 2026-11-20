@@ -17,6 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
@@ -84,7 +85,11 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	stopSummarizer := startSummarizerLoop(ctx, store, cfg)
 	defer stopSummarizer()
 
-	server := NewServer(store)
+	var auth *k8sauth.Authenticator
+	if cfg.Auth.Enabled {
+		auth = k8sauth.NewAuthenticator(cfg.Auth)
+	}
+	server := NewServer(store, auth)
 	httpServer := &http.Server{
 		Addr:              ":" + port,
 		Handler:           server.Handler(),

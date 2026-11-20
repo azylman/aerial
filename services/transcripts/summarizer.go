@@ -61,6 +61,7 @@ func (c SummarizerConfig) withDefaults() SummarizerConfig {
 
 // summaryCandidate is one session whose indexed steps outran its summary watermark.
 type summaryCandidate struct {
+	agent       string
 	sessionID   string
 	threadID    string
 	summary     string
@@ -184,10 +185,10 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 	cutoff := nowFn().UTC().Add(-s.cfg.IdleThreshold)
 	scanLimit := s.cfg.BatchLimit * 4
 	rows, err := s.store.db.QueryContext(queryCtx,
-		`SELECT session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
-		 WHERE stack = $1 AND summary_step_watermark < last_indexed_step
-		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $2))
-		 ORDER BY updated_at ASC LIMIT $3`, s.store.stack, s.cfg.MinStepDelta, scanLimit)
+		`SELECT stack, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
+		 WHERE summary_step_watermark < last_indexed_step
+		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $1))
+		 ORDER BY updated_at ASC LIMIT $2`, s.cfg.MinStepDelta, scanLimit)
 	if err != nil {
 		return nil, fmt.Errorf("select summary candidates: %w", err)
 	}
@@ -197,9 +198,10 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 		var cand summaryCandidate
 		var rawMtime any
 		var isSettled sql.NullBool
-		if err := rows.Scan(&cand.sessionID, &cand.threadID, &cand.summary, &cand.lastIndexed, &cand.watermark, &rawMtime, &isSettled); err != nil {
+		if err := rows.Scan(&cand.agent, &cand.sessionID, &cand.threadID, &cand.summary, &cand.lastIndexed, &cand.watermark, &rawMtime, &isSettled); err != nil {
 			return nil, fmt.Errorf("scan summary candidate: %w", err)
 		}
+		cand.agent = strings.TrimSpace(cand.agent)
 		cand.sessionID = strings.TrimSpace(cand.sessionID)
 		cand.threadID = strings.TrimSpace(cand.threadID)
 		cand.summary = strings.TrimSpace(cand.summary)
@@ -240,7 +242,7 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate
 	if s.cfg.MaxSteps > 0 && endStep-fromStep+1 > s.cfg.MaxSteps {
 		fromStep = endStep - s.cfg.MaxSteps + 1
 	}
-	steps, err := s.store.GetSteps(ctx, s.store.stack, cand.sessionID, fromStep, endStep)
+	steps, err := s.store.GetSteps(ctx, cand.agent, cand.sessionID, fromStep, endStep)
 	if err != nil {
 		return 0, fmt.Errorf("load summary steps: %w", err)
 	}
@@ -272,7 +274,7 @@ func (s *Summarizer) storeSummary(ctx context.Context, cand summaryCandidate, su
 	if _, err := s.store.db.ExecContext(queryCtx,
 		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, updated_at = CURRENT_TIMESTAMP
 		 WHERE stack = $3 AND session_id = $4`,
-		summary, cand.lastIndexed, s.store.stack, cand.sessionID); err != nil {
+		summary, cand.lastIndexed, cand.agent, cand.sessionID); err != nil {
 		return fmt.Errorf("store session summary: %w", err)
 	}
 	return nil

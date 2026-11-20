@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -32,7 +33,13 @@ func (p *WorkerPool) initTranscriptPublisher() (*transcript.Publisher, *transcri
 	if p.TranscriptPublisher == nil {
 		p.TranscriptPublisher = transcript.NewPublisher(p.stackName(), func(ctx context.Context, b transcriptwire.TranscriptStepBatch) error {
 			if bus := p.EventBus(); bus != nil {
-				return bus.Publish(ctx, pubsub.SubjectTranscriptsSteps(b.SessionID), transcriptwire.MsgID(b), b)
+				agent := p.stackName()
+				if !k8sauth.IsValidAgentSlug(agent) {
+					return fmt.Errorf("transcript publisher: agent %q is not a valid RFC-1123 slug", agent)
+				}
+				b.Agent = agent
+				b.Stack = agent
+				return bus.Publish(ctx, pubsub.SubjectTranscriptsStepsForAgent(agent, b.SessionID), transcriptwire.MsgID(b), b)
 			}
 			return fmt.Errorf("transcript publisher: event bus not configured")
 		})
@@ -43,9 +50,26 @@ func (p *WorkerPool) initTranscriptPublisher() (*transcript.Publisher, *transcri
 	return p.TranscriptPublisher, p.TranscriptIndexerClient
 }
 
+func (p *WorkerPool) stackNameCandidates() []string {
+	var candidates []string
+	if p != nil && p.appCfg != nil && p.appCfg.Current() != nil {
+		cfg := p.appCfg.Current()
+		candidates = append(candidates, cfg.Transcripts.Stack, cfg.BotID)
+	}
+	if p != nil {
+		candidates = append(candidates, p.agentName, p.cfg.AgentName)
+	}
+	return candidates
+}
+
 func (p *WorkerPool) stackName() string {
-	if p != nil && p.appCfg != nil && p.appCfg.Current() != nil && p.appCfg.Current().Transcripts.Stack != "" {
-		return strings.TrimSpace(p.appCfg.Current().Transcripts.Stack)
+	for _, c := range p.stackNameCandidates() {
+		clean := strings.ToLower(strings.TrimSpace(c))
+		clean = strings.ReplaceAll(clean, "_", "-")
+		clean = strings.ReplaceAll(clean, ".", "-")
+		if k8sauth.IsValidAgentSlug(clean) {
+			return clean
+		}
 	}
 	return defaultStackName
 }

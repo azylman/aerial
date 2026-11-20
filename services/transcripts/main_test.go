@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -149,6 +150,7 @@ func TestRunApp(t *testing.T) {
 		{"open db error", &Config{Port: "4017", DatabaseURL: "postgres://x"}, errors.New("db down"), true, "db down", false},
 		{"listen failure surfaces", &Config{Port: "99999", DatabaseURL: "postgres://x", Stack: "aerial"}, nil, true, "", false},
 		{"canceled context shuts down cleanly", &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial"}, nil, true, "", true},
+		{"auth enabled shuts down cleanly", &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial", Auth: k8sauth.Config{Enabled: true}}, nil, true, "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

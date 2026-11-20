@@ -408,7 +408,7 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 		},
 		{
 			name:      "MismatchedAgentSkipsExtraction",
-			msgData:   `{"thread_id":"th-ext-1","agent":"miorine"}`,
+			msgData:   `{"thread_id":"th-ext-1","agent":"agent-alpha"}`,
 			delivered: 1,
 			worker:    worker,
 		},
@@ -627,18 +627,18 @@ func TestCovenDurableNamesAndFilters(t *testing.T) {
 			wantExtractFilter:  "aerial.coalesced.coven_extract.>",
 		},
 		{
-			name:               "miorine stack scoped",
-			stack:              "miorine",
-			wantIndexedDurable: "coven-transcripts-indexed-miorine",
-			wantExtractDurable: "coven-extract-miorine",
-			wantExtractFilter:  "aerial.coalesced.coven_extract.miorine.>",
+			name:               "agent-alpha stack scoped",
+			stack:              "agent-alpha",
+			wantIndexedDurable: "coven-transcripts-indexed-agent-alpha",
+			wantExtractDurable: "coven-extract-agent-alpha",
+			wantExtractFilter:  "aerial.coalesced.coven_extract.agent-alpha.>",
 		},
 		{
-			name:               "suletta stack scoped",
-			stack:              "suletta",
-			wantIndexedDurable: "coven-transcripts-indexed-suletta",
-			wantExtractDurable: "coven-extract-suletta",
-			wantExtractFilter:  "aerial.coalesced.coven_extract.suletta.>",
+			name:               "agent-beta stack scoped",
+			stack:              "agent-beta",
+			wantIndexedDurable: "coven-transcripts-indexed-agent-beta",
+			wantExtractDurable: "coven-extract-agent-beta",
+			wantExtractFilter:  "aerial.coalesced.coven_extract.agent-beta.>",
 		},
 	}
 
