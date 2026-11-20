@@ -367,9 +367,9 @@ func TestBuildServiceName(t *testing.T) {
 		{name: "empty agent defaults to Build", agent: "", wantBuild: "Build"},
 		{name: "aerial agent defaults to Build", agent: "aerial", wantBuild: "Build"},
 		{name: "trimmed and upper aerial defaults to Build", agent: "  AERIAL  ", wantBuild: "Build"},
-		{name: "miorine stack agent", agent: "miorine", wantBuild: "Build-miorine"},
-		{name: "trimmed upper miorine", agent: "  MIORINE  ", wantBuild: "Build-miorine"},
-		{name: "suletta stack agent", agent: "suletta", wantBuild: "Build-suletta"},
+		{name: "agent-alpha stack agent", agent: "agent-alpha", wantBuild: "Build-agent-alpha"},
+		{name: "trimmed upper agent-alpha", agent: "  AGENT-ALPHA  ", wantBuild: "Build-agent-alpha"},
+		{name: "agent-beta stack agent", agent: "agent-beta", wantBuild: "Build-agent-beta"},
 		{name: "custom agent identifier", agent: "custom-worker", wantBuild: "Build-custom-worker"},
 	}
 	for _, tc := range tests {

@@ -28,14 +28,14 @@ func TestSessionManagerService_ServiceName(t *testing.T) {
 			wantName:  "SessionManager",
 		},
 		{
-			name:      "miorine stack",
-			agentName: "miorine",
-			wantName:  "SessionManager-miorine",
+			name:      "agent-alpha stack",
+			agentName: "agent-alpha",
+			wantName:  "SessionManager-agent-alpha",
 		},
 		{
-			name:      "suletta stack",
-			agentName: "suletta",
-			wantName:  "SessionManager-suletta",
+			name:      "agent-beta stack",
+			agentName: "agent-beta",
+			wantName:  "SessionManager-agent-beta",
 		},
 	}
 

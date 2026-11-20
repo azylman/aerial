@@ -32,9 +32,9 @@ func TestSetupTracing(t *testing.T) {
 		wantContent bool // prompt/response capture switched on
 	}{
 		{name: "missing config runs disabled", content: ""},
-		{name: "malformed config runs disabled", content: "enabled: [true\nstack: marida\n"},
-		{name: "enabled without endpoint runs disabled", content: "enabled: true\nstack: marida\n"},
-		{name: "stack names the turn agent", content: "enabled: false\nstack: marida\n", wantAgent: "marida"},
+		{name: "malformed config runs disabled", content: "enabled: [true\nstack: agent-gamma\n"},
+		{name: "enabled without endpoint runs disabled", content: "enabled: true\nstack: agent-gamma\n"},
+		{name: "stack names the turn agent", content: "enabled: false\nstack: agent-gamma\n", wantAgent: "agent-gamma"},
 		{name: "enabled config switches on the MCP trace proxy", content: "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: aerial\n", wantAgent: "aerial", wantProxy: true},
 		{name: "capture_content on an enabled config captures content", content: "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: aerial\ncapture_content: true\n", wantAgent: "aerial", wantProxy: true, wantContent: true},
 		{name: "capture_content on a disabled config captures nothing", content: "enabled: false\nstack: aerial\ncapture_content: true\n", wantAgent: "aerial"},
