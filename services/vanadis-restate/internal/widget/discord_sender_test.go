@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1117,6 +1118,126 @@ func TestNewDiscordWidgetDelivererTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		channelA    string
+		channelB    string
+		expectOrder []string
+	}{
+		{
+			name:        "same channel deliveries are serialized sequentially",
+			channelA:    "chan-shared",
+			channelB:    "chan-shared",
+			expectOrder: []string{"first-start", "first-end", "second-start", "second-end"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var (
+				mu     sync.Mutex
+				events []string
+			)
+
+			mock := &mockWidgetSender{
+				sendMsg: &discordgo.Message{ID: "msg-sync"},
+			}
+			deliverer := &DiscordWidgetDeliverer{
+				sender: mock,
+				nowFn:  func() time.Time { return now },
+			}
+
+			chStarted := make(chan struct{})
+			chRelease := make(chan struct{})
+
+			// Custom sender wrapper to track concurrency order
+			firstSender := &mockSerializedSender{
+				mock: mock,
+				onSend: func() {
+					mu.Lock()
+					events = append(events, "first-start")
+					mu.Unlock()
+					close(chStarted)
+					<-chRelease
+					mu.Lock()
+					events = append(events, "first-end")
+					mu.Unlock()
+				},
+			}
+			deliverer.sender = firstSender
+
+			doneFirst := make(chan struct{})
+			go func() {
+				_, _ = deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+					ChannelID: tc.channelA,
+					Title:     "Build First",
+				})
+				close(doneFirst)
+			}()
+
+			<-chStarted
+
+			secondSender := &mockSerializedSender{
+				mock: mock,
+				onSend: func() {
+					mu.Lock()
+					events = append(events, "second-start", "second-end")
+					mu.Unlock()
+				},
+			}
+			deliverer.sender = secondSender
+
+			doneSecond := make(chan struct{})
+			go func() {
+				_, _ = deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+					ChannelID: tc.channelB,
+					Title:     "Build Second",
+				})
+				close(doneSecond)
+			}()
+
+			close(chRelease)
+			<-doneFirst
+			<-doneSecond
+
+			mu.Lock()
+			gotEvents := append([]string(nil), events...)
+			mu.Unlock()
+
+			assert.Equal(t, tc.expectOrder, gotEvents)
+		})
+	}
+}
+
+type mockSerializedSender struct {
+	mock   *mockWidgetSender
+	onSend func()
+}
+
+func (m *mockSerializedSender) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	if m.onSend != nil {
+		m.onSend()
+	}
+	return m.mock.ChannelMessageSendComplex(channelID, data, options...)
+}
+
+func (m *mockSerializedSender) ChannelMessageEditComplex(edit *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	return m.mock.ChannelMessageEditComplex(edit, options...)
+}
+
+func (m *mockSerializedSender) ChannelMessages(channelID string, limit int, beforeID, afterID, aroundID string, options ...discordgo.RequestOption) ([]*discordgo.Message, error) {
+	return m.mock.ChannelMessages(channelID, limit, beforeID, afterID, aroundID, options...)
+}
+
+func (m *mockSerializedSender) ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error {
+	return m.mock.ChannelMessageDelete(channelID, messageID, options...)
 }
 
 func TestIsNotFoundError(t *testing.T) {
