@@ -90,6 +90,7 @@ jobs:
               - 'pkg/**'
             docs:
               - 'services/docs-service/**'
+              - 'web/theme/**'
             synapse:
               - 'services/synapse/**'
               - 'pkg/**'
@@ -159,7 +160,7 @@ jobs:
               { service: "kernel-mcp", context: ".", file: "./mcp/kernel-mcp/Dockerfile", image_name: "aerial-kernel-mcp" },
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
               { service: "console", context: ".", file: "./services/console/Dockerfile", image_name: "aerial-console" },
-              { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
+              { service: "docs", context: "./services/docs-service", build_contexts: "theme=./web/theme", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "transcripts", context: ".", file: "./services/transcripts/Dockerfile", image_name: "aerial-transcripts" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
@@ -332,6 +333,7 @@ jobs:
         if: needs.changes.outputs.docs == 'true'
         run: |
           node --check services/docs-service/app/assets/js/plugins/docsify-mermaid.js
+          node --check services/docs-service/app/assets/js/plugins/docsify-theme.js
 
       - name: Hold Failure Until RoboRev Completes
         if: failure() && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
@@ -537,6 +539,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts || '' }}
           file: ${{ matrix.file }}
           push: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: |

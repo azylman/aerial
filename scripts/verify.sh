@@ -780,6 +780,7 @@ if [ "$MODE" = "staged" ]; then
     # Check docs service JS syntax
     if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
         run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
+        run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-theme.js"
     fi
 
     # Check homepage JS syntax & unit tests
@@ -831,6 +832,7 @@ run_atlas_validate
 echo "=== 2. Frontend & Script Syntax Checks ==="
 run_node_syntax "web/theme/aerial-theme.js"
 run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
+run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-theme.js"
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
 run_console_ui

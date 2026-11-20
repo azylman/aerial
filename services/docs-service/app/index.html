@@ -5,7 +5,24 @@
   <title>Aerial Docs</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
   <meta name="description" content="Aerial Assistant Documentation & Architecture Diagrams">
-  <link rel="stylesheet" href="assets/css/dark.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#181825">
+  <meta name="color-scheme" content="dark light">
+  <link rel="stylesheet" href="assets/aerial-tokens.css">
+  <link rel="stylesheet" href="assets/css/aerial-docs.css">
+  <!-- Shared theme state, then a synchronous pre-paint apply (docsify-theme.js reuses it). -->
+  <script src="assets/aerial-theme.js"></script>
+  <script>
+    window.aerialDocsApplyTheme = function (theme) {
+      var root = document.documentElement;
+      root.setAttribute('data-theme', theme);
+      root.style.colorScheme = theme;
+      var meta = document.querySelector('meta[name="theme-color"]');
+      var canvas = getComputedStyle(root).getPropertyValue('--ae-canvas').trim();
+      if (meta && canvas) meta.content = canvas;
+    };
+    window.aerialDocsApplyTheme(window.AerialTheme ? window.AerialTheme.get() : 'dark');
+  </script>
 </head>
 <body>
   <div id="app">Loading...</div>
@@ -57,5 +74,8 @@
   <!-- Mermaid.js Engine & Plugin -->
   <script src="assets/js/mermaid.min.js"></script>
   <script src="assets/js/plugins/docsify-mermaid.js"></script>
+
+  <!-- Shared Light/Dark Theme Toggle -->
+  <script src="assets/js/plugins/docsify-theme.js"></script>
 </body>
 </html>

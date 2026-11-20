@@ -14,6 +14,10 @@ COPY --link app/index.html ./index.html
 COPY --link app/assets/ ./assets/
 COPY --link app/fallback/ ./fallback/
 
+# Shared Aerial palette and theme script from web/theme, passed as the named build context
+# `theme` (docker buildx build --build-context theme=./web/theme ...). Baked in, no runtime mounts.
+COPY --link --from=theme aerial-tokens.css aerial-theme.js ./assets/
+
 # Expose internal HTTP port
 EXPOSE 80
 
