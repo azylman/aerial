@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,23 +46,31 @@ var (
 	}
 )
 
-// GetChannelWatermark returns the highest message snowflake processed for a channel.
-func GetChannelWatermark(channelID string) string {
-	channelWatermarksMu.RLock()
-	defer channelWatermarksMu.RUnlock()
-	return channelWatermarks[channelID]
+func watermarkKey(agent, channelID string) string {
+	if agent == "" {
+		return channelID
+	}
+	return agent + ":" + channelID
 }
 
-// AdvanceChannelWatermark advances the tracked watermark for a channel if messageID is newer.
-func AdvanceChannelWatermark(channelID, messageID string) {
+// GetChannelWatermarkForAgent returns the highest message snowflake processed for a channel under a specific agent.
+func GetChannelWatermarkForAgent(agent, channelID string) string {
+	channelWatermarksMu.RLock()
+	defer channelWatermarksMu.RUnlock()
+	key := watermarkKey(agent, channelID)
+	return channelWatermarks[key]
+}
+
+// AdvanceChannelWatermarkForAgent advances the tracked watermark for a channel under a specific agent if messageID is newer.
+func AdvanceChannelWatermarkForAgent(agent, channelID, messageID string) {
 	if channelID == "" || messageID == "" {
 		return
 	}
 	channelWatermarksMu.Lock()
 	defer channelWatermarksMu.Unlock()
-	curr := channelWatermarks[channelID]
-	if CompareDiscordSnowflakes(messageID, curr) > 0 {
-		channelWatermarks[channelID] = messageID
+	key := watermarkKey(agent, channelID)
+	if CompareDiscordSnowflakes(messageID, channelWatermarks[key]) > 0 {
+		channelWatermarks[key] = messageID
 	}
 }
 
@@ -146,85 +155,109 @@ func MarkDiscordJobSpan(span trace.Span, err error) {
 	}
 }
 
-// StartGateway initializes and starts the Discord Gateway WebSocket connection.
-func StartGateway(ctx context.Context, server IngressServer, token string) (func(), error) {
-	cleanToken := strings.TrimSpace(token)
-	if cleanToken == "" {
-		log.Println("[synapse] [discord] DISCORD_TOKEN is empty; Discord Gateway disabled")
+// StartDiscordGateway initializes and starts Discord Gateway WebSocket connections for all configured bots in cfg.Bots.
+func StartDiscordGateway(ctx context.Context, server IngressServer) (func(), error) {
+	if isNilServer(server) || server.Config() == nil {
+		return func() {}, nil
+	}
+	cfg := server.Config()
+	bots := cfg.Bots
+	if len(bots) == 0 {
 		return func() {}, nil
 	}
 
-	botToken := cleanToken
-	if !strings.HasPrefix(botToken, "Bot ") {
-		botToken = "Bot " + botToken
+	agents := make([]string, 0, len(bots))
+	for agent := range bots {
+		agents = append(agents, agent)
 	}
-
-	dg, err := discordgo.New(botToken)
-	if err != nil {
-		return nil, fmt.Errorf("create discordgo session: %w", err)
-	}
-
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
-	dg.SyncEvents = false
+	sort.Strings(agents)
 
 	gatewayCtx, cancelGateway := context.WithCancel(ctx)
 	var sweepWG sync.WaitGroup
-
-	dg.AddHandler(NewDiscordGatewayMessageCreateHandler(gatewayCtx, server))
-	dg.AddHandler(NewDiscordGatewayInteractionCreateHandler(gatewayCtx, server))
-	dg.AddHandler(NewDiscordGatewayReadyHandler(gatewayCtx, server, &sweepWG))
+	var sessions []*discordgo.Session
 
 	gatewayOpenerMu.RLock()
 	opener := gatewayOpener
 	gatewayOpenerMu.RUnlock()
 
-	if err := opener(dg); err != nil {
+	cleanupAll := func() {
 		cancelGateway()
-		return nil, fmt.Errorf("open discord gateway: %w", err)
+		sweepWG.Wait()
+		for _, dg := range sessions {
+			if err := dg.Close(); err != nil {
+				log.Printf("[synapse] [discord] error closing discord gateway session: %v", err)
+			}
+		}
 	}
-	log.Println("[synapse] [discord] Discord Gateway connected successfully")
 
-	if server != nil {
-		server.SetGatewayLatencyFn(dg.HeartbeatLatency)
-		metrics.SetDiscordGatewayLatency(dg.HeartbeatLatency().Seconds())
+	for _, agent := range agents {
+		bot := bots[agent]
+		cleanToken := strings.TrimSpace(bot.DiscordToken)
+		if cleanToken == "" {
+			log.Printf("[synapse] [discord] DiscordToken for agent %q is empty; skipping Gateway", agent)
+			continue
+		}
+		botToken := cleanToken
+		if !strings.HasPrefix(botToken, "Bot ") {
+			botToken = "Bot " + botToken
+		}
+
+		dg, err := discordgo.New(botToken)
+		if err != nil {
+			cleanupAll()
+			return nil, fmt.Errorf("create discordgo session for agent %q: %w", agent, err)
+		}
+
+		dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+		dg.SyncEvents = false
+
+		dg.AddHandler(NewDiscordGatewayMessageCreateHandlerForAgent(gatewayCtx, server, agent))
+		dg.AddHandler(NewDiscordGatewayInteractionCreateHandlerForAgent(gatewayCtx, server, agent))
+		dg.AddHandler(NewDiscordGatewayReadyHandlerForAgent(gatewayCtx, server, &sweepWG, agent))
+
+		sessions = append(sessions, dg)
+		if err := opener(dg); err != nil {
+			cleanupAll()
+			return nil, fmt.Errorf("open discord gateway for agent %q: %w", agent, err)
+		}
+		log.Printf("[synapse] [discord] Discord Gateway for agent %q connected successfully", agent)
+
+		if agent == cfg.DefaultOwnerAgent() || len(sessions) == 1 {
+			server.SetGatewayLatencyFn(dg.HeartbeatLatency)
+			metrics.SetDiscordGatewayLatency(dg.HeartbeatLatency().Seconds())
+		}
 	}
 
 	var stopOnce sync.Once
 	stopFn := func() {
-		stopOnce.Do(func() {
-			cancelGateway()
-			sweepWG.Wait()
-			if err := dg.Close(); err != nil {
-				log.Printf("[synapse] [discord] error closing discord gateway session: %v", err)
-			}
-		})
+		stopOnce.Do(cleanupAll)
 	}
 	return stopFn, nil
 }
 
-// NewDiscordGatewayMessageCreateHandler creates a discordgo MessageCreate handler.
-func NewDiscordGatewayMessageCreateHandler(ctx context.Context, server IngressServer) func(s *discordgo.Session, m *discordgo.MessageCreate) {
+// NewDiscordGatewayMessageCreateHandlerForAgent creates a discordgo MessageCreate handler for a specific agent.
+func NewDiscordGatewayMessageCreateHandlerForAgent(ctx context.Context, server IngressServer, agent string) func(s *discordgo.Session, m *discordgo.MessageCreate) {
 	return func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		HandleGatewayMessageCreate(ctx, server, s, m)
+		HandleGatewayMessageCreateForAgent(ctx, server, s, m, agent)
 	}
 }
 
-// NewDiscordGatewayInteractionCreateHandler creates a discordgo InteractionCreate handler.
-func NewDiscordGatewayInteractionCreateHandler(ctx context.Context, server IngressServer) func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+// NewDiscordGatewayInteractionCreateHandlerForAgent creates a discordgo InteractionCreate handler for a specific agent.
+func NewDiscordGatewayInteractionCreateHandlerForAgent(ctx context.Context, server IngressServer, agent string) func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	return func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		HandleGatewayInteractionCreate(ctx, server, i)
+		HandleGatewayInteractionCreateForAgent(ctx, server, i, agent)
 	}
 }
 
-// NewDiscordGatewayReadyHandler creates a discordgo Ready handler.
-func NewDiscordGatewayReadyHandler(ctx context.Context, server IngressServer, wg *sync.WaitGroup) func(s *discordgo.Session, r *discordgo.Ready) {
+// NewDiscordGatewayReadyHandlerForAgent creates a discordgo Ready handler for a specific agent.
+func NewDiscordGatewayReadyHandlerForAgent(ctx context.Context, server IngressServer, wg *sync.WaitGroup, agent string) func(s *discordgo.Session, r *discordgo.Ready) {
 	return func(s *discordgo.Session, r *discordgo.Ready) {
-		HandleGatewayReady(ctx, server, s, r, wg)
+		HandleGatewayReadyForAgent(ctx, server, s, r, wg, agent)
 	}
 }
 
-// HandleGatewayReady updates session state and triggers a background catch-up sweep.
-func HandleGatewayReady(ctx context.Context, server IngressServer, s *discordgo.Session, r *discordgo.Ready, wg *sync.WaitGroup) {
+// HandleGatewayReadyForAgent updates session state and triggers a background catch-up sweep for an agent.
+func HandleGatewayReadyForAgent(ctx context.Context, server IngressServer, s *discordgo.Session, r *discordgo.Ready, wg *sync.WaitGroup, agent string) {
 	if s != nil && r != nil && r.User != nil {
 		if s.State != nil {
 			s.State.Lock()
@@ -236,11 +269,11 @@ func HandleGatewayReady(ctx context.Context, server IngressServer, s *discordgo.
 	}
 	if wg != nil {
 		wg.Go(func() {
-			RunCatchUpSweep(ctx, s, server, time.Now().UTC())
+			RunCatchUpSweepForAgent(ctx, s, server, time.Now().UTC(), agent)
 		})
 		return
 	}
-	go RunCatchUpSweep(ctx, s, server, time.Now().UTC())
+	go RunCatchUpSweepForAgent(ctx, s, server, time.Now().UTC(), agent)
 }
 
 // SessionBotUserID safely extracts the current bot user ID from discordgo session state.
@@ -280,10 +313,10 @@ func isNilServer(s IngressServer) bool {
 	return val.Kind() == reflect.Pointer && val.IsNil()
 }
 
-// HandleGatewayMessageCreate advances watermarks and enqueues inbound messages.
-func HandleGatewayMessageCreate(ctx context.Context, server IngressServer, s *discordgo.Session, m *discordgo.MessageCreate) {
+// HandleGatewayMessageCreateForAgent advances watermarks and enqueues inbound messages for an agent.
+func HandleGatewayMessageCreateForAgent(ctx context.Context, server IngressServer, s *discordgo.Session, m *discordgo.MessageCreate, agent string) {
 	if m != nil && m.ChannelID != "" && m.ID != "" {
-		AdvanceChannelWatermark(m.ChannelID, m.ID)
+		AdvanceChannelWatermarkForAgent(agent, m.ChannelID, m.ID)
 	}
 	if isNilServer(server) || m == nil || m.Message == nil || m.Author == nil {
 		return
@@ -292,11 +325,11 @@ func HandleGatewayMessageCreate(ctx context.Context, server IngressServer, s *di
 	if botUserID != "" && m.Author.ID == botUserID {
 		return
 	}
-	EnqueueDiscordMessage(ctx, server, s, m.Message, botUserID)
+	EnqueueDiscordMessageForAgent(ctx, server, s, m.Message, botUserID, agent)
 }
 
-// EnqueueDiscordMessage prepares and publishes or dispatches an inbound Discord message.
-func EnqueueDiscordMessage(ctx context.Context, server IngressServer, s *discordgo.Session, m *discordgo.Message, botUserID string) {
+// EnqueueDiscordMessageForAgent prepares and publishes or dispatches an inbound Discord message for an agent.
+func EnqueueDiscordMessageForAgent(ctx context.Context, server IngressServer, s *discordgo.Session, m *discordgo.Message, botUserID, agent string) {
 	if isNilServer(server) || m == nil || m.Author == nil {
 		return
 	}
@@ -316,7 +349,12 @@ func EnqueueDiscordMessage(ctx context.Context, server IngressServer, s *discord
 
 	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	enqueueCtx, span := tracing.Tracer().Start(enqueueCtx, "discord.gateway MESSAGE_CREATE", GatewaySpanOptions(m.ChannelID)...)
+
+	spanOpts := GatewaySpanOptions(m.ChannelID)
+	if agent != "" {
+		spanOpts = append(spanOpts, trace.WithAttributes(attribute.String("aerial.agent", agent)))
+	}
+	enqueueCtx, span := tracing.Tracer().Start(enqueueCtx, "discord.gateway MESSAGE_CREATE", spanOpts...)
 	defer span.End()
 
 	args := model.DiscordIngressArgs{
@@ -324,6 +362,7 @@ func EnqueueDiscordMessage(ctx context.Context, server IngressServer, s *discord
 		BotUserID: botUserID,
 		RoleNames: roleNames,
 		Message:   m,
+		Agent:     agent,
 	}
 
 	if server.EventBus() != nil {
@@ -337,20 +376,26 @@ func EnqueueDiscordMessage(ctx context.Context, server IngressServer, s *discord
 	}
 }
 
-// HandleGatewayInteractionCreate enqueues application command interactions.
-func HandleGatewayInteractionCreate(ctx context.Context, server IngressServer, i *discordgo.InteractionCreate) {
+// HandleGatewayInteractionCreateForAgent enqueues application command interactions for an agent.
+func HandleGatewayInteractionCreateForAgent(ctx context.Context, server IngressServer, i *discordgo.InteractionCreate, agent string) {
 	if isNilServer(server) || i == nil || i.Interaction == nil || i.Type != discordgo.InteractionApplicationCommand {
 		return
 	}
 
 	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	enqueueCtx, span := tracing.Tracer().Start(enqueueCtx, "discord.gateway INTERACTION_CREATE", GatewaySpanOptions(i.ChannelID)...)
+
+	spanOpts := GatewaySpanOptions(i.ChannelID)
+	if agent != "" {
+		spanOpts = append(spanOpts, trace.WithAttributes(attribute.String("aerial.agent", agent)))
+	}
+	enqueueCtx, span := tracing.Tracer().Start(enqueueCtx, "discord.gateway INTERACTION_CREATE", spanOpts...)
 	defer span.End()
 
 	args := model.DiscordInteractionArgs{
 		InteractionID: i.ID,
 		Interaction:   i.Interaction,
+		Agent:         agent,
 	}
 
 	if server.EventBus() != nil {

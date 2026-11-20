@@ -465,35 +465,35 @@ var prAndPushTestCases = []ghEventCase{
 	},
 	{
 		name: "pull_request opened foreign bot_id skips registration and lifecycle events", event: "pull_request", delivery: "del-pr-foreign-open",
-		payload:  `{"action":"opened","number":2165,"pull_request":{"number":2165,"title":"feat: foreign bot work","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		payload:  `{"action":"opened","number":2165,"pull_request":{"number":2165,"title":"feat: foreign bot work","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
 		botID:    "aerial",
-		reg:      &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/suletta"},
-		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165", wantSource: "pull_request_payload",
+		reg:      &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/agent-beta"},
+		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165", wantSource: "pull_request_payload",
 		wantEnsureCalls: 0,
 	},
 	{
 		name: "pull_request synchronize foreign bot_id skips sync update and commit sha caching", event: "pull_request", delivery: "del-pr-foreign-sync",
-		payload:  `{"action":"synchronize","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165sync"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		payload:  `{"action":"synchronize","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165sync"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
 		botID:    "aerial",
-		reg:      &mockPRRegistry{syncTargetID: "100000000000000002", resolveTargetID: "100000000000000002", resolveBranch: "feat/suletta"},
-		wantRepo: "azylman/aerial", wantAction: "synchronize", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165sync", wantSource: "pull_request_payload",
+		reg:      &mockPRRegistry{syncTargetID: "100000000000000002", resolveTargetID: "100000000000000002", resolveBranch: "feat/agent-beta"},
+		wantRepo: "azylman/aerial", wantAction: "synchronize", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165sync", wantSource: "pull_request_payload",
 		wantSyncCalls:  0,
 		wantSyncEvents: 0,
 	},
 	{
 		name: "pull_request closed unmerged foreign bot_id skips closed transition", event: "pull_request", delivery: "del-pr-foreign-closed",
-		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165closed"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165closed"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
 		botID:    "aerial",
 		reg:      &mockPRRegistry{closedTargetID: "100000000000000002"},
-		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165closed", wantSource: "pull_request_payload",
+		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165closed", wantSource: "pull_request_payload",
 		wantClosedCalls: 0,
 	},
 	{
 		name: "pull_request closed merged foreign bot_id skips merged transition", event: "pull_request", delivery: "del-pr-foreign-merged",
-		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"suletta\"} -->","head":{"ref":"feat/suletta","sha":"foreignsha2165merged"},"merged":true,"merge_commit_sha":"foreignmergesha2165"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"suletta"}}`,
+		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165merged"},"merged":true,"merge_commit_sha":"foreignmergesha2165"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
 		botID:    "aerial",
 		reg:      &mockPRRegistry{mergedTargetID: "100000000000000002"},
-		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/suletta", wantHeadSHA: "foreignsha2165merged", wantMergeSHA: "foreignmergesha2165", wantSource: "pull_request_payload",
+		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165merged", wantMergeSHA: "foreignmergesha2165", wantSource: "pull_request_payload",
 		wantMergedCalls: 0,
 	},
 }
@@ -786,5 +786,145 @@ func assertEventBusCalls(t *testing.T, tc ghEventCase, bus *mockEventBus) {
 	}
 	if tc.wantSyncEvents > 0 {
 		assertSyncEvents(t, tc, bus)
+	}
+}
+
+func TestResolveOwningAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cfgBots   map[string]BotConfig
+		prBody    string
+		meta      map[string]any
+		prNum     int
+		repo      string
+		wantAgent string
+	}{
+		{
+			name:      "pr body trailer agent takes precedence",
+			prBody:    "Fix bug\n<!-- aerial-pr: {\"agent\":\"agent-beta\"} -->",
+			meta:      map[string]any{"agent": "agent-alpha"},
+			prNum:     42,
+			repo:      "azylman/aerial",
+			wantAgent: "agent-beta",
+		},
+		{
+			name:      "registry metadata agent used when prBody has no trailer",
+			prBody:    "Fix bug without trailer",
+			meta:      map[string]any{"agent": "agent-alpha"},
+			prNum:     42,
+			repo:      "azylman/aerial",
+			wantAgent: "agent-alpha",
+		},
+		{
+			name:      "registry metadata bot_id used when agent not in meta",
+			prBody:    "Fix bug without trailer",
+			meta:      map[string]any{"bot_id": "agent-alpha"},
+			prNum:     42,
+			repo:      "azylman/aerial",
+			wantAgent: "agent-alpha",
+		},
+		{
+			name:   "default owner agent used when no trailer or registry metadata",
+			prBody: "Dependabot bump",
+			prNum:  42,
+			repo:   "azylman/aerial",
+			cfgBots: map[string]BotConfig{
+				"aerial":      {DefaultOwner: false},
+				"agent-alpha": {DefaultOwner: true},
+			},
+			wantAgent: "agent-alpha",
+		},
+		{
+			name:      "fallback aerial used when no config or registry",
+			prBody:    "Dependabot bump",
+			wantAgent: "aerial",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &mockPRRegistry{rawMetadata: tc.meta}
+			cfg := Config{Bots: tc.cfgBots}
+			srv := newTestRouter(cfg, nil, reg, nil)
+			got := srv.resolveOwningAgent(context.Background(), tc.repo, tc.prNum, tc.prBody)
+			if got != tc.wantAgent {
+				t.Errorf("resolveOwningAgent() = %q, want %q", got, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestIsForeignBotEvent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilCfg      bool
+		cfgBots     map[string]BotConfig
+		cfgBotID    string
+		meta        AerialPRMetadata
+		wantForeign bool
+	}{
+		{
+			name:        "nil cfgSrc returns false",
+			nilCfg:      true,
+			meta:        AerialPRMetadata{Agent: "aerial"},
+			wantForeign: false,
+		},
+		{
+			name:        "empty agent is not foreign",
+			cfgBots:     map[string]BotConfig{"aerial": {}},
+			meta:        AerialPRMetadata{},
+			wantForeign: false,
+		},
+		{
+			name:        "configured bot is not foreign",
+			cfgBots:     map[string]BotConfig{"aerial": {}, "agent-alpha": {}},
+			meta:        AerialPRMetadata{Agent: "agent-alpha"},
+			wantForeign: false,
+		},
+		{
+			name:        "case-insensitive configured bot is not foreign",
+			cfgBots:     map[string]BotConfig{"aerial": {}, "agent-alpha": {}},
+			meta:        AerialPRMetadata{Agent: "AGENT-ALPHA"},
+			wantForeign: false,
+		},
+		{
+			name:        "unconfigured bot is foreign",
+			cfgBots:     map[string]BotConfig{"aerial": {}},
+			meta:        AerialPRMetadata{Agent: "agent-beta"},
+			wantForeign: true,
+		},
+		{
+			name:        "legacy single bot config matching is not foreign",
+			cfgBotID:    "aerial",
+			meta:        AerialPRMetadata{BotID: "aerial"},
+			wantForeign: false,
+		},
+		{
+			name:        "legacy single bot config foreign",
+			cfgBotID:    "aerial",
+			meta:        AerialPRMetadata{BotID: "agent-beta"},
+			wantForeign: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var srv *RouterServer
+			if tc.nilCfg {
+				srv = &RouterServer{}
+			} else {
+				srv = newTestRouter(Config{Bots: tc.cfgBots, BotID: tc.cfgBotID}, nil, nil, nil)
+			}
+			got := srv.isForeignBotEvent(tc.meta)
+			if got != tc.wantForeign {
+				t.Errorf("isForeignBotEvent() = %v, want %v", got, tc.wantForeign)
+			}
+		})
 	}
 }

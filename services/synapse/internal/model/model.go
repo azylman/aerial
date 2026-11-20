@@ -32,6 +32,15 @@ type PRRegisterRequest struct {
 	Title    string `json:"title,omitempty"`
 	Metadata string `json:"metadata,omitempty"`
 	BotID    string `json:"bot_id,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+}
+
+// OwningAgent returns the explicit Agent if set, otherwise falling back to BotID.
+func (r PRRegisterRequest) OwningAgent() string {
+	if r.Agent != "" {
+		return r.Agent
+	}
+	return r.BotID
 }
 
 // PRBuildLifecycle is the registry lifecycle fence image-build consumers read
@@ -79,7 +88,7 @@ type PRRegistryUpdater interface {
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
 	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error
-	LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, error)
+	LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, bool, error)
 	IsPRDeployed(ctx context.Context, repo string, prNumber int) (bool, error)
 }
 
@@ -276,6 +285,7 @@ type DeployWebhookArgs struct {
 
 // DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.
 type DiscordMessageIngressRequest struct {
+	Agent     string             `json:"agent,omitempty"`
 	BotUserID string             `json:"bot_user_id,omitempty"`
 	RoleNames map[string]string  `json:"role_names,omitempty"`
 	Message   *discordgo.Message `json:"message"`
@@ -284,6 +294,7 @@ type DiscordMessageIngressRequest struct {
 // DiscordIngressArgs contains payload data for JetStream queueing of Discord message ingress events.
 type DiscordIngressArgs struct {
 	MessageID string             `json:"message_id"`
+	Agent     string             `json:"agent,omitempty"`
 	BotUserID string             `json:"bot_user_id,omitempty"`
 	RoleNames map[string]string  `json:"role_names,omitempty"`
 	Message   *discordgo.Message `json:"message"`
@@ -292,6 +303,7 @@ type DiscordIngressArgs struct {
 // DiscordInteractionArgs contains payload data for JetStream queueing of Discord interaction events.
 type DiscordInteractionArgs struct {
 	InteractionID string                 `json:"interaction_id"`
+	Agent         string                 `json:"agent,omitempty"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
 }
 
@@ -373,8 +385,30 @@ type GitHubPullRequest struct {
 	} `json:"user"`
 }
 
+func (pr GitHubPullRequest) GetBody() string {
+	return pr.Body
+}
+
+func (pr GitHubPullRequest) GetNumber() int {
+	return pr.Number
+}
+
 // AerialPRMetadata captures structured metadata trailers in PR descriptions.
 type AerialPRMetadata struct {
 	TargetID string `json:"target_id,omitempty"`
 	BotID    string `json:"bot_id,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+}
+
+// OK reports whether any metadata fields are set.
+func (m AerialPRMetadata) OK() bool {
+	return m.TargetID != "" || m.BotID != "" || m.Agent != ""
+}
+
+// OwningAgent returns the explicit Agent if set, otherwise falling back to BotID.
+func (m AerialPRMetadata) OwningAgent() string {
+	if m.Agent != "" {
+		return m.Agent
+	}
+	return m.BotID
 }

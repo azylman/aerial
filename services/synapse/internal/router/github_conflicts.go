@@ -168,24 +168,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 	if err != nil {
 		return fmt.Errorf("list open prs: %w", err)
 	}
-	openPRs := make([]GitHubPullRequest, len(openPRsModel))
-	for i, p := range openPRsModel {
-		openPRs[i] = GitHubPullRequest{
-			NodeID:         p.NodeID,
-			Number:         p.Number,
-			State:          p.State,
-			Title:          p.Title,
-			Body:           p.Body,
-			Head:           GitHubPRRef(p.Head),
-			Base:           GitHubPRRef(p.Base),
-			Draft:          p.Draft,
-			Merged:         p.Merged,
-			MergeCommitSHA: p.MergeCommitSHA,
-			Mergeable:      p.Mergeable,
-			MergeableState: p.MergeableState,
-			User:           p.User,
-		}
-	}
+	openPRs := openPRsModel
 	for _, pr := range openPRs {
 		if ctx.Err() != nil {
 			return ctx.Err()
