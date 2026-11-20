@@ -22,10 +22,16 @@ export interface FactCardProps {
  * an index into the filtered list.
  */
 export const FactCard = memo(function FactCard({ fact, count, query, now }: FactCardProps) {
+  const agent = (fact.agent || 'aerial').toLowerCase();
   return (
     <div className={count >= 2 ? 'fact-card high-importance' : 'fact-card'}>
       <div className="fact-card-header">
-        <span className="fact-category-tag cat-system_config">NODE #{String(fact.id || 0)}</span>
+        <div className="fact-header-left">
+          <span className="fact-category-tag cat-system_config">NODE #{String(fact.id || 0)}</span>
+          <span className={`agent-badge agent-${agent}`} data-agent={agent}>
+            {agent}
+          </span>
+        </div>
         <div className="fact-importance-gauge">
           <span>
             <Glyph name="bolt" /> {count}x

@@ -92,7 +92,7 @@ describe('MemoryView lifecycle', () => {
     expect(text('#memory-avg-importance')).toBe('2.60x');
     expect(screen.getByText(`SYNCED ${new Date(NOW).toLocaleTimeString()}`)).toBeTruthy();
     expect(nodes()).toEqual(['NODE #12', 'NODE #7', 'NODE #9', 'NODE #30', 'NODE #4']);
-    expect(text('.fact-card')).toBe('NODE #12 5xBuilds ship through Vanadis 30s AGO COPY');
+    expect(text('.fact-card')).toBe('NODE #12aerial 5xBuilds ship through Vanadis 30s AGO COPY');
     expect(document.querySelectorAll('.fact-card.high-importance')).toHaveLength(3);
     expect(text('.results-telemetry-bar span')).toBe('SHOWING 5 / 5 NODES');
   });

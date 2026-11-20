@@ -307,6 +307,79 @@ body::after {
     font-variant-numeric: tabular-nums;
 }
 
+/* Agent Selector Pill Bar */
+.agent-selector-bar {
+    display: inline-flex;
+    align-items: center;
+    background: var(--bg-elevated);
+    border: 1px solid var(--card-border);
+    border-radius: 999px;
+    padding: 2px;
+    gap: 2px;
+}
+
+.agent-pill {
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    padding: 3px 9px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    line-height: 1;
+    min-height: 24px;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.agent-pill:hover {
+    color: var(--text-primary);
+    background: var(--tab-hover-bg);
+}
+
+.agent-pill.active {
+    background: var(--pill-active-bg);
+    color: var(--pill-active-fg);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Agent Badges */
+.agent-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    border: 1px solid var(--card-border);
+    line-height: 1;
+}
+
+.agent-badge[data-agent="aerial"],
+.agent-badge.agent-aerial {
+    border-color: rgba(203, 166, 247, 0.4);
+    color: var(--accent-primary);
+}
+
+.agent-badge[data-agent="miorine"],
+.agent-badge.agent-miorine {
+    border-color: rgba(166, 227, 161, 0.4);
+    color: var(--accent-emerald);
+}
+
+.agent-badge[data-agent="suletta"],
+.agent-badge.agent-suletta {
+    border-color: rgba(243, 139, 168, 0.4);
+    color: var(--accent-crimson);
+}
+
 /* Primary View Tabs - Inline Segmented Control */
 .hud-view-tabs,
 .hud-nav {
@@ -483,6 +556,9 @@ body::after {
         order: 2;
     }
     .theme-toggle-btn {
+        order: 2;
+    }
+    .agent-selector-bar {
         order: 2;
     }
     .quick-launch-dock {
