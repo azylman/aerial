@@ -514,6 +514,49 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	return DeliverStatusWidget(sender, req, now, opts...)
 }
 
+// DeliverDirectMessage delivers a direct plain-text channel alert message to Discord REST.
+func (d *DiscordWidgetDeliverer) DeliverDirectMessage(ctx context.Context, channelID, content string) error {
+	if d == nil {
+		return errors.New("discord widget deliverer is nil")
+	}
+	sender := d.sender
+	if isNilSender(sender) && !isNilSender(d.session) {
+		sender = d.session
+	}
+	if isNilSender(sender) {
+		return errors.New("discord widget sender is nil")
+	}
+
+	cleanChannelID := strings.TrimSpace(channelID)
+	cleanContent := strings.TrimSpace(content)
+	if cleanChannelID == "" || cleanContent == "" {
+		return nil
+	}
+
+	now := d.now()
+	targetChannelID := d.resolveChannelID(d.redirectChannelIfNoBuildUpdates(cleanChannelID, now), cleanChannelID, now)
+
+	var opts []discordgo.RequestOption
+	if ctx != nil {
+		opts = append(opts, discordgo.WithContext(ctx))
+	}
+
+	lockVal, _ := d.channelLocks.LoadOrStore(targetChannelID, &sync.Mutex{})
+	if chLock, ok := lockVal.(*sync.Mutex); ok && chLock != nil {
+		chLock.Lock()
+		defer chLock.Unlock()
+	}
+
+	_, err := sender.ChannelMessageSendComplex(targetChannelID, &discordgo.MessageSend{
+		Content:         cleanContent,
+		AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
+	}, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to send direct discord message: %w", err)
+	}
+	return nil
+}
+
 func isNotFoundError(err error) bool {
 	if err == nil {
 		return false

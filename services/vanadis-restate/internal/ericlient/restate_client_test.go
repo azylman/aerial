@@ -193,12 +193,20 @@ func TestReconcileRestateServiceTimeouts(t *testing.T) {
 }
 
 type mockDeliverer struct {
-	msgID string
-	err   error
+	msgID       string
+	err         error
+	lastChannel string
+	lastContent string
 }
 
 func (m *mockDeliverer) DeliverStatusWidget(_ context.Context, _ StatusWidgetRequest) (string, error) {
 	return m.msgID, m.err
+}
+
+func (m *mockDeliverer) DeliverDirectMessage(_ context.Context, channelID, content string) error {
+	m.lastChannel = channelID
+	m.lastContent = content
+	return m.err
 }
 
 type dispatchTestCase struct {
@@ -556,14 +564,59 @@ type widgetTestCase struct {
 	wantErr     bool
 	errContain  string
 	testMessage bool
+	wantEriHit  bool
+}
+
+func assertExpectedError(t *testing.T, err error, wantErr bool, errContain string) bool {
+	t.Helper()
+	if !wantErr {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return false
+	}
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if errContain != "" && !strings.Contains(err.Error(), errContain) {
+		t.Fatalf("error %q does not contain %q", err.Error(), errContain)
+	}
+	return true
+}
+
+func verifyWidgetMessageCall(t *testing.T, client *RestateEriClient, mockDel *mockDeliverer, eriHits *int, tc widgetTestCase) {
+	t.Helper()
+	err := client.Message(context.Background(), "ch-1", "test content")
+	if assertExpectedError(t, err, tc.wantErr, tc.errContain) {
+		return
+	}
+	if tc.wantEriHit {
+		if eriHits == nil || *eriHits != 1 {
+			t.Errorf("eriHits = %v, want 1", eriHits)
+		}
+		if mockDel != nil && (mockDel.lastChannel != "" || mockDel.lastContent != "") {
+			t.Errorf("mockDeliverer was unexpectedly called: channel=%q, content=%q", mockDel.lastChannel, mockDel.lastContent)
+		}
+		return
+	}
+	if tc.hasDeliver && tc.envToken != "" && tc.restateURL != "" && mockDel != nil {
+		if mockDel.lastChannel != "ch-1" || mockDel.lastContent != "test content" {
+			t.Errorf("mockDeliverer got channel=%q content=%q, want ch-1 / test content", mockDel.lastChannel, mockDel.lastContent)
+		}
+		if eriHits != nil && *eriHits != 0 {
+			t.Errorf("eriHits = %d, want 0 when direct deliverer active", *eriHits)
+		}
+	}
 }
 
 func runWidgetTest(t *testing.T, tc widgetTestCase) {
 	t.Helper()
 	t.Setenv("DISCORD_TOKEN", tc.envToken)
+	var eriHits int
 	var eriURL string
 	if tc.eriBody != "" {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			eriHits++
 			w.WriteHeader(tc.eriStatus)
 			_, _ = w.Write([]byte(tc.eriBody))
 		}))
@@ -572,34 +625,21 @@ func runWidgetTest(t *testing.T, tc widgetTestCase) {
 	}
 
 	var deliverer StatusWidgetDeliverer
+	var mockDel *mockDeliverer
 	if tc.hasDeliver {
-		deliverer = &mockDeliverer{msgID: tc.deliverMsg, err: tc.deliverErr}
+		mockDel = &mockDeliverer{msgID: tc.deliverMsg, err: tc.deliverErr}
+		deliverer = mockDel
 	}
 
 	client := NewRestateEriClient(tc.restateURL, eriURL, "aerial", nil, deliverer)
 	if tc.testMessage {
-		err := client.Message(context.Background(), "ch-1", "test content")
-		if tc.wantErr && err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		if !tc.wantErr && err != nil {
-			t.Fatalf("unexpected message error: %v", err)
-		}
+		verifyWidgetMessageCall(t, client, mockDel, &eriHits, tc)
 		return
 	}
 
 	msgID, err := client.Widget(context.Background(), StatusWidgetRequest{ID: "w1"})
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-			t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-		}
+	if assertExpectedError(t, err, tc.wantErr, tc.errContain) {
 		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
 	if msgID != tc.wantMsgID {
 		t.Errorf("msgID = %q, want %q", msgID, tc.wantMsgID)
@@ -642,10 +682,56 @@ func TestRestateEriClient_WidgetAndMessage(t *testing.T) {
 			errContain: "neither widget deliverer nor eri url configured",
 		},
 		{
+			name:        "message direct deliverer active when token and restate set",
+			envToken:    "dummy-token",
+			restateURL:  "http://restate.test",
+			hasDeliver:  true,
+			testMessage: true,
+		},
+		{
+			name:        "message direct deliverer error propagates",
+			envToken:    "dummy-token",
+			restateURL:  "http://restate.test",
+			hasDeliver:  true,
+			deliverErr:  errors.New("deliverer direct boom"),
+			testMessage: true,
+			wantErr:     true,
+			errContain:  "deliverer direct boom",
+		},
+		{
+			name:        "message falls back to eri when token missing",
+			envToken:    "",
+			restateURL:  "http://restate.test",
+			hasDeliver:  true,
+			eriStatus:   http.StatusOK,
+			eriBody:     `{"status":"ok"}`,
+			testMessage: true,
+			wantEriHit:  true,
+		},
+		{
+			name:        "message falls back to eri when restate url empty",
+			envToken:    "dummy-token",
+			restateURL:  "",
+			hasDeliver:  true,
+			eriStatus:   http.StatusOK,
+			eriBody:     `{"status":"ok"}`,
+			testMessage: true,
+			wantEriHit:  true,
+		},
+		{
+			name:        "message unconfigured returns error",
+			envToken:    "",
+			restateURL:  "",
+			testMessage: true,
+			wantErr:     true,
+			errContain:  "neither direct message deliverer nor http fallback configured for message delivery",
+		},
+		{
 			name:        "message delegates to http fallback",
 			eriStatus:   http.StatusOK,
 			eriBody:     `{"status":"ok"}`,
 			testMessage: true,
+			wantEriHit:  true,
 		},
 	}
 
