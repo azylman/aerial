@@ -59,13 +59,13 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 			wantSubstr:   "consumer stats",
 		},
 		{
-			name:         "aggregates pending and in_flight across static consumers",
+			name:         "aggregates pending and in_flight across static and default-agent consumers",
 			defaultAgent: "alpha",
 			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-github":              {3, 1},
-				"AERIAL_JOBS/synapse-deploy":              {4, 2},
-				"AERIAL_JOBS/synapse-discord-ingress":     {5, 3},
-				"AERIAL_JOBS/synapse-discord-interaction": {2, 1},
+				"AERIAL_JOBS/synapse-github":                    {3, 1},
+				"AERIAL_JOBS/synapse-deploy":                    {4, 2},
+				"AERIAL_JOBS/synapse-discord-ingress-alpha":     {5, 3},
+				"AERIAL_JOBS/synapse-discord-interaction-alpha": {2, 1},
 			},
 			wantDepth: map[[2]string]float64{
 				{"default", "pending"}:               7,
@@ -75,22 +75,20 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 			},
 		},
 		{
-			name:         "sums per-agent and legacy drain durables into existing discord series",
+			name:         "sums per-agent durables into existing discord series",
 			bots:         []string{"beta", "alpha"},
 			defaultAgent: "alpha",
 			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-discord-ingress":           {1, 0},
-				"AERIAL_JOBS/synapse-discord-interaction":       {1, 1},
 				"AERIAL_JOBS/synapse-discord-ingress-alpha":     {2, 1},
 				"AERIAL_JOBS/synapse-discord-ingress-beta":      {7, 1},
 				"AERIAL_JOBS/synapse-discord-interaction-alpha": {0, 0},
 				"AERIAL_JOBS/synapse-discord-interaction-beta":  {3, 2},
 			},
 			wantDepth: map[[2]string]float64{
-				{"discord_ingress", "pending"}:       10,
+				{"discord_ingress", "pending"}:       9,
 				{"discord_ingress", "in_flight"}:     2,
-				{"discord_interaction", "pending"}:   4,
-				{"discord_interaction", "in_flight"}: 3,
+				{"discord_interaction", "pending"}:   3,
+				{"discord_interaction", "in_flight"}: 2,
 			},
 			wantAgentDepth: map[[3]string]float64{
 				{"discord_ingress", "alpha", "pending"}:       2,
