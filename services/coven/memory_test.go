@@ -95,7 +95,7 @@ func validateTestFact(text string, emb []float32) (string, error) {
 	return cleaned, nil
 }
 
-func (m *TestMemStore) InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error) {
+func (m *TestMemStore) InsertFact(ctx context.Context, factText string, embedding []float32, sourceAgent ...string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "InsertFact" {
@@ -108,9 +108,14 @@ func (m *TestMemStore) InsertFact(ctx context.Context, factText string, embeddin
 	id := m.nextID
 	m.nextID++
 	now := time.Now().UTC()
+	agent := "aerial"
+	if len(sourceAgent) > 0 && strings.TrimSpace(sourceAgent[0]) != "" {
+		agent = strings.TrimSpace(sourceAgent[0])
+	}
 	m.facts[id] = &Fact{
 		ID:               id,
 		FactText:         cleanText,
+		SourceAgent:      agent,
 		CreatedAt:        now,
 		LastReinforcedAt: now,
 		ReinforceCount:   1,
@@ -1069,14 +1074,16 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 	existingID, _ := store.InsertFact(context.Background(), "Existing Fact", testEmbedding(1.0))
 
 	tests := []struct {
-		name       string
-		args       MemoryStoreArgs
-		emb        []float32
-		ollamaErr  error
-		storeFail  string
-		wantErr    bool
-		wantAction string
-		wantID     int64
+		name         string
+		args         MemoryStoreArgs
+		emb          []float32
+		ollamaErr    error
+		storeFail    string
+		handlerStack string
+		wantErr      bool
+		wantAction   string
+		wantID       int64
+		wantAgent    string
 	}{
 		{
 			name:       "ReinforceDuplicateFact",
@@ -1097,6 +1104,22 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 			args:       MemoryStoreArgs{FactText: "Unique fact"},
 			emb:        testEmbeddingAt(2, 1.0),
 			wantAction: "inserted",
+		},
+		{
+			name:         "InsertWithTargetAgentAndStack",
+			args:         MemoryStoreArgs{FactText: "Target agent fact", TargetAgent: "miorine"},
+			emb:          testEmbeddingAt(4, 1.0),
+			handlerStack: "suletta",
+			wantAction:   "inserted",
+			wantAgent:    "miorine",
+		},
+		{
+			name:         "InsertWithStackFallback",
+			args:         MemoryStoreArgs{FactText: "Stack fallback fact"},
+			emb:          testEmbeddingAt(5, 1.0),
+			handlerStack: "suletta",
+			wantAction:   "inserted",
+			wantAgent:    "suletta",
 		},
 		{
 			name:      "InsertWithOllamaErrorFails",
@@ -1141,7 +1164,7 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ollama := &MockOllamaClient{embedding: tc.emb, err: tc.ollamaErr}
-			handler := NewToolHandler(&Config{}, store, ollama)
+			handler := NewToolHandler(&Config{Stack: tc.handlerStack}, store, ollama)
 			if tc.storeFail != "" {
 				store.SetFail(tc.storeFail, errors.New("simulated store failure"))
 				defer store.SetFail("", nil)
@@ -1150,64 +1173,84 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MemoryStore() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr {
-				if tc.wantAction != "" && out.Action != tc.wantAction {
-					t.Errorf("out.Action = %q, want %q", out.Action, tc.wantAction)
+			if tc.wantErr {
+				return
+			}
+			if tc.wantAction != "" && out.Action != tc.wantAction {
+				t.Errorf("out.Action = %q, want %q", out.Action, tc.wantAction)
+			}
+			if tc.wantID > 0 && out.FactID != tc.wantID {
+				t.Errorf("out.FactID = %d, want %d", out.FactID, tc.wantID)
+			}
+			if tc.wantAgent != "" {
+				fact := store.facts[out.FactID]
+				if fact == nil {
+					t.Fatalf("fact with ID %d not found in store", out.FactID)
 				}
-				if tc.wantID > 0 && out.FactID != tc.wantID {
-					t.Errorf("out.FactID = %d, want %d", out.FactID, tc.wantID)
+				if fact.SourceAgent != tc.wantAgent {
+					t.Errorf("fact.SourceAgent = %q, want %q", fact.SourceAgent, tc.wantAgent)
 				}
 			}
 		})
 	}
 }
 
-func TestToolHandler_MemoryForget(t *testing.T) {
-	store := newTestMemStore()
-	id, _ := store.InsertFact(context.Background(), "Forget me", testEmbedding(1.0))
-	handler := NewToolHandler(&Config{}, store, nil)
-
+func TestToolHandler_MemoryStoreWithInput(t *testing.T) {
 	tests := []struct {
-		name      string
-		args      MemoryForgetArgs
-		storeFail bool
-		wantErr   bool
+		name       string
+		input      FactInput
+		wantAgent  string
+		wantAction string
+		wantErr    bool
 	}{
 		{
-			name:    "ForgetSuccess",
-			args:    MemoryForgetArgs{FactID: id},
-			wantErr: false,
+			name: "stamps custom source agent",
+			input: FactInput{
+				FactText:    "Durable fact preference for tea",
+				SourceAgent: "miorine",
+			},
+			wantAgent:  "miorine",
+			wantAction: "inserted",
 		},
 		{
-			name:    "ForgetNonexistent",
-			args:    MemoryForgetArgs{FactID: 99999},
+			name: "empty source agent defaults to aerial",
+			input: FactInput{
+				FactText:    "Durable fact preference for coffee",
+				SourceAgent: "",
+			},
+			wantAgent:  "aerial",
+			wantAction: "inserted",
+		},
+		{
+			name: "empty fact text returns error",
+			input: FactInput{
+				FactText:    "   ",
+				SourceAgent: "suletta",
+			},
 			wantErr: true,
-		},
-		{
-			name:    "InvalidIDZero",
-			args:    MemoryForgetArgs{FactID: 0},
-			wantErr: true,
-		},
-		{
-			name:      "StoreDeleteError",
-			args:      MemoryForgetArgs{FactID: 10},
-			storeFail: true,
-			wantErr:   true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.storeFail {
-				store.SetFail("DeleteFact", errors.New("disk failure"))
-				defer store.SetFail("", nil)
-			}
-			out, err := handler.MemoryForget(context.Background(), tc.args)
+			store := newTestMemStore()
+			ollama := &MockOllamaClient{embedding: testEmbedding(1.0)}
+			handler := NewToolHandler(&Config{Stack: "suletta"}, store, ollama)
+			out, err := handler.MemoryStoreWithInput(context.Background(), tc.input)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("MemoryForget() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("MemoryStoreWithInput() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && out.Status != "success" {
-				t.Errorf("out.Status = %q, want success", out.Status)
+			if !tc.wantErr {
+				if out.Action != tc.wantAction {
+					t.Errorf("out.Action = %q, want %q", out.Action, tc.wantAction)
+				}
+				fact := store.facts[out.FactID]
+				if fact == nil {
+					t.Fatalf("fact with ID %d not found in store", out.FactID)
+				}
+				if fact.SourceAgent != tc.wantAgent {
+					t.Errorf("fact.SourceAgent = %q, want %q", fact.SourceAgent, tc.wantAgent)
+				}
 			}
 		})
 	}

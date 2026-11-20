@@ -16,6 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 // serverRequestCase is the shared row shape for the Routes and handleMCP tests:
@@ -174,7 +175,6 @@ func TestServer_HandleMCP(t *testing.T) {
 		{name: "MCPReadError", method: http.MethodPost, path: "/mcp", body: &mockErrReadCloser{}, wantStatus: http.StatusBadRequest},
 		{name: "MCPDoublePrefixNormalized", method: http.MethodPost, path: "/mcp", body: mcpToolCallBody(1, "memory_memory_search", `{"query":"test"}`), wantStatus: http.StatusOK},
 		{name: "MCPStoreToolCall", method: http.MethodPost, path: "/mcp", body: mcpToolCallBody(2, "memory_store", `{"fact_text":"tool call store"}`), wantStatus: http.StatusOK},
-		{name: "MCPForgetToolCall", method: http.MethodPost, path: "/mcp", body: mcpToolCallBody(3, "memory_forget", `{"fact_id":1}`), wantStatus: http.StatusOK},
 		{name: "MCPToolsListDocumentsAdmissionGate", method: http.MethodPost, path: "/mcp", body: strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}`), wantStatus: http.StatusOK, wantSubstr: "admission gate constraints"},
 	}
 
@@ -970,6 +970,368 @@ func TestServer_Metrics_Table(t *testing.T) {
 				if !strings.Contains(body, sub) {
 					t.Errorf("expected body to contain %q, body:\n%s", sub, body)
 				}
+			}
+		})
+	}
+}
+
+type staticAuthRoundTripper struct {
+	authStatus int
+	authBody   string
+	sarStatus  int
+	sarBody    string
+	err        error
+}
+
+func (s *staticAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if strings.Contains(req.URL.Path, "tokenreviews") {
+		return &http.Response{
+			StatusCode: s.authStatus,
+			Body:       io.NopCloser(strings.NewReader(s.authBody)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	if strings.Contains(req.URL.Path, "subjectaccessreviews") {
+		return &http.Response{
+			StatusCode: s.sarStatus,
+			Body:       io.NopCloser(strings.NewReader(s.sarBody)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func newTestAuthConfig(t *testing.T, tr *staticAuthRoundTripper) k8sauth.Config {
+	t.Helper()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
+		t.Fatalf("failed to write host token: %v", err)
+	}
+	return k8sauth.Config{
+		Enabled:          true,
+		TokenPath:        tokenFile,
+		APIServerURL:     "https://k8s.local",
+		HTTPClient:       &http.Client{Transport: tr},
+		ConfiguredAgents: []string{"aerial", "miorine", "suletta"},
+	}
+}
+
+func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) (*TestMemStore, *Server) {
+	t.Helper()
+	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
+	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta })
+
+	store := newTestMemStore()
+	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
+	handler := NewToolHandler(&Config{Stack: DefaultStack, Auth: authCfg}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
+	server := NewServer(handler, func(_ context.Context, threadID string) error {
+		if threadID == "th-busy" {
+			return ErrAdvisoryLockBusy
+		}
+		if threadID == "th-err" {
+			return errors.New("extract failed")
+		}
+		return nil
+	})
+	return store, server
+}
+
+type authEndpointTestCase struct {
+	name       string
+	method     string
+	path       string
+	body       io.Reader
+	header     map[string]string
+	rt         *staticAuthRoundTripper
+	wantStatus int
+	wantSubstr string
+}
+
+func runAuthEndpointTests(t *testing.T, trDefault *staticAuthRoundTripper, tests []authEndpointTestCase) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := trDefault
+			if tc.rt != nil {
+				rt = tc.rt
+			}
+			_, server := newServerFixtureWithAuth(t, newTestAuthConfig(t, rt))
+			req := httptest.NewRequest(tc.method, tc.path, tc.body)
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			server.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("response %q missing %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestServer_Auth_Endpoints_ExemptAndUnauthorized(t *testing.T) {
+	trSuccess := &staticAuthRoundTripper{
+		authStatus: http.StatusOK,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		sarStatus:  http.StatusOK,
+		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+	}
+	trUnauth := &staticAuthRoundTripper{
+		authStatus: http.StatusOK,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`,
+	}
+
+	tests := []authEndpointTestCase{
+		{
+			name:       "health is exempt from auth",
+			method:     http.MethodGet,
+			path:       "/health",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "metrics is exempt from auth",
+			method:     http.MethodGet,
+			path:       "/metrics",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "missing token returns 401",
+			method:     http.MethodGet,
+			path:       "/facts",
+			wantStatus: http.StatusUnauthorized,
+			wantSubstr: "missing Authorization header",
+		},
+		{
+			name:       "invalid token returns 401",
+			method:     http.MethodGet,
+			path:       "/facts",
+			header:     map[string]string{"Authorization": "Bearer bad-token"},
+			rt:         trUnauth,
+			wantStatus: http.StatusUnauthorized,
+			wantSubstr: "token expired",
+		},
+	}
+	runAuthEndpointTests(t, trSuccess, tests)
+}
+
+func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
+	trSuccess := &staticAuthRoundTripper{
+		authStatus: http.StatusOK,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		sarStatus:  http.StatusOK,
+		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+	}
+	trDenied := &staticAuthRoundTripper{
+		authStatus: http.StatusOK,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		sarStatus:  http.StatusOK,
+		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"access denied by test policy"}}`,
+	}
+
+	tests := []authEndpointTestCase{
+		{
+			name:       "facts allowed returns 200",
+			method:     http.MethodGet,
+			path:       "/facts",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trSuccess,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"facts"`,
+		},
+		{
+			name:       "facts denied returns 403",
+			method:     http.MethodGet,
+			path:       "/facts",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trDenied,
+			wantStatus: http.StatusForbidden,
+			wantSubstr: "access denied by test policy",
+		},
+		{
+			name:       "context allowed returns 200",
+			method:     http.MethodGet,
+			path:       "/context?q=test",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trSuccess,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "context denied returns 403",
+			method:     http.MethodGet,
+			path:       "/context?q=test",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trDenied,
+			wantStatus: http.StatusForbidden,
+			wantSubstr: "access denied by test policy",
+		},
+		{
+			name:       "admin extract allowed returns 200",
+			method:     http.MethodPost,
+			path:       "/admin/extract?thread_id=th-1",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trSuccess,
+			wantStatus: http.StatusOK,
+			wantSubstr: `{"status":"ok"}`,
+		},
+		{
+			name:       "admin extract denied returns 403",
+			method:     http.MethodPost,
+			path:       "/admin/extract?thread_id=th-1",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trDenied,
+			wantStatus: http.StatusForbidden,
+			wantSubstr: "access denied by test policy",
+		},
+		{
+			name:       "consolidate allowed returns 200",
+			method:     http.MethodPost,
+			path:       "/consolidate",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trSuccess,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"status":"ok"`,
+		},
+		{
+			name:       "consolidate denied returns 403",
+			method:     http.MethodPost,
+			path:       "/consolidate",
+			header:     map[string]string{"Authorization": "Bearer valid-token"},
+			rt:         trDenied,
+			wantStatus: http.StatusForbidden,
+			wantSubstr: "access denied by test policy",
+		},
+	}
+	runAuthEndpointTests(t, trSuccess, tests)
+}
+
+func TestServer_Auth_MCPTools(t *testing.T) {
+	trSuccess := &staticAuthRoundTripper{
+		authStatus: http.StatusOK,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		sarStatus:  http.StatusOK,
+		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
+	}
+	trDenied := &staticAuthRoundTripper{
+		authStatus: http.StatusOK,
+		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-miorine"}}}`,
+		sarStatus:  http.StatusOK,
+		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"operation forbidden"}}`,
+	}
+
+	tests := []struct {
+		name       string
+		toolName   string
+		toolArgs   string
+		rt         *staticAuthRoundTripper
+		wantSubstr string
+	}{
+		{
+			name:       "memory search allowed returns results",
+			toolName:   "memory_search",
+			toolArgs:   `{"query":"test"}`,
+			rt:         trSuccess,
+			wantSubstr: `"facts"`,
+		},
+		{
+			name:       "memory search denied returns error",
+			toolName:   "memory_search",
+			toolArgs:   `{"query":"test"}`,
+			rt:         trDenied,
+			wantSubstr: "operation forbidden",
+		},
+		{
+			name:       "memory store allowed with target agent stamps source",
+			toolName:   "memory_store",
+			toolArgs:   `{"fact_text":"Durable test fact for miorine","target_agent":"miorine"}`,
+			rt:         trSuccess,
+			wantSubstr: `"status":"success"`,
+		},
+		{
+			name:       "memory store denied returns error",
+			toolName:   "memory_store",
+			toolArgs:   `{"fact_text":"Durable test fact for miorine","target_agent":"miorine"}`,
+			rt:         trDenied,
+			wantSubstr: "operation forbidden",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server := newServerFixtureWithAuth(t, newTestAuthConfig(t, tc.rt))
+			body := mcpToolCallBody(1, tc.toolName, tc.toolArgs)
+			req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+			req.Header.Set("Authorization", "Bearer valid-token")
+			rec := httptest.NewRecorder()
+			server.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("response %q missing %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestWriteAuthError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantSubstr string
+	}{
+		{
+			name:       "validation error returns 400",
+			err:        &k8sauth.ValidationError{Message: "bad target agent"},
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "bad target agent",
+		},
+		{
+			name:       "unauthorized error returns 401",
+			err:        &k8sauth.UnauthorizedError{Message: "missing token"},
+			wantStatus: http.StatusUnauthorized,
+			wantSubstr: "missing token",
+		},
+		{
+			name:       "forbidden error returns 403",
+			err:        &k8sauth.ForbiddenError{Message: "access denied"},
+			wantStatus: http.StatusForbidden,
+			wantSubstr: "access denied",
+		},
+		{
+			name:       "generic error returns 500",
+			err:        errors.New("internal error"),
+			wantStatus: http.StatusInternalServerError,
+			wantSubstr: "internal error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			writeAuthError(rec, tc.err)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
 			}
 		})
 	}

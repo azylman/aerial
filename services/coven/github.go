@@ -351,7 +351,7 @@ func (p *GitHubSkillPublisher) PublishSkillChanges(ctx context.Context, changes 
 	if p.token == "" {
 		return 0, fmt.Errorf("github: missing GITHUB_PAT")
 	}
-	if p.repo == "aerial" {
+	if p.repo == DefaultStack {
 		return 0, fmt.Errorf("github: publishing directly to aerial repository is forbidden")
 	}
 	if len(changes) == 0 {

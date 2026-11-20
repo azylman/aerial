@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -157,7 +158,7 @@ type ClusterResponse struct {
 // Singleton tuned HTTP client for upstream brain communication
 var brainHTTPClient = tracing.Client(&http.Client{
 	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
+	Transport: k8sauth.NewServiceAccountTransport(&http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   2 * time.Second,
@@ -168,7 +169,7 @@ var brainHTTPClient = tracing.Client(&http.Client{
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 4 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-	},
+	}, ""),
 })
 
 // Unix socket client for Docker daemon status inspection

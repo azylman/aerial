@@ -407,6 +407,12 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 			wantTerm:  true,
 		},
 		{
+			name:      "MismatchedAgentSkipsExtraction",
+			msgData:   `{"thread_id":"th-ext-1","agent":"miorine"}`,
+			delivered: 1,
+			worker:    worker,
+		},
+		{
 			name:       "WorkerSuccessAdvancesWatermark",
 			msgData:    `{"thread_id":"th-ext-1"}`,
 			delivered:  1,
@@ -595,4 +601,59 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	cancel()
 	consumers := &covenConsumers{}
 	retrySubscribeCovenConsumers(canceledCtx, memBus, worker, consumers)
+}
+
+func TestCovenDurableNamesAndFilters(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name               string
+		stack              string
+		wantIndexedDurable string
+		wantExtractDurable string
+		wantExtractFilter  string
+	}{
+		{
+			name:               "aerial stack defaults",
+			stack:              "aerial",
+			wantIndexedDurable: "coven-transcripts-indexed",
+			wantExtractDurable: "coven-extract",
+			wantExtractFilter:  "aerial.coalesced.coven_extract.>",
+		},
+		{
+			name:               "empty stack defaults to aerial",
+			stack:              "",
+			wantIndexedDurable: "coven-transcripts-indexed",
+			wantExtractDurable: "coven-extract",
+			wantExtractFilter:  "aerial.coalesced.coven_extract.>",
+		},
+		{
+			name:               "miorine stack scoped",
+			stack:              "miorine",
+			wantIndexedDurable: "coven-transcripts-indexed-miorine",
+			wantExtractDurable: "coven-extract-miorine",
+			wantExtractFilter:  "aerial.coalesced.coven_extract.miorine.>",
+		},
+		{
+			name:               "suletta stack scoped",
+			stack:              "suletta",
+			wantIndexedDurable: "coven-transcripts-indexed-suletta",
+			wantExtractDurable: "coven-extract-suletta",
+			wantExtractFilter:  "aerial.coalesced.coven_extract.suletta.>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := covenTranscriptsIndexedDurable(tc.stack); got != tc.wantIndexedDurable {
+				t.Errorf("covenTranscriptsIndexedDurable(%q) = %q, want %q", tc.stack, got, tc.wantIndexedDurable)
+			}
+			if got := covenExtractDurable(tc.stack); got != tc.wantExtractDurable {
+				t.Errorf("covenExtractDurable(%q) = %q, want %q", tc.stack, got, tc.wantExtractDurable)
+			}
+			if got := covenExtractSubjectFilter(tc.stack); got != tc.wantExtractFilter {
+				t.Errorf("covenExtractSubjectFilter(%q) = %q, want %q", tc.stack, got, tc.wantExtractFilter)
+			}
+		})
+	}
 }

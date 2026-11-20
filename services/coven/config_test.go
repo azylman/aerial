@@ -292,3 +292,53 @@ ollama:
 		})
 	}
 }
+
+func TestLoadConfigFile_Auth(t *testing.T) {
+	tests := []struct {
+		name        string
+		yaml        string
+		envEnabled  string
+		wantEnabled bool
+	}{
+		{
+			name:        "auth enabled from yaml",
+			yaml:        "auth:\n  enabled: true\n",
+			wantEnabled: true,
+		},
+		{
+			name:        "auth disabled by default",
+			yaml:        "",
+			wantEnabled: false,
+		},
+		{
+			name:        "env overrides yaml enabled",
+			yaml:        "auth:\n  enabled: false\n",
+			envEnabled:  "true",
+			wantEnabled: true,
+		},
+		{
+			name:        "env disables yaml enabled",
+			yaml:        "auth:\n  enabled: true\n",
+			envEnabled:  "false",
+			wantEnabled: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envEnabled != "" {
+				t.Setenv("K8S_AUTH_ENABLED", tc.envEnabled)
+			} else {
+				t.Setenv("K8S_AUTH_ENABLED", "")
+			}
+			path := writeCovenDarkConfig(t, covenDarkBaseConfig+tc.yaml)
+			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test")
+			if err != nil {
+				t.Fatalf("LoadConfigFile() error = %v", err)
+			}
+			if cfg.Auth.Enabled != tc.wantEnabled {
+				t.Errorf("Auth.Enabled = %v, want %v", cfg.Auth.Enabled, tc.wantEnabled)
+			}
+		})
+	}
+}

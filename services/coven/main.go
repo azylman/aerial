@@ -44,6 +44,9 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 		}
 		return nil
 	}
+	if worker != nil && NormalizeStack(args.EffectiveAgent()) != NormalizeStack(worker.Stack()) {
+		return nil
+	}
 	if err := worker.ExtractThread(ctx, threadID); err != nil {
 		if errors.Is(err, ErrAdvisoryLockBusy) {
 			if nakErr := msg.NakWithDelay(5 * time.Second); nakErr != nil {
@@ -59,25 +62,42 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 	return nil
 }
 
+func covenTranscriptsIndexedDurable(stack string) string {
+	s := NormalizeStack(stack)
+	if s == DefaultStack {
+		return "coven-transcripts-indexed"
+	}
+	return "coven-transcripts-indexed-" + s
+}
+
+func covenExtractDurable(stack string) string {
+	s := NormalizeStack(stack)
+	if s == DefaultStack {
+		return "coven-extract"
+	}
+	return "coven-extract-" + s
+}
+
+func covenExtractSubjectFilter(stack string) string {
+	s := NormalizeStack(stack)
+	if s == DefaultStack {
+		return "aerial.coalesced.coven_extract.>"
+	}
+	return pubsub.SubjectCovenExtractCoalescedForAgent(s, ">")
+}
+
 func subscribeCovenTranscriptsIndexed(ctx context.Context, b pubsub.Bus, stack string) error {
 	if b == nil {
 		return nil
 	}
 	subject := pubsub.SubjectAerialTurnPrefix + "transcripts_indexed"
-	_, err := b.Subscribe(ctx, subject, "coven-transcripts-indexed", func(msgCtx context.Context, msg pubsub.Message) error {
-		return handleTranscriptsIndexedEvent(msgCtx, msg, stack, func(extractCtx context.Context, threadID string) error {
-			msgID := fmt.Sprintf("coven:extract:%s:%d", threadID, time.Now().UnixNano())
-			args := pubsub.CovenExtractJobArgs{
-				ThreadID: threadID,
-			}
-			return b.Publish(extractCtx, pubsub.SubjectCovenExtractCoalesced(threadID), msgID, args)
-		})
-	})
+	durable := covenTranscriptsIndexedDurable(stack)
+	_, err := b.Subscribe(ctx, subject, durable, newTranscriptsIndexedHandler(b, stack))
 	if err != nil {
-		log.Printf("[Coven] warning: failed to subscribe coven-transcripts-indexed: %v", err)
+		log.Printf("[Coven] warning: failed to subscribe %s: %v", durable, err)
 		return err
 	}
-	log.Println("[Coven] Subscribed coven-transcripts-indexed durable consumer to " + subject)
+	log.Printf("[Coven] Subscribed %s durable consumer to %s", durable, subject)
 	return nil
 }
 
@@ -85,14 +105,17 @@ func subscribeCovenExtract(ctx context.Context, b pubsub.Bus, worker *Worker) er
 	if b == nil || worker == nil {
 		return nil
 	}
-	_, err := b.Subscribe(ctx, "aerial.coalesced.coven_extract.>", "coven-extract", func(msgCtx context.Context, msg pubsub.Message) error {
+	stack := worker.Stack()
+	subject := covenExtractSubjectFilter(stack)
+	durable := covenExtractDurable(stack)
+	_, err := b.Subscribe(ctx, subject, durable, func(msgCtx context.Context, msg pubsub.Message) error {
 		return handleCovenExtractJob(msgCtx, msg, worker)
 	})
 	if err != nil {
-		log.Printf("[Coven] warning: failed to subscribe coven-extract: %v", err)
+		log.Printf("[Coven] warning: failed to subscribe %s: %v", durable, err)
 		return err
 	}
-	log.Println("[Coven] Subscribed coven-extract durable consumer to aerial.coalesced.coven_extract.>")
+	log.Printf("[Coven] Subscribed %s durable consumer to %s", durable, subject)
 	return nil
 }
 

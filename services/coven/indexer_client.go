@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -33,7 +34,10 @@ type IndexerClient struct {
 // NewIndexerClient builds an IndexerClient for stack against baseURL.
 func NewIndexerClient(baseURL, stack string, httpClient *http.Client) *IndexerClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, ""),
+		}
 	}
 	return &IndexerClient{
 		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
@@ -94,6 +98,7 @@ func (c *IndexerClient) GetTrajectoryContext(ctx context.Context, threadID strin
 
 func (c *IndexerClient) query() url.Values {
 	q := url.Values{}
+	q.Set("agent", c.stack)
 	q.Set("stack", c.stack)
 	if c.maxSteps > 0 {
 		q.Set("limit", strconv.Itoa(c.maxSteps))

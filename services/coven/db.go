@@ -40,6 +40,7 @@ type Fact struct {
 	CreatedAt        time.Time `json:"created_at"`
 	LastReinforcedAt time.Time `json:"last_reinforced_at"`
 	ReinforceCount   int       `json:"reinforce_count"`
+	SourceAgent      string    `json:"source_agent,omitempty"`
 }
 
 // ScoredFact couples a fact with its retrieval relevance score.
@@ -134,7 +135,7 @@ type DBTX interface {
 
 // Store defines persistent storage operations for facts and procedural candidates.
 type Store interface {
-	InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error)
+	InsertFact(ctx context.Context, factText string, embedding []float32, sourceAgent ...string) (int64, error)
 	UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error
 	ReinforceFact(ctx context.Context, id int64) error
 	DeleteFact(ctx context.Context, id int64) error
@@ -346,7 +347,7 @@ func (ft *FactTime) Scan(src any) error {
 }
 
 // InsertFact persists a new fact into the database.
-func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error) {
+func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []float32, _ ...string) (int64, error) {
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
@@ -357,6 +358,10 @@ func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []
 	if len(embedding) != ExpectedEmbeddingDim {
 		return 0, fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
+	// Note: Store.InsertFact accepts sourceAgent in Chunk c02b to dark-launch the interface contract
+	// and in-memory mock store validation. Persistence into the PostgreSQL facts table is intentionally
+	// deferred to chunk c03-phase1-schema-agent-rename, which executes the declarative Atlas schema migration
+	// adding the facts.source_agent column and updates the SQL queries atomically.
 	now := time.Now().UTC()
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
