@@ -36,6 +36,8 @@ const (
 type (
 	EriClient                = ericlient.EriClient
 	HTTPEriClient            = ericlient.HTTPEriClient
+	RestateEriClient         = ericlient.RestateEriClient
+	StatusWidgetDeliverer    = ericlient.StatusWidgetDeliverer
 	BrainDispatchRequest     = ericlient.BrainDispatchRequest
 	StatusWidgetChunk        = ericlient.StatusWidgetChunk
 	StatusWidgetRequest      = ericlient.StatusWidgetRequest
@@ -45,7 +47,8 @@ type (
 var (
 	ErrDispatchActive = ericlient.ErrDispatchActive
 
-	NewHTTPEriClient = ericlient.NewHTTPEriClient
+	NewHTTPEriClient    = ericlient.NewHTTPEriClient
+	NewRestateEriClient = ericlient.NewRestateEriClient
 
 	FormatChunkActiveStep     = widget.FormatChunkActiveStep
 	FindSymbolSpan            = prompt.FindSymbolSpan
@@ -146,6 +149,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(build.ThreadID),
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
+		VanadisBuildID: strings.TrimSpace(build.ID),
 		Prompt:         notice + chunkPrompt,
 		Effort:         store.CapChunkEffort(chunk.Effort),
 		SkipIfActive:   true,

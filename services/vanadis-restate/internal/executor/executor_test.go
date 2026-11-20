@@ -132,8 +132,8 @@ func TestExecutor_PromptAndDispatch(t *testing.T) {
 	if err := exec.ExecuteLaunchChunk(context.Background(), st, b, chunks, 0, "[NOTICE]\n"); err != nil {
 		t.Fatalf("ExecuteLaunchChunk failed: %v", err)
 	}
-	if eri.lastDispatch == nil || eri.lastDispatch.VanadisChunkID != "c1" {
-		t.Errorf("lastDispatch chunkID = %+v, want c1", eri.lastDispatch)
+	if eri.lastDispatch == nil || eri.lastDispatch.VanadisChunkID != "c1" || eri.lastDispatch.VanadisBuildID != "b1" {
+		t.Errorf("lastDispatch chunkID / buildID = %+v, want chunkID c1, buildID b1", eri.lastDispatch)
 	}
 
 	if err := exec.CancelChunkDispatch(context.Background(), "c1"); err != nil || eri.lastCancel != "c1" {
