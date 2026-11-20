@@ -43,9 +43,9 @@ func TestPostgresPRRegistry_KustomizationUnit(t *testing.T) {
 		{name: "MarkKustomizationsDeployed zero pr guard", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 0, jobs: []string{"aerial-core"}, mockSelectErr: errors.New("unexpected query")},
 		{name: "MarkKustomizationsDeployed nil pool guard", op: "MarkKustomizationsDeployed", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"aerial-core"}},
 		{name: "MarkKustomizationsDeployed empty names guard", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{" "}, mockSelectErr: errors.New("unexpected query")},
-		{name: "MarkKustomizationsDeployed returns the scanned transition", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"marida-core"}, wantUpdated: true},
-		{name: "MarkKustomizationsDeployed already deployed returns false", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"marida-core"}, mockSelectErr: pgx.ErrNoRows},
-		{name: "MarkKustomizationsDeployed db error", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"marida-core"}, mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "MarkKustomizationsDeployed returns the scanned transition", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"agent-gamma-core"}, wantUpdated: true},
+		{name: "MarkKustomizationsDeployed already deployed returns false", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"agent-gamma-core"}, mockSelectErr: pgx.ErrNoRows},
+		{name: "MarkKustomizationsDeployed db error", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"agent-gamma-core"}, mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// HasKustomizationRequests
 		{name: "HasKustomizationRequests empty repo guard", op: "HasKustomizationRequests", repo: "", prNumber: 42},

@@ -98,7 +98,7 @@ func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
 		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"aerial-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}}},
 		{"metadata":{"labels":{"app":"unmanaged"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}}}
 	]}`
-	cronJobList := `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"marida-core"}},"spec":{"jobTemplate":{"spec":{"template":{"spec":{"initContainers":[{"image":"ghcr.io/azylman/aerial-synapse@sha256:beef"}],"containers":[{"image":"busybox"}]}}}}}}]}`
+	cronJobList := `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"agent-gamma-core"}},"spec":{"jobTemplate":{"spec":{"template":{"spec":{"initContainers":[{"image":"ghcr.io/azylman/aerial-synapse@sha256:beef"}],"containers":[{"image":"busybox"}]}}}}}}]}`
 	restateClusterList := `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"restate-system","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}}}]}`
 	kustomizationList := `{"items":[
 		{"metadata":{"name":"zeta","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}},
@@ -120,7 +120,7 @@ func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
 			name:         "labeled deployment and cronjob initContainer owners are discovered",
 			imageNames:   []string{"aerial-synapse"},
 			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeCronJobsPath: {body: cronJobList}}),
-			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}, {Namespace: "flux-system", Name: "marida-core"}},
+			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}, {Namespace: "flux-system", Name: "agent-gamma-core"}},
 			wantRequests: 7,
 		},
 		{
@@ -218,7 +218,7 @@ func newConfiguredDispatcher(t *testing.T, routes map[string]kubeRoute, configur
 func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	const marida = "PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/apps/kustomizations/marida-core"
+	const agentGamma = "PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/apps/kustomizations/agent-gamma-core"
 	const requestedAt = "2026-11-08T10:00:00.123456789Z"
 
 	tests := []struct {
@@ -227,8 +227,8 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 		routes  map[string]kubeRoute
 		wantErr string
 	}{
-		{name: "patches the given requestedAt annotation in the ref namespace", routes: map[string]kubeRoute{marida: {body: `{}`}}},
-		{name: "patch rejection returns error", routes: map[string]kubeRoute{marida: {status: http.StatusForbidden, body: `forbidden`}}, wantErr: "reconcile kustomization apps/marida-core"},
+		{name: "patches the given requestedAt annotation in the ref namespace", routes: map[string]kubeRoute{agentGamma: {body: `{}`}}},
+		{name: "patch rejection returns error", routes: map[string]kubeRoute{agentGamma: {status: http.StatusForbidden, body: `forbidden`}}, wantErr: "reconcile kustomization apps/agent-gamma-core"},
 		{name: "unconfigured kube API returns error", noKube: true, wantErr: "kube api server not configured"},
 	}
 
@@ -236,7 +236,7 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			disp, fixture := newConfiguredDispatcher(t, tc.routes, !tc.noKube)
-			err := disp.ReconcileKustomization(ctx, fluxKustomizationRef{Namespace: "apps", Name: "marida-core"}, requestedAt)
+			err := disp.ReconcileKustomization(ctx, fluxKustomizationRef{Namespace: "apps", Name: "agent-gamma-core"}, requestedAt)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
@@ -247,7 +247,7 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			wantBody := `{"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"2026-11-08T10:00:00.123456789Z"}}}`
-			if got := fixture.Body(marida); got != wantBody {
+			if got := fixture.Body(agentGamma); got != wantBody {
 				t.Errorf("patch body = %s, want %s", got, wantBody)
 			}
 		})

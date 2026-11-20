@@ -171,7 +171,7 @@ func TestRecordedKustomizationRequests(t *testing.T) {
 		meta string
 		want map[string]kustomizationRequest
 	}{
-		{name: "decodes requests", meta: `{"kustomization_requests":{"marida-core":{"namespace":"apps","requested_at":"t1"}}}`, want: map[string]kustomizationRequest{"marida-core": {Namespace: "apps", RequestedAt: "t1"}}},
+		{name: "decodes requests", meta: `{"kustomization_requests":{"agent-gamma-core":{"namespace":"apps","requested_at":"t1"}}}`, want: map[string]kustomizationRequest{"agent-gamma-core": {Namespace: "apps", RequestedAt: "t1"}}},
 		{name: "legacy started_jobs only", meta: `{"started_jobs":["aerial-synapse"]}`},
 		{name: "malformed requests list", meta: `{"kustomization_requests":["aerial-core"]}`},
 		{name: "malformed request entry", meta: `{"kustomization_requests":{"aerial-core":"t1"}}`},
@@ -316,7 +316,7 @@ func newRolloutRouter(t *testing.T, reg PRRegistryUpdater, disp OutboundDispatch
 func TestApplyKustomizationStatus(t *testing.T) {
 	t.Parallel()
 	ready := readyCond("True", "ReconciliationSucceeded", "")
-	twoTargets := map[string]string{"aerial-core": reqT1, "marida-core": reqT1}
+	twoTargets := map[string]string{"aerial-core": reqT1, "agent-gamma-core": reqT1}
 
 	tests := []struct {
 		name          string
@@ -342,7 +342,7 @@ func TestApplyKustomizationStatus(t *testing.T) {
 		wantErr       bool
 	}{
 		{name: "two-target PR stays deploying after the first kustomization", prs: []DeployingPR{trackedPR(42, twoTargets)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}}},
-		{name: "two-target PR deploys on the second kustomization", prs: []DeployingPR{trackedPR(42, twoTargets, "aerial-core")}, markRes: true, obs: kobs("marida-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"marida-core"}}},
+		{name: "two-target PR deploys on the second kustomization", prs: []DeployingPR{trackedPR(42, twoTargets, "aerial-core")}, markRes: true, obs: kobs("agent-gamma-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"agent-gamma-core"}}},
 		{name: "already deployed kustomization is not re-marked", prs: []DeployingPR{trackedPR(42, twoTargets, "aerial-core")}, obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
 		{name: "superseded request completes on the later handled request", prs: []DeployingPR{trackedPR(41, map[string]string{"aerial-core": reqT1})}, markRes: true, obs: kobs("aerial-core", reqT2, reqT2, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}}},
 		{name: "Ready=False after handling fails the PR", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, obs: kobs("aerial-core", reqT1, reqT1, false, readyCond("False", "ReconciliationFailed", "apply failed")), want: rolloutOutcome{failed: 1}},
@@ -456,7 +456,7 @@ func TestApplyKustomizationStatus(t *testing.T) {
 func TestApplyKustomizationList(t *testing.T) {
 	t.Parallel()
 	ready := readyCond("True", "ReconciliationSucceeded", "")
-	twoTargets := map[string]string{"aerial-core": reqT1, "marida-core": reqT1}
+	twoTargets := map[string]string{"aerial-core": reqT1, "agent-gamma-core": reqT1}
 
 	tests := []struct {
 		name         string
@@ -468,8 +468,8 @@ func TestApplyKustomizationList(t *testing.T) {
 		wantErr      bool
 	}{
 		{name: "recorded kustomization absent from the list fails the PR", prs: []DeployingPR{trackedPR(42, twoTargets)}, observations: []kustomizationObservation{kobs("aerial-core", reqT1, reqT0, false, ready)}, want: rolloutOutcome{failed: 1}},
-		{name: "every listed item is applied", prs: []DeployingPR{trackedPR(42, twoTargets)}, observations: []kustomizationObservation{kobs("aerial-core", reqT1, reqT1, false, ready), kobs("marida-core", reqT0, reqT0, false, ready)}, want: rolloutOutcome{marks: []string{"aerial-core"}, repatchAts: []string{reqT1}}},
-		{name: "absent but already deployed kustomization is ignored", prs: []DeployingPR{trackedPR(42, twoTargets, "marida-core")}, observations: []kustomizationObservation{kobs("aerial-core", reqT1, reqT0, false, ready)}},
+		{name: "every listed item is applied", prs: []DeployingPR{trackedPR(42, twoTargets)}, observations: []kustomizationObservation{kobs("aerial-core", reqT1, reqT1, false, ready), kobs("agent-gamma-core", reqT0, reqT0, false, ready)}, want: rolloutOutcome{marks: []string{"aerial-core"}, repatchAts: []string{reqT1}}},
+		{name: "absent but already deployed kustomization is ignored", prs: []DeployingPR{trackedPR(42, twoTargets, "agent-gamma-core")}, observations: []kustomizationObservation{kobs("aerial-core", reqT1, reqT0, false, ready)}},
 		{name: "absent kustomization of another namespace is ignored", prs: []DeployingPR{{Repo: "azylman/aerial", PRNumber: 44, Metadata: map[string]any{kustomizationRequestsKey: map[string]any{"stack": map[string]any{"namespace": "apps", "requested_at": reqT1}}}}}},
 		{name: "deploying list error is returned", listErr: errors.New("db down"), wantErr: true},
 	}
@@ -498,8 +498,8 @@ func TestApplyKustomizationDeleted(t *testing.T) {
 		wantErr     bool
 	}{
 		{name: "pending request fails the PR", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, want: rolloutOutcome{failed: 1}},
-		{name: "already deployed kustomization is ignored", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1, "marida-core": reqT1}, "aerial-core")}},
-		{name: "PR waiting on other kustomizations is ignored", prs: []DeployingPR{trackedPR(42, map[string]string{"marida-core": reqT1})}},
+		{name: "already deployed kustomization is ignored", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1, "agent-gamma-core": reqT1}, "aerial-core")}},
+		{name: "PR waiting on other kustomizations is ignored", prs: []DeployingPR{trackedPR(42, map[string]string{"agent-gamma-core": reqT1})}},
 		{name: "deploying list error is returned", listErr: errors.New("db down"), wantErr: true},
 	}
 	for _, tc := range tests {
@@ -669,13 +669,13 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 			source:       flux.KustomizationSource{Namespace: "flux-system"},
 			name:         "list then chunked watch stream applies events and re-lists when the stream ends",
 			lists:        []kubeRoute{list("10", "aerial-core"), list("20")},
-			watches:      []kubeRoute{{body: event("ADDED", "marida-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "marida-core", reqT1, "")}},
+			watches:      []kubeRoute{{body: event("ADDED", "agent-gamma-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "agent-gamma-core", reqT1, "")}},
 			wantRequests: []string{"LIST kustomizations", "WATCH kustomizations rv=10", "LIST kustomizations", "WATCH kustomizations rv=20"},
 			wantEvents: []string{
 				"list flux-system [aerial-core]",
-				"status flux-system/marida-core requested=" + reqT1 + " handled=",
+				"status flux-system/agent-gamma-core requested=" + reqT1 + " handled=",
 				"status flux-system/aerial-core requested=" + reqT1 + " handled=" + reqT1,
-				"deleted flux-system/marida-core",
+				"deleted flux-system/agent-gamma-core",
 				"list flux-system []",
 			},
 		},
@@ -846,7 +846,7 @@ func TestHasPendingRollouts(t *testing.T) {
 		want    bool
 		wantErr bool
 	}{
-		{name: "PR with an undeployed request is pending", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1, "marida-core": reqT1}, "aerial-core")}, want: true},
+		{name: "PR with an undeployed request is pending", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1, "agent-gamma-core": reqT1}, "aerial-core")}, want: true},
 		{name: "PR with every request deployed is not pending", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1}, "aerial-core")}},
 		{name: "PR with all requests deployed but deploy_success_pending is pending", prs: []DeployingPR{{Repo: "azylman/aerial", PRNumber: 42, Metadata: map[string]any{kustomizationRequestsKey: map[string]any{"aerial-core": map[string]any{"namespace": fluxSystemNamespace, "requested_at": reqT1}}, deployedKustomizationsKey: []any{"aerial-core"}, "deploy_success_pending": true}}}, want: true},
 		{name: "legacy PR without requests is not pending", prs: []DeployingPR{{Repo: "azylman/aerial", PRNumber: 40, Metadata: map[string]any{"jobs": []any{"aerial-core"}}}}},

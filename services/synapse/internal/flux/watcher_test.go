@@ -123,7 +123,7 @@ func TestRecordedKustomizationRequests(t *testing.T) {
 		meta string
 		want map[string]model.KustomizationRequest
 	}{
-		{name: "decodes requests", meta: `{"kustomization_requests":{"marida-core":{"namespace":"apps","requested_at":"t1"}}}`, want: map[string]model.KustomizationRequest{"marida-core": {Namespace: "apps", RequestedAt: "t1"}}},
+		{name: "decodes requests", meta: `{"kustomization_requests":{"agent-gamma-core":{"namespace":"apps","requested_at":"t1"}}}`, want: map[string]model.KustomizationRequest{"agent-gamma-core": {Namespace: "apps", RequestedAt: "t1"}}},
 		{name: "legacy started_jobs only", meta: `{"started_jobs":["aerial-synapse"]}`},
 		{name: "malformed requests list", meta: `{"kustomization_requests":["aerial-core"]}`},
 		{name: "malformed request entry", meta: `{"kustomization_requests":{"aerial-core":"t1"}}`},
@@ -181,7 +181,7 @@ func TestNewKustomizationRequests(t *testing.T) {
 	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	refs := []model.FluxKustomizationRef{
 		{Namespace: "flux-system", Name: "aerial-core"},
-		{Namespace: "flux-system", Name: "marida-core"},
+		{Namespace: "flux-system", Name: "agent-gamma-core"},
 	}
 	reqs := NewKustomizationRequests(refs, now)
 	if len(reqs) != 2 {
@@ -375,13 +375,13 @@ func kubeWatcherKustomizationCases(list func(rv string, names ...string) kubeRou
 			source:       KustomizationSource{Namespace: "flux-system"},
 			name:         "list then chunked watch stream applies events and re-lists when stream ends",
 			lists:        []kubeRoute{list("10", "aerial-core"), list("20")},
-			watches:      []kubeRoute{{body: event("ADDED", "marida-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "marida-core", reqT1, "")}},
+			watches:      []kubeRoute{{body: event("ADDED", "agent-gamma-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "agent-gamma-core", reqT1, "")}},
 			wantRequests: []string{"LIST kustomizations", "WATCH kustomizations rv=10", "LIST kustomizations", "WATCH kustomizations rv=20"},
 			wantEvents: []string{
 				"list flux-system [aerial-core]",
-				"status flux-system/marida-core requested=" + reqT1 + " handled=",
+				"status flux-system/agent-gamma-core requested=" + reqT1 + " handled=",
 				"status flux-system/aerial-core requested=" + reqT1 + " handled=" + reqT1,
-				"deleted flux-system/marida-core",
+				"deleted flux-system/agent-gamma-core",
 				"list flux-system []",
 			},
 		},

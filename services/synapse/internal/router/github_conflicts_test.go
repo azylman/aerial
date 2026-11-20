@@ -203,10 +203,10 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	core := fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
-	marida := fluxKustomizationRef{Namespace: "flux-system", Name: "marida-core"}
+	agentGamma := fluxKustomizationRef{Namespace: "flux-system", Name: "agent-gamma-core"}
 	owners := map[string][]fluxKustomizationRef{
 		"aerial-brain": {core},
-		"aerial-haro":  {core, marida},
+		"aerial-haro":  {core, agentGamma},
 	}
 
 	for _, tc := range dispatchWorkflowRunTestCases() {
@@ -351,7 +351,7 @@ func dispatchWorkflowRunCasesPart1() []dispatchWorkflowRunTestCase {
 	brainJob := `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`
 	twoJobs := `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"},{"name":"Build & Push Images to GHCR (haro)","status":"completed","conclusion":"success"}]}`
 	core := fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
-	marida := fluxKustomizationRef{Namespace: "flux-system", Name: "marida-core"}
+	agentGamma := fluxKustomizationRef{Namespace: "flux-system", Name: "agent-gamma-core"}
 
 	return []dispatchWorkflowRunTestCase{
 		{
@@ -372,8 +372,8 @@ func dispatchWorkflowRunCasesPart1() []dispatchWorkflowRunTestCase {
 			jobsBody:         twoJobs,
 			wantPromoteCalls: 2,
 			wantDeployJobs:   []string{"brain", "haro"},
-			wantReconciles:   []fluxKustomizationRef{core, marida},
-			wantRecorded:     []string{"aerial-core", "marida-core"},
+			wantReconciles:   []fluxKustomizationRef{core, agentGamma},
+			wantRecorded:     []string{"aerial-core", "agent-gamma-core"},
 		},
 		{
 			name:             "partial reconcile failure keeps every recorded request for watcher repair and errors",
@@ -383,8 +383,8 @@ func dispatchWorkflowRunCasesPart1() []dispatchWorkflowRunTestCase {
 			reconcileErrs:    map[string]error{"aerial-core": errors.New("patch denied")},
 			wantPromoteCalls: 2,
 			wantDeployJobs:   []string{"brain", "haro"},
-			wantReconciles:   []fluxKustomizationRef{core, marida},
-			wantRecorded:     []string{"aerial-core", "marida-core"},
+			wantReconciles:   []fluxKustomizationRef{core, agentGamma},
+			wantRecorded:     []string{"aerial-core", "agent-gamma-core"},
 			wantErr:          true,
 		},
 		{
