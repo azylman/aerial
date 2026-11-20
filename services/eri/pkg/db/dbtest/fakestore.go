@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 var (
@@ -959,25 +958,6 @@ func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionI
 		}
 		s.InternalSessionID, s.TurnCount, s.UpdatedAt = newSessionID, 0, now
 		return nil
-	})
-}
-
-func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]db.SessionInfo, error) {
-	return withFakeLock(f, "FindUnrotatedSessions", func() ([]db.SessionInfo, error) {
-		minTurns = defaultVal(minTurns, session.DefaultMaxSessionTurns)
-		limitAge := db.DefaultUnrotatedSessionMaxAge
-		if len(maxAge) > 0 {
-			limitAge = maxAge[0]
-		}
-		cutoff := time.Now().UTC().Add(-limitAge)
-		var res []db.SessionInfo
-		for _, s := range f.sessions {
-			if s != nil && s.TurnCount > minTurns && (limitAge <= 0 || !s.UpdatedAt.Before(cutoff)) {
-				res = append(res, *s)
-			}
-		}
-		sort.Slice(res, func(i, j int) bool { return res[i].TurnCount > res[j].TurnCount })
-		return res, nil
 	})
 }
 

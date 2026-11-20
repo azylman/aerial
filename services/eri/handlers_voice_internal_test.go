@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
@@ -766,8 +767,57 @@ func TestCleanTempDir_ErrorBranch(t *testing.T) {
 	cleanTempDir("/dev/null/impossible-path-that-fails-removeall")
 }
 
+type syncVoiceMsg struct {
+	pubsub.Message
+
+	subject string
+	data    []byte
+}
+
+func (m syncVoiceMsg) Data() []byte    { return m.data }
+func (m syncVoiceMsg) Subject() string { return m.subject }
+
+type syncVoiceSub struct{}
+
+func (syncVoiceSub) Unsubscribe() error { return nil }
+
+type syncVoiceBus struct {
+	pubsub.Bus
+
+	mu       sync.RWMutex
+	handlers map[string]pubsub.Handler
+}
+
+func newSyncVoiceBus() *syncVoiceBus {
+	return &syncVoiceBus{
+		Bus:      pubsub.NewMemoryBus(),
+		handlers: make(map[string]pubsub.Handler),
+	}
+}
+
+func (b *syncVoiceBus) Subscribe(_ context.Context, subject, _ string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	b.mu.Lock()
+	b.handlers[subject] = handler
+	b.mu.Unlock()
+	return syncVoiceSub{}, nil
+}
+
+func (b *syncVoiceBus) Publish(ctx context.Context, subject, _ string, data any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	b.mu.RLock()
+	h := b.handlers[subject]
+	b.mu.RUnlock()
+	if h != nil {
+		return h(ctx, syncVoiceMsg{subject: subject, data: raw})
+	}
+	return nil
+}
+
 func TestStreamRestateVoiceEvents_BufferedEventOrder(t *testing.T) {
-	bus := pubsub.NewMemoryBus()
+	bus := newSyncVoiceBus()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req queue.VoiceSessionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -822,5 +872,20 @@ func TestStreamRestateVoiceEvents_BufferedEventOrder(t *testing.T) {
 	}
 	if len(sseEvents) != 2 || sseEvents[0] != "reply" || sseEvents[1] != "done" {
 		t.Fatalf("unexpected sseEvents: %+v", sseEvents)
+	}
+}
+
+func TestDrainVoiceEvents(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan queue.VoiceStreamEvent, 2)
+	ch <- queue.VoiceStreamEvent{Event: "sentence", Text: "hello"}
+	ch <- queue.VoiceStreamEvent{Event: "reply", Reply: "world"}
+	var received []string
+	drainVoiceEvents(ch, func(ev queue.VoiceStreamEvent) {
+		received = append(received, ev.Event)
+	})
+	if len(received) != 2 || received[0] != "sentence" || received[1] != "reply" {
+		t.Fatalf("unexpected drained events: %+v", received)
 	}
 }

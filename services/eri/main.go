@@ -14,12 +14,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
-	"testing"
 	"time"
 	_ "time/tzdata"
 
@@ -32,7 +30,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
-	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -41,24 +38,13 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
-// syncBrainEnvironment provisions rules, skills, hooks and MCP configs with provisioner.
-func syncBrainEnvironment(ctx context.Context, provisioner *env.Provisioner, cfg *config.Config) error {
-	if err := provisioner.Sync(ctx, cfg); err != nil {
-		log.Printf("Warning: env sync error: %v", err)
-		return err
-	}
-	return nil
-}
-
 type ReloadOption func(*reloadConfigOptions)
 
 type reloadConfigOptions struct {
 	dgSession             *discordgo.Session
 	reloadSupplier        func(active *config.Config) error
 	skipEnvironmentSync   bool
-	provisioner           *env.Provisioner
 	workerPool            *queue.WorkerPool
-	ephemeralPool         runner.AgentPool
 	onReload              func(source string)
 	lastDaemonFingerprint string
 }
@@ -69,29 +55,17 @@ func WithDiscordSession(s *discordgo.Session) ReloadOption {
 	}
 }
 
-func WithProvisioner(p *env.Provisioner) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.provisioner = p
-	}
-}
-
 func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.workerPool = pool
 	}
 }
 
-func WithEphemeralPool(pool runner.AgentPool) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.ephemeralPool = pool
-	}
-}
-
 func ensureConfigDefaults(cfg *config.Config) {
-	cur := cfg.Current()
-	if cur == nil {
+	if cfg == nil {
 		return
 	}
+	cur := cfg.Current()
 	changed := false
 	if cur.GeminiHomeDir == "" {
 		cur.GeminiHomeDir = DefaultGeminiHomeDir()
@@ -106,7 +80,7 @@ func ensureConfigDefaults(cfg *config.Config) {
 	}
 }
 
-func computeDaemonReloadFingerprint(cfg *config.Config, options *reloadConfigOptions) string {
+func computeDaemonReloadFingerprint(cfg *config.Config) string {
 	if cfg == nil || cfg.Current() == nil {
 		return ""
 	}
@@ -181,100 +155,23 @@ func computeDaemonReloadFingerprint(cfg *config.Config, options *reloadConfigOpt
 	}
 	b.WriteByte('\n')
 
-	for _, cred := range []struct {
-		name   string
-		source config.CredentialSource
-	}{
-		{"oauth", cur.CredentialSources.OAuth},
-		{"codex", cur.CredentialSources.Codex},
-		{"muse", cur.CredentialSources.Muse},
-	} {
-		if cred.source.Disabled || strings.TrimSpace(cred.source.Path) == "" {
-			continue
-		}
-		path := strings.TrimSpace(cred.source.Path)
-		b.WriteString("credBytes:")
-		b.WriteString(cred.name)
-		b.WriteByte(':')
-		b.WriteString(path)
-		b.WriteByte(':')
-		if data, err := os.ReadFile(path); err == nil {
-			b.Write(data)
-		}
-		b.WriteByte('\n')
-	}
-
-	if options != nil && !options.skipEnvironmentSync && options.provisioner != nil {
-		b.WriteString("provisioner:")
-		b.WriteString(options.provisioner.SourceFingerprint())
-		b.WriteByte('\n')
-	}
-
 	h := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(h[:])
 }
 
-func updateEphemeralPoolEngineAndModel(cur *config.ConfigData, ephemPool runner.AgentPool) {
-	if ephemPool == nil {
-		return
-	}
-	switch u := ephemPool.(type) {
-	case interface {
-		UpdateEngine(engine, claudeBin string, codexBin ...string)
-	}:
-		u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
-	case interface {
-		UpdateEngine(engine, claudeBin string)
-	}:
-		u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
-	}
-	lowModel, _ := resolveBrainModelDefaults(cur)
-	if modelUpdater, ok := ephemPool.(interface{ UpdateModel(model string) }); ok {
-		modelUpdater.UpdateModel(lowModel)
-	}
-}
-
-func updateWorkerPoolEngine(cur *config.ConfigData, workerPool *queue.WorkerPool) {
-	if workerPool == nil {
-		return
-	}
-	for _, k := range queue.AllValidPoolKeys() {
-		if p := workerPool.Pool(k); p != nil {
-			switch u := p.(type) {
-			case interface {
-				UpdateEngine(engine, claudeBin string, codexBin ...string)
-			}:
-				u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
-			case interface {
-				UpdateEngine(engine, claudeBin string)
-			}:
-				u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
-			}
-		}
-	}
-}
-
 func markDirtyIfFingerprintChanged(source string, cfg *config.Config, options *reloadConfigOptions) {
-	nextFP := computeDaemonReloadFingerprint(cfg, options)
+	nextFP := computeDaemonReloadFingerprint(cfg)
 	if nextFP == options.lastDaemonFingerprint {
 		log.Printf("[%s] Daemon configuration and provisioned assets unchanged; preserving active daemon sessions", source)
 		return
 	}
 	options.lastDaemonFingerprint = nextFP
-	if options.ephemeralPool != nil {
-		if md, ok := options.ephemeralPool.(interface{ MarkDirty() }); ok {
-			md.MarkDirty()
-		}
-	}
 	if options.workerPool != nil {
 		options.workerPool.MarkDirty()
 	}
 }
 
-func executeConfigReload(ctx context.Context, source string, cfg *config.Config, options *reloadConfigOptions) {
-	if cfg == nil {
-		return
-	}
+func executeConfigReload(source string, cfg *config.Config, options *reloadConfigOptions) {
 	candidate := config.NewFromData(cfg.Current())
 	reloadErr := prepareReloadCandidate(candidate, options)
 	if err := reloadErr; err != nil {
@@ -293,19 +190,10 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 	metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
 	config.RegisterConfigTokens(cfg)
 
-	if !options.skipEnvironmentSync && options.provisioner != nil {
-		if err := options.provisioner.Sync(ctx, cfg); err != nil {
-			log.Printf("[%s] Warning: env sync error: %v", source, err)
-		}
-	}
-
-	cur := cfg.Current()
-	updateEphemeralPoolEngineAndModel(cur, options.ephemeralPool)
-	updateWorkerPoolEngine(cur, options.workerPool)
 	markDirtyIfFingerprintChanged(source, cfg, options)
 }
 
-func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...ReloadOption) func(source string) {
+func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
 		reloadSupplier: func(candidate *config.Config) error {
 			// Loading a reload candidate must not publish to ActiveConfig before validation.
@@ -321,12 +209,7 @@ func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...Rel
 		}
 	}
 
-	if options.provisioner == nil && !options.skipEnvironmentSync && cfg != nil {
-		if prov, err := env.NewFromConfig(cfg); err == nil {
-			options.provisioner = prov
-		}
-	}
-	options.lastDaemonFingerprint = computeDaemonReloadFingerprint(cfg, options)
+	options.lastDaemonFingerprint = computeDaemonReloadFingerprint(cfg)
 
 	var reloadMu sync.Mutex
 	return func(source string) {
@@ -338,7 +221,7 @@ func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...Rel
 			}
 		}()
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
-		executeConfigReload(ctx, source, cfg, options)
+		executeConfigReload(source, cfg, options)
 	}
 }
 
@@ -399,304 +282,6 @@ func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCP
 	return result
 }
 
-// buildPoolEnv returns a process environment slice with unified compiler and module
-// cache directories under runtimeBase/cache when not already explicitly set.
-func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []string {
-	if runtimeBase == "" {
-		return baseEnv
-	}
-	cacheBase := filepath.Join(runtimeBase, "cache")
-
-	envMap := make(map[string]bool)
-	for _, e := range baseEnv {
-		if k, _, ok := strings.Cut(e, "="); ok {
-			envMap[k] = true
-		}
-	}
-
-	var extra []string
-	for _, item := range []struct{ key, sub string }{
-		{"GOCACHE", "go-build"},
-		{"GOPATH", "go"},
-		{"GOMODCACHE", filepath.Join("go", "pkg", "mod")},
-		{"GOLANGCI_LINT_CACHE", "golangci-lint"},
-	} {
-		if !envMap[item.key] {
-			extra = append(extra, item.key+"="+filepath.Join(cacheBase, item.sub))
-		}
-	}
-	if !envMap["GOFLAGS"] {
-		extra = append(extra, "GOFLAGS=-trimpath")
-	}
-	if !envMap["TZ"] {
-		var tz string
-		if len(timezone) > 0 && strings.TrimSpace(timezone[0]) != "" {
-			tz = strings.TrimSpace(timezone[0])
-		} else {
-			tz = config.GetTimezone()
-		}
-		if tz != "" {
-			extra = append(extra, "TZ="+tz)
-		}
-	}
-
-	if len(extra) == 0 {
-		return baseEnv
-	}
-	result := make([]string, len(baseEnv)+len(extra))
-	copy(result, baseEnv)
-	copy(result[len(baseEnv):], extra)
-	return result
-}
-
-func initVoiceAmbientRetriever(ctx context.Context, cur *config.ConfigData) runner.AmbientContextRetriever {
-	ambCfg := cur.VoiceAmbientContext()
-	if ambCfg == nil {
-		return nil
-	}
-	voiceServers := extractMCPServers(cur, false)
-	disp := mcp.NewDispatcher(voiceServers, nil)
-	p, pErr := ambient.NewProvider(*ambCfg, disp)
-	if pErr != nil {
-		log.Printf("[INIT] Warning: failed to initialize voice ambient provider: %v", pErr)
-		return nil
-	}
-	go func() {
-		primeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if err := p.Prime(primeCtx); err != nil {
-			log.Printf("[INIT] Ambient context prime warning: %v", err)
-		}
-	}()
-	log.Printf("[INIT] Voice ambient context provider initialized (tools=%d, cache_ttl=%s)", len(ambCfg.Tools), ambCfg.CacheTTL)
-	return p.Retrieve
-}
-
-func buildGeminiVoicePool(cur *config.ConfigData, lowEffortModel string, prewarmedTargets []string, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) (runner.AgentPool, string, string, []runner.MCPServerConfig, bool) {
-	apiKey := cur.HarnessAPIKey
-	if apiKey == "" {
-		apiKey = cur.APIKey
-	}
-	if apiKey == "" {
-		log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
-		return nil, "", "", nil, false
-	}
-	geminiModel := lowEffortModel
-	if strings.TrimSpace(cur.Voice.Model) != "" {
-		geminiModel = strings.TrimSpace(cur.Voice.Model)
-	}
-	mcpServers := extractMCPServers(cur, false)
-	voicePool := runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
-		APIKey:                  apiKey,
-		Model:                   geminiModel,
-		PrewarmedTargets:        prewarmedTargets,
-		SystemPrompt:            cur.SystemPrompt,
-		MCPServers:              mcpServers,
-		AllowedTools:            cur.VoiceAllowedTools(),
-		DataDir:                 cur.DataDir,
-		MemoryRetriever:         memoryRetriever,
-		AmbientContextRetriever: ambRetriever,
-	})
-	log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d, allowed_tools=%d)", geminiModel, prewarmedTargets, len(mcpServers), len(cur.VoiceAllowedTools()))
-	return voicePool, geminiModel, apiKey, mcpServers, true
-}
-
-func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome, lowEffortModel, mcpProxyPort, stack string, prewarmedTargets []string, spawner runner.DaemonSpawner, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) runner.AgentPool {
-	runtimeBase := cur.DataDir
-	if runtimeBase == "" && cfg != nil {
-		runtimeBase = cfg.DataDir()
-	}
-	if runtimeBase == "" && cfg != nil {
-		runtimeBase = cfg.GeminiHomeDir()
-	}
-	voiceSessionMgr := session.New(voiceHome, runtimeBase)
-	voiceEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
-	return runner.NewUnifiedProcessPool(runner.PoolConfig{
-		Engine:                  cur.GetEngine(),
-		ClaudeBin:               cur.ClaudeBin,
-		CodexBin:                cur.CodexBin,
-		MuseBin:                 cur.MuseBin,
-		GeminiHomeDir:           voiceHome,
-		Model:                   lowEffortModel,
-		AgyBin:                  cur.AgyBin,
-		Cwd:                     cur.DataDir,
-		Env:                     voiceEnv,
-		Timezone:                cur.Timezone,
-		PrewarmedTargets:        prewarmedTargets,
-		TranscriptRescuer:       voiceSessionMgr.ExtractResponseSinceContext,
-		TerminalTurnRescuer:     voiceSessionMgr.ExtractDefaultTerminalTurnResponse,
-		MemoryRetriever:         memoryRetriever,
-		AmbientContextRetriever: ambRetriever,
-		SessionManager:          voiceSessionMgr,
-		MCPProxyPort:            mcpProxyPort,
-		Stack:                   stack,
-	}, spawner)
-}
-
-func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey string, cur *config.ConfigData, prewarmedTargets []string, mcpServers []runner.MCPServerConfig) string {
-	var b strings.Builder
-	b.WriteString("engine:")
-	b.WriteString(voiceEngine)
-	b.WriteString("\nmodel:")
-	b.WriteString(effectiveModel)
-	b.WriteString("\n")
-	if effectiveAPIKey != "" {
-		keyHash := sha256.Sum256([]byte(effectiveAPIKey))
-		b.WriteString("apiKeyHash:")
-		b.WriteString(hex.EncodeToString(keyHash[:]))
-		b.WriteString("\n")
-	}
-	if voiceEngine != config.VoiceEngineGeminiAPI {
-		b.WriteString("processEngine:")
-		b.WriteString(cur.GetEngine())
-		b.WriteString("\nclaudeBin:")
-		if cur != nil {
-			b.WriteString(cur.ClaudeBin)
-		}
-		b.WriteString("\n")
-		if cur != nil && ((cur.CodexBin != "" && cur.CodexBin != "codex") || cur.GetEngine() == config.EngineCodex) {
-			b.WriteString("codexBin:")
-			b.WriteString(cur.CodexBin)
-			b.WriteString("\n")
-		}
-		if cur != nil && ((cur.MuseBin != "" && cur.MuseBin != "muse") || cur.GetEngine() == config.EngineMuse) {
-			b.WriteString("museBin:")
-			b.WriteString(cur.MuseBin)
-			b.WriteString("\n")
-		}
-	}
-	if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
-		b.WriteString("ambient_context_tools:")
-		fmt.Fprintf(&b, "%d", len(ambCfg.Tools))
-		b.WriteString("\nambient_context_ttl:")
-		b.WriteString(ambCfg.CacheTTL)
-		b.WriteString("\nambient_context_template:")
-		b.WriteString(ambCfg.Template)
-		b.WriteString("\nambient_context_template_path:")
-		b.WriteString(ambCfg.TemplatePath)
-		b.WriteString("\n")
-	}
-	for _, target := range prewarmedTargets {
-		b.WriteString("prewarmed:")
-		b.WriteString(target)
-		b.WriteString("\n")
-	}
-	for _, s := range mcpServers {
-		b.WriteString("mcp:")
-		b.WriteString(s.Name)
-		b.WriteString("=")
-		b.WriteString(s.ServerURL)
-		b.WriteString("\n")
-	}
-	b.WriteString("systemPrompt:")
-	b.WriteString(cur.SystemPrompt)
-	b.WriteString("\n")
-
-	h := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(h[:])
-}
-
-// createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine()
-// wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
-// mcpProxyPort points agy/Claude voice daemons at the loopback MCP trace proxy ("" when tracing
-// is off), exactly as basePoolCfg does for the Discord and ephemeral pools.
-func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, lowEffortModel, mcpProxyPort, stack string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
-	var memoryRetriever runner.MemoryRetriever
-	if len(memRetriever) > 0 {
-		memoryRetriever = memRetriever[0]
-	}
-	buildPool := func() (runner.AgentPool, string, error) {
-		var cur *config.ConfigData
-		var voiceEngine string
-		var prewarmedTargets []string
-		if cfg != nil {
-			cur = cfg.Current()
-			voiceEngine = cfg.VoiceEngine()
-			prewarmedTargets = cfg.VoicePrewarmedTargets()
-		} else {
-			cur = config.DefaultConfigData()
-			voiceEngine = config.EngineAgy
-			prewarmedTargets = []string{}
-		}
-
-		effectiveLow := strings.TrimSpace(lowEffortModel)
-		if cur != nil && strings.TrimSpace(cur.LowEffortModel) != "" {
-			effectiveLow = strings.TrimSpace(cur.LowEffortModel)
-		}
-
-		var voicePool runner.AgentPool
-		var effectiveModel string
-		var effectiveAPIKey string
-		var mcpServers []runner.MCPServerConfig
-
-		ambRetriever := initVoiceAmbientRetriever(ctx, cur)
-
-		if voiceEngine == config.VoiceEngineGeminiAPI {
-			pool, model, apiKey, servers, ok := buildGeminiVoicePool(cur, effectiveLow, prewarmedTargets, memoryRetriever, ambRetriever)
-			if ok {
-				voicePool = pool
-				effectiveModel = model
-				effectiveAPIKey = apiKey
-				mcpServers = servers
-			} else {
-				voiceEngine = config.EngineAgy
-			}
-		}
-		if voiceEngine != config.VoiceEngineGeminiAPI {
-			effectiveModel = effectiveLow
-			if cur != nil && strings.TrimSpace(cur.Voice.Model) != "" {
-				effectiveModel = strings.TrimSpace(cur.Voice.Model)
-			}
-			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, effectiveModel, mcpProxyPort, stack, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
-		}
-
-		fingerprint := computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey, cur, prewarmedTargets, mcpServers)
-		return voicePool, fingerprint, nil
-	}
-
-	return runner.NewDynamicVoicePool(buildPool)
-}
-
-// PrewarmProcessPoolsSequentially pre-warms process pool targets in series in the background,
-// ensuring only one daemon is in the CPU-intensive startup phase at a time across all pools.
-// captureContent records each ephemeral run's prompt and response on its trace span.
-func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonSpawner, keyPrefix string, captureContent bool) *runner.InterchangeablePool {
-	underlying := runner.NewUnifiedProcessPool(pCfg, spawner)
-	return runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
-		WorkerCount:    len(pCfg.PrewarmedTargets),
-		KeyPrefix:      keyPrefix,
-		CaptureContent: captureContent,
-	})
-}
-
-func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentPool) {
-	go func() {
-		prewarmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-
-		log.Printf("[INIT] Pre-warming process pools sequentially...")
-		for _, p := range pools {
-			if p == nil {
-				continue
-			}
-			if err := p.Initialize(prewarmCtx); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("[WARN] Failed pre-warming pool: %v", err)
-			}
-			select {
-			case <-prewarmCtx.Done():
-				return
-			default:
-			}
-		}
-		log.Printf("[INIT] Process pool pre-warming completed.")
-	}()
-}
-
-var (
-	onServerReady func(addr string)
-	openDefaultDB = db.New
-)
-
 func validateBrainStartupConfig(cur *config.ConfigData, hasInjectedStore bool) error {
 	if !hasInjectedStore && cur.DatabaseURL == "" {
 		return fmt.Errorf("database URL or path is required")
@@ -713,105 +298,10 @@ func validateBrainStartupConfig(cur *config.ConfigData, hasInjectedStore bool) e
 	return nil
 }
 
-func resolveBrainModelDefaults(cur *config.ConfigData) (lowEffortModel, mediumEffortModel string) {
-	lowEffortModel = cur.LowEffortModel
-	if lowEffortModel == "" {
-		lowEffortModel = "gemini-3.8-flash-low"
-	}
-	mediumEffortModel = cur.MediumEffortModel
-	if mediumEffortModel == "" {
-		mediumEffortModel = "gemini-3.8-flash-medium"
-	}
-	return lowEffortModel, mediumEffortModel
-}
-
-// brainPools is the full set of agent process pools built at startup, plus the
-// spawn environment and ephemeral runtime home they share.
-type brainPools struct {
-	discord       map[queue.PoolKey]runner.AgentPool
-	ephemeral     *runner.InterchangeablePool
-	voice         runner.AgentPool
-	all           []runner.AgentPool
-	env           []string
-	ephemeralHome string
-}
-
-func buildBrainProcessPools(
-	ctx context.Context,
-	cfg *config.Config,
-	cur *config.ConfigData,
-	sessionMgr *session.Manager,
-	spawner runner.DaemonSpawner,
-	mcpProxyPort string,
-	traceContent bool,
-	stack string,
-) brainPools {
-	lowEffortModel, mediumEffortModel := resolveBrainModelDefaults(cur)
-	runtimeBase := cur.DataDir
-
-	discordHome := filepath.Join(runtimeBase, "runtimes", "discord")
-	voiceHome := filepath.Join(runtimeBase, "runtimes", "voice")
-	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
-
-	poolEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
-	if cur.BotID != "" {
-		poolEnv = append(poolEnv, "AERIAL_BOT_ID="+cur.BotID)
-	}
-	if cur.SynapseURL != "" {
-		poolEnv = append(poolEnv, "SYNAPSE_URL="+cur.SynapseURL)
-	}
-	if cur.VanadisURL != "" {
-		poolEnv = append(poolEnv, "VANADIS_URL="+cur.VanadisURL)
-	}
-	memoryRetriever := newHTTPMemoryRetriever(cur.CovenURL)
-
-	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
-		pcfg := runner.PoolConfig{
-			Engine:              cur.GetEngine(),
-			ClaudeBin:           cur.ClaudeBin,
-			CodexBin:            cur.CodexBin,
-			MuseBin:             cur.MuseBin,
-			GeminiHomeDir:       home,
-			Model:               model,
-			AgyBin:              cur.AgyBin,
-			Cwd:                 cur.DataDir,
-			Env:                 poolEnv,
-			Timezone:            cur.Timezone,
-			TranscriptRescuer:   sessionMgr.ExtractResponseSinceContext,
-			TerminalTurnRescuer: sessionMgr.ExtractDefaultTerminalTurnResponse,
-			SessionManager:      sessionMgr,
-			PrewarmedTargets:    prewarmed,
-			MCPProxyPort:        mcpProxyPort,
-			Stack:               stack,
-		}
-		if home == discordHome {
-			pcfg.MemoryRetriever = memoryRetriever
-		}
-		return pcfg
-	}
-
-	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
-	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker", traceContent)
-	voicePool := createVoiceProcessPool(ctx, cfg, voiceHome, lowEffortModel, mcpProxyPort, stack, spawner, memoryRetriever)
-	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
-
-	return brainPools{
-		discord:       discordPools,
-		ephemeral:     ephemeralPool,
-		voice:         voicePool,
-		all:           allPools,
-		env:           poolEnv,
-		ephemeralHome: ephemeralHome,
-	}
-}
-
-func closeAllBrainPools(pools []runner.AgentPool) {
-	for _, p := range pools {
-		if err := p.Close(); err != nil {
-			log.Printf("[WARN] Failed to close process pool: %v", err)
-		}
-	}
-}
+var (
+	onServerReady func(addr string)
+	openDefaultDB = db.New
+)
 
 func newAmbientContextResolver(cfg *config.Config) func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
 	var ambientProviders sync.Map
@@ -882,88 +372,6 @@ func setupDiscordFunnel(
 		}
 	}
 	return dgSession, cleanup
-}
-
-var startupResendInitialBackoff = 250 * time.Millisecond
-
-func runStartupResendLoop(ctx context.Context, pool *queue.WorkerPool, backoff time.Duration) {
-	for ctx.Err() == nil {
-		err := pool.RunStartupResend(ctx)
-		if err == nil || ctx.Err() != nil {
-			return
-		}
-		log.Printf("[StartupResend] Warning running startup resend: %v", err)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-			backoff = min(backoff*2, 30*time.Second)
-		}
-	}
-}
-
-func startLeaderHandoff(
-	ctx context.Context,
-	store db.Store,
-	txStore db.TranscriptStore,
-	pool *queue.WorkerPool,
-	allPools []runner.AgentPool,
-	ephemeralPool interface {
-		EphemeralLLMFunc(model string) runner.LLMFunc
-	},
-	cfg *config.Config,
-	cur *config.ConfigData,
-) (<-chan error, func(), func()) {
-	leaderCtx, cancelLeader := context.WithCancel(ctx)
-	leaderDone := make(chan struct{})
-	errCh := make(chan error, 1)
-	var releaseMu sync.Mutex
-	var releaseFn func()
-
-	go func() {
-		defer close(leaderDone)
-		if store != nil {
-			rel, err := store.AcquireLeaderLock(leaderCtx)
-			if err != nil {
-				if leaderCtx.Err() == nil {
-					errCh <- fmt.Errorf("failed to acquire leader lock: %w", err)
-				}
-				return
-			}
-			releaseMu.Lock()
-			releaseFn = rel
-			releaseMu.Unlock()
-		}
-		if leaderCtx.Err() != nil {
-			return
-		}
-		queue.RecoverInterrupted(leaderCtx, store, pool)
-		PrewarmProcessPoolsSequentially(leaderCtx, allPools...)
-		_ = txStore
-		_ = ephemeralPool
-		_ = cfg
-		_ = cur
-		if pool != nil {
-			runStartupResendLoop(leaderCtx, pool, startupResendInitialBackoff)
-		}
-	}()
-
-	stopHandoff := func() {
-		cancelLeader()
-		<-leaderDone
-	}
-
-	releaseLock := func() {
-		releaseMu.Lock()
-		rel := releaseFn
-		releaseFn = nil
-		releaseMu.Unlock()
-		if rel != nil {
-			rel()
-		}
-	}
-
-	return errCh, stopHandoff, releaseLock
 }
 
 // reloadTrigger runs git-sync webhook reloads on a single background worker,
@@ -1072,41 +480,9 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 	}
 }
 
-// mcpTraceRoutes returns the MCP proxy routes and port daemons are pointed at: with tracing on,
-// agents reach their HTTP MCP servers through eri's loopback trace proxy, which parents each
-// call under the turn of the daemon making it. Both are zero when tracing is off.
-func mcpTraceRoutes(tracingEnabled bool, port string) (*env.MCPProxyRoutes, string) {
-	if !tracingEnabled {
-		return nil, ""
-	}
-	return env.NewMCPProxyRoutes(port), port
-}
-
-// registerMCPTraceProxy mounts the loopback MCP trace proxy when tracing routes exist,
-// and always mounts the loopback OTel log receiver for agent process diagnostics.
-func registerMCPTraceProxy(mux *http.ServeMux, routes *env.MCPProxyRoutes, turns *runner.ActiveTurnRegistry, stack ...string) {
-	if routes != nil {
-		mcp.NewTraceProxy(mcp.TraceProxyConfig{Upstreams: routes, Turns: turns}).Register(mux)
-	}
-	var stackName string
-	if len(stack) > 0 {
-		stackName = stack[0]
-	}
-	mcp.NewOTelLogProxy(mcp.OTelLogProxyConfig{Turns: turns, Stack: stackName}).Register(mux)
-}
-
-// brainHandler wraps mux with request metrics and server spans, except for the loopback MCP
-// trace proxy and OTel log receiver: their requests are agents' MCP calls and logs, which
-// are parented under the calling turn, so a server span there would only add an orphan root trace.
+// brainHandler wraps mux with request metrics and server spans.
 func brainHandler(mux http.Handler) http.Handler {
-	traced := tracing.Middleware("eri", metricsMiddleware(mux))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, env.MCPProxyPathPrefix) || strings.HasPrefix(r.URL.Path, env.OTelLogsPathPrefix) {
-			mux.ServeHTTP(w, r)
-			return
-		}
-		traced.ServeHTTP(w, r)
-	})
+	return tracing.Middleware("eri", metricsMiddleware(mux))
 }
 
 func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, asyncErrCh ...<-chan error) error {
@@ -1149,19 +525,6 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer shutdownCancel()
 		return errors.Join(err, srv.Shutdown(shutdownCtx))
-	}
-}
-
-func startBrainEngineUsagePoller(ctx context.Context, cur *config.ConfigData, pools brainPools) {
-	switch cur.GetEngine() {
-	case config.EngineAgy:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, pools.ephemeralHome, pools.env, testing.Testing()), metrics.RecordUsageJSON)
-	case config.EngineClaude:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
-	case config.EngineCodex:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultCodexUsageRunner(filepath.Join(cur.DataDir, "codex", "auth.json"), testing.Testing()), metrics.RecordCodexUsageJSON)
-	case config.EngineMuse:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultMuseUsageRunner(cur.MuseBin, pools.ephemeralHome, pools.env, testing.Testing()), metrics.RecordMuseUsageJSON)
 	}
 }
 
@@ -1219,14 +582,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	config.RegisterConfigTokens(cfg)
 
-	mcpRoutes, mcpProxyPort := mcpTraceRoutes(appOpts.tracingEnabled, cur.Port)
-	activeTurns := runner.NewActiveTurnRegistry()
-
-	provisioner, provisionErr := initializeEnvironment(ctx, cfg, mcpRoutes)
-	if provisionErr != nil {
-		return provisionErr
-	}
-
 	store, txStore, cleanupStores, storeErr := resolveBrainStores(cfg, cur, appOpts)
 	if storeErr != nil {
 		return storeErr
@@ -1237,19 +592,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
 
-	var releaseLeaderLock func()
-	defer func() {
-		if releaseLeaderLock != nil {
-			releaseLeaderLock()
-		}
-	}()
-
-	pools := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent, appOpts.agentName)
-	defer closeAllBrainPools(pools.all)
-
-	startBrainEngineUsagePoller(ctx, cur, pools)
-
-	cls := classifier.New(cfg, classifier.WithProcessPool(pools.ephemeral))
+	cls := classifier.New(cfg)
 	ambientResolver := newAmbientContextResolver(cfg)
 
 	restateClient := appOpts.restateClient
@@ -1271,10 +614,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		defer SetFunnelQuotaProvider(nil)
 	}
 
-	llmFn := pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer")
-	if remoteLLMFn != nil {
-		llmFn = remoteLLMFn
-	}
+	llmFn := remoteLLMFn
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		ParentContext:          ctx,
@@ -1283,30 +623,27 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
 		Classifier:             cls,
 		SessionManager:         sessionMgr,
-		Pools:                  pools.discord,
-		VoiceProcessPool:       pools.voice,
 		LLMFunc:                llmFn,
 		AmbientResolver:        ambientResolver,
 		NATSURL:                cur.NATSURL,
 		AgentName:              appOpts.agentName,
 		TraceContent:           appOpts.traceContent,
-		ActiveTurns:            activeTurns,
+		ActiveTurns:            runner.NewActiveTurnRegistry(),
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
 	})
 	detachEventBus := attachEriEventBus(ctx, pool)
 	defer detachEventBus()
-	pool.HoldUntilLeader()
 	pool.Start()
 
 	dgSession, cleanupFunnel := setupDiscordFunnel(ctx, cfg, store, pool, cur.DiscordToken)
 	defer cleanupFunnel()
 
 	var reloadOpts []ReloadOption
-	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool), WithEphemeralPool(pools.ephemeral))
+	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithWorkerPool(pool))
 	if appOpts.onReload != nil {
 		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
 	}
-	reloadConfig := CreateReloadConfigFunc(ctx, cfg, reloadOpts...)
+	reloadConfig := CreateReloadConfigFunc(cfg, reloadOpts...)
 
 	stopHup := startSIGHUPReloadLoop(ctx, appOpts.hupChan, reloadConfig)
 	defer stopHup()
@@ -1319,8 +656,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}
 	mux := SetupBrainMuxWithEmbedder(store, txStore, pool, embedder, sessionMgr.Roots()...)
-	// Stop the git-sync reload worker and wait out any in-flight reload before
-	// the deferred pool and Discord teardown above run.
 	reloadCtx, stopReloads := context.WithCancel(ctx)
 	gitSyncReloads := newReloadTrigger(reloadCtx, reloadConfig)
 	defer func() {
@@ -1328,7 +663,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		<-gitSyncReloads.done
 	}()
 	registerGitSyncReload(mux, gitSyncReloads)
-	registerMCPTraceProxy(mux, mcpRoutes, activeTurns, appOpts.agentName)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)
@@ -1341,11 +675,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, txStore, pool, pools.all, pools.ephemeral, cfg, cur)
-	releaseLeaderLock = releaseLock
-	defer stopHandoff()
-
-	return serveBrainHTTP(ctx, ln, mux, cur.Model, leaderErrCh)
+	return serveBrainHTTP(ctx, ln, mux, cur.Model)
 }
 
 // setupTracing installs the global tracer provider and propagator from the config at path
@@ -1402,35 +732,7 @@ func main() {
 	}
 }
 
-func initializeEnvironment(ctx context.Context, cfg *config.Config, routes *env.MCPProxyRoutes) (*env.Provisioner, error) {
-	provisioner, err := env.NewFromConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	provisioner.WithMCPProxy(routes)
-	if err := syncBrainEnvironment(ctx, provisioner, cfg); err != nil {
-		if _, ok := errors.AsType[*env.CredentialError](err); ok {
-			return nil, err
-		}
-		log.Printf("Warning initializing brain environment: %v", err)
-	}
-	return provisioner, nil
-}
-
-// prepareReloadCandidate keeps supplier mutations isolated until credentials are ready.
+// prepareReloadCandidate loads candidate configuration from supplier without mutating active config.
 func prepareReloadCandidate(candidate *config.Config, options *reloadConfigOptions) error {
-	if err := options.reloadSupplier(candidate); err != nil {
-		return err
-	}
-	if err := env.ValidateCredentialSources(candidate.Current().CredentialSources); err != nil {
-		return err
-	}
-	if options.provisioner == nil && !options.skipEnvironmentSync {
-		provisioner, err := env.NewFromConfig(candidate)
-		if err != nil {
-			return err
-		}
-		options.provisioner = provisioner
-	}
-	return nil
+	return options.reloadSupplier(candidate)
 }

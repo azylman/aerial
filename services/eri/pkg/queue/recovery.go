@@ -164,6 +164,10 @@ func mergeHeldPendingEntries(ctx context.Context, store db.Store, msgs []db.Mess
 
 // RecoverInterrupted resumes all PENDING and PROCESSING messages and dispatches from the database on startup in chronological order.
 // Orphaned PROCESSING entries are reset to PENDING before releasing any canary leader hold on the pool.
+//
+// TODO(c09f-purge-dead-eri-job-fallbacks): Interrupted message recovery is intentionally dropped from the stateless eri HTTP binary
+// because crash recovery and turn execution durability are now managed natively by Restate Virtual Objects (ThreadSession, DispatchSession, VoiceSession)
+// in services/eri-restate. This legacy recovery path and its associated tests will be purged in chunk c09f.
 func RecoverInterrupted(ctx context.Context, store db.Store, pool *WorkerPool) {
 	if store == nil || pool == nil {
 		return

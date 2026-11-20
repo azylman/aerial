@@ -1078,43 +1078,7 @@ func TestStatusRecorder_Flush(t *testing.T) {
 	srPlain.Flush() // should not panic
 }
 
-func runHTTPMemoryRetrieverCases(t *testing.T) {
-	t.Helper()
-	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("q") == "fail" {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if r.URL.Query().Get("q") == "badjson" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("{bad"))
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"context": "<retrieved_memory>ok</retrieved_memory>"})
-	}))
-	defer memSrv.Close()
-
-	ret := newHTTPMemoryRetriever(memSrv.URL)
-	if out, err := ret(context.Background(), ""); err != nil || out != "" {
-		t.Errorf("expected empty on blank query, got %q, %v", out, err)
-	}
-	if out, err := ret(context.Background(), "hello world"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
-		t.Errorf("expected retrieved memory, got %q, %v", out, err)
-	}
-	if _, err := ret(context.Background(), "fail"); err == nil {
-		t.Errorf("expected error on 500 status")
-	}
-	if _, err := ret(context.Background(), "badjson"); err == nil {
-		t.Errorf("expected error on bad json")
-	}
-
-	retEmpty := newHTTPMemoryRetriever("")
-	if out, err := retEmpty(context.Background(), "hello"); err != nil || out != "" {
-		t.Errorf("expected empty string and nil error on empty base URL, got %q, %v", out, err)
-	}
-}
-
-func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
+func TestHandleInternalLLM(t *testing.T) {
 	attSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/file.txt":
@@ -1234,8 +1198,6 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	if _, err := os.Stat(observedDir); !os.IsNotExist(err) {
 		t.Errorf("expected staged tmpDir %q to be removed after handleInternalLLM returned", observedDir)
 	}
-
-	runHTTPMemoryRetrieverCases(t)
 }
 
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {

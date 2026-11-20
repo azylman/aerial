@@ -271,8 +271,15 @@ run_deadcode() {
             exit 1
         }
         if [ -n "$main_pkgs" ]; then
+            filter_flag=""
+            if [ "$svc" = "services/eri" ]; then
+                # services/eri exports shared worker packages (pkg/env, pkg/runner, pkg/mcp) to services/eri-restate,
+                # while legacy queue recovery fallbacks are scheduled for deletion in chunk c09f.
+                # Scope deadcode to services/eri root package during the Restate transition.
+                filter_flag="-filter=^github\.com/azylman/aerial/services/eri$"
+            fi
             # shellcheck disable=SC2086
-            dead_prod=$(cd "$svc" && "$DEADCODE_BIN" $main_pkgs 2>&1) || {
+            dead_prod=$(cd "$svc" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
                 echo "🚨 [Aerial Verify] Error: deadcode (production) execution failed on $svc:" >&2
                 echo "$dead_prod" >&2
                 exit 1

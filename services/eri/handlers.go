@@ -29,7 +29,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
@@ -1035,41 +1034,6 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"response": resp})
-	}
-}
-
-func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		return func(ctx context.Context, query string) (string, error) {
-			return "", nil
-		}
-	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	return func(ctx context.Context, query string) (string, error) {
-		q := strings.TrimSpace(query)
-		if q == "" {
-			return "", nil
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/context?q="+url.QueryEscape(q)+"&limit=5", http.NoBody)
-		if err != nil {
-			return "", err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("coven returned status %d", resp.StatusCode)
-		}
-		var out struct {
-			Context string `json:"context"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return "", err
-		}
-		return out.Context, nil
 	}
 }
 

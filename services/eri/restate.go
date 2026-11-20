@@ -151,14 +151,6 @@ func resolveRestateClient(clients ...*RestateIngressClient) *RestateIngressClien
 	return ActiveRestateIngressClient()
 }
 
-// AgentName returns the configured agent name on this client.
-func (c *RestateIngressClient) AgentName() string {
-	if c == nil {
-		return ""
-	}
-	return c.agentName
-}
-
 // NewRestateIngressClient constructs a RestateIngressClient.
 func NewRestateIngressClient(ingressURL, agentName string, httpClient ...*http.Client) *RestateIngressClient {
 	ingressURL = strings.TrimRight(strings.TrimSpace(ingressURL), "/")
@@ -328,6 +320,9 @@ func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, r
 		IsPrompt:     true,
 	}
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
+	if req.SkipIfActive {
+		idempotencyKey = ""
+	}
 	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
 	if err != nil {
 		return "", err
@@ -347,7 +342,11 @@ func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient,
 		Model:          strings.TrimSpace(req.Model),
 		SkipIfActive:   req.SkipIfActive,
 	}
-	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, dispatchID)
+	idempotencyKey := dispatchID
+	if req.SkipIfActive {
+		idempotencyKey = ""
+	}
+	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, idempotencyKey)
 	if err != nil {
 		return "", err
 	}
@@ -422,7 +421,6 @@ var _ = []any{
 	SetActiveRestateIngressClient,
 	ActiveRestateIngressClient,
 	resolveRestateClient,
-	(*RestateIngressClient).AgentName,
 	(*RestateIngressClient).postJSON,
 	(*RestateIngressClient).EnqueueThread,
 	(*RestateIngressClient).CancelThreadTurn,

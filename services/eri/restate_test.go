@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -263,18 +262,21 @@ func (e *errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 }
 
 type threadSessionOpCase struct {
-	name           string
-	op             string
-	threadID       string
-	enqueueReq     queue.ThreadEnqueueRequest
-	cancelReq      queue.CancelTurnRequest
-	rotateReq      queue.RotateSessionRequest
-	serverResp     string
-	statusCode     int
-	transportError bool
-	wantStatus     string
-	wantErrorSub   string
-	wantPathSub    string
+	name             string
+	op               string
+	threadID         string
+	enqueueReq       queue.ThreadEnqueueRequest
+	cancelReq        queue.CancelTurnRequest
+	rotateReq        queue.RotateSessionRequest
+	serverResp       string
+	statusCode       int
+	transportError   bool
+	nilClient        bool
+	emptyIngressURL  bool
+	customIngressURL string
+	wantStatus       string
+	wantErrorSub     string
+	wantPathSub      string
 }
 
 func runThreadSessionOperationCase(t *testing.T, tc threadSessionOpCase) {
@@ -300,7 +302,30 @@ func runThreadSessionOperationCase(t *testing.T, tc threadSessionOpCase) {
 			Transport: &errRoundTripper{err: assert.AnError},
 		}
 	}
-	client := NewRestateIngressClient(ts.URL, "aerial", httpClient)
+	if tc.emptyIngressURL {
+		httpClient = &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				mu.Lock()
+				lastPath = r.URL.String()
+				mu.Unlock()
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Body:       io.NopCloser(strings.NewReader(tc.serverResp)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		}
+	}
+	ingressURL := ts.URL
+	if tc.emptyIngressURL {
+		ingressURL = ""
+	} else if tc.customIngressURL != "" {
+		ingressURL = tc.customIngressURL
+	}
+	client := NewRestateIngressClient(ingressURL, "aerial", httpClient)
+	if tc.nilClient {
+		client.httpClient = nil
+	}
 
 	var err error
 	switch tc.op {
@@ -433,6 +458,33 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 			enqueueReq:     queue.ThreadEnqueueRequest{Prompt: "fail"},
 			transportError: true,
 			wantErrorSub:   "post restate request",
+		},
+		{
+			name:            "empty ingress url defaults to restate.aerial:8080",
+			op:              "enqueue",
+			threadID:        "th-108",
+			enqueueReq:      queue.ThreadEnqueueRequest{Prompt: "default url"},
+			emptyIngressURL: true,
+			serverResp:      `{"status":"accepted","message_id":"msg-108"}`,
+			statusCode:      http.StatusOK,
+			wantStatus:      "accepted",
+			wantPathSub:     "http://restate.aerial:8080/ThreadSession/th-108/Enqueue",
+		},
+		{
+			name:         "nil client returns error",
+			op:           "enqueue",
+			threadID:     "th-109",
+			enqueueReq:   queue.ThreadEnqueueRequest{Prompt: "nil client"},
+			nilClient:    true,
+			wantErrorSub: "restate ingress client is nil",
+		},
+		{
+			name:             "invalid ingress url returns request creation error",
+			op:               "enqueue",
+			threadID:         "th-110",
+			enqueueReq:       queue.ThreadEnqueueRequest{Prompt: "bad url"},
+			customIngressURL: "http://\x7f",
+			wantErrorSub:     "create restate request",
 		},
 	}
 
@@ -1024,7 +1076,7 @@ func TestHandleVoiceAsk_RestateCutover(t *testing.T) {
 }
 
 func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
-	bus := pubsub.NewMemoryBus()
+	bus := newSyncVoiceBus()
 	SetVoiceEventBus(bus)
 	defer SetVoiceEventBus(nil)
 
@@ -1251,7 +1303,7 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			bus := pubsub.NewMemoryBus()
+			bus := newSyncVoiceBus()
 			SetVoiceEventBus(bus)
 			defer SetVoiceEventBus(nil)
 
@@ -1282,6 +1334,126 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Contains(t, rec.Body.String(), tc.wantSubstr)
 			assert.Contains(t, rec.Body.String(), "event: done")
+		})
+	}
+}
+
+func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		skipIfActive       bool
+		channelID          string
+		msgID              string
+		wantIdempotencyKey string
+	}{
+		{
+			name:               "idempotency key populated when skip-if-active is false",
+			skipIfActive:       false,
+			channelID:          "ch-100",
+			msgID:              "msg-200",
+			wantIdempotencyKey: "prompt:ch-100:msg-200",
+		},
+		{
+			name:               "idempotency key omitted when skip-if-active is true",
+			skipIfActive:       true,
+			channelID:          "ch-100",
+			msgID:              "msg-200",
+			wantIdempotencyKey: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var capturedKey string
+			var headerPresent bool
+			httpClient := &http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					capturedKey = r.Header.Get("Idempotency-Key")
+					_, headerPresent = r.Header["Idempotency-Key"]
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"status":"accepted"}`)),
+						Header:     make(http.Header),
+					}, nil
+				}),
+			}
+
+			client := NewRestateIngressClient("http://restate.test", "aerial", httpClient)
+			status, err := handlePromptViaRestate(context.Background(), client, PromptRequest{
+				Prompt:       "hello world",
+				SkipIfActive: tc.skipIfActive,
+			}, tc.channelID, tc.msgID)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted", status)
+			if tc.wantIdempotencyKey == "" {
+				assert.False(t, headerPresent)
+				assert.Empty(t, capturedKey)
+			} else {
+				assert.True(t, headerPresent)
+				assert.Equal(t, tc.wantIdempotencyKey, capturedKey)
+			}
+		})
+	}
+}
+
+func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		skipIfActive       bool
+		sessionKey         string
+		dispatchID         string
+		wantIdempotencyKey string
+	}{
+		{
+			name:               "idempotency key populated with dispatch id when skip-if-active is false",
+			skipIfActive:       false,
+			sessionKey:         "sess-100",
+			dispatchID:         "disp-200",
+			wantIdempotencyKey: "disp-200",
+		},
+		{
+			name:               "idempotency key omitted when skip-if-active is true",
+			skipIfActive:       true,
+			sessionKey:         "sess-100",
+			dispatchID:         "disp-200",
+			wantIdempotencyKey: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var receivedKey string
+			var hasHeader bool
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedKey = r.Header.Get("Idempotency-Key")
+				_, hasHeader = r.Header["Idempotency-Key"]
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"status":"accepted"}`))
+			}))
+			defer ts.Close()
+
+			ingress := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			res, err := handleDispatchViaRestate(context.Background(), ingress, DispatchRequest{
+				Prompt:       "run task",
+				SkipIfActive: tc.skipIfActive,
+			}, tc.sessionKey, tc.dispatchID)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted", res)
+			if tc.wantIdempotencyKey == "" {
+				assert.False(t, hasHeader)
+				assert.Empty(t, receivedKey)
+			} else {
+				assert.True(t, hasHeader)
+				assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
+			}
 		})
 	}
 }

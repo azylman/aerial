@@ -92,7 +92,7 @@ type WorkerPoolConfig struct {
 	DiscordSession                                                               *discordgo.Session
 	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt       string
 	TimeoutMinutes, MaxAttempts                                                  int
-	BackoffBase, IdleTimeout, RetryDelayOverride, MaintenanceInterval            time.Duration
+	BackoffBase, IdleTimeout, RetryDelayOverride                                 time.Duration
 	SessionManager                                                               *session.Manager
 	Pools                                                                        map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
@@ -686,99 +686,12 @@ func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
 	p.wg.Go(p.runTranscriptPublishWorker)
-	if p.AgentPool() != nil || p.cfg.Store != nil {
-		p.wg.Go(func() {
-			interval := p.cfg.MaintenanceInterval
-			if interval <= 0 {
-				interval = 30 * time.Minute
-			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			lastReportedTurnCount := make(map[string]int)
-			for {
-				select {
-				case <-p.ctx.Done():
-					return
-				case <-ticker.C:
-					p.checkUnrotatedSessions(p.ctx, lastReportedTurnCount)
-				}
-			}
-		})
-	}
-}
-
-// checkUnrotatedSessions scans for active sessions exceeding the turn limit without rotating and alerts the system channel.
-func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTurnCount map[string]int) {
-	if p == nil || p.cfg.Store == nil {
-		return
-	}
-	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	sessions, err := p.cfg.Store.FindUnrotatedSessions(checkCtx, session.DefaultMaxSessionTurns)
-	if err != nil {
-		log.Printf("[WorkerPool] Warning: failed to query unrotated sessions: %v", err)
-		return
-	}
-
-	activeUnrotated := make(map[string]struct{}, len(sessions))
-	var runawayList []db.SessionInfo
-	for _, s := range sessions {
-		activeUnrotated[s.ThreadID] = struct{}{}
-		if s.TurnCount > lastReportedTurnCount[s.ThreadID] {
-			runawayList = append(runawayList, s)
-		}
-	}
-	for threadID := range lastReportedTurnCount {
-		if _, exists := activeUnrotated[threadID]; !exists {
-			delete(lastReportedTurnCount, threadID)
-		}
-	}
-	if len(runawayList) == 0 {
-		return
-	}
-
-	sess := p.getDiscordSession()
-	var lines []string
-	for i, s := range runawayList {
-		if i >= 5 {
-			lines = append(lines, fmt.Sprintf("- *...and %d more runaway session(s)*", len(runawayList)-5))
-			break
-		}
-		lines = append(lines, formatUnrotatedSessionLine(sess, s))
-	}
-	for _, s := range runawayList {
-		lastReportedTurnCount[s.ThreadID] = s.TurnCount
-	}
-
-	sysChan := p.systemChannel()
-	alertMsg := fmt.Sprintf("⚠️ **Unrotated Runaway Sessions Detected**\n\nThe following sessions have exceeded the turn limit (%d turns) without rotating:\n%s\n\n*Purely informational watchdog alert. Sessions may require investigation if turn count continues increasing.*",
-		session.DefaultMaxSessionTurns, strings.Join(lines, "\n"))
-	if p.cfg.SystemAlertFunc != nil {
-		if alertErr := p.cfg.SystemAlertFunc(sess, sysChan, "Unrotated Runaway Sessions", sanitizeErrorText(alertMsg)); alertErr != nil {
-			log.Printf("[WorkerPool] Warning sending unrotated sessions alert: %v", alertErr)
-		}
-	}
-}
-
-// formatUnrotatedSessionLine formats an unrotated session entry for system alerts.
-func formatUnrotatedSessionLine(sess *discordgo.Session, s db.SessionInfo) string {
-	rawThreadID := strings.TrimPrefix(s.ThreadID, "discord-")
-	if !IsNumericSnowflake(rawThreadID) {
-		return fmt.Sprintf("- Thread `%s`: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
-	}
-	effID, _, isThread, _ := ResolveChannelAndThread(sess, rawThreadID)
-	if isThread {
-		if effID != "" && effID != rawThreadID {
-			return fmt.Sprintf("- Thread <#%s> (in <#%s>): **%d** turns (session: `%s`)", rawThreadID, effID, s.TurnCount, s.InternalSessionID)
-		}
-		return fmt.Sprintf("- Thread <#%s>: **%d** turns (session: `%s`)", rawThreadID, s.TurnCount, s.InternalSessionID)
-	}
-	return fmt.Sprintf("- Channel <#%s>: **%d** turns (session: `%s`)", rawThreadID, s.TurnCount, s.InternalSessionID)
 }
 
 // HoldUntilLeader gates worker spawning on EnqueueBurst and EnqueueDispatch
 // until ReleaseLeaderHold is called after acquiring the leader lock.
+//
+// TODO(c09f-purge-dead-eri-job-fallbacks): Deprecated; leader locks are superseded by Restate durable execution in services/eri-restate.
 func (p *WorkerPool) HoldUntilLeader() {
 	if p == nil {
 		return
