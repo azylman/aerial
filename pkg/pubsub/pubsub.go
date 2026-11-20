@@ -54,6 +54,9 @@ const (
 	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
 	SubjectProsperaVoicemailJob    = "aerial.jobs.prospera.voicemail"
 	SubjectProsperaSMSJob          = "aerial.jobs.prospera.sms"
+	SubjectEriPromptJob            = "aerial.jobs.eri.prompt"
+	SubjectEriDispatchJob          = "aerial.jobs.eri.dispatch"
+	SubjectEriDiscordMessageJob    = "aerial.jobs.eri.discord_message"
 	SubjectHaroOneShotJob          = "aerial.jobs.haro.oneshot"
 )
 
