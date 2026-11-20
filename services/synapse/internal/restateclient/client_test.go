@@ -2,6 +2,8 @@ package restateclient
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -91,7 +93,7 @@ func TestClient(t *testing.T) {
 	}
 }
 
-func checkSendResult(t *testing.T, err error, recs []recordedRequest, wantErr, wantPath string, wantBodySubs []string, wantRequests int, wantIdempotencyKey string) {
+func checkSendResult(t *testing.T, err error, recs []recordedRequest, wantErr, wantPath string, wantBodySubs []string, wantRequests int, wantIdemPrefix string) {
 	t.Helper()
 	if wantErr == "" && err != nil {
 		t.Fatalf("send() = %v, want nil", err)
@@ -111,8 +113,10 @@ func checkSendResult(t *testing.T, err error, recs []recordedRequest, wantErr, w
 	if recs[0].path != wantPath {
 		t.Errorf("path = %q, want %q", recs[0].path, wantPath)
 	}
-	if recs[0].idempotencyKey != wantIdempotencyKey {
-		t.Errorf("idempotencyKey = %q, want %q", recs[0].idempotencyKey, wantIdempotencyKey)
+	// Every one-way send carries a key: prefix plus a 16-hex payload digest.
+	// The digest value itself is pinned by TestSendIdempotencyKey.
+	if !strings.HasPrefix(recs[0].idempotencyKey, wantIdemPrefix) || len(recs[0].idempotencyKey) != len(wantIdemPrefix)+16 {
+		t.Errorf("idempotencyKey = %q, want prefix %q plus 16 hex digest", recs[0].idempotencyKey, wantIdemPrefix)
 	}
 	for _, sub := range wantBodySubs {
 		if !strings.Contains(recs[0].body, sub) {
@@ -134,23 +138,25 @@ func resolveBaseURL(srv *httptest.Server, override string) string {
 func TestSendPREvent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name               string
-		baseURL            string
-		handler            string
-		event              PREvent
-		serverStatus       int
-		truncate           bool
-		idempotencyKey     string
-		wantErr            string
-		wantPath           string
-		wantBodySubs       []string
-		wantRequests       int
-		wantIdempotencyKey string
+		name           string
+		baseURL        string
+		handler        string
+		event          PREvent
+		serverStatus   int
+		truncate       bool
+		identity       string
+		wantErr        string
+		wantPath       string
+		wantBodySubs   []string
+		wantRequests   int
+		wantIdemPrefix string
 	}{
-		{name: "owned check failed routes to PRObject", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`}, wantRequests: 1},
-		{name: "idempotency key propagated when set", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, idempotencyKey: "test-idem-key-1", serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed", wantBodySubs: []string{`"head_sha":"abc123"`}, wantRequests: 1, wantIdempotencyKey: "test-idem-key-1"},
-		{name: "bare repo normalizes with owner prefix", handler: "HandleCheckPassed", event: PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1},
-		{name: "owned merged carries merge sha", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1},
+		{name: "owned check failed routes to PRObject", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`, `"effects_owner":"legacy"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:"},
+		{name: "idempotency key propagated when set", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, identity: "gh:delivery-1", serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:gh:delivery-1:"},
+		{name: "bare repo normalizes with owner prefix", handler: "HandleCheckPassed", event: PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed/send", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckPassed:"},
+		{name: "owned merged carries merge sha", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
+		{name: "restate stamp is preserved", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, MergeSHA: "merge999", EffectsOwner: "Restate"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"effects_owner":"restate"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
+		{name: "unknown stamp normalizes to legacy", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, MergeSHA: "merge999", EffectsOwner: "both"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"effects_owner":"legacy"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
 		{name: "empty repo sends nothing", handler: "HandleClosed", event: PREvent{Event: "closed", Repo: "", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
 		{name: "bad pr number sends nothing", handler: "HandleClosed", event: PREvent{Event: "closed", Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "pr_number is required", wantRequests: 0},
@@ -169,11 +175,11 @@ func TestSendPREvent(t *testing.T) {
 			defer srv.Close()
 			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
 			ctx := t.Context()
-			if tc.idempotencyKey != "" {
-				ctx = WithIdempotencyKey(ctx, tc.idempotencyKey)
+			if tc.identity != "" {
+				ctx = WithEventIdentity(ctx, tc.identity)
 			}
 			err := c.SendPREvent(ctx, tc.handler, tc.event)
-			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests, tc.wantIdempotencyKey)
+			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests, tc.wantIdemPrefix)
 		})
 	}
 }
@@ -181,23 +187,23 @@ func TestSendPREvent(t *testing.T) {
 func TestSendRepoEvent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name               string
-		baseURL            string
-		handler            string
-		event              RepoEvent
-		serverStatus       int
-		idempotencyKey     string
-		wantErr            string
-		wantPath           string
-		wantBodySubs       []string
-		wantRequests       int
-		wantIdempotencyKey string
+		name           string
+		baseURL        string
+		handler        string
+		event          RepoEvent
+		serverStatus   int
+		identity       string
+		wantErr        string
+		wantPath       string
+		wantBodySubs   []string
+		wantRequests   int
+		wantIdemPrefix string
 	}{
-		{name: "main push routes to RepoObject", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1},
-		{name: "idempotency key propagated when set", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, idempotencyKey: "repo-idem-key-1", serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1, wantIdempotencyKey: "repo-idem-key-1"},
+		{name: "main push routes to RepoObject", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send", wantBodySubs: []string{`"main_sha":"abc123"`, `"effects_owner":"legacy"`}, wantRequests: 1, wantIdemPrefix: "HandleMainPush:"},
+		{name: "idempotency key propagated when set", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, identity: "gh:delivery-2", serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleMainPush:gh:delivery-2:"},
 		{name: "unconfigured endpoint sends nothing", baseURL: "unconfigured", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
-		{name: "fanout carries pr and head sha", handler: "HandleFanout", event: RepoEvent{Repo: "azylman/mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/RepoObject/azylman%2Fmirrormere/HandleFanout", wantBodySubs: []string{`"pr_number":7`, `"head_sha":"def456"`}, wantRequests: 1},
-		{name: "kustomization status routes to RepoObject", handler: "HandleKustomizationStatus", event: RepoEvent{Repo: "aerial", Generation: 3, PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleKustomizationStatus", wantBodySubs: []string{`"generation":3`}, wantRequests: 1},
+		{name: "fanout carries pr and head sha", handler: "HandleFanout", event: RepoEvent{Repo: "azylman/mirrormere", PRNumber: 7, HeadSHA: "def456", EffectsOwner: "restate"}, serverStatus: 202, wantPath: "/RepoObject/azylman%2Fmirrormere/HandleFanout/send", wantBodySubs: []string{`"pr_number":7`, `"head_sha":"def456"`, `"effects_owner":"restate"`}, wantRequests: 1, wantIdemPrefix: "HandleFanout:"},
+		{name: "kustomization status routes to RepoObject", handler: "HandleKustomizationStatus", event: RepoEvent{Repo: "aerial", Generation: 3, PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleKustomizationStatus/send", wantBodySubs: []string{`"generation":3`}, wantRequests: 1, wantIdemPrefix: "HandleKustomizationStatus:"},
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "unknown repo handler", wantRequests: 0},
 		{name: "pr handler rejected for repo event", handler: "HandleCheckFailed", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "unknown repo handler", wantRequests: 0},
 		{name: "empty repo sends nothing", handler: "HandleMainPush", event: RepoEvent{Repo: "", MainSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
@@ -210,11 +216,11 @@ func TestSendRepoEvent(t *testing.T) {
 			defer srv.Close()
 			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
 			ctx := t.Context()
-			if tc.idempotencyKey != "" {
-				ctx = WithIdempotencyKey(ctx, tc.idempotencyKey)
+			if tc.identity != "" {
+				ctx = WithEventIdentity(ctx, tc.identity)
 			}
 			err := c.SendRepoEvent(ctx, tc.handler, tc.event)
-			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests, tc.wantIdempotencyKey)
+			checkSendResult(t, err, recs, tc.wantErr, tc.wantPath, tc.wantBodySubs, tc.wantRequests, tc.wantIdemPrefix)
 		})
 	}
 }
@@ -262,8 +268,8 @@ func TestPayloadJSONShape(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `agent,branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
-		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `agent,generation,head_sha,main_sha,pr_number,repo`},
+		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `agent,branch,build_id,check_name,effects_owner,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
+		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `agent,effects_owner,generation,head_sha,main_sha,pr_number,repo`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,9 +289,9 @@ func TestSingleObjectServiceRouting(t *testing.T) {
 		wantPRPath   string
 		wantRepoPath string
 	}{
-		{name: "empty agent defaults to standard services", agent: "", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
-		{name: "aerial agent defaults to standard services", agent: "aerial", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
-		{name: "agent-alpha agent still targets the single services", agent: "agent-alpha", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush"},
+		{name: "empty agent defaults to standard services", agent: "", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed/send", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send"},
+		{name: "aerial agent defaults to standard services", agent: "aerial", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed/send", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send"},
+		{name: "agent-alpha agent still targets the single services", agent: "agent-alpha", wantPRPath: "/PRObject/azylman%2Faerial%231/HandleCheckPassed/send", wantRepoPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,6 +313,79 @@ func TestSingleObjectServiceRouting(t *testing.T) {
 			}
 			if recs[1].path != tc.wantRepoPath {
 				t.Errorf("Repo path = %q, want %q", recs[1].path, tc.wantRepoPath)
+			}
+		})
+	}
+}
+
+func TestSendIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	// Digests are the first 8 bytes of sha256 over the payload, derived
+	// independently with sha256sum.
+	tests := []struct {
+		name     string
+		identity string
+		handler  string
+		payload  string
+		want     string
+	}{
+		{name: "identity scopes handler and payload digest", identity: "gh:delivery-1", handler: "HandleMerged", payload: `{"repo":"azylman/aerial"}`, want: "HandleMerged:gh:delivery-1:d0732f62781ebd07"},
+		{name: "blank identity falls back to payload digest", identity: "  ", handler: "HandleMainPush", payload: `{"repo":"azylman/aerial"}`, want: "HandleMainPush:d0732f62781ebd07"},
+		{name: "empty payload still digests", identity: "deploy:k1", handler: "HandleRolloutProgress", payload: "", want: "HandleRolloutProgress:deploy:k1:e3b0c44298fc1c14"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SendIdempotencyKey(tc.identity, tc.handler, []byte(tc.payload)); got != tc.want {
+				t.Errorf("SendIdempotencyKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeEffectsOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		owner string
+		want  string
+	}{
+		{name: "missing stamp is legacy", owner: "", want: "legacy"},
+		{name: "legacy stays legacy", owner: "legacy", want: "legacy"},
+		{name: "restate with padding and case", owner: " ReState ", want: "restate"},
+		{name: "unknown stamp is legacy", owner: "both", want: "legacy"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := NormalizeEffectsOwner(tc.owner); got != tc.want {
+				t.Errorf("NormalizeEffectsOwner(%q) = %q, want %q", tc.owner, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsTerminal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil is not terminal", err: nil, want: false},
+		{name: "invalid event is terminal", err: fmt.Errorf("%w: repo is required", ErrInvalidEvent), want: true},
+		{name: "bad request is terminal", err: &StatusError{Code: 400}, want: true},
+		{name: "wrapped not found is terminal", err: fmt.Errorf("send: %w", &StatusError{Code: 404, Body: "no service"}), want: true},
+		{name: "request timeout retries", err: &StatusError{Code: 408}, want: false},
+		{name: "too many requests retries", err: &StatusError{Code: 429}, want: false},
+		{name: "server error retries", err: &StatusError{Code: 503}, want: false},
+		{name: "transport error retries", err: errors.New("restate ingress request failed: dial tcp: refused"), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsTerminal(tc.err); got != tc.want {
+				t.Errorf("IsTerminal(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

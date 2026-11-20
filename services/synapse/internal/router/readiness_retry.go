@@ -1,8 +1,10 @@
 package router
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -12,6 +14,7 @@ import (
 type readinessRetryStore = model.ReadinessRetryStore
 
 func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
 	var req struct {
 		Repo   string `json:"repo"`
 		Number int    `json:"pr_number"`
@@ -81,7 +84,12 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 	// drop it as stale when the gate already advanced. A route failure
 	// reports 503; the legacy reconcile above already ran, and the
 	// operator retry safely re-triggers it without minting a generation.
-	if err := s.routePREvent(r.Context(), "HandleReadinessRetry", restateclient.PREvent{
+	// Each operator retry is its own logical request: the identity carries
+	// the request's arrival time so a deliberate re-trigger is not deduped,
+	// and the effect owner is snapshotted once for the request.
+	routeCtx := stampEffectsOwner(restateclient.WithEventIdentity(r.Context(),
+		fmt.Sprintf("readiness:%s#%d:%s:%d", req.Repo, req.Number, req.Merge, receivedAt.UnixNano())))
+	if err := s.routePREvent(routeCtx, "HandleReadinessRetry", restateclient.PREvent{
 		Repo: req.Repo, PRNumber: req.Number, MergeSHA: req.Merge, Agent: targetAgent,
 	}); err != nil {
 		httpkit.WriteJSON(w, 503, map[string]string{fieldError: err.Error()})

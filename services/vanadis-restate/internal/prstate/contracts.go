@@ -23,6 +23,7 @@ package prstate
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -192,26 +193,50 @@ const (
 	DispositionAbsorbTerminal EventDisposition = "absorb_terminal"
 )
 
+// EffectsOwner says who performs an event's side effects. Synapse stamps
+// every event exactly once when it first accepts it. For legacy events
+// prstate still applies the state transition and commits effect keys but
+// skips the side effect itself; for restate events prstate executes it.
+type EffectsOwner string
+
+// Effect owner values on the wire.
+const (
+	EffectsOwnerLegacy  EffectsOwner = "legacy"
+	EffectsOwnerRestate EffectsOwner = "restate"
+)
+
+// ParseEffectsOwner maps a wire stamp to an owner. Only an exact
+// (case-insensitive) restate stamp hands effects to prstate; a missing,
+// empty, or unknown stamp is legacy, so a malformed value can never make
+// prstate double-fire an effect synapse already performed.
+func ParseEffectsOwner(raw string) EffectsOwner {
+	if strings.EqualFold(strings.TrimSpace(raw), string(EffectsOwnerRestate)) {
+		return EffectsOwnerRestate
+	}
+	return EffectsOwnerLegacy
+}
+
 // PREvent is the canonical PRObject payload. It carries the head or merge SHA
 // every cross-object send needs for the stale-SHA guard, plus the gate
 // generation and reopen epoch the disposition logic compares.
 // PREvent marshals with the snake_case wire format the synapse ingress
 // invoker emits; the tags are load-bearing for cross-module interop.
 type PREvent struct {
-	Event          string `json:"event"`
-	Repo           string `json:"repo"`
-	PRNumber       int    `json:"pr_number"`
-	Agent          string `json:"agent,omitempty"`
-	HeadSHA        string `json:"head_sha"`
-	MergeSHA       string `json:"merge_sha"`
-	CheckName      string `json:"check_name"`
-	JobName        string `json:"job_name"`
-	Branch         string `json:"branch"`
-	Title          string `json:"title"`
-	GateGeneration uint64 `json:"gate_generation"`
-	ReopenEpoch    uint64 `json:"reopen_epoch"`
-	Unmanaged      bool   `json:"unmanaged"`
-	BuildID        string `json:"build_id"`
+	Event          string       `json:"event"`
+	Repo           string       `json:"repo"`
+	PRNumber       int          `json:"pr_number"`
+	Agent          string       `json:"agent,omitempty"`
+	HeadSHA        string       `json:"head_sha"`
+	MergeSHA       string       `json:"merge_sha"`
+	CheckName      string       `json:"check_name"`
+	JobName        string       `json:"job_name"`
+	Branch         string       `json:"branch"`
+	Title          string       `json:"title"`
+	GateGeneration uint64       `json:"gate_generation"`
+	ReopenEpoch    uint64       `json:"reopen_epoch"`
+	Unmanaged      bool         `json:"unmanaged"`
+	BuildID        string       `json:"build_id"`
+	EffectsOwner   EffectsOwner `json:"effects_owner,omitempty"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
@@ -219,11 +244,38 @@ type PREvent struct {
 // RepoEvent marshals with the snake_case wire format the synapse ingress
 // invoker emits; the tags are load-bearing for cross-module interop.
 type RepoEvent struct {
-	Repo       string `json:"repo"`
-	MainSHA    string `json:"main_sha"`
-	Generation uint64 `json:"generation"`
-	PRNumber   int    `json:"pr_number"`
-	HeadSHA    string `json:"head_sha"`
+	Repo         string       `json:"repo"`
+	MainSHA      string       `json:"main_sha"`
+	Generation   uint64       `json:"generation"`
+	PRNumber     int          `json:"pr_number"`
+	HeadSHA      string       `json:"head_sha"`
+	EffectsOwner EffectsOwner `json:"effects_owner,omitempty"`
+}
+
+// UnmarshalJSON decodes the wire payload and normalizes EffectsOwner, so
+// every decoded PREvent carries legacy or restate, never empty.
+func (ev *PREvent) UnmarshalJSON(data []byte) error {
+	type wirePREvent PREvent
+	var w wirePREvent
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*ev = PREvent(w)
+	ev.EffectsOwner = ParseEffectsOwner(string(ev.EffectsOwner))
+	return nil
+}
+
+// UnmarshalJSON decodes the wire payload and normalizes EffectsOwner, so
+// every decoded RepoEvent carries legacy or restate, never empty.
+func (ev *RepoEvent) UnmarshalJSON(data []byte) error {
+	type wireRepoEvent RepoEvent
+	var w wireRepoEvent
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*ev = RepoEvent(w)
+	ev.EffectsOwner = ParseEffectsOwner(string(ev.EffectsOwner))
+	return nil
 }
 
 // PRObject is the frozen PR handler surface. One method per lifecycle event;

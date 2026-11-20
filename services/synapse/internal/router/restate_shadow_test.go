@@ -236,7 +236,7 @@ func TestClosedActionShadowMirror(t *testing.T) {
 			shot.mu.Lock()
 			path := shot.paths[0]
 			shot.mu.Unlock()
-			if !strings.HasSuffix(path, "/"+tc.wantHandler) {
+			if !strings.HasSuffix(path, "/"+tc.wantHandler+"/send") {
 				t.Errorf("shadow path = %q, want suffix %q", path, tc.wantHandler)
 			}
 		})
@@ -479,7 +479,7 @@ func TestShadowConflictResolved(t *testing.T) {
 				shot.mu.Lock()
 				path := shot.paths[0]
 				shot.mu.Unlock()
-				if !strings.HasSuffix(path, "/HandleConflictResolved") {
+				if !strings.HasSuffix(path, "/HandleConflictResolved/send") {
 					t.Errorf("shadow path = %q, want HandleConflictResolved suffix", path)
 				}
 			}
