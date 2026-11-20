@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -65,7 +68,7 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 	}
 	notifiedInStep := false
 	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
-		out, stepErr := b.executeAuthoritativeTransition(ctx, buildID, mutation, priorLaunched, terminalNotificationRecorded(priorState))
+		out, stepErr := b.executeAuthoritativeTransition(ctx, buildID, mutation, priorState, priorLaunched, terminalNotificationRecorded(priorState))
 		if stepErr != nil {
 			notifiedInStep = true
 			RecordReconcileError(stepName, stepErr)
@@ -289,7 +292,73 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.Vana
 	return errors.Join(wakeErr, widgetErr)
 }
 
-func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk) (string, error) {
+func rolloutStateJobsEqual(a, b *pubsub.PRRolloutState) bool {
+	if a == b {
+		return true
+	}
+	var aExp, aStart, aDep []string
+	var aStates, aKust map[string]string
+	if a != nil {
+		aExp, aStart, aDep = a.ExpectedJobs, a.StartedJobs, a.DeployedJobs
+		aStates, aKust = a.JobStates, a.KustomizationStatuses
+	}
+	var bExp, bStart, bDep []string
+	var bStates, bKust map[string]string
+	if b != nil {
+		bExp, bStart, bDep = b.ExpectedJobs, b.StartedJobs, b.DeployedJobs
+		bStates, bKust = b.JobStates, b.KustomizationStatuses
+	}
+	return slices.Equal(aExp, bExp) &&
+		slices.Equal(aStart, bStart) &&
+		slices.Equal(aDep, bDep) &&
+		maps.Equal(aStates, bStates) &&
+		maps.Equal(aKust, bKust)
+}
+
+func widgetStateEqual(prior *model.BuildObjectState, build model.VanadisBuild, chunks []model.VanadisChunk) bool {
+	if prior == nil {
+		return false
+	}
+	if strings.TrimSpace(build.StatusMessageID) == "" {
+		return false
+	}
+	if prior.Build.StatusMessageID != build.StatusMessageID {
+		return false
+	}
+	if prior.Build.Status != build.Status {
+		return false
+	}
+	if prior.Build.Title != build.Title {
+		return false
+	}
+	if prior.Build.Tier != build.Tier {
+		return false
+	}
+	if prior.Build.ThreadID != build.ThreadID {
+		return false
+	}
+	if len(prior.Chunks) != len(chunks) {
+		return false
+	}
+	for i := range chunks {
+		pc := prior.Chunks[i]
+		c := chunks[i]
+		if pc.ID != c.ID ||
+			pc.ChunkIndex != c.ChunkIndex ||
+			pc.Mode != c.Mode ||
+			pc.Repo != c.Repo ||
+			pc.Title != c.Title ||
+			pc.Status != c.Status ||
+			pc.PRNumber != c.PRNumber ||
+			executor.FormatChunkActiveStep(pc) != executor.FormatChunkActiveStep(c) ||
+			!rolloutStateJobsEqual(pc.RolloutState, c.RolloutState) {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, skipWidgetSync ...bool) (string, error) {
 	allDone := true
 	hasFailed := false
 	for _, c := range chunks {
@@ -324,7 +393,8 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *mo
 		}
 		return statusCompleted, nil
 	default:
-		if b.executor != nil {
+		skip := len(skipWidgetSync) > 0 && skipWidgetSync[0]
+		if !skip && b.executor != nil {
 			if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, ""); err != nil {
 				slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
 			}
@@ -362,7 +432,7 @@ func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *
 	return false, nil
 }
 
-func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool, terminalNotified bool) (reconcileStepOutput, error) {
+func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorState *model.BuildObjectState, priorLaunched map[string]bool, terminalNotified bool) (reconcileStepOutput, error) {
 	if b.store == nil {
 		return reconcileStepOutput{}, errors.New("store not configured")
 	}
@@ -410,7 +480,8 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	if deferred {
 		recoveryReason = executor.ErrDispatchActive.Error()
 	}
-	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks)
+	skipSync := len(launchedChunks) == 0 && widgetStateEqual(priorState, *build, chunks)
+	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks, skipSync)
 	if err != nil {
 		return reconcileStepOutput{}, err
 	}

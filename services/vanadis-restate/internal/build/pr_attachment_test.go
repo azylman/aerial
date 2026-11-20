@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
@@ -66,34 +68,82 @@ func TestExecutePRAttachment(t *testing.T) {
 		db          dbScript
 		wantCode    restate.Code
 		wantMessage string
+		wantErr     bool
 	}{
-		{"missing action repo", attachRequest("c1", ""), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required"},
-		{"blank action repo", attachRequest("c1", "  "), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required"},
-		{"standalone repo", attachRequest("", ""), dbScript{}, 400, "repo is required"},
-		{"invalid number", store.AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number"},
-		{"transient database error", attachRequest("c1", "aerial"), dbScript{row: errRow(errors.New("connection interrupted"))}, 0, "connection interrupted"},
+		{"missing action repo", attachRequest("c1", ""), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required", true},
+		{"blank action repo", attachRequest("c1", "  "), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required", true},
+		{"standalone repo", attachRequest("", ""), dbScript{}, 400, "repo is required", true},
+		{"invalid number", store.AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number", true},
+		{"transient database error", attachRequest("c1", "aerial"), dbScript{row: errRow(errors.New("connection interrupted"))}, 0, "connection interrupted", true},
+		{
+			name: "successful attach skips sync widget during attach step",
+			req:  attachRequest("c1", "aerial"),
+			db: dbScript{
+				routes: []sqlRoute{
+					{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
+					{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("pr")},
+					{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b1")},
+					{match: "RETURNING b.id, c.id, b.thread_id", row: valuesRow("b1", "c1", "th-1")},
+					{match: "WHERE c.id = $1", row: failRow("running", "running")},
+				},
+				row:      valuesRow("running"),
+				buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: "running", Title: "Build", StatusMessageID: "msg-123"}},
+				chunks:   []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "running", Repo: "aerial", Mode: "pr"}},
+				countRow: valuesRow(1),
+				execTag:  "UPDATE 1",
+			},
+			wantErr: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := tc.db.open()
-			bo := NewBuildObject("", nil).WithAuthority(st, nil)
+			var attachStepWidgetCalls atomic.Int32
+			eri := &mockEriClient{
+				widgetFn: func(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
+					attachStepWidgetCalls.Add(1)
+					return "msg-123", nil
+				},
+			}
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", nil)
+			fakeRT := newFakeObjectRuntime("b1")
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRT }).WithAuthority(st, exec)
 			mc := mocks.NewMockContext(t)
-			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), _ any, _ ...restate.RunOption) restate.TerminalError {
-				_, err := fn(mockRunContext{Context: context.Background()})
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantMessage)
-				var terminal restate.TerminalError
-				if tc.wantCode > 0 {
-					require.True(t, errors.As(err, &terminal), "journal callback must stop retries: %v", err)
-					assert.Equal(t, tc.wantCode, terminal.Code())
-				} else {
-					assert.False(t, errors.As(err, &terminal), "transient failures must remain retryable")
+			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
+				beforeCalls := attachStepWidgetCalls.Load()
+				res, err := fn(mockRunContext{Context: context.Background()})
+				if tc.wantErr {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), tc.wantMessage)
+					var terminal restate.TerminalError
+					if tc.wantCode > 0 {
+						require.True(t, errors.As(err, &terminal), "journal callback must stop retries: %v", err)
+						assert.Equal(t, tc.wantCode, terminal.Code())
+					} else {
+						assert.False(t, errors.As(err, &terminal), "transient failures must remain retryable")
+					}
+					return restate.ToTerminalError(err)
 				}
-				return restate.ToTerminalError(err)
+				require.NoError(t, err)
+				assert.Equal(t, beforeCalls, attachStepWidgetCalls.Load(), "attach-pr-postgres step must not call SyncBuildWidget")
+				if output != nil && res != nil {
+					outVal := reflect.ValueOf(output)
+					resVal := reflect.ValueOf(res)
+					if outVal.Kind() == reflect.Pointer && !outVal.IsNil() && outVal.Elem().Type() == resVal.Type() {
+						outVal.Elem().Set(resVal)
+					}
+				}
+				return nil
 			})
-			_, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req)
-			require.Error(t, err)
+			resp, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "attached", resp.Status)
+			assert.Equal(t, "b1", resp.BuildID)
 		})
 	}
 }

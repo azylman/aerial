@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -256,6 +257,9 @@ func (r *mockRows) scan25(dest []any) error {
 		c := r.items[r.idx-1]
 		rawCIChecks := recoveryFixtureChecks(c)
 		rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
+		if c.RolloutState != nil {
+			rawRolloutState, _ = json.Marshal(c.RolloutState)
+		}
 		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 	}
 	return scanValues(dest, "c1", "b1", 0, "pr", "aerial", "c1", "inst", []string{}, []string{}, "medium", []string{}, "pending", 0, 0, []string{}, 0, []byte("{}"), []byte("{}"), "", "", "", sql.NullTime{}, time.Now(), time.Now())
@@ -534,6 +538,17 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.Vanadi
 }
 
 func recoveryFixtureChecks(c model.VanadisChunk) []byte {
+	if len(c.CIChecks) > 0 {
+		checks := maps.Clone(c.CIChecks)
+		if c.HeadSHA != "" {
+			checks["_head_sha"] = c.HeadSHA
+		}
+		if c.MergeSHA != "" {
+			checks["_merge_sha"] = c.MergeSHA
+		}
+		raw, _ := json.Marshal(checks)
+		return raw
+	}
 	if c.HeadSHA == "" && c.MergeSHA == "" {
 		return []byte(`{"lint":"passed"}`)
 	}
