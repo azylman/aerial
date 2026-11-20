@@ -13,14 +13,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/haro/internal/model"
 )
 
 var (
-	vanadisMu     sync.RWMutex
-	vanadisURL    string
-	vanadisClient = tracing.Client(&http.Client{Timeout: 5 * time.Second})
+	vanadisMu          sync.RWMutex
+	vanadisURL         string
+	vanadisClient      = tracing.Client(&http.Client{Timeout: 5 * time.Second})
+	vanadisTokenSource = k8sauth.NewTokenSource("", nil)
 )
 
 // SetVanadisURL sets the base URL for Vanadis HTTP API calls.
@@ -75,6 +77,14 @@ func validateVanadisTarget(ctx context.Context, baseURL, source, target string) 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/%s/%s", baseURL, pathPrefix, url.PathEscape(target)), http.NoBody)
 	if err != nil {
 		return fmt.Errorf("create %s request: %w", entityName, err)
+	}
+	vanadisMu.RLock()
+	ts := vanadisTokenSource
+	vanadisMu.RUnlock()
+	if ts != nil {
+		if tok, tokErr := ts.Token(); tokErr == nil && tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
 	}
 	resp, err := vanadisClient.Do(req)
 	if err != nil {

@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,61 +38,88 @@ func handleMockEntityStatus(w http.ResponseWriter, key, id string, mockMap map[s
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) {
+func setupTestTargetEnv(t *testing.T, tcName, token string) {
 	t.Helper()
+	if token != "" {
+		tokenPath := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
+			t.Fatalf("failed to write mock token file: %v", err)
+		}
+		oldTS := GetVanadisTokenSource()
+		SetVanadisTokenPath(tokenPath)
+		t.Cleanup(func() { SetVanadisTokenSource(oldTS) })
+	}
+	switch {
+	case strings.HasPrefix(tcName, "vanadis URL not configured"):
+		old := GetVanadisURL()
+		SetVanadisURL("")
+		t.Cleanup(func() { SetVanadisURL(old) })
+	case strings.HasPrefix(tcName, "vanadis unreachable"):
+		old := GetVanadisURL()
+		SetVanadisURL("http://127.0.0.1:1")
+		t.Cleanup(func() { SetVanadisURL(old) })
+	case strings.HasPrefix(tcName, "vanadis malformed URL"):
+		old := GetVanadisURL()
+		SetVanadisURL("://bad-url")
+		t.Cleanup(func() { SetVanadisURL(old) })
+	}
+}
+
+func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB, getLastAuth ...func() string) {
+	t.Helper()
+	var authGetter func() string
+	if len(getLastAuth) > 0 {
+		authGetter = getLastAuth[0]
+	}
 	validateTests := []struct {
 		name            string
 		source          string
 		target          string
+		token           string
+		wantAuth        string
 		wantErr         bool
 		wantErrContains string
 	}{
-		{"vanadis_build running", "vanadis_build", "b-running", false, ""},
-		{"vanadis_build completed", "vanadis_build", "b-completed", true, ""},
-		{"vanadis_build failed", "vanadis_build", "b-failed", true, ""},
-		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", true, ""},
-		{"vanadis_build canceled", "vanadis_build", "b-canceled", true, ""},
-		{"vanadis_build not found", "vanadis_build", "b-missing", true, ""},
-		{"vanadis_build 500 error", "vanadis_build", "b-500", true, ""},
-		{"vanadis_build bad json", "vanadis_build", "b-badjson", true, ""},
-		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", false, ""},
-		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", true, ""},
-		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", true, ""},
-		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", true, ""},
-		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", true, ""},
-		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", true, ""},
-		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", true, ""},
-		{"empty target", "vanadis_build", "   ", true, ""},
-		{"other source flux", "flux", "azylman/aerial", false, ""},
-		{"other source github", "github", "azylman/aerial:main", false, ""},
-		{"other source nomad", "nomad", "aerial-brain", false, ""},
-		{"vanadis URL not configured build", "vanadis_build", "b-running", true, "vanadis URL is not configured"},
-		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true, "vanadis URL is not configured"},
-		{"vanadis unreachable build", "vanadis_build", "b-running", true, "failed to query"},
-		{"vanadis malformed URL build", "vanadis_build", "b-running", true, "create vanadis build request"},
+		{"vanadis_build running", "vanadis_build", "b-running", "", "", false, ""},
+		{"vanadis_build bearer auth", "vanadis_build", "b-running", "mock-token-build", "Bearer mock-token-build", false, ""},
+		{"vanadis_build completed", "vanadis_build", "b-completed", "", "", true, ""},
+		{"vanadis_build failed", "vanadis_build", "b-failed", "", "", true, ""},
+		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", "", "", true, ""},
+		{"vanadis_build canceled", "vanadis_build", "b-canceled", "", "", true, ""},
+		{"vanadis_build not found", "vanadis_build", "b-missing", "", "", true, ""},
+		{"vanadis_build 500 error", "vanadis_build", "b-500", "", "", true, ""},
+		{"vanadis_build bad json", "vanadis_build", "b-badjson", "", "", true, ""},
+		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", "", "", false, ""},
+		{"vanadis_chunk bearer auth", "vanadis_chunk", "c-pending", "mock-token-chunk", "Bearer mock-token-chunk", false, ""},
+		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", "", "", true, ""},
+		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", "", "", true, ""},
+		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", "", "", true, ""},
+		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", "", "", true, ""},
+		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", "", "", true, ""},
+		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", "", "", true, ""},
+		{"empty target", "vanadis_build", "   ", "", "", true, ""},
+		{"other source flux", "flux", "azylman/aerial", "", "", false, ""},
+		{"other source github", "github", "azylman/aerial:main", "", "", false, ""},
+		{"other source nomad", "nomad", "aerial-brain", "", "", false, ""},
+		{"vanadis URL not configured build", "vanadis_build", "b-running", "", "", true, "vanadis URL is not configured"},
+		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", "", "", true, "vanadis URL is not configured"},
+		{"vanadis unreachable build", "vanadis_build", "b-running", "", "", true, "failed to query"},
+		{"vanadis malformed URL build", "vanadis_build", "b-running", "", "", true, "create vanadis build request"},
 	}
 	for _, tc := range validateTests {
 		t.Run("validate_"+tc.name, func(t *testing.T) {
-			switch {
-			case strings.HasPrefix(tc.name, "vanadis URL not configured"):
-				old := GetVanadisURL()
-				SetVanadisURL("")
-				defer SetVanadisURL(old)
-			case strings.HasPrefix(tc.name, "vanadis unreachable"):
-				old := GetVanadisURL()
-				SetVanadisURL("http://127.0.0.1:1")
-				defer SetVanadisURL(old)
-			case strings.HasPrefix(tc.name, "vanadis malformed URL"):
-				old := GetVanadisURL()
-				SetVanadisURL("://bad-url")
-				defer SetVanadisURL(old)
-			}
+			setupTestTargetEnv(t, tc.name, tc.token)
 			err := ValidateLiveEventTarget(ctx, db, tc.source, tc.target)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, wantErr = %v", tc.source, tc.target, err, tc.wantErr)
 			}
 			if tc.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrContains)) {
 				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, want error containing %q", tc.source, tc.target, err, tc.wantErrContains)
+			}
+			if tc.wantAuth != "" && authGetter != nil {
+				if got := authGetter(); got != tc.wantAuth {
+					t.Fatalf("ValidateLiveEventTarget(%q, %q) auth header = %q, want %q", tc.source, tc.target, got, tc.wantAuth)
+				}
 			}
 		})
 	}
@@ -228,7 +258,14 @@ func TestDB_EventTriggers(t *testing.T) {
 		"c-completed": "completed",
 		"c-failed":    "failed",
 	}
+	var (
+		authMu         sync.Mutex
+		lastAuthHeader string
+	)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authMu.Lock()
+		lastAuthHeader = r.Header.Get("Authorization")
+		authMu.Unlock()
 		if after, ok := strings.CutPrefix(r.URL.Path, "/builds/"); ok {
 			handleMockEntityStatus(w, "build", after, mockBuilds)
 			return
@@ -244,7 +281,11 @@ func TestDB_EventTriggers(t *testing.T) {
 	SetVanadisURL(ts.URL)
 	defer SetVanadisURL(oldVanadis)
 
-	testValidateLiveEventTarget(ctx, t, db)
+	testValidateLiveEventTarget(ctx, t, db, func() string {
+		authMu.Lock()
+		defer authMu.Unlock()
+		return lastAuthHeader
+	})
 	testEventTriggersCRUD(ctx, t, db)
 	testClaimEventTriggers(ctx, t, db)
 }
