@@ -1285,23 +1285,3 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 		})
 	}
 }
-
-func TestRestateIngressClient_AgentName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		client   *RestateIngressClient
-		wantName string
-	}{
-		{name: "nil client returns empty", client: nil, wantName: ""},
-		{name: "configured agent name", client: NewRestateIngressClient("http://127.0.0.1:8080", "miorine"), wantName: "miorine"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantName, tc.client.AgentName())
-		})
-	}
-}

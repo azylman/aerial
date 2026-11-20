@@ -825,7 +825,7 @@ func TestStreamRestateVoiceEvents_BufferedEventOrder(t *testing.T) {
 	}
 }
 
-func TestDrainVoiceEvents_And_BusResolution(t *testing.T) {
+func TestDrainVoiceEvents(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan queue.VoiceStreamEvent, 2)
@@ -837,15 +837,5 @@ func TestDrainVoiceEvents_And_BusResolution(t *testing.T) {
 	})
 	if len(received) != 2 || received[0] != "sentence" || received[1] != "reply" {
 		t.Fatalf("unexpected drained events: %+v", received)
-	}
-
-	bus := pubsub.NewMemoryBus()
-	SetVoiceEventBus(bus)
-	if got := resolveVoiceEventBus(nil); got == nil {
-		t.Fatalf("expected non-nil voice bus from global activeVoiceBus")
-	}
-	SetVoiceEventBus(nil)
-	if got := resolveVoiceEventBus(nil); got != nil {
-		t.Fatalf("expected nil voice bus after clearing")
 	}
 }

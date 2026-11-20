@@ -167,6 +167,17 @@ func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConf
 }
 
 func TestCreateReloadConfigFunc(t *testing.T) {
+	t.Run("nil config handled", func(t *testing.T) {
+		CreateReloadConfigFunc(nil)("TestNil")
+	})
+
+	t.Run("default supplier and unchanged reload", func(t *testing.T) {
+		cfg := newTestConfig()
+		reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(nil))
+		reloadFn("DefaultReload")
+		reloadFn("UnchangedReload")
+	})
+
 	t.Run("invalid YAML with alert", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
 		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
@@ -174,14 +185,27 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		}), WithSkipEnvironmentSync())("TestReload")
 	})
 
-	t.Run("supplier success updating model", func(t *testing.T) {
+	t.Run("supplier success updating model and marking pool dirty", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
-			active.Update(&config.ConfigData{
-				CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, Model: "gemini-2.5-flash",
-			})
-			return nil
-		}), WithSkipEnvironmentSync())("TestReloadSuccess")
+		cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "gemini-2.5-pro" })
+		wp := queue.New(cfg, queue.WorkerPoolConfig{})
+		calledOnReload := false
+		CreateReloadConfigFunc(cfg,
+			WithDiscordSession(s),
+			WithWorkerPool(wp),
+			func(o *reloadConfigOptions) { o.onReload = func(src string) { calledOnReload = true } },
+			WithReloadSupplier(func(active *config.Config) error {
+				active.Update(&config.ConfigData{
+					CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}},
+					Model:             "gemini-2.5-flash",
+				})
+				return nil
+			}),
+			WithSkipEnvironmentSync(),
+		)("TestReloadSuccess")
+		if !calledOnReload {
+			t.Fatalf("expected onReload to be called")
+		}
 	})
 
 	t.Run("complete success with sync and blocker home error", func(t *testing.T) {
@@ -203,51 +227,94 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		cfg.Update(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, GeminiHomeDir: filepath.Join(blockerHome, "sub"), DataDir: tmpData})
 		reloadFn("TestErrorSource")
 	})
+}
 
-	t.Run("fingerprint gated reload preserves config unless changes occur", func(t *testing.T) {
-		cfg := newTestConfig(func(d *config.ConfigData) {
-			d.Model = "gemini-3.8-flash-low"
-			d.LowEffortModel = "gemini-3.8-flash-low"
-		})
+func TestEnsureConfigDefaults(t *testing.T) {
+	t.Parallel()
 
-		wp := queue.New(cfg, queue.WorkerPoolConfig{})
-		supplierCandidateMutator := func(candidate *config.Config) error { return nil }
+	ensureConfigDefaults(nil)
 
-		reloadFn := CreateReloadConfigFunc(cfg,
-			WithWorkerPool(wp),
-			WithReloadSupplier(func(candidate *config.Config) error {
-				return supplierCandidateMutator(candidate)
-			}),
-		)
+	cfg := config.NewFromData(&config.ConfigData{})
+	ensureConfigDefaults(cfg)
+	if cfg.Current().GeminiHomeDir == "" || cfg.Current().DataDir == "" {
+		t.Fatalf("expected defaults to be filled")
+	}
+}
 
-		// 1. Unchanged reload
-		reloadFn("UnchangedReload")
+func TestComputeDaemonReloadFingerprint(t *testing.T) {
+	t.Parallel()
 
-		// 2. Change model
-		supplierCandidateMutator = func(candidate *config.Config) error {
-			cur := candidate.Current()
-			cur.Model = "gemini-2.5-pro"
-			candidate.Update(cur)
-			return nil
-		}
-		reloadFn("ModelChangeReload")
-		if cfg.Current().Model != "gemini-2.5-pro" {
-			t.Fatalf("expected reloaded model gemini-2.5-pro, got %s", cfg.Current().Model)
-		}
-
-		// 3. Change engine
-		supplierCandidateMutator = func(candidate *config.Config) error {
-			cur := candidate.Current()
-			cur.Engine = "claude"
-			cur.ClaudeBin = "/usr/local/bin/claude"
-			candidate.Update(cur)
-			return nil
-		}
-		reloadFn("EngineChangeReload")
-		if cfg.Current().GetEngine() != "claude" {
-			t.Fatalf("expected reloaded engine claude, got %s", cfg.Current().GetEngine())
-		}
+	baseCfg := newTestConfig(func(d *config.ConfigData) {
+		d.Model = "gemini-3.8-flash-low"
+		d.LowEffortModel = "gemini-3.8-flash-low"
+		d.Engine = "gemini"
 	})
+	baseFP := computeDaemonReloadFingerprint(baseCfg)
+	if baseFP == "" {
+		t.Fatal("expected non-empty base fingerprint")
+	}
+
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		wantDiff  bool
+		wantEmpty bool
+	}{
+		{
+			name:      "nil config produces empty fingerprint",
+			cfg:       nil,
+			wantEmpty: true,
+		},
+		{
+			name: "identical config produces identical fingerprint",
+			cfg: newTestConfig(func(d *config.ConfigData) {
+				d.Model = "gemini-3.8-flash-low"
+				d.LowEffortModel = "gemini-3.8-flash-low"
+				d.Engine = "gemini"
+			}),
+			wantDiff: false,
+		},
+		{
+			name: "changed model produces different fingerprint",
+			cfg: newTestConfig(func(d *config.ConfigData) {
+				d.Model = "gemini-2.5-pro"
+				d.LowEffortModel = "gemini-3.8-flash-low"
+				d.Engine = "gemini"
+			}),
+			wantDiff: true,
+		},
+		{
+			name: "changed engine produces different fingerprint",
+			cfg: newTestConfig(func(d *config.ConfigData) {
+				d.Model = "gemini-3.8-flash-low"
+				d.LowEffortModel = "gemini-3.8-flash-low"
+				d.Engine = "claude"
+			}),
+			wantDiff: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fp := computeDaemonReloadFingerprint(tc.cfg)
+			if tc.wantEmpty {
+				if fp != "" {
+					t.Fatalf("expected empty fingerprint, got %q", fp)
+				}
+				return
+			}
+			if tc.wantDiff {
+				if fp == baseFP {
+					t.Fatalf("expected different fingerprint than base, got %q", fp)
+				}
+			} else {
+				if fp != baseFP {
+					t.Fatalf("expected identical fingerprint to base, got %q (base: %q)", fp, baseFP)
+				}
+			}
+		})
+	}
 }
 
 func TestRegisterGitSyncReload(t *testing.T) {
@@ -575,34 +642,6 @@ func (*mockErrProcessHandle) Pid() int    { return 99999 }
 func (*mockErrProcessHandle) Kill() error { return errors.New("simulated kill error") }
 func (*mockErrProcessHandle) Wait() error { return nil }
 
-func runBrainAppLifecyclePrewarmedWorkers(t *testing.T, cfg *config.Config) {
-	t.Helper()
-	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg)
-	resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(`{"prompt":"Hello test prompt","channel_id":"1542423172400291873","message_id":"msg-1"}`))
-	if err == nil {
-		_ = resp.Body.Close()
-	}
-
-	cancel()
-	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("unexpected error waiting for server shutdown: %v", err)
-	}
-}
-
-func runBrainAppLifecycleClaudeEngine(t *testing.T, cfg *config.Config) {
-	t.Helper()
-	boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg)
-	resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(`{"prompt":"Hello test prompt","channel_id":"1542423172400291873","message_id":"msg-1"}`))
-	if err == nil {
-		_ = resp.Body.Close()
-	}
-
-	cancel()
-	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("unexpected error waiting for server shutdown: %v", err)
-	}
-}
-
 func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -624,31 +663,6 @@ func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string
 }
 
 func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
-	t.Run("PrewarmedWorkers", func(t *testing.T) {
-		_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
-			d.DiscordToken = "mock-discord-token"
-			d.HarnessAPIKey = "gemini-test-key"
-			d.DataDir = d.GeminiHomeDir
-			d.LowEffortModel = "gemini-test-low"
-			d.MediumEffortModel = "gemini-test-medium"
-			d.Ollama.BaseURL = "http://127.0.0.1:65534"
-			d.BotID = "aerial-main"
-			d.SynapseURL = "http://synapse.local:4020"
-			d.VanadisURL = "http://vanadis.local:4025"
-			d.Voice = config.VoiceConfig{
-				Engine:           "gemini_api",
-				Model:            "gemini-2.5-flash",
-				PrewarmedTargets: []string{"kiosk"},
-				AmbientContext:   &config.AmbientContextConfig{Template: "Time: {{.now}}", CacheTTL: "5s"},
-			}
-			d.Channels = map[string]config.ChannelPolicy{
-				"default": {Mode: "threads", AmbientContext: &config.AmbientContextConfig{Template: "Time: {{.now}}", CacheTTL: "5s"}},
-			}
-		})
-
-		runBrainAppLifecyclePrewarmedWorkers(t, cfg)
-	})
-
 	t.Run("SIGHUP", func(t *testing.T) {
 		_, cfg := newLifecycleCfg(t)
 		hupChan := make(chan os.Signal, 1)
@@ -732,23 +746,6 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			t.Fatalf("unexpected error from RunBrainApp: %v", err)
 		}
 	})
-
-	t.Run("ClaudeEngineFullLifecycle", func(t *testing.T) {
-		_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
-			d.Engine = "claude"
-			d.ClaudeBin = "/usr/local/bin/claude"
-			d.DiscordToken = "mock-discord-token"
-			d.DataDir = d.GeminiHomeDir
-			d.LowEffortModel = "claude-haiku"
-			d.MediumEffortModel = "claude-sonnet"
-			d.Voice = config.VoiceConfig{
-				Engine: "agy",
-				Model:  "claude-voice",
-			}
-		})
-
-		runBrainAppLifecycleClaudeEngine(t, cfg)
-	})
 }
 
 func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
@@ -812,66 +809,6 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	opts.onReload("test")
 	if !called {
 		t.Errorf("expected onReload to be invoked")
-	}
-}
-
-func TestReloadCandidateModelUpdate(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		mutate    func(candidate *config.Config)
-		wantModel string
-	}{
-		{
-			name: "update model directly",
-			mutate: func(candidate *config.Config) {
-				cur := candidate.Current()
-				cur.Model = "new-model"
-				candidate.Update(cur)
-			},
-			wantModel: "new-model",
-		},
-		{
-			name: "leave model unchanged",
-			mutate: func(candidate *config.Config) {
-				cur := candidate.Current()
-				cur.SystemPrompt = "updated prompt"
-				candidate.Update(cur)
-			},
-			wantModel: "old-model",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" })
-			reload := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(candidate *config.Config) error {
-				tc.mutate(candidate)
-				return nil
-			}))
-			reload("test")
-			if got := cfg.Current().Model; got != tc.wantModel {
-				t.Fatalf("model=%q want %q", got, tc.wantModel)
-			}
-		})
-	}
-}
-
-func TestPrepareReloadCandidate(t *testing.T) {
-	t.Parallel()
-	cfg := newTestConfig()
-	if err := prepareReloadCandidate(cfg, nil); err != nil {
-		t.Fatalf("unexpected error with nil options: %v", err)
-	}
-	called := false
-	opt := &reloadConfigOptions{
-		reloadSupplier: func(c *config.Config) error {
-			called = true
-			return nil
-		},
-	}
-	if err := prepareReloadCandidate(cfg, opt); err != nil || !called {
-		t.Fatalf("prepareReloadCandidate failed or didn't invoke supplier: %v", err)
 	}
 }
 

@@ -62,10 +62,10 @@ func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
 }
 
 func ensureConfigDefaults(cfg *config.Config) {
-	cur := cfg.Current()
-	if cur == nil {
+	if cfg == nil {
 		return
 	}
+	cur := cfg.Current()
 	changed := false
 	if cur.GeminiHomeDir == "" {
 		cur.GeminiHomeDir = DefaultGeminiHomeDir()

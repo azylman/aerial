@@ -151,14 +151,6 @@ func resolveRestateClient(clients ...*RestateIngressClient) *RestateIngressClien
 	return ActiveRestateIngressClient()
 }
 
-// AgentName returns the configured agent name on this client.
-func (c *RestateIngressClient) AgentName() string {
-	if c == nil {
-		return ""
-	}
-	return c.agentName
-}
-
 // NewRestateIngressClient constructs a RestateIngressClient.
 func NewRestateIngressClient(ingressURL, agentName string, httpClient ...*http.Client) *RestateIngressClient {
 	ingressURL = strings.TrimRight(strings.TrimSpace(ingressURL), "/")
@@ -422,7 +414,6 @@ var _ = []any{
 	SetActiveRestateIngressClient,
 	ActiveRestateIngressClient,
 	resolveRestateClient,
-	(*RestateIngressClient).AgentName,
 	(*RestateIngressClient).postJSON,
 	(*RestateIngressClient).EnqueueThread,
 	(*RestateIngressClient).CancelThreadTurn,
