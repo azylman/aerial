@@ -881,6 +881,20 @@ spec:
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
 metadata:
+  name: eri-restate
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eri-restate
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
   name: arc-metrics
   namespace: default
 spec:
