@@ -84,6 +84,43 @@ const ThemeToggle = memo(function ThemeToggle() {
   );
 });
 
+const DEFAULT_AGENTS = ['all', 'aerial', 'miorine', 'suletta'] as const;
+
+export const AgentSelector = memo(function AgentSelector() {
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const setSelectedAgent = useConsoleStore((s) => s.setSelectedAgent);
+  const configured = useConsoleStore((s) => s.status.cluster.data?.configured_agents);
+
+  const agents = useMemo(() => {
+    if (configured && configured.length > 0) {
+      const list = ['all', ...configured.map((a) => a.toLowerCase())];
+      return Array.from(new Set(list));
+    }
+    return DEFAULT_AGENTS;
+  }, [configured]);
+
+  return (
+    <nav className="agent-selector-bar" role="toolbar" aria-label="Agent Selector">
+      {agents.map((agent) => {
+        const isSelected = selectedAgent === agent;
+        const label = agent === 'all' ? 'All' : agent.charAt(0).toUpperCase() + agent.slice(1);
+        return (
+          <button
+            key={agent}
+            type="button"
+            className={isSelected ? 'agent-pill active' : 'agent-pill'}
+            data-agent={agent}
+            aria-pressed={isSelected}
+            onClick={() => setSelectedAgent(agent)}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+});
+
 /**
  * The HUD header. It subscribes to nothing itself: the gauge, tab buttons and dock each select
  * their own slice of state, so the header shell renders exactly once.
@@ -104,6 +141,7 @@ export const Header = memo(function Header() {
         <TabBar />
       </div>
       <div className="cmd-right">
+        <AgentSelector />
         <QuickLaunchDock />
         <PermetGauge />
         <ThemeToggle />

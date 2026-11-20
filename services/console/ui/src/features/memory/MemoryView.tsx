@@ -5,6 +5,7 @@ import { Icon } from '../../components/Icon';
 import { VirtualList } from '../../components/VirtualList';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { useTabActive } from '../../hooks/useTabActive';
+import { filterByAgent } from '../../store/selectors';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import '../../styles/sections.css';
@@ -273,7 +274,9 @@ const FactList = memo(function FactList({ facts, query, now }: ListProps) {
  */
 export default function MemoryView() {
   const data = useConsoleStore(selectData);
-  const facts = useConsoleStore(selectFacts);
+  const rawFacts = useConsoleStore(selectFacts);
+  const selectedAgent = useConsoleStore((s) => s.selectedAgent);
+  const facts = useMemo(() => filterByAgent(rawFacts, selectedAgent), [rawFacts, selectedAgent]);
   const error = useConsoleStore(selectError);
   const [syncedAt, touchSynced] = useSyncStamp(data);
   const refresh = useManualSync(touchSynced);

@@ -49,17 +49,26 @@ async function getJSON<T>(path: string, signal: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
-export const fetchStatus = (signal: AbortSignal): Promise<ClusterResponse> => getJSON('/api/status', signal);
+function withAgent(path: string, agent?: string): string {
+  if (!agent || agent === 'all') return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}agent=${encodeURIComponent(agent)}`;
+}
 
-export const fetchFacts = (signal: AbortSignal): Promise<FactsAPIResponse> => getJSON('/api/facts', signal);
+export const fetchStatus = (signal: AbortSignal, agent?: string): Promise<ClusterResponse> =>
+  getJSON(withAgent('/api/status', agent), signal);
 
-export const fetchSchedules = (signal: AbortSignal): Promise<SchedulesAPIResponse> =>
-  getJSON('/api/schedules', signal);
+export const fetchFacts = (signal: AbortSignal, agent?: string): Promise<FactsAPIResponse> =>
+  getJSON(withAgent('/api/facts', agent), signal);
 
-export const fetchScheduleRuns = (signal: AbortSignal): Promise<ScheduleRunsAPIResponse> =>
-  getJSON('/api/schedules/runs?limit=50&offset=0', signal);
+export const fetchSchedules = (signal: AbortSignal, agent?: string): Promise<SchedulesAPIResponse> =>
+  getJSON(withAgent('/api/schedules', agent), signal);
 
-export const fetchBuilds = (signal: AbortSignal): Promise<BuildsAPIResponse> => getJSON('/api/builds', signal);
+export const fetchScheduleRuns = (signal: AbortSignal, agent?: string): Promise<ScheduleRunsAPIResponse> =>
+  getJSON(withAgent('/api/schedules/runs?limit=50&offset=0', agent), signal);
+
+export const fetchBuilds = (signal: AbortSignal, agent?: string): Promise<BuildsAPIResponse> =>
+  getJSON(withAgent('/api/builds', agent), signal);
 
 export const fetchBuildDetail = (id: string, signal: AbortSignal): Promise<BuildDetailAPIResponse> =>
   getJSON(`/api/builds/${encodeURIComponent(id)}`, signal);

@@ -63,6 +63,7 @@ export interface ActiveTaskStatus {
   readonly trigger_type: string;
   readonly created_at: IsoTimestamp;
   readonly started_at: IsoTimestamp;
+  readonly agent?: string;
 }
 
 export interface QuickLaunchLink {
@@ -120,7 +121,10 @@ export interface ClusterResponse {
   readonly git_sync: GitSyncStatusResponse;
   readonly ongoing_deploy: string;
   readonly is_deploying: boolean;
+  readonly configured_agents?: readonly string[];
 }
+
+export type StatusResponse = ClusterResponse;
 
 // ---- /api/facts (handlers.go: FactsAPIResponse) ----
 
@@ -130,6 +134,7 @@ export interface FactItem {
   readonly reinforce_count: number;
   readonly last_reinforced_at?: IsoTimestamp;
   readonly created_at: IsoTimestamp;
+  readonly agent?: string;
 }
 
 export interface FactsAPIResponse {
@@ -163,6 +168,7 @@ export interface CronSchedule {
   readonly next_run_at: IsoTimestamp;
   readonly enabled: boolean;
   readonly created_at: IsoTimestamp;
+  readonly agent?: string;
 }
 
 export interface OneShotSchedule {
@@ -171,6 +177,7 @@ export interface OneShotSchedule {
   readonly prompt: string;
   readonly run_at: IsoTimestamp;
   readonly created_at: IsoTimestamp;
+  readonly agent?: string;
 }
 
 export interface SchedulesAPIResponse {
@@ -198,6 +205,7 @@ export interface ScheduleRun {
   readonly completed_at?: IsoTimestamp;
   readonly duration_ms: number;
   readonly error?: string;
+  readonly agent?: string;
 }
 
 export interface ScheduleRunsAPIResponse {
@@ -229,6 +237,7 @@ export interface VanadisChunkDTO {
   readonly completed_at: IsoTimestamp;
   readonly created_at: IsoTimestamp;
   readonly updated_at: IsoTimestamp;
+  readonly agent?: string;
 }
 
 export interface VanadisBuildDTO {
@@ -249,6 +258,7 @@ export interface VanadisBuildDTO {
   readonly pending_chunks?: number;
   readonly failed_chunks?: number;
   readonly chunks?: readonly VanadisChunkDTO[];
+  readonly agent?: string;
 }
 
 export interface BuildsAPIResponse {

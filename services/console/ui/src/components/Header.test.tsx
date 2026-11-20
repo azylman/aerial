@@ -137,6 +137,42 @@ describe('Header', () => {
     });
     expect(toggle.getAttribute('aria-label')).toBe('Switch to dark theme');
   });
+
+  it('renders agent selector pills and updates selectedAgent on click', () => {
+    render(<Header />);
+    const all = screen.getByRole('button', { name: 'All' });
+    const aerial = screen.getByRole('button', { name: 'Aerial' });
+    const miorine = screen.getByRole('button', { name: 'Miorine' });
+    const suletta = screen.getByRole('button', { name: 'Suletta' });
+
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+    expect(all.className).toContain('active');
+    expect(aerial.getAttribute('aria-pressed')).toBe('false');
+
+    act(() => miorine.click());
+    expect(useConsoleStore.getState().selectedAgent).toBe('miorine');
+    expect(miorine.getAttribute('aria-pressed')).toBe('true');
+    expect(miorine.className).toContain('active');
+    expect(all.getAttribute('aria-pressed')).toBe('false');
+
+    act(() => suletta.click());
+    expect(useConsoleStore.getState().selectedAgent).toBe('suletta');
+    expect(suletta.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('renders configured_agents from cluster status payload', () => {
+    render(<Header />);
+    act(() => {
+      useConsoleStore.getState().setCluster({
+        ...CLUSTER,
+        configured_agents: ['aerial', 'miorine'],
+      });
+    });
+    expect(screen.getByRole('button', { name: 'All' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Aerial' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Miorine' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Suletta' })).toBeNull();
+  });
 });
 
 interface IsolationRow {
@@ -177,6 +213,12 @@ const isolationRows: IsolationRow[] = [
     name: 'facts poll: only the memory badge button re-renders',
     update: () => useConsoleStore.getState().setFacts({ ...FACTS, total: 151 }),
     wantIcons: ['brain:14'],
+    wantCommits: 1,
+  },
+  {
+    name: 'selectedAgent change: agent selector and affected tab badges re-render',
+    update: () => useConsoleStore.getState().setSelectedAgent('miorine'),
+    wantIcons: ['brain:14', 'target:14'],
     wantCommits: 1,
   },
 ];
