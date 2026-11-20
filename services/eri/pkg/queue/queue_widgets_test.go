@@ -719,80 +719,42 @@ type chunkStepStreamingCase struct {
 	name                  string
 	nilPool               bool
 	noSession             bool
+	failFirstFlush        bool
+	useProductionNew      bool
 	chunkID, turnID       string
 	stepText              string
+	secondStepText        string
+	flushInterval         time.Duration
+	deliverWaiters        int32
 	seedWidget            bool
 	chunkStatus           string
 	mismatchedTurn        bool
 	expectFlushErr        bool
 	expectFlushDelivered  bool
 	expectFinishDelivered bool
+	wantStepBeforeFinish  string
+	wantDeliveredCount    int
 	deliveredMsgID        string
 	wantCachedMsgID       string
 	wantFinishReqMsgID    string
 }
 
-func runChunkStepStreamingCase(t *testing.T, tc chunkStepStreamingCase) {
+func runNilPoolChunkStepCase(t *testing.T, tc chunkStepStreamingCase) {
 	t.Helper()
-	if tc.nilPool {
-		var p *WorkerPool
-		if err := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.stepText); err == nil {
-			t.Fatalf("expected error from nil pool FlushChunkActiveStep")
-		}
-		p.StartChunkStepTurn(context.Background(), tc.chunkID, "b1", 0, tc.turnID)
-		p.FinishChunkStepTurn(context.Background(), tc.chunkID, tc.turnID)
-		return
+	var p *WorkerPool
+	if err := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.stepText); err == nil {
+		t.Fatalf("expected error from nil pool FlushChunkActiveStep")
 	}
-	var deliveredMu sync.Mutex
-	var deliveredReqs []discord.StatusWidgetRequest
-	p := &WorkerPool{}
-	if !tc.noSession {
-		p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
-			deliveredMu.Lock()
-			deliveredReqs = append(deliveredReqs, req)
-			deliveredMu.Unlock()
-			if tc.deliveredMsgID != "" {
-				return tc.deliveredMsgID, nil
-			}
-			if req.MessageID != "" {
-				return req.MessageID, nil
-			}
-			return "msg-delivered", nil
-		})
-	}
-	if tc.seedWidget {
-		p.widgetMu.Lock()
-		p.ensureWidgetMapsLocked()
-		p.widgetsByID["build-"+tc.chunkID] = discord.StatusWidgetRequest{
-			ID:        "build-" + tc.chunkID,
-			ChannelID: "chan-1",
-			MessageID: "msg-" + tc.chunkID,
-			Status:    "running",
-			Chunks: []discord.StatusWidgetChunk{
-				{ID: "", Status: tc.chunkStatus},
-				{ID: "c-sibling", Status: "running"},
-			},
-		}
-		p.activeChunkSteps["c-sibling"] = "sibling step"
-		p.widgetMu.Unlock()
-	}
-	assignedTurn := tc.turnID
-	if tc.mismatchedTurn {
-		assignedTurn = "t-actual"
-	}
-	p.StartChunkStepTurn(context.Background(), tc.chunkID, "build-"+tc.chunkID, 0, assignedTurn)
-	p.ensureChunkWidgetHydrated(context.Background(), "Prompt for "+tc.chunkID, tc.chunkID, "build-"+tc.chunkID)
-	err := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.stepText)
-	if (err != nil) != tc.expectFlushErr {
-		t.Fatalf("FlushChunkActiveStep err = %v, expectFlushErr = %v", err, tc.expectFlushErr)
-	}
+	p.StartChunkStepTurn(context.Background(), tc.chunkID, "b1", 0, tc.turnID)
 	p.FinishChunkStepTurn(context.Background(), tc.chunkID, tc.turnID)
+}
 
-	deliveredMu.Lock()
-	reqs := append([]discord.StatusWidgetRequest(nil), deliveredReqs...)
-	deliveredMu.Unlock()
+func assertChunkStepStreamingResults(t *testing.T, tc chunkStepStreamingCase, p *WorkerPool, reqs []discord.StatusWidgetRequest) {
+	t.Helper()
 	count := len(reqs)
-
+	if tc.wantDeliveredCount > 0 && count != tc.wantDeliveredCount {
+		t.Fatalf("delivered count = %d, want %d", count, tc.wantDeliveredCount)
+	}
 	if tc.expectFlushDelivered && count == 0 {
 		t.Fatalf("expected at least 1 delivered request")
 	}
@@ -819,102 +781,255 @@ func runChunkStepStreamingCase(t *testing.T, tc chunkStepStreamingCase) {
 	}
 }
 
+func createStreamingDeliveryFunc(deliveredMu *sync.Mutex, deliveredReqs *[]discord.StatusWidgetRequest, tc chunkStepStreamingCase) func(discord.StatusWidgetRequest) (string, error) {
+	firstFlushFailed := false
+	return func(req discord.StatusWidgetRequest) (string, error) {
+		deliveredMu.Lock()
+		defer deliveredMu.Unlock()
+		if tc.failFirstFlush && !firstFlushFailed {
+			firstFlushFailed = true
+			return "", errors.New("simulated delivery failure")
+		}
+		*deliveredReqs = append(*deliveredReqs, req)
+		if tc.deliveredMsgID != "" {
+			return tc.deliveredMsgID, nil
+		}
+		if req.MessageID != "" {
+			return req.MessageID, nil
+		}
+		return "msg-delivered", nil
+	}
+}
+
+func runChunkStepStreamingCase(t *testing.T, tc chunkStepStreamingCase) {
+	t.Helper()
+	if tc.nilPool {
+		runNilPoolChunkStepCase(t, tc)
+		return
+	}
+	var deliveredMu sync.Mutex
+	var deliveredReqs []discord.StatusWidgetRequest
+	var p *WorkerPool
+	if tc.useProductionNew {
+		p = New(nil, WorkerPoolConfig{
+			ChunkStepFlushInterval: tc.flushInterval,
+		})
+	} else {
+		p = &WorkerPool{}
+		p.cfg.ChunkStepFlushInterval = tc.flushInterval
+	}
+	if !tc.noSession {
+		p.SetWidgetDeliveryFunc(createStreamingDeliveryFunc(&deliveredMu, &deliveredReqs, tc))
+	}
+	if tc.seedWidget {
+		p.widgetMu.Lock()
+		p.ensureWidgetMapsLocked()
+		p.widgetsByID["build-"+tc.chunkID] = discord.StatusWidgetRequest{
+			ID:        "build-" + tc.chunkID,
+			ChannelID: "chan-1",
+			MessageID: "msg-" + tc.chunkID,
+			Status:    "running",
+			Chunks: []discord.StatusWidgetChunk{
+				{ID: "", Status: tc.chunkStatus},
+				{ID: "c-sibling", Status: "running"},
+			},
+		}
+		p.activeChunkSteps["c-sibling"] = "sibling step"
+		p.widgetMu.Unlock()
+	}
+	if tc.deliverWaiters > 0 {
+		actual, _ := p.widgetChannelLocks.LoadOrStore("chan-1", &widgetChannelLock{})
+		chanLock, ok := actual.(*widgetChannelLock)
+		if !ok {
+			t.Fatalf("expected *widgetChannelLock, got %T", actual)
+		}
+		chanLock.deliverWaiters.Store(tc.deliverWaiters)
+	}
+	assignedTurn := tc.turnID
+	if tc.mismatchedTurn {
+		assignedTurn = "t-actual"
+	}
+	p.StartChunkStepTurn(context.Background(), tc.chunkID, "build-"+tc.chunkID, 0, assignedTurn)
+	p.ensureChunkWidgetHydrated(context.Background(), "Prompt for "+tc.chunkID, tc.chunkID, "build-"+tc.chunkID)
+	err := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.stepText)
+	if (err != nil) != tc.expectFlushErr {
+		t.Fatalf("FlushChunkActiveStep err = %v, expectFlushErr = %v", err, tc.expectFlushErr)
+	}
+	if tc.secondStepText != "" {
+		if err2 := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.secondStepText); err2 != nil {
+			t.Fatalf("second FlushChunkActiveStep err = %v", err2)
+		}
+	}
+	if tc.wantStepBeforeFinish != "" {
+		p.widgetMu.Lock()
+		step := p.activeChunkSteps[tc.chunkID]
+		p.widgetMu.Unlock()
+		if step != tc.wantStepBeforeFinish {
+			t.Errorf("activeChunkSteps[%q] = %q, want %q", tc.chunkID, step, tc.wantStepBeforeFinish)
+		}
+	}
+	p.FinishChunkStepTurn(context.Background(), tc.chunkID, tc.turnID)
+
+	deliveredMu.Lock()
+	reqs := append([]discord.StatusWidgetRequest(nil), deliveredReqs...)
+	deliveredMu.Unlock()
+	assertChunkStepStreamingResults(t, tc, p, reqs)
+}
+
+func chunkStepStreamingBaseCases() []chunkStepStreamingCase {
+	return []chunkStepStreamingCase{
+		{name: "nil pool returns error on flush", nilPool: true, chunkID: "c1", turnID: "t1", stepText: "step 1", expectFlushErr: true},
+		{name: "nil session returns error on flush", noSession: true, chunkID: "c-nosess", turnID: "t-nosess", stepText: "step 1", seedWidget: true, chunkStatus: "running", expectFlushErr: true, wantCachedMsgID: "msg-c-nosess"},
+		{name: "empty chunkID or turnID is no-op", chunkID: "", turnID: "", stepText: "step 1"},
+		{name: "mismatched turn ID is rejected", chunkID: "c-mismatch", turnID: "t-wrong", stepText: "step 1", seedWidget: true, chunkStatus: "running", mismatchedTurn: true},
+		{name: "chunk not in progress skips flush", chunkID: "c-pr-open", turnID: "t-open", stepText: "step 1", seedWidget: true, chunkStatus: "pr_opened"},
+		{name: "running chunk flushes and finishes cleanly", chunkID: "c-run", turnID: "t-run", stepText: "⚡ Executing `git status`...", seedWidget: true, chunkStatus: "running", expectFlushDelivered: true, expectFinishDelivered: true, wantCachedMsgID: "msg-c-run", wantFinishReqMsgID: "msg-c-run"},
+		{name: "sunk step edit records new message ID for later edits", chunkID: "c-sunk", turnID: "t-sunk", stepText: "⚡ Executing `go build ./...`...", seedWidget: true, chunkStatus: "running", expectFlushDelivered: true, expectFinishDelivered: true, deliveredMsgID: "msg-sunk-new", wantCachedMsgID: "msg-sunk-new", wantFinishReqMsgID: "msg-sunk-new"},
+		{name: "failed chunk during CI remediation flushes and finishes cleanly", chunkID: "c-failed", turnID: "t-failed", stepText: "⚡ Executing `go test ./...`...", seedWidget: true, chunkStatus: "failed", expectFlushDelivered: true, expectFinishDelivered: true},
+		{name: "conflict chunk during rebase remediation flushes and finishes cleanly", chunkID: "c-conflict", turnID: "t-conflict", stepText: "⚡ Executing `git rebase origin/main`...", seedWidget: true, chunkStatus: "conflict", expectFlushDelivered: true, expectFinishDelivered: true},
+	}
+}
+
+func chunkStepStreamingThrottleCases() []chunkStepStreamingCase {
+	return []chunkStepStreamingCase{
+		{
+			name:                  "throttles second flush within interval while updating step in memory and delivering finish",
+			chunkID:               "c-throttle",
+			turnID:                "t-throttle",
+			stepText:              "⚡ Executing `step 1`...",
+			secondStepText:        "⚡ Executing `step 2`...",
+			flushInterval:         10 * time.Minute,
+			seedWidget:            true,
+			chunkStatus:           "running",
+			expectFlushDelivered:  true,
+			expectFinishDelivered: true,
+			wantStepBeforeFinish:  "⚡ Executing `step 2`...",
+			wantDeliveredCount:    2,
+			wantCachedMsgID:       "msg-c-throttle",
+			wantFinishReqMsgID:    "msg-c-throttle",
+		},
+		{
+			name:                 "yields flush when deliver waiters exist on channel lock while retaining step in memory",
+			chunkID:              "c-waiter",
+			turnID:               "t-waiter",
+			stepText:             "⚡ Executing `go test ./...`...",
+			deliverWaiters:       1,
+			seedWidget:           true,
+			chunkStatus:          "running",
+			wantStepBeforeFinish: "⚡ Executing `go test ./...`...",
+			wantDeliveredCount:   1,
+			wantCachedMsgID:      "msg-c-waiter",
+			wantFinishReqMsgID:   "msg-c-waiter",
+		},
+		{
+			name:                  "production pool defaults throttles second flush without explicit interval assignment",
+			useProductionNew:      true,
+			chunkID:               "c-prod-default",
+			turnID:                "t-prod-default",
+			stepText:              "⚡ Executing `step 1`...",
+			secondStepText:        "⚡ Executing `step 2`...",
+			seedWidget:            true,
+			chunkStatus:           "running",
+			expectFlushDelivered:  true,
+			expectFinishDelivered: true,
+			wantStepBeforeFinish:  "⚡ Executing `step 2`...",
+			wantDeliveredCount:    2,
+			wantCachedMsgID:       "msg-c-prod-default",
+			wantFinishReqMsgID:    "msg-c-prod-default",
+		},
+		{
+			name:                  "failed step delivery does not stamp flush interval allowing immediate second flush",
+			useProductionNew:      true,
+			chunkID:               "c-fail-retry",
+			turnID:                "t-fail-retry",
+			failFirstFlush:        true,
+			stepText:              "⚡ Executing `step 1 fail`...",
+			secondStepText:        "⚡ Executing `step 2 retry`...",
+			expectFlushErr:        true,
+			seedWidget:            true,
+			chunkStatus:           "running",
+			expectFinishDelivered: true,
+			wantStepBeforeFinish:  "⚡ Executing `step 2 retry`...",
+			wantDeliveredCount:    2,
+			wantCachedMsgID:       "msg-c-fail-retry",
+			wantFinishReqMsgID:    "msg-c-fail-retry",
+		},
+	}
+}
+
 func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 	t.Parallel()
-	tests := []chunkStepStreamingCase{
+	cases := append(chunkStepStreamingBaseCases(), chunkStepStreamingThrottleCases()...)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runChunkStepStreamingCase(t, tc)
+		})
+	}
+}
+
+func TestWorkerPool_ChannelHasDeliverWaiter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nilPool    bool
+		channelID  string
+		setWaiters int32
+		want       bool
+	}{
 		{
-			name:           "nil pool returns error on flush",
-			nilPool:        true,
-			chunkID:        "c1",
-			turnID:         "t1",
-			stepText:       "step 1",
-			expectFlushErr: true,
+			name:      "nil pool returns false",
+			nilPool:   true,
+			channelID: "chan-1",
+			want:      false,
 		},
 		{
-			name:            "nil session returns error on flush",
-			noSession:       true,
-			chunkID:         "c-nosess",
-			turnID:          "t-nosess",
-			stepText:        "step 1",
-			seedWidget:      true,
-			chunkStatus:     "running",
-			expectFlushErr:  true,
-			wantCachedMsgID: "msg-c-nosess",
+			name:      "empty channel ID returns false",
+			channelID: "",
+			want:      false,
 		},
 		{
-			name:     "empty chunkID or turnID is no-op",
-			chunkID:  "",
-			turnID:   "",
-			stepText: "step 1",
+			name:      "whitespace channel ID returns false",
+			channelID: "   ",
+			want:      false,
 		},
 		{
-			name:           "mismatched turn ID is rejected",
-			chunkID:        "c-mismatch",
-			turnID:         "t-wrong",
-			stepText:       "step 1",
-			seedWidget:     true,
-			chunkStatus:    "running",
-			mismatchedTurn: true,
+			name:      "unknown channel ID returns false",
+			channelID: "chan-unknown",
+			want:      false,
 		},
 		{
-			name:        "chunk not in progress skips flush",
-			chunkID:     "c-pr-open",
-			turnID:      "t-open",
-			stepText:    "step 1",
-			seedWidget:  true,
-			chunkStatus: "pr_opened",
+			name:       "channel with zero waiters returns false",
+			channelID:  "chan-zero",
+			setWaiters: 0,
+			want:       false,
 		},
 		{
-			name:                  "running chunk flushes and finishes cleanly",
-			chunkID:               "c-run",
-			turnID:                "t-run",
-			stepText:              "⚡ Executing `git status`...",
-			seedWidget:            true,
-			chunkStatus:           "running",
-			expectFlushDelivered:  true,
-			expectFinishDelivered: true,
-			wantCachedMsgID:       "msg-c-run",
-			wantFinishReqMsgID:    "msg-c-run",
-		},
-		{
-			name:                  "sunk step edit records new message ID for later edits",
-			chunkID:               "c-sunk",
-			turnID:                "t-sunk",
-			stepText:              "⚡ Executing `go build ./...`...",
-			seedWidget:            true,
-			chunkStatus:           "running",
-			expectFlushDelivered:  true,
-			expectFinishDelivered: true,
-			deliveredMsgID:        "msg-sunk-new",
-			wantCachedMsgID:       "msg-sunk-new",
-			wantFinishReqMsgID:    "msg-sunk-new",
-		},
-		{
-			name:                  "failed chunk during CI remediation flushes and finishes cleanly",
-			chunkID:               "c-failed",
-			turnID:                "t-failed",
-			stepText:              "⚡ Executing `go test ./...`...",
-			seedWidget:            true,
-			chunkStatus:           "failed",
-			expectFlushDelivered:  true,
-			expectFinishDelivered: true,
-		},
-		{
-			name:                  "conflict chunk during rebase remediation flushes and finishes cleanly",
-			chunkID:               "c-conflict",
-			turnID:                "t-conflict",
-			stepText:              "⚡ Executing `git rebase origin/main`...",
-			seedWidget:            true,
-			chunkStatus:           "conflict",
-			expectFlushDelivered:  true,
-			expectFinishDelivered: true,
+			name:       "channel with positive waiters returns true",
+			channelID:  "chan-active",
+			setWaiters: 2,
+			want:       true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runChunkStepStreamingCase(t, tc)
+			var p *WorkerPool
+			if !tc.nilPool {
+				p = &WorkerPool{}
+				if tc.setWaiters > 0 || tc.channelID == "chan-zero" {
+					actual, _ := p.widgetChannelLocks.LoadOrStore(tc.channelID, &widgetChannelLock{})
+					chanLock, ok := actual.(*widgetChannelLock)
+					if !ok {
+						t.Fatalf("expected *widgetChannelLock, got %T", actual)
+					}
+					chanLock.deliverWaiters.Store(tc.setWaiters)
+				}
+			}
+			if got := p.channelHasDeliverWaiter(tc.channelID); got != tc.want {
+				t.Fatalf("channelHasDeliverWaiter(%q) = %v, want %v", tc.channelID, got, tc.want)
+			}
 		})
 	}
 }

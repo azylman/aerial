@@ -1245,20 +1245,21 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	ambientResolver := newAmbientContextResolver(cfg)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		ParentContext:         ctx,
-		Store:                 store,
-		TranscriptStore:       txStore,
-		TranscriptsIndexerURL: cur.Transcripts.IndexerURL,
-		Classifier:            cls,
-		SessionManager:        sessionMgr,
-		Pools:                 pools.discord,
-		VoiceProcessPool:      pools.voice,
-		LLMFunc:               pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer"),
-		AmbientResolver:       ambientResolver,
-		NATSURL:               cur.NATSURL,
-		AgentName:             appOpts.agentName,
-		TraceContent:          appOpts.traceContent,
-		ActiveTurns:           activeTurns,
+		ParentContext:          ctx,
+		Store:                  store,
+		TranscriptStore:        txStore,
+		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
+		Classifier:             cls,
+		SessionManager:         sessionMgr,
+		Pools:                  pools.discord,
+		VoiceProcessPool:       pools.voice,
+		LLMFunc:                pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer"),
+		AmbientResolver:        ambientResolver,
+		NATSURL:                cur.NATSURL,
+		AgentName:              appOpts.agentName,
+		TraceContent:           appOpts.traceContent,
+		ActiveTurns:            activeTurns,
+		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
 	})
 	detachEventBus := attachEriEventBus(ctx, pool)
 	defer detachEventBus()

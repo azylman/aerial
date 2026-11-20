@@ -273,20 +273,30 @@ func TestWorkerPool_Accessors(t *testing.T) {
 	t.Parallel()
 	fake := setupTestStore(t)
 	noopLLM := func(context.Context, string, string) (string, error) { return "", nil }
+	appCfg := config.NewFromData(&config.ConfigData{NATSURL: "nats://127.0.0.1:4222"})
 	tests := []struct {
 		name                                                           string
 		pool                                                           *WorkerPool
 		wantStoreNil, wantSummaryNil, wantAgentPoolNil, wantLLMFuncNil bool
+		wantNATSURL                                                    string
+		wantAppCfgNil                                                  bool
 	}{
-		{"nil", nil, true, true, true, true},
-		{"empty", &WorkerPool{}, true, false, true, true},
-		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake, LLMFunc: noopLLM}, pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: "high"}: &testRunnerAgentPool{}}}, false, false, false, false},
+		{"nil", nil, true, true, true, true, "", true},
+		{"empty", &WorkerPool{}, true, false, true, true, "", true},
+		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake, LLMFunc: noopLLM}, pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: "high"}: &testRunnerAgentPool{}}}, false, false, false, false, "", true},
+		{"with_appcfg_and_nats", &WorkerPool{appCfg: appCfg, cfg: WorkerPoolConfig{NATSURL: "nats://fallback:4222"}}, true, false, true, true, "nats://127.0.0.1:4222", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if (tc.pool.Store() == nil) != tc.wantStoreNil || (tc.pool.SummaryGroup() == nil) != tc.wantSummaryNil || (tc.pool.AgentPool() == nil) != tc.wantAgentPoolNil || (tc.pool.LLMFunc() == nil) != tc.wantLLMFuncNil {
 				t.Errorf("accessor mismatch: store=%v summary=%v agent=%v llm=%v", tc.pool.Store() == nil, tc.pool.SummaryGroup() == nil, tc.pool.AgentPool() == nil, tc.pool.LLMFunc() == nil)
+			}
+			if tc.pool.NATSURL() != tc.wantNATSURL {
+				t.Errorf("NATSURL() = %q, want %q", tc.pool.NATSURL(), tc.wantNATSURL)
+			}
+			if (tc.pool.AppConfig() == nil) != tc.wantAppCfgNil {
+				t.Errorf("AppConfig() nil = %v, want %v", tc.pool.AppConfig() == nil, tc.wantAppCfgNil)
 			}
 		})
 	}
