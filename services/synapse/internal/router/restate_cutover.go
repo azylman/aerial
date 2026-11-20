@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
@@ -23,12 +25,17 @@ import (
 // redelivery. Shadow (fail-closed) sends only run when the flag is
 // off; authoritative and shadow sends never double-fire.
 //
-// What stays live: the registry-backed pipeline (registry transitions,
-// publishes, dispatches) runs unchanged. Per-SHA conflict republish
-// suppression reads the projection lifecycle head SHA; deploy_success
-// suppression reads the deployed projection; recovery reads the ci_failed
-// projection. Collaborator DMs are at-least-once: redelivery may resend
-// because the per-SHA DM marks died with the trackers.
+// What stays live: the registry-backed pipeline (registry atomic
+// transitions, publishes, dispatches) runs unchanged. Every effect decision
+// resolves from the Restate PRObject when authoritative: deploy_success via
+// HandleDeployDispatched, conflict republish via HandleConflictDetected with
+// the HandleConflictPublished ack, CI recovery via HandleCIRecovery. The
+// Postgres projection is never consulted on the authoritative path. The
+// projection stays only on the legacy fallback path (non-authoritative
+// conflict/deployed/ci_failed suppression) and for pure routing and
+// read-model renders, each marked projection-safe at its call site.
+// Collaborator DMs are at-least-once: redelivery may resend because the
+// per-SHA DM marks died with the trackers.
 //
 // Rollback: consumer rebind via YAML config (restate_authoritative: false),
 // hot-reloaded without restart or code revert. Forward-fix only: the journal
@@ -167,6 +174,28 @@ func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName,
 	})
 }
 
+// resolvePRVerdict is the single authoritative-verdict core behind the
+// deploy, conflict, and CI-recovery resolves: authoritative sends invoke the
+// frozen PRObject handler and decode the verdict, while shadow mode returns
+// the zero verdict without emitting a request. A transport or decode failure
+// surfaces so the caller retries instead of losing the signal. It rides on
+// routeEvent so verdicts share the one metric/error mapping; callers guard
+// PR-less payloads (no PRObject key exists for them).
+func resolvePRVerdict[T any](ctx context.Context, s *RouterServer, handler string, ev restateclient.PREvent) (T, error) {
+	var zero T
+	err := s.routeEvent(ctx, handler,
+		func(r *shadowRestateReporter, ctx context.Context) error {
+			return r.client.InvokePREvent(ctx, handler, ev, &zero)
+		},
+		func(context.Context) {},
+	)
+	if err != nil {
+		var empty T
+		return empty, err
+	}
+	return zero, nil
+}
+
 // resolveDeployDispatch asks the Restate PRObject whether synapse must
 // publish deploy_success. The PRObject verdict is the sole authority when
 // restate_authoritative is on: the Postgres deployed projection is never
@@ -175,29 +204,12 @@ func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName,
 // transport or decode failure surfaces so the caller retries. Off the
 // authoritative path it returns the zero verdict without emitting a request.
 func (s *RouterServer) resolveDeployDispatch(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int) (restateclient.DeployDispatchDecision, error) {
-	if !s.restateAuthoritative() {
-		return restateclient.DeployDispatchDecision{}, nil
-	}
 	if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
 		return restateclient.DeployDispatchDecision{}, nil
 	}
-	r := s.restateShadow()
-	if !r.Enabled() {
-		return restateclient.DeployDispatchDecision{}, fmt.Errorf("restate authoritative with no restate_url configured")
-	}
-	var decision restateclient.DeployDispatchDecision
-	if err := r.client.InvokePREvent(ctx, "HandleDeployDispatched", restateclient.PREvent{
+	return resolvePRVerdict[restateclient.DeployDispatchDecision](ctx, s, "HandleDeployDispatched", restateclient.PREvent{
 		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
-	}, &decision); err != nil {
-		r.sendErrors.Add(1)
-		metrics.RecordRestateShadowSend("HandleDeployDispatched", "authoritative_error")
-		slog.WarnContext(ctx, "[synapse] [restate-cutover] authoritative deploy decision failed",
-			"repo", repo, "pr", prNumber, "job", jobName, "error", err)
-		return restateclient.DeployDispatchDecision{}, err
-	}
-	r.sends.Add(1)
-	metrics.RecordRestateShadowSend("HandleDeployDispatched", "authoritative_sent")
-	return decision, nil
+	})
 }
 
 // recordDeployPublished acks one confirmed deploy_success publish to the
@@ -235,6 +247,86 @@ func (s *RouterServer) publishUnownedDeploySuccessAuthoritative(ctx context.Cont
 		return &evt, err
 	}
 	return &evt, nil
+}
+
+// resolveConflictDispatch asks the Restate PRObject whether synapse must
+// publish a conflict republish. The PRObject verdict is the sole authority
+// when restate_authoritative is on: the Postgres conflict projection is
+// never consulted here. The verdict records nothing, so a publish failure
+// leaves the next invocation returning ShouldPublish again (at-least-once).
+// A transport or decode failure surfaces so the caller retries. Off the
+// authoritative path it returns the zero verdict without emitting a request.
+func (s *RouterServer) resolveConflictDispatch(ctx context.Context, repo, branch, headSHA string, prNumber int) (restateclient.ConflictDispatchDecision, error) {
+	if prNumber <= 0 {
+		return restateclient.ConflictDispatchDecision{}, nil
+	}
+	return resolvePRVerdict[restateclient.ConflictDispatchDecision](ctx, s, "HandleConflictDetected", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
+	})
+}
+
+// recordConflictPublished acks one confirmed conflict republish to the
+// Restate PRObject, completing the dispatch. The ack surfaces failures so a
+// lost ack redelivers: the next resolve re-resolves and republishes rather
+// than losing the signal. Off the authoritative path it is a no-op.
+func (s *RouterServer) recordConflictPublished(ctx context.Context, repo, branch, headSHA string, prNumber int) error {
+	if !s.restateAuthoritative() {
+		return nil
+	}
+	if prNumber <= 0 {
+		return nil
+	}
+	return s.routePREvent(ctx, "HandleConflictPublished", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
+	})
+}
+
+// resolveCIRecovery asks the Restate PRObject whether the PR is CI-failed
+// for the given head SHA from the Restate-owned failure slots. The verdict
+// is the sole authority when restate_authoritative is on: the Postgres
+// ci_failed projection is never consulted here. The resolve is a pure read
+// and records nothing. A transport or decode failure surfaces so the caller
+// can fall back to the projection instead of losing the signal. Off the
+// authoritative path it returns the zero verdict without emitting a request.
+func (s *RouterServer) resolveCIRecovery(ctx context.Context, repo string, prNumber int, headSHA string) (restateclient.CIRecoveryDecision, error) {
+	if prNumber <= 0 {
+		return restateclient.CIRecoveryDecision{}, nil
+	}
+	return resolvePRVerdict[restateclient.CIRecoveryDecision](ctx, s, "HandleCIRecovery", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA,
+	})
+}
+
+// publishConflictAuthoritative publishes one conflict lifecycle event
+// decided by the Restate PRObject. The projection is never consulted here;
+// a deduped or stale verdict skips the publish, and an ack failure surfaces
+// so redelivery re-resolves and republishes.
+func (s *RouterServer) publishConflictAuthoritative(ctx context.Context, repo string, prNumber int, branch, headSHA, targetID string) (bool, error) {
+	decision, err := s.resolveConflictDispatch(ctx, repo, branch, headSHA, prNumber)
+	if err != nil {
+		return false, err
+	}
+	if !decision.ShouldPublish {
+		return true, nil
+	}
+	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        prConflict,
+		Repo:         repo,
+		PRNumber:     prNumber,
+		Branch:       branch,
+		HeadSHA:      headSHA,
+		TargetID:     targetID,
+		Status:       prConflict,
+		RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
+		Quiet:        isDependabotBranch(branch),
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return false, err
+	}
+	if err := s.recordConflictPublished(ctx, repo, branch, headSHA, prNumber); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // routeRolloutProgress journals one kustomization progress observation.

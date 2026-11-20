@@ -669,6 +669,10 @@ func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEve
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, aOpts...)
 }
 
+// isWaitingForImageBuild routes a deploy_success to the sync path while the
+// image build is still pending. Projection-safe: pure routing between two
+// live paths, never an effect dedup decision (the publish itself still
+// resolves from Restate when authoritative).
 func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, prNumber int) bool {
 	repo = normalizeRepo(repo)
 	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 || metadataWorkflowPath(repo) == "" {
@@ -709,7 +713,8 @@ func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt D
 // watcher gate passes — when the repo is the source of at least one watched Kustomization.
 // Failure and rollback alerts keep the direct path unless the PR is tracked under a Kustomization.
 // A discovery error fails closed: the alert is owned but gated, so the caller must publish nothing
-// and record no dedup for it.
+// and record no dedup for it. Projection-safe: pure watcher routing; the
+// terminal publish itself resolves from Restate when authoritative.
 func (s *RouterServer) deployEventWatcherOwnership(ctx context.Context, evt DeployEvent) (owned bool, err error) {
 	if s.registry == nil || evt.PRNumber <= 0 {
 		return false, nil
@@ -759,6 +764,8 @@ func (s *RouterServer) deferOwnedDeployEventToWatcher(ctx context.Context, evt D
 		slog.ErrorContext(ctx, "[synapse] [deploy] kustomization discovery failed; suppressing alert without publishing", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber, "error", discErr)
 		return true, nil
 	}
+	// Projection-safe: watcher-routing deferral only; the terminal publish
+	// itself resolves from Restate when authoritative.
 	if tracked, trackErr := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber); trackErr == nil && tracked {
 		slog.InfoContext(ctx, "[synapse] [deploy] deferring event to the kustomization watcher", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		return true, nil
@@ -864,9 +871,10 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 }
 
 // shouldSuppressDuplicateDeploySuccess reports whether a deploy_success
-// dispatch is a duplicate. Restate journaled effect keys and the pr_registry
-// deployed projection are the sole authority; the in-memory dedup maps are
-// deleted.
+// dispatch is a duplicate. Legacy fallback only: the authoritative path
+// resolves from the Restate PRObject and never calls this. It survives
+// because the non-authoritative direct-alert path still needs projection
+// dedup; deleting it would republish duplicates on the fallback path.
 func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context, repo, _jobName, _commitSHA string, prNum int) bool {
 	if s == nil {
 		return false

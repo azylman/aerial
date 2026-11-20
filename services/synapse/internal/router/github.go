@@ -65,6 +65,8 @@ func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNu
 		return nil
 	}
 	// Only the identity-validated snapshot for the PR's current revision renders.
+	// Projection-safe: read-model render for rollout state display, never an
+	// effect decision.
 	delete(meta, "build_metadata")
 	if m, found, err := s.registry.LoadPRBuildMetadata(ctx, repo, prNum); err == nil && found {
 		meta["build_metadata"] = m

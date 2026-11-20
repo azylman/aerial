@@ -193,14 +193,14 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 }
 
 // canRecoverRoboRevSuccess reports whether a roborev success recovers the PR.
-// Per-check active-failure memory is deleted with the tracker; the
-// pr_registry ci_failed projection and the live roborev comment decide.
+// When authoritative, the Restate PRObject CI-failed verdict decides; the
+// live roborev comment stays as the non-authoritative fallback signal.
 func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	if s == nil || prNumber <= 0 || headSHA == "" {
 		return false
 	}
-	if s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA) {
+	if s.isCIFailedForSHA(ctx, repo, prNumber, headSHA) {
 		return true
 	}
 	comment := s.fetchLatestRoboRevComment(ctx, repo, prNumber, headSHA)
@@ -213,12 +213,12 @@ func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, 
 		return false
 	}
 	if isGateAggregatorCheck(checkName) {
-		return headSHA != "" && s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA)
+		return headSHA != "" && s.isCIFailedForSHA(ctx, repo, prNumber, headSHA)
 	}
 	if isRoboRevCheck(checkName) {
 		return s.canRecoverRoboRevSuccess(ctx, repo, prNumber, headSHA)
 	}
-	return headSHA != "" && s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA)
+	return headSHA != "" && s.isCIFailedForSHA(ctx, repo, prNumber, headSHA)
 }
 
 func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
@@ -504,6 +504,30 @@ func (s *RouterServer) recordNonGateCheckFailureDetailed(res *ResolvedGitHubEven
 	return s.recordFailedCheckRunDetailed(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 }
 
+// isCIFailedForSHA reports whether the PR is CI-failed for the given head
+// SHA. When authoritative, the Restate PRObject verdict decides and the
+// Postgres projection is never consulted; a resolve failure falls back to
+// the projection instead of losing the signal. Off the authoritative path
+// it reads the projection directly.
+func (s *RouterServer) isCIFailedForSHA(ctx context.Context, repo string, prNumber int, headSHA ...string) bool {
+	if s.restateAuthoritative() && prNumber > 0 {
+		var query string
+		if len(headSHA) > 0 {
+			query = headSHA[0]
+		}
+		decision, err := s.resolveCIRecovery(ctx, repo, prNumber, query)
+		if err == nil {
+			return decision.CIFailed
+		}
+		slog.WarnContext(ctx, "[synapse] [github] CI recovery resolve failed, falling back to projection", "repo", repo, "pr", prNumber, "error", err)
+	}
+	return s.isPRRegistryCIFailed(ctx, repo, prNumber, headSHA...)
+}
+
+// isPRRegistryCIFailed is the legacy fallback: it reads the Postgres
+// ci_failed projection directly and runs only off the authoritative path or
+// when the Restate resolve fails. Never called directly by effect gates;
+// isCIFailedForSHA is the single entry point.
 func (s *RouterServer) isPRRegistryCIFailed(ctx context.Context, repo string, prNumber int, headSHA ...string) bool {
 	if s == nil || s.registry == nil || prNumber <= 0 || normalizeRepo(repo) == "" {
 		return false
@@ -523,7 +547,7 @@ func (s *RouterServer) isPRRegistryCIFailed(ctx context.Context, repo string, pr
 }
 
 func (s *RouterServer) shouldRetryCIFailureCompletion(ctx context.Context, res *ResolvedGitHubEvent) bool {
-	if res.PRNumber <= 0 || !s.isPRRegistryCIFailed(ctx, res.Repo, res.PRNumber) {
+	if res.PRNumber <= 0 || !s.isCIFailedForSHA(ctx, res.Repo, res.PRNumber) {
 		return false
 	}
 	if res.TargetID == "" && s.registry != nil {

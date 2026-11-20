@@ -164,6 +164,9 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	return s.recordAndReconcileKustomizations(ctx, repo, prNum, headBranch, headSHA, targetID, refs, trackPR, finalAttempt)
 }
 
+// hasUnrecordedKustomizationRequests is projection-safe: pure workflow
+// routing (whether reconcile requests still need recording), never an
+// effect dedup decision.
 func (s *RouterServer) hasUnrecordedKustomizationRequests(ctx context.Context, repo string, prNum int) bool {
 	hasReqs, err := s.registry.HasKustomizationRequests(ctx, repo, prNum)
 	return err == nil && !hasReqs

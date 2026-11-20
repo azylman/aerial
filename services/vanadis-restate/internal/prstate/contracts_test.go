@@ -106,6 +106,27 @@ func stubDeployPublishedErr(ctx context.Context, ev PREvent) error {
 	return err
 }
 
+// stubConflictDetectedErr adapts the verdict-returning conflict stub to the
+// error-only stub table without a per-row closure.
+func stubConflictDetectedErr(ctx context.Context, ev PREvent) error {
+	_, err := PRObjectStub{}.HandleConflictDetected(ctx, ev)
+	return err
+}
+
+// stubConflictPublishedErr adapts the outcome-returning conflict ack stub to
+// the error-only stub table without a per-row closure.
+func stubConflictPublishedErr(ctx context.Context, ev PREvent) error {
+	_, err := PRObjectStub{}.HandleConflictPublished(ctx, ev)
+	return err
+}
+
+// stubCIRecoveryErr adapts the verdict-returning recovery stub to the
+// error-only stub table without a per-row closure.
+func stubCIRecoveryErr(ctx context.Context, ev PREvent) error {
+	_, err := PRObjectStub{}.HandleCIRecovery(ctx, ev)
+	return err
+}
+
 func TestPRStateStubHandlersNoop(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -119,7 +140,9 @@ func TestPRStateStubHandlersNoop(t *testing.T) {
 		{name: "check passed", got: PRObjectStub{}.HandleCheckPassed(ctx, ev)},
 		{name: "check rerun", got: PRObjectStub{}.HandleCheckRerunRequested(ctx, ev)},
 		{name: "collaborator alert", got: PRObjectStub{}.HandleCollaboratorAlert(ctx, ev)},
-		{name: "conflict detected", got: PRObjectStub{}.HandleConflictDetected(ctx, ev)},
+		{name: "conflict detected", got: stubConflictDetectedErr(ctx, ev)},
+		{name: "conflict published", got: stubConflictPublishedErr(ctx, ev)},
+		{name: "ci recovery", got: stubCIRecoveryErr(ctx, ev)},
 		{name: "conflict resolved", got: PRObjectStub{}.HandleConflictResolved(ctx, ev)},
 		{name: "merged", got: PRObjectStub{}.HandleMerged(ctx, ev)},
 		{name: "closed", got: PRObjectStub{}.HandleClosed(ctx, ev)},
