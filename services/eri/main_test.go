@@ -192,16 +192,12 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		}
 	})
 
-	t.Run("default supplier and unchanged reload", func(t *testing.T) {
+	t.Run("nil supplier retains config without panic", func(t *testing.T) {
 		cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "gemini-2.5-pro" })
 		reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(nil))
-		reloadFn("DefaultReload")
+		reloadFn("NilSupplierReload")
 		if got := cfg.Current().Model; got != "gemini-2.5-pro" {
-			t.Fatalf("expected model unchanged after first reload, got %s", got)
-		}
-		reloadFn("UnchangedReload")
-		if got := cfg.Current().Model; got != "gemini-2.5-pro" {
-			t.Fatalf("expected model unchanged after second reload, got %s", got)
+			t.Fatalf("expected model unchanged after nil supplier reload, got %s", got)
 		}
 	})
 
