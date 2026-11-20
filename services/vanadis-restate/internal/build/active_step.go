@@ -27,28 +27,8 @@ type AckResponse struct {
 }
 
 func (b *BuildObject) syncActiveStepWidget(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error {
-	if msgID := deliverDirectWidgetIfConfigured(ctx, build, chunks); msgID != "" {
-		if msgID != build.StatusMessageID && b.store != nil {
-			if uErr := b.store.UpdateBuildStatusMessageID(ctx, build.ID, msgID); uErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] update status message id failed", "error", uErr)
-			}
-		}
-		return nil
-	}
 	_, err := b.executor.SyncBuildWidget(ctx, b.store, build, chunks, "")
 	return err
-}
-
-func deliverDirectWidgetIfConfigured(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) string {
-	d, err := widget.NewDiscordWidgetDeliverer("")
-	if err != nil || d == nil {
-		return ""
-	}
-	msgID, dErr := d.DeliverStatusWidget(ctx, widget.BuildSyncWidgetRequest(build, chunks))
-	if dErr != nil {
-		return ""
-	}
-	return msgID
 }
 
 // UpdateActiveStep updates the running chunk's live active step description and refreshes the Discord widget.
