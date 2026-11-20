@@ -242,6 +242,89 @@ spec:
               requests:
                 cpu: 10m
                 memory: 32Mi
+          - name: patch-unblocker
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
+            imagePullPolicy: IfNotPresent
+            command:
+              - node
+              - -e
+              - |
+                const fs = require('node:fs');
+                const https = require('node:https');
+                const cfg = JSON.parse(fs.readFileSync('/etc/gha-listener/config.json', 'utf8'));
+                const ns = cfg.ephemeral_runner_set_namespace;
+                const name = cfg.ephemeral_runner_set_name;
+                const ca = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
+                const agent = new https.Agent({ ca, keepAlive: true });
+                const path = `/apis/actions.github.com/v1alpha1/namespaces/${ns}/ephemeralrunnersets/${name}`;
+                function patch(body) {
+                  const token = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8').trim();
+                  return new Promise((resolve, reject) => {
+                    const req = https.request({
+                      hostname: process.env.KUBERNETES_SERVICE_HOST || 'kubernetes.default.svc',
+                      port: process.env.KUBERNETES_SERVICE_PORT || 443,
+                      path,
+                      method: 'PATCH',
+                      agent,
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'application/merge-patch+json',
+                        Accept: 'application/json',
+                        'Content-Length': Buffer.byteLength(body),
+                      },
+                    }, (res) => {
+                      let data = '';
+                      res.on('data', (c) => (data += c));
+                      res.on('end', () => {
+                        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
+                        else reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+                      });
+                    });
+                    req.on('error', reject);
+                    req.write(body);
+                    req.end();
+                  });
+                }
+                let seenPatchID = 0;
+                let seenCount = 0;
+                setInterval(async () => {
+                  try {
+                    const ers = await patch('{}');
+                    const pid = ers?.spec?.patchID || 0;
+                    const reps = ers?.spec?.replicas || 0;
+                    const cpid = ers?.status?.finishedRunnerCleanupPatchID || 0;
+                    if (pid > 0 && reps > 0 && cpid === pid) {
+                      if (seenPatchID === pid) {
+                        seenCount++;
+                        if (seenCount >= 2) {
+                          await patch('{"spec":{"patchID":0}}');
+                          console.log(`Unblocked suppressed scale-up for ${ns}/${name} (patchID=${pid}, replicas=${reps})`);
+                          seenPatchID = 0;
+                          seenCount = 0;
+                        }
+                      } else {
+                        seenPatchID = pid;
+                        seenCount = 1;
+                      }
+                    } else {
+                      seenPatchID = 0;
+                      seenCount = 0;
+                    }
+                  } catch (e) {
+                    console.error(e.message);
+                  }
+                }, 1000);
+            resources:
+              limits:
+                cpu: 50m
+                memory: 64Mi
+              requests:
+                cpu: 5m
+                memory: 16Mi
+            volumeMounts:
+              - mountPath: /etc/gha-listener
+                name: listener-config
+                readOnly: true
     maxRunners: 6
     minRunners: 0
     runnerScaleSetName: roborev-runner-aerial
@@ -386,6 +469,89 @@ spec:
               requests:
                 cpu: 10m
                 memory: 32Mi
+          - name: patch-unblocker
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
+            imagePullPolicy: IfNotPresent
+            command:
+              - node
+              - -e
+              - |
+                const fs = require('node:fs');
+                const https = require('node:https');
+                const cfg = JSON.parse(fs.readFileSync('/etc/gha-listener/config.json', 'utf8'));
+                const ns = cfg.ephemeral_runner_set_namespace;
+                const name = cfg.ephemeral_runner_set_name;
+                const ca = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
+                const agent = new https.Agent({ ca, keepAlive: true });
+                const path = `/apis/actions.github.com/v1alpha1/namespaces/${ns}/ephemeralrunnersets/${name}`;
+                function patch(body) {
+                  const token = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8').trim();
+                  return new Promise((resolve, reject) => {
+                    const req = https.request({
+                      hostname: process.env.KUBERNETES_SERVICE_HOST || 'kubernetes.default.svc',
+                      port: process.env.KUBERNETES_SERVICE_PORT || 443,
+                      path,
+                      method: 'PATCH',
+                      agent,
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'application/merge-patch+json',
+                        Accept: 'application/json',
+                        'Content-Length': Buffer.byteLength(body),
+                      },
+                    }, (res) => {
+                      let data = '';
+                      res.on('data', (c) => (data += c));
+                      res.on('end', () => {
+                        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
+                        else reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+                      });
+                    });
+                    req.on('error', reject);
+                    req.write(body);
+                    req.end();
+                  });
+                }
+                let seenPatchID = 0;
+                let seenCount = 0;
+                setInterval(async () => {
+                  try {
+                    const ers = await patch('{}');
+                    const pid = ers?.spec?.patchID || 0;
+                    const reps = ers?.spec?.replicas || 0;
+                    const cpid = ers?.status?.finishedRunnerCleanupPatchID || 0;
+                    if (pid > 0 && reps > 0 && cpid === pid) {
+                      if (seenPatchID === pid) {
+                        seenCount++;
+                        if (seenCount >= 2) {
+                          await patch('{"spec":{"patchID":0}}');
+                          console.log(`Unblocked suppressed scale-up for ${ns}/${name} (patchID=${pid}, replicas=${reps})`);
+                          seenPatchID = 0;
+                          seenCount = 0;
+                        }
+                      } else {
+                        seenPatchID = pid;
+                        seenCount = 1;
+                      }
+                    } else {
+                      seenPatchID = 0;
+                      seenCount = 0;
+                    }
+                  } catch (e) {
+                    console.error(e.message);
+                  }
+                }, 1000);
+            resources:
+              limits:
+                cpu: 50m
+                memory: 64Mi
+              requests:
+                cpu: 5m
+                memory: 16Mi
+            volumeMounts:
+              - mountPath: /etc/gha-listener
+                name: listener-config
+                readOnly: true
     maxRunners: 16
     minRunners: 0
     runnerScaleSetName: ci-runner-aerial

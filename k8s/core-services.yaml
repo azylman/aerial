@@ -1942,6 +1942,8 @@ spec:
               value: "4020"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/synapse/synapse.yaml
+            - name: K8S_AUTH_ENABLED
+              value: "true"
             - name: ERI_URL
               value: http://eri.aerial
             - name: NATS_AERIAL_PASSWORD
@@ -1956,6 +1958,18 @@ spec:
                 secretKeyRef:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
+                  optional: true
+            - name: DISCORD_TOKEN_MIORINE
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_TOKEN
+                  name: miorine-secrets
+                  optional: true
+            - name: DISCORD_TOKEN_SULETTA
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_TOKEN
+                  name: suletta-secrets
                   optional: true
             - name: POSTGRES_PASSWORD
               valueFrom:
