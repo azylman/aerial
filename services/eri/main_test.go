@@ -166,16 +166,43 @@ func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConf
 	return inW, outR, errR, &mockMainProcessHandle{pid: 12345}, nil
 }
 
+type mockMarkDirtyPool struct {
+	dirty atomic.Bool
+}
+
+func (m *mockMarkDirtyPool) MarkDirty() { m.dirty.Store(true) }
+func (*mockMarkDirtyPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
+	return nil, nil
+}
+func (*mockMarkDirtyPool) Initialize(ctx context.Context) error { return nil }
+func (*mockMarkDirtyPool) Close() error                         { return nil }
+
 func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("nil config handled", func(t *testing.T) {
-		CreateReloadConfigFunc(nil)("TestNil")
+		called := false
+		reloadFn := CreateReloadConfigFunc(nil, func(o *reloadConfigOptions) {
+			o.onReload = func(src string) { called = true }
+		})
+		if reloadFn == nil {
+			t.Fatal("expected non-nil reload function")
+		}
+		reloadFn("TestNil")
+		if !called {
+			t.Fatal("expected onReload to be called even when config is nil")
+		}
 	})
 
 	t.Run("default supplier and unchanged reload", func(t *testing.T) {
-		cfg := newTestConfig()
+		cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "gemini-2.5-pro" })
 		reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(nil))
 		reloadFn("DefaultReload")
+		if got := cfg.Current().Model; got != "gemini-2.5-pro" {
+			t.Fatalf("expected model unchanged after first reload, got %s", got)
+		}
 		reloadFn("UnchangedReload")
+		if got := cfg.Current().Model; got != "gemini-2.5-pro" {
+			t.Fatalf("expected model unchanged after second reload, got %s", got)
+		}
 	})
 
 	t.Run("invalid YAML with alert", func(t *testing.T) {
@@ -188,9 +215,10 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("supplier success updating model and marking pool dirty", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
 		cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "gemini-2.5-pro" })
-		wp := queue.New(cfg, queue.WorkerPoolConfig{})
+		mockPool := &mockMarkDirtyPool{}
+		wp := queue.New(cfg, queue.WorkerPoolConfig{ProcessPool: mockPool})
 		calledOnReload := false
-		CreateReloadConfigFunc(cfg,
+		reloadFn := CreateReloadConfigFunc(cfg,
 			WithDiscordSession(s),
 			WithWorkerPool(wp),
 			func(o *reloadConfigOptions) { o.onReload = func(src string) { calledOnReload = true } },
@@ -202,9 +230,25 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 				return nil
 			}),
 			WithSkipEnvironmentSync(),
-		)("TestReloadSuccess")
+		)
+		reloadFn("TestReloadSuccess")
 		if !calledOnReload {
 			t.Fatalf("expected onReload to be called")
+		}
+		if got := cfg.Current().Model; got != "gemini-2.5-flash" {
+			t.Fatalf("expected reloaded model gemini-2.5-flash, got %s", got)
+		}
+		if got := wp.GetRuntimeConfig(); got != "gemini-2.5-flash" {
+			t.Fatalf("expected worker pool runtime model gemini-2.5-flash, got %s", got)
+		}
+		if !mockPool.dirty.Load() {
+			t.Fatalf("expected worker pool to be marked dirty after fingerprint change")
+		}
+
+		mockPool.dirty.Store(false)
+		reloadFn("TestReloadUnchangedFingerprint")
+		if mockPool.dirty.Load() {
+			t.Fatalf("expected worker pool dirty flag not to be set when fingerprint is unchanged")
 		}
 	})
 

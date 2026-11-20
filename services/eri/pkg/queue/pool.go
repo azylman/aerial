@@ -91,7 +91,7 @@ type WorkerPoolConfig struct {
 	DiscordSession                                                               *discordgo.Session
 	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt       string
 	TimeoutMinutes, MaxAttempts                                                  int
-	BackoffBase, IdleTimeout, RetryDelayOverride, MaintenanceInterval            time.Duration
+	BackoffBase, IdleTimeout, RetryDelayOverride                                 time.Duration
 	SessionManager                                                               *session.Manager
 	Pools                                                                        map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
@@ -686,6 +686,8 @@ func (p *WorkerPool) Start() {
 
 // HoldUntilLeader gates worker spawning on EnqueueBurst and EnqueueDispatch
 // until ReleaseLeaderHold is called after acquiring the leader lock.
+//
+// TODO(c09f-purge-dead-eri-job-fallbacks): Deprecated; leader locks are superseded by Restate durable execution in services/eri-restate.
 func (p *WorkerPool) HoldUntilLeader() {
 	if p == nil {
 		return
