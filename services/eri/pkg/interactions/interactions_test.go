@@ -564,6 +564,7 @@ func TestRouter_HandleQuota(t *testing.T) {
 	}{
 		{"WithActiveQuotaBuckets", sampleGroups, refreshedAt, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h", "Last refreshed: 4m ago", `\u003ct:`}, nil},
 		{"CodexWeeklyOnly", []metrics.QuotaGroup{{Name: "Codex", Buckets: []metrics.QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}}}}, refreshedAt, true, 0, []string{"**Codex**", "**weekly**: `98%` remaining"}, []string{"**5h**"}},
+		{"ZeroUpdatedAtOmitsLine", sampleGroups, time.Time{}, true, 0, []string{"**Gemini Models**"}, []string{"Last refreshed"}},
 		{"EmptyQuotaFallback", nil, time.Time{}, false, 0, []string{"No quota telemetry recorded yet"}, nil},
 		{"ErrorLoggingHttp500", nil, time.Time{}, true, http.StatusInternalServerError, nil, nil},
 	}
@@ -571,9 +572,8 @@ func TestRouter_HandleQuota(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
 			if tc.useProvider {
-				g, u := tc.groups, tc.updatedAt
-				router.deps.QuotaProvider = func() []metrics.QuotaGroup { return g }
-				router.deps.QuotaTimeProvider = func() time.Time { return u }
+				snap := metrics.QuotaSnapshot{Groups: tc.groups, UpdatedAt: tc.updatedAt}
+				router.deps.QuotaProvider = func() metrics.QuotaSnapshot { return snap }
 			}
 			router.Handle(t.Context(), session, mkCmd("int-quota", "chan-1", "admin-123", "quota"))
 			reqs := transport.Requests()
