@@ -379,3 +379,35 @@ func SanitizeAuthor(name string) string {
 	name = strings.ReplaceAll(name, ">", "")
 	return strings.TrimSpace(name)
 }
+
+// matchNothingPattern is an RE2 pattern that matches no input, including the empty string.
+const matchNothingPattern = `[^\s\S]`
+
+// ValuePattern returns an RE2 alternation matching every registered-style variant of values
+// (raw, Base64 alignments, URL-encoded, git basic auth) as literal text. Values and variants
+// shorter than the sanitizer's minimum token length are skipped, duplicates are dropped, and
+// alternatives are ordered longest first so the longest variant wins at each position.
+// With no usable values it returns a pattern that matches nothing.
+func ValuePattern(values []string) string {
+	variants := buildSensitiveTokenSlice(nil, values)
+	if len(variants) == 0 {
+		return matchNothingPattern
+	}
+	sort.SliceStable(variants, func(i, j int) bool {
+		if len(variants[i]) != len(variants[j]) {
+			return len(variants[i]) > len(variants[j])
+		}
+		return variants[i] < variants[j]
+	})
+	quoted := make([]string, len(variants))
+	for i, v := range variants {
+		quoted[i] = regexp.QuoteMeta(v)
+	}
+	return strings.Join(quoted, "|")
+}
+
+// OTTLStringBody escapes backslashes and double quotes so pattern can be embedded
+// inside an OTTL double-quoted string literal.
+func OTTLStringBody(pattern string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(pattern)
+}

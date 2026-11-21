@@ -154,7 +154,8 @@ func (h *ConflictHandlers) HandleConflictCheck(ctx context.Context, prKey string
 		return ConflictOutcome{}, fmt.Errorf("unknown pr key %q", strings.TrimSpace(prKey))
 	}
 	switch pr.ApplyEvent(ev) {
-	case DispositionDropStale:
+	case DispositionDropStale, DispositionRecoverStale:
+		// ApplyEvent never recovers; only a synchronize does.
 		return ConflictOutcome{Disposition: DispositionDropStale}, nil
 	case DispositionAbsorbTerminal:
 		return ConflictOutcome{Disposition: DispositionAbsorbTerminal}, nil

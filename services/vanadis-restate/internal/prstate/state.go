@@ -29,10 +29,15 @@ type FailedCheckState struct {
 // PRState is the Restate-owned per-PR state. It replaces the in-memory
 // StateTracker maps for one PR with a single serializable struct.
 type PRState struct {
-	Repo                 string
-	PRNumber             int
-	Agent                string
-	HeadSHA              string
+	Repo     string
+	PRNumber int
+	Agent    string
+	HeadSHA  string
+	// PriorHeads is the bounded ring (oldest first, at most MaxPriorHeads)
+	// of heads this PR moved past. A synchronize whose head is in it is a
+	// late redelivery; any other mismatched synchronize recovers the head.
+	// State serialized before the field existed decodes it empty.
+	PriorHeads           []string
 	GateGeneration       uint64
 	ReopenEpoch          uint64
 	Terminal             TerminalState
@@ -155,8 +160,37 @@ func (s *PRState) RecordFailedCISHA(headSHA string) bool {
 		return false
 	}
 	s.FailedCISHA = headSHA
-	s.HeadSHA = headSHA
+	s.SetHead(headSHA)
 	return true
+}
+
+// MaxPriorHeads bounds PRState.PriorHeads.
+const MaxPriorHeads = 20
+
+// SetHead moves HeadSHA to head. A different non-empty head it leaves
+// behind joins the PriorHeads ring (oldest dropped past MaxPriorHeads), and
+// the new head leaves the ring, so a force-push back to an earlier head is
+// current again rather than stale.
+func (s *PRState) SetHead(head string) {
+	head = strings.TrimSpace(head)
+	prev := strings.TrimSpace(s.HeadSHA)
+	s.HeadSHA = head
+	if head != "" {
+		s.PriorHeads = slices.DeleteFunc(s.PriorHeads, func(h string) bool { return strings.EqualFold(h, head) })
+	}
+	if prev == "" || strings.EqualFold(prev, head) {
+		return
+	}
+	s.PriorHeads = append(s.PriorHeads, prev)
+	if n := len(s.PriorHeads); n > MaxPriorHeads {
+		s.PriorHeads = slices.Clone(s.PriorHeads[n-MaxPriorHeads:])
+	}
+}
+
+// HasPriorHead reports whether head is one this PR already moved past.
+func (s *PRState) HasPriorHead(head string) bool {
+	head = strings.TrimSpace(head)
+	return s != nil && head != "" && slices.ContainsFunc(s.PriorHeads, func(h string) bool { return strings.EqualFold(h, head) })
 }
 
 // HasFailedCISHA reports whether a failed CI SHA is recorded; a non-empty
