@@ -338,25 +338,25 @@ func TestNewResource(t *testing.T) {
 		wantErr       bool
 	}{
 		{
-			name: "agent becomes service.namespace and aerial.agent", agent: "miorine",
+			name: "agent becomes service.namespace and aerial.agent", agent: "agent-alpha",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "miorine", "aerial.agent": "miorine", "aerial.stack": "miorine",
+				"service.name": "haro", "service.namespace": "agent-alpha", "aerial.agent": "agent-alpha", "aerial.stack": "agent-alpha",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "stack fallback becomes service.namespace and aerial.agent", stack: "miorine",
+			name: "stack fallback becomes service.namespace and aerial.agent", stack: "agent-alpha",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "miorine", "aerial.agent": "miorine", "aerial.stack": "miorine",
+				"service.name": "haro", "service.namespace": "agent-alpha", "aerial.agent": "agent-alpha", "aerial.stack": "agent-alpha",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "agent takes precedence over stack", agent: "suletta", stack: "miorine",
+			name: "agent takes precedence over stack", agent: "agent-beta", stack: "agent-alpha",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "suletta", "aerial.agent": "suletta", "aerial.stack": "suletta",
+				"service.name": "haro", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
@@ -376,9 +376,9 @@ func TestNewResource(t *testing.T) {
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "OTEL_SERVICE_NAME overrides service.name", agent: "suletta",
+			name: "OTEL_SERVICE_NAME overrides service.name", agent: "agent-beta",
 			env:           map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
-			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "suletta", "aerial.agent": "suletta", "aerial.stack": "suletta"},
+			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta"},
 			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
@@ -431,7 +431,7 @@ func TestInit(t *testing.T) {
 	}{
 		{name: "missing file runs disabled", path: filepath.Join(dir, "absent.yaml")},
 		{name: "malformed yaml runs disabled", path: write("bad.yaml", "enabled: [")},
-		{name: "enabled config exports", path: write("ok.yaml", "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: marida\n"), wantEnabled: true, wantStack: "marida"},
+		{name: "enabled config exports", path: write("ok.yaml", "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: agent-gamma\n"), wantEnabled: true, wantStack: "agent-gamma"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

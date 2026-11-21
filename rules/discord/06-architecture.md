@@ -12,10 +12,10 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`coven`**: Semantic fact extraction, ACT-R memory decay, and procedural skill synthesis service.
   - **`vanadis`**: Multi-chunk build queue orchestrator providing HTTP/MCP APIs (`:4025`), JIT symbol line-slice resolution, and NATS JetStream consumers paired with **`vanadis-restate`** (`RestateDeployment` on `:9080` Restate SDK and `:4026` health/metrics) executing durable Restate `Build` Virtual Object and `BuildRouter` DAG workflows.
   - **`nats`**: NATS 2 JetStream broker (`StatefulSet` on `:4222`, HTTP monitoring `:8222`) backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup via `pkg/pubsub`.
-  - **`restate`**: Official Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB state/journal storage across `restate`, `restate-marida`, and `restate-miorine` namespaces).
+  - **`restate`**: Official Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB state/journal storage in the restate namespace).
   - **`postgres`**: CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana), also hosting the logical `docket` database for `docket-store` (Vikunja) and `docket-mcp`.
   - **`flux-system` / `git-sync`**: Flux CD (`flux-system`) reconciling `./k8s` Kustomizations and Kubernetes `git-sync` sidecar initContainers mounting `/share/aerial:ro` and `/share/aerial-config:ro` into `eri`.
-  - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`restate.aerial` -> `restate.restate.svc.cluster.local`, `restate-marida.aerial` -> `restate.restate-marida.svc.cluster.local`, `*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
+  - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`restate.aerial` -> `restate.restate.svc.cluster.local`, `*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
   - **`infisical`**: Centralized secret management and automated rotation backed by Valkey 9, synced via External Secrets Operator into scoped per-service Kubernetes Secrets and the `shared-secrets` redaction bundle.
 
 - **Outbound Model Context Protocol (MCP) Microservices**:

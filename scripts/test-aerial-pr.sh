@@ -1856,14 +1856,14 @@ EOF
             fi
         }
         export -f curl
-        AERIAL_BOT_ID='suletta' submit_scratch \"\$WORK_DIR_BOT\" 'feat: bot test' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
+        AERIAL_BOT_ID='agent-beta' submit_scratch \"\$WORK_DIR_BOT\" 'feat: bot test' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
     )
 
     reg_pl_bot=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG_BOT\" | sed 's/^REG_PAYLOAD://')
     rm -rf \"\$WORK_DIR_BOT\" \"\$PAYLOAD_LOG_BOT\"
 
     if [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.pr_number')\" -eq 89 ] && \
-       [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.bot_id')\" = 'suletta' ]; then
+       [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.bot_id')\" = 'agent-beta' ]; then
         echo 'submit_bot_id_env:ok'
     else
         echo \"submit_bot_id_env:fail:reg=\$reg_pl_bot\"

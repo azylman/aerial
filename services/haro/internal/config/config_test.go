@@ -116,7 +116,7 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 	_ = os.WriteFile(pathWithBoth, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
 	_ = os.WriteFile(pathWithoutEri, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
 	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"), 0o644)
-	_ = os.WriteFile(pathWithRestate, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'miorine'\n"), 0o644)
+	_ = os.WriteFile(pathWithRestate, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'agent-alpha'\n"), 0o644)
 
 	tests := []struct {
 		name           string
@@ -174,7 +174,7 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			wantEriURL:     "http://yaml.eri:8088",
 			wantVanadisURL: "http://yaml.vanadis:4025",
 			wantRestateURL: "http://yaml.restate:8080",
-			wantAgentName:  "miorine",
+			wantAgentName:  "agent-alpha",
 		},
 		{
 			name:           "env restate url and agent name take precedence over yaml",
@@ -182,12 +182,12 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			envEri:         "",
 			envVanadis:     "",
 			envRestate:     "http://env.restate:8080/",
-			envAgent:       "suletta",
+			envAgent:       "agent-beta",
 			envDB:          "postgres://localhost/db",
 			wantEriURL:     "http://yaml.eri:8088",
 			wantVanadisURL: "http://yaml.vanadis:4025",
 			wantRestateURL: "http://env.restate:8080",
-			wantAgentName:  "suletta",
+			wantAgentName:  "agent-beta",
 		},
 		{
 			name:       "missing eri url returns error",

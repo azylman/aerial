@@ -349,11 +349,11 @@ func parseK8sClusterStateRolloutCases(refTime time.Time) []parseK8sClusterStateT
 		},
 		{
 			name:            "sibling deployment picks first sha-tagged container",
-			deploymentsJSON: `{"items":[{"metadata":{"name":"eri-suletta"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"git-sync","image":"registry.k8s.io/git-sync/git-sync:v4.4.0"},{"name":"eri","image":"` + eriImg + `"}]}}},"status":{"replicas":1,"readyReplicas":1,"updatedReplicas":1}}]}`,
+			deploymentsJSON: `{"items":[{"metadata":{"name":"eri-agent-beta"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"git-sync","image":"registry.k8s.io/git-sync/git-sync:v4.4.0"},{"name":"eri","image":"` + eriImg + `"}]}}},"status":{"replicas":1,"readyReplicas":1,"updatedReplicas":1}}]}`,
 			now:             refTime,
 			wantCount:       1,
-			wantCommits:     map[string]string{"eri-suletta": sha},
-			wantImages:      map[string]string{"eri-suletta": eriImg},
+			wantCommits:     map[string]string{"eri-agent-beta": sha},
+			wantImages:      map[string]string{"eri-agent-beta": eriImg},
 		},
 		{
 			name:            "non-sha tag keeps image without commit",
