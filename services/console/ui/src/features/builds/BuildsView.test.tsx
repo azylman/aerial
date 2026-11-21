@@ -92,13 +92,14 @@ function Shortcuts() {
 
 describe('BuildsView lifecycle', () => {
   it.each([
-    { name: 'loading', data: null, error: null, wantSkeletons: 4, wantCards: 0, wantBanner: false, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
-    { name: 'ready', data: payload(), error: null, wantSkeletons: 0, wantCards: 4, wantBanner: false, wantResults: 'SHOWING 4 / 4 BUILDS', wantProgress: '2/5' },
-    { name: 'empty queue', data: payload([]), error: null, wantSkeletons: 0, wantCards: 0, wantBanner: false, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
-    { name: 'failed first poll keeps the skeleton', data: null, error: 'HTTP 502', wantSkeletons: 4, wantCards: 0, wantBanner: true, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
-    { name: 'stale list under a failed poll', data: payload(), error: 'HTTP 502', wantSkeletons: 0, wantCards: 4, wantBanner: true, wantResults: 'SHOWING 4 / 4 BUILDS', wantProgress: '2/5' },
-    { name: 'degraded payload', data: payload(BUILDS, { status: 'degraded' }), error: null, wantSkeletons: 0, wantCards: 4, wantBanner: true, wantResults: 'SHOWING 4 / 4 BUILDS', wantProgress: '2/5' },
-  ])('$name', ({ data, error, wantSkeletons, wantCards, wantBanner, wantResults, wantProgress }) => {
+    { name: 'loading', data: null, error: null, wantSkeletons: 4, wantCards: 0, wantErrorCard: false, wantBanner: false, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
+    { name: 'ready', data: payload(), error: null, wantSkeletons: 0, wantCards: 4, wantErrorCard: false, wantBanner: false, wantResults: 'SHOWING 4 / 4 BUILDS', wantProgress: '2/5' },
+    { name: 'empty queue', data: payload([]), error: null, wantSkeletons: 0, wantCards: 0, wantErrorCard: false, wantBanner: false, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
+    { name: 'failed first poll shows the error, not a skeleton', data: null, error: 'HTTP 502', wantSkeletons: 0, wantCards: 0, wantErrorCard: true, wantBanner: true, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
+    { name: 'stale list under a failed poll', data: payload(), error: 'HTTP 502', wantSkeletons: 0, wantCards: 4, wantErrorCard: false, wantBanner: true, wantResults: 'SHOWING 4 / 4 BUILDS', wantProgress: '2/5' },
+    { name: 'degraded payload with builds stays data', data: payload(BUILDS, { status: 'degraded' }), error: null, wantSkeletons: 0, wantCards: 4, wantErrorCard: false, wantBanner: true, wantResults: 'SHOWING 4 / 4 BUILDS', wantProgress: '2/5' },
+    { name: 'empty error payload is an error, not an idle queue', data: payload([], { status: 'error', error: 'Upstream vanadis error occurred' }), error: null, wantSkeletons: 0, wantCards: 0, wantErrorCard: true, wantBanner: true, wantResults: 'SHOWING 0 / 0 BUILDS', wantProgress: '0/0' },
+  ])('$name', ({ data, error, wantSkeletons, wantCards, wantErrorCard, wantBanner, wantResults, wantProgress }) => {
     act(() => {
       if (data !== null) useConsoleStore.getState().setBuilds(data);
       if (error !== null) useConsoleStore.getState().failBuilds(error);
@@ -109,7 +110,8 @@ describe('BuildsView lifecycle', () => {
     expect(screen.queryByText('RECONNECTING TO VANADIS // STALE-WHILE-REVALIDATE ACTIVE') !== null).toBe(wantBanner);
     expect(text('#builds-results-count')).toBe(wantResults);
     expect(text('#builds-chunks-progress')).toBe(wantProgress);
-    expect(document.querySelectorAll('.builds-empty-card')).toHaveLength(data !== null && wantCards === 0 ? 1 : 0);
+    expect(document.querySelectorAll('.builds-error-card')).toHaveLength(wantErrorCard ? 1 : 0);
+    expect(document.querySelectorAll('.builds-empty-card')).toHaveLength(!wantErrorCard && data !== null && wantCards === 0 ? 1 : 0);
   });
 
   it('shows metrics, pill counts and each card with its badge, stats and timing', () => {

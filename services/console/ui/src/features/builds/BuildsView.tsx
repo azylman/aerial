@@ -5,6 +5,7 @@ import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
 import { useTabActive } from '../../hooks/useTabActive';
+import { buildsPanelState } from '../../lib/builds';
 import { filterByAgent } from '../../store/selectors';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
@@ -36,6 +37,7 @@ const EMPTY_BUILDS: readonly VanadisBuildDTO[] = Object.freeze([]);
 const selectData = (s: ConsoleState): BuildsAPIResponse | null => s.builds.list.data;
 const selectBuilds = (s: ConsoleState): readonly VanadisBuildDTO[] => s.builds.list.data?.builds ?? EMPTY_BUILDS;
 const selectLoaded = (s: ConsoleState): boolean => s.builds.list.data !== null;
+const selectListError = (s: ConsoleState): string | null => s.builds.list.error;
 const selectReconnect = (s: ConsoleState): boolean => showsReconnect(s.builds.list.data, s.builds.list.error);
 
 /** Polls the queue now (SYNC BUILDS); a newer click or unmount cancels the previous one. */
@@ -214,6 +216,17 @@ function BuildsSkeleton() {
   ));
 }
 
+function BuildsUnavailable({ error }: { readonly error: string }) {
+  return (
+    <div className="task-idle-card builds-error-card" role="alert">
+      <div className="idle-indicator">
+        <span className="pulse-dot unhealthy" /> <span>VANADIS UNREACHABLE</span>
+      </div>
+      <div>ERROR: {error}</div>
+    </div>
+  );
+}
+
 function NoBuilds() {
   return (
     <div className="task-idle-card builds-empty-card">
@@ -234,14 +247,17 @@ const FIRST_PASS_BUILDS = 10;
  */
 const BuildGrid = memo(function BuildGrid({ builds }: { readonly builds: readonly IndexedBuild[] }) {
   const loaded = useConsoleStore(selectLoaded);
+  const error = useConsoleStore(selectListError);
   const shown = useFirstPassLimit(loaded ? builds.length : 0, FIRST_PASS_BUILDS);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const onToggle = useCallback((id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
   }, []);
+  const panel = buildsPanelState(loaded, builds.length, error);
   let body;
-  if (!loaded) body = <BuildsSkeleton />;
-  else if (builds.length === 0) body = <NoBuilds />;
+  if (panel === 'loading') body = <BuildsSkeleton />;
+  else if (panel === 'error') body = <BuildsUnavailable error={error ?? ''} />;
+  else if (panel === 'idle') body = <NoBuilds />;
   else
     body = builds
       .slice(0, shown)

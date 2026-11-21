@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildsPanelState,
+  buildsPayloadError,
   classifyBuildQueueState,
   compareBuilds,
   computeBuildChunkStats,
@@ -284,5 +286,30 @@ describe('compareBuilds', () => {
     const list = [bCompEarly, bQueued1, bCompLate, bRun1, bQueued2, bRun2];
     const sorted = [...list].sort(compareBuilds);
     expect(sorted.map((b) => (b as { id: string }).id)).toEqual(['r1', 'r2', 'q1', 'q2', 'c-late', 'c-early']);
+  });
+});
+
+describe('buildsPayloadError', () => {
+  it.each([
+    { name: 'healthy payload', status: 'ok', error: undefined, builds: [], want: null },
+    { name: 'in-band error message', status: 'error', error: 'Upstream vanadis error occurred', builds: [], want: 'Upstream vanadis error occurred' },
+    { name: 'degraded without a message', status: 'degraded', error: undefined, builds: [], want: 'Vanadis degraded' },
+    { name: 'status is case-insensitive', status: ' ERROR ', error: undefined, builds: [], want: 'Vanadis error' },
+    { name: 'payload that still carries builds stays data', status: 'degraded', error: 'partial', builds: [{ id: 'b1' }], want: null },
+  ])('$name', ({ status, error, builds, want }) => {
+    expect(buildsPayloadError({ status, error, builds } as Parameters<typeof buildsPayloadError>[0])).toBe(want);
+  });
+});
+
+describe('buildsPanelState', () => {
+  it.each([
+    { name: 'nothing yet', loaded: false, count: 0, error: null, want: 'loading' },
+    { name: 'empty healthy queue', loaded: true, count: 0, error: null, want: 'idle' },
+    { name: 'failure before any data', loaded: false, count: 0, error: 'HTTP 401', want: 'error' },
+    { name: 'failure over an empty snapshot is not idle', loaded: true, count: 0, error: 'HTTP 401', want: 'error' },
+    { name: 'failure over builds keeps the stale builds', loaded: true, count: 2, error: 'HTTP 401', want: 'builds' },
+    { name: 'healthy builds', loaded: true, count: 2, error: null, want: 'builds' },
+  ])('$name', ({ loaded, count, error, want }) => {
+    expect(buildsPanelState(loaded, count, error)).toBe(want);
   });
 });

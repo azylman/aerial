@@ -84,6 +84,9 @@ func init() {
 			Transport: k8sauth.NewServiceAccountTransport(http.DefaultTransport, tokenPath),
 		})
 	}
+	if tokenPath != "" {
+		vanadisHTTPClient = newVanadisHTTPClient(k8sauth.NewTokenSource(tokenPath, time.Now))
+	}
 }
 
 func TestMain(m *testing.M) {
