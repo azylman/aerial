@@ -740,6 +740,23 @@ spec:
             severity: critical
           annotations:
             summary: vanadis-restate reconcile or handler errors detected (Restate invocation backing off)
+    - name: github_credential_health
+      interval: 1m
+      rules:
+        # A service configured for the GitHub App (github_credential: app)
+        # keeps sending PAT-authenticated requests: App env missing or token
+        # mint failing. A deliberate move to pat sets
+        # github_credential_configured{credential="app"} to 0 and never pages.
+        - alert: GitHubPATTrafficOnAppCredential
+          expr: |
+            sum by (namespace, job) (rate(github_requests_by_source_total{source="pat"}[5m])) > 0
+            and on (namespace, job)
+            max by (namespace, job) (github_credential_configured{credential="app"}) == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }} is configured for the GitHub App but has sent PAT-authenticated GitHub requests for 15 minutes"
     - name: eri_session_health
       interval: 30s
       rules:

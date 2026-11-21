@@ -2,8 +2,10 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -239,7 +241,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		}
 		if err != nil {
 			errLower := strings.ToLower(err.Error())
-			if strings.Contains(err.Error(), "403") || strings.Contains(errLower, "rate limit") {
+			if statusErr, ok := errors.AsType[*github.StatusError](err); github.IsRateLimitError(err) || (ok && statusErr.StatusCode == http.StatusForbidden) {
 				return err
 			}
 			if strings.Contains(errLower, "head ref does not exist") {
