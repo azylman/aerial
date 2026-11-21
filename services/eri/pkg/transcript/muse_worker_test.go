@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/services/eri/pkg/enginefmt"
 )
 
 type parseMuseEntryTestCase struct {
@@ -29,7 +31,7 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 		},
 		{
 			name:        "non-run kind ignored",
-			env:         museLineEnvelope{PayloadType: "runtime.session", Payload: musePayload{Kind: "init"}},
+			env:         museLineEnvelope{PayloadType: "runtime.session", Payload: enginefmt.MusePayload{Kind: "init"}},
 			wantHandled: true,
 		},
 		{
@@ -57,9 +59,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510000000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: "Please refactor this service"},
+					Event: enginefmt.MuseEvent{Kind: "started", Prompt: "Please refactor this service"},
 				},
 			},
 			wantHandled: true,
@@ -72,9 +74,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510000000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: "[Chat Alice]: hello"},
+					Event: enginefmt.MuseEvent{Kind: "started", Prompt: "[Chat Alice]: hello"},
 				},
 			},
 			wantHandled: true,
@@ -84,9 +86,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510000000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: ""},
+					Event: enginefmt.MuseEvent{Kind: "started", Prompt: ""},
 				},
 			},
 			wantHandled: true,
@@ -96,9 +98,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510001000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "assistant_message_committed", Text: "I will look into that."},
+					Event: enginefmt.MuseEvent{Kind: "assistant_message_committed", Text: "I will look into that."},
 				},
 			},
 			wantHandled: true,
@@ -111,9 +113,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510001000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "assistant_message_committed", Text: ""},
+					Event: enginefmt.MuseEvent{Kind: "assistant_message_committed", Text: ""},
 				},
 			},
 			wantHandled: true,
@@ -123,9 +125,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510006000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "terminal", Terminal: "failed", Reason: "Out of memory"},
+					Event: enginefmt.MuseEvent{Kind: "terminal", Terminal: "failed", Reason: "Out of memory"},
 				},
 			},
 			wantHandled: true,
@@ -138,9 +140,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510006000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "terminal", Terminal: "failed"},
+					Event: enginefmt.MuseEvent{Kind: "terminal", Terminal: "failed"},
 				},
 			},
 			wantHandled: true,
@@ -153,9 +155,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510006000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "terminal", Terminal: "succeeded"},
+					Event: enginefmt.MuseEvent{Kind: "terminal", Terminal: "succeeded"},
 				},
 			},
 			wantHandled: true,
@@ -170,11 +172,11 @@ func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510002000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "assistant_tool_calls_committed",
-						ToolCalls: []museToolCall{
+						ToolCalls: []enginefmt.MuseToolCall{
 							{Name: "bash", CallID: "call_123", Args: json.RawMessage(`{"command":"ls -la"}`)},
 						},
 					},
@@ -192,9 +194,9 @@ func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510002000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "assistant_tool_calls_committed"},
+					Event: enginefmt.MuseEvent{Kind: "assistant_tool_calls_committed"},
 				},
 			},
 			wantHandled: true,
@@ -204,11 +206,11 @@ func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510002000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "assistant_tool_calls_committed",
-						ToolCalls: []museToolCall{
+						ToolCalls: []enginefmt.MuseToolCall{
 							{Name: "glob", ID: "call_id_only", Args: json.RawMessage(`{"pattern":"*.go"}`)},
 						},
 					},
@@ -231,11 +233,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510003000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", Output: "total 0"},
 						},
 					},
@@ -252,11 +254,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510004000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", Output: "exit code 1", IsError: true},
 						},
 					},
@@ -273,11 +275,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510004000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", Text: "stderr output", IsError: true},
 						},
 					},
@@ -294,11 +296,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510004000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", IsError: true},
 						},
 					},
@@ -315,11 +317,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510003000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{ToolCallID: "call_fallback", Output: "content output"},
 						},
 					},

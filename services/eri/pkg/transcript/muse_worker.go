@@ -1,12 +1,13 @@
 package transcript
 
 import (
-	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/enginefmt"
 )
 
 // discoverMuseSessions scans Muse session base directories for session files.
@@ -119,10 +120,10 @@ func isMuseTranscriptPath(cleanPath, slashPath string, extraDirs []string) bool 
 }
 
 type museLineEnvelope struct {
-	RetainedFrame string      `json:"retained_frame,omitempty"`
-	PayloadType   string      `json:"payload_type"`
-	RecordedAt    int64       `json:"recorded_at"`
-	Payload       musePayload `json:"payload"`
+	RetainedFrame string                `json:"retained_frame,omitempty"`
+	PayloadType   string                `json:"payload_type"`
+	RecordedAt    int64                 `json:"recorded_at"`
+	Payload       enginefmt.MusePayload `json:"payload"`
 }
 
 func isMuseEnvelope(env museLineEnvelope) bool {
@@ -132,38 +133,7 @@ func isMuseEnvelope(env museLineEnvelope) bool {
 		strings.HasPrefix(env.PayloadType, "run.")
 }
 
-type musePayload struct {
-	Kind  string    `json:"kind"`
-	RunID string    `json:"run_id"`
-	Event museEvent `json:"event"`
-}
-
-type museEvent struct {
-	Kind      string           `json:"kind"`
-	Prompt    string           `json:"prompt,omitempty"`
-	Text      string           `json:"text,omitempty"`
-	Terminal  string           `json:"terminal,omitempty"`
-	Reason    string           `json:"reason,omitempty"`
-	ToolCalls []museToolCall   `json:"tool_calls,omitempty"`
-	Results   []museToolResult `json:"results,omitempty"`
-}
-
-type museToolCall struct {
-	ID     string          `json:"id,omitempty"`
-	CallID string          `json:"call_id,omitempty"`
-	Name   string          `json:"name"`
-	Args   json.RawMessage `json:"args,omitempty"`
-}
-
-type museToolResult struct {
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	Text       string `json:"text,omitempty"`
-	Output     string `json:"output,omitempty"`
-	IsError    bool   `json:"is_error,omitempty"`
-}
-
-func (st *transcriptScanState) handleMuseStartedEvent(ev *museEvent, ts string) {
+func (st *transcriptScanState) handleMuseStartedEvent(ev *enginefmt.MuseEvent, ts string) {
 	prompt := strings.TrimSpace(ev.Prompt)
 	if prompt == "" || strings.HasPrefix(prompt, "[Chat ") {
 		return
@@ -178,7 +148,7 @@ func (st *transcriptScanState) handleMuseStartedEvent(ev *museEvent, ts string) 
 	})
 }
 
-func (st *transcriptScanState) handleMuseAssistantCommitted(ev *museEvent, ts string) {
+func (st *transcriptScanState) handleMuseAssistantCommitted(ev *enginefmt.MuseEvent, ts string) {
 	text := strings.TrimSpace(ev.Text)
 	if text == "" {
 		return
@@ -193,7 +163,7 @@ func (st *transcriptScanState) handleMuseAssistantCommitted(ev *museEvent, ts st
 	})
 }
 
-func (st *transcriptScanState) handleMuseToolCallsCommitted(ev *museEvent, ts string) {
+func (st *transcriptScanState) handleMuseToolCallsCommitted(ev *enginefmt.MuseEvent, ts string) {
 	if len(ev.ToolCalls) == 0 {
 		return
 	}
@@ -228,7 +198,7 @@ func (st *transcriptScanState) handleMuseToolCallsCommitted(ev *museEvent, ts st
 	})
 }
 
-func (st *transcriptScanState) handleMuseToolResultBatch(ev *museEvent, ts string) {
+func (st *transcriptScanState) handleMuseToolResultBatch(ev *enginefmt.MuseEvent, ts string) {
 	for _, res := range ev.Results {
 		callID := res.CallID
 		if callID == "" {
@@ -262,7 +232,7 @@ func (st *transcriptScanState) handleMuseToolResultBatch(ev *museEvent, ts strin
 	}
 }
 
-func (st *transcriptScanState) handleMuseTerminal(ev *museEvent, ts string) {
+func (st *transcriptScanState) handleMuseTerminal(ev *enginefmt.MuseEvent, ts string) {
 	errMsg := ev.Reason
 	if errMsg == "" {
 		errMsg = "terminal failed"
