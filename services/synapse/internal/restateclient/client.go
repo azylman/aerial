@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -47,6 +48,10 @@ var prHandlers = map[string]bool{
 	"HandleCheckPassed":            true,
 	"HandleCheckRerunRequested":    true,
 	"HandleCIRecovery":             true,
+	"HandleCIRecovered":            true,
+	"HandleConflict":               true,
+	"HandleDeploySuccess":          true,
+	"HandleDeployAttemptFailed":    true,
 	"HandleCollaboratorAlert":      true,
 	"HandleConflictDetected":       true,
 	"HandleConflictPublished":      true,
@@ -110,6 +115,10 @@ type PREvent struct {
 	// EriEffects are the rendered eri-bound effects for this event; tags
 	// mirror the prstate EriEffect contract.
 	EriEffects []EriEffect `json:"eri_effects,omitempty"`
+	// Facts are the rendered aerial.pr.> lifecycle facts for this event;
+	// PRObject publishes them when it owns the event's effects and records
+	// them as intended otherwise.
+	Facts []pubsub.PRLifecycleEvent `json:"facts,omitempty"`
 }
 
 // Eri effect kinds; values mirror the prstate Effect* constants.
@@ -144,6 +153,34 @@ func EffectMatchKey(repo string, prNumber int, headSHA, kind, jobName, checkName
 		fmt.Fprintf(&sb, ":check=%s", canon)
 	}
 	return sb.String()
+}
+
+// FactEffectPrefix prefixes every lifecycle-fact effect kind; the value
+// mirrors prstate FactEffectPrefix.
+const FactEffectPrefix = "pr_fact_"
+
+// FactEffectKind is the effect kind for a lifecycle fact event
+// (pr_fact_<event>), matching prstate FactEffectKind.
+func FactEffectKind(event string) string {
+	return FactEffectPrefix + strings.ToLower(strings.TrimSpace(event))
+}
+
+// FactMatchKey renders the generation-free key prstate records for one
+// lifecycle fact: keyed on its head SHA, falling back to its merge SHA,
+// plus its job and check names.
+func FactMatchKey(fact pubsub.PRLifecycleEvent) string {
+	sha := strings.TrimSpace(fact.HeadSHA)
+	if sha == "" || isZeroSHA(sha) {
+		sha = strings.TrimSpace(fact.MergeSHA)
+	}
+	if isZeroSHA(sha) {
+		sha = ""
+	}
+	return EffectMatchKey(fact.Repo, fact.PRNumber, sha, FactEffectKind(fact.Event), fact.JobName, fact.CheckName)
+}
+
+func isZeroSHA(sha string) bool {
+	return strings.Trim(sha, "0") == ""
 }
 
 // RegisterRequest is the PRObject.Register payload: the normalized register
@@ -506,20 +543,31 @@ func (c *Client) send(ctx context.Context, service, key, handler string, payload
 }
 
 // idempotencyPayload strips wall-clock noise from a payload before it is
-// digested into the Idempotency-Key: kustomization requested_at stamps are
-// minted per attempt, so a retried event must still dedup at the ingress
-// (the first accepted request wins). Every other payload digests as sent.
+// digested into the Idempotency-Key: kustomization requested_at stamps and
+// fact occurred_at stamps are minted per attempt, so a retried event must
+// still dedup at the ingress (the first accepted request wins). Every other
+// payload digests as sent.
 func idempotencyPayload(payload any) any {
 	ev, ok := payload.(PREvent)
-	if !ok || len(ev.KustomizationRequests) == 0 {
+	if !ok || (len(ev.KustomizationRequests) == 0 && len(ev.Facts) == 0) {
 		return payload
 	}
-	stripped := make(map[string]model.KustomizationRequest, len(ev.KustomizationRequests))
-	for name, req := range ev.KustomizationRequests {
-		req.RequestedAt = ""
-		stripped[name] = req
+	if len(ev.KustomizationRequests) > 0 {
+		stripped := make(map[string]model.KustomizationRequest, len(ev.KustomizationRequests))
+		for name, req := range ev.KustomizationRequests {
+			req.RequestedAt = ""
+			stripped[name] = req
+		}
+		ev.KustomizationRequests = stripped
 	}
-	ev.KustomizationRequests = stripped
+	if len(ev.Facts) > 0 {
+		facts := make([]pubsub.PRLifecycleEvent, len(ev.Facts))
+		for i, f := range ev.Facts {
+			f.OccurredAt = time.Time{}
+			facts[i] = f
+		}
+		ev.Facts = facts
+	}
 	return ev
 }
 

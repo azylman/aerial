@@ -80,6 +80,12 @@ type PRState struct {
 	// skipped because synapse owned the event's effects (legacy). Shadow
 	// gates compare it key for key with synapse's [synapse-effect] log.
 	IntendedEffects []IntendedEffect
+
+	// PendingDeployFailure is the armed deploy-failure deadline for a
+	// restate-owned deploy attempt that failed; DeployFailureSeq numbers
+	// the deadlines so a stale timer never fires a newer attempt.
+	PendingDeployFailure *PendingDeployFailure
+	DeployFailureSeq     uint64
 }
 
 // NewPRState returns an empty PR state for repo#prNumber.
@@ -747,9 +753,12 @@ type RepoState struct {
 	Repo          string
 	MainPushIndex []string
 	LatestMainSHA string
-	TouchedPRKeys []string
-	touchedSet    map[string]bool
-	Tombstones    map[string]uint64
+	// FannedOutMainSHA is the main SHA whose main-advanced fan-out already
+	// went out; the fan-out effect fires once per main SHA.
+	FannedOutMainSHA string
+	TouchedPRKeys    []string
+	touchedSet       map[string]bool
+	Tombstones       map[string]uint64
 	// SHAIndex maps a lower-cased head or merge SHA to the PR that most
 	// recently claimed it.
 	SHAIndex map[string]SHAIndexEntry

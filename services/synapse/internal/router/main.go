@@ -714,6 +714,10 @@ func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt Dep
 
 func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt DeployEvent, prefix string) error {
 	targetID := evt.TargetID
+	if s.registry != nil && evt.PRNumber > 0 && restateOwnsEffects(ctx) {
+		// PRObject applies deploy_failed and publishes the carried fact.
+		return s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, false, s.deployLifecycleFact(ctx, evt, eventDeployFailed, eventDeployFailed))
+	}
 	if s.registry != nil && evt.PRNumber > 0 {
 		if err := s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, false); err != nil {
 			return err
@@ -724,11 +728,16 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		}
 		targetID = firstNonEmpty(tID, targetID)
 	}
-	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed"); err != nil {
+	fact := s.deployLifecycleFact(ctx, evt, eventDeployFailed, eventDeployFailed)
+	if evt.PRNumber > 0 {
+		if err := s.publishLegacyFact(ctx, fact); err != nil {
+			return fmt.Errorf("publish deploy lifecycle event: %w", err)
+		}
+	} else if err := s.publishPRLifecycleEvent(ctx, fact); err != nil {
 		return fmt.Errorf("publish deploy lifecycle event: %w", err)
 	}
 	if s.registry != nil && evt.PRNumber > 0 {
-		if ackErr := s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, true); ackErr != nil {
+		if ackErr := s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, true, fact); ackErr != nil {
 			slog.WarnContext(ctx, "[synapse] [restate-cutover] failed journaling deploy_failed ack", "repo", evt.Repo, "pr", evt.PRNumber, "error", ackErr)
 		}
 		if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, evt.Repo, evt.PRNumber); ackErr != nil {
@@ -940,33 +949,7 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 			return &evt, nil
 		}
 
-		if s.restateAuthoritative() && evt.PRNumber > 0 {
-			return s.publishUnownedDeploySuccessAuthoritative(ctx, evt)
-		}
-		if evt.PRNumber > 0 {
-			// Journal before the suppress check: the journal is the ordered
-			// record and Restate dedups the repeat; the suppress check below
-			// still skips the duplicate legacy publish.
-			if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
-				return &evt, err
-			}
-		}
-		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
-			slog.InfoContext(ctx, "[synapse] [deploy] suppressing duplicate deploy_success", "repo", evt.Repo, "job", evt.JobName, "pr", evt.PRNumber, "commit", evt.CommitSHA)
-			return &evt, nil
-		}
-		if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", statusDeployed); err != nil {
-			return &evt, err
-		}
-		if evt.PRNumber > 0 {
-			return &evt, nil
-		}
-		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
-			return &evt, err
-		}
-		// No Restate route: non-PR dispatches have no PRObject key in either
-		// mode, and the prompt above is the only effect.
-		return &evt, nil
+		return s.publishUnownedDeploySuccess(ctx, evt)
 	case eventDeployRollback, eventDeployFailed:
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
 	case eventSyncSuccess:
@@ -977,6 +960,44 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 	case eventSyncFailed:
 		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
 	}
+	return &evt, nil
+}
+
+// publishUnownedDeploySuccess publishes one unowned deploy_success alert:
+// authoritative PR dispatches resolve through PRObject; otherwise the
+// merged HandleDeploySuccess verdict is journaled with the fact before the
+// legacy suppress check and publish (restate-owned events stop there).
+func (s *RouterServer) publishUnownedDeploySuccess(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
+	if s.restateAuthoritative() && evt.PRNumber > 0 {
+		return s.publishUnownedDeploySuccessAuthoritative(ctx, evt)
+	}
+	fact := s.deployLifecycleFact(ctx, evt, eventDeploySuccess, statusDeployed)
+	if evt.PRNumber > 0 {
+		// Journal before the suppress check: the journal is the ordered
+		// record and Restate dedups the repeat; the suppress check below
+		// still skips the duplicate legacy publish.
+		if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber, fact); err != nil {
+			return &evt, err
+		}
+		if restateOwnsEffects(ctx) {
+			return &evt, nil
+		}
+	}
+	if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
+		slog.InfoContext(ctx, "[synapse] [deploy] suppressing duplicate deploy_success", "repo", evt.Repo, "job", evt.JobName, "pr", evt.PRNumber, "commit", evt.CommitSHA)
+		return &evt, nil
+	}
+	if evt.PRNumber > 0 {
+		return &evt, s.publishLegacyFact(ctx, fact)
+	}
+	if err := s.publishPRLifecycleEvent(ctx, fact); err != nil {
+		return &evt, err
+	}
+	if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
+		return &evt, err
+	}
+	// No Restate route: non-PR dispatches have no PRObject key in either
+	// mode, and the prompt above is the only effect.
 	return &evt, nil
 }
 
@@ -1009,14 +1030,16 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 		return s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
 	}
 	// Journal before the legacy publish and dedup mark so a journal failure
-	// leaves nothing recorded and the redelivery retries the journal.
-	if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
+	// leaves nothing recorded and the redelivery retries the journal. A
+	// restate-owned event leaves the publish to PRObject.
+	fact := s.deployLifecycleFact(ctx, evt, eventDeploySuccess, statusDeployed)
+	if err := s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber, fact); err != nil {
 		return err
 	}
-	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", statusDeployed); err != nil {
-		return err
+	if restateOwnsEffects(ctx) {
+		return nil
 	}
-	return nil
+	return s.publishLegacyFact(ctx, fact)
 }
 
 func (s *RouterServer) isDependabotPRNumber(ctx context.Context, repo string, prNum int) bool {

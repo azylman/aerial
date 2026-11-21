@@ -213,6 +213,7 @@ func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
 	var errs []error
 	if recorded {
 		errs = append(errs, h.sendMainAdvanced(ctx, st, ev.EffectsOwner))
+		st.FannedOutMainSHA = st.LatestMainSHA
 	}
 	h.store.SaveRepo(st)
 	if recorded {
@@ -235,9 +236,11 @@ func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState, owne
 	return errors.Join(errs...)
 }
 
-// HandleFanout re-delivers the latest main push to every open PR as one-way
-// HandleMainAdvanced sends. It records no state; receiving PRObjects treat
-// the clear as idempotent.
+// HandleFanout delivers the latest main push to every open PR as one-way
+// HandleMainAdvanced sends, as a journaled effect keyed by the main SHA: a
+// main SHA already fanned out (by HandleMainPush or an earlier fan-out)
+// sends nothing, so a redelivered fan-out never re-fires. The sends are
+// state transitions, so they run for legacy and restate owners alike.
 func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 	repo := NormalizeRepo(ev.Repo)
 	if repo == "" {
@@ -247,10 +250,13 @@ func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 	if err != nil {
 		return err
 	}
-	if st == nil || strings.TrimSpace(st.LatestMainSHA) == "" {
+	if st == nil || strings.TrimSpace(st.LatestMainSHA) == "" || st.FannedOutMainSHA == st.LatestMainSHA {
 		return nil
 	}
-	return h.sendMainAdvanced(ctx, st, ev.EffectsOwner)
+	err = h.sendMainAdvanced(ctx, st, ev.EffectsOwner)
+	st.FannedOutMainSHA = st.LatestMainSHA
+	h.store.SaveRepo(st)
+	return err
 }
 
 // HandleKustomizationStatus records a dispatched-SHA tombstone scoped to its

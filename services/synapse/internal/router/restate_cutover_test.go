@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -268,7 +269,7 @@ func TestRouteDeployDispatched(t *testing.T) {
 				url = srv.URL
 			}
 			srv := NewRouterServer(fixedConfig(Config{RestateAuthoritative: tc.authoritative, RestateURL: url}), nil)
-			err := srv.routeDeployDispatched(context.Background(), "azylman/aerial", "api", tc.headSHA, "", tc.prNumber)
+			err := srv.routeDeployDispatched(context.Background(), "azylman/aerial", "api", tc.headSHA, "", tc.prNumber, pubsub.PRLifecycleEvent{})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("routeDeployDispatched() error = %v, wantErr %v", err, tc.wantErr)
 			}

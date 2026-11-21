@@ -34,10 +34,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}
 	// Journal before the legacy publish: a journal failure leaves nothing
 	// recorded, so the redelivery retries the journal.
-	if err := s.routeDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum); err != nil {
-		return err
-	}
-	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	fact := pubsub.PRLifecycleEvent{
 		Event:        eventDeploySuccess,
 		Repo:         repo,
 		PRNumber:     prNum,
@@ -48,10 +45,14 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
 		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
+	}
+	if err := s.routeDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum, fact); err != nil {
 		return err
 	}
-	return nil
+	if restateOwnsEffects(ctx) {
+		return nil
+	}
+	return s.publishLegacyFact(ctx, fact)
 }
 
 func isMainBranch(branch string) bool {
@@ -123,8 +124,8 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", run.ID, "attempt", run.Attempt, "repo", repo, "error", err)
-		if finalAttempt && trackPR {
-			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+		if trackPR {
+			s.handleDeployAttemptFailure(ctx, repo, prNum, headBranch, headSHA, targetID, finalAttempt, err)
 		}
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
@@ -149,8 +150,8 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 
 	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
 	if err := s.promoteWorkflowRunImages(ctx, images, ImageReadyEventRequest{Repo: repo, CommitSHA: headSHA, PRNumber: prNum, TargetID: targetID}); err != nil {
-		if finalAttempt && trackPR {
-			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+		if trackPR {
+			s.handleDeployAttemptFailure(ctx, repo, prNum, headBranch, headSHA, targetID, finalAttempt, err)
 		}
 		return err
 	}
@@ -196,15 +197,13 @@ func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, rep
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			slog.ErrorContext(ctx, "[synapse] [dispatcher] error recording kustomization requests", "repo", repo, "pr", prNum, "error", err)
-			if finalAttempt {
-				s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
-			}
+			s.handleDeployAttemptFailure(ctx, repo, prNum, headBranch, headSHA, targetID, finalAttempt, err)
 			return fmt.Errorf("record kustomization requests: %w", err)
 		}
 	}
 	if err := s.reconcileImageKustomizations(ctx, refs, requests); err != nil {
-		if finalAttempt && trackPR && s.hasUnrecordedKustomizationRequests(ctx, repo, prNum) {
-			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+		if trackPR && s.hasUnrecordedKustomizationRequests(ctx, repo, prNum) {
+			s.handleDeployAttemptFailure(ctx, repo, prNum, headBranch, headSHA, targetID, finalAttempt, err)
 		}
 		return err
 	}
@@ -233,6 +232,11 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		mergeSHA = headSHA
 	}
 
+	if restateOwnsEffects(ctx) {
+		// PRObject applies deploy_failed and publishes the carried fact.
+		fact := s.imageDeployFailedFact(ctx, repo, prNum, branch, headSHA, mergeSHA, s.deployFailedTarget(targetID), causeErr)
+		return s.routeDeployFailed(ctx, repo, prNum, headSHA, mergeSHA, false, fact)
+	}
 	if err := s.routeDeployFailed(ctx, repo, prNum, headSHA, mergeSHA, false); err != nil {
 		return err
 	}
@@ -247,16 +251,36 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 	if newTID != "" {
 		targetID = newTID
 	}
-	if targetID == "" && s.cfgSrc != nil {
-		targetID = strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
+	fact := s.imageDeployFailedFact(ctx, repo, prNum, branch, headSHA, mergeSHA, s.deployFailedTarget(targetID), causeErr)
+	if pErr := s.publishLegacyFact(ctx, fact); pErr != nil {
+		return fmt.Errorf("publish deploy failed event: %w", pErr)
 	}
+	if ackErr := s.routeDeployFailed(ctx, repo, prNum, headSHA, mergeSHA, true, fact); ackErr != nil {
+		slog.WarnContext(ctx, "[synapse] [dispatcher] failed journaling deploy_failed ack", "repo", repo, "pr", prNum, "error", ackErr)
+	}
+	if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, repo, prNum); ackErr != nil {
+		slog.WarnContext(ctx, "[synapse] [dispatcher] failed acknowledging deploy_failed_published", "repo", repo, "pr", prNum, "error", ackErr)
+	}
+	return nil
+}
 
+// deployFailedTarget falls back to the system channel when the PR has no
+// Discord target.
+func (s *RouterServer) deployFailedTarget(targetID string) string {
+	if targetID == "" && s.cfgSrc != nil {
+		return strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
+	}
+	return targetID
+}
+
+// imageDeployFailedFact renders the deploy_failed fact for one failed image
+// promotion.
+func (s *RouterServer) imageDeployFailedFact(ctx context.Context, repo string, prNum int, branch, headSHA, mergeSHA, targetID string, causeErr error) pubsub.PRLifecycleEvent {
 	errMsg := ""
 	if causeErr != nil {
 		errMsg = causeErr.Error()
 	}
-
-	if pErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	return pubsub.PRLifecycleEvent{
 		Event:        eventDeployFailed,
 		Repo:         repo,
 		PRNumber:     prNum,
@@ -269,16 +293,24 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 		Quiet:        isDependabotBranch(branch) || s.isDependabotPRNumber(ctx, repo, prNum),
 		OccurredAt:   time.Now().UTC(),
-	}); pErr != nil {
-		return fmt.Errorf("publish deploy failed event: %w", pErr)
 	}
-	if ackErr := s.routeDeployFailed(ctx, repo, prNum, headSHA, mergeSHA, true); ackErr != nil {
-		slog.WarnContext(ctx, "[synapse] [dispatcher] failed journaling deploy_failed ack", "repo", repo, "pr", prNum, "error", ackErr)
+}
+
+// handleDeployAttemptFailure routes one failed deploy attempt for a tracked
+// PR. A restate-owned attempt reports to PRObject, whose bounded
+// deploy-failure deadline decides deploy_failed; a legacy attempt keeps the
+// final-attempt rule (deploy_failed only on the last JetStream delivery).
+func (s *RouterServer) handleDeployAttemptFailure(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, finalAttempt bool, causeErr error) {
+	if restateOwnsEffects(ctx) {
+		fact := s.imageDeployFailedFact(ctx, repo, prNum, headBranch, headSHA, headSHA, s.deployFailedTarget(targetID), causeErr)
+		if err := s.routeDeployAttemptFailed(ctx, repo, prNum, headSHA, headSHA, fact); err != nil {
+			slog.ErrorContext(ctx, "[synapse] [dispatcher] error reporting deploy attempt failure", "repo", repo, "pr", prNum, "error", err)
+		}
+		return
 	}
-	if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, repo, prNum); ackErr != nil {
-		slog.WarnContext(ctx, "[synapse] [dispatcher] failed acknowledging deploy_failed_published", "repo", repo, "pr", prNum, "error", ackErr)
+	if finalAttempt {
+		s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, causeErr)
 	}
-	return nil
 }
 
 // promoteWorkflowRunImages promotes every image concurrently and waits for all of them.

@@ -37,24 +37,17 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		}
 		// Journal before the legacy publish and conflict mark: a journal
 		// failure leaves nothing recorded, so the redelivery retries the
-		// journal instead of returning early via WasConflictPublished.
-		if err := s.routePREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
-			Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
-		}); err != nil {
+		// journal instead of returning early via WasConflictPublished. The
+		// merged HandleConflict verdict commits the conflict keys and
+		// records the carried fact (or, restate-owned, publishes it).
+		fact := s.conflictFact(ctx, repo, prNumber, branch, headSHA, targetID)
+		if err := s.routeConflict(ctx, repo, prNumber, branch, headSHA, fact); err != nil {
 			return false, err
 		}
-		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        prConflict,
-			Repo:         repo,
-			PRNumber:     prNumber,
-			Branch:       branch,
-			HeadSHA:      headSHA,
-			TargetID:     targetID,
-			Status:       prConflict,
-			RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
-			Quiet:        isDependabotBranch(branch),
-			OccurredAt:   time.Now().UTC(),
-		}); err != nil {
+		if restateOwnsEffects(ctx) {
+			return true, nil
+		}
+		if err := s.publishLegacyFact(ctx, fact); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -74,11 +67,13 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		return s.publishConflictAuthoritative(ctx, repo, prNumber, branch, headSHA, tid)
 	}
 	// Journal before the publish check: the journal is the ordered record
-	// and Restate dedups the repeat.
-	if err := s.routePREvent(ctx, "HandleConflictDetected", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch,
-	}); err != nil {
+	// and Restate dedups the repeat by the recorded conflict SHA.
+	fact := s.conflictFact(ctx, repo, prNumber, branch, headSHA, tid)
+	if err := s.routeConflict(ctx, repo, prNumber, branch, headSHA, fact); err != nil {
 		return false, err
+	}
+	if restateOwnsEffects(ctx) {
+		return true, nil
 	}
 	// Projection-safe (legacy fallback only): suppresses the duplicate
 	// legacy publish when the projection already carries this head SHA; a
@@ -88,18 +83,7 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 			return true, nil
 		}
 	}
-	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        prConflict,
-		Repo:         repo,
-		PRNumber:     prNumber,
-		Branch:       branch,
-		HeadSHA:      headSHA,
-		TargetID:     tid,
-		Status:       prConflict,
-		RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
-		Quiet:        isDependabotBranch(branch),
-		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
+	if err := s.publishLegacyFact(ctx, fact); err != nil {
 		return false, err
 	}
 	return true, nil

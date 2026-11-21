@@ -512,7 +512,7 @@ func TestShadowDeployDispatchedGuards(t *testing.T) {
 			defer srv.Close()
 			r := newTestRouter(Config{RestateURL: srv.URL}, srv.Client(), &mockPRRegistry{resolveHeadSHA: shadowTestHeadSHA(), resolveMergeSHA: shadowTestMergeSHA()}, nil)
 			r.SetRestateShadow(newShadowRestateReporter(Config{RestateURL: srv.URL}, srv.Client()))
-			r.shadowDeployDispatched(context.Background(), "aerial", "api", tc.headSHA, tc.mergeSHA, tc.prNumber)
+			r.shadowDeployDispatched(context.Background(), "aerial", "api", tc.headSHA, tc.mergeSHA, tc.prNumber, nil)
 			if got := shot.count(); got != tc.wantCalls {
 				t.Errorf("captured shadow calls = %d, want %d", got, tc.wantCalls)
 			}

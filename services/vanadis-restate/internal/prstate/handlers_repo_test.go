@@ -91,6 +91,7 @@ type repoSeed struct {
 	mains      []string
 	held       []SHAEvent
 	tombstones map[string]uint64
+	fannedOut  string
 }
 
 func (s repoSeed) empty() bool {
@@ -113,6 +114,7 @@ func seedRepoStore(seed repoSeed, loadErr bool) *MemRepoStore {
 		for sha, gen := range seed.tombstones {
 			st.RecordTombstone(sha, gen)
 		}
+		st.FannedOutMainSHA = seed.fannedOut
 		store.SaveRepo(st)
 	}
 	if loadErr {
@@ -256,6 +258,8 @@ func TestRepoHandlers_HandleFanout(t *testing.T) {
 	}{
 		{name: "fans out latest main to open prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, ev: RepoEvent{Repo: "aerial", EffectsOwner: EffectsOwnerRestate}, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerRestate), mainAdvanced(102, EffectsOwnerRestate)}},
 		{name: "no main push sends nothing", seed: repoSeed{index: openTwo}, ev: RepoEvent{Repo: "aerial"}},
+		{name: "already fanned out main sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}},
+		{name: "stale fanned out sha fans out the newer main", seed: repoSeed{mains: []string{"mainsha1", "mainsha2"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerLegacy), mainAdvanced(102, EffectsOwnerLegacy)}},
 		{name: "missing repo state sends nothing", ev: RepoEvent{Repo: "aerial"}},
 		{name: "failing pr never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial"}, wantErr: true, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerLegacy), mainAdvanced(102, EffectsOwnerLegacy)}},
 		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial"}, wantErr: true},
