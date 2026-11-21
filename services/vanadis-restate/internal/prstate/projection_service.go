@@ -92,6 +92,7 @@ func (s *PRObjectService) afterCommit(ctx restate.ObjectContext, st *PRState, ow
 	if st == nil || NormalizeRepo(st.Repo) == "" || st.PRNumber <= 0 {
 		return
 	}
+	s.syncRolloutIndex(ctx, st)
 	key := PRObjectKey(st.Repo, st.PRNumber)
 	if ParseEffectsOwner(string(owner)) == EffectsOwnerRestate {
 		if s.projection != nil {
@@ -215,6 +216,7 @@ func (s *PRObjectService) Hydrate(ctx restate.ObjectContext, req HydrateRequest)
 			sendPRIndex(ctx, st, ev, IndexDeploying)
 		}
 	}
+	s.syncRolloutIndex(ctx, st)
 	return HydrateResponse{Changed: true, Agent: st.OwnerAgent(), Status: st.RegistryStatus()}, nil
 }
 

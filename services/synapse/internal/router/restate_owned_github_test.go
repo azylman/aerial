@@ -32,16 +32,18 @@ const (
 )
 
 // ownedIngress is the hermetic Restate ingress: one-way sends answer 202,
-// request-response handlers answer the configured status and body.
+// request-response handlers answer the configured status and body, or the
+// per-handler body named by the path's last segment.
 type ownedIngress struct {
-	mu        sync.Mutex
-	paths     []string
-	bodies    []string
-	sendCode  int
-	callCode  int
-	callBody  string
-	callPaths []string
-	callBods  []string
+	mu            sync.Mutex
+	paths         []string
+	bodies        []string
+	sendCode      int
+	callCode      int
+	callBody      string
+	handlerBodies map[string]string
+	callPaths     []string
+	callBods      []string
 }
 
 func (in *ownedIngress) serve(t *testing.T) string {
@@ -54,8 +56,12 @@ func (in *ownedIngress) serve(t *testing.T) string {
 		if !strings.HasSuffix(path, "/send") {
 			in.callPaths = append(in.callPaths, path)
 			in.callBods = append(in.callBods, string(raw))
+			body := in.callBody
+			if hb, ok := in.handlerBodies[path[strings.LastIndex(path, "/")+1:]]; ok {
+				body = hb
+			}
 			w.WriteHeader(in.callCode)
-			_, _ = w.Write([]byte(in.callBody))
+			_, _ = w.Write([]byte(body))
 			return
 		}
 		in.paths = append(in.paths, path)
@@ -607,7 +613,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			wantPaths: []string{ownedOtherR + "HandleWorkflowRunBySHA/send"}, wantBodies: []string{`"handler":"HandleCheckPassed"`},
 		},
 		{
-			name: "main workflow run belongs to the deploy path", event: ghEventWorkflowRun,
+			name: "main workflow run on a non-default owner sends nothing", event: ghEventWorkflowRun,
 			body: workflowRunPayload("main", "success", false),
 		},
 		{

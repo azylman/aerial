@@ -337,7 +337,18 @@ func (s *RouterServer) routeConflictResolved(ctx context.Context, res *ResolvedG
 // a restate-owned one makes PRObject decide and publish. Non-PR dispatches
 // journal nothing: no PRObject key exists for them, legacy already emitted
 // the prompt, and erroring would redelivery-loop.
+//
+// A restate-owned dispatch always sends (never shadows): PRObject is the
+// only thing that will publish it.
 func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int, fact pubsub.PRLifecycleEvent) error {
+	if restateOwnsEffects(ctx) {
+		if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
+			return nil
+		}
+		return s.sendOwnedPR(ctx, "HandleDeploySuccess", restateclient.PREvent{
+			Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName, Facts: facts(fact),
+		})
+	}
 	if !s.restateAuthoritative() {
 		s.shadowDeployDispatched(ctx, repo, jobName, headSHA, mergeSHA, prNumber, facts(fact))
 		return nil
@@ -555,6 +566,9 @@ func (s *RouterServer) routeDeployAttemptFailed(ctx context.Context, repo string
 // the legacy registry recorded for it, so PRObject records the same row.
 // Deploy failures route through routeDeployFailed instead.
 func (s *RouterServer) routeRolloutProgress(ctx context.Context, ev restateclient.PREvent) error {
+	if restateOwnsEffects(ctx) {
+		return s.sendOwnedPR(ctx, "HandleRolloutProgress", ev)
+	}
 	if !s.restateAuthoritative() {
 		s.shadowRolloutProgress(ctx, ev)
 		return nil

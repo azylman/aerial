@@ -140,8 +140,8 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
-			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRerun,HandleWorkflowRunBySHA,ResolvePRBySHA",
+			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
+			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA",
 		},
 	}
 	for _, tc := range tests {
@@ -722,6 +722,10 @@ func TestPRObjectService_OwnerPreserved(t *testing.T) {
 
 func prIndexSend(idx PRIndexEvent) sentCall {
 	return sentCall{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: idx}
+}
+
+func rolloutIndexSend(seq uint64, active bool) sentCall {
+	return sentCall{service: "RepoObject", key: RolloutIndexKey, method: "HandleRolloutIndex", input: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Seq: seq, Active: active}}
 }
 
 func prObjectSend(pr int, method string, ev PREvent) sentCall {

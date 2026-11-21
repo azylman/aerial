@@ -327,6 +327,13 @@ type PREvent struct {
 	// publish them for effects_owner=restate once their decision commits,
 	// and record them as intended otherwise.
 	Facts []pubsub.PRLifecycleEvent `json:"facts,omitempty"`
+	// ExpectedJobs are the deploy jobs a deploy alert announced
+	// (RecordExpectedJobs); HandleDeployObserved records them.
+	ExpectedJobs []string `json:"expected_jobs,omitempty"`
+	// ObservedReconcileAt is the lastHandledReconcileAt the watcher saw on
+	// a Kustomization whose recorded reconcile request was lost; it scopes
+	// the HandleReconcileLost re-patch key to that observation.
+	ObservedReconcileAt string `json:"observed_reconcile_at,omitempty"`
 }
 
 // EriEffect is one rendered eri-bound effect. Synapse renders it from
@@ -473,6 +480,10 @@ const (
 	// delayed retry of a failed PR reconcile.
 	PRHandlerKustomizationRequested = "HandleKustomizationRequested"
 	PRHandlerRetryFluxReconcile     = "RetryFluxReconcile"
+	// PRHandlerDeployObserved applies one deploy-alert observation and
+	// PRHandlerReconcileLost re-patches a lost reconcile request.
+	PRHandlerDeployObserved = "HandleDeployObserved"
+	PRHandlerReconcileLost  = "HandleReconcileLost"
 )
 
 // RepoObject handler names PRObject and RepoObject itself target with
@@ -489,6 +500,10 @@ const (
 
 	RepoHandlerGitPush        = "HandleGitPush"
 	RepoHandlerImagePromotion = "HandleImagePromotion"
+
+	// RepoHandlerRolloutIndex applies one PRObject rollout-index update on
+	// the RolloutIndexKey object.
+	RepoHandlerRolloutIndex = "HandleRolloutIndex"
 )
 
 // SHA-only event kinds RepoObject routes through its SHA index.
@@ -504,7 +519,7 @@ const (
 // sends appear; verdict handlers need request-response and never route.
 var shaRouteHandlers = map[string]map[string]bool{
 	SHAKindCheckRun:    {PRHandlerCheckFailed: true, PRHandlerCheckPassed: true, PRHandlerCheckRerunRequested: true, PRHandlerCollaboratorAlert: true},
-	SHAKindWorkflowRun: {PRHandlerCheckFailed: true, PRHandlerCheckPassed: true, PRHandlerCheckRerunRequested: true, PRHandlerCollaboratorAlert: true},
+	SHAKindWorkflowRun: {PRHandlerCheckFailed: true, PRHandlerCheckPassed: true, PRHandlerCheckRerunRequested: true, PRHandlerCollaboratorAlert: true, PRHandlerDeployFailed: true},
 	SHAKindPush:        {PRHandlerMerged: true, PRHandlerRolloutProgress: true},
 	SHAKindImageReady:  {PRHandlerRolloutProgress: true},
 }

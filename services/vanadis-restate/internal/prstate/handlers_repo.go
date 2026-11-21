@@ -834,6 +834,7 @@ func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (
 	if err != nil {
 		return RepoEffectOutcome{}, err
 	}
+	ev = resolvePromotionPR(st, ev)
 	out := RepoEffectOutcome{Key: RepoEffectKey(EffectImagePromote, ev)}
 	var reconcileKey EffectKey
 	if ev.PRNumber <= 0 && len(sortedRequestNames(ev.KustomizationRequests)) > 0 {
@@ -872,6 +873,42 @@ func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (
 		h.store.SaveRepo(st)
 	}
 	return out, nil
+}
+
+// resolvePromotionPR fills a SHA-only restate-owned promotion's PR from the durable SHA
+// index (synapse sends the commit when no PR resolved statelessly), so the
+// rollout it starts is tracked on the owning PR. The carried facts take the
+// resolved PR number. An unresolved commit stays an untracked rollout.
+func resolvePromotionPR(st *RepoState, ev RepoEvent) RepoEvent {
+	if ev.PRNumber > 0 || ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
+		return ev
+	}
+	entry, ok := st.ResolveSHA(ev.HeadSHA)
+	if !ok {
+		return ev
+	}
+	ev.PRNumber = entry.PRNumber
+	if strings.TrimSpace(ev.Branch) == "" {
+		ev.Branch = entry.Branch
+	}
+	ev.Facts = withFactPR(ev.Facts, entry.PRNumber)
+	ev.DeployFailedFacts = withFactPR(ev.DeployFailedFacts, entry.PRNumber)
+	return ev
+}
+
+// withFactPR returns facts with every missing PR number set to pr.
+func withFactPR(facts []pubsub.PRLifecycleEvent, pr int) []pubsub.PRLifecycleEvent {
+	if len(facts) == 0 {
+		return facts
+	}
+	out := make([]pubsub.PRLifecycleEvent, len(facts))
+	for i, f := range facts {
+		if f.PRNumber <= 0 {
+			f.PRNumber = pr
+		}
+		out[i] = f
+	}
+	return out
 }
 
 // recordPromotionIntent commits the legacy promotion (and untracked

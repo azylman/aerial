@@ -91,6 +91,12 @@ type PRState struct {
 	// operator retry re-requests its reconcile under its own effect key
 	// without minting a generation.
 	ReadinessRetries uint64
+
+	// RolloutIndexed is the rollout-index membership last sent for this PR
+	// (InRollout); RolloutIndexSeq numbers those sends so the index drops a
+	// reordered older one.
+	RolloutIndexed  bool
+	RolloutIndexSeq uint64
 }
 
 // NewPRState returns an empty PR state for repo#prNumber.

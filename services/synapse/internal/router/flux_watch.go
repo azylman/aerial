@@ -43,14 +43,15 @@ func kustomizationRequestAction(recorded kustomizationRequest, obs kustomization
 	return flux.KustomizationRequestAction(recorded, obs)
 }
 
-// startKustomizationWatcher runs the Kustomization rollout watchers when PR state is durable and the kube
-// API is configured. The returned stop function cancels them and waits for them to exit; it is idempotent.
+// startKustomizationWatcher runs the Kustomization rollout watchers when PR state is durable (the
+// registry, or Restate for restate-owned watcher calls) and the kube API is configured. The returned
+// stop function cancels them and waits for them to exit; it is idempotent.
 func (s *RouterServer) startKustomizationWatcher(ctx context.Context, kube *DefaultOutboundDispatcher) func() {
-	if s == nil || s.registry == nil {
-		// Without a registry there are no tracked rollouts to reconcile:
-		// trackedRollouts is empty so every apply iterates nothing and
-		// every recheck is a no-op. Skip the watchers instead of burning
-		// kube list calls that can never match a rollout.
+	if s == nil || (s.registry == nil && !s.restateShadow().Enabled()) {
+		// Without a registry or Restate there are no tracked rollouts to
+		// reconcile: trackedRollouts is empty so every apply iterates
+		// nothing and every recheck is a no-op. Skip the watchers instead
+		// of burning kube list calls that can never match a rollout.
 		return func() {}
 	}
 	return flux.StartWatcher(ctx, kube, s)
@@ -77,7 +78,13 @@ func (s *RouterServer) hasPendingRollouts(ctx context.Context) (bool, error) {
 	return slices.ContainsFunc(rollouts, trackedRollout.HasPending), nil
 }
 
+// trackedRollouts lists the deploying PRs gated on recorded requests: from
+// the Restate rollout index for a restate-owned watcher call, else from the
+// registry.
 func (s *RouterServer) trackedRollouts(ctx context.Context) ([]trackedRollout, error) {
+	if restateOwnsEffects(ctx) {
+		return s.ownedTrackedRollouts(ctx)
+	}
 	if s.registry == nil {
 		return nil, nil
 	}
@@ -112,7 +119,7 @@ func (s *RouterServer) ApplyKustomizationDeleted(ctx context.Context, ref model.
 
 // HasPendingRollouts satisfies flux.RolloutSink.
 func (s *RouterServer) HasPendingRollouts(ctx context.Context) (bool, error) {
-	return s.hasPendingRollouts(ctx)
+	return s.hasPendingRollouts(stampEffectsOwner(ctx))
 }
 
 // applyKustomizationList reconciles a full LIST: every observation is applied, and any pending request
@@ -172,6 +179,7 @@ func (s *RouterServer) applyKustomizationDeleted(ctx context.Context, ref fluxKu
 func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedRollout, obs kustomizationObservation) error {
 	ctx = restateclient.WithEventIdentity(ctx, kustomizationObservationIdentity(obs))
 	repatchAt := ""
+	var lost []DeployingPR
 	var errs []error
 	var state kustomizationRolloutState
 	var loadErr error
@@ -195,11 +203,19 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 		case kustomizationFail:
 			errs = append(errs, s.failKustomizationRollout(ctx, t.PR, obs.Ref.Name, action.Reason))
 		case kustomizationRepatch:
+			if restateOwnsEffects(ctx) {
+				// PRObject re-patches its own recorded request.
+				lost = append(lost, t.PR)
+				continue
+			}
 			if repatchAt == "" || !kustomizationRequestHandled(req.RequestedAt, repatchAt) {
 				repatchAt = req.RequestedAt
 			}
 		case kustomizationWait:
 		}
+	}
+	if len(lost) > 0 {
+		errs = append(errs, s.sendOwnedReconcileLost(ctx, lost, obs))
 	}
 	if repatchAt != "" && s.dispatcher != nil {
 		slog.InfoContext(ctx, "[synapse] [flux-watch] re-requesting lost reconcile", "namespace", obs.Ref.Namespace, "name", obs.Ref.Name, "requested_at", repatchAt)
@@ -277,6 +293,15 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	readyJobs := flux.ReadyForCommitServices(in)
 	if done {
 		readyJobs = append(readyJobs, name)
+	}
+	if restateOwnsEffects(ctx) {
+		if err := s.sendOwnedRolloutProgress(ctx, pr, name, readyJobs, done); err != nil {
+			return err
+		}
+		if !done {
+			slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
+		}
+		return nil
 	}
 	var jobsUpdated bool
 	if s.registry != nil && len(readyJobs) > 0 {
@@ -538,6 +563,14 @@ func (s *RouterServer) syncDeployedProjection(ctx context.Context, pr DeployingP
 // guarantees the failure is reported once. An error leaves (or reverts) the PR deploying, so the
 // watcher's re-list retries it.
 func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr DeployingPR, name, reason string) error {
+	if restateOwnsEffects(ctx) {
+		// PRObject applies deploy_failed and publishes the carried fact.
+		evt := DeployEvent{Repo: pr.Repo, PRNumber: pr.PRNumber, JobName: name, CommitSHA: firstNonEmpty(pr.MergeSHA, pr.HeadSHA), TargetID: pr.TargetID, Details: reason}
+		if err := s.sendOwnedDeployFailed(ctx, evt, pr.Branch); err != nil {
+			return fmt.Errorf("report %s failure for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
+		}
+		return nil
+	}
 	evt := DeployEvent{
 		Event:      eventDeployFailed,
 		Status:     statusFailed,

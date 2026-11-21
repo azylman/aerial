@@ -80,6 +80,8 @@ var prHandlers = map[string]bool{
 	"HandleSynchronized":           true,
 	"HandleCheckStatus":            true,
 	"HandleConflictCheck":          true,
+	"HandleDeployObserved":         true,
+	"HandleReconcileLost":          true,
 }
 
 // Frozen RepoObject handler surface from chunk-01. SendRepoEvent rejects
@@ -135,6 +137,11 @@ type PREvent struct {
 	// PRObject publishes them when it owns the event's effects and records
 	// them as intended otherwise.
 	Facts []pubsub.PRLifecycleEvent `json:"facts,omitempty"`
+	// ExpectedJobs are the deploy jobs a deploy alert announced.
+	ExpectedJobs []string `json:"expected_jobs,omitempty"`
+	// ObservedReconcileAt scopes a HandleReconcileLost re-patch to the
+	// lastHandledReconcileAt the watcher observed.
+	ObservedReconcileAt string `json:"observed_reconcile_at,omitempty"`
 }
 
 // Eri effect kinds; values mirror the prstate Effect* constants.
@@ -273,7 +280,7 @@ type BuildLifecycle struct {
 // one RepoObject accepts for that SHA kind.
 var repoSHAHandlers = map[string]map[string]bool{
 	"HandleCheckRunBySHA":    {HandlerCheckFailed: true, HandlerCheckPassed: true, HandlerCheckRerunRequested: true, HandlerCollaboratorAlert: true},
-	"HandleWorkflowRunBySHA": {HandlerCheckFailed: true, HandlerCheckPassed: true, HandlerCheckRerunRequested: true, HandlerCollaboratorAlert: true},
+	"HandleWorkflowRunBySHA": {HandlerCheckFailed: true, HandlerCheckPassed: true, HandlerCheckRerunRequested: true, HandlerCollaboratorAlert: true, "HandleDeployFailed": true},
 	"HandlePushBySHA":        {HandlerMerged: true, HandlerRolloutProgress: true},
 }
 
@@ -595,6 +602,75 @@ func (c *Client) ResolvePRBySHA(ctx context.Context, repo, sha string) (ResolveS
 	return out, nil
 }
 
+// DeployView is PRObject's per-PR deploy read model (GetDeployView); tags
+// mirror the prstate DeployView contract. Found is false for a PR Restate
+// has never seen.
+type DeployView struct {
+	Found                  bool                                  `json:"found"`
+	Repo                   string                                `json:"repo"`
+	PRNumber               int                                   `json:"pr_number"`
+	Status                 string                                `json:"status"`
+	Branch                 string                                `json:"branch"`
+	HeadSHA                string                                `json:"head_sha"`
+	MergeSHA               string                                `json:"merge_sha"`
+	TargetID               string                                `json:"target_id"`
+	Agent                  string                                `json:"agent,omitempty"`
+	Jobs                   []string                              `json:"jobs,omitempty"`
+	DeployedJobs           []string                              `json:"deployed_jobs,omitempty"`
+	KustomizationRequests  map[string]model.KustomizationRequest `json:"kustomization_requests,omitempty"`
+	DeployedKustomizations []string                              `json:"deployed_kustomizations,omitempty"`
+	DeploySuccessPending   bool                                  `json:"deploy_success_pending,omitempty"`
+	HasExpectedDeployJobs  bool                                  `json:"has_expected_deploy_jobs,omitempty"`
+}
+
+// GetDeployView invokes the shared, read-only PRObject.GetDeployView query.
+func (c *Client) GetDeployView(ctx context.Context, repo string, prNumber int) (DeployView, error) {
+	return queryPR[DeployView](ctx, c, repo, prNumber, "GetDeployView")
+}
+
+// queryPR invokes one shared, read-only PRObject query that takes no input.
+func queryPR[T any](ctx context.Context, c *Client, repo string, prNumber int, handler string) (T, error) {
+	var out T
+	if strings.TrimSpace(c.baseURL) == "" {
+		return out, errors.New("restate is not configured")
+	}
+	repo = model.NormalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return out, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	}
+	if err := c.call(ctx, PRObjectKey(repo, prNumber), handler, struct{}{}, &out); err != nil {
+		var zero T
+		return zero, err
+	}
+	return out, nil
+}
+
+// RolloutIndexKey is the RepoObject key holding the cross-repo rollout
+// index; it mirrors prstate.RolloutIndexKey.
+const RolloutIndexKey = "_rollouts"
+
+// RolloutRef names one PR whose rollout the Kustomization watcher gates.
+type RolloutRef struct {
+	Repo     string `json:"repo"`
+	PRNumber int    `json:"pr_number"`
+}
+
+// ListRollouts invokes the shared, read-only RepoObject.ListRollouts query
+// on the rollout index: every PR deploying with recorded Kustomization
+// requests, across repos (the registry ListDeployingPRs scan).
+func (c *Client) ListRollouts(ctx context.Context) ([]RolloutRef, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, errors.New("restate is not configured")
+	}
+	var out struct {
+		Rollouts []RolloutRef `json:"rollouts"`
+	}
+	if err := c.callService(ctx, c.repoService, RolloutIndexKey, "ListRollouts", struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return out.Rollouts, nil
+}
+
 // InvokePREvent delivers ev to one frozen PRObject handler and decodes the
 // JSON verdict into out. Unknown handlers, unconfigured clients, and invalid
 // payloads fail closed without emitting a request; transport failures and
@@ -654,18 +730,7 @@ func (c *Client) Register(ctx context.Context, req RegisterRequest) (RegisterRes
 // GetBuildLifecycle invokes the shared, read-only PRObject.GetBuildLifecycle
 // query. A PR Restate has never seen yields the zero lifecycle.
 func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber int) (BuildLifecycle, error) {
-	if strings.TrimSpace(c.baseURL) == "" {
-		return BuildLifecycle{}, errors.New("restate is not configured")
-	}
-	repo = model.NormalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return BuildLifecycle{}, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
-	}
-	var out BuildLifecycle
-	if err := c.call(ctx, PRObjectKey(repo, prNumber), "GetBuildLifecycle", struct{}{}, &out); err != nil {
-		return BuildLifecycle{}, err
-	}
-	return out, nil
+	return queryPR[BuildLifecycle](ctx, c, repo, prNumber, "GetBuildLifecycle")
 }
 
 // RetryReadinessRequest is the PRObject.RetryReadiness payload: the merge

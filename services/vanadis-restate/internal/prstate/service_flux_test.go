@@ -266,20 +266,20 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 		{
 			name: "legacy retry re-arms the gate and records the reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
-			wantSet: true, wantStatus: RegistryStatusDeploying, wantDispatched: true, wantSends: []sentCall{indexSend},
+			wantSet: true, wantStatus: RegistryStatusDeploying, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 			wantIntended: []IntendedEffect{{Kind: EffectFluxReconcile, Agent: "agent-alpha", EffectKey: readinessKey, MatchKey: "azylman/aerial#101@m1:flux_reconcile:job=readiness", Digest: KustomizationRequestsDigest(coreRequests)}},
 		},
 		{
 			name: "restate retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
-			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend},
+			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},
 		{name: "missing merge sha fails terminally", req: RetryReadinessRequest{}, kube: &fakeKube{}, wantErr: true},
 		{name: "fenced caller for another owner fails terminally", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "agent-beta"}, kube: &fakeKube{}, wantErr: true},
 		{
 			name: "fenced caller for the stored owner is accepted", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "agent-alpha", EffectsOwner: EffectsOwnerRestate}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
-			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend},
+			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},
 	}
 	for _, tc := range tests {
@@ -317,7 +317,7 @@ func TestPRObjectServiceHandleReadinessRetry(t *testing.T) {
 		wantIntended int
 		wantSends    int
 	}{
-		{name: "legacy retry applies the gate", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantIntended: 1, wantSends: 1},
+		{name: "legacy retry applies the gate", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantIntended: 1, wantSends: 2},
 		{name: "stale merge sha drops", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m9"}},
 		{name: "merged pr without a rollout persists unchanged", seed: merged(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusMerged},
 		{name: "missing merge sha does nothing", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101}},
