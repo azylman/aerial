@@ -507,16 +507,11 @@ func kernelLoadConfigTestCases(tmpDir, validYAMLPath, emptyYAMLPath, invalidYAML
 
 func runKernelLoadConfigCase(t *testing.T, tc kernelLoadConfigCase) {
 	t.Helper()
-	t.Setenv("PORT", "")
-	t.Setenv("CDP_HOST", "")
-	t.Setenv("CDP_PORT", "")
-	t.Setenv("KERNEL_CDP_URL", "")
-	t.Setenv("KERNEL_API_URL", "")
-	t.Setenv("SETTLE_DELAY", "")
+	env := map[string]string{}
 	if tc.envKey != "" {
-		t.Setenv(tc.envKey, tc.envVal)
+		env[tc.envKey] = tc.envVal
 	}
-	cfg, err := LoadConfig(tc.path)
+	cfg, err := LoadConfig(tc.path, func(k string) string { return env[k] })
 	if tc.wantErr {
 		if err == nil {
 			t.Fatalf("LoadConfig(%q) expected error, got nil", tc.path)
