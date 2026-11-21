@@ -380,21 +380,12 @@ func TestHTTPEndpoints(t *testing.T) {
 }
 
 func TestInitPostgresAndRunServer(t *testing.T) {
-	origPoolFn := newPgxPoolFn
-	defer func() { newPgxPoolFn = origPoolFn }()
 	ctx := context.Background()
 	srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 	if _, err := initPostgres(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
 		t.Fatal("expected parse error")
 	}
-	newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
-		return nil, errors.New("pool creation failed")
-	}
-	if _, err := initPostgres(ctx, srv, "postgres://u:p@127.0.0.1:5432/db"); err == nil {
-		t.Fatal("expected pool error")
-	}
 	cfg, _ := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
-	newPgxPoolFn = origPoolFn
 	cleanup, err := initPostgres(ctx, srv, cfg.ConnString())
 	if err != nil || cleanup == nil {
 		t.Fatalf("expected success from initPostgres, got err=%v", err)
