@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -37,33 +38,39 @@ func (r *ownedMapRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha 
 	return 0, "", "", nil
 }
 
-func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
-	t.Parallel()
+// trailerScopingCase is one handlePullRequestRegistryAction row.
+type trailerScopingCase struct {
+	name             string
+	botID            string
+	bots             []string
+	defaultOwner     bool
+	prBody           string
+	action           string
+	merged           bool
+	wantRegistered   bool
+	wantEnsureAgents []string
+	wantSyncHeads    []string
+	wantClosed       bool
+	wantEvents       []wantPREvent
+}
 
-	tests := []struct {
-		name           string
-		botID          string
-		defaultOwner   bool
-		prBody         string
-		action         string
-		merged         bool
-		wantRegistered bool
-		wantClosed     bool
-		wantEvents     []wantPREvent
-	}{
+func trailerScopingCases() []trailerScopingCase {
+	return []trailerScopingCase{
 		{
-			name:           "matching bot_id registered",
-			botID:          "aerial",
-			defaultOwner:   false,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"aerial\"} -->",
-			wantRegistered: true,
+			name:             "matching bot_id registered",
+			botID:            "aerial",
+			defaultOwner:     false,
+			prBody:           "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"aerial\"} -->",
+			wantRegistered:   true,
+			wantEnsureAgents: []string{"aerial"},
 		},
 		{
-			name:           "case-insensitive matching bot_id registered",
-			botID:          "aerial",
-			defaultOwner:   false,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"AERIAL\"} -->",
-			wantRegistered: true,
+			name:             "case-insensitive matching bot_id registered",
+			botID:            "aerial",
+			defaultOwner:     false,
+			prBody:           "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"AERIAL\"} -->",
+			wantRegistered:   true,
+			wantEnsureAgents: []string{"AERIAL"},
 		},
 		{
 			name:           "peer bot_id skipped",
@@ -91,11 +98,12 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			wantClosed:     false,
 		},
 		{
-			name:           "untagged registered when default owner",
-			botID:          "aerial",
-			defaultOwner:   true,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\"} -->",
-			wantRegistered: true,
+			name:             "untagged registered when default owner",
+			botID:            "aerial",
+			defaultOwner:     true,
+			prBody:           "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\"} -->",
+			wantRegistered:   true,
+			wantEnsureAgents: []string{""},
 		},
 		{
 			name:           "untagged skipped when not default owner",
@@ -121,10 +129,65 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			defaultOwner:   false,
 			action:         "synchronize",
 			wantRegistered: false,
+			wantSyncHeads:  []string{"sha101"},
 			wantEvents:     []wantPREvent{{Event: "synchronize", PRNumber: 101, HeadSHA: "sha101", Status: "open", Title: "Test PR"}},
 		},
+		{
+			name:             "sibling miorine synchronize processed with configured bots",
+			botID:            "aerial",
+			bots:             []string{"aerial", "miorine", "suletta"},
+			prBody:           "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"miorine\"} -->",
+			action:           "synchronize",
+			wantRegistered:   true,
+			wantEnsureAgents: []string{"miorine"},
+			wantSyncHeads:    []string{"sha101"},
+			wantEvents:       []wantPREvent{{Event: "synchronize", PRNumber: 101, HeadSHA: "sha101", Status: "open", Title: "Test PR"}},
+		},
+		{
+			name:       "sibling suletta closed unmerged processed with configured bots",
+			botID:      "aerial",
+			bots:       []string{"aerial", "miorine", "suletta"},
+			prBody:     "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"suletta\"} -->",
+			action:     "closed",
+			wantClosed: true,
+			wantEvents: []wantPREvent{{Event: "closed_unmerged", PRNumber: 101, HeadSHA: "sha101", Status: "closed_unmerged"}},
+		},
+		{
+			name:             "sibling suletta merged processed with configured bots",
+			botID:            "aerial",
+			bots:             []string{"aerial", "miorine", "suletta"},
+			prBody:           "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"suletta\"} -->",
+			action:           "closed",
+			merged:           true,
+			wantRegistered:   true,
+			wantEnsureAgents: []string{"suletta"},
+			wantEvents:       []wantPREvent{{Event: "merged", PRNumber: 101, HeadSHA: "sha101", Status: "merged"}},
+		},
+		{
+			name:             "default bot aerial synchronize processed with configured bots",
+			botID:            "aerial",
+			bots:             []string{"aerial", "miorine", "suletta"},
+			prBody:           "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"aerial\"} -->",
+			action:           "synchronize",
+			wantRegistered:   true,
+			wantEnsureAgents: []string{"aerial"},
+			wantSyncHeads:    []string{"sha101"},
+			wantEvents:       []wantPREvent{{Event: "synchronize", PRNumber: 101, HeadSHA: "sha101", Status: "open", Title: "Test PR"}},
+		},
+		{
+			name:   "bot outside configured bots synchronize dropped",
+			botID:  "aerial",
+			bots:   []string{"aerial", "miorine", "suletta"},
+			prBody: "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"gundam\"} -->",
+			action: "synchronize",
+		},
 	}
+}
 
+func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
+	t.Parallel()
+
+	tests := trailerScopingCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -132,6 +195,12 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			cfg := Config{
 				BotID:        tc.botID,
 				DefaultOwner: tc.defaultOwner,
+			}
+			if len(tc.bots) > 0 {
+				cfg.Bots = map[string]BotConfig{}
+				for _, b := range tc.bots {
+					cfg.Bots[b] = BotConfig{}
+				}
 			}
 			bus := &mockEventBus{}
 			srv := newTestRouter(cfg, nil, reg, nil, bus)
@@ -157,18 +226,7 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tc.wantRegistered && len(reg.ensureCalls) == 0 {
-				t.Fatalf("expected PR to be registered, but EnsurePRRegistered was not called")
-			}
-			if !tc.wantRegistered && len(reg.ensureCalls) > 0 {
-				t.Fatalf("expected PR NOT to be registered, but EnsurePRRegistered was called %d times", len(reg.ensureCalls))
-			}
-			if tc.wantClosed && len(reg.closedUnmergedCalls) == 0 {
-				t.Fatalf("expected PR to be marked closed unmerged, but UpdatePRClosedUnmerged was not called")
-			}
-			if !tc.wantClosed && len(reg.closedUnmergedCalls) > 0 {
-				t.Fatalf("expected PR NOT to be marked closed unmerged, but UpdatePRClosedUnmerged was called %d times", len(reg.closedUnmergedCalls))
-			}
+			assertRegistryActionCalls(t, reg, tc.wantRegistered, tc.wantClosed, tc.wantEnsureAgents, tc.wantSyncHeads)
 			assertPREvents(t, bus, tc.wantEvents)
 		})
 	}
@@ -362,5 +420,32 @@ func resolvePRFromCommitSHATestCases() []resolvePRFromCommitSHATestCase {
 			wantErr:       true,
 			wantErrSubstr: "no pull requests associated",
 		},
+	}
+}
+
+// prCallHeads lists the head SHA of each recorded registry call.
+func prCallHeads(calls []prCall) []string {
+	heads := make([]string, 0, len(calls))
+	for _, c := range calls {
+		heads = append(heads, c.headSHA)
+	}
+	return heads
+}
+
+// assertRegistryActionCalls checks the registry writes one
+// handlePullRequestRegistryAction call made.
+func assertRegistryActionCalls(t *testing.T, reg *mockPRRegistry, wantRegistered, wantClosed bool, wantEnsureAgents, wantSyncHeads []string) {
+	t.Helper()
+	if got := len(reg.ensureCalls) > 0; got != wantRegistered {
+		t.Errorf("EnsurePRRegistered called = %v (%d calls), want %v", got, len(reg.ensureCalls), wantRegistered)
+	}
+	if got := len(reg.closedUnmergedCalls) > 0; got != wantClosed {
+		t.Errorf("UpdatePRClosedUnmerged called = %v (%d calls), want %v", got, len(reg.closedUnmergedCalls), wantClosed)
+	}
+	if !reflect.DeepEqual(reg.ensureAgents, wantEnsureAgents) {
+		t.Errorf("EnsurePRRegistered agents = %v, want %v", reg.ensureAgents, wantEnsureAgents)
+	}
+	if got := prCallHeads(reg.syncCalls); len(got)+len(wantSyncHeads) > 0 && !reflect.DeepEqual(got, wantSyncHeads) {
+		t.Errorf("UpdatePRSync heads = %v, want %v", got, wantSyncHeads)
 	}
 }

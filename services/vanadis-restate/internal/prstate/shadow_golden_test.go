@@ -204,3 +204,53 @@ func TestShadowLegacyAgentColumnOwnerGolden(t *testing.T) {
 		})
 	}
 }
+
+// siblingWant is the hand-derived PRObject outcome of one sibling-bot case.
+type siblingWant struct {
+	Owner     string   `json:"owner"`
+	HeadSHA   string   `json:"head_sha"`
+	Status    string   `json:"status"`
+	Divergent []string `json:"divergent"`
+}
+
+// siblingCase registers the PR, replays the legacy-owned shadow sends
+// synapse emits for its synchronize, then compares the projection against
+// the row legacy wrote; synapse-only fields are ignored.
+type siblingCase struct {
+	Name   string             `json:"name"`
+	Setup  []parityInvocation `json:"setup"`
+	Shadow []parityInvocation `json:"shadow"`
+	Want   siblingWant        `json:"want"`
+	Row    RegistryRow        `json:"row"`
+}
+
+// TestShadowSiblingBotSynchronizeGolden pins that a configured sibling
+// bot's synchronize moves PRObject to the head the legacy row records with
+// the registered owner and no projection divergence, while a bot outside
+// cfg.Bots (no send) keeps the registered head the untouched row holds.
+func TestShadowSiblingBotSynchronizeGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/sibling-bot-synchronize.json")
+	require.NoError(t, err)
+	var g struct {
+		Cases []siblingCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newParitySim(t)
+			for _, inv := range append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...) {
+				sim.send(inv)
+			}
+			stRaw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, tc.Setup[0])+"/"+prObjectStateKey]
+			require.True(t, ok, "PRObject state committed")
+			st, err := decodeInput[PRState](stRaw)
+			require.NoError(t, err)
+			got := siblingWant{Owner: st.OwnerAgent(), HeadSHA: st.HeadSHA, Status: st.RegistryStatus(), Divergent: CompareProjection(BuildProjection(&st), tc.Row, true).Divergent}
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}

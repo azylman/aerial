@@ -266,7 +266,7 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 	if targetID == "" {
 		return
 	}
-	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID); err != nil {
+	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID, ""); err != nil {
 		slog.WarnContext(ctx, "[synapse] [registry] error self-healing dependabot PR on CI failure", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 	}
 }
@@ -361,13 +361,14 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
 	cfg := s.cfgSrc.Current()
 	meta := ParseAerialPRMetadata(pr.GetBody())
-	var cfgBotID string
 	var defaultOwner bool
 	if cfg != nil {
-		cfgBotID = cfg.BotID
 		defaultOwner = cfg.DefaultOwner
 	}
-	if isForeignBotPR(meta, cfgBotID) {
+	// Same multi-bot predicate as processPullRequest and the restate-owned
+	// path: a PR owned by any configured bot (siblings included) is
+	// processed; only a bot outside cfg.Bots is dropped.
+	if s.isForeignBotEvent(meta) {
 		return nil
 	}
 	shouldRegister := meta.BotID != "" || defaultOwner
@@ -377,7 +378,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	}
 	if shouldRegister && s.registry != nil && targetID != "" && (res.Action != ghActionClosed || pr.Merged) {
 		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
-		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, targetID)
+		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, targetID, meta.OwningAgent())
 		if err != nil {
 			return err
 		}
@@ -447,7 +448,7 @@ func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *Resolved
 	if targetID == "" {
 		return
 	}
-	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID)
+	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID, "")
 	if err != nil {
 		slog.WarnContext(ctx, "[synapse] [registry] error registering dependabot PR", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 		return

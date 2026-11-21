@@ -504,7 +504,7 @@ func executePRRegistryRegistrationOps(ctx context.Context, t *testing.T, reg *Po
 			t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
 		}
 	case "EnsurePRRegistered":
-		gotTarget, err := reg.EnsurePRRegistered(ctx, tc.repo, tc.prNumber, "feat/branch", "head123", "feat: title", tc.targetID)
+		gotTarget, err := reg.EnsurePRRegistered(ctx, tc.repo, tc.prNumber, "feat/branch", "head123", "feat: title", tc.targetID, "miorine")
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("EnsurePRRegistered err = %v, wantErr = %v", err, tc.wantErr)
 		}
@@ -990,6 +990,29 @@ func TestLoadPRBuildLifecycle(t *testing.T) {
 			got, err := r.LoadPRBuildLifecycle(context.Background(), tc.repo, tc.pr)
 			if got != tc.want || (err != nil) != tc.wantErr {
 				t.Fatalf("got=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestEnsureOwnerMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		agent string
+		want  string
+	}{
+		{name: "sibling owner seeds agent and bot_id", agent: "miorine", want: `{"agent":"miorine","bot_id":"miorine"}`},
+		{name: "owner is trimmed", agent: "  suletta ", want: `{"agent":"suletta","bot_id":"suletta"}`},
+		{name: "owner is lowercased", agent: "AERIAL", want: `{"agent":"aerial","bot_id":"aerial"}`},
+		{name: "unknown owner stays empty", agent: "", want: `{}`},
+		{name: "whitespace owner stays empty", agent: "   ", want: `{}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ensureOwnerMetadata(tc.agent); got != tc.want {
+				t.Errorf("ensureOwnerMetadata(%q) = %s, want %s", tc.agent, got, tc.want)
 			}
 		})
 	}
