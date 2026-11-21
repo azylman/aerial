@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -620,6 +621,157 @@ func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
 				if !strings.Contains(got, tc.preserved) {
 					t.Errorf("expected %q to be preserved in %q", tc.preserved, got)
 				}
+			}
+		})
+	}
+}
+
+func TestValuePattern_TableDriven(t *testing.T) {
+	metaVal := `a.b*c+d?(e)[f]{g}|h^$\i`
+	b64Val := "dummy_b64_value_abc"
+	urlVal := "dummy pass/with&chars"
+	tests := []struct {
+		name       string
+		values     []string
+		wantExact  string
+		matches    []string
+		nonMatches []string
+	}{
+		{
+			name:       "no values matches nothing",
+			values:     nil,
+			wantExact:  `[^\s\S]`,
+			nonMatches: []string{"", "anything", " "},
+		},
+		{
+			name:       "only short and blank values matches nothing",
+			values:     []string{"abc", "  ", ""},
+			wantExact:  `[^\s\S]`,
+			nonMatches: []string{"", "abc", "xx abc yy"},
+		},
+		{
+			name:       "metacharacter heavy value matched literally",
+			values:     []string{metaVal},
+			matches:    []string{"prefix " + metaVal + " suffix"},
+			nonMatches: []string{"abbbc+d", "a.b*c+d?(e)[f]{g}"},
+		},
+		{
+			name:   "base64 variants matched inside surrounding text",
+			values: []string{b64Val},
+			matches: []string{
+				"hdr=" + base64.StdEncoding.EncodeToString([]byte(b64Val)) + ";",
+				"x" + base64.RawURLEncoding.EncodeToString([]byte(b64Val)) + "x",
+				"Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+b64Val)),
+			},
+			nonMatches: []string{"dummy_b64_value", "unrelated text"},
+		},
+		{
+			name:       "url encoded variant matched inside surrounding text",
+			values:     []string{urlVal},
+			matches:    []string{"?q=dummy+pass%2Fwith%26chars&x=1", "raw dummy pass/with&chars end"},
+			nonMatches: []string{"dummy+pass"},
+		},
+		{
+			name:       "short value skipped while long value kept",
+			values:     []string{"xyz", "longenough"},
+			matches:    []string{"a longenough b"},
+			nonMatches: []string{"xyz"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ValuePattern(tc.values)
+			if tc.wantExact != "" && got != tc.wantExact {
+				t.Fatalf("ValuePattern() = %q, want %q", got, tc.wantExact)
+			}
+			re, err := regexp.Compile(got)
+			if err != nil {
+				t.Fatalf("pattern does not compile: %v", err)
+			}
+			for _, s := range tc.matches {
+				if !re.MatchString(s) {
+					t.Errorf("pattern should match %q", s)
+				}
+			}
+			for _, s := range tc.nonMatches {
+				if re.MatchString(s) {
+					t.Errorf("pattern should not match %q", s)
+				}
+			}
+		})
+	}
+}
+
+func TestValuePattern_Ordering_TableDriven(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{
+			name:   "duplicate values collapse and longest variant first",
+			values: []string{"abcd", "abcd", " abcd "},
+			want:   []string{"eC1hY2Nlc3MtdG9rZW46YWJjZA==", "eC1hY2Nlc3MtdG9rZW46YWJjZA", "YWJjZA==", "YWJjZA", "abcd"},
+		},
+		{
+			name:   "longer value precedes shorter overlapping value",
+			values: []string{"wxyz", "wxyzwxyz"},
+			want:   []string{"wxyzwxyz", "wxyz"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			alts := strings.Split(ValuePattern(tc.values), "|")
+			seen := make(map[string]bool, len(alts))
+			for i, a := range alts {
+				if seen[a] {
+					t.Errorf("duplicate alternative %q", a)
+				}
+				seen[a] = true
+				if i > 0 && len(alts[i-1]) < len(a) {
+					t.Errorf("alternative %q (len %d) follows shorter %q", a, len(a), alts[i-1])
+				}
+			}
+			last := -1
+			for _, w := range tc.want {
+				idx := slices.Index(alts, regexp.QuoteMeta(w))
+				if idx < 0 {
+					t.Fatalf("missing alternative %q in %v", w, alts)
+				}
+				if idx < last {
+					t.Errorf("alternative %q out of order in %v", w, alts)
+				}
+				last = idx
+			}
+			re := regexp.MustCompile(ValuePattern(tc.values))
+			if got := re.FindString("--" + tc.want[0] + "--"); got != tc.want[0] {
+				t.Errorf("leftmost match = %q, want longest %q", got, tc.want[0])
+			}
+		})
+	}
+}
+
+func TestOTTLStringBody_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		want    string
+	}{
+		{name: "empty", pattern: "", want: ""},
+		{name: "plain", pattern: "abcd|efgh", want: "abcd|efgh"},
+		{name: "match nothing", pattern: `[^\s\S]`, want: `[^\\s\\S]`},
+		{name: "quote and backslash", pattern: `a"b\.c`, want: `a\"b\\.c`},
+		{name: "quoted metachar value", pattern: ValuePattern([]string{`say "hi".now`}), want: ""},
+	}
+	unescape := strings.NewReplacer(`\\`, `\`, `\"`, `"`)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := OTTLStringBody(tc.pattern)
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("OTTLStringBody(%q) = %q, want %q", tc.pattern, got, tc.want)
+			}
+			if back := unescape.Replace(got); back != tc.pattern {
+				t.Errorf("round trip = %q, want %q", back, tc.pattern)
 			}
 		})
 	}
