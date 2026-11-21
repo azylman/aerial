@@ -182,7 +182,13 @@ func (s *RouterServer) sendOwnedDeployFailed(ctx context.Context, evt DeployEven
 // rollout (deploying jobs, fresh reconcile requests, the deploy_started
 // fact) to PRObject.HandleKustomizationRequested, which records the
 // requests before patching them, and reports that the watcher owns the PR.
-func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, prNum int, branch string) (bool, error) {
+//
+// A PR the deploy view does not find (never seen, or untracked: an
+// upstream Flux source commit resolved to a PR nobody registered) is
+// handled like legacy deferPRToWatcher with no registry row: the
+// Kustomizations are patched once and nothing is tracked, so no rollout
+// starts that could never complete.
+func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, prNum int, view restateclient.DeployView) (bool, error) {
 	if s.dispatcher == nil || prNum <= 0 {
 		return false, nil
 	}
@@ -197,13 +203,19 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 	for _, ref := range refs {
 		names = append(names, ref.Name)
 	}
+	requests := newKustomizationRequests(refs, time.Now().UTC())
+	if !view.Found {
+		slog.InfoContext(ctx, "[synapse] [deploy] untracked PR: patching kustomizations without tracking a rollout", "repo", repo, "pr", prNum, "kustomizations", strings.Join(names, ", "))
+		return true, s.reconcileImageKustomizations(ctx, refs, requests)
+	}
+	branch := view.Branch
 	started := pubsub.PRLifecycleEvent{
 		Event: eventDeployStarted, Repo: repo, PRNumber: prNum, Status: statusDeploying,
 		Quiet: isDependabotBranch(branch), OccurredAt: time.Now().UTC(),
 	}
 	if err := s.sendOwnedPR(ctx, "HandleKustomizationRequested", restateclient.PREvent{
 		Repo: repo, PRNumber: prNum, Branch: branch, Jobs: names,
-		KustomizationRequests: newKustomizationRequests(refs, time.Now().UTC()), Facts: facts(started),
+		KustomizationRequests: requests, Facts: facts(started),
 	}); err != nil {
 		return false, err
 	}
@@ -296,7 +308,7 @@ func (s *RouterServer) ownedSyncExpected(ctx context.Context, evt DeployEvent, v
 	if view.HasExpectedDeployJobs || s.ownedWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber, view) {
 		return true, false, nil
 	}
-	deferred, err = s.ownedDeferPRToWatcher(ctx, evt.Repo, evt.PRNumber, view.Branch)
+	deferred, err = s.ownedDeferPRToWatcher(ctx, evt.Repo, evt.PRNumber, view)
 	return false, deferred, err
 }
 
@@ -323,7 +335,7 @@ func (s *RouterServer) ownedDeferDeployEventToWatcher(ctx context.Context, evt D
 		slog.InfoContext(ctx, "[synapse] [deploy] watcher-owned event waiting for image build", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		return false, nil
 	}
-	return s.ownedDeferPRToWatcher(ctx, evt.Repo, evt.PRNumber, view.Branch)
+	return s.ownedDeferPRToWatcher(ctx, evt.Repo, evt.PRNumber, view)
 }
 
 // ownedDeployEventWatcherOwnership mirrors deployEventWatcherOwnership with
@@ -564,7 +576,8 @@ func (s *RouterServer) ownedCompleteNoDeploy(ctx context.Context, repo, headSHA 
 		return nil
 	}
 	branch = firstNonEmpty(view.Branch, branch)
-	if deferred, err := s.ownedDeferPRToWatcher(ctx, repo, prNum, branch); deferred || err != nil {
+	view.Branch = branch
+	if deferred, err := s.ownedDeferPRToWatcher(ctx, repo, prNum, view); deferred || err != nil {
 		return err
 	}
 	fact := pubsub.PRLifecycleEvent{

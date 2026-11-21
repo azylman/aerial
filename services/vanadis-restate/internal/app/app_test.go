@@ -296,7 +296,7 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 42)
+			require.Len(t, byName["PRObject"], 43)
 			require.True(t, byName["PRObject"]["RetryReadiness"])
 			require.True(t, byName["PRObject"]["RetryFluxReconcile"])
 			require.True(t, byName["PRObject"]["HandleConflictCheck"])
@@ -322,6 +322,7 @@ func TestBindRestateServices(t *testing.T) {
 			require.True(t, byName["PRObject"]["GetDeployView"])
 			require.True(t, byName["PRObject"]["HandleDeployObserved"])
 			require.True(t, byName["PRObject"]["HandleReconcileLost"])
+			require.True(t, byName["PRObject"]["DropUntracked"])
 			require.Len(t, byName["RepoObject"], 17)
 			require.True(t, byName["RepoObject"]["HandleRolloutIndex"])
 			require.True(t, byName["RepoObject"]["ListRollouts"])

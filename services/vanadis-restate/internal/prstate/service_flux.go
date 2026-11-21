@@ -149,12 +149,16 @@ func (s *PRObjectService) WithKube(k KubeEffector) *PRObjectService {
 // A carried deploy_started fact publishes only when the jobs moved the PR to
 // deploying (the registry TransitionDeploying target ID gate); every other
 // carried fact publishes on any applied request.
+//
+// An untracked PR (PRState.Untracked: an upstream Flux source commit
+// resolved to a PR nobody registered) drops the request entirely, like the
+// legacy registry, which has no row to transition or record into.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
 	started, rest := SplitDeployStartedFacts(ev.Facts)
 	ev.Facts = nil
 	var recorded, committed *PRState
 	var transitioned bool
-	if err := s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+	if err := s.mutateRolloutEvent(ctx, ev, PRHandlerKustomizationRequested, func(st *PRState) {
 		st.DisarmDeployFailure()
 		transitioned = st.TransitionDeploying(ev.Jobs)
 		if st.RecordKustomizationRequestSet(ev.KustomizationRequests) {
@@ -239,11 +243,11 @@ func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PRE
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || merge == "" {
 		return nil
 	}
-	st, err := s.loadOrCreatePRState(ctx, ev)
+	st, stored, err := s.loadPRState(ctx, ev)
 	if err != nil {
 		return err
 	}
-	if st.ApplyDeployEvent(ev) != DispositionApply {
+	if s.dropUntrackedRollout(ctx, st, stored, "HandleReadinessRetry") || st.ApplyDeployEvent(ev) != DispositionApply {
 		return nil
 	}
 	st.RetryPRReadiness()

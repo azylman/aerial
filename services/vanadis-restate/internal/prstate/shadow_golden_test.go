@@ -70,3 +70,74 @@ func TestShadowRolloutReadyJobsGolden(t *testing.T) {
 		})
 	}
 }
+
+// untrackedWant is the hand-derived outcome of one untracked-upstream case.
+type untrackedWant struct {
+	Persisted       bool           `json:"persisted"`
+	Status          string         `json:"status"`
+	IntendedEffects []string       `json:"intended_effects"`
+	Effects         []parityEffect `json:"effects"`
+	Rollouts        []RolloutRef   `json:"rollouts"`
+	RepoIndexed     bool           `json:"repo_indexed"`
+}
+
+// untrackedCase is one untracked-upstream sequence: optional setup, the
+// event stream synapse sends, and the outcome.
+type untrackedCase struct {
+	Name   string             `json:"name"`
+	Setup  []parityInvocation `json:"setup"`
+	Stream []parityInvocation `json:"stream"`
+	Want   untrackedWant      `json:"want"`
+}
+
+// untrackedGolden is untracked-upstream-kustomization.json; synapse-only
+// fields are ignored here.
+type untrackedGolden struct {
+	Cases []untrackedCase `json:"cases"`
+}
+
+// TestShadowUntrackedUpstreamGolden pins that rollout events for a PR
+// PRObject never saw register, Hydrate, opened or merge persist nothing,
+// index nothing and record no fact, reconcile or intended effect, while a
+// tracked merged PR still records, reconciles once per generation and is
+// tracked as a rollout.
+func TestShadowUntrackedUpstreamGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/untracked-upstream-kustomization.json")
+	require.NoError(t, err)
+	var g untrackedGolden
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newParitySim(t)
+			for _, inv := range tc.Setup {
+				sim.send(inv)
+			}
+			sim.effects = nil
+			for _, inv := range tc.Stream {
+				sim.send(inv)
+			}
+			first := tc.Stream[0]
+			got := untrackedWant{Effects: sim.effects}
+			if raw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, first)+"/"+prObjectStateKey]; ok {
+				st, err := decodeInput[PRState](raw)
+				require.NoError(t, err)
+				got.Persisted, got.Status = true, st.Status
+				for _, e := range st.IntendedEffects {
+					got.IntendedEffects = append(got.IntendedEffects, e.EffectKey)
+				}
+			}
+			if raw, ok := sim.kv[RepoObjectServiceName+"/"+RolloutIndexKey+"/"+rolloutIndexStateKey]; ok {
+				idx, err := decodeInput[RolloutIndexState](raw)
+				require.NoError(t, err)
+				got.Rollouts = idx.Active()
+			}
+			addr := parityInvocation{Object: RepoObjectServiceName, Event: first.Event}
+			_, got.RepoIndexed = sim.kv[RepoObjectServiceName+"/"+objectKey(t, addr)+"/"+repoObjectStateKey]
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}
