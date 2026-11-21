@@ -597,9 +597,3 @@ func (ev *RepoEvent) UnmarshalJSON(data []byte) error {
 	ev.EffectsOwner = ParseEffectsOwner(string(ev.EffectsOwner))
 	return nil
 }
-
-// Compile-time surface freeze: stub must satisfy the full interface.
-
-// Compile-time surface freeze: stub must satisfy the full interface.
-
-// Compile-time freeze: the shared fake must satisfy the invoker interface.

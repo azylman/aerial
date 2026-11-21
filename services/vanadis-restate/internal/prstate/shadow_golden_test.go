@@ -2,11 +2,9 @@ package prstate
 
 // Shadow goldens, prstate side: testdata/prlifecycle/shadow/ pins the
 // legacy-owned wire synapse sent while it still wrote pr_registry. prstate
-// now owns every effect and rejects a legacy stamp, so this file proves two
-// things: every legacy-stamped capture is rejected terminally and writes
-// nothing (TestShadowGoldensRejectLegacy), and each captured event stream,
-// replayed under restate ownership (restamped), still lands on the
-// hand-derived state and effects. synapse's restate_shadow_golden_test.go
+// now owns every effect and rejects a legacy stamp (TestRejectLegacyOwner),
+// so each captured event stream replays under restate ownership
+// (restamped) and must still land on the hand-derived state and effects. synapse's restate_shadow_golden_test.go
 // asserts it sends exactly those events until its legacy path is deleted.
 // The projection-compare fields the goldens carry (divergent, superseded,
 // intended_effects) belonged to the retired shadow compare and are ignored.
@@ -14,11 +12,9 @@ package prstate
 import (
 	"encoding/json"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 
-	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,85 +73,6 @@ func restamped(t *testing.T, invs []parityInvocation) []parityInvocation {
 func restampOwner(ev map[string]any) {
 	if owner, ok := ev["effects_owner"].(string); ok && ParseEffectsOwner(owner) == EffectsOwnerLegacy {
 		ev["effects_owner"] = string(EffectsOwnerRestate)
-	}
-}
-
-// legacyInvocations collects every invocation in a decoded golden whose
-// event (or nested SHA event) carries a legacy effects_owner stamp.
-func legacyInvocations(t *testing.T, node any) []parityInvocation {
-	t.Helper()
-	var out []parityInvocation
-	switch n := node.(type) {
-	case map[string]any:
-		object, okObject := n["object"].(string)
-		handler, okHandler := n["handler"].(string)
-		if ev, ok := n["event"].(map[string]any); ok && okObject && okHandler && carriesLegacyStamp(ev) {
-			raw, err := json.Marshal(ev)
-			require.NoError(t, err)
-			out = append(out, parityInvocation{Object: object, Handler: handler, Event: raw})
-		}
-		keys := make([]string, 0, len(n))
-		for k := range n {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			out = append(out, legacyInvocations(t, n[k])...)
-		}
-	case []any:
-		for _, v := range n {
-			out = append(out, legacyInvocations(t, v)...)
-		}
-	}
-	return out
-}
-
-// carriesLegacyStamp reports whether ev or its nested SHA event is stamped
-// legacy.
-func carriesLegacyStamp(ev map[string]any) bool {
-	if owner, ok := ev["effects_owner"].(string); ok && ParseEffectsOwner(owner) == EffectsOwnerLegacy {
-		return true
-	}
-	nested, ok := ev["event"].(map[string]any)
-	return ok && carriesLegacyStamp(nested)
-}
-
-// TestShadowGoldensRejectLegacy pins that every legacy-stamped event the
-// shadow goldens captured is rejected with a terminal error before it
-// writes any Restate state or sends anything.
-func TestShadowGoldensRejectLegacy(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		file      string
-		wantCount int
-	}{
-		{file: "dependabot-opened.json", wantCount: 6},
-		{file: "legacy-agent-column-owner.json", wantCount: 2},
-		{file: "lost-merge-webhooks.json", wantCount: 14},
-		{file: "merged-stale-head-deploy.json", wantCount: 19},
-		{file: "rollout-ready-jobs.json", wantCount: 4},
-		{file: "sibling-bot-synchronize.json", wantCount: 2},
-		{file: "stale-head-synchronize.json", wantCount: 8},
-		{file: "untracked-upstream-kustomization.json", wantCount: 6},
-	}
-	for _, tc := range tests {
-		t.Run(tc.file, func(t *testing.T) {
-			t.Parallel()
-			raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/" + tc.file)
-			require.NoError(t, err)
-			var doc any
-			require.NoError(t, json.Unmarshal(raw, &doc))
-			invs := legacyInvocations(t, doc)
-			require.Len(t, invs, tc.wantCount)
-			for _, inv := range invs {
-				sim := newStaleHeadSim(t)
-				err := sim.run(simCall{service: inv.Object, key: objectKey(t, inv), handler: inv.Handler, input: inv.Event})
-				require.True(t, restate.IsTerminalError(err), "%s/%s err = %v", inv.Object, inv.Handler, err)
-				require.Equal(t, restate.Code(409), restate.AsTerminalError(err).Code())
-				require.Empty(t, sim.kv, "%s/%s wrote state", inv.Object, inv.Handler)
-				require.Empty(t, sim.pending, "%s/%s sent", inv.Object, inv.Handler)
-			}
-		})
 	}
 }
 
