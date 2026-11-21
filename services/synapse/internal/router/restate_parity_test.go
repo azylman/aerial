@@ -113,13 +113,26 @@ type paritySynapseStep struct {
 	Failure     *parityFailure     `json:"failure"`
 }
 
-// parityScenario is one golden file; Restate-only fields are ignored here.
+// parityRestateSend names one send of a golden's restate stream; the
+// event payload is pinned by the prstate parity test.
+type parityRestateSend struct {
+	Object  string `json:"object"`
+	Handler string `json:"handler"`
+}
+
+// parityScenario is one golden file; of the restate stream only the
+// handler names are read here (TestRestateOwnedLifecycleEdge).
 type parityScenario struct {
-	Name         string              `json:"name"`
-	GitHubRoutes map[string]string   `json:"github_routes"`
-	Synapse      []paritySynapseStep `json:"synapse"`
-	Effects      []parityEffect      `json:"effects"`
-	Rows         []parityRow         `json:"rows"`
+	Name    string              `json:"name"`
+	Restate []parityRestateSend `json:"restate"`
+	// OwnedExtraSends counts, by handler, the state-only sends the
+	// restate-owned edge makes beyond the golden restate stream (they carry
+	// no effect, so the prstate replay omits them).
+	OwnedExtraSends map[string]int      `json:"owned_extra_sends"`
+	GitHubRoutes    map[string]string   `json:"github_routes"`
+	Synapse         []paritySynapseStep `json:"synapse"`
+	Effects         []parityEffect      `json:"effects"`
+	Rows            []parityRow         `json:"rows"`
 }
 
 func loadParityScenarios(t *testing.T) []parityScenario {
