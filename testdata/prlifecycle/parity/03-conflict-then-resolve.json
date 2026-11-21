@@ -1,6 +1,6 @@
 {
   "name": "03-conflict-then-resolve",
-  "description": "auto_merge_disabled on a dirty PR publishes conflict once; a synchronize to a new head reopens the row, publishes synchronize and resolves the conflict.",
+  "description": "auto_merge_disabled on a dirty PR publishes conflict once; a synchronize to a new head reopens the row, publishes synchronize and PRObject, which alone knows the row was in conflict, resolves it inside HandleSynchronized.",
   "synapse": [
     {
       "kind": "register",
@@ -121,17 +121,6 @@
             "head_sha": "h103b"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
-      }
-    },
-    {
-      "object": "PRObject",
-      "handler": "HandleConflictResolved",
-      "event": {
-        "pr_number": 103,
-        "head_sha": "h103b",
-        "branch": "feat/conflict",
         "repo": "azylman/aerial",
         "effects_owner": "restate"
       }

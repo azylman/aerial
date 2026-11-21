@@ -177,6 +177,9 @@ func newParitySim(t *testing.T) *paritySim {
 		"RepoObject/" + RepoHandlerImagePromotion:     bindErr(repo.HandleImagePromotion),
 		"RepoObject/" + "HandleKustomizationStatus":   bindErr(repo.HandleKustomizationStatus),
 		"RepoObject/" + RepoHandlerRolloutIndex:       bindErr(repo.HandleRolloutIndex),
+		"RepoObject/" + "HandlePushBySHA":             bindErr(repo.HandlePushBySHA),
+		"RepoObject/" + "HandleHeldReplay":            bindErr(repo.HandleHeldReplay),
+		"RepoObject/" + "HandleHeldExpiry":            bindErr(repo.HandleHeldExpiry),
 	}
 	return sim
 }
@@ -391,9 +394,18 @@ func TestRestateOwnershipParity(t *testing.T) {
 			for _, inv := range tc.Restate {
 				owner, err := decodeInput[struct {
 					EffectsOwner EffectsOwner `json:"effects_owner"`
+					// A RepoObject *BySHA envelope carries the owner on
+					// the wrapped PRObject event.
+					Event struct {
+						EffectsOwner EffectsOwner `json:"effects_owner"`
+					} `json:"event"`
 				}](inv.Event)
 				require.NoError(t, err)
-				require.Equal(t, EffectsOwnerRestate, owner.EffectsOwner, "every golden event is restate-owned")
+				got := owner.EffectsOwner
+				if strings.HasSuffix(inv.Handler, "BySHA") {
+					got = owner.Event.EffectsOwner
+				}
+				require.Equal(t, EffectsOwnerRestate, got, "every golden event is restate-owned")
 				sim.send(inv)
 			}
 			require.Equal(t, sortedEffects(tc.Effects), sortedEffects(sim.effects))
