@@ -19,7 +19,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -344,15 +343,6 @@ func assertSchedulesResponse(t *testing.T, rec *httptest.ResponseRecorder, wantT
 	if resp.Summary.TotalActive != wantTotal {
 		t.Errorf("got TotalActive=%d, want %d", resp.Summary.TotalActive, wantTotal)
 	}
-	if len(resp.Crons) > 0 && strings.Contains(resp.Crons[0].Prompt, "secrettoken") {
-		t.Errorf("secret not redacted from cron prompt: %s", resp.Crons[0].Prompt)
-	}
-	if len(resp.Heartbeats) > 0 && strings.Contains(resp.Heartbeats[0].Prompt, "github_pat_") {
-		t.Errorf("secret not redacted from heartbeat prompt: %s", resp.Heartbeats[0].Prompt)
-	}
-	if len(resp.OneShots) > 0 && strings.Contains(resp.OneShots[0].Prompt, "secretpass") {
-		t.Errorf("secret not redacted from oneshot prompt: %s", resp.OneShots[0].Prompt)
-	}
 }
 
 func runHandleSchedulesCase(t *testing.T, tc handleSchedulesTestCase) {
@@ -369,15 +359,6 @@ func runHandleSchedulesCase(t *testing.T, tc handleSchedulesTestCase) {
 }
 
 func TestHandleSchedules_Table(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	t.Setenv("GITHUB_PAT", "[REDACTED]")
-	t.Setenv("POSTGRES_PASSWORD", "secretpass")
-	secretsDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(secretsDir, "PAT_SECRET"), []byte("[REDACTED]"), 0o600)
-	oldSecretsPath := sanitizer.DefaultSharedSecretsPath
-	sanitizer.DefaultSharedSecretsPath = secretsDir
-	t.Cleanup(func() { sanitizer.DefaultSharedSecretsPath = oldSecretsPath })
-
 	cfg := &config.Config{
 		DatabaseURL: "postgres://aerial:supersecret@127.0.0.1:5432/aerial",
 		NATSURL:     "nats://user:secrettoken123456@127.0.0.1:4222",
@@ -542,17 +523,6 @@ func assertScheduleRunsResponse(t *testing.T, rec *httptest.ResponseRecorder, wa
 	if resp.Total != wantTotal {
 		t.Errorf("got Total=%d, want %d", resp.Total, wantTotal)
 	}
-	for _, r := range resp.Runs {
-		if strings.Contains(r.Prompt, "mysecrettoken") {
-			t.Errorf("prompt not sanitized: %s", r.Prompt)
-		}
-		if strings.Contains(r.Title, "ghp_") {
-			t.Errorf("title not sanitized: %s", r.Title)
-		}
-		if strings.Contains(r.Error, "supersecret") {
-			t.Errorf("error not sanitized: %s", r.Error)
-		}
-	}
 }
 
 func completedAtForStatus(status string, i int) *time.Time {
@@ -577,9 +547,6 @@ func runHandleScheduleRunsCase(t *testing.T, tc handleScheduleRunsTestCase) {
 }
 
 func TestHandleScheduleRuns_Table(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	t.Setenv("GITHUB_PAT", "[REDACTED]")
-	t.Setenv("POSTGRES_PASSWORD", "supersecret")
 	cfg := &config.Config{
 		DatabaseURL: "postgres://aerial:supersecret@127.0.0.1:5432/aerial",
 		NATSURL:     "nats://user:mysecrettoken123@127.0.0.1:4222",

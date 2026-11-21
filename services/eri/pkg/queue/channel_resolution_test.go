@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
@@ -451,5 +452,27 @@ func TestFetchAndCacheRESTChannel_Errors(t *testing.T) {
 	snap, ok = fetchAndCacheRESTChannel(sess, "999888777")
 	if ok || snap.ID != "" {
 		t.Errorf("expected false, got %v", ok)
+	}
+}
+
+func TestFormatThreadTitle_RedactsBeforeClamp(t *testing.T) {
+	sanitizer.RegisterSensitiveTokens("plain-dummy-boundary-secret")
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	testTime := time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		prefix string
+		prompt string
+		want   string
+	}{
+		{"secret in prefix straddling clamp", strings.Repeat("A", 90) + " plain-dummy-boundary-secret", "", strings.Repeat("A", 90) + " [REDAC..."},
+		{"secret in prompt", "", "Rotate plain-dummy-boundary-secret now", "Rotate [REDACTED] now – Aug 28, 2026"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FormatThreadTitle(tc.prefix, tc.prompt, testTime); got != tc.want {
+				t.Errorf("FormatThreadTitle() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

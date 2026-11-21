@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // Schedule types shared by the schedule tables, metrics labels and run records.
@@ -526,11 +524,6 @@ func FormatCronDescription(cronExpr string) string {
 	return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
 }
 
-// SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.
-func SanitizeScheduleText(s string) string {
-	return sanitizer.SanitizeString(s)
-}
-
 // CronScheduleWithDesc is a recurring schedule serialized with a cron description.
 type CronScheduleWithDesc struct {
 	ID              string    `json:"id"`
@@ -584,10 +577,10 @@ func buildRecurringScheduleWithDesc(id, targetID, titlePrefix, cronExpr, prompt,
 		ID:              id,
 		TargetID:        targetID,
 		ChannelID:       targetID,
-		TitlePrefix:     SanitizeScheduleText(titlePrefix),
+		TitlePrefix:     titlePrefix,
 		CronExpr:        cronExpr,
 		CronDescription: FormatCronDescription(cronExpr),
-		Prompt:          SanitizeScheduleText(prompt),
+		Prompt:          prompt,
 		Timezone:        timezone,
 		NextRunAt:       nextRunAt,
 		Enabled:         enabled,
@@ -625,7 +618,7 @@ func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
 		oneShots = append(oneShots, OneShotScheduleJSON{
 			ID:        s.ID,
 			ThreadID:  s.ThreadID,
-			Prompt:    SanitizeScheduleText(s.Prompt),
+			Prompt:    s.Prompt,
 			RunAt:     s.RunAt,
 			CreatedAt: s.CreatedAt,
 			Effort:    s.Effort,
