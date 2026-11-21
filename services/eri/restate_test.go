@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -486,7 +487,7 @@ type dispatchOpCase struct {
 	name           string
 	op             string
 	sessionKey     string
-	dispatchReq    queue.BrainDispatchRequest
+	dispatchReq    eriwire.BrainDispatchRequest
 	cancelReq      queue.CancelDispatchRequest
 	serverResp     string
 	statusCode     int
@@ -560,7 +561,7 @@ func TestRestateIngressClient_DispatchOperations(t *testing.T) {
 			name:        "enqueue dispatch accepted",
 			op:          "enqueue",
 			sessionKey:  "disp-201",
-			dispatchReq: queue.BrainDispatchRequest{ID: "d-201", Source: "vanadis"},
+			dispatchReq: eriwire.BrainDispatchRequest{ID: "d-201", Source: "vanadis"},
 			serverResp:  `{"status":"accepted","dispatch_id":"d-201"}`,
 			statusCode:  http.StatusOK,
 			wantStatus:  "accepted",
@@ -580,7 +581,7 @@ func TestRestateIngressClient_DispatchOperations(t *testing.T) {
 			name:           "enqueue dispatch returns error on transport failure",
 			op:             "enqueue",
 			sessionKey:     "disp-fail",
-			dispatchReq:    queue.BrainDispatchRequest{ID: "d-fail", Source: "vanadis", SessionID: "disp-fail"},
+			dispatchReq:    eriwire.BrainDispatchRequest{ID: "d-fail", Source: "vanadis", SessionID: "disp-fail"},
 			transportError: true,
 			wantErrorSub:   "post restate request",
 		},
