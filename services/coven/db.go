@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/pgvector/pgvector-go"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (
@@ -160,30 +158,13 @@ type Store interface {
 // SQLStore implements Store backed by PostgreSQL and Eri HTTP APIs.
 type SQLStore struct {
 	db            DBTX
-	brainURL      string
-	httpClient    *http.Client
-	brainToken    string
 	stack         string
 	indexerClient *IndexerClient
 }
 
-// NewSQLStore creates a new SQLStore instance using an empty Brain URL.
+// NewSQLStore creates a new SQLStore instance for db.
 func NewSQLStore(db DBTX) *SQLStore {
-	return NewSQLStoreWithBrainURL(db, "", nil)
-}
-
-// NewSQLStoreWithBrainURL creates a new SQLStore instance with custom Brain URL and HTTP client.
-func NewSQLStoreWithBrainURL(db DBTX, brainURL string, client *http.Client) *SQLStore {
-	cleanURL := strings.TrimRight(strings.TrimSpace(brainURL), "/")
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	return &SQLStore{
-		db:         db,
-		brainURL:   cleanURL,
-		httpClient: tracing.Client(client),
-		stack:      DefaultStack,
-	}
+	return &SQLStore{db: db, stack: DefaultStack}
 }
 
 // SetStack sets the stack namespace on an existing SQLStore.
@@ -191,11 +172,6 @@ func (s *SQLStore) SetStack(stack string) {
 	if s != nil {
 		s.stack = NormalizeStack(stack)
 	}
-}
-
-// Stack returns the configured stack namespace, defaulting to DefaultStack ("aerial").
-func (s *SQLStore) Stack() string {
-	return s.effectiveStack()
 }
 
 func (s *SQLStore) effectiveStack() string {
@@ -214,14 +190,6 @@ func (s *SQLStore) SetIndexerClient(client *IndexerClient) {
 	if s != nil {
 		s.indexerClient = client
 	}
-}
-
-// IndexerClient returns the configured IndexerClient, or nil if not set.
-func (s *SQLStore) IndexerClient() *IndexerClient {
-	if s != nil {
-		return s.indexerClient
-	}
-	return nil
 }
 
 // WithDB returns a shallow copy of SQLStore with db replaced by conn.
@@ -262,33 +230,6 @@ func (s *SQLStore) Conn(ctx context.Context) (*sql.Conn, error) {
 		return conn, nil
 	}
 	return nil, errNoPinnedConn
-}
-
-// SetBrainURL sets the Brain URL on an existing SQLStore.
-func (s *SQLStore) SetBrainURL(brainURL string) {
-	cleanURL := strings.TrimRight(strings.TrimSpace(brainURL), "/")
-	s.brainURL = cleanURL
-}
-
-// SetBrainToken sets the Brain authentication token on an existing SQLStore.
-func (s *SQLStore) SetBrainToken(token string) {
-	if s != nil {
-		s.brainToken = strings.TrimSpace(token)
-	}
-}
-
-func (s *SQLStore) getBrainURL() string {
-	if s != nil && s.brainURL != "" {
-		return s.brainURL
-	}
-	return ""
-}
-
-func (s *SQLStore) getHTTPClient() *http.Client {
-	if s != nil && s.httpClient != nil {
-		return s.httpClient
-	}
-	return tracing.Client(&http.Client{Timeout: 15 * time.Second})
 }
 
 func (s *SQLStore) checkDB() error {

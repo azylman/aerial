@@ -344,7 +344,7 @@ func TestResolvePinnedStore_PrePinnedConnNotClosed(t *testing.T) {
 		}
 	}()
 
-	store := NewSQLStoreWithBrainURL(conn, "", nil)
+	store := NewSQLStore(conn)
 
 	updatedStore, lockDB, ownedConn, err := resolvePinnedStore(ctx, store)
 	if err != nil {
@@ -361,7 +361,7 @@ func TestResolvePinnedStore_PrePinnedConnNotClosed(t *testing.T) {
 	}
 
 	// For a store backed by *sql.DB, ownedConn should be populated
-	dbStore := NewSQLStoreWithBrainURL(dbMem, "", nil)
+	dbStore := NewSQLStore(dbMem)
 	_, _, ownedFromDB, err := resolvePinnedStore(ctx, dbStore)
 	if err != nil {
 		t.Fatalf("resolvePinnedStore(dbStore) err = %v", err)

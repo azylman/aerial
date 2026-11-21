@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -84,215 +85,74 @@ func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
 func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 
-	tests := []threadTrajectoryContextTestCase{
-		{
-			name:     "NilDBError",
-			nilDB:    true,
-			threadID: "t-1",
-			wantErr:  true,
-		},
-		{
-			name:     "EmptyThreadID",
-			threadID: "   ",
-			wantErr:  false,
-		},
-		{
-			name:     "DBQueryError",
-			threadID: "t-1",
-			queryErr: errors.New("db disconnect"),
-			wantErr:  true,
-		},
-		{
-			name:         "EmptySessions",
-			threadID:     "t-1",
-			watermarkSQL: "SELECT 0, NULL",
-			wantErr:      false,
-		},
-		{
-			name:         "SessionsFallbackWithPreviousConversationID",
-			threadID:     "t-1",
-			agent:        "agent-beta",
-			watermarkSQL: "SELECT 0, '2026-01-01T00:00:00Z'",
-			summarySQL:   "SELECT 'sess-1', 'sess-0'",
-			searchBody:   `{"steps":[]}`,
-			wantErr:      false,
-		},
-		{
-			name:         "TranscriptSearchError",
-			threadID:     "t-1",
-			agent:        "agent-alpha",
-			watermarkSQL: "SELECT 0, NULL",
-			messagesSQL:  "SELECT 's1' UNION ALL SELECT 's0'",
-			searchStatus: http.StatusInternalServerError,
-			wantErr:      true,
-		},
-		{
-			name:         "SuccessParsingAndDeduplication",
-			threadID:     "t-1",
-			agent:        "agent-beta",
-			watermarkSQL: "SELECT 0, '2026-01-01T00:00:00Z'",
-			messagesSQL:  "SELECT 's1' UNION ALL SELECT 's0'",
-			searchBody: `{"steps":[
-				{"step_type":"USER_INPUT","tool_name":"","content":"<retrieved_memory>\n- [id:42] User likes matcha\n- [id:42] User likes matcha\n- [id:43] Prefers dark mode\n</retrieved_memory>"},
-				{"step_type":"PLANNER_RESPONSE","tool_name":"memory_search","content":"{\"query\": \"matcha\"}"},
-				{"step_type":"USER_INPUT","tool_name":"","content":"<\\RETRIEVED_MEMORY>\n- [id:42] User likes matcha\n- [id:44] Morning coffee at 8am\n<\\/RETRIEVED_MEMORY>"},
-				{"step_type":"OTHER","tool_name":"","content":"ignored long content 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"}
-			]}`,
-			wantErr: false,
-			wantFacts: []string{
-				"- [id:42] User likes matcha",
-				"- [id:43] Prefers dark mode",
-				"- [id:44] Morning coffee at 8am",
-			},
-			wantToolCalls: []string{
-				`memory_search({"query": "matcha"})`,
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runGetThreadTrajectoryContextCase(t, tc, dbMem)
-		})
-	}
-}
-
-func TestTruncateSingleLine(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		maxLen   int
-		expected string
+		name       string
+		nilDB      bool
+		noIndexer  bool
+		threadID   string
+		agent      string
+		statusCode int
+		body       string
+		wantErr    bool
+		wantFacts  []string
+		wantTools  []string
+		wantAgent  string
 	}{
+		{name: "NilDBError", nilDB: true, threadID: "t-1", wantErr: true},
+		{name: "EmptyThreadIDReturnsNil", threadID: "   "},
+		{name: "NoIndexerClientReturnsNil", noIndexer: true, threadID: "t-1"},
 		{
-			name:     "Empty",
-			input:    "",
-			maxLen:   10,
-			expected: "",
+			name:       "SuccessDefaultStack",
+			threadID:   "th-traj-1",
+			statusCode: http.StatusOK,
+			body:       `{"retrieved_facts": ["- [id:1] Matcha"], "tool_calls": ["search(tea)"]}`,
+			wantFacts:  []string{"- [id:1] Matcha"},
+			wantTools:  []string{"search(tea)"},
+			wantAgent:  "aerial",
 		},
 		{
-			name:     "WhitespaceCollapse",
-			input:    "   hello \n\t  world  \r\n test   ",
-			maxLen:   50,
-			expected: "hello world test",
+			name:       "SuccessAgentOverride",
+			threadID:   "th-traj-1",
+			agent:      "  agent-beta  ",
+			statusCode: http.StatusOK,
+			body:       `{"retrieved_facts": ["- [id:2] Dark mode"], "tool_calls": []}`,
+			wantFacts:  []string{"- [id:2] Dark mode"},
+			wantTools:  []string{},
+			wantAgent:  "agent-beta",
 		},
-		{
-			name:     "Truncated",
-			input:    "this is a long sentence that exceeds the limit",
-			maxLen:   10,
-			expected: "this is a ",
-		},
-		{
-			name:     "NoLimit",
-			input:    "sentence with spaces",
-			maxLen:   0,
-			expected: "sentence with spaces",
-		},
+		{name: "IndexerServerError", threadID: "th-traj-2", statusCode: http.StatusInternalServerError, wantErr: true, wantAgent: "aerial"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res := truncateSingleLine(tc.input, tc.maxLen)
-			if res != tc.expected {
-				t.Errorf("truncateSingleLine(%q, %d) = %q, want %q", tc.input, tc.maxLen, res, tc.expected)
-			}
-		})
-	}
-}
+			var gotAgent string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAgent = r.URL.Query().Get("agent")
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
 
-func TestExtractTrajectorySignals(t *testing.T) {
-	tests := []struct {
-		name          string
-		stepType      string
-		toolName      string
-		content       string
-		wantFacts     []string
-		wantToolCalls string
-	}{
-		{
-			name:     "UserInputStandardRetrievedMemory",
-			stepType: "USER_INPUT",
-			content:  "<retrieved_memory>\n- [id:1] User likes matcha\n- [id:2] Prefers dark mode\n</retrieved_memory>",
-			wantFacts: []string{
-				"- [id:1] User likes matcha",
-				"- [id:2] Prefers dark mode",
-			},
-		},
-		{
-			name:     "UserInputSanitizedEscapedRetrievedMemory",
-			stepType: "USER_INPUT",
-			content:  "<\x5cRETRIEVED_MEMORY>\n- [id:10] Fact A\n- [id:10] Fact A\n<\x5c/RETRIEVED_MEMORY>",
-			wantFacts: []string{
-				"- [id:10] Fact A",
-			},
-		},
-		{
-			name:      "UserInputNoRetrievedMemory",
-			stepType:  "USER_INPUT",
-			content:   "Just regular user content",
-			wantFacts: nil,
-		},
-		{
-			name:          "PlannerResponseWithTool",
-			stepType:      "PLANNER_RESPONSE",
-			toolName:      "memory_search",
-			content:       "{\"query\": \n \"something\"}",
-			wantToolCalls: "memory_search({\"query\": \"something\"})",
-		},
-		{
-			name:     "PlannerResponseEmptyTool",
-			stepType: "PLANNER_RESPONSE",
-			toolName: "",
-			content:  "some thought",
-		},
-		{
-			name:     "OtherStepType",
-			stepType: "SYSTEM",
-			content:  "<retrieved_memory>- [id:1] test</retrieved_memory>",
-		},
-		{
-			name:          "PlannerResponseWithSkill",
-			stepType:      "PLANNER_RESPONSE",
-			toolName:      "read_file",
-			content:       `{"Path": "/skills/ha-operations/SKILL.md"}`,
-			wantToolCalls: `read_file({"Path": "/skills/ha-operations/SKILL.md"}) [SKILL_LOADED: ha-operations]`,
-		},
-		{
-			name:          "GenericStepWithSkill",
-			stepType:      "GENERIC",
-			toolName:      "",
-			content:       "---\nname: ha-operations\ndescription: test",
-			wantToolCalls: `[SKILL_LOADED: ha-operations]`,
-		},
-		{
-			name:          "ToolStepOutputNoSkill",
-			stepType:      "TOOL",
-			toolName:      "read_file",
-			content:       "file content without skill",
-			wantToolCalls: `-> OUTPUT(read_file): file content without skill`,
-		},
-		{
-			name:          "RunCommandStepEmptyTool",
-			stepType:      "RUN_COMMAND",
-			toolName:      "",
-			content:       "command line output",
-			wantToolCalls: `-> OUTPUT(run_command): command line output`,
-		},
-	}
+			store := NewSQLStore(dbMem)
+			if tc.nilDB {
+				store = &SQLStore{}
+			}
+			if !tc.noIndexer {
+				store.SetIndexerClient(NewIndexerClient(srv.URL, "aerial", srv.Client()))
+			}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			facts, tool := extractTrajectorySignals(tc.stepType, tc.toolName, tc.content)
-			if len(facts) != len(tc.wantFacts) {
-				t.Fatalf("len(facts) = %d, want %d (%v)", len(facts), len(tc.wantFacts), facts)
+			facts, tools, err := store.GetThreadTrajectoryContext(context.Background(), tc.threadID, tc.agent)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			for i := range facts {
-				if facts[i] != tc.wantFacts[i] {
-					t.Errorf("facts[%d] = %q, want %q", i, facts[i], tc.wantFacts[i])
-				}
+			if gotAgent != tc.wantAgent {
+				t.Errorf("indexer agent = %q, want %q", gotAgent, tc.wantAgent)
 			}
-			if tool != tc.wantToolCalls {
-				t.Errorf("tool = %q, want %q", tool, tc.wantToolCalls)
+			if !reflect.DeepEqual(facts, tc.wantFacts) {
+				t.Errorf("facts = %#v, want %#v", facts, tc.wantFacts)
+			}
+			if !reflect.DeepEqual(tools, tc.wantTools) {
+				t.Errorf("tools = %#v, want %#v", tools, tc.wantTools)
 			}
 		})
 	}
@@ -663,92 +523,6 @@ func runGetThreadContextBeforeWatermarkCase(t *testing.T, tc threadContextBefore
 	}
 	if len(turns) == 2 && turns[0].RowID > turns[1].RowID {
 		t.Errorf("turns not chronological: row_id[0]=%d, row_id[1]=%d", turns[0].RowID, turns[1].RowID)
-	}
-}
-
-type threadTrajectoryContextTestCase struct {
-	name          string
-	nilDB         bool
-	threadID      string
-	agent         string
-	queryErr      error
-	watermarkSQL  string
-	summarySQL    string
-	messagesSQL   string
-	searchStatus  int
-	searchBody    string
-	wantErr       bool
-	wantFacts     []string
-	wantToolCalls []string
-}
-
-func runGetThreadTrajectoryContextCase(t *testing.T, tc threadTrajectoryContextTestCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var store *SQLStore
-
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if tc.searchStatus != 0 {
-				w.WriteHeader(tc.searchStatus)
-			}
-			if tc.searchBody != "" {
-				_, _ = w.Write([]byte(tc.searchBody))
-				return
-			}
-			_, _ = w.Write([]byte(`{"steps":[]}`))
-		}))
-		defer server.Close()
-
-		store = NewSQLStoreWithBrainURL(queryMockDBTX{
-			dbMem:        dbMem,
-			queryErr:     tc.queryErr,
-			watermarkSQL: tc.watermarkSQL,
-			summarySQL:   tc.summarySQL,
-			messagesSQL:  tc.messagesSQL,
-		}, server.URL, server.Client())
-	}
-
-	var facts, tools []string
-	var err error
-	if tc.agent != "" {
-		facts, tools, err = store.GetThreadTrajectoryContext(ctx, tc.threadID, tc.agent)
-	} else {
-		facts, tools, err = store.GetThreadTrajectoryContext(ctx, tc.threadID)
-	}
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr {
-		return
-	}
-	assertTrajectoryFacts(t, facts, tc.wantFacts)
-	assertTrajectoryTools(t, tools, tc.wantToolCalls)
-}
-
-func assertTrajectoryFacts(t *testing.T, got, want []string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("len(facts) = %d, want %d (%v)", len(got), len(want), got)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("facts[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-func assertTrajectoryTools(t *testing.T, got, want []string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("len(tools) = %d, want %d (%v)", len(got), len(want), got)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("tools[%d] = %q, want %q", i, got[i], want[i])
-		}
 	}
 }
 

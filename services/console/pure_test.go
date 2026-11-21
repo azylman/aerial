@@ -62,21 +62,19 @@ func mkJob(id, runID int64, name, status, conclusion string, startOff, endOff ti
 	return j
 }
 
+// mkCont builds a container in the shape synthesizeContainersFromServices produces
+// for a service without image metadata; the service defaults to the name minus "aerial-".
 func mkCont(name, service, sha, state, health string, createdOff time.Duration) DockerContainerJSON {
+	if service == "" {
+		service = strings.TrimPrefix(name, "aerial-")
+	}
 	c := DockerContainerJSON{
-		ID:      "c-" + name,
-		Names:   []string{"/" + strings.TrimPrefix(name, "/")},
 		State:   state,
 		Created: testRefTime.Add(createdOff).Unix(),
+		Labels:  map[string]string{"aerial.service": service},
 	}
-	if service != "" || sha != "" {
-		c.Labels = map[string]string{"com.docker.compose.project": "aerial"}
-		if service != "" {
-			c.Labels["com.docker.compose.service"] = service
-		}
-		if sha != "" {
-			c.Labels["org.opencontainers.image.revision"] = sha
-		}
+	if sha != "" {
+		c.Labels["aerial.commit_sha"] = sha
 	}
 	if health != "" {
 		c.Health = &DockerContainerHealth{Status: health}
@@ -84,35 +82,8 @@ func mkCont(name, service, sha, state, health string, createdOff time.Duration) 
 	return c
 }
 
-func mkLabeledCont(name, state string, labels map[string]string) DockerContainerJSON {
-	c := DockerContainerJSON{
-		ID:     "c-" + name,
-		State:  state,
-		Labels: labels,
-	}
-	if name != "" {
-		c.Names = []string{"/" + strings.TrimPrefix(name, "/")}
-	}
-	return c
-}
-
-func mkRecon(active bool, state, sha, errMsg string, targets []string, startOff time.Duration) GitSyncStatusResponse {
-	status := "synced"
-	if state == "failed" {
-		status = "error"
-	}
-	return GitSyncStatusResponse{
-		Status: status,
-		Reconciliation: &ReconciliationStatus{
-			Active:         active,
-			State:          state,
-			Stage:          state,
-			CommitSHA:      sha,
-			Error:          errMsg,
-			TargetServices: targets,
-			StartedAt:      testRefTime.Add(startOff),
-		},
-	}
+func mkLabeledCont(state string, labels map[string]string) DockerContainerJSON {
+	return DockerContainerJSON{State: state, Labels: labels}
 }
 
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
@@ -518,12 +489,12 @@ func TestBuildContainerChips_TableDriven(t *testing.T) {
 	}{
 		{name: "empty containers returns empty slice", containers: []DockerContainerJSON{}, now: testRefTime, wantChips: []MatrixJobChip{}},
 		{name: "zero-time default fallback", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -60*time.Second)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "brain"}}},
-		{name: "zero or future creation time defaults to 0s duration", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "running", nil), mkCont("aerial-dashboard", "", "", "running", "", 10*time.Minute)}, now: testRefTime, wantChips: []MatrixJobChip{{Duration: "0s"}, {Duration: "0s"}}},
+		{name: "zero or future creation time defaults to 0s duration", containers: []DockerContainerJSON{mkLabeledCont("running", map[string]string{"aerial.service": "brain"}), mkCont("aerial-dashboard", "", "", "running", "", 10*time.Minute)}, now: testRefTime, wantChips: []MatrixJobChip{{Duration: "0s"}, {Duration: "0s"}}},
 		{name: "health status active for starting, failed for unhealthy or not running", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "starting", -120*time.Second), mkCont("aerial-proxy", "", "", "exited", "", -300*time.Second), mkCont("aerial-haro", "", "", "running", "unhealthy", -600*time.Second)}, now: testRefTime, wantChips: []MatrixJobChip{{Status: "active", Duration: "2m"}, {Status: "failed", Conclusion: "failure"}, {Status: "failed", Conclusion: "failure"}}},
 		{name: "deduplicates running brain containers with future and current created", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 1*time.Hour), mkCont("aerial-brain", "brain", "", "running", "", 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Duration: "0s"}}},
-		{name: "nomad containers with alloc_id labels", containers: []DockerContainerJSON{
-			mkLabeledCont("brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0", "running", map[string]string{"aerial.service": "brain", "com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0"}),
-			mkLabeledCont("hassio_supervisor", "running", nil),
+		{name: "containers without an aerial.service label are skipped", containers: []DockerContainerJSON{
+			mkLabeledCont("running", map[string]string{"aerial.service": "brain"}),
+			mkLabeledCont("running", nil),
 		}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "completed", Conclusion: "success"}}},
 		{name: "zero reference time defaults to now", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "", -10*time.Second)}, now: time.Time{}, wantChips: []MatrixJobChip{{Status: "completed", Conclusion: "success"}}},
 	}
@@ -739,82 +710,6 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 	}
 }
 
-type buildTargetContainerChipsTestCase struct {
-	name             string
-	targets          []string
-	startedAt        time.Time
-	customContainers []DockerContainerJSON
-	wantChips        []MatrixJobChip
-}
-
-func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
-	now := testRefTime
-	startedAt := now.Add(-60 * time.Second)
-
-	rawContainers := []DockerContainerJSON{
-		mkCont("aerial-dashboard", "dashboard", "", "running", "", -30*time.Second),
-		mkCont("aerial-brain", "brain", "", "running", "", -3*time.Hour),
-		mkCont("aerial-proxy", "proxy", "", "running", "starting", -10*time.Second),
-		mkCont("aerial-docs", "docs", "", "exited", "", -5*time.Second),
-	}
-
-	tests := []buildTargetContainerChipsTestCase{
-		{name: "nil targets falls back to all containers", targets: nil, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
-		{name: "empty targets falls back to all containers", targets: []string{}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
-		{name: "scoped to single recently created target", targets: []string{"dashboard"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Conclusion: "success", Duration: "30s"}}},
-		{name: "stale container reports active and pending duration", targets: []string{"brain"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "brain", Status: "active", Duration: "pending"}}},
-		{name: "missing container reports active and pending duration", targets: []string{"haro"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "haro", Status: "active", Duration: "pending"}}},
-		{name: "starting health reports active and non-empty duration", targets: []string{"proxy"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "proxy", Status: "active"}}},
-		{name: "exited container reports failed and failure conclusion", targets: []string{"docs"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "docs", Status: "failed", Conclusion: "failure"}}},
-		{name: "multiple targets deduplicated and trimmed", targets: []string{"dashboard", " dashboard ", "docs", ""}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "docs"}}},
-		{name: "zero reference time defaults now to time.Now().UTC()", targets: []string{"dashboard"}, startedAt: startedAt, customContainers: rawContainers, wantChips: []MatrixJobChip{{Name: "dashboard", Duration: "*"}}},
-		{name: "container name prefix fallback and newer container wins", targets: []string{"brain"}, startedAt: startedAt, customContainers: []DockerContainerJSON{
-			mkCont("aerial-brain", "", "", "running", "", -55*time.Second),
-			mkCont("aerial-brain", "", "", "exited", "", -160*time.Second),
-		}, wantChips: []MatrixJobChip{{Name: "brain", Status: "completed"}}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runBuildTargetContainerChipsCase(t, tt, rawContainers, now, startedAt)
-		})
-	}
-}
-
-func runBuildTargetContainerChipsCase(t *testing.T, tt buildTargetContainerChipsTestCase, rawContainers []DockerContainerJSON, now, startedAt time.Time) {
-	t.Helper()
-	containers := rawContainers
-	if tt.customContainers != nil {
-		containers = tt.customContainers
-	}
-	refTime := now
-	if tt.name == "zero reference time defaults now to time.Now().UTC()" {
-		refTime = time.Time{}
-	}
-	got := BuildTargetContainerChips(containers, tt.targets, tt.startedAt, refTime)
-	if len(got) != len(tt.wantChips) {
-		t.Fatalf("BuildTargetContainerChips() returned %d chips, want %d", len(got), len(tt.wantChips))
-	}
-	for i, want := range tt.wantChips {
-		if want.Name != "" && got[i].Name != want.Name {
-			t.Errorf("chip[%d] name = %q, want %q", i, got[i].Name, want.Name)
-		}
-		if want.Status != "" && got[i].Status != want.Status {
-			t.Errorf("chip[%d] status = %q, want %q", i, got[i].Status, want.Status)
-		}
-		if want.Conclusion != "" && got[i].Conclusion != want.Conclusion {
-			t.Errorf("chip[%d] conclusion = %q, want %q", i, got[i].Conclusion, want.Conclusion)
-		}
-		if want.Duration == "*" {
-			if got[i].Duration == "" {
-				t.Errorf("chip[%d] expected non-empty duration", i)
-			}
-		} else if want.Duration != "" && got[i].Duration != want.Duration {
-			t.Errorf("chip[%d] duration = %q, want %q", i, got[i].Duration, want.Duration)
-		}
-	}
-}
-
 type wantDep struct {
 	ID               string
 	Service          string
@@ -832,7 +727,7 @@ type wantDep struct {
 	CheckCommitTime  *time.Time
 }
 
-func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
+func TestMergeClusterDeployments_PureTableDriven(t *testing.T) {
 	t.Parallel()
 	tests := make([]mergeClusterTestCase, 0, 70)
 	tests = append(tests, mergeClusterBatch1Cases()...)
@@ -861,21 +756,17 @@ func mergeClusterBatch1Cases() []mergeClusterTestCase {
 		mkRun(102, "", "5555555555555555555555555555555555555555", "completed", "success", "", -10*time.Minute, -2*time.Minute),
 		mkRun(103, "", "2222222222222222222222222222222222222222", "queued", "", "", -1*time.Minute, -1*time.Minute),
 	)
-	sortGitSync := mkRecon(true, "pulling", "4444444444444444444444444444444444444444", "", nil, -30*time.Second)
 	sortContainers := []DockerContainerJSON{
 		mkCont("proxy", "proxy", "1111111111111111111111111111111111111111", "running", "", -40*time.Second),
 		mkCont("brain", "brain", "6666666666666666666666666666666666666666", "running", "", -300*time.Second),
 	}
 
 	return []mergeClusterTestCase{
-		// 1. Concurrent Pipelines
-		{name: "ConcurrentPipelines", runs: mkRuns(mkRun(201, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "feat: build feature B", -5*time.Minute, -1*time.Minute)), jobs: map[int64][]GitHubJob{201: {mkJob(1, 201, "build (dashboard)", "in_progress", "", -4*time.Minute, 0)}}, gitSync: mkRecon(true, "swapping", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", []string{"proxy"}, -2*time.Minute), currentCommit: "aaaaaaaa", wantList: []wantDep{{Stage: "swapping", Commit: "aaaaaaa"}, {Stage: "building", Commit: "bbbbbbb"}}},
-
 		// 2. AwaitingPullBridge
 		{name: "AwaitingPullBridge", runs: mkRuns(mkRun(301, "", "cccccccccccccccccccccccccccccccccccccccc", "completed", "success", "chore: updated docs", -10*time.Minute, -5*time.Minute)), currentCommit: "oldcommit", wantList: []wantDep{{Commit: "ccccccc", Stage: "awaiting_pull", StepStatusMap: map[int]string{1: "completed", 2: "active"}}}},
 
 		// 3. DeterministicSort
-		{name: "DeterministicSort", runs: sortRuns, gitSync: sortGitSync, containers: sortContainers, currentCommit: "6666666", wantCount: 5, wantList: []wantDep{{Stage: "swapping"}, {Stage: "pulling"}, {Stage: "building"}, {Stage: "awaiting_pull"}, {Stage: "queued"}}, wantRepeats: 10},
+		{name: "DeterministicSort", runs: sortRuns, containers: sortContainers, currentCommit: "6666666", wantCount: 4, wantList: []wantDep{{Stage: "swapping"}, {Stage: "building"}, {Stage: "awaiting_pull"}, {Stage: "queued"}}, wantRepeats: 10},
 
 		// 4. MultiCommitContainerGrouping
 		{name: "MultiCommitContainerGrouping", runs: mkRuns(mkRun(1, "", "aaaaaaa123456789", "completed", "success", "", -10*time.Minute, -5*time.Minute), mkRun(2, "", "bbbbbbb123456789", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "aaaaaaa123456789", "running", "", -300*time.Second), mkCont("aerial-proxy", "proxy", "bbbbbbb123456789", "running", "", -30*time.Second)}, currentCommit: "aaaaaaa", wantList: []wantDep{{Commit: "bbbbbbb", Stage: "swapping"}, {Commit: "aaaaaaa", Stage: "live"}}},
@@ -889,17 +780,8 @@ func mergeClusterBatch1Cases() []mergeClusterTestCase {
 		// 7. CardinalityClamp
 		{name: "CardinalityClamp", runs: cardinalityRuns, wantCount: 5},
 
-		// 8. PullingNotPromotedToSwapping
-		{name: "PullingNotPromotedToSwapping", gitSync: mkRecon(true, "pulling", "7777777777777777777777777777777777777777", "", []string{"aerial-dashboard"}, -15*time.Second), containers: []DockerContainerJSON{mkCont("aerial-dashboard", "", "7777777777777777777777777777777777777777", "running", "", -300*time.Second)}, wantList: []wantDep{{Stage: "pulling", StepStatusMap: map[int]string{2: "active", 3: "pending"}}}},
-
 		// 9. DegradedAndFailedBranches_DegradedContainer
 		{name: "DegradedAndFailedBranches_DegradedContainer", runs: mkRuns(mkRun(801, "", "8888888888888888888888888888888888888888", "completed", "success", "", -5*time.Minute, -2*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-dashboard", "", "8888888888888888888888888888888888888888", "exited", "", -60*time.Second)}, wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{4: "failed"}}}},
-
-		// 10. DegradedAndFailedBranches_HangarFailedWithError
-		{name: "DegradedAndFailedBranches_HangarFailedWithError", gitSync: mkRecon(false, "failed", "9999999999999999999999999999999999999999", "failed to pull image: auth expired", nil, 0), wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "auth expired"}}},
-
-		// 11. DegradedAndFailedBranches_HangarFailedWithoutError
-		{name: "DegradedAndFailedBranches_HangarFailedWithoutError", gitSync: mkRecon(false, "failed", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", nil, 0), wantList: []wantDep{{Stage: "failed"}}},
 
 		// 12. MultiRunSameCommitAndSortTies_SameCommit
 		{name: "MultiRunSameCommitAndSortTies_SameCommit", runs: mkRuns(mkRun(111, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "completed", "success", "", -10*time.Minute, -5*time.Minute), mkRun(112, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "", -1*time.Minute, -30*time.Second)), wantList: []wantDep{{Stage: "building"}}},
@@ -914,7 +796,7 @@ func mergeClusterBatch1Cases() []mergeClusterTestCase {
 		{name: "MultiRunSameCommitAndSortTies_ExpiredIgnored", runs: mkRuns(mkRun(401, "", "3333333333333333333333333333333333333333", "completed", "success", "", -40*time.Minute, -35*time.Minute)), wantCount: 0},
 
 		// 16. UnparentedContainersDoNotSpawnCards
-		{name: "UnparentedContainersDoNotSpawnCards", containers: []DockerContainerJSON{mkLabeledCont("aerial-postgres", "running", map[string]string{"com.docker.compose.service": "postgres"}), mkLabeledCont("aerial-vector", "exited", map[string]string{"com.docker.compose.service": "vector"})}, currentCommit: "livecommit", wantCount: 0},
+		{name: "UnparentedContainersDoNotSpawnCards", containers: []DockerContainerJSON{mkLabeledCont("running", map[string]string{"aerial.service": "postgres"}), mkLabeledCont("exited", map[string]string{"aerial.service": "vector"})}, currentCommit: "livecommit", wantCount: 0},
 
 		// 17. ActiveCIRun
 		{name: "ActiveCIRun", runs: mkRuns(mkRun(481, "", "7a9f1b234567", "in_progress", "", "feat(brain): live github actions tracking", -2*time.Minute, -10*time.Second)), jobs: map[int64][]GitHubJob{481: {mkJob(1, 481, "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)", "in_progress", "", -40*time.Second, 0), mkJob(2, 481, "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)", "completed", "success", -60*time.Second, -10*time.Second)}}, currentCommit: "7a9f1b2", wantList: []wantDep{{Stage: "building", Commit: "7a9f1b2", MatrixJobCount: 2, HTMLURL: "https://github.com/azylman/aerial/actions/runs/481"}}},
@@ -922,11 +804,8 @@ func mergeClusterBatch1Cases() []mergeClusterTestCase {
 		// 18. FailedCIRun
 		{name: "FailedCIRun", runs: mkRuns(mkRun(482, "", "abc1234567", "completed", "failure", "", -5*time.Minute, -4*time.Minute)), currentCommit: "abc1234", wantList: []wantDep{{Stage: "failed", StepStatusMap: map[int]string{1: "failed"}}}},
 
-		// 19. AwaitingHangarSync
-		{name: "AwaitingHangarSync", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(483, "", "def5678901", "completed", "success", "", -4*time.Minute, -45*time.Second)), jobs: map[int64][]GitHubJob{483: {mkJob(0, 483, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull", StepStatusMap: map[int]string{2: "active"}}}},
-
-		// 20. HangarSyncTimeout
-		{name: "HangarSyncTimeout", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(484, "", "timeout1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{484: {mkJob(0, 484, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, gitSync: mkRecon(false, "idle", "", "", nil, -1*time.Hour), currentCommit: "old1234", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "Hangar reconciliation timed out (>120s)", StepStatusMap: map[int]string{2: "failed"}}}},
+		// 19. AwaitingPullUntilRolloutObserved
+		{name: "AwaitingPullUntilRolloutObserved", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(483, "", "def5678901", "completed", "success", "", -4*time.Minute, -45*time.Second)), jobs: map[int64][]GitHubJob{483: {mkJob(0, 483, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull", StepStatusMap: map[int]string{2: "active"}}}},
 	}
 }
 
@@ -971,17 +850,8 @@ func mergeClusterBatch2Cases() []mergeClusterTestCase {
 		// 33. EmptyAndFuture_FutureContainers
 		{name: "EmptyAndFuture_FutureContainers", runs: mkRuns(mkRun(123, "", "sha1234567890", "completed", "success", "", -10*time.Minute, 0)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 2*time.Hour)}, wantCount: 1},
 
-		// 34. HangarActiveSuppresses120sTimeout
-		{name: "HangarActiveSuppresses120sTimeout", runs: mkRuns(mkRun(101, "", "abc1234567890", "completed", "success", "", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{101: {mkJob(0, 101, "Build & Push Images (dashboard)", "completed", "success", 0, 0)}}, gitSync: mkRecon(true, "pulling", "", "", []string{"dashboard"}, 0), currentCommit: "oldcommit", wantList: []wantDep{{StepStatusMap: map[int]string{2: "active"}}}},
-
-		// 35. HangarFailedFastFail
-		{name: "HangarFailedFastFail", runs: mkRuns(mkRun(102, "", "def5678901234", "completed", "success", "", -60*time.Second, -30*time.Second)), gitSync: mkRecon(false, "failed", "", "manifest unknown", nil, 0), currentCommit: "oldcommit", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "manifest unknown", StepStatusMap: map[int]string{2: "failed"}}}},
-
-		// 36. TargetServicesScoping
-		{name: "TargetServicesScoping", containers: []DockerContainerJSON{mkCont("aerial-dashboard", "dashboard", "", "running", "", -30*time.Second), mkCont("aerial-brain", "brain", "", "running", "", -5*3600*time.Second), mkCont("aerial-proxy", "proxy", "", "running", "", -5*3600*time.Second)}, gitSync: mkRecon(true, "swapping", "548c826", "", []string{"dashboard"}, -60*time.Second), currentCommit: "current", wantList: []wantDep{{Stage: "swapping", Commit: "548c826", MatrixJobCount: 1}}},
-
-		// 37. DegradedWithoutHangarFailure
-		{name: "DegradedWithoutHangarFailure", runs: mkRuns(mkRun(105, "", "commit123", "completed", "success", "", -15*time.Minute, -12*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "unhealthy", -10*time.Minute)}, gitSync: GitSyncStatusResponse{Status: "synced"}, currentCommit: "commit123", wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{3: "completed", 4: "failed"}}}},
+		// 37. UnhealthyContainerDegradesCard
+		{name: "UnhealthyContainerDegradesCard", runs: mkRuns(mkRun(105, "", "commit123", "completed", "success", "", -15*time.Minute, -12*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "unhealthy", -10*time.Minute)}, currentCommit: "commit123", wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{3: "completed", 4: "failed"}}}},
 
 		// 38. MultiRepoActiveFanout
 		{name: "MultiRepoActiveFanout", runs: mkRuns(mkRun(101, "azylman/aerial", "1111aaa", "in_progress", "", "", -2*time.Minute, 0), mkRun(201, "azylman/aerial-sidecars", "2222bbb", "in_progress", "", "", -1*time.Minute, 0)), currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Service: "aerial-sidecars", Stage: "building"}, {Repository: "azylman/aerial", Service: "aerial-stack", Stage: "building"}}},
@@ -999,42 +869,6 @@ func mergeClusterBatch3Cases() []mergeClusterTestCase {
 		// 41. CompletedPRRunDoesNotTimeout
 		{name: "CompletedPRRunDoesNotTimeout", runs: mkRuns(mkPRRun(9002, "azylman/aerial-sidecars", "feat/sidecars-pr", "aabbccdd1122", "completed", "success", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{9002: {mkJob(0, 9002, "Build & Push Sidecar Images to GHCR (aura-farming)", "completed", "success", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantCount: 0},
 
-		// 42. ReconTargetServices_MatchingContainerWithoutCommitLabel
-		{name: "ReconTargetServices_MatchingContainerWithoutCommitLabel", gitSync: mkRecon(true, "pulling", "8888888888888888888888888888888888888888", "", []string{"proxy"}, -15*time.Second), containers: []DockerContainerJSON{mkCont("aerial-proxy", "proxy", "", "running", "", -10*time.Second)}, wantList: []wantDep{{Commit: "8888888", MatrixJobCount: 1, HasContainerChip: true}}},
-
-		// 43. ReconShortSteps_FailedState
-		{name: "ReconShortSteps_FailedState", gitSync: mkRecon(false, "failed", "9999999999999999999999999999999999999999", "docker compose build failed", nil, -2*time.Minute), wantList: []wantDep{{Stage: "failed", Progress: 55, CommitMsgSubstr: "docker compose build failed", StepStatuses: []string{"completed", "completed", "failed", "pending", "pending"}}}},
-
-		// 44. ReconEmptyCommitSHA_FallbackToHangar
-		{name: "ReconEmptyCommitSHA_FallbackToHangar", gitSync: mkRecon(true, "pulling", "", "", nil, -10*time.Second), wantList: []wantDep{{ID: "dep-aerial-stack-hangar", Commit: "dep-aerial-stack-hangar"}}},
-
-		// 45. ReconEmptyCommitSHA_FallbackToRuns
-		{name: "ReconEmptyCommitSHA_FallbackToRuns", runs: mkRuns(mkRun(701, "", "abcdef0123456789012345678901234567890123", "in_progress", "", "", -1*time.Minute, 0)), gitSync: mkRecon(true, "pulling", "", "", nil, -10*time.Second), currentCommit: "ignored", wantList: []wantDep{{Commit: "abcdef0"}}},
-
-		// 46. ReconEmptyCommitSHA_FallbackToCurrentCommit
-		{name: "ReconEmptyCommitSHA_FallbackToCurrentCommit", gitSync: mkRecon(true, "pulling", "", "", nil, -10*time.Second), currentCommit: "fedcba987654321", wantList: []wantDep{{Commit: "fedcba9"}}},
-
-		// 47. ReconExistingRun_SwappingState
-		{name: "ReconExistingRun_SwappingState", runs: mkRuns(mkRun(777, "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(true, "swapping", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", []string{"brain"}, -30*time.Second), wantList: []wantDep{{Stage: "swapping", StepStatusMap: map[int]string{3: "active", 4: "active"}}}},
-
-		// 48. ReconExistingRun_FailedState
-		{name: "ReconExistingRun_FailedState", runs: mkRuns(mkRun(778, "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(false, "failed", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "host crash", nil, -10*time.Second), wantList: []wantDep{{Stage: "failed", StepStatusMap: map[int]string{2: "failed"}}}},
-
-		// 49. ReconExistingRun_HealthyState
-		{name: "ReconExistingRun_HealthyState", runs: mkRuns(mkRun(779, "", "cccccccccccccccccccccccccccccccccccccccc", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(false, "healthy", "cccccccccccccccccccccccccccccccccccccccc", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "building", Progress: 25, StepStatuses: []string{"completed", "completed", "completed", "completed", "completed"}}}},
-
-		// 50. ReconShortSteps_HealthyState
-		{name: "ReconShortSteps_HealthyState", gitSync: mkRecon(false, "healthy", "cccccccccccccccccccccccccccccccccccccccc", "", nil, -10*time.Second), wantCount: 0},
-
-		// 51. ReconShortSteps_PullingState
-		{name: "ReconShortSteps_PullingState", gitSync: mkRecon(true, "pulling", "dddddddddddddddddddddddddddddddddddddddd", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "pulling", Progress: 55, StepStatuses: []string{"completed", "completed", "active", "pending", "pending"}}}},
-
-		// 52. ReconExistingRun_PullingState
-		{name: "ReconExistingRun_PullingState", runs: mkRuns(mkRun(780, "", "dddddddddddddddddddddddddddddddddddddddd", "in_progress", "", "", -2*time.Minute, 0)), gitSync: mkRecon(true, "pulling", "dddddddddddddddddddddddddddddddddddddddd", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "pulling", Progress: 55, StepStatusMap: map[int]string{1: "completed", 2: "active"}}}},
-
-		// 53. ReconShortSteps_SwappingState
-		{name: "ReconShortSteps_SwappingState", gitSync: mkRecon(true, "swapping", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "", nil, -10*time.Second), wantList: []wantDep{{Stage: "swapping", Progress: 60, StepStatuses: []string{"completed", "completed", "completed", "active", "active"}}}},
-
 		// 54. Prefix40CharSHA_MatchedBy7CharPrefixContainer
 		{name: "Prefix40CharSHA_MatchedBy7CharPrefixContainer", runs: mkRuns(mkRun(888, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "", -3*time.Minute, 0)), containers: []DockerContainerJSON{mkCont("aerial-proxy", "proxy", "bbbbbbb", "running", "", -20*time.Second)}, wantList: []wantDep{{Commit: "bbbbbbb"}}},
 
@@ -1047,7 +881,6 @@ type mergeClusterTestCase struct {
 	name          string
 	runs          []GitHubRun
 	jobs          map[int64][]GitHubJob
-	gitSync       GitSyncStatusResponse
 	containers    []DockerContainerJSON
 	currentCommit string
 	refTime       time.Time
@@ -1063,7 +896,7 @@ func runMergeClusterDeploymentsCase(t *testing.T, tt mergeClusterTestCase, defau
 	if ref.IsZero() && !tt.useZeroTime {
 		ref = defaultRefTime
 	}
-	deps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+	deps := MergeClusterDeployments(tt.runs, tt.jobs, tt.containers, tt.currentCommit, ref)
 
 	expectedCount := tt.wantCount
 	if expectedCount == 0 && len(tt.wantList) > 0 {
@@ -1176,7 +1009,7 @@ func assertMergeClusterDeploymentChips(t *testing.T, i int, got DeploymentStatus
 func assertMergeClusterDeploymentRepeats(t *testing.T, tt mergeClusterTestCase, ref time.Time) {
 	t.Helper()
 	for iter := range tt.wantRepeats {
-		iterDeps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+		iterDeps := MergeClusterDeployments(tt.runs, tt.jobs, tt.containers, tt.currentCommit, ref)
 		if len(iterDeps) != len(tt.wantList) {
 			t.Fatalf("iteration %d: expected %d deployments, got %d", iter, len(tt.wantList), len(iterDeps))
 		}
@@ -1185,29 +1018,6 @@ func assertMergeClusterDeploymentRepeats(t *testing.T, tt mergeClusterTestCase, 
 				t.Fatalf("iteration %d at index %d: expected stage %q, got %q", iter, idx, want.Stage, iterDeps[idx].Stage)
 			}
 		}
-	}
-}
-
-func TestExtractSingleContainerCommit_TableDriven(t *testing.T) {
-	tests := []struct {
-		name      string
-		container DockerContainerJSON
-		want      string
-	}{
-		{name: "nil_labels", container: mkLabeledCont("", "", nil), want: ""},
-		{name: "empty_labels", container: mkLabeledCont("", "", map[string]string{}), want: ""},
-		{name: "opencontainers_revision_priority", container: mkLabeledCont("", "", map[string]string{"org.opencontainers.image.revision": "1111111111111111111111111111111111111111", "aerial.commit_sha": "2222222222222222222222222222222222222222", "vcs-ref": "3333333333333333333333333333333333333333"}), want: "1111111111111111111111111111111111111111"},
-		{name: "aerial_commit_sha_fallback", container: mkLabeledCont("", "", map[string]string{"aerial.commit_sha": "2222222222222222222222222222222222222222", "vcs-ref": "3333333333333333333333333333333333333333"}), want: "2222222222222222222222222222222222222222"},
-		{name: "vcs_ref_fallback", container: mkLabeledCont("", "", map[string]string{"vcs-ref": "3333333333333333333333333333333333333333"}), want: "3333333333333333333333333333333333333333"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractSingleContainerCommit(tt.container)
-			if got != tt.want {
-				t.Errorf("ExtractSingleContainerCommit() = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -1247,35 +1057,6 @@ func TestIsDeployOngoing_TableDriven(t *testing.T) {
 			got := IsDeployOngoing(tt.input)
 			if got != tt.want {
 				t.Errorf("IsDeployOngoing(%v) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestExtractAerialServiceName(t *testing.T) {
-	tests := []struct {
-		name        string
-		container   DockerContainerJSON
-		expectedSvc string
-		expectedOk  bool
-	}{
-		{name: "Docker Compose container", container: mkLabeledCont("aerial-brain-1", "", map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}), expectedSvc: "brain", expectedOk: true},
-		{name: "Foreign Docker Compose project container", container: mkLabeledCont("homeassistant-web-1", "", map[string]string{"com.docker.compose.project": "homeassistant", "com.docker.compose.service": "web"}), expectedSvc: "", expectedOk: false},
-		{name: "Nomad container with aerial.service label", container: mkLabeledCont("haro-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e", "", map[string]string{"aerial.service": "haro", "com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"}), expectedSvc: "haro", expectedOk: true},
-		{name: "Legacy container with aerial- prefix", container: mkCont("aerial-proxy", "", "", "", "", 0), expectedSvc: "proxy", expectedOk: true},
-		{name: "Host supervisor container (non-Aerial)", container: mkLabeledCont("hassio_supervisor", "", map[string]string{"io.hass.type": "supervisor"}), expectedSvc: "", expectedOk: false},
-		{name: "Host addon container (non-Aerial)", container: mkLabeledCont("app_core_zigbee2mqtt", "", map[string]string{"supervisor_managed": ""}), expectedSvc: "", expectedOk: false},
-		{name: "Empty container metadata", container: mkLabeledCont("", "running", nil), expectedSvc: "", expectedOk: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			svc, ok := ExtractAerialServiceName(tc.container)
-			if ok != tc.expectedOk {
-				t.Errorf("expected ok=%v, got %v", tc.expectedOk, ok)
-			}
-			if svc != tc.expectedSvc {
-				t.Errorf("expected svc=%q, got %q", tc.expectedSvc, svc)
 			}
 		})
 	}

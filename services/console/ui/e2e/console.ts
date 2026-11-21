@@ -474,18 +474,6 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     },
   },
   {
-    name: 'telemetry: git-sync badge shows the lag',
-    start: '#telemetry',
-    steps: [],
-    expect: {
-      hash: '#telemetry',
-      activeTab: 'Overview',
-      badges: BADGES_ALL,
-      texts: ['GIT SYNC: BEHIND (Δ 1m 15s)'],
-      counts: [{ selector: '.gitsync-pill.lagging', count: 1 }, DEPLOY_TIMERS_TICKED],
-    },
-  },
-  {
     name: 'telemetry: services grid, pipeline and task queue',
     start: '#telemetry',
     steps: [],

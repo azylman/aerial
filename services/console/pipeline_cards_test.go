@@ -59,9 +59,6 @@ func mergeClusterBatch4Cases() []mergeClusterTestCase {
 
 		// 65. Hidden PR card is not resurrected by a container group on its SHA
 		{name: "HiddenPRCardIgnoresContainerGroup", runs: mkRuns(hiddenGreen), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", shaB, "running", "", -60*time.Second)}, wantCount: 0},
-
-		// 66. Hidden PR card is not resurrected by Hangar reconciliation on its SHA
-		{name: "HiddenPRCardIgnoresHangar", runs: mkRuns(hiddenGreen), gitSync: mkRecon(true, "pulling", shaB, "", nil, -10*time.Second), wantCount: 0},
 	}
 }
 

@@ -252,7 +252,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 	}
 
 	now := time.Now().UTC()
-	nextRun, err := CalculateNextCronRun(cronExpr, tz, now)
+	nextRun, err := model.CalculateNextCronRun(cronExpr, tz, now)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +300,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 func applyHeartbeatTimingUpdates(args map[string]any, sched *model.HeartbeatSchedule) (bool, error) {
 	recompute := false
 	if cronExpr := getMapString(args, "cron_expr", "cron_expression"); cronExpr != "" {
-		if _, err := CalculateNextCronRun(cronExpr, sched.Timezone, time.Now().UTC()); err != nil {
+		if _, err := model.CalculateNextCronRun(cronExpr, sched.Timezone, time.Now().UTC()); err != nil {
 			return false, err
 		}
 		sched.CronExpr = cronExpr
@@ -369,7 +369,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 	}
 
 	if recomputeNextRun && sched.Enabled {
-		nextRun, calculateErr := CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
+		nextRun, calculateErr := model.CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
 		if calculateErr != nil {
 			return nil, calculateErr
 		}

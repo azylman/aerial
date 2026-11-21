@@ -3,13 +3,11 @@ import type {
   BuildsAPIResponse,
   ClusterResponse,
   FactsAPIResponse,
-  GitSyncStatusResponse,
   QuickLaunchLink,
   SchedulesAPIResponse,
   ServiceStatus,
   VanadisBuildDTO,
 } from '../api/types';
-import { formatGitSyncDelta, parseValidTimestampMs } from '../lib/formatters';
 
 // Pure derivations for the app shell. Components select the raw (reconciled) snapshot and pass it
 // here, so an unchanged poll yields the same primitive and React bails out of the render.
@@ -101,31 +99,6 @@ export function permetScore(services: readonly ServiceStatus[] | null): PermetSc
   if (ratio === 1) return { percent, label, tone: 'optimal' };
   if (ratio > 0.7) return { percent, label, tone: 'stable' };
   return { percent, label, tone: 'warning' };
-}
-
-export type GitSyncTone = 'synced' | 'lagging' | 'error';
-
-export interface GitSyncBadgeModel {
-  readonly tone: GitSyncTone;
-  readonly text: string;
-}
-
-/**
- * Git-sync badge model. A lagging repo keeps counting between polls: the lag reported at
- * `system_time` plus the seconds elapsed since then on the shared live clock. When `now` equals
- * the response's `system_time` the text shows the reported lag unchanged.
- */
-export function gitSyncBadge(gitSync: GitSyncStatusResponse | null, systemTime: string | null, now: number): GitSyncBadgeModel {
-  if (gitSync === null) return { tone: 'synced', text: 'GIT SYNC: IN SYNC (Δ 0s)' };
-  const status = (gitSync.status || 'synced').toLowerCase();
-  const reported = Number(gitSync.max_lag_seconds) || 0;
-  if (status === 'error') return { tone: 'error', text: 'GIT SYNC: ERROR' };
-  if (status === 'lagging' || reported > 0) {
-    const sampledAt = parseValidTimestampMs(systemTime);
-    const drift = sampledAt === null ? 0 : Math.max(0, Math.floor((now - sampledAt) / 1000));
-    return { tone: 'lagging', text: `GIT SYNC: BEHIND (${formatGitSyncDelta(reported + drift)})` };
-  }
-  return { tone: 'synced', text: `GIT SYNC: IN SYNC (${formatGitSyncDelta(reported)})` };
 }
 
 const EMPTY_LINKS: readonly QuickLaunchLink[] = Object.freeze([]);

@@ -137,17 +137,6 @@ func NewHTTPPromptDispatcher(brainURL string, restateOpts ...string) *HTTPPrompt
 	}
 }
 
-func (d *HTTPPromptDispatcher) SetRestateConfig(restateURL, agentName string) {
-	if d != nil {
-		d.restateURL = strings.TrimRight(strings.TrimSpace(restateURL), "/")
-		agent := strings.TrimSpace(agentName)
-		if agent == "" {
-			agent = defaultAgentName
-		}
-		d.agentName = agent
-	}
-}
-
 // TraceFire runs one schedule, heartbeat or event-trigger dispatch under its own span, so the
 // eri turn it starts joins a trace that begins where the work began. Inside an inbound request
 // (event triggers) the span continues the caller's trace. Only the schedule type and id are

@@ -115,52 +115,17 @@ type BrainTasksAPIResponse struct {
 	} `json:"tasks"`
 }
 
-type RepoStatus struct {
-	Repo             string     `json:"repo"`
-	GitHubRepo       string     `json:"github_repo,omitempty"`
-	DiskCommit       string     `json:"disk_commit"`
-	DiskCommitTime   *time.Time `json:"disk_commit_time,omitempty"`
-	RemoteCommit     string     `json:"remote_commit"`
-	RemoteCommitTime *time.Time `json:"remote_commit_time,omitempty"`
-	TimeLagSeconds   int64      `json:"time_lag_seconds"`
-	SyncStatus       string     `json:"sync_status"` // "synced", "lagging", "error"
-	LastSyncTime     time.Time  `json:"last_sync_time"`
-	Error            string     `json:"error,omitempty"`
-}
-
-type ReconciliationStatus struct {
-	Active         bool      `json:"active"`
-	State          string    `json:"state"`                     // "idle", "pulling", "swapping", "rolling_back", "healthy", "failed"
-	Stage          string    `json:"stage"`                     // alias to State for backward compatibility
-	Trigger        string    `json:"trigger,omitempty"`         // "image_poll", "git_sync", "manual_api"
-	TargetServices []string  `json:"target_services,omitempty"` // services planned/targeted for reconciliation
-	CommitSHA      string    `json:"commit_sha,omitempty"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	CompletedAt    time.Time `json:"completed_at,omitempty"`
-	Error          string    `json:"error,omitempty"`
-}
-
-type GitSyncStatusResponse struct {
-	Status         string                `json:"status"` // "synced", "lagging", "error"
-	MaxLagSeconds  int64                 `json:"max_lag_seconds"`
-	LastSyncTime   time.Time             `json:"last_sync_time"`
-	Repos          map[string]RepoStatus `json:"repos,omitempty"`
-	Reconciliation *ReconciliationStatus `json:"reconciliation,omitempty"`
-	Error          string                `json:"error,omitempty"`
-}
-
 type ClusterResponse struct {
-	SystemTime       time.Time             `json:"system_time"`
-	ClusterStatus    string                `json:"cluster_status"`
-	ActiveTasksCount int                   `json:"active_tasks_count"`
-	ActiveTasks      []ActiveTaskStatus    `json:"active_tasks"`
-	Services         []ServiceStatus       `json:"services"`
-	Deployments      []DeploymentStatus    `json:"deployments"`
-	QuickLaunchLinks []QuickLaunchLink     `json:"quick_launch_links"`
-	GitSync          GitSyncStatusResponse `json:"git_sync"`
-	OngoingDeploy    string                `json:"ongoing_deploy"`
-	IsDeploying      bool                  `json:"is_deploying"`
-	ConfiguredAgents []string              `json:"configured_agents,omitempty"`
+	SystemTime       time.Time          `json:"system_time"`
+	ClusterStatus    string             `json:"cluster_status"`
+	ActiveTasksCount int                `json:"active_tasks_count"`
+	ActiveTasks      []ActiveTaskStatus `json:"active_tasks"`
+	Services         []ServiceStatus    `json:"services"`
+	Deployments      []DeploymentStatus `json:"deployments"`
+	QuickLaunchLinks []QuickLaunchLink  `json:"quick_launch_links"`
+	OngoingDeploy    string             `json:"ongoing_deploy"`
+	IsDeploying      bool               `json:"is_deploying"`
+	ConfiguredAgents []string           `json:"configured_agents,omitempty"`
 }
 
 // Singleton tuned HTTP client for upstream brain communication
@@ -179,16 +144,6 @@ var brainHTTPClient = tracing.Client(&http.Client{
 		ExpectContinueTimeout: 1 * time.Second,
 	}, ""),
 })
-
-// Unix socket client for Docker daemon status inspection
-var dockerSocketClient = &http.Client{
-	Timeout: 2 * time.Second,
-	Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 1 * time.Second}).DialContext(ctx, "unix", "/var/run/docker.sock")
-		},
-	},
-}
 
 func drainAndClose(body io.ReadCloser, name string) {
 	if body == nil {
@@ -225,62 +180,6 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 	}
 	w.WriteHeader(status)
 	httpkit.WriteResponse(w, r, "console", b)
-}
-
-func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerContainerJSON, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/containers/json", http.NoBody)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	resp, err := dockerSocketClient.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	defer drainAndClose(resp.Body, "docker response body")
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("docker API status %d", resp.StatusCode)
-	}
-
-	var rawContainers []DockerContainerJSON
-	if err := json.NewDecoder(resp.Body).Decode(&rawContainers); err != nil {
-		return nil, nil, err
-	}
-
-	now := time.Now().UTC()
-	var services []ServiceStatus
-
-	for _, c := range rawContainers {
-		svcName, isAerial := ExtractAerialServiceName(c)
-		if !isAerial || svcName == "" {
-			continue
-		}
-
-		createdAt := time.Unix(c.Created, 0).UTC()
-		uptimeSec := max(int64(now.Sub(createdAt).Seconds()), 0)
-
-		status := healthHealthy
-		statusLower := strings.ToLower(c.Status)
-		switch {
-		case strings.Contains(statusLower, "(unhealthy)"):
-			status = healthUnhealthy
-		case strings.Contains(statusLower, "starting") || strings.Contains(statusLower, "(health: starting)"):
-			status = healthStarting
-		case c.State != containerStateRunning:
-			status = healthUnhealthy
-		}
-
-		services = append(services, ServiceStatus{
-			Name:          svcName,
-			Status:        status,
-			UptimeSeconds: uptimeSec,
-			LastCheckTime: now,
-		})
-	}
-
-	return services, rawContainers, nil
 }
 
 type cachedDiscoveredAgents struct {
@@ -434,51 +333,9 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string, agent ...st
 	return tasks, nil
 }
 
-// fetchGitSyncStatus queries the GitSync sidecar for real-time repository checkout and lag metadata.
-func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusResponse {
-	fallback := GitSyncStatusResponse{
-		Status:        "synced",
-		MaxLagSeconds: 0,
-		LastSyncTime:  time.Now().UTC(),
-	}
-
-	if gitsyncURL == "" {
-		return fallback
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gitsyncURL, "/")+"/status", http.NoBody)
-	if err != nil {
-		fallback.Error = err.Error()
-		return fallback
-	}
-
-	client := tracing.Client(&http.Client{Timeout: 2 * time.Second})
-	resp, err := client.Do(req)
-	if err != nil {
-		fallback.Error = err.Error()
-		return fallback
-	}
-	defer resp.Body.Close()
-	defer drainAndClose(resp.Body, "gitsync response body")
-
-	if resp.StatusCode != http.StatusOK {
-		fallback.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		return fallback
-	}
-
-	var status GitSyncStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		fallback.Error = err.Error()
-		return fallback
-	}
-
-	return status
-}
-
 // synthesizeContainersFromServices converts ServiceStatus entries into DockerContainerJSON
 // records. aerial.commit_sha and aerial.image are stamped from the Deployment image tag when
-// known; services without them fall back to recon.TargetServices or currentCommit in
-// resolveContainerCommit.
+// known; services without them fall back to currentCommit in resolveContainerCommit.
 func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) []DockerContainerJSON {
 	out := make([]DockerContainerJSON, 0, len(services))
 	for _, svc := range services {
@@ -494,11 +351,8 @@ func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) [
 			labels[labelImage] = imageName(svc.Image)
 		}
 		out = append(out, DockerContainerJSON{
-			Names:   []string{"/" + svc.Name},
-			Image:   svc.Image,
 			Created: now.Unix() - svc.UptimeSeconds,
 			State:   state,
-			Status:  svc.Status,
 			Labels:  labels,
 			Health:  &DockerContainerHealth{Status: svc.Status},
 		})
@@ -506,34 +360,21 @@ func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) [
 	return out
 }
 
-func resolveClusterState(ctx context.Context, kubeAPIServer, gitCommit string, gitSync GitSyncStatusResponse, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string, error) {
+func resolveClusterState(ctx context.Context, kubeAPIServer, gitCommit string, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string) {
 	var services []ServiceStatus
-	var rawContainers []DockerContainerJSON
-	var err error
 	if kubeAPIServer != "" {
-		k8sServices, k8sErr := fetchK8sClusterState(ctx, kubeAPIServer)
-		if k8sErr == nil && len(k8sServices) > 0 {
+		k8sServices, err := fetchK8sClusterState(ctx, kubeAPIServer)
+		if err != nil {
+			slog.WarnContext(ctx, "[Console] failed to fetch K8s cluster state", "kube_api_server", kubeAPIServer, "error", err)
+		} else {
 			services = k8sServices
-		} else if k8sErr != nil {
-			slog.WarnContext(ctx, "[Console] failed to fetch K8s cluster state, falling back to Docker", "kube_api_server", kubeAPIServer, "error", k8sErr)
 		}
-	}
-	if len(services) == 0 {
-		services, rawContainers, err = fetchDockerClusterState(ctx)
 	}
 	currentCommit := gitCommit
 	if currentCommit == "" {
 		currentCommit = "latest"
 	}
-	if currentCommit == "latest" && gitSync.Repos != nil {
-		if r, ok := gitSync.Repos["/share/aerial"]; ok && r.DiskCommit != "" {
-			currentCommit = shortenSHA(r.DiskCommit)
-		}
-	}
-	if len(rawContainers) == 0 && len(services) > 0 {
-		rawContainers = synthesizeContainersFromServices(services, now)
-	}
-	return services, rawContainers, currentCommit, err
+	return services, synthesizeContainersFromServices(services, now), currentCommit
 }
 
 func fetchUpstreamDiscoveredAgentsWithCache(ctx context.Context, cache *cachedDiscoveredAgents, haroURL, vanadisURL string, now time.Time) []string {
@@ -598,7 +439,7 @@ func discoverConfiguredAgents(ctx context.Context, allTasks []ActiveTaskStatus, 
 	return SortConfiguredAgents(discovered)
 }
 
-func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
+func statusHandler(brainURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
 	kubeAPIServer := ""
 	if len(optionalAddrs) > 0 {
 		kubeAPIServer = strings.TrimSpace(optionalAddrs[0])
@@ -627,9 +468,8 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 			ghRuns, ghJobs = globalGHPoller.GetSnapshot()
 		}
 
-		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
-		services, rawContainers, currentCommit, err := resolveClusterState(ctx, kubeAPIServer, gitCommit, gitSync, now)
-		deployments := mergeClusterDeploymentsWithHangar(rawContainers, ghRuns, ghJobs, gitSync, currentCommit)
+		services, rawContainers, currentCommit := resolveClusterState(ctx, kubeAPIServer, gitCommit, now)
+		deployments := MergeClusterDeployments(ghRuns, ghJobs, rawContainers, currentCommit, time.Time{})
 		if deployments == nil {
 			deployments = []DeploymentStatus{}
 		}
@@ -653,7 +493,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 
 		quickLinks := loadQuickLaunchLinks(configPath)
 
-		if err != nil || len(services) == 0 {
+		if len(services) == 0 {
 			uptimeSec := int64(time.Since(startTime).Seconds())
 			services = []ServiceStatus{
 				{Name: "brain", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
@@ -684,7 +524,6 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 			Services:         services,
 			Deployments:      deployments,
 			QuickLaunchLinks: quickLinks,
-			GitSync:          gitSync,
 			OngoingDeploy:    ongoingDeploy,
 			IsDeploying:      isDeploying,
 			ConfiguredAgents: configuredAgents,
@@ -726,8 +565,8 @@ func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 	vanadisURL := strings.TrimSpace(cfg.VanadisURL)
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/console/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
-	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
+	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/console/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))

@@ -233,7 +233,6 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	defer httpkit.CloseWarn(database, "database on shutdown")
 
 	store := NewSQLStore(database)
-	store.SetBrainURL(cfg.EriURL)
 	store.SetStack(cfg.EffectiveStack())
 	if cfg.TranscriptsURL != "" {
 		indexerClient := NewIndexerClient(cfg.TranscriptsURL, cfg.EffectiveStack(), nil)

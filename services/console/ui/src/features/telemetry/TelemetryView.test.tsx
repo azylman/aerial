@@ -54,7 +54,6 @@ const cluster = (over: Partial<ClusterResponse> = {}): ClusterResponse => ({
   services: SERVICES,
   deployments: DEPLOYS,
   quick_launch_links: [],
-  git_sync: { status: 'synced', max_lag_seconds: 0, last_sync_time: '2026-11-08T12:00:00Z' },
   ongoing_deploy: '',
   is_deploying: true,
   ...over,
@@ -802,7 +801,7 @@ describe('TelemetryView', () => {
       'Cluster Service Matrix',
       'Deployment Pipeline',
     ]);
-    expect(screen.getByText('GIT SYNC: IN SYNC (Δ 0s)')).toBeTruthy();
+    expect(screen.queryByText(/GIT SYNC/)).toBeNull();
     expect(screen.getByText('ALL WORKERS IDLE // NO PENDING TURNS')).toBeTruthy();
     act(() => screen.getByRole('button', { name: 'Tasks ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('tasks');

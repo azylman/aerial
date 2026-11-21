@@ -95,12 +95,6 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 	return time.Time{}, fmt.Errorf("unrecognized run_at format %q: expected ISO timestamp (e.g. 2026-08-28T21:00:00Z) or relative duration (e.g. 30m, 2h, 1d)", raw)
 }
 
-// CalculateNextCronRun delegates to the internal/model cron parser so tool
-// callers keep compiling; the logic lives in internal/model/cron.go.
-func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
-	return model.CalculateNextCronRun(cronExpr, timezone, from)
-}
-
 // ToolHandler executes haro MCP tool calls against the schedule store.
 // Fields are exported so the compiler-enforced layering (not yet moved
 // server.go) can construct and read handlers across packages; root
@@ -159,7 +153,7 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 	}
 
 	now := time.Now().UTC()
-	nextRun, err := CalculateNextCronRun(args.CronExpression, args.Timezone, now)
+	nextRun, err := model.CalculateNextCronRun(args.CronExpression, args.Timezone, now)
 	if err != nil {
 		return ScheduleRecurringOutput{}, err
 	}
@@ -452,7 +446,7 @@ func (h *ToolHandler) recomputeCronNextRun(ctx context.Context, id, newExpr, new
 		expr = newExpr
 	}
 	tz := resolveTimezone(newTZ, resolveTimezone(sched.Timezone, h.Timezone))
-	return CalculateNextCronRun(expr, tz, time.Now().UTC())
+	return model.CalculateNextCronRun(expr, tz, time.Now().UTC())
 }
 
 func trimmedOrEmpty(s *string) string {

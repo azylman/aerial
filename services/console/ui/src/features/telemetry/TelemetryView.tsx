@@ -1,6 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import type { CronSchedule, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
-import { GitSyncBadge } from '../../components/GitSyncBadge';
 import { Icon } from '../../components/Icon';
 import {
   compareBuilds,
@@ -269,7 +268,6 @@ export default function TelemetryView() {
             <h2>Deployment Pipeline</h2>
           </div>
           <div className="section-actions section-header-badges">
-            <GitSyncBadge />
             <DeployBadge />
           </div>
         </div>

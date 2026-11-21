@@ -46,7 +46,6 @@ const BODIES: Readonly<Record<string, unknown>> = {
     active_tasks: [{ id: 't1' }],
     services: [{ name: 'eri', status: 'healthy' }],
     quick_launch_links: [],
-    git_sync: { status: 'synced', max_lag_seconds: 0, last_sync_time: '2026-11-08T12:00:00Z' },
   },
   '/console/api/schedules': { status: 'ok', summary: { total_active: 3 }, crons: [], one_shots: [] },
   '/console/api/facts': { facts: [], total: 9, limit: 0, offset: 0 },

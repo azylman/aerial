@@ -15,20 +15,6 @@ import (
 	"time"
 )
 
-func TestMergeClusterDeployments_WrapperSmoke(t *testing.T) {
-	t.Parallel()
-	deploys := mergeClusterDeploymentsWithHangar(
-		[]DockerContainerJSON{{ID: "c1", Names: []string{"/aerial-brain"}, State: "running"}},
-		[]GitHubRun{{ID: 1, HeadSHA: "abc1234567", Status: "in_progress"}},
-		nil,
-		GitSyncStatusResponse{},
-		"abc1234",
-	)
-	if len(deploys) != 1 || deploys[0].Stage != "building" {
-		t.Fatalf("unexpected wrapper deployment output: %+v", deploys)
-	}
-}
-
 func TestGitHubPoller_PollAndDecode(t *testing.T) {
 	for _, tc := range gitHubPollAndDecodeCases() {
 		t.Run(tc.name, func(t *testing.T) {
