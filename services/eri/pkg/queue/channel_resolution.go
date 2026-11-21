@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 )
 
 // ChannelSnapshot holds immutable channel metadata to avoid cross-goroutine pointer races.
@@ -428,7 +429,9 @@ func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID str
 }
 
 // FormatThreadTitle formats the thread title for a thread trigger, clamped to at most 100 runes.
+// Inputs are redacted before clamping so a secret straddling the limit cannot leave a fragment.
 func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
+	titlePrefix, prompt = delivery.RedactOutbound(titlePrefix), delivery.RedactOutbound(prompt)
 	dateStr := now.Format("Jan 02, 2006")
 	trimmed := strings.TrimSpace(titlePrefix)
 	var title string
@@ -550,7 +553,7 @@ func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now ti
 		return channelID
 	}
 	if sess != nil && sess.Token != "" {
-		if ch, err := sess.ThreadStart(channelID, threadTitle, discordgo.ChannelTypeGuildPublicThread, 1440); err == nil && ch != nil && ch.ID != "" {
+		if ch, err := delivery.StartThread(sess, channelID, threadTitle); err == nil && ch != nil && ch.ID != "" {
 			CacheDiscordChannel(ch)
 			return ch.ID
 		}

@@ -14,7 +14,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -138,7 +137,7 @@ func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, clien
 			emitSSE("done", map[string]any{sseFieldConversationID: ev.ConversationID})
 		case "error":
 			replyReceived = true
-			emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizer.SanitizeString(ev.Error)})
+			emitSSE(sseEventError, map[string]string{jsonKeyError: ev.Error})
 			emitSSE("done", map[string]any{})
 		}
 	}
@@ -151,7 +150,7 @@ func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, clien
 			drainVoiceEvents(events, processEvent)
 			if askRes.err != nil {
 				if !replyReceived {
-					emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizer.SanitizeString(askRes.err.Error())})
+					emitSSE(sseEventError, map[string]string{jsonKeyError: askRes.err.Error()})
 					emitSSE("done", map[string]any{})
 				}
 				return
@@ -238,8 +237,7 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 			Effort:         req.Effort,
 		})
 		if err != nil {
-			sanitizedErr := sanitizer.SanitizeString(err.Error())
-			emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizedErr})
+			emitSSE(sseEventError, map[string]string{jsonKeyError: err.Error()})
 			emitSSE("done", map[string]any{})
 			return
 		}
@@ -297,8 +295,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			})
 			if err != nil {
 				metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
-				sanitizedErr := sanitizer.SanitizeString(err.Error())
-				httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: sanitizedErr})
+				httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: err.Error()})
 				return
 			}
 			metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))

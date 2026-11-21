@@ -1114,11 +1114,7 @@ func sanitizeActiveTasks(rawTasks []db.ActiveTask, poolOpt ...*queue.WorkerPool)
 				task.SessionID = liveSess
 			}
 		}
-		task.Prompt = sanitizer.SanitizeString(task.Prompt)
-		task.Summary = sanitizer.SanitizeString(task.Summary)
-		task.ResponseText = sanitizer.SanitizeString(task.ResponseText)
-		task.ThreadSummary = sanitizer.SanitizeString(task.ThreadSummary)
-		task.AuthorName = sanitizer.SanitizeString(sanitizer.SanitizeAuthor(task.AuthorName))
+		task.AuthorName = sanitizer.SanitizeAuthor(task.AuthorName)
 		tasks = append(tasks, task)
 	}
 	return tasks

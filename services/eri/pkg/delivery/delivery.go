@@ -337,6 +337,13 @@ func sendChunkedDiscordMessages(s *discordgo.Session, channelID string, chunks [
 	return nil
 }
 
+// RedactOutbound is eri's single outbound Discord redaction checkpoint. Every write of
+// user-visible text to Discord (message sends and edits, interaction responses, thread
+// titles) passes through it; internal surfaces do not redact.
+func RedactOutbound(text string) string {
+	return sanitizer.SanitizeString(text)
+}
+
 // SendMessageWithAttachments delivers text to the target Discord channel/thread, chunking at 2000 characters,
 // binding any provided file attachments strictly to the final (last) message chunk, and optionally attaching
 // a Discord message_reference inline reply to the first transmitted chunk.
@@ -359,7 +366,7 @@ func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, at
 		return fmt.Errorf("channelID cannot be empty")
 	}
 
-	text = sanitizer.SanitizeString(text)
+	text = RedactOutbound(text)
 	chunks := SplitMessage(FormatDiscordLatex(text), MaxDiscordMessageLength)
 	if len(chunks) == 0 && len(attachments) == 0 {
 		return nil
@@ -509,7 +516,7 @@ func EditMessage(s *discordgo.Session, channelID, messageID, text string) error 
 	if messageID == "" {
 		return fmt.Errorf("messageID cannot be empty")
 	}
-	text = sanitizer.SanitizeString(text)
+	text = RedactOutbound(text)
 	trimmed := strings.TrimSpace(FormatDiscordLatex(text))
 	if trimmed == "" {
 		return fmt.Errorf("text cannot be empty")
@@ -523,6 +530,37 @@ func EditMessage(s *discordgo.Session, channelID, messageID, text string) error 
 	edit.Flags = discordgo.MessageFlagsSuppressEmbeds
 	_, err := s.ChannelMessageEditComplex(edit)
 	return err
+}
+
+// SendSingleMessage posts one redacted message without chunking and returns its message ID.
+func SendSingleMessage(s *discordgo.Session, channelID, text string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("discord session is nil")
+	}
+	if channelID == "" {
+		return "", fmt.Errorf("channelID cannot be empty")
+	}
+	msg, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{Content: RedactOutbound(text), Flags: discordgo.MessageFlagsSuppressEmbeds})
+	if err != nil {
+		return "", err
+	}
+	return msg.ID, nil
+}
+
+// StartMessageThread creates a thread anchored on messageID with a redacted title.
+func StartMessageThread(s *discordgo.Session, channelID, messageID, title string) (*discordgo.Channel, error) {
+	if s == nil {
+		return nil, fmt.Errorf("discord session is nil")
+	}
+	return s.MessageThreadStart(channelID, messageID, RedactOutbound(title), 1440)
+}
+
+// StartThread creates a standalone public thread in channelID with a redacted title.
+func StartThread(s *discordgo.Session, channelID, title string) (*discordgo.Channel, error) {
+	if s == nil {
+		return nil, fmt.Errorf("discord session is nil")
+	}
+	return s.ThreadStart(channelID, RedactOutbound(title), discordgo.ChannelTypeGuildPublicThread, 1440)
 }
 
 // DeleteMessage deletes an existing message in the specified channel or thread.

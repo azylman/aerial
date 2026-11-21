@@ -564,12 +564,6 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for i := range runs {
-		runs[i].Prompt = model.SanitizeScheduleText(runs[i].Prompt)
-		runs[i].Error = model.SanitizeScheduleText(runs[i].Error)
-		runs[i].Title = model.SanitizeScheduleText(runs[i].Title)
-	}
-
 	if limit <= 0 {
 		limit = 50
 	} else if limit > 100 {

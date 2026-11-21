@@ -14,6 +14,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -174,6 +175,9 @@ func checkCachedThreadForMessage(s *discordgo.Session, msgID string) (string, bo
 }
 
 func resolveNewThreadTitle(ctx context.Context, content, msgID string, shouldSummarize bool) string {
+	// Redact before summarizing or truncating so a secret cut at the title length limit
+	// cannot survive as an unmatchable fragment; StartMessageThread redacts again on write.
+	content = delivery.RedactOutbound(content)
 	title := ""
 	if shouldSummarize {
 		if cls := currentFunnelClassifier(); cls != nil {
@@ -265,7 +269,7 @@ func getOrCreateThreadID(ctx context.Context, s *discordgo.Session, m *discordgo
 		return m.ChannelID, false
 	}
 
-	thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
+	thread, err := delivery.StartMessageThread(s, m.ChannelID, m.ID, title)
 	if err != nil {
 		if IsThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
 			return recoverExistingThreadOnConflict(s, m.ID, m.ChannelID, guildID)
