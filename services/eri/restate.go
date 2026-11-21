@@ -17,6 +17,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -167,40 +168,23 @@ func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, metho
 	if c == nil || c.httpClient == nil {
 		return errors.New("restate ingress client is nil")
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
 	var reqURL string
 	if key == "" {
 		reqURL = fmt.Sprintf("%s/%s/%s", c.ingressURL, url.PathEscape(service), url.PathEscape(method))
 	} else {
 		reqURL = fmt.Sprintf("%s/%s/%s/%s", c.ingressURL, url.PathEscape(service), url.PathEscape(key), url.PathEscape(method))
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create restate request: %w", err)
+	idemKey := ""
+	if len(idempotencyKey) > 0 {
+		idemKey = idempotencyKey[0]
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if len(idempotencyKey) > 0 && strings.TrimSpace(idempotencyKey[0]) != "" {
-		req.Header.Set("Idempotency-Key", strings.TrimSpace(idempotencyKey[0]))
-	}
-
-	resp, err := c.httpClient.Do(req)
+	respBody, err := restateingress.Post(ctx, c.httpClient, reqURL, idemKey, payload, 0)
 	if err != nil {
+		if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+			return fmt.Errorf("restate returned status %d: %s", httpErr.Status, httpErr.Body)
+		}
 		return fmt.Errorf("post restate request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("restate returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	if out != nil && len(respBody) > 0 {
 		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("unmarshal response: %w", err)

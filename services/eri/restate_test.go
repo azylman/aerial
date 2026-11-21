@@ -472,7 +472,7 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 			threadID:         "th-110",
 			enqueueReq:       queue.ThreadEnqueueRequest{Prompt: "bad url"},
 			customIngressURL: "http://\x7f",
-			wantErrorSub:     "create restate request",
+			wantErrorSub:     "post restate request",
 		},
 	}
 
