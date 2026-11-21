@@ -11,6 +11,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
@@ -415,18 +416,6 @@ func StartTyping(s *discordgo.Session, channelID string) (stop func()) {
 	}
 }
 
-func isSnowflake(str string) bool {
-	if str == "" {
-		return false
-	}
-	for _, r := range str {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func findChannelInState(s *discordgo.Session, trimmed string) (string, bool) {
 	if s.State == nil {
 		return "", false
@@ -476,7 +465,7 @@ func ResolveChannelByNameOrID(s *discordgo.Session, nameOrID string) (string, er
 		return "", fmt.Errorf("channel name or ID cannot be empty")
 	}
 
-	if isSnowflake(trimmed) {
+	if discordutil.IsSnowflake(trimmed) {
 		return trimmed, nil
 	}
 
