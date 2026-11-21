@@ -87,28 +87,23 @@ func TestServer_WriteAuthAndStoreErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		isAuthErr  bool
 		err        error
 		wantCode   int
 		wantSubstr string
 	}{
-		{name: "auth validation error", isAuthErr: true, err: &k8sauth.ValidationError{Message: "bad slug"}, wantCode: http.StatusBadRequest, wantSubstr: "bad slug"},
-		{name: "auth unauthorized error", isAuthErr: true, err: &k8sauth.UnauthorizedError{Message: "no token"}, wantCode: http.StatusUnauthorized, wantSubstr: "no token"},
-		{name: "auth forbidden error", isAuthErr: true, err: &k8sauth.ForbiddenError{Message: "denied"}, wantCode: http.StatusForbidden, wantSubstr: "denied"},
-		{name: "auth generic error", isAuthErr: true, err: errors.New("boom"), wantCode: http.StatusInternalServerError, wantSubstr: "boom"},
-		{name: "store build not found", isAuthErr: false, err: ErrBuildNotFound, wantCode: http.StatusNotFound, wantSubstr: "build not found"},
-		{name: "store build conflict", isAuthErr: false, err: ErrBuildConflict, wantCode: http.StatusConflict, wantSubstr: "vanadis build state conflict"},
-		{name: "store invalid build input", isAuthErr: false, err: ErrInvalidBuildInput, wantCode: http.StatusBadRequest, wantSubstr: "invalid vanadis build input"},
+		{name: "auth validation error", err: &k8sauth.ValidationError{Message: "bad slug"}, wantCode: http.StatusBadRequest, wantSubstr: "bad slug"},
+		{name: "auth unauthorized error", err: &k8sauth.UnauthorizedError{Message: "no token"}, wantCode: http.StatusUnauthorized, wantSubstr: "no token"},
+		{name: "auth forbidden error", err: &k8sauth.ForbiddenError{Message: "denied"}, wantCode: http.StatusForbidden, wantSubstr: "denied"},
+		{name: "auth generic error", err: errors.New("boom"), wantCode: http.StatusInternalServerError, wantSubstr: "boom"},
+		{name: "store build not found", err: ErrBuildNotFound, wantCode: http.StatusNotFound, wantSubstr: "build not found"},
+		{name: "store build conflict", err: ErrBuildConflict, wantCode: http.StatusConflict, wantSubstr: "vanadis build state conflict"},
+		{name: "store invalid build input", err: ErrInvalidBuildInput, wantCode: http.StatusBadRequest, wantSubstr: "invalid vanadis build input"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rec := httptest.NewRecorder()
-			if tc.isAuthErr {
-				writeAuthErr(rec, tc.err)
-			} else {
-				writeStoreErr(context.Background(), rec, tc.err)
-			}
+			writeStoreErr(context.Background(), rec, tc.err)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("code = %d, want %d", rec.Code, tc.wantCode)
 			}

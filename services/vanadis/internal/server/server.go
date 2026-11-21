@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/strutil"
@@ -172,49 +173,8 @@ func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	return s.queueStats
 }
 
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
-}
-
-func isNumericSnowflake(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
-}
-
-func mapAuthOrStoreStatus(err error) int {
-	if _, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
-		return http.StatusBadRequest
-	}
-	if _, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
-		return http.StatusUnauthorized
-	}
-	if _, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
-		return http.StatusForbidden
-	}
-	return 0
-}
-
-func writeAuthErr(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	if s := mapAuthOrStoreStatus(err); s != 0 {
-		status = s
-	}
-	writeErr(w, status, err.Error())
 }
 
 // writeStoreErr maps a store or Restate error onto its HTTP status and writes it. Server-side
@@ -231,8 +191,12 @@ func writeStoreErr(ctx context.Context, w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrBuildConflict):
 		status = http.StatusConflict
 	default:
-		if s := mapAuthOrStoreStatus(err); s != 0 {
-			status = s
+		if _, ok := errors.AsType[interface {
+			error
+			StatusCode() int
+		}](err); ok {
+			k8sauth.WriteError(w, err)
+			return
 		}
 	}
 	if status >= http.StatusInternalServerError {
@@ -270,16 +234,11 @@ func SetupMux(server *VanadisServer) http.Handler {
 	} {
 		mux.HandleFunc(p, h)
 	}
-	authMiddleware := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if server != nil && server.authEnabled() {
-				server.auth.Middleware("/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush")(next).ServeHTTP(w, r)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
+	var auth *k8sauth.Authenticator
+	if server != nil {
+		auth = server.auth
 	}
-	return tracing.Middleware("vanadis", authMiddleware(mux))
+	return tracing.Middleware("vanadis", auth.Middleware(k8sauth.DefaultExemptPaths...)(mux))
 }
 
 // Routes returns the HTTP handler for the server.
@@ -315,9 +274,9 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
-	threadID, objective := normalizeDiscordThreadID(req.ThreadID), strings.TrimSpace(req.Objective)
+	threadID, objective := discordutil.NormalizeThreadID(req.ThreadID), strings.TrimSpace(req.Objective)
 	switch {
-	case !isNumericSnowflake(threadID):
+	case !discordutil.IsSnowflake(threadID):
 		writeErr(w, http.StatusBadRequest, "thread_id is required and must be a numeric Discord snowflake")
 		return
 	case objective == "":
@@ -351,12 +310,12 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	if s.authEnabled() {
 		caller, ok := k8sauth.CallerFromContext(r.Context())
 		if !ok {
-			writeAuthErr(w, &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity})
+			k8sauth.WriteError(w, &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity})
 			return
 		}
 		resolved, err := s.auth.AuthorizeTarget(r.Context(), caller, "builds", "create", req.Agent)
 		if err != nil {
-			writeAuthErr(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 		targetAgent = resolved
@@ -404,7 +363,7 @@ func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, 
 	switch r.Method {
 	case http.MethodGet:
 		if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
-			writeAuthErr(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 		build, chunks, err := s.store.GetBuild(r.Context(), id)
@@ -499,7 +458,7 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.authorizeBuildRead(r.Context(), "list"); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	limit := 50

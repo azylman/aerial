@@ -8,13 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
@@ -53,12 +54,6 @@ func (c *Client) RouterPath(handler string) string {
 // resolves env overrides once via config.LoadRestateConfig.
 func (c *Client) IngressURL() string {
 	return strings.TrimRight(strings.TrimSpace(c.cfg.RestateIngressURL), "/")
-}
-
-type restateErrorResponse struct {
-	Message string `json:"message"`
-	Error   string `json:"error"`
-	Code    int    `json:"code"`
 }
 
 // MapRestateError maps a Restate ingress error status onto a Vanadis sentinel error.
@@ -105,58 +100,25 @@ func (c *Client) CallIngressKeyed(ctx context.Context, path, idempotencyKey stri
 	if ingressURL == "" {
 		return errors.New("restate ingress URL not configured")
 	}
-	var reqBody io.Reader
+	var body any
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("marshal restate payload: %w", err)
 		}
-		reqBody = bytes.NewReader(b)
-	} else {
-		reqBody = http.NoBody
+		body = json.RawMessage(b)
 	}
 
 	// Leave five seconds within the server write budget to return an actionable response.
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	fullURL := ingressURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, reqBody)
-	if err != nil {
-		return fmt.Errorf("create restate request: %w", err)
+	bodyBytes, err := restateingress.Post(ctx, c.httpClient, ingressURL+path, idempotencyKey, body, 2<<20)
+	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		return MapRestateError(httpErr.Status, strutil.FirstNonEmpty(httpErr.Message, httpErr.Body))
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
-	}
-
-	client := http.DefaultClient
-	if c.httpClient != nil {
-		client = c.httpClient
-	}
-
-	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("call restate ingress %s: %w", path, restateCallError(parent, err))
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return fmt.Errorf("read restate response: %w", restateCallError(parent, err))
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp restateErrorResponse
-		msg := string(bodyBytes)
-		if jsonErr := json.Unmarshal(bodyBytes, &errResp); jsonErr == nil {
-			if errResp.Message != "" {
-				msg = errResp.Message
-			} else if errResp.Error != "" {
-				msg = errResp.Error
-			}
-		}
-		return MapRestateError(resp.StatusCode, msg)
 	}
 
 	if out != nil && len(bodyBytes) > 0 {
@@ -175,23 +137,13 @@ func (c *Client) CallRetryAction(ctx context.Context, buildService, buildID stri
 		return errors.New("restate ingress URL not configured")
 	}
 	target := base + c.ObjectPath(buildService, buildID, "RetryActionChunk")
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", idempotencyKey)
 	client := c.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		return fmt.Errorf("durable retry request: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		switch response.StatusCode {
+	response, err := restateingress.Post(ctx, client, target, idempotencyKey, json.RawMessage(body), 1<<20)
+	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		switch httpErr.Status {
 		case http.StatusBadRequest:
 			return fmt.Errorf("%w: retry rejected", model.ErrInvalidBuildInput)
 		case http.StatusNotFound:
@@ -199,9 +151,12 @@ func (c *Client) CallRetryAction(ctx context.Context, buildService, buildID stri
 		case http.StatusConflict:
 			return model.ErrBuildConflict
 		}
-		return fmt.Errorf("durable retry returned HTTP %d", response.StatusCode)
+		return fmt.Errorf("durable retry returned HTTP %d", httpErr.Status)
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(out); err != nil {
+	if err != nil {
+		return fmt.Errorf("durable retry request: %w", err)
+	}
+	if err := json.NewDecoder(bytes.NewReader(response)).Decode(out); err != nil {
 		return fmt.Errorf("decode durable retry: %w", err)
 	}
 	return nil
