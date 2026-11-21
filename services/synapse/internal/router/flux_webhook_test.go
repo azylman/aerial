@@ -1,48 +1,13 @@
 package router
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5"
 )
-
-func scanPreImagePRRow(dest ...any) error {
-	if len(dest) < 3 {
-		return nil
-	}
-	if p, ok := dest[0].(*int); ok {
-		*p = 896
-	}
-	if b, ok := dest[1].(*string); ok {
-		*b = "feat/test"
-	}
-	if t, ok := dest[2].(*string); ok {
-		*t = "100000000000000001"
-	}
-	return nil
-}
-
-func newMockPreImageKustomizationPool(status string) *mockSynapsePgxPool {
-	return &mockSynapsePgxPool{
-		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-			if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
-				return mockSynapsePgxRow{scanFn: scanPreImagePRRow}
-			}
-			if strings.Contains(sql, "SELECT status, COALESCE(head_sha") {
-				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-					return scanValues(dest, status, legacyFixtureHead, legacyFixtureHead, false)
-				}}
-			}
-			return mockSynapsePgxRow{}
-		},
-	}
-}
 
 type handleFluxWebhookCase struct {
 	name           string
@@ -51,7 +16,6 @@ type handleFluxWebhookCase struct {
 	withBus        bool
 	busFail        bool
 	downstreamFail bool
-	pgReg          *PostgresPRRegistry
 	wantStatusCode int
 	wantStatus     string
 	wantEvent      string
@@ -91,7 +55,7 @@ func assertFluxResponse(t *testing.T, body []byte, wantStatus, wantEvent, wantJo
 
 func runHandleFluxWebhookCase(t *testing.T, tc handleFluxWebhookCase) {
 	t.Helper()
-	srv := newTestRouter(Config{SystemChannelID: "123456789012345678"}, nil, tc.pgReg, nil)
+	srv := newTestRouter(Config{SystemChannelID: "123456789012345678"}, nil, nil)
 	if tc.downstreamFail {
 		srv.SetDispatcher(&mockOutboundDispatcher{directMessageErr: errors.New("dispatch failed")})
 	}
@@ -186,32 +150,6 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantStatus:     "accepted",
 			wantEvent:      "deploy_failed",
 			wantJobName:    "webhooks-router",
-		},
-		{
-			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_started event without inserting bus jobs",
-			endpoint:       "/webhooks/flux",
-			payload:        `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"Progressing","message":"progressing","metadata":{"revision":"main@sha1:12345"}}`,
-			withBus:        true,
-			pgReg:          NewPostgresPRRegistry(newMockPreImageKustomizationPool("merged")),
-			wantStatusCode: http.StatusOK,
-			wantStatus:     "ignored",
-			wantEvent:      "deploy_started",
-			wantJobName:    "aerial-core",
-			wantPRNumber:   896,
-			wantBusJobs:    0,
-		},
-		{
-			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_success event without inserting bus jobs",
-			endpoint:       "/webhooks/flux",
-			payload:        `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"reconciled","metadata":{"revision":"main@sha1:12345"}}`,
-			withBus:        true,
-			pgReg:          NewPostgresPRRegistry(newMockPreImageKustomizationPool("synced")),
-			wantStatusCode: http.StatusOK,
-			wantStatus:     "ignored",
-			wantEvent:      "deploy_success",
-			wantJobName:    "aerial-core",
-			wantPRNumber:   896,
-			wantBusJobs:    0,
 		},
 	}
 

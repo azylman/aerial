@@ -151,8 +151,8 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 
 func TestClientRetryReadiness(t *testing.T) {
 	t.Parallel()
-	const wantBody = `{"merge_sha":"m1","effects_owner":"restate","enforce_owner":true,"expected_owner":"aerial"}`
-	req := RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate, EnforceOwner: true, ExpectedOwner: "aerial"}
+	const wantBody = `{"merge_sha":"m1","enforce_owner":true,"expected_owner":"aerial"}`
+	req := RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "aerial"}
 	tests := []struct {
 		name         string
 		unconfigured bool
@@ -247,8 +247,8 @@ func TestClientSendSHAEvent(t *testing.T) {
 		wantPath     string
 		wantBodySub  string
 	}{
-		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: PREvent{HeadSHA: sha, CheckName: "ci", EffectsOwner: "restate"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"azylman/aerial","pr_number":0`},
-		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandlePushBySHA/send", wantBodySub: `"effects_owner":"legacy"`},
+		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: PREvent{HeadSHA: sha, CheckName: "ci"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"azylman/aerial","pr_number":0`},
+		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandlePushBySHA/send", wantBodySub: `"merge_sha":"0123456789abcdef0123456789abcdef01234567"`},
 		{name: "unknown sha handler rejected without request", handler: "HandleMainPush", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "unknown repo sha handler", wantTerminal: true},
 		{name: "unroutable pr handler rejected without request", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckStatus"}, wantErrSub: "not routable", wantTerminal: true},
 		{name: "zero sha rejected without request", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: "0000000", Handler: "HandleMerged"}, wantErrSub: "sha is required", wantTerminal: true},

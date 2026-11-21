@@ -8,11 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -100,29 +96,10 @@ func ownedGitHub(t *testing.T, body string) string {
 	return srv.URL
 }
 
-// countingPool counts every pr_registry query so tests prove zero calls.
-func countingPool(calls *atomic.Int64) *mockSynapsePgxPool {
-	return &mockSynapsePgxPool{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			calls.Add(1)
-			return mockSynapsePgxRow{}
-		},
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			calls.Add(1)
-			return pgconn.NewCommandTag("UPDATE 1"), nil
-		},
-		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
-			calls.Add(1)
-			return &mockSynapsePgxRows{}, nil
-		},
-	}
-}
-
 // ownedHarness wires a server whose every effect boundary records.
 type ownedHarness struct {
 	srv     *RouterServer
 	ingress *ownedIngress
-	db      *atomic.Int64
 	bus     *recordingBus
 	disp    *mockOutboundDispatcher
 }
@@ -130,10 +107,8 @@ type ownedHarness struct {
 func newOwnedHarness(t *testing.T, cfg Config, ingress *ownedIngress, ghBody string) *ownedHarness {
 	t.Helper()
 	cfg.RestateURL = ingress.serve(t)
-	cfg.RestateAuthoritative = true
 	cfg.GitHubAPIURL = ownedGitHub(t, ghBody)
-	h := &ownedHarness{srv: NewRouterServer(fixedConfig(cfg), nil), ingress: ingress, db: &atomic.Int64{}, bus: &recordingBus{}, disp: &mockOutboundDispatcher{}}
-	h.srv.SetRegistry(NewPostgresPRRegistry(countingPool(h.db)))
+	h := &ownedHarness{srv: NewRouterServer(fixedConfig(cfg), nil), ingress: ingress, bus: &recordingBus{}, disp: &mockOutboundDispatcher{}}
 	h.srv.SetEventBus(h.bus)
 	h.srv.SetDispatcher(h.disp)
 	return h
@@ -155,7 +130,7 @@ func (h *ownedHarness) effectCount() int {
 }
 
 // assertEdgeOnly checks the exact Restate sends (each body containing its
-// substring) and that nothing touched pr_registry or performed an effect.
+// substring) and that synapse performed no effect.
 func (h *ownedHarness) assertEdgeOnly(t *testing.T, wantPaths, wantBodies []string) {
 	t.Helper()
 	paths, bodies := h.ingress.sends()
@@ -167,16 +142,13 @@ func (h *ownedHarness) assertEdgeOnly(t *testing.T, wantPaths, wantBodies []stri
 			t.Errorf("send %d body = %s, want substring %s", i, bodies[i], sub)
 		}
 	}
-	if got := h.db.Load(); got != 0 {
-		t.Errorf("pr_registry calls = %d, want 0", got)
-	}
 	if got := h.effectCount(); got != 0 {
 		t.Errorf("lifecycle effects = %d, want 0", got)
 	}
 }
 
 func ownedCtx() context.Context {
-	return restateclient.WithEventIdentity(withEffectsOwner(context.Background(), restateclient.EffectsOwnerRestate), "github:d1")
+	return restateclient.WithEventIdentity(context.Background(), "github:d1")
 }
 
 func prPayload(repo, action string, merged bool, branch, body, mergeableState string) []byte {
@@ -242,53 +214,11 @@ func TestProcessGitHubEventRestateOwned(t *testing.T) {
 				t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.sendCode >= 500 {
-				if failed, terminal := restateOwnedSendFailure(err); !failed || terminal {
-					t.Fatalf("restateOwnedSendFailure() = %v/%v, want retryable", failed, terminal)
+				if failed, terminal := restateSendFailure(err); !failed || terminal {
+					t.Fatalf("restateSendFailure() = %v/%v, want retryable", failed, terminal)
 				}
 			}
 			h.assertEdgeOnly(t, tc.wantPaths, tc.wantBodies)
-		})
-	}
-}
-
-// TestRouteEventRestateOwnedSkipsRegistry pins that a restate-owned route
-// never looks the owner up in pr_registry and never falls back to shadow,
-// even when the live config is no longer authoritative.
-func TestRouteEventRestateOwnedSkipsRegistry(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		authoritative bool
-		repo          bool
-		wantPath      string
-		wantBodySub   string
-	}{
-		{name: "pr event travels with an empty owner", authoritative: true, wantPath: ownedPRKey + "HandleConflict/send", wantBodySub: `"agent":"","effects_owner":"restate"`},
-		{name: "stamp outlives a reload to shadow", wantPath: ownedPRKey + "HandleConflict/send", wantBodySub: `"effects_owner":"restate"`},
-		{name: "repo event is sent owned", repo: true, wantPath: ownedRepoK + "HandleMainPush/send", wantBodySub: `"agent":"","effects_owner":"restate"`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ingress := &ownedIngress{sendCode: http.StatusAccepted}
-			h := newOwnedHarness(t, Config{}, ingress, "{}")
-			h.srv.cfgSrc = fixedConfig(Config{RestateURL: h.srv.currentConfig().RestateURL, RestateAuthoritative: tc.authoritative})
-			var err error
-			if tc.repo {
-				err = h.srv.routeRepoEvent(ownedCtx(), "HandleMainPush", restateclient.RepoEvent{Repo: "azylman/aerial", MainSHA: ownedMerge})
-			} else {
-				err = h.srv.routePREvent(ownedCtx(), "HandleConflict", restateclient.PREvent{Repo: "azylman/aerial", PRNumber: 42, HeadSHA: ownedHead})
-			}
-			if err != nil {
-				t.Fatalf("route err = %v", err)
-			}
-			paths, bodies := ingress.sends()
-			if len(paths) != 1 || paths[0] != tc.wantPath || !strings.Contains(bodies[0], tc.wantBodySub) {
-				t.Fatalf("sends = %v %v, want %s with %s", paths, bodies, tc.wantPath, tc.wantBodySub)
-			}
-			if got := h.db.Load(); got != 0 {
-				t.Errorf("pr_registry calls = %d, want 0", got)
-			}
 		})
 	}
 }
@@ -315,7 +245,7 @@ func TestRestateBuildMetadataStore(t *testing.T) {
 	}{
 		{name: "found lifecycle and metadata map through", callCode: 200, callBody: lifecycleBody, fact: &fact, wantLifecycle: model.PRBuildLifecycle{Status: "open", HeadSHA: "h1", Started: true}, wantMetaRun: 9, wantMetaFound: true, wantSendSub: `"facts":[{"event":"check_updated"`},
 		{name: "unknown pr reads zero", callCode: 200, callBody: `{"found":false}`, wantSendSub: `"build_metadata":{"version":0`},
-		{name: "read failure surfaces", callCode: 500, callBody: "boom", wantReadErr: true, wantSendSub: `"effects_owner":"restate"`},
+		{name: "read failure surfaces", callCode: 500, callBody: "boom", wantReadErr: true, wantSendSub: `"build_metadata":{"version":0`},
 		{name: "no restate url fails every call", noURL: true, wantReadErr: true, wantRecordErr: true},
 	}
 	for _, tc := range tests {
@@ -353,8 +283,7 @@ func TestRestateBuildMetadataStore(t *testing.T) {
 }
 
 // TestRestateOwnedBuildMetadataPaths pins the restate-owned metadata entry
-// points that resolve no PR or no producer workflow: they send nothing and
-// never touch pr_registry.
+// points that resolve no PR or no producer workflow: they send nothing.
 func TestRestateOwnedBuildMetadataPaths(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -377,17 +306,13 @@ func TestRestateOwnedBuildMetadataPaths(t *testing.T) {
 			if paths, _ := h.ingress.sends(); len(paths) != 0 {
 				t.Fatalf("sends = %v, want none", paths)
 			}
-			if got := h.db.Load(); got != 0 {
-				t.Errorf("pr_registry calls = %d, want 0", got)
-			}
 		})
 	}
 }
 
 // TestHandlePRRegisterRestateOwned pins the restate-owned register: the
-// caller is checked exactly as on the legacy path, PRObject.Register returns
-// the target, its failures map to the legacy statuses, and pr_registry is
-// never touched.
+// caller is checked locally, PRObject.Register returns
+// the target and its failures map to HTTP statuses.
 func TestHandlePRRegisterRestateOwned(t *testing.T) {
 	t.Parallel()
 	const (
@@ -411,7 +336,7 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 		wantCallSub string
 		wantCalls   int
 	}{
-		{name: "valid register returns the restate target", body: validReq, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantRespSub: `"target_id":"100000000000000001"`, wantCallSub: `"fallback_target_id":"` + sysTarget + `","effects_owner":"restate"`, wantCalls: 1},
+		{name: "valid register returns the restate target", body: validReq, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantRespSub: `"target_id":"100000000000000001"`, wantCallSub: `"fallback_target_id":"` + sysTarget + `"`, wantCalls: 1},
 		{name: "headless target travels empty for restate to resolve", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"dispatch-uuid-1"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"target_id":""`, wantCalls: 1},
 		{name: "agent metadata is forwarded", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001","metadata":"{\"widget_state\":\"w1\"}"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"widget_state":"w1"`, wantCalls: 1},
 		{name: "explicit bad target is rejected locally", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"bad"}`, wantStatus: http.StatusBadRequest},
@@ -440,10 +365,8 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 				cfg.K8sAuthEnabled = true
 				cfg.K8sAuthConfig = newTestK8sAuthConfig(t, &staticAuthRoundTripper{authStatus: http.StatusOK, authBody: authOK, sarRules: []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}}})
 			}
-			var db atomic.Int64
 			srv := NewRouterServer(fixedConfig(cfg), nil)
-			srv.SetRegistry(NewPostgresPRRegistry(countingPool(&db)))
-			req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body)).WithContext(withEffectsOwner(context.Background(), restateclient.EffectsOwnerRestate))
+			req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body))
 			if tc.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tc.token)
 			}
@@ -458,9 +381,6 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 			}
 			if tc.wantCalls > 0 && (calls[0] != regPath || !strings.Contains(ingress.callBodies()[0], tc.wantCallSub)) {
 				t.Errorf("register call = %s %s, want %s containing %s", calls[0], ingress.callBodies()[0], regPath, tc.wantCallSub)
-			}
-			if got := db.Load(); got != 0 {
-				t.Errorf("pr_registry calls = %d, want 0", got)
 			}
 		})
 	}
@@ -492,8 +412,8 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
 			wantBodies: []string{
-				`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"aerial","effects_owner":"restate","target_id":"` + ownedThread + `"}`,
-				`"agent":"aerial","effects_owner":"restate"`,
+				`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"aerial","target_id":"` + ownedThread + `"}`,
+				`"agent":"aerial"`,
 			},
 		},
 		{
@@ -505,15 +425,15 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			name: "default-owned dependabot pr gets the system channel target", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       prPayload("azylman/aerial", "reopened", false, "dependabot/go/x", "", ""),
 			wantPaths:  []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleReopened/send"},
-			wantBodies: []string{`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","effects_owner":"restate","target_id":"` + ownedSystem + `"}`, `"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","effects_owner":"restate"}`},
+			wantBodies: []string{`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","target_id":"` + ownedSystem + `"}`, `"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":""}`},
 		},
 		{
 			name: "default-owned dependabot opened registers with the system channel and title", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "dependabot/go/x", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
 			wantBodies: []string{
-				`"branch":"dependabot/go/x","title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","effects_owner":"restate","target_id":"` + ownedSystem + `"}`,
-				`"title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","effects_owner":"restate","facts":[{"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"dependabot/go/x","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedSystem + `"`,
+				`"branch":"dependabot/go/x","title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","target_id":"` + ownedSystem + `"}`,
+				`"title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","facts":[{"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"dependabot/go/x","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedSystem + `"`,
 			},
 		},
 		{
@@ -544,7 +464,7 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 		{
 			name: "headless metadata without a system channel sends no target", event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", "reopened", false, "feat", aerialBody("aerial", "headless:abc"), ""),
-			wantPaths: []string{ownedPRKey + "HandleReopened/send"}, wantBodies: []string{`"agent":"aerial","effects_owner":"restate"}`},
+			wantPaths: []string{ownedPRKey + "HandleReopened/send"}, wantBodies: []string{`"agent":"aerial"}`},
 		},
 		{
 			name: "synchronize carries the compare-and-set head and fact", event: ghEventPullRequest,
@@ -623,7 +543,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "gate success triggers the auto-update cascade directly", event: ghEventCheckRun,
 			body:       checkRunPayload("CI Gate", "completed", "success", true),
 			wantPaths:  []string{ownedOther + "HandleCIRecovered/send", ownedOther + "HandleCheckPassed/send", ownedOtherR + "HandleAutoUpdate/send"},
-			wantBodies: []string{`"facts":[{"event":"synchronize"`, `"check_name":"CI Gate"`, `"pr_number":42,"head_sha":"` + ownedHead + `","agent":"","effects_owner":"restate","check_name":"CI Gate"`},
+			wantBodies: []string{`"facts":[{"event":"synchronize"`, `"check_name":"CI Gate"`, `"pr_number":42,"head_sha":"` + ownedHead + `","agent":"","check_name":"CI Gate"`},
 		},
 		{
 			name: "pr workflow success never triggers the auto-update cascade", event: ghEventWorkflowRun,
@@ -673,7 +593,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "default-owned dependabot failure self-registers first", event: ghEventWorkflowRun, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       workflowRunPayload("dependabot/go/x", "failure", true),
 			wantPaths:  []string{ownedOther + "HandleSelfRegistered/send", ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"},
-			wantBodies: []string{`"branch":"dependabot/go/x","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","effects_owner":"restate","target_id":"` + ownedSystem + `"}`, `Workflow \"CI\" concluded with failure`},
+			wantBodies: []string{`"branch":"dependabot/go/x","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","target_id":"` + ownedSystem + `"}`, `Workflow \"CI\" concluded with failure`},
 		},
 		{
 			name: "sha-only workflow success rides the repo sha route", event: ghEventWorkflowRun,
@@ -706,13 +626,13 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "default owner direct commit dispatches the git push with no pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
 			body:       pushPayload("refs/heads/main", "Direct commit"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedRepoK + "HandlePushBySHA/send", ownedRepoK + "HandleAutoUpdate/send", ownedRepoK + "HandleGitPush/send"},
-			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`, `"auto_update":{"default_owner":true}`, `"main_sha":"` + ownedMerge + `","generation":0,"pr_number":0,"head_sha":"","agent":"","effects_owner":"restate","ref":"refs/heads/main"`},
+			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`, `"auto_update":{"default_owner":true}`, `"main_sha":"` + ownedMerge + `","generation":0,"pr_number":0,"head_sha":"","agent":"","ref":"refs/heads/main"`},
 		},
 		{
 			name: "default owner squash push dispatches the git push for the pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
 			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleAutoUpdate/send", ownedRepoK + "HandleGitPush/send"},
-			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","agent":"","effects_owner":"restate","ref":"refs/heads/main"`},
+			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","agent":"","ref":"refs/heads/main"`},
 		},
 		{name: "branch push sends nothing", event: "push", body: pushPayload("refs/heads/feat", "wip")},
 		{name: "tag push sends nothing", event: "push", body: pushPayload("refs/tags/v1", "tag")},
@@ -722,7 +642,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 		{
 			name: "ingress failure surfaces as a retryable restate-owned error", event: ghEventPullRequest, sendCode: 503, wantErr: true,
 			body:      prPayload("azylman/aerial", ghActionClosed, false, "feat", "", ""),
-			wantPaths: []string{ownedPRKey + "HandleClosed/send"}, wantBodies: []string{`"effects_owner":"restate"`},
+			wantPaths: []string{ownedPRKey + "HandleClosed/send"}, wantBodies: []string{`"pr_number":42`},
 		},
 		{name: "malformed pull_request fails", event: ghEventPullRequest, body: []byte(`{`), wantErr: true},
 		{name: "malformed check_run fails", event: ghEventCheckRun, body: []byte(`{`), wantErr: true},

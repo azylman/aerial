@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/services/synapse/internal/github"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func TestFormatCollaboratorPRTarget(t *testing.T) {
@@ -168,9 +168,9 @@ type collaboratorCIFailureTestCase struct {
 	apiAuthor     string
 	apiHeadSHA    string
 	alertRules    []CollaboratorCIAlertRule
-	dmErr         error
+	alertFails    bool
 	wantErr       bool
-	wantDMCalls   int
+	wantAlerts    int
 	wantDMChannel string
 	wantContains  string
 }
@@ -206,14 +206,7 @@ func runCollaboratorCIFailureCase(ctx context.Context, t *testing.T, tc collabor
 	}))
 	defer mockServer.Close()
 
-	disp := &mockOutboundDispatcher{
-		directMessageErr: tc.dmErr,
-	}
-	cfg := Config{
-		GitHubAPIURL:         mockServer.URL,
-		CollaboratorCIAlerts: tc.alertRules,
-	}
-	srv := newTestRouter(cfg, mockServer.Client(), nil, disp)
+	srv, ingress, disp := newCollaboratorRouter(t, mockServer, tc.alertRules, tc.alertFails)
 
 	res := &ResolvedGitHubEvent{
 		Repo:      tc.resRepo,
@@ -232,27 +225,7 @@ func runCollaboratorCIFailureCase(ctx context.Context, t *testing.T, tc collabor
 		return
 	}
 
-	calls := disp.DirectMessageCalls()
-	if len(calls) != tc.wantDMCalls {
-		t.Fatalf("DirectMessageCalls() = %d, want %d", len(calls), tc.wantDMCalls)
-	}
-	if tc.wantDMCalls > 0 {
-		if calls[0].ChannelID != tc.wantDMChannel {
-			t.Errorf("channelID = %q, want %q", calls[0].ChannelID, tc.wantDMChannel)
-		}
-		if tc.wantContains != "" && !strings.Contains(calls[0].Content, tc.wantContains) {
-			t.Errorf("content = %q, want contains %q", calls[0].Content, tc.wantContains)
-		}
-
-		// Without the deleted per-SHA mark, a duplicate redelivery resends
-		// (at-least-once); the journaled Restate effect key owns dedup.
-		if err := srv.notifyCollaboratorCIFailure(ctx, res, tc.checkURL); err != nil {
-			t.Fatalf("second notifyCollaboratorCIFailure() err = %v", err)
-		}
-		if got := len(disp.DirectMessageCalls()); got != 2*tc.wantDMCalls {
-			t.Errorf("DirectMessageCalls() after duplicate = %d, want %d", got, 2*tc.wantDMCalls)
-		}
-	}
+	assertCollaboratorAlerts(t, ingress, disp, tc.wantAlerts, tc.wantDMChannel, tc.wantContains)
 }
 
 func TestNotifyCollaboratorCIFailure(t *testing.T) {
@@ -282,7 +255,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 			apiMerged:     false,
 			apiAuthor:     "collab-user",
 			alertRules:    standardRules,
-			wantDMCalls:   1,
+			wantAlerts:    1,
 			wantDMChannel: "111111111111111111",
 			wantContains:  "<@123456> CI check \"Test\" failed",
 		},
@@ -296,66 +269,66 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 			apiState:    "open",
 			apiAuthor:   "collab-user",
 			alertRules:  standardRules,
-			wantDMCalls: 0,
+			wantAlerts:  0,
 		},
 		{
-			name:        "pr with aerial trailer skips dm",
-			resRepo:     "azylman/aerial",
-			resPRNum:    44,
-			resBranch:   "feat/collab",
-			resHeadSHA:  "sha-collab-3",
-			apiState:    "open",
-			apiBody:     "PR body\n<!-- aerial-pr:{\"target_id\":\"100000000000000001\"} -->",
-			apiAuthor:   "collab-user",
-			alertRules:  standardRules,
-			wantDMCalls: 0,
+			name:       "pr with aerial trailer skips dm",
+			resRepo:    "azylman/aerial",
+			resPRNum:   44,
+			resBranch:  "feat/collab",
+			resHeadSHA: "sha-collab-3",
+			apiState:   "open",
+			apiBody:    "PR body\n<!-- aerial-pr:{\"target_id\":\"100000000000000001\"} -->",
+			apiAuthor:  "collab-user",
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
-			name:        "unconfigured author skips dm",
-			resRepo:     "azylman/aerial",
-			resPRNum:    45,
-			resBranch:   "feat/collab",
-			resHeadSHA:  "sha-collab-4",
-			apiState:    "open",
-			apiAuthor:   "unknown-user",
-			alertRules:  standardRules,
-			wantDMCalls: 0,
+			name:       "unconfigured author skips dm",
+			resRepo:    "azylman/aerial",
+			resPRNum:   45,
+			resBranch:  "feat/collab",
+			resHeadSHA: "sha-collab-4",
+			apiState:   "open",
+			apiAuthor:  "unknown-user",
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
-			name:        "closed pr skips dm",
-			resRepo:     "azylman/aerial",
-			resPRNum:    46,
-			resBranch:   "feat/collab",
-			resHeadSHA:  "sha-collab-5",
-			apiState:    "closed",
-			apiAuthor:   "collab-user",
-			alertRules:  standardRules,
-			wantDMCalls: 0,
+			name:       "closed pr skips dm",
+			resRepo:    "azylman/aerial",
+			resPRNum:   46,
+			resBranch:  "feat/collab",
+			resHeadSHA: "sha-collab-5",
+			apiState:   "closed",
+			apiAuthor:  "collab-user",
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
-			name:        "api head sha mismatch skips dm",
-			resRepo:     "azylman/aerial",
-			resPRNum:    48,
-			resBranch:   "feat/collab",
-			resHeadSHA:  "sha-collab-7",
-			apiHeadSHA:  "sha-collab-different",
-			apiState:    "open",
-			apiAuthor:   "collab-user",
-			alertRules:  standardRules,
-			wantDMCalls: 0,
+			name:       "api head sha mismatch skips dm",
+			resRepo:    "azylman/aerial",
+			resPRNum:   48,
+			resBranch:  "feat/collab",
+			resHeadSHA: "sha-collab-7",
+			apiHeadSHA: "sha-collab-different",
+			apiState:   "open",
+			apiAuthor:  "collab-user",
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
-			name:        "dm error propagates",
-			resRepo:     "azylman/aerial",
-			resPRNum:    49,
-			resBranch:   "feat/collab",
-			resHeadSHA:  "sha-collab-8",
-			apiState:    "open",
-			apiAuthor:   "collab-user",
-			alertRules:  standardRules,
-			dmErr:       errors.New("dm send failed"),
-			wantErr:     true,
-			wantDMCalls: 1,
+			name:       "dm error propagates",
+			resRepo:    "azylman/aerial",
+			resPRNum:   49,
+			resBranch:  "feat/collab",
+			resHeadSHA: "sha-collab-8",
+			apiState:   "open",
+			apiAuthor:  "collab-user",
+			alertRules: standardRules,
+			alertFails: true,
+			wantErr:    true,
+			wantAlerts: 1,
 		},
 	}
 
@@ -374,10 +347,10 @@ type collaboratorConflictTestCase struct {
 	resHeadSHA    string
 	pr            GitHubPullRequest
 	alertRules    []CollaboratorCIAlertRule
-	dmErr         error
+	alertFails    bool
 	apiErr        bool
 	wantErr       bool
-	wantDMCalls   int
+	wantAlerts    int
 	wantDMChannel string
 	wantContains  string
 }
@@ -396,12 +369,7 @@ func runCollaboratorConflictCase(ctx context.Context, t *testing.T, tc collabora
 	}))
 	defer mockServer.Close()
 
-	disp := &mockOutboundDispatcher{directMessageErr: tc.dmErr}
-	cfg := Config{
-		GitHubAPIURL:         mockServer.URL,
-		CollaboratorCIAlerts: tc.alertRules,
-	}
-	srv := newTestRouter(cfg, mockServer.Client(), nil, disp)
+	srv, ingress, disp := newCollaboratorRouter(t, mockServer, tc.alertRules, tc.alertFails)
 
 	err := srv.notifyCollaboratorConflict(ctx, tc.resRepo, tc.pr)
 	if (err != nil) != tc.wantErr {
@@ -411,27 +379,7 @@ func runCollaboratorConflictCase(ctx context.Context, t *testing.T, tc collabora
 		return
 	}
 
-	calls := disp.DirectMessageCalls()
-	if len(calls) != tc.wantDMCalls {
-		t.Fatalf("DirectMessageCalls() = %d, want %d", len(calls), tc.wantDMCalls)
-	}
-	if tc.wantDMCalls > 0 {
-		if calls[0].ChannelID != tc.wantDMChannel {
-			t.Errorf("channelID = %q, want %q", calls[0].ChannelID, tc.wantDMChannel)
-		}
-		if tc.wantContains != "" && !strings.Contains(calls[0].Content, tc.wantContains) {
-			t.Errorf("content = %q, want contains %q", calls[0].Content, tc.wantContains)
-		}
-
-		// Without the deleted per-SHA mark, a duplicate redelivery resends
-		// (at-least-once); the journaled Restate effect key owns dedup.
-		if err := srv.notifyCollaboratorConflict(ctx, tc.resRepo, tc.pr); err != nil {
-			t.Fatalf("second notifyCollaboratorConflict() err = %v", err)
-		}
-		if got := len(disp.DirectMessageCalls()); got != 2*tc.wantDMCalls {
-			t.Errorf("DirectMessageCalls() after duplicate = %d, want %d", got, 2*tc.wantDMCalls)
-		}
-	}
+	assertCollaboratorAlerts(t, ingress, disp, tc.wantAlerts, tc.wantDMChannel, tc.wantContains)
 }
 
 func TestNotifyCollaboratorConflict(t *testing.T) {
@@ -468,7 +416,7 @@ func TestNotifyCollaboratorConflict(t *testing.T) {
 				},
 			},
 			alertRules:    standardRules,
-			wantDMCalls:   1,
+			wantAlerts:    1,
 			wantDMChannel: "111111111111111111",
 			wantContains:  "<@123456> Merge conflict with `main` detected",
 		},
@@ -491,8 +439,8 @@ func TestNotifyCollaboratorConflict(t *testing.T) {
 					SHA: "sha-conflict-2",
 				},
 			},
-			alertRules:  standardRules,
-			wantDMCalls: 0,
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
 			name:       "dm error propagates and clears state",
@@ -513,17 +461,17 @@ func TestNotifyCollaboratorConflict(t *testing.T) {
 				},
 			},
 			alertRules:    standardRules,
-			dmErr:         errors.New("dm send failed"),
+			alertFails:    true,
 			wantErr:       true,
-			wantDMCalls:   1,
+			wantAlerts:    1,
 			wantDMChannel: "111111111111111111",
 		},
 		{
-			name:        "unconfigured repo skips conflict dm",
-			resRepo:     "other/repo",
-			resPRNum:    53,
-			alertRules:  standardRules,
-			wantDMCalls: 0,
+			name:       "unconfigured repo skips conflict dm",
+			resRepo:    "other/repo",
+			resPRNum:   53,
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
 			name:       "api error during resolve returns error",
@@ -594,119 +542,6 @@ func TestSyncPRFallbackFields(t *testing.T) {
 	}
 }
 
-func TestDispatchCollaboratorDM_Guards(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name          string
-		nilServer     bool
-		nilDispatcher bool
-		channelID     string
-		sha           string
-		owner         string
-		wantDispatch  bool
-	}{
-		{
-			name:         "restate-owned event skips the legacy send",
-			channelID:    "111111111111111111",
-			sha:          "abcdef1",
-			owner:        "restate",
-			wantDispatch: false,
-		},
-		{
-			name:         "nil server returns nil",
-			nilServer:    true,
-			channelID:    "111111111111111111",
-			sha:          "abcdef1",
-			wantDispatch: false,
-		},
-		{
-			name:          "nil dispatcher returns nil",
-			nilDispatcher: true,
-			channelID:     "111111111111111111",
-			sha:           "abcdef1",
-			wantDispatch:  false,
-		},
-		{
-			name:         "empty channel id returns nil without dispatch",
-			channelID:    "",
-			sha:          "abcdef1",
-			wantDispatch: false,
-		},
-		{
-			name:         "empty sha returns nil without dispatch",
-			channelID:    "111111111111111111",
-			sha:          "",
-			wantDispatch: false,
-		},
-		{
-			name:         "zero sha returns nil without dispatch",
-			channelID:    "111111111111111111",
-			sha:          "0000000000000000000000000000000000000000",
-			wantDispatch: false,
-		},
-		{
-			name:         "successful dispatch sends DM",
-			channelID:    "111111111111111111",
-			sha:          "abcdef1",
-			wantDispatch: true,
-		},
-	}
-
-	// Every subtest owns its dispatcher mock: the guards assert exact dispatch
-	// counts, so sharing one mock across parallel subtests would attribute a
-	// concurrent successful dispatch to a guard case.
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockDisp := &mockOutboundDispatcher{}
-			srv := &RouterServer{dispatcher: mockDisp}
-			if tc.nilServer {
-				srv = nil
-			}
-			if tc.nilDispatcher {
-				srv = &RouterServer{}
-			}
-			callCtx := ctx
-			if tc.owner != "" {
-				callCtx = withEffectsOwner(ctx, tc.owner)
-			}
-			if err := srv.dispatchCollaboratorDM(callCtx, "repo", 1, tc.sha, "", tc.channelID, "msg"); err != nil {
-				t.Errorf("dispatchCollaboratorDM error = %v, want nil", err)
-			}
-			want := 0
-			if tc.wantDispatch {
-				want = 1
-			}
-			if got := len(mockDisp.DirectMessageCalls()); got != want {
-				t.Errorf("direct message dispatches = %d, want %d", got, want)
-			}
-		})
-	}
-
-	dupDisp := &mockOutboundDispatcher{}
-	dupSrv := &RouterServer{dispatcher: dupDisp}
-	// Without the deleted per-SHA dedup map, repeat deliveries resend
-	// (at-least-once); the Restate journal owns dedup.
-	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "", "111111111111111111", "msg"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	beforeCalls := len(dupDisp.DirectMessageCalls())
-	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "", "111111111111111111", "msg"); err != nil {
-		t.Fatalf("unexpected error on duplicate: %v", err)
-	}
-	if len(dupDisp.DirectMessageCalls()) != beforeCalls+1 {
-		t.Errorf("expected duplicate dispatch to resend without dedup")
-	}
-
-	failDisp := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
-	srvFail := &RouterServer{dispatcher: failDisp}
-	if err := srvFail.dispatchCollaboratorDM(ctx, "repo", 1, "sha2", "", "111111111111111111", "msg"); err == nil {
-		t.Fatalf("expected error from failed dispatch")
-	}
-}
-
 func TestResolveCollaboratorAlertTarget_Guards(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -719,7 +554,7 @@ func TestResolveCollaboratorAlertTarget_Guards(t *testing.T) {
 				Authors:   map[string]string{"collab-user": "<@123>"},
 			},
 		},
-	}, nil, nil, nil)
+	}, nil, nil)
 
 	tests := []struct {
 		name        string
@@ -820,5 +655,46 @@ func TestResolveCollaboratorAlertTarget_Guards(t *testing.T) {
 				t.Errorf("resolveCollaboratorAlertTarget() ok = %v, want %v", ok, tc.wantOK)
 			}
 		})
+	}
+}
+
+// newCollaboratorRouter wires a router whose collaborator alerts go to a fake
+// Restate ingress (failing every send when alertFails) and whose dispatcher
+// records any DM synapse would wrongly send itself.
+func newCollaboratorRouter(t *testing.T, gh *httptest.Server, rules []CollaboratorCIAlertRule, alertFails bool) (*RouterServer, *ownedIngress, *mockOutboundDispatcher) {
+	t.Helper()
+	ingress := &ownedIngress{sendCode: http.StatusAccepted}
+	if alertFails {
+		ingress.sendCode = http.StatusServiceUnavailable
+	}
+	disp := &mockOutboundDispatcher{}
+	cfg := Config{GitHubAPIURL: gh.URL, CollaboratorCIAlerts: rules, RestateURL: ingress.serve(t)}
+	return newTestRouter(cfg, gh.Client(), disp), ingress, disp
+}
+
+// assertCollaboratorAlerts checks the HandleCollaboratorAlert sends: their
+// count, and the DM the first one carries for PRObject to send. synapse
+// itself never sends the DM.
+func assertCollaboratorAlerts(t *testing.T, ingress *ownedIngress, disp *mockOutboundDispatcher, wantAlerts int, wantChannel, wantContains string) {
+	t.Helper()
+	paths, bodies := ingress.sends()
+	if len(paths) != wantAlerts {
+		t.Fatalf("collaborator alert sends = %v, want %d", paths, wantAlerts)
+	}
+	if got := len(disp.DirectMessageCalls()); got != 0 {
+		t.Errorf("synapse DirectMessageCalls() = %d, want 0", got)
+	}
+	if wantAlerts == 0 {
+		return
+	}
+	if !strings.HasSuffix(paths[0], "/HandleCollaboratorAlert/send") {
+		t.Errorf("send path = %s, want HandleCollaboratorAlert", paths[0])
+	}
+	var ev restateclient.PREvent
+	if err := json.Unmarshal([]byte(bodies[0]), &ev); err != nil {
+		t.Fatalf("decode alert: %v", err)
+	}
+	if len(ev.EriEffects) != 1 || ev.EriEffects[0].ChannelID != wantChannel || !strings.Contains(ev.EriEffects[0].Content, wantContains) {
+		t.Errorf("eri_effects = %+v, want one DM to %s containing %q", ev.EriEffects, wantChannel, wantContains)
 	}
 }

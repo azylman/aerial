@@ -10,8 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 func TestIsRoboRevCheck(t *testing.T) {
@@ -341,11 +339,9 @@ func TestClient_ErrorsAndEdgeCases(t *testing.T) {
 	}
 
 	err404 := client.GetJSON(context.Background(), "/404", 1<<20, &comment)
-	if !IsNotFound(err404) {
-		t.Errorf("expected IsNotFound=true for 404 response, got %v", err404)
-	}
-	if IsNotFound(errors.New("generic error")) {
-		t.Errorf("expected IsNotFound=false for generic error")
+	var notFound *StatusError
+	if !errors.As(err404, &notFound) || notFound.StatusCode != http.StatusNotFound {
+		t.Errorf("expected StatusError 404, got %v", err404)
 	}
 
 	err403 := client.GetJSON(context.Background(), "/403", 1<<20, &comment)
@@ -363,77 +359,6 @@ func TestClient_ErrorsAndEdgeCases(t *testing.T) {
 	_, errBadMethod := NewRequest(context.Background(), "", "", "INVALID METHOD \x7f", "/path", nil)
 	if errBadMethod == nil {
 		t.Errorf("expected error for invalid HTTP method")
-	}
-}
-
-func TestConflicts_Helpers(t *testing.T) {
-	t.Parallel()
-
-	// IsAutoUpdateAuthorAllowed
-	allowed := []string{"octo-user", "dependabot[bot]"}
-	if !IsAutoUpdateAuthorAllowed("octo-user", allowed) {
-		t.Errorf("expected octo-user to be allowed")
-	}
-	if !IsAutoUpdateAuthorAllowed("OCTO-USER", allowed) {
-		t.Errorf("expected case-insensitive match")
-	}
-	if IsAutoUpdateAuthorAllowed("mallory", allowed) {
-		t.Errorf("expected mallory to be denied")
-	}
-	if IsAutoUpdateAuthorAllowed("", allowed) || IsAutoUpdateAuthorAllowed("octo-user", nil) {
-		t.Errorf("expected empty inputs to return false")
-	}
-
-	// UpdatePRBranch guards
-	if _, err := UpdatePRBranch(context.Background(), nil, "", 1); err == nil {
-		t.Errorf("expected error for empty repo in UpdatePRBranch")
-	}
-	if _, err := UpdatePRBranch(context.Background(), nil, "azylman/aerial", 0); err == nil {
-		t.Errorf("expected error for zero prNumber in UpdatePRBranch")
-	}
-
-	// UpdatePRBranch server tests
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/pulls/1/update-branch"):
-			w.WriteHeader(http.StatusOK)
-		case strings.HasSuffix(r.URL.Path, "/pulls/2/update-branch"):
-			w.WriteHeader(http.StatusConflict)
-		case strings.HasSuffix(r.URL.Path, "/pulls/3/update-branch"):
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = w.Write([]byte(`{"message":"no new commits on the base branch"}`))
-		case strings.HasSuffix(r.URL.Path, "/pulls/4/update-branch"):
-			w.WriteHeader(http.StatusForbidden)
-		default:
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token")
-
-	// 200 OK -> (false, nil)
-	conflict, err := UpdatePRBranch(context.Background(), client, "azylman/aerial", 1)
-	if err != nil || conflict {
-		t.Errorf("expected (false, nil) on 200, got (%v, %v)", conflict, err)
-	}
-
-	// 409 Conflict -> (true, nil)
-	conflict, err = UpdatePRBranch(context.Background(), client, "azylman/aerial", 2)
-	if err != nil || !conflict {
-		t.Errorf("expected (true, nil) on 409, got (%v, %v)", conflict, err)
-	}
-
-	// 422 No new commits -> (false, nil)
-	conflict, err = UpdatePRBranch(context.Background(), client, "azylman/aerial", 3)
-	if err != nil || conflict {
-		t.Errorf("expected (false, nil) on no new commits, got (%v, %v)", conflict, err)
-	}
-
-	// 403 Forbidden -> error
-	_, err = UpdatePRBranch(context.Background(), client, "azylman/aerial", 4)
-	if err == nil {
-		t.Errorf("expected error on 403 forbidden")
 	}
 }
 
@@ -505,105 +430,6 @@ func TestConflicts_FetchSinglePR(t *testing.T) {
 	}
 }
 
-func TestConflicts_FetchOpenPullRequests(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/repos/azylman/aerial/pulls" {
-			_, _ = w.Write([]byte(`[
-				{"number":41,"state":"closed","title":"Closed PR","head":{"ref":"feat/branch","sha":"head-fallback"}},
-				{"number":42,"state":"open","title":"Test PR","head":{"ref":"feat/branch","sha":"head42"}}
-			]`))
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token")
-
-	// FetchOpenPullRequests guards
-	if _, err := FetchOpenPullRequests(context.Background(), client, ""); err == nil {
-		t.Errorf("expected error for empty repo in FetchOpenPullRequests")
-	}
-	if _, err := FetchOpenPullRequests(context.Background(), nil, "azylman/aerial"); err == nil {
-		t.Errorf("expected error for nil client in FetchOpenPullRequests")
-	}
-
-	// FetchOpenPullRequests
-	openPRs, errOpen := FetchOpenPullRequests(context.Background(), client, "azylman/aerial")
-	if errOpen != nil || len(openPRs) != 2 {
-		t.Fatalf("FetchOpenPullRequests failed: %v, count=%d", errOpen, len(openPRs))
-	}
-}
-
-func TestConflicts_PendingOrFailedChecks(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/repos/azylman/aerial/commits/head42/check-runs":
-			_, _ = w.Write([]byte(`{"total_count":3,"check_runs":[
-				{"id":10,"name":"unit-test","status":"completed","conclusion":"failure"},
-				{"id":11,"name":"build-metadata","status":"completed","conclusion":"success"},
-				{"id":12,"name":"ci gate","status":"completed","conclusion":"failure"}
-			]}`))
-		case "/repos/azylman/aerial/commits/head-pending/check-runs":
-			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":20,"name":"integration","status":"in_progress","conclusion":""}]}`))
-		case "/repos/azylman/aerial/commits/head-500/check-runs":
-			w.WriteHeader(http.StatusInternalServerError)
-		case "/repos/azylman/aerial/commits/head-404/check-runs":
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token")
-
-	// HasPendingOrFailedChecksForSHA guards
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, "", 42, "head42") {
-		t.Errorf("expected false for empty repo")
-	}
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 0, "head42") {
-		t.Errorf("expected false for zero pr")
-	}
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 42, "") {
-		t.Errorf("expected false for empty sha")
-	}
-	if HasPendingOrFailedChecksForSHA(context.Background(), nil, "azylman/aerial", 42, "head42") {
-		t.Errorf("expected false for nil client")
-	}
-
-	// HasPendingOrFailedChecksForSHA (failing check)
-	hasFailed := HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 42, "head42")
-	if !hasFailed {
-		t.Errorf("expected hasFailed=true for failing check-run")
-	}
-	// Repeated call re-reads live check runs (no in-memory cache)
-	if !HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 42, "head42") {
-		t.Errorf("expected repeated call to return true")
-	}
-
-	// HasPendingOrFailedChecksForSHA (pending check)
-	hasPending := HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 50, "head-pending")
-	if !hasPending {
-		t.Errorf("expected hasPending=true for in_progress check")
-	}
-
-	// 500 error returns true (!IsNotFound(err))
-	if !HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 51, "head-500") {
-		t.Errorf("expected true on 500 server error")
-	}
-	// 404 error returns false (!IsNotFound(err) is false)
-	if HasPendingOrFailedChecksForSHA(context.Background(), client, "azylman/aerial", 52, "head-404") {
-		t.Errorf("expected false on 404 not found")
-	}
-}
-
 func TestConflicts_ResolvePRFromCommitSHA(t *testing.T) {
 	t.Parallel()
 
@@ -656,27 +482,6 @@ func TestConflicts_ResolvePRFromCommitSHA(t *testing.T) {
 	// When neither endpoint finds any PR
 	if _, _, errEmpty := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head-empty"); errEmpty == nil {
 		t.Errorf("expected error when no PRs associated with commit")
-	}
-}
-
-func TestConflicts_DedupeCheckRuns(t *testing.T) {
-	t.Parallel()
-
-	runs := []model.GitHubMetadataCheck{
-		{ID: 1, Name: "build-metadata"},
-		{ID: 2, Name: "lint", App: struct {
-			ID   int64  `json:"id"`
-			Slug string `json:"slug"`
-		}{Slug: "dependabot"}},
-		{ID: 3, Name: "unit-test"},
-		{ID: 4, Name: "unit-test"}, // Newer ID overrides older
-	}
-	deduped := dedupeLatestCheckRuns(runs)
-	if len(deduped) != 1 || deduped[0].ID != 4 {
-		t.Errorf("expected 1 deduped check run with ID 4, got %v", deduped)
-	}
-	if dedupeLatestCheckRuns(nil) != nil {
-		t.Errorf("expected nil for nil runs in dedupeLatestCheckRuns")
 	}
 }
 

@@ -98,58 +98,16 @@ var (
 		},
 	)
 
-	// RestateShadowSendsTotal counts dark shadow requests mirrored at the
-	// Restate PRObject/RepoObject ingress, partitioned by handler and outcome.
-	// Shadow failures always fail closed; the legacy path stays authoritative.
-	RestateShadowSendsTotal = prometheus.NewCounterVec(
+	// RestateSendsTotal counts every synapse request to the Restate
+	// PRObject/RepoObject ingress (one-way sends and the few
+	// request-response calls), partitioned by handler and outcome: sent,
+	// error (retried) or terminal (job dropped).
+	RestateSendsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "synapse_restate_shadow_sends_total",
-			Help: "Total number of dark shadow requests mirrored at Restate ingress by outcome.",
+			Name: "synapse_restate_sends_total",
+			Help: "Total number of synapse requests to Restate PRObject/RepoObject ingress by handler and outcome.",
 		},
 		[]string{"handler", fieldStatus},
-	)
-
-	// RestateShadowDivergenceTotal counts first-touch hydration mismatches
-	// between live events and the pr_registry projection. The cutover gate
-	// requires this to stay zero.
-	RestateShadowDivergenceTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_restate_shadow_divergence_total",
-			Help: "Total number of dark shadow hydration divergences from the registry projection by reason.",
-		},
-		[]string{fieldReason},
-	)
-
-	// LegacyEffectsTotal counts side effects synapse really performed on
-	// the legacy pipeline, by effect kind. Shadow gates compare it with
-	// prstate_intended_effects_total{kind} and the [synapse-effect] log.
-	LegacyEffectsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_legacy_effects_total",
-			Help: "Total number of side effects synapse performed on the legacy pipeline by effect kind.",
-		},
-		[]string{"kind"},
-	)
-
-	// RegistryCallsTotal counts every pr_registry call synapse makes, by
-	// registry method. Restate-owned events must leave it flat; the
-	// authoritative soak gates on it before the registry is deleted.
-	RegistryCallsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_registry_calls_total",
-			Help: "Total number of pr_registry calls synapse made by registry method.",
-		},
-		[]string{"method"},
-	)
-
-	// RestateLookupDivergenceTotal counts shadow read-only lookups where the
-	// legacy registry and Restate disagree (SHA->PR resolution or owner).
-	RestateLookupDivergenceTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_restate_lookup_divergence_total",
-			Help: "Total number of shadow lookups where pr_registry and Restate disagreed, by lookup kind.",
-		},
-		[]string{"kind"},
 	)
 	// RestateMergeRecoveredTotal counts merges synapse recovered for PRObject
 	// from a deploy-path commit lookup that fell back to GitHub, because the
@@ -249,11 +207,7 @@ func registerCollector(c prometheus.Collector) {
 }
 
 func init() {
-	registerCollector(RestateShadowSendsTotal)
-	registerCollector(RestateShadowDivergenceTotal)
-	registerCollector(LegacyEffectsTotal)
-	registerCollector(RegistryCallsTotal)
-	registerCollector(RestateLookupDivergenceTotal)
+	registerCollector(RestateSendsTotal)
 	registerCollector(RestateMergeRecoveredTotal)
 	registerCollector(GitHubRequestsBySource)
 	registerCollector(GitHubRateLimitRemaining)
@@ -318,50 +272,16 @@ func RecordJobDropped(queue, kind, reason string) {
 	JobsDroppedTotal.WithLabelValues(queue, kind, reason).Inc()
 }
 
-// RecordRestateShadowSend increments the RestateShadowSendsTotal counter for
-// the specified frozen handler and outcome ("sent" or "error").
-func RecordRestateShadowSend(handler, status string) {
+// RecordRestateSend increments the RestateSendsTotal counter for the
+// specified Restate handler and outcome ("sent", "error" or "terminal").
+func RecordRestateSend(handler, status string) {
 	if handler == "" {
 		handler = unknownLabel
 	}
 	if status == "" {
 		status = unknownLabel
 	}
-	RestateShadowSendsTotal.WithLabelValues(handler, status).Inc()
-}
-
-// RecordRestateShadowDivergence increments the RestateShadowDivergenceTotal
-// counter for the specified mismatch reason.
-func RecordRestateShadowDivergence(reason string) {
-	if reason == "" {
-		reason = unknownLabel
-	}
-	RestateShadowDivergenceTotal.WithLabelValues(reason).Inc()
-}
-
-// RecordLegacyEffect increments the LegacyEffectsTotal counter for kind.
-func RecordLegacyEffect(kind string) {
-	if kind == "" {
-		kind = unknownLabel
-	}
-	LegacyEffectsTotal.WithLabelValues(kind).Inc()
-}
-
-// RecordRegistryCall increments the RegistryCallsTotal counter for method.
-func RecordRegistryCall(method string) {
-	if method == "" {
-		method = unknownLabel
-	}
-	RegistryCallsTotal.WithLabelValues(method).Inc()
-}
-
-// RecordRestateLookupDivergence increments the RestateLookupDivergenceTotal
-// counter for kind.
-func RecordRestateLookupDivergence(kind string) {
-	if kind == "" {
-		kind = unknownLabel
-	}
-	RestateLookupDivergenceTotal.WithLabelValues(kind).Inc()
+	RestateSendsTotal.WithLabelValues(handler, status).Inc()
 }
 
 // RecordRestateMergeRecovered increments the RestateMergeRecoveredTotal

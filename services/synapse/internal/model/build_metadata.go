@@ -85,10 +85,6 @@ func IsBuildMetadataCheck(name string) bool {
 	return name == BuildMetadataCheckName || name == BuildMetadataResultCheckName
 }
 
-func IsDependabotAppCheck(appSlug string) bool {
-	return strings.EqualFold(strings.TrimSpace(appSlug), "dependabot")
-}
-
 func ValidWorkflowPath(path string) bool {
 	return strings.HasPrefix(path, ".github/workflows/") &&
 		!strings.Contains(strings.TrimPrefix(path, ".github/workflows/"), "/") &&

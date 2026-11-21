@@ -1,15 +1,11 @@
 package router
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
-	"testing"
 
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 )
@@ -89,57 +85,3 @@ func firstStatus(override, status int) int {
 }
 
 func runs(rs ...metadataWorkflowRun) []metadataWorkflowRun { return rs }
-
-func TestBuildMetadataEventIngestion(t *testing.T) {
-	t.Parallel()
-	pr := tPRMeta(1, "engine")
-	prChecks := checks(tCheck(pr), tCheck(tResultOf(pr, "engine", buildResultRunning, false)))
-	api := metadataAPI{runs: runs(tPRRun(1, "in_progress", "")), checks: prChecks, parents: []string{tBase, tHead}}
-	checkRun := `{"action":"completed","repository":{"full_name":"example/aerial"},"check_run":{"name":"build-metadata-result","head_sha":"` + tHead + `","status":"completed","conclusion":"neutral","pull_requests":[{"number":42,"head":{"sha":"` + tHead + `","ref":"BRANCH"}}]}}`
-	workflowRun := `{"action":"in_progress","repository":{"full_name":"example/aerial"},"workflow_run":{"id":77,"run_attempt":1,"path":".github/workflows/docker-publish.yml","event":"pull_request","name":"CD","head_sha":"` + tHead + `","head_branch":"BRANCH","status":"in_progress","pull_requests":[{"number":42,"head":{"sha":"` + tHead + `","ref":"BRANCH"}}]}}`
-	tests := []struct {
-		name, event, payload, branch string
-		owner                        bool
-		checksStatus                 int
-		wantWrites                   int
-		wantPublished                int
-		wantErr                      bool
-		busErr                       error
-	}{
-		{"Dependabot transport check ingests", ghEventCheckRun, checkRun, "dependabot/go_modules/x", true, 0, 1, 1, false, nil},
-		{"feature transport check ingests", ghEventCheckRun, checkRun, "feature", true, 0, 1, 1, false, nil},
-		{"transport check publish error handled", ghEventCheckRun, checkRun, "feature", true, 0, 1, 0, false, errors.New("bus fail")},
-		{"foreign stack owner skips", ghEventCheckRun, checkRun, "", false, 0, 0, 0, false, nil},
-		{"transport API failure retries", ghEventCheckRun, checkRun, "feature", true, http.StatusBadGateway, 0, 0, true, nil},
-		{"workflow run refreshes progress", ghEventWorkflowRun, workflowRun, "feature", true, 0, 1, 0, false, nil},
-		{"workflow run refresh failure never blocks CI handling", ghEventWorkflowRun, workflowRun, "feature", true, http.StatusBadGateway, 0, 0, false, nil},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := api
-			fixture.checksStatus = tc.checksStatus
-			server := httptest.NewServer(http.HandlerFunc(fixture.serve))
-			defer server.Close()
-			reg := &mockPRRegistry{resolveBranch: tc.branch, resolveHeadSHA: tHead, buildLifecycle: PRBuildLifecycle{Status: prOpen, HeadSHA: tHead}}
-			if tc.branch != "" {
-				reg.resolveTargetID = "100000000000000001"
-			}
-			bus := &mockEventBus{err: tc.busErr}
-			srv := newTestRouter(Config{GitHubAPIURL: server.URL, DefaultOwner: tc.owner}, server.Client(), reg, nil, bus)
-			_, err := srv.ProcessGitHubEvent(context.Background(), tc.event, "delivery", []byte(strings.ReplaceAll(tc.payload, "BRANCH", tc.branch)))
-			if (err != nil) != tc.wantErr || len(reg.recordedBuildMetadata) != tc.wantWrites {
-				t.Fatalf("err=%v writes=%d, want err=%v writes=%d", err, len(reg.recordedBuildMetadata), tc.wantErr, tc.wantWrites)
-			}
-			published := 0
-			for _, ev := range bus.publishedPREvents {
-				if ev.Event == "check_updated" && ev.PRNumber == 42 && ev.CheckName == "" {
-					published++
-				}
-			}
-			if published != tc.wantPublished {
-				t.Fatalf("published=%d want %d", published, tc.wantPublished)
-			}
-		})
-	}
-}

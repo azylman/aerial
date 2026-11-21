@@ -1,13 +1,11 @@
 package router
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -162,7 +160,7 @@ func TestResolveOwnedSHAPRMergeRecovery(t *testing.T) {
 			}
 			cfg := Config{RestateURL: ingress.serve(t), GitHubAPIURL: recoveryGitHub(t, tc.ghCode, tc.ghBody)}
 			srv := NewRouterServer(fixedConfig(cfg), nil)
-			ctx := withEffectsOwner(context.Background(), restateclient.EffectsOwnerRestate)
+			ctx := context.Background()
 			counter := metrics.RestateMergeRecoveredTotal.WithLabelValues(mergeRecoveryPathOwnedDeploy)
 			before := testutil.ToFloat64(counter)
 			prNum, _ := srv.resolveOwnedSHAPR(ctx, "azylman/aerial", recoveryMerge)
@@ -213,8 +211,8 @@ func TestOwnedDeployEventRecoversMergeFirst(t *testing.T) {
 				},
 			}
 			cfg := Config{RestateURL: ingress.serve(t), GitHubAPIURL: recoveryGitHub(t, 200, mergedPR)}
-			srv := newTestRouter(cfg, nil, nil, &mockOutboundDispatcher{}, &mockEventBus{})
-			ctx := withEffectsOwner(context.Background(), restateclient.EffectsOwnerRestate)
+			srv := newTestRouter(cfg, nil, &mockOutboundDispatcher{}, &mockEventBus{})
+			ctx := context.Background()
 			if _, err := srv.processOwnedDeployEvent(ctx, tc.evt); err != nil {
 				t.Fatalf("processOwnedDeployEvent() err = %v", err)
 			}
@@ -229,133 +227,8 @@ func TestOwnedDeployEventRecoversMergeFirst(t *testing.T) {
 			if err := json.Unmarshal([]byte(sends[0].body), &ev); err != nil {
 				t.Fatal(err)
 			}
-			if ev.HeadSHA != recoveryHead || ev.MergeSHA != recoveryMerge || ev.EffectsOwner != restateclient.EffectsOwnerRestate {
-				t.Errorf("recovered merge = %+v, want head %s merge %s restate-owned", ev, recoveryHead, recoveryMerge)
-			}
-		})
-	}
-}
-
-// TestResolveSHAMergeRecovery drives the legacy deploy path: ResolveSHA
-// backfills the row and mirrors a recovered merge to PRObject in shadow.
-// Rows run serially because they share the global merge-recovered counter.
-func TestResolveSHAMergeRecovery(t *testing.T) {
-	mergedPR := `[{"number":2327,"state":"closed","head":{"ref":"feat/redaction-purge","sha":"` + recoveryHead + `"},"merged_at":"2026-11-21T08:38:21Z","merge_commit_sha":"` + recoveryMerge + `"}]`
-	openView := `{"found":true,"repo":"azylman/aerial","pr_number":2327,"status":"open","head_sha":"` + recoveryHead + `"}`
-	tests := []struct {
-		name         string
-		registryPR   int
-		noRestate    bool
-		ghCode       int
-		wantPR       int
-		wantBackfill int
-		wantSends    []string
-		wantRecorded float64
-	}{
-		{name: "registry hit sends no merge", registryPR: 2327, ghCode: 200, wantPR: 2327},
-		{name: "github fallback backfills and mirrors the merge", ghCode: 200, wantPR: 2327, wantBackfill: 1, wantSends: []string{"HandleMerged"}, wantRecorded: 1},
-		{name: "restate off backfills only", noRestate: true, ghCode: 200, wantPR: 2327, wantBackfill: 1},
-		{name: "github error resolves nothing", ghCode: 500},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ingress := &recoveryIngress{bodies: map[string]string{"GetDeployView": openView}}
-			cfg := Config{GitHubAPIURL: recoveryGitHub(t, tc.ghCode, mergedPR)}
-			if !tc.noRestate {
-				cfg.RestateURL = ingress.serve(t)
-			}
-			reg := &mockPRRegistry{resolvePRNum: tc.registryPR}
-			srv := newTestRouter(cfg, nil, reg, &mockOutboundDispatcher{})
-			counter := metrics.RestateMergeRecoveredTotal.WithLabelValues(mergeRecoveryPathDeploy)
-			before := testutil.ToFloat64(counter)
-			prNum, _, _, _ := srv.ResolveSHA(context.Background(), "azylman/aerial", recoveryMerge)
-			if prNum != tc.wantPR {
-				t.Errorf("ResolveSHA() pr = %d, want %d", prNum, tc.wantPR)
-			}
-			if got := len(reg.backfillCalls); got != tc.wantBackfill {
-				t.Errorf("backfills = %d, want %d", got, tc.wantBackfill)
-			}
-			sends := ingress.captured()
-			handlers := make([]string, 0, len(sends))
-			for _, s := range sends {
-				handlers = append(handlers, s.handler)
-			}
-			if strings.Join(handlers, ",") != strings.Join(tc.wantSends, ",") {
-				t.Errorf("sends = %v, want %v", handlers, tc.wantSends)
-			}
-			if got := testutil.ToFloat64(counter) - before; got != tc.wantRecorded {
-				t.Errorf("merge recovered delta = %v, want %v", got, tc.wantRecorded)
-			}
-		})
-	}
-}
-
-// lostMergeGoldenCase is the synapse side of lost-merge-webhooks.json.
-type lostMergeGoldenCase struct {
-	Name   string `json:"name"`
-	Lookup struct {
-		CommitSHA string          `json:"commit_sha"`
-		GitHub    json.RawMessage `json:"github"`
-		View      json.RawMessage `json:"view"`
-	} `json:"lookup"`
-	RecoveryShadow  []shadowGoldenSend `json:"recovery_shadow"`
-	RecoveryRestate []shadowGoldenSend `json:"recovery_restate"`
-}
-
-// TestShadowLostMergeWebhooksGolden pins the merge synapse recovers from a
-// deploy commit lookup in both modes: the legacy ResolveSHA mirrors
-// recovery_shadow and the restate-owned resolveOwnedSHAPR journals
-// recovery_restate. prstate's TestShadowLostMergeWebhooksGolden replays
-// both through PRObject.
-func TestShadowLostMergeWebhooksGolden(t *testing.T) {
-	raw, err := os.ReadFile(shadowGoldenDir + "lost-merge-webhooks.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var g struct {
-		Cases []lostMergeGoldenCase `json:"cases"`
-	}
-	if err := json.Unmarshal(raw, &g); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.Cases) == 0 {
-		t.Fatal("no cases in lost-merge-webhooks.json")
-	}
-	type modeRow struct {
-		name  string
-		c     lostMergeGoldenCase
-		owned bool
-		want  []shadowGoldenSend
-	}
-	tests := make([]modeRow, 0, 2*len(g.Cases))
-	for _, c := range g.Cases {
-		tests = append(tests, modeRow{name: c.Name + "/legacy", c: c, want: c.RecoveryShadow},
-			modeRow{name: c.Name + "/restate", c: c, owned: true, want: c.RecoveryRestate})
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ingress := &recoveryIngress{bodies: map[string]string{"ResolvePRBySHA": `{"found":false}`, "GetDeployView": string(tc.c.Lookup.View)}}
-			cfg := Config{RestateURL: ingress.serve(t), GitHubAPIURL: recoveryGitHub(t, 200, string(tc.c.Lookup.GitHub))}
-			srv := newTestRouter(cfg, nil, &mockPRRegistry{}, &mockOutboundDispatcher{})
-			if tc.owned {
-				srv.resolveOwnedSHAPR(withEffectsOwner(context.Background(), restateclient.EffectsOwnerRestate), "azylman/aerial", tc.c.Lookup.CommitSHA)
-			} else {
-				srv.ResolveSHA(context.Background(), "azylman/aerial", tc.c.Lookup.CommitSHA)
-			}
-			sends := ingress.captured()
-			if len(sends) != len(tc.want) {
-				t.Fatalf("sends = %d, want %d: %+v", len(sends), len(tc.want), sends)
-			}
-			for i, s := range sends {
-				var ev map[string]any
-				if err := json.Unmarshal([]byte(s.body), &ev); err != nil {
-					t.Fatal(err)
-				}
-				gotJSON, _ := json.Marshal([]any{s.handler, normalizeShadowWire(ev)})
-				wantJSON, _ := json.Marshal([]any{tc.want[i].Handler, normalizeShadowWire(tc.want[i].Event)})
-				if !bytes.Equal(gotJSON, wantJSON) {
-					t.Errorf("send %d:\n got  %s\n want %s", i, gotJSON, wantJSON)
-				}
+			if ev.HeadSHA != recoveryHead || ev.MergeSHA != recoveryMerge {
+				t.Errorf("recovered merge = %+v, want head %s merge %s", ev, recoveryHead, recoveryMerge)
 			}
 		})
 	}

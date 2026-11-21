@@ -45,15 +45,13 @@ func shouldRecoverMerge(pr github.CommitPR, sha string, view restateclient.Deplo
 // main-branch commit SHA resolved to it only through the GitHub fallback
 // (the SHA index missed) because its closed and main-push webhooks were
 // lost. It sends HandleMerged before the caller forwards the deploy event,
-// so the deploy event lands on a merged PR. Legacy events mirror it in
-// shadow mode (legacy itself backfilled the row merge SHA); restate-owned
-// events journal it. Failures are logged: the next deploy event of the same
-// rollout retries the recovery.
+// so the deploy event lands on a merged PR. Failures are logged: the next
+// deploy event of the same rollout retries the recovery.
 func (s *RouterServer) recoverLostMerge(ctx context.Context, path, repo, sha string, pr github.CommitPR) {
 	if !pr.MergedOn(sha) {
 		return
 	}
-	c, err := s.ownedRestateClient()
+	c, err := s.restateClient()
 	if err != nil {
 		return
 	}
@@ -72,7 +70,7 @@ func (s *RouterServer) recoverLostMerge(ctx context.Context, path, repo, sha str
 		MergeSHA: strings.TrimSpace(sha), Branch: pr.Branch,
 	}
 	sendCtx := restateclient.WithEventIdentity(ctx, mergeRecoveryIdentity(repo, pr.Number, sha))
-	if err := s.routePREvent(sendCtx, "HandleMerged", ev); err != nil {
+	if err := s.sendOwnedPR(sendCtx, "HandleMerged", ev); err != nil {
 		slog.WarnContext(ctx, "[synapse] restate merge recovery send failed",
 			"repo", repo, "pr", pr.Number, "merge_sha", sha, "path", path, "error", err)
 		return

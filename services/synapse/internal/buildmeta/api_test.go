@@ -148,8 +148,6 @@ func (g *testGitHubGetter) FetchRunLogsArchive(ctx context.Context, repo string,
 }
 
 type testPRRegistry struct {
-	model.PRRegistryUpdater
-
 	lifecycle model.PRBuildLifecycle
 	lifeErr   error
 	recordErr error

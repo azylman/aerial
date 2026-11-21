@@ -28,7 +28,7 @@ func TestEventTriggersDelegatesAndNilGuards(t *testing.T) {
 	noBusSrv.evaluateGitHubEventTriggers(ctx, &ResolvedGitHubEvent{Event: "push"}, nil)
 
 	bus := &mockEventBus{}
-	busSrv := newTestRouter(Config{}, nil, nil, nil, bus)
+	busSrv := newTestRouter(Config{}, nil, nil, bus)
 	if err := busSrv.evaluateEventTriggers(ctx, "src", "push", []string{"t1"}, "hdr"); err != nil {
 		t.Fatalf("evaluateEventTriggers error: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestAlertsWebhook_InvalidTargetChannel(t *testing.T) {
 	cfg := Config{
 		SystemChannelID: "invalid-target-snowflake",
 	}
-	srv := newTestRouter(cfg, nil, nil, nil)
+	srv := newTestRouter(cfg, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewBufferString(`[{"status":"firing","labels":{"alertname":"DiskFull"}}]`))
 	req.Header.Set("Content-Type", "application/json")
@@ -59,7 +59,7 @@ func TestEventsWebhook_Success(t *testing.T) {
 
 	bus := &mockEventBus{}
 	cfg := Config{}
-	srv := newTestRouter(cfg, nil, nil, nil, bus)
+	srv := newTestRouter(cfg, nil, nil, bus)
 
 	body := `{"source":"ci","event_type":"build","target":"api"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/events", bytes.NewBufferString(body))
@@ -85,7 +85,7 @@ func TestEventsWebhook_ErrorCases(t *testing.T) {
 	t.Parallel()
 
 	bus := &mockEventBus{}
-	srv := newTestRouter(Config{}, nil, nil, nil, bus)
+	srv := newTestRouter(Config{}, nil, nil, bus)
 
 	// 0. Body read error
 	reqErr := httptest.NewRequest(http.MethodPost, "/api/webhooks/events", errReader{})
@@ -112,7 +112,7 @@ func TestEventsWebhook_ErrorCases(t *testing.T) {
 	}
 
 	// 3. Bus nil
-	noBusSrv := newTestRouter(Config{}, nil, nil, nil, nil)
+	noBusSrv := newTestRouter(Config{}, nil, nil, nil)
 	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/events", bytes.NewBufferString(`{"source":"ci","event_type":"push","target":"t1"}`))
 	w = httptest.NewRecorder()
 	noBusSrv.handleEventsWebhook(w, req)
@@ -122,7 +122,7 @@ func TestEventsWebhook_ErrorCases(t *testing.T) {
 
 	// 4. evaluateEventTriggers error
 	errBus := &mockEventBus{err: errors.New("bus fail")}
-	errSrv := newTestRouter(Config{}, nil, nil, nil, errBus)
+	errSrv := newTestRouter(Config{}, nil, nil, errBus)
 	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/events", bytes.NewBufferString(`{"source":"ci","event_type":"push","target":"t1"}`))
 	w = httptest.NewRecorder()
 	errSrv.handleEventsWebhook(w, req)
@@ -154,7 +154,7 @@ func TestAlertsWebhook_DispatchLifecycleAndErrors(t *testing.T) {
 	cfg := Config{SystemChannelID: targetID}
 
 	// 1. Invalid JSON body
-	srv := newTestRouter(cfg, nil, nil, nil)
+	srv := newTestRouter(cfg, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewBufferString(`{not-json-array`))
 	w := httptest.NewRecorder()
 	srv.handleAlertsWebhook(w, req)
@@ -163,7 +163,7 @@ func TestAlertsWebhook_DispatchLifecycleAndErrors(t *testing.T) {
 	}
 
 	// 2. Dispatcher nil
-	srvNoDisp := newTestRouter(cfg, nil, nil, nil)
+	srvNoDisp := newTestRouter(cfg, nil, nil)
 	req = httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewBufferString(`[{"status":"firing","labels":{"alertname":"DiskFull"}}]`))
 	w = httptest.NewRecorder()
 	srvNoDisp.handleAlertsWebhook(w, req)
@@ -183,7 +183,7 @@ func TestAlertsWebhook_DispatchLifecycleAndErrors(t *testing.T) {
 
 	// 3. Successful dispatch, resolved, non-firing, duplicate firing
 	disp = &mockOutboundDispatcher{}
-	srvSuccess := newTestRouter(cfg, nil, nil, nil)
+	srvSuccess := newTestRouter(cfg, nil, nil)
 	srvSuccess.SetDispatcher(disp)
 
 	payload := `[
@@ -204,7 +204,7 @@ func TestAlertsWebhook_DispatchLifecycleAndErrors(t *testing.T) {
 
 	// 4. Dispatcher error
 	errDisp := &mockOutboundDispatcher{directMessageErr: errors.New("failed")}
-	srvErr := newTestRouter(cfg, nil, nil, nil)
+	srvErr := newTestRouter(cfg, nil, nil)
 	srvErr.SetDispatcher(errDisp)
 	req = httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewBufferString(`[{"status":"firing","labels":{"alertname":"OOM"}}]`))
 	w = httptest.NewRecorder()

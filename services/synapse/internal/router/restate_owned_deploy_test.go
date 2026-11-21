@@ -1,12 +1,12 @@
 package router
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
@@ -28,8 +28,7 @@ func trackedView(repo string) string {
 	return deployViewBody(repo, statusDeploying, `,"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"`+ownedReqAt+`"}}`)
 }
 
-// assertOwnedDeploy checks the exact Restate sends, zero pr_registry calls,
-// and the stateless system-alert effects a PR-less alert performs.
+// assertOwnedDeploy checks the exact Restate sends and the stateless system-alert effects a PR-less alert performs.
 func assertOwnedDeploy(t *testing.T, h *ownedHarness, wantPaths, wantBodies []string, wantEffects int) {
 	t.Helper()
 	paths, bodies := h.ingress.sends()
@@ -41,34 +40,30 @@ func assertOwnedDeploy(t *testing.T, h *ownedHarness, wantPaths, wantBodies []st
 			t.Errorf("send %d body = %s, want substring %s", i, bodies[i], sub)
 		}
 	}
-	if got := h.db.Load(); got != 0 {
-		t.Errorf("pr_registry calls = %d, want 0", got)
-	}
 	if got := h.effectCount(); got != wantEffects {
 		t.Errorf("synapse effects = %d, want %d", got, wantEffects)
 	}
 }
 
-// TestProcessDeployEventRestateOwned proves restate-owned deploy alerts are
-// a Postgres-free edge: PR state comes from PRObject.GetDeployView, every PR
-// outcome is a PRObject send carrying its fact, and only PR-less alerts keep
-// the stateless system-alert effects.
-func TestProcessDeployEventRestateOwned(t *testing.T) {
-	t.Parallel()
+// processDeployEventOwnedCase is one deploy alert and the exact Restate sends
+// and synapse effects it must produce.
+type processDeployEventOwnedCase struct {
+	name        string
+	evt         DeployEvent
+	bodies      map[string]string
+	callCode    int
+	repoRefs    map[string][]fluxKustomizationRef
+	ghBody      string
+	wantPaths   []string
+	wantBodies  []string
+	wantEffects int
+	wantErr     bool
+}
+
+func processDeployEventOwnedCases() []processDeployEventOwnedCase {
 	cfgRepo := "azylman/aerial-config"
 	cfgRefs := map[string][]fluxKustomizationRef{cfgRepo: {{Namespace: "flux-system", Name: "aerial-config"}}}
-	tests := []struct {
-		name        string
-		evt         DeployEvent
-		bodies      map[string]string
-		callCode    int
-		repoRefs    map[string][]fluxKustomizationRef
-		ghBody      string
-		wantPaths   []string
-		wantBodies  []string
-		wantEffects int
-		wantErr     bool
-	}{
+	return []processDeployEventOwnedCase{
 		{
 			name: "untracked flux success starts the watcher rollout", evt: DeployEvent{Event: eventDeploySuccess, SourceKind: kindKustomization, JobName: "aerial-config", Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
 			bodies: map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")}, repoRefs: cfgRefs,
@@ -162,10 +157,42 @@ func TestProcessDeployEventRestateOwned(t *testing.T) {
 			bodies: map[string]string{"ResolvePRBySHA": `nope`}, ghBody: "[]", wantEffects: 3,
 		},
 		{
+			name: "untracked pr patches its kustomizations once without tracking", evt: DeployEvent{Event: eventDeploySuccess, SourceKind: kindKustomization, JobName: "aerial-config", Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs, wantEffects: 1,
+		},
+		{
+			name: "pr-less sync failure keeps the stateless system alert", evt: DeployEvent{Event: eventSyncFailed, Repo: cfgRepo, Details: "fetch failed"},
+			wantEffects: 3,
+		},
+		{
+			name: "pr-less deploy started publishes its fact", evt: DeployEvent{Event: eventDeployStarted, SourceKind: "Deployment", JobName: "eri", Repo: cfgRepo, TargetID: ownedThread},
+			wantEffects: 1,
+		},
+		{
+			name: "pr-less deploy success publishes and prompts the system channel", evt: DeployEvent{Event: eventDeploySuccess, SourceKind: "Deployment", JobName: "eri", Repo: cfgRepo, TargetID: ownedThread, DeploymentID: "rs-1"},
+			wantEffects: 2,
+		},
+		{
+			name: "pr-less rollback keeps the stateless system alert", evt: DeployEvent{Event: eventDeployRollback, SourceKind: "HelmRelease", JobName: "eri", Repo: cfgRepo},
+			wantEffects: 3,
+		},
+		{
+			name: "pr-less sync success does nothing", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo},
+		},
+		{
 			name: "sync deferral discovery failure retries", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
 			bodies: map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")}, repoRefs: map[string][]fluxKustomizationRef{"discover-error": nil}, wantErr: true,
 		},
 	}
+}
+
+// TestProcessDeployEventRestateOwned proves restate-owned deploy alerts are
+// a Postgres-free edge: PR state comes from PRObject.GetDeployView, every PR
+// outcome is a PRObject send carrying its fact, and only PR-less alerts keep
+// the stateless system-alert effects.
+func TestProcessDeployEventRestateOwned(t *testing.T) {
+	t.Parallel()
+	tests := processDeployEventOwnedCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -242,13 +269,16 @@ func TestApplyKustomizationStatusRestateOwned(t *testing.T) {
 	core := fluxKustomizationRef{Namespace: "flux-system", Name: "core"}
 	list := `{"rollouts":[{"repo":"azylman/aerial-config","pr_number":42}]}`
 	tests := []struct {
-		name       string
-		obs        kustomizationObservation
-		bodies     map[string]string
-		callCode   int
-		wantPaths  []string
-		wantBodies []string
-		wantErr    bool
+		name         string
+		obs          kustomizationObservation
+		bodies       map[string]string
+		callCode     int
+		sourceRepo   string
+		workloadsErr bool
+		ghBody       string
+		wantPaths    []string
+		wantBodies   []string
+		wantErr      bool
 	}{
 		{
 			name: "live change completes the kustomization", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
@@ -277,6 +307,23 @@ func TestApplyKustomizationStatusRestateOwned(t *testing.T) {
 			bodies: map[string]string{"ListRollouts": list, "GetDeployView": deployViewBody("aerial-config", "deployed", "")},
 		},
 		{
+			name: "own-repo source waits until the merge commit is applied", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
+			bodies: map[string]string{"ListRollouts": list, "GetDeployView": trackedView("aerial-config")}, sourceRepo: "azylman/aerial-config",
+		},
+		{
+			name: "own-repo source that applied the merge commit completes", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, LastAppliedRevision: "main@sha1:" + ownedMerge, Conditions: ready},
+			bodies: map[string]string{"ListRollouts": list, "GetDeployView": trackedView("aerial-config")}, sourceRepo: "azylman/aerial-config",
+			wantPaths: []string{cfgPRKey + "HandleRolloutProgress/send", cfgPRKey + "HandleDeploySuccess/send"},
+		},
+		{
+			name: "workload list failure surfaces for the watcher retry", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
+			bodies: map[string]string{"ListRollouts": list, "GetDeployView": trackedView("aerial-config")}, workloadsErr: true, wantErr: true,
+		},
+		{
+			name: "merge time failure surfaces for the watcher retry", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
+			bodies: map[string]string{"ListRollouts": list, "GetDeployView": trackedView("aerial-config")}, ghBody: `{}`, wantErr: true,
+		},
+		{
 			name: "rollout index failure surfaces for the watcher retry", obs: kustomizationObservation{Ref: core},
 			callCode: http.StatusInternalServerError, wantErr: true,
 		},
@@ -292,10 +339,96 @@ func TestApplyKustomizationStatusRestateOwned(t *testing.T) {
 			if code == 0 {
 				code = http.StatusOK
 			}
-			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted, callCode: code, handlerBodies: tc.bodies}, `{"committer":{"date":"2026-11-20T00:00:00Z"}}`)
+			ghBody := tc.ghBody
+			if ghBody == "" {
+				ghBody = `{"committer":{"date":"2026-11-20T00:00:00Z"}}`
+			}
+			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted, callCode: code, handlerBodies: tc.bodies}, ghBody)
+			h.disp.sourceRepo = tc.sourceRepo
+			if tc.workloadsErr {
+				h.disp.workloadsErr = errors.New("kube down")
+			}
 			err := h.srv.ApplyKustomizationStatus(ownedCtx(), tc.obs)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ApplyKustomizationStatus() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			assertOwnedDeploy(t, h, tc.wantPaths, tc.wantBodies, 0)
+		})
+	}
+}
+
+// TestApplyKustomizationListRestateOwned proves a full LIST applies every
+// observation and fails a rollout whose pending Kustomization is gone from
+// its namespace.
+func TestApplyKustomizationListRestateOwned(t *testing.T) {
+	t.Parallel()
+	list := `{"rollouts":[{"repo":"azylman/aerial-config","pr_number":42}]}`
+	core := fluxKustomizationRef{Namespace: "flux-system", Name: "core"}
+	tests := []struct {
+		name         string
+		namespace    string
+		observations []kustomizationObservation
+		callCode     int
+		wantPaths    []string
+		wantBodies   []string
+		wantErr      bool
+	}{
+		{
+			name: "pending kustomization missing from the list fails the rollout", namespace: "flux-system",
+			wantPaths: []string{cfgPRKey + "HandleDeployFailed/send"}, wantBodies: []string{`"details":"Kustomization deleted"`},
+		},
+		{name: "listed unready kustomization waits", namespace: "flux-system", observations: []kustomizationObservation{{Ref: core, LastHandledReconcileAt: ownedReqAt}}},
+		{name: "another namespace's list leaves the rollout alone", namespace: "apps"},
+		{name: "rollout index failure surfaces for the watcher retry", namespace: "flux-system", callCode: http.StatusInternalServerError, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code := tc.callCode
+			if code == 0 {
+				code = http.StatusOK
+			}
+			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted, callCode: code, handlerBodies: map[string]string{"ListRollouts": list, "GetDeployView": trackedView("aerial-config")}}, "{}")
+			err := h.srv.ApplyKustomizationList(ownedCtx(), tc.namespace, tc.observations)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ApplyKustomizationList() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			assertOwnedDeploy(t, h, tc.wantPaths, tc.wantBodies, 0)
+		})
+	}
+}
+
+// TestApplyKustomizationDeletedRestateOwned proves a deleted Kustomization
+// fails every rollout still waiting on it.
+func TestApplyKustomizationDeletedRestateOwned(t *testing.T) {
+	t.Parallel()
+	list := `{"rollouts":[{"repo":"azylman/aerial-config","pr_number":42}]}`
+	tests := []struct {
+		name       string
+		ref        fluxKustomizationRef
+		callCode   int
+		wantPaths  []string
+		wantBodies []string
+		wantErr    bool
+	}{
+		{
+			name: "deleted pending kustomization fails the rollout", ref: fluxKustomizationRef{Namespace: "flux-system", Name: "core"},
+			wantPaths: []string{cfgPRKey + "HandleDeployFailed/send"}, wantBodies: []string{`"details":"Kustomization deleted"`},
+		},
+		{name: "deleted unrelated kustomization changes nothing", ref: fluxKustomizationRef{Namespace: "flux-system", Name: "other"}},
+		{name: "rollout index failure surfaces for the watcher retry", ref: fluxKustomizationRef{Namespace: "flux-system", Name: "core"}, callCode: http.StatusInternalServerError, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code := tc.callCode
+			if code == 0 {
+				code = http.StatusOK
+			}
+			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted, callCode: code, handlerBodies: map[string]string{"ListRollouts": list, "GetDeployView": trackedView("aerial-config")}}, "{}")
+			err := h.srv.ApplyKustomizationDeleted(ownedCtx(), tc.ref)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ApplyKustomizationDeleted() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			assertOwnedDeploy(t, h, tc.wantPaths, tc.wantBodies, 0)
 		})
@@ -463,7 +596,7 @@ func TestPromoteOwnedImages(t *testing.T) {
 		{
 			name: "owned images start the pr rollout", images: images, byImage: refs,
 			wantPaths:  []string{"/RepoObject/azylman%2Faerial/HandleImagePromotion/send"},
-			wantBodies: []string{`"pr_number":42,"head_sha":"` + ownedMerge + `","agent":"","effects_owner":"restate","branch":"feat","images":["ghcr.io/azylman/synapse:latest"],"jobs":["synapse"],"kustomization_requests":{"aerial-core":`},
+			wantBodies: []string{`"pr_number":42,"head_sha":"` + ownedMerge + `","agent":"","branch":"feat","images":["ghcr.io/azylman/synapse:latest"],"jobs":["synapse"],"kustomization_requests":{"aerial-core":`},
 		},
 		{
 			name: "unowned images promote then complete with git-merge", images: images,
@@ -486,35 +619,6 @@ func TestPromoteOwnedImages(t *testing.T) {
 				t.Fatalf("promoteOwnedImages() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			assertOwnedDeploy(t, h, tc.wantPaths, tc.wantBodies, 0)
-		})
-	}
-}
-
-// TestRouteDeployDispatchedRestateOwned pins that a restate-owned dispatch
-// always sends HandleDeploySuccess with its fact, even when the live config
-// is no longer authoritative, and that keyless dispatches send nothing.
-func TestRouteDeployDispatchedRestateOwned(t *testing.T) {
-	t.Parallel()
-	fact := pubsub.PRLifecycleEvent{Event: eventDeploySuccess, Repo: "azylman/aerial", PRNumber: 42, JobName: "core"}
-	tests := []struct {
-		name      string
-		pr        int
-		merge     string
-		wantPaths []string
-	}{
-		{name: "pr dispatch sends the merged verdict", pr: 42, merge: ownedMerge, wantPaths: []string{ownedPRKey + "HandleDeploySuccess/send"}},
-		{name: "pr-less dispatch sends nothing", merge: ownedMerge},
-		{name: "sha-less dispatch sends nothing", pr: 42},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted}, "{}")
-			h.srv.cfgSrc = fixedConfig(Config{RestateURL: h.srv.currentConfig().RestateURL})
-			if err := h.srv.routeDeployDispatched(ownedCtx(), "azylman/aerial", "core", "", tc.merge, tc.pr, fact); err != nil {
-				t.Fatalf("routeDeployDispatched() err = %v", err)
-			}
-			assertOwnedDeploy(t, h, tc.wantPaths, nil, 0)
 		})
 	}
 }

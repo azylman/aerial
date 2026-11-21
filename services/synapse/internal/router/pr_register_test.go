@@ -1,7 +1,6 @@
 package router
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,127 +14,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/k8sauth"
 )
-
-func TestHandlePRRegister(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		cfgBotID   string
-		useNilReg  bool
-		regErr     error
-		body       string
-		wantStatus int
-	}{
-		{
-			name:       "nil registry returns 500",
-			useNilReg:  true,
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "invalid json returns 400",
-			body:       `{malformed`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "empty repo returns 400",
-			body:       `{"repo":"","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "zero pr_number returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "empty branch returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "empty head_sha returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "invalid target_id returns 400",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"bad"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "headless session key resolves system channel fallback and succeeds",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"dispatch-uuid-1"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "valid request succeeds",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "registry register error returns 500",
-			regErr:     errors.New("db insert fail"),
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "foreign bot_id returns 409 conflict",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"agent-beta"}`,
-			wantStatus: http.StatusConflict,
-		},
-		{
-			name:       "matching bot_id succeeds",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"aerial"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "case-insensitive matching bot_id succeeds",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"AERIAL"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "empty bot_id in request succeeds when config has bot_id",
-			cfgBotID:   "aerial",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":""}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "bot_id in request succeeds when config has empty bot_id",
-			cfgBotID:   "",
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","bot_id":"agent-beta"}`,
-			wantStatus: http.StatusOK,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var reg PRRegistryUpdater
-			var mockReg *mockPRRegistry
-			if !tc.useNilReg {
-				mockReg = &mockPRRegistry{registerErr: tc.regErr}
-				reg = mockReg
-			}
-			srv := newTestRouter(Config{SystemChannelID: "100000000000000001", BotID: tc.cfgBotID}, nil, reg, &mockOutboundDispatcher{})
-			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
-			if rec.Code != tc.wantStatus {
-				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantStatus == http.StatusConflict {
-				if !strings.Contains(rec.Body.String(), "bot_id mismatch for local pr_registry") {
-					t.Errorf("body = %s, want substr 'bot_id mismatch for local pr_registry'", rec.Body.String())
-				}
-				if mockReg != nil && len(mockReg.registerCalls) > 0 {
-					t.Errorf("registerCalls = %d, want 0 when bot_id mismatches", len(mockReg.registerCalls))
-				}
-			}
-		})
-	}
-}
 
 type sarRule struct {
 	Resource string
@@ -242,8 +120,6 @@ type handlePRRegisterK8sAuthCase struct {
 	sarStatus  int
 	sarRules   []sarRule
 	sarBody    string
-	rawMeta    map[string]any
-	rawMetaErr error
 	cfgBots    map[string]BotConfig
 	body       string
 	wantStatus int
@@ -340,58 +216,6 @@ func handlePRRegisterK8sAuthCases() []handlePRRegisterK8sAuthCase {
 			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"unknown-agent"}`,
 			wantStatus: http.StatusBadRequest,
 		},
-		{
-			name:       "existing PR with different agent update forbidden returns 403",
-			token:      "valid-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
-			sarRules:   []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}},
-			rawMeta:    map[string]any{"agent": "agent-beta"},
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial"}`,
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "existing PR with update allowed succeeds",
-			token:      "valid-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
-			sarRules:   []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}, {Resource: "prs", Verb: "update", Name: "aerial"}},
-			rawMeta:    map[string]any{"agent": "aerial"},
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial"}`,
-			wantStatus: http.StatusOK,
-			wantAgent:  "aerial",
-		},
-		{
-			name:       "existing PR metadata error rejects request",
-			token:      "valid-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
-			sarRules:   []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}},
-			rawMetaErr: errors.New("db load error"),
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial"}`,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "existing legacy PR with empty metadata update allowed succeeds",
-			token:      "valid-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`,
-			sarRules:   []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}, {Resource: "prs", Verb: "update", Name: "aerial"}},
-			rawMeta:    map[string]any{},
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"aerial"}`,
-			wantStatus: http.StatusOK,
-			wantAgent:  "aerial",
-		},
-		{
-			name:       "existing legacy PR with empty metadata update forbidden returns 403",
-			token:      "valid-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-			sarRules:   []sarRule{{Resource: "prs", Verb: "create", Name: "agent-alpha"}, {Resource: "prs", Verb: "update", Name: "agent-alpha"}},
-			rawMeta:    map[string]any{},
-			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","agent":"agent-alpha"}`,
-			wantStatus: http.StatusForbidden,
-		},
 	}
 }
 
@@ -409,13 +233,14 @@ func TestHandlePRRegister_K8sAuth(t *testing.T) {
 				sarBody:    tc.sarBody,
 			}
 			authCfg := newTestK8sAuthConfig(t, tr)
-			reg := &mockPRRegistry{rawMetadata: tc.rawMeta, rawMetadataErr: tc.rawMetaErr}
+			ingress := &ownedIngress{callCode: http.StatusOK, callBody: `{"target_id":"100000000000000001"}`}
 			srv := newTestRouter(Config{
+				RestateURL:      ingress.serve(t),
 				SystemChannelID: "100000000000000001",
 				Bots:            tc.cfgBots,
 				K8sAuthEnabled:  true,
 				K8sAuthConfig:   authCfg,
-			}, nil, reg, &mockOutboundDispatcher{})
+			}, nil, &mockOutboundDispatcher{})
 
 			headers := make(map[string]string)
 			if tc.token != "" {
@@ -506,83 +331,11 @@ func TestIsKnownBot(t *testing.T) {
 			if tc.nilCfg {
 				srv = &RouterServer{}
 			} else {
-				srv = newTestRouter(Config{BotID: tc.cfgBotID, Bots: tc.cfgBots}, nil, nil, nil)
+				srv = newTestRouter(Config{BotID: tc.cfgBotID, Bots: tc.cfgBots}, nil, nil)
 			}
 			got := srv.isKnownBot(tc.botID)
 			if got != tc.want {
 				t.Errorf("isKnownBot(%q) = %v, want %v", tc.botID, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestAuthorizeExistingPROwner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		nilReg   bool
-		repo     string
-		prNum    int
-		meta     map[string]any
-		sarRules []sarRule
-		wantErr  bool
-	}{
-		{
-			name:   "nil registry returns nil",
-			nilReg: true,
-		},
-		{
-			name:  "empty repo returns nil",
-			repo:  "",
-			prNum: 42,
-		},
-		{
-			name:  "zero prNum returns nil",
-			repo:  "azylman/aerial",
-			prNum: 0,
-		},
-		{
-			name:  "non-existent PR returns nil",
-			repo:  "azylman/aerial",
-			prNum: 42,
-			meta:  nil,
-		},
-		{
-			name:     "empty metadata uses default owner and succeeds when update allowed",
-			repo:     "azylman/aerial",
-			prNum:    42,
-			meta:     map[string]any{},
-			sarRules: []sarRule{{Resource: "prs", Verb: "update", Name: "aerial"}},
-			wantErr:  false,
-		},
-		{
-			name:     "metadata with matching bot_id fallback succeeds",
-			repo:     "azylman/aerial",
-			prNum:    42,
-			meta:     map[string]any{"bot_id": "aerial"},
-			sarRules: []sarRule{{Resource: "prs", Verb: "update", Name: "aerial"}},
-			wantErr:  false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var reg PRRegistryUpdater
-			if !tc.nilReg {
-				reg = &mockPRRegistry{rawMetadata: tc.meta}
-			}
-			srv := newTestRouter(Config{}, nil, reg, nil)
-			tr := &staticAuthRoundTripper{sarRules: tc.sarRules}
-			authCfg := newTestK8sAuthConfig(t, tr)
-			auth := k8sauth.NewAuthenticator(authCfg)
-			caller := k8sauth.CallerIdentity{
-				Username:    "system:serviceaccount:default:eri-aerial",
-				CallerAgent: "aerial",
-			}
-			err := srv.authorizeExistingPROwner(context.Background(), auth, caller, tc.repo, tc.prNum)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("authorizeExistingPROwner() err = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
 	}

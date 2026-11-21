@@ -11,19 +11,6 @@ import (
 // aerial repo root; prstate reads the same files.
 const fixtureDir = "../../../../testdata/prlifecycle/"
 
-type matchKeyFixture struct {
-	Cases []struct {
-		Name      string `json:"name"`
-		Repo      string `json:"repo"`
-		PRNumber  int    `json:"pr_number"`
-		HeadSHA   string `json:"head_sha"`
-		Kind      string `json:"kind"`
-		JobName   string `json:"job_name"`
-		CheckName string `json:"check_name"`
-		Want      string `json:"want"`
-	} `json:"cases"`
-}
-
 func readFixture(t *testing.T, name string, out any) {
 	t.Helper()
 	raw, err := os.ReadFile(fixtureDir + name)
@@ -35,38 +22,18 @@ func readFixture(t *testing.T, name string, out any) {
 	}
 }
 
-// TestEffectMatchKey pins the generation-free match key against the shared
-// golden fixture prstate's EffectKey.MatchKey test reads too.
-func TestEffectMatchKey(t *testing.T) {
-	t.Parallel()
-	var fx matchKeyFixture
-	readFixture(t, "eri_effect_match_keys.json", &fx)
-	if len(fx.Cases) == 0 {
-		t.Fatal("fixture has no cases")
-	}
-	for _, tc := range fx.Cases {
-		t.Run(tc.Name, func(t *testing.T) {
-			t.Parallel()
-			if got := EffectMatchKey(tc.Repo, tc.PRNumber, tc.HeadSHA, tc.Kind, tc.JobName, tc.CheckName); got != tc.Want {
-				t.Errorf("EffectMatchKey = %q, want %q", got, tc.Want)
-			}
-		})
-	}
-}
-
 type wireFixture struct {
 	Fields struct {
-		Repo         string `json:"repo"`
-		PRNumber     int    `json:"pr_number"`
-		HeadSHA      string `json:"head_sha"`
-		CheckName    string `json:"check_name"`
-		Branch       string `json:"branch"`
-		Title        string `json:"title"`
-		Unmanaged    bool   `json:"unmanaged"`
-		Agent        string `json:"agent"`
-		EffectsOwner string `json:"effects_owner"`
-		ChannelID    string `json:"channel_id"`
-		Content      string `json:"content"`
+		Repo      string `json:"repo"`
+		PRNumber  int    `json:"pr_number"`
+		HeadSHA   string `json:"head_sha"`
+		CheckName string `json:"check_name"`
+		Branch    string `json:"branch"`
+		Title     string `json:"title"`
+		Unmanaged bool   `json:"unmanaged"`
+		Agent     string `json:"agent"`
+		ChannelID string `json:"channel_id"`
+		Content   string `json:"content"`
 	} `json:"fields"`
 	Event map[string]any `json:"event"`
 }
@@ -81,11 +48,15 @@ func TestPREventEriEffectsWire(t *testing.T) {
 	f := fx.Fields
 	withEffect := PREvent{
 		Repo: f.Repo, PRNumber: f.PRNumber, HeadSHA: f.HeadSHA, CheckName: f.CheckName,
-		Branch: f.Branch, Title: f.Title, Unmanaged: f.Unmanaged, Agent: f.Agent, EffectsOwner: f.EffectsOwner,
+		Branch: f.Branch, Title: f.Title, Unmanaged: f.Unmanaged, Agent: f.Agent,
 		EriEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: f.ChannelID, Content: f.Content}},
 	}
 	withoutEffect := withEffect
 	withoutEffect.EriEffects = nil
+	// The shared golden event still carries the effects_owner stamp for
+	// prstate's decode test; synapse no longer sends it (prstate reads a
+	// missing stamp as restate).
+	delete(fx.Event, "effects_owner")
 	wantWithout := make(map[string]any, len(fx.Event))
 	for k, v := range fx.Event {
 		if k != "eri_effects" {
@@ -127,6 +98,9 @@ func TestRepoEventAutoUpdateWire(t *testing.T) {
 		Event map[string]any `json:"event"`
 	}
 	readFixture(t, "github_effect_wire.json", &fx)
+	// Synapse no longer sends the effects_owner stamp the shared golden
+	// event keeps for prstate.
+	delete(fx.Event, "effects_owner")
 	tests := []struct {
 		name string
 		ev   RepoEvent
@@ -135,7 +109,7 @@ func TestRepoEventAutoUpdateWire(t *testing.T) {
 		{
 			name: "gate-success trigger matches the golden event",
 			ev: RepoEvent{
-				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", Agent: "aerial", EffectsOwner: EffectsOwnerRestate, CheckName: "CI Gate",
+				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", Agent: "aerial", CheckName: "CI Gate",
 				AutoUpdate: &AutoUpdatePolicy{
 					Authors: []string{"aerial-bot", "dependabot[bot]"}, DefaultOwner: true,
 					Collaborators: []CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},

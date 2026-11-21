@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,14 +27,6 @@ type StatusError struct {
 
 func (e *StatusError) Error() string {
 	return e.Message
-}
-
-// IsNotFound returns true if the error represents a GitHub 404 StatusNotFound response.
-func IsNotFound(err error) bool {
-	if statusErr, ok := errors.AsType[*StatusError](err); ok {
-		return statusErr.StatusCode == http.StatusNotFound
-	}
-	return false
 }
 
 // VerifySignature validates a GitHub webhook HMAC-SHA256 signature header against secret and body.
@@ -162,12 +153,6 @@ func forbiddenMessage(body io.Reader) string {
 		msg = string(r[:maxForbiddenMessageRunes])
 	}
 	return msg
-}
-
-// IsRateLimitError reports whether err is a GitHub rate-limit StatusError.
-func IsRateLimitError(err error) bool {
-	statusErr, ok := errors.AsType[*StatusError](err)
-	return ok && statusErr.RateLimited
 }
 
 // Client wraps an HTTP client and credentials for GitHub REST API calls.

@@ -6,13 +6,13 @@
 // (POST .../<handler>/send) carrying a deterministic Idempotency-Key, so
 // synapse never waits behind a handler holding the exclusive object lock
 // while it runs effects. Request-response invocations remain only for the
-// verdict calls the legacy path still consumes.
+// sync APIs: Register, RetryReadiness and the read-only queries
+// (GetDeployView, GetBuildLifecycle, ListRollouts, ResolvePRBySHA).
 //
 // Unmanaged-PR guard: this package has no BuildRouter send path and
 // performs no build-ID resolution. Every event, owned or unmanaged,
 // addresses PRObject or RepoObject only; a build ID rides opaquely in
-// the payload for the Restate side to decide. pr_registry is never
-// consulted here: it stays a read-only projection.
+// the payload for the Restate side to decide.
 package restateclient
 
 import (
@@ -31,7 +31,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -58,14 +57,11 @@ var prHandlers = map[string]bool{
 	HandlerCheckFailed:             true,
 	HandlerCheckPassed:             true,
 	HandlerCheckRerunRequested:     true,
-	"HandleCIRecovery":             true,
 	"HandleCIRecovered":            true,
 	"HandleConflict":               true,
 	"HandleDeploySuccess":          true,
 	"HandleDeployAttemptFailed":    true,
 	HandlerCollaboratorAlert:       true,
-	"HandleConflictDetected":       true,
-	"HandleConflictPublished":      true,
 	"HandleConflictResolved":       true,
 	HandlerMerged:                  true,
 	"HandleClosed":                 true,
@@ -74,8 +70,6 @@ var prHandlers = map[string]bool{
 	HandlerSelfRegistered:          true,
 	"HandleReadinessRetry":         true,
 	HandlerRolloutProgress:         true,
-	"HandleDeployDispatched":       true,
-	"HandleDeploySuccessPublished": true,
 	"HandleKustomizationRequested": true,
 	"HandleDeployFailed":           true,
 	"HandleBuildMetadata":          true,
@@ -117,7 +111,6 @@ type PREvent struct {
 	Unmanaged      bool   `json:"unmanaged"`
 	BuildID        string `json:"build_id"`
 	Agent          string `json:"agent"`
-	EffectsOwner   string `json:"effects_owner"`
 
 	// Registry row payload: omitted when empty so events without registry
 	// data keep the frozen wire key set. Tags mirror the prstate contract.
@@ -132,9 +125,8 @@ type PREvent struct {
 	Banner                 string                                `json:"banner,omitempty"`
 	Acknowledged           bool                                  `json:"acknowledged,omitempty"`
 	BuildMetadata          *model.BuildMetadata                  `json:"build_metadata,omitempty"`
-	// AutoUpdate rides a restate-owned HandleCIRecovered: when PRObject
-	// applies the recovery it forwards RepoObject.HandleAutoUpdate with this
-	// policy, the recovered-check cascade legacy synapse ran itself.
+	// AutoUpdate rides HandleCIRecovered: when PRObject applies the
+	// recovery it forwards RepoObject.HandleAutoUpdate with this policy.
 	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
 	// EriEffects are the rendered eri-bound effects for this event; tags
 	// mirror the prstate EriEffect contract.
@@ -157,8 +149,7 @@ const (
 	EffectEriDirectMessage = "eri_direct_message"
 )
 
-// GitHub effect kinds; values mirror the prstate Effect* constants. Synapse
-// logs each legacy GitHub call as [synapse-effect] under these kinds.
+// GitHub effect kinds; values mirror the prstate Effect* constants.
 const (
 	EffectGitHubAutoUpdate    = "github_auto_update"
 	EffectGitHubUpdateBranch  = "github_update_branch"
@@ -192,46 +183,6 @@ type EriEffect struct {
 	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
-// EffectMatchKey renders the generation-free effect key
-// (repo#pr@sha:kind[:job=..][:check=..]) that prstate's EffectKey.MatchKey
-// renders for the same inputs. Synapse never knows the gate generation, so
-// the [synapse-effect] log and prstate's intended-effect record meet here.
-func EffectMatchKey(repo string, prNumber int, headSHA, kind, jobName, checkName string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s#%d@%s:%s", model.NormalizeRepo(repo), prNumber, strings.TrimSpace(headSHA), strings.TrimSpace(kind))
-	if clean := strings.TrimSpace(jobName); clean != "" {
-		fmt.Fprintf(&sb, ":job=%s", clean)
-	}
-	if canon := github.CanonicalFailedCheckKey(checkName); canon != "" {
-		fmt.Fprintf(&sb, ":check=%s", canon)
-	}
-	return sb.String()
-}
-
-// FactEffectPrefix prefixes every lifecycle-fact effect kind; the value
-// mirrors prstate FactEffectPrefix.
-const FactEffectPrefix = "pr_fact_"
-
-// FactEffectKind is the effect kind for a lifecycle fact event
-// (pr_fact_<event>), matching prstate FactEffectKind.
-func FactEffectKind(event string) string {
-	return FactEffectPrefix + strings.ToLower(strings.TrimSpace(event))
-}
-
-// FactMatchKey renders the generation-free key prstate records for one
-// lifecycle fact: keyed on its head SHA, falling back to its merge SHA,
-// plus its job and check names.
-func FactMatchKey(fact pubsub.PRLifecycleEvent) string {
-	sha := strings.TrimSpace(fact.HeadSHA)
-	if sha == "" || isZeroSHA(sha) {
-		sha = strings.TrimSpace(fact.MergeSHA)
-	}
-	if isZeroSHA(sha) {
-		sha = ""
-	}
-	return EffectMatchKey(fact.Repo, fact.PRNumber, sha, FactEffectKind(fact.Event), fact.JobName, fact.CheckName)
-}
-
 func isZeroSHA(sha string) bool {
 	return strings.Trim(sha, "0") == ""
 }
@@ -254,9 +205,6 @@ type RegisterRequest struct {
 	FallbackTargetID string            `json:"fallback_target_id,omitempty"`
 	EnforceOwner     bool              `json:"enforce_owner,omitempty"`
 	ExpectedOwner    string            `json:"expected_owner,omitempty"`
-	// EffectsOwner is the request's effect-owner stamp: restate makes
-	// PRObject write the registry row, legacy leaves it to synapse.
-	EffectsOwner string `json:"effects_owner,omitempty"`
 }
 
 // RegisterResponse is the PRObject.Register result.
@@ -266,7 +214,7 @@ type RegisterResponse struct {
 	Status   string `json:"status"`
 }
 
-// BuildLifecycle is the PRObject.GetBuildLifecycle result: the registry
+// BuildLifecycle is the PRObject.GetBuildLifecycle result: the PR
 // lifecycle fence plus the revision-fenced build metadata snapshot.
 type BuildLifecycle struct {
 	Found            bool                 `json:"found"`
@@ -310,13 +258,12 @@ type ResolveSHAResponse struct {
 // dispatched-SHA tombstones, and fan-out sends only. JSON tags mirror
 // the frozen chunk-01 contract exactly.
 type RepoEvent struct {
-	Repo         string `json:"repo"`
-	MainSHA      string `json:"main_sha"`
-	Generation   uint64 `json:"generation"`
-	PRNumber     int    `json:"pr_number"`
-	HeadSHA      string `json:"head_sha"`
-	Agent        string `json:"agent"`
-	EffectsOwner string `json:"effects_owner"`
+	Repo       string `json:"repo"`
+	MainSHA    string `json:"main_sha"`
+	Generation uint64 `json:"generation"`
+	PRNumber   int    `json:"pr_number"`
+	HeadSHA    string `json:"head_sha"`
+	Agent      string `json:"agent"`
 
 	// GitHub effect payload, omitted when empty; tags mirror the prstate
 	// RepoEvent contract. CheckName scopes an auto-update or rerun trigger,
@@ -355,26 +302,6 @@ type CollaboratorAlert struct {
 	Author    string `json:"author"`
 	ChannelID string `json:"channel_id"`
 	Mention   string `json:"mention"`
-}
-
-// Effect ownership values carried in PREvent/RepoEvent.EffectsOwner. Each
-// event is stamped exactly once when synapse first accepts it: legacy means
-// synapse performed the side effects and prstate only records intent;
-// restate means prstate executes them. A missing value means legacy.
-const (
-	EffectsOwnerLegacy  = "legacy"
-	EffectsOwnerRestate = "restate"
-)
-
-// NormalizeEffectsOwner maps any stamp to legacy or restate. Only an exact
-// (case-insensitive) restate stamp hands effects to Restate; anything else,
-// including an empty or unknown stamp, stays legacy so a malformed value can
-// never silently move effects off the legacy pipeline.
-func NormalizeEffectsOwner(owner string) string {
-	if strings.EqualFold(strings.TrimSpace(owner), EffectsOwnerRestate) {
-		return EffectsOwnerRestate
-	}
-	return EffectsOwnerLegacy
 }
 
 // ErrInvalidEvent marks a payload rejected before any request: unknown
@@ -416,36 +343,6 @@ func IsTerminal(err error) bool {
 // It mirrors the chunk-01 PRObjectKey normalization exactly.
 func PRObjectKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", model.NormalizeRepo(repo), prNumber)
-}
-
-// DeployDispatchDecision mirrors the Restate PRObject deploy verdict: the
-// sole authority for whether synapse publishes deploy_success when
-// restate_authoritative is on. JSON tags match the PRObject handler wire
-// format exactly; a decode failure surfaces so the caller retries.
-type DeployDispatchDecision struct {
-	Disposition   string `json:"disposition"`
-	ShouldPublish bool   `json:"should_publish"`
-	Deduped       bool   `json:"deduped"`
-	EffectKey     string `json:"effect_key"`
-}
-
-// ConflictDispatchDecision mirrors the Restate PRObject conflict verdict:
-// the sole authority for whether synapse publishes a conflict republish
-// when restate_authoritative is on. JSON tags match the PRObject handler
-// wire format exactly; a decode failure surfaces so the caller retries.
-type ConflictDispatchDecision struct {
-	Disposition   string `json:"disposition"`
-	ShouldPublish bool   `json:"should_publish"`
-	Deduped       bool   `json:"deduped"`
-}
-
-// CIRecoveryDecision mirrors the Restate PRObject CI-recovery verdict: the
-// sole authority for whether the PR is CI-failed for the event head SHA
-// when restate_authoritative is on. JSON tags match the PRObject handler
-// wire format exactly; a decode failure surfaces so the caller retries.
-type CIRecoveryDecision struct {
-	Disposition string `json:"disposition"`
-	CIFailed    bool   `json:"cifailed"`
 }
 
 // RepoObjectKey returns the Restate key for a repo object: repo.
@@ -539,7 +436,6 @@ func (c *Client) SendPREvent(ctx context.Context, handler string, ev PREvent) er
 	if ev.PRNumber <= 0 {
 		return fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
-	ev.EffectsOwner = NormalizeEffectsOwner(ev.EffectsOwner)
 	return c.send(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 }
 
@@ -556,7 +452,6 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent
 	if ev.Repo == "" {
 		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
 	}
-	ev.EffectsOwner = NormalizeEffectsOwner(ev.EffectsOwner)
 	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
 }
 
@@ -583,12 +478,11 @@ func (c *Client) SendSHAEvent(ctx context.Context, handler string, ev SHAEvent) 
 		return fmt.Errorf("%w: sha is required", ErrInvalidEvent)
 	}
 	ev.Event.Repo = ev.Repo
-	ev.Event.EffectsOwner = NormalizeEffectsOwner(ev.Event.EffectsOwner)
 	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
 }
 
 // ResolvePRBySHA invokes the shared, read-only RepoObject.ResolvePRBySHA
-// lookup. It records nothing; shadow comparisons use it read-only.
+// lookup. It records nothing.
 func (c *Client) ResolvePRBySHA(ctx context.Context, repo, sha string) (ResolveSHAResponse, error) {
 	if strings.TrimSpace(c.baseURL) == "" {
 		return ResolveSHAResponse{}, errors.New("restate is not configured")
@@ -663,7 +557,7 @@ type RolloutRef struct {
 
 // ListRollouts invokes the shared, read-only RepoObject.ListRollouts query
 // on the rollout index: every PR deploying with recorded Kustomization
-// requests, across repos (the registry ListDeployingPRs scan).
+// requests, across repos.
 func (c *Client) ListRollouts(ctx context.Context) ([]RolloutRef, error) {
 	if strings.TrimSpace(c.baseURL) == "" {
 		return nil, errors.New("restate is not configured")
@@ -675,44 +569,6 @@ func (c *Client) ListRollouts(ctx context.Context) ([]RolloutRef, error) {
 		return nil, err
 	}
 	return out.Rollouts, nil
-}
-
-// InvokePREvent delivers ev to one frozen PRObject handler and decodes the
-// JSON verdict into out. Unknown handlers, unconfigured clients, and invalid
-// payloads fail closed without emitting a request; transport failures and
-// undecodable bodies surface so the caller retries instead of losing the
-// signal. Verdicts are request-response reads of current state, so they
-// carry no Idempotency-Key: a cached verdict would go stale.
-func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, out any) error {
-	if !prHandlers[handler] {
-		return fmt.Errorf("%w: unknown pr handler %q", ErrInvalidEvent, handler)
-	}
-	if strings.TrimSpace(c.baseURL) == "" {
-		return errors.New("restate is not configured")
-	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	if ev.Repo == "" {
-		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
-	}
-	if ev.PRNumber <= 0 {
-		return fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
-	}
-	if out == nil {
-		return fmt.Errorf("%w: output is required", ErrInvalidEvent)
-	}
-	ev.EffectsOwner = NormalizeEffectsOwner(ev.EffectsOwner)
-	bodyBytes, err := json.Marshal(ev)
-	if err != nil {
-		return fmt.Errorf("marshal restate payload: %w", err)
-	}
-	body, err := c.post(ctx, c.ingressURL(c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler), bodyBytes, "")
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("decode restate response: %w", err)
-	}
-	return nil
 }
 
 // Register invokes PRObject.Register (request-response, exclusive) and
@@ -741,11 +597,10 @@ func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber in
 
 // RetryReadinessRequest is the PRObject.RetryReadiness payload: the merge
 // SHA the operator expects the gate at, the caller's agent hint, and the
-// effects owner stamped once for the request.
+// optional existing-owner fence.
 type RetryReadinessRequest struct {
 	MergeSHA      string `json:"merge_sha"`
 	Agent         string `json:"agent,omitempty"`
-	EffectsOwner  string `json:"effects_owner,omitempty"`
 	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
 	ExpectedOwner string `json:"expected_owner,omitempty"`
 }

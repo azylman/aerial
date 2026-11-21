@@ -156,46 +156,50 @@ func newTestReloadable(initial, next Config) *httpkit.Reloadable[Config] {
 	}, synapseRestartRequired)
 }
 
+// testRestateURL is a never-dialed Restate ingress for lifecycle tests: the
+// server only needs restate_url to pass startup validation.
+const testRestateURL = "http://restate.test:8080"
+
 func TestRunServerLifecycle(t *testing.T) {
 	tests := []runServerLifecycleCase{
 		{
 			name:             "runServer start, loopback reload, and graceful cancel shutdown",
-			config:           Config{Port: "0"},
+			config:           Config{Port: "0", RestateURL: testRestateURL},
 			wantGraceful:     true,
 			wantReloadStatus: httpkit.ReloadUnchanged,
 		},
 		{
 			name:             "runServer live reload applies non-restart field",
-			config:           Config{Port: "0"},
-			reloadConfig:     &Config{Port: "0", SystemChannelID: "123456789012345678"},
+			config:           Config{Port: "0", RestateURL: testRestateURL},
+			reloadConfig:     &Config{Port: "0", RestateURL: testRestateURL, SystemChannelID: "123456789012345678"},
 			wantGraceful:     true,
 			wantReloadStatus: httpkit.ReloadApplied,
 		},
 		{
 			name:    "runServer invalid port -1 returns error",
-			config:  Config{Port: "-1"},
+			config:  Config{Port: "-1", RestateURL: testRestateURL},
 			wantErr: true,
 		},
 		{
 			name:      "runApp pre-canceled context returns clean or server closed",
-			config:    Config{Port: "0"},
+			config:    Config{Port: "0", RestateURL: testRestateURL},
 			preCancel: true,
 			isRunApp:  true,
 		},
 		{
 			name:         "runApp exits cleanly when reload requires restart",
-			config:       Config{Port: "0"},
-			reloadConfig: &Config{Port: "4021"},
+			config:       Config{Port: "0", RestateURL: testRestateURL},
+			reloadConfig: &Config{Port: "4021", RestateURL: testRestateURL},
 			isRunApp:     true,
 		},
 		{
-			name:    "runServer invalid postgres url returns error",
-			config:  Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"},
+			name:    "runServer without restate url returns error",
+			config:  Config{Port: "0"},
 			wantErr: true,
 		},
 		{
 			name:     "runApp invalid port returns error",
-			config:   Config{Port: "-1"},
+			config:   Config{Port: "-1", RestateURL: testRestateURL},
 			isRunApp: true,
 			wantErr:  true,
 		},
@@ -305,320 +309,5 @@ func runServerAppCase(t *testing.T, tc runServerLifecycleCase, cfgSrc *httpkit.R
 	err := runApp(ctxC, cfgSrc)
 	if (err != nil) != tc.wantErr && !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("unexpected error from runApp: %v", err)
-	}
-}
-
-func TestHandleCIFailureByHeadSHA_FallbackAndRollback(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name        string
-		busErr      error
-		isCIFailed  bool
-		resPRNumber int
-		regPRNumber int
-		updated     bool
-		wantErr     bool
-	}{
-		{
-			name:        "resolves PR from head SHA and rolls back on bus error",
-			busErr:      errors.New("bus fail"),
-			isCIFailed:  true,
-			resPRNumber: 0,
-			regPRNumber: 42,
-			updated:     false,
-			wantErr:     true,
-		},
-		{
-			name:        "resolves PR from head SHA and succeeds",
-			isCIFailed:  true,
-			resPRNumber: 0,
-			regPRNumber: 42,
-			updated:     false,
-			wantErr:     false,
-		},
-		{
-			name:        "not failed in registry returns false without error",
-			isCIFailed:  false,
-			resPRNumber: 0,
-			regPRNumber: 0,
-			updated:     false,
-			wantErr:     false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			bus := &mockEventBus{err: tc.busErr}
-			reg := &mockPRRegistry{
-				resolveTargetID: "100000000000000001",
-				resolveHeadSHA:  "sha-head",
-				buildLifecycle: PRBuildLifecycle{
-					Status: func() string {
-						if tc.isCIFailed {
-							return prCIFailed
-						}
-						return prOpen
-					}(),
-				},
-				ciFailedBySHAUpdated: tc.updated,
-				ciFailedBySHAPRNum:   tc.regPRNumber,
-				ciFailedBySHATarget:  "",
-			}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.bus = bus
-			srv.registry = reg
-
-			res := &ResolvedGitHubEvent{
-				Event:      ghEventCheckRun,
-				Repo:       "azylman/aerial",
-				PRNumber:   tc.resPRNumber,
-				HeadSHA:    "sha-head",
-				CheckName:  "test-check",
-				Conclusion: conclusionFailure,
-			}
-			handled, err := srv.handleCIFailureByHeadSHA(ctx, res, "ci failed", "https://check.url")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("handleCIFailureByHeadSHA() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				if handled {
-					t.Fatalf("expected handled = false on error")
-				}
-				return
-			}
-			if tc.isCIFailed && tc.regPRNumber > 0 {
-				if !handled {
-					t.Fatalf("expected handled = true on success")
-				}
-			}
-		})
-	}
-}
-
-func TestWorkflowRunPRDeployingAndNoDeploy_LifecycleErrors(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name       string
-		busErr     error
-		noDeploy   bool
-		wantErrSub string
-	}{
-		{
-			name:       "startWorkflowRunPRDeploying publish error propagates",
-			busErr:     errors.New("bus deploy_started fail"),
-			wantErrSub: "bus deploy_started fail",
-		},
-		{
-			name:       "completeNoDeployWorkflowRun publish error propagates",
-			busErr:     errors.New("bus deploy_success fail"),
-			noDeploy:   true,
-			wantErrSub: "bus deploy_success fail",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			bus := &mockEventBus{err: tc.busErr}
-			reg := &mockPRRegistry{
-				resolveTargetID:   "100000000000000001",
-				deployingTargetID: "100000000000000001",
-			}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.bus = bus
-			srv.registry = reg
-
-			var err error
-			if tc.noDeploy {
-				err = srv.completeNoDeployWorkflowRun(ctx, "azylman/aerial", "sha123", "100000000000000001", 42)
-			} else {
-				err = srv.startWorkflowRunPRDeploying(ctx, "azylman/aerial", 42, "sha123", "100000000000000001", []string{"eri"})
-			}
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErrSub)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-		})
-	}
-}
-
-func TestGitHubLifecyclePublishErrors(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name       string
-		action     string
-		merged     bool
-		isPush     bool
-		isOpened   bool
-		wantErrSub string
-	}{
-		{
-			name:       "handlePRClosedAction merged publish error propagates",
-			action:     ghActionClosed,
-			merged:     true,
-			wantErrSub: "bus fail",
-		},
-		{
-			name:       "handlePRClosedAction unmerged publish error propagates",
-			action:     ghActionClosed,
-			merged:     false,
-			wantErrSub: "bus fail",
-		},
-		{
-			name:       "handlePullRequestRegistryAction synchronize publish error propagates",
-			action:     ghActionSynchronize,
-			wantErrSub: "bus fail",
-		},
-		{
-			name:       "resolveAndBackfillPushPR publish error propagates",
-			isPush:     true,
-			wantErrSub: "bus fail",
-		},
-		{
-			name:       "processGitHubPullRequestEvent opened publish error propagates",
-			action:     ghActionOpened,
-			isOpened:   true,
-			wantErrSub: "bus fail",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			bus := &mockEventBus{err: errors.New("bus fail")}
-			reg := &mockPRRegistry{
-				resolveTargetID: "100000000000000001",
-			}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.bus = bus
-			srv.registry = reg
-
-			res := &ResolvedGitHubEvent{
-				Event:    ghEventPullRequest,
-				Action:   tc.action,
-				Repo:     "azylman/aerial",
-				PRNumber: 42,
-				HeadSHA:  "head123",
-				Branch:   "feat/test",
-			}
-			var err error
-			switch {
-			case tc.isOpened:
-				payload := GitHubPullRequestPayload{
-					Action: ghActionOpened,
-					Number: 42,
-					PullRequest: GitHubPullRequest{
-						Number: 42,
-						Title:  "PR title",
-						Head:   GitHubPRRef{Ref: "feat/test", SHA: "head123"},
-					},
-				}
-				payload.Repository.FullName = "azylman/aerial"
-				body, _ := json.Marshal(payload)
-				_, err = srv.processGitHubPullRequestEvent(ctx, "delivery-1", body, res)
-			case tc.isPush:
-				payload := GitHubPushPayload{
-					Ref: "refs/heads/main",
-					HeadCommit: &GitHubCommit{
-						ID:      "head123",
-						Message: "merge (#42)",
-					},
-				}
-				err = srv.resolveAndBackfillPushPR(ctx, res, payload)
-			case tc.action == ghActionClosed:
-				err = srv.handlePRClosedAction(ctx, res, tc.merged)
-			case tc.action == ghActionSynchronize:
-				err = srv.handlePullRequestRegistryAction(ctx, res, GitHubPullRequest{Title: "PR title"})
-			}
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErrSub)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-		})
-	}
-}
-
-func TestIsPRRegistryCIFailed_Guards(t *testing.T) {
-	t.Parallel()
-	var nilSrv *RouterServer
-	if nilSrv.isPRRegistryCIFailed(context.Background(), "azylman/aerial", 42) {
-		t.Errorf("expected false for nil server")
-	}
-	srv := &RouterServer{}
-	if srv.isPRRegistryCIFailed(context.Background(), "azylman/aerial", 42) {
-		t.Errorf("expected false for nil registry")
-	}
-	srv.registry = &mockPRRegistry{}
-	if srv.isPRRegistryCIFailed(context.Background(), "azylman/aerial", 0) {
-		t.Errorf("expected false for pr <= 0")
-	}
-	if srv.isPRRegistryCIFailed(context.Background(), "", 42) {
-		t.Errorf("expected false for empty repo")
-	}
-
-	regCIFailed := &mockPRRegistry{
-		buildLifecycle: PRBuildLifecycle{Status: prCIFailed},
-	}
-	srvCIFailed := &RouterServer{registry: regCIFailed}
-	if !srvCIFailed.isPRRegistryCIFailed(context.Background(), "azylman/aerial", 42) {
-		t.Errorf("expected true when status is prCIFailed")
-	}
-
-	regOpen := &mockPRRegistry{
-		buildLifecycle: PRBuildLifecycle{Status: prOpen},
-	}
-	srvOpen := &RouterServer{registry: regOpen}
-	if srvOpen.isPRRegistryCIFailed(context.Background(), "azylman/aerial", 42) {
-		t.Errorf("expected false when status is prOpen")
-	}
-
-	regErr := &mockPRRegistry{
-		buildLifecycleErr: errors.New("db error"),
-	}
-	srvErr := &RouterServer{registry: regErr}
-	if srvErr.isPRRegistryCIFailed(context.Background(), "azylman/aerial", 42) {
-		t.Errorf("expected false when registry returns error")
-	}
-}
-
-func TestHandleCIFailureByPRNumber_Fallback(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	reg := &mockPRRegistry{
-		resolveTargetID: "100000000000000001",
-		buildLifecycle: PRBuildLifecycle{
-			Status: prCIFailed,
-		},
-		ciFailedUpdated: false,
-	}
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	srv.bus = &mockEventBus{}
-	srv.registry = reg
-
-	res := &ResolvedGitHubEvent{
-		Event:      ghEventCheckRun,
-		Repo:       "azylman/aerial",
-		PRNumber:   42,
-		HeadSHA:    "sha-head",
-		CheckName:  "test-check",
-		Conclusion: conclusionFailure,
-	}
-	handled, err := srv.handleCIFailureByPRNumber(ctx, res, "ci failed", "https://check.url", false, false)
-	if err != nil || !handled {
-		t.Fatalf("handleCIFailureByPRNumber() = (%v, %v), want (true, nil)", handled, err)
 	}
 }

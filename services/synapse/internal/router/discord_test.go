@@ -49,7 +49,7 @@ func TestProcessDiscordIngress(t *testing.T) {
 			if tc.dispatchErr {
 				disp.discordMessageErr = errors.New("downstream error")
 			}
-			srv := newTestRouter(Config{}, nil, nil, disp)
+			srv := newTestRouter(Config{}, nil, disp)
 			if tc.nilDispatcher {
 				srv.SetDispatcher(nil)
 			}
@@ -120,7 +120,7 @@ func TestProcessDiscordInteraction(t *testing.T) {
 			if tc.dispatchErr {
 				disp.discordInteractionErr = errors.New("downstream error")
 			}
-			srv := newTestRouter(Config{}, nil, nil, disp)
+			srv := newTestRouter(Config{}, nil, disp)
 			if tc.nilDispatcher {
 				srv.SetDispatcher(nil)
 			}
@@ -158,7 +158,7 @@ func TestDiscordDelegations(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. startDiscordGateway delegation with empty token (disabled)
-	srv := newTestRouter(Config{}, nil, nil, nil)
+	srv := newTestRouter(Config{}, nil, nil)
 	stopFn, err := startDiscordGateway(ctx, srv, "")
 	if err != nil {
 		t.Fatalf("startDiscordGateway(empty) err = %v", err)

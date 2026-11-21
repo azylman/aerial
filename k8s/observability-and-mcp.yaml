@@ -696,6 +696,54 @@ spec:
             severity: warning
           annotations:
             summary: VictoriaTraces has ingested no spans for 15 minutes
+    - name: pr_lifecycle_restate
+      interval: 1m
+      rules:
+        - alert: SynapseRestateSendErrors
+          expr: |
+            sum by (handler) (increase(synapse_restate_sends_total{status="error"}[15m])) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: synapse Restate sends to {{ $labels.handler }} keep failing; PR lifecycle events are retrying
+        - alert: SynapseRestateSendRejected
+          expr: |
+            sum by (handler) (increase(synapse_restate_sends_total{status="terminal"}[15m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate rejected synapse {{ $labels.handler }} sends terminally; the jobs were dropped
+        - alert: SynapseLifecycleJobsDropped
+          expr: |
+            sum by (kind, reason) (increase(synapse_jobs_dropped_total{kind=~"github_webhook|deploy_webhook"}[15m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: synapse dropped {{ $labels.kind }} jobs ({{ $labels.reason }}); those PR lifecycle events never reached Restate
+        - alert: PrstateEffectErrors
+          expr: |
+            sum by (kind, result) (increase(prstate_effects_total{result=~"error|dropped|unconfigured"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: prstate {{ $labels.kind }} effects are failing ({{ $labels.result }})
+        - alert: PrstateProjectionWriteErrors
+          expr: |
+            sum(increase(prstate_projection_writes_total{result="error"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: PRObject pr_registry projection writes are failing
+        - alert: PrstateLegacyEventsRejected
+          expr: |
+            sum by (handler) (increase(prstate_legacy_events_rejected_total[15m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: prstate rejected legacy-stamped {{ $labels.handler }} events; a synapse still runs the legacy lifecycle path
     - name: nats_health
       interval: 1m
       rules:

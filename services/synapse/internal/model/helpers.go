@@ -188,29 +188,3 @@ func TruncatePromptRunes(s string, maxRunes int) string {
 	}
 	return string(runes[:maxRunes]) + "... (truncated)"
 }
-
-// ExtractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.
-func ExtractStringSliceFromMetadata(meta map[string]any, key string) []string {
-	if meta == nil {
-		return nil
-	}
-	var raw []string
-	if rawVal, ok := meta[key]; ok {
-		switch v := rawVal.(type) {
-		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					raw = append(raw, s)
-				}
-			}
-		case []string:
-			raw = append(raw, v...)
-		}
-	}
-	return DedupeTrimmedStrings(raw)
-}
-
-// ExtractJobsFromMetadata extracts candidate job names stored in the PR registry metadata JSONB.
-func ExtractJobsFromMetadata(meta map[string]any) []string {
-	return ExtractStringSliceFromMetadata(meta, "jobs")
-}

@@ -364,7 +364,7 @@ func PRBuildRevision(lifecycle model.PRBuildLifecycle, sha string) (pullRequest,
 
 type LegacyImageResolver func(ctx context.Context, repo string, runID int64) ([]string, error)
 
-// PRMetadataRegistry is the subset of the PR registry required for build metadata tracking.
+// PRMetadataRegistry is the PR state store build metadata tracking reads and writes (PRObject, through Restate).
 type PRMetadataRegistry interface {
 	LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error)
 	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata model.BuildMetadata) (bool, error)

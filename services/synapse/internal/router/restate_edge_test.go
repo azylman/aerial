@@ -10,14 +10,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // acceptJobMsg is one queued JetStream job replayed into its consumer.
@@ -33,8 +31,8 @@ func (*acceptJobMsg) Term() error                      { return nil }
 func (*acceptJobMsg) Snooze(time.Duration) error       { return nil }
 func (*acceptJobMsg) InProgress() error                { return nil }
 
-// acceptBus records every publish: queued webhook jobs (with the
-// effects_owner they were stamped with) and aerial.pr.> lifecycle facts.
+// acceptBus records every publish: queued webhook jobs and aerial.pr.>
+// lifecycle facts.
 type acceptBus struct {
 	pubsub.Bus
 
@@ -71,123 +69,6 @@ func (b *acceptBus) factCount() int {
 	return b.facts
 }
 
-// jobOwner reads the effects_owner a queued job was stamped with.
-func jobOwner(job any) string {
-	switch j := job.(type) {
-	case GitHubWebhookArgs:
-		return j.EffectsOwner
-	case DeployWebhookArgs:
-		return j.EffectsOwner
-	}
-	return ""
-}
-
-func TestNewEventEffectsOwner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		authoritative bool
-		want          string
-	}{
-		{name: "authoritative snapshot is restate-owned", authoritative: true, want: "restate"},
-		{name: "non-authoritative snapshot is legacy", authoritative: false, want: "legacy"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := newEventEffectsOwner(tc.authoritative); got != tc.want {
-				t.Errorf("newEventEffectsOwner(%v) = %q, want %q", tc.authoritative, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestWebhookAcceptStampsOwner proves both webhook accept points stamp the
-// queued job from the config snapshot at accept time, and that a
-// restate-owned flux alert is queued without touching pr_registry.
-func TestWebhookAcceptStampsOwner(t *testing.T) {
-	t.Parallel()
-	const pingBody = `{"zen":"Keep it simple"}`
-	const fluxBody = `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"applied","metadata":{"revision":"main@sha1:abcdef1234"}}`
-	tests := []struct {
-		name          string
-		path          string
-		event         string
-		body          string
-		authoritative bool
-		wantOwner     string
-		wantDBCalls   bool
-	}{
-		{name: "github webhook authoritative stamps restate", path: "/webhooks/github", event: "ping", body: pingBody, authoritative: true, wantOwner: "restate"},
-		{name: "github webhook non-authoritative stamps legacy", path: "/webhooks/github", event: "ping", body: pingBody, wantOwner: "legacy"},
-		{name: "flux webhook authoritative stamps restate without registry", path: "/webhooks/flux", body: fluxBody, authoritative: true, wantOwner: "restate"},
-		{name: "flux webhook non-authoritative stamps legacy after registry enrichment", path: "/webhooks/flux", body: fluxBody, wantOwner: "legacy", wantDBCalls: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := &atomic.Int64{}
-			srv := NewRouterServer(fixedConfig(Config{GitHubWebhookSecret: testGitHubWebhookSecret, RestateAuthoritative: tc.authoritative}), nil)
-			srv.SetRegistry(NewPostgresPRRegistry(countingPool(db)))
-			bus := &acceptBus{}
-			srv.SetEventBus(bus)
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
-			req.Header.Set("Content-Type", "application/json")
-			if tc.event != "" {
-				req.Header.Set("X-Github-Event", tc.event)
-				req.Header.Set("X-Github-Delivery", "d-accept")
-				req.Header.Set("X-Hub-Signature-256", signTestGitHubWebhook(testGitHubWebhookSecret, tc.body))
-			}
-			rec := httptest.NewRecorder()
-			srv.Routes().ServeHTTP(rec, req)
-			jobs := bus.drain()
-			if len(jobs) != 1 {
-				t.Fatalf("queued jobs = %d (status %d %s), want 1", len(jobs), rec.Code, rec.Body.String())
-			}
-			if got := jobOwner(jobs[0]); got != tc.wantOwner {
-				t.Errorf("job effects_owner = %q, want %q", got, tc.wantOwner)
-			}
-			if got := db.Load() > 0; got != tc.wantDBCalls {
-				t.Errorf("pr_registry touched = %v (calls %d), want %v", got, db.Load(), tc.wantDBCalls)
-			}
-		})
-	}
-}
-
-// TestFluxWatcherStampsOwner proves each watcher sink call snapshots the
-// owner from config: authoritative ticks list rollouts from the Restate
-// index, others from pr_registry.
-func TestFluxWatcherStampsOwner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		authoritative bool
-		wantIngress   bool
-		wantDBCalls   bool
-	}{
-		{name: "authoritative tick reads the restate rollout index", authoritative: true, wantIngress: true},
-		{name: "non-authoritative tick reads pr_registry", wantDBCalls: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ingress := &ownedIngress{sendCode: http.StatusAccepted, callCode: http.StatusOK, callBody: `{"rollouts":null}`}
-			db := &atomic.Int64{}
-			srv := NewRouterServer(fixedConfig(Config{RestateURL: ingress.serve(t), RestateAuthoritative: tc.authoritative}), nil)
-			srv.SetRegistry(NewPostgresPRRegistry(countingPool(db)))
-			if _, err := srv.HasPendingRollouts(context.Background()); err != nil {
-				t.Fatalf("HasPendingRollouts() err = %v", err)
-			}
-			if got := len(ingress.calls()) > 0; got != tc.wantIngress {
-				t.Errorf("restate calls = %v, want %v", ingress.calls(), tc.wantIngress)
-			}
-			if got := db.Load() > 0; got != tc.wantDBCalls {
-				t.Errorf("pr_registry touched = %v (calls %d), want %v", got, db.Load(), tc.wantDBCalls)
-			}
-		})
-	}
-}
-
 // parityAcceptStep reports whether a golden synapse input is a real accept
 // point (register, GitHub webhook, deploy alert, watcher observation).
 // Rollout, promotion and attempt-failure steps call legacy internals
@@ -197,12 +78,11 @@ func parityAcceptStep(kind string) bool {
 	return slices.Contains([]string{"register", "github", "deploy", "kustomization"}, kind)
 }
 
-// acceptEdge is an authoritative server whose every boundary records:
-// Restate ingress, pr_registry queries, the bus and the dispatcher.
+// acceptEdge is a server whose every boundary records: Restate ingress, the
+// bus and the dispatcher.
 type acceptEdge struct {
 	srv     *RouterServer
 	ingress *ownedIngress
-	db      *atomic.Int64
 	disp    *mockOutboundDispatcher
 	bus     *acceptBus
 }
@@ -214,14 +94,13 @@ func newAcceptEdge(t *testing.T) *acceptEdge {
 			sendCode: http.StatusAccepted, callCode: http.StatusOK, callBody: "{}",
 			handlerBodies: map[string]string{"Register": `{"target_id":"100000000000000001"}`, "ListRollouts": `{"rollouts":null}`},
 		},
-		db: &atomic.Int64{}, disp: &mockOutboundDispatcher{}, bus: &acceptBus{},
+		disp: &mockOutboundDispatcher{}, bus: &acceptBus{},
 	}
 	e.srv = NewRouterServer(fixedConfig(Config{
-		RestateURL: e.ingress.serve(t), RestateAuthoritative: true, DefaultOwner: true,
+		RestateURL: e.ingress.serve(t), DefaultOwner: true,
 		GitHubAPIURL: ownedGitHub(t, "[]"), GitHubToken: "token", AutoUpdatePRAuthors: []string{"azylman"},
 		GitHubWebhookSecret: testGitHubWebhookSecret,
 	}), nil)
-	e.srv.SetRegistry(NewPostgresPRRegistry(countingPool(e.db)))
 	e.srv.SetEventBus(e.bus)
 	e.srv.SetDispatcher(e.disp)
 	return e
@@ -239,9 +118,6 @@ func (e *acceptEdge) run(ctx context.Context, t *testing.T, steps []paritySynaps
 		driven++
 		driveAcceptStep(ctx, t, e.srv, step)
 		for _, job := range e.bus.drain() {
-			if got := jobOwner(job); got != restateclient.EffectsOwnerRestate {
-				t.Fatalf("queued job effects_owner = %q, want restate", got)
-			}
 			replayAcceptJob(ctx, t, e.srv, job)
 		}
 	}
@@ -257,8 +133,8 @@ func (e *acceptEdge) synapseEffects() int {
 }
 
 // ownedHandlers counts the Restate writes by handler (one-way sends plus
-// the request-response Register) and reports any send not stamped
-// restate-owned.
+// the request-response Register) and reports any send still carrying an
+// effects_owner stamp (prstate reads a missing stamp as restate).
 func (e *acceptEdge) ownedHandlers(t *testing.T) map[string]int {
 	t.Helper()
 	got := map[string]int{}
@@ -266,8 +142,8 @@ func (e *acceptEdge) ownedHandlers(t *testing.T) map[string]int {
 	for i, p := range paths {
 		trimmed := strings.TrimSuffix(p, "/send")
 		got[trimmed[strings.LastIndex(trimmed, "/")+1:]]++
-		if !strings.Contains(bodies[i], `"effects_owner":"restate"`) {
-			t.Errorf("send %s body %s is not restate-owned", p, bodies[i])
+		if strings.Contains(bodies[i], `"effects_owner"`) {
+			t.Errorf("send %s body %s still carries an effects_owner stamp", p, bodies[i])
 		}
 	}
 	for _, c := range e.ingress.calls() {
@@ -288,10 +164,8 @@ func goldenHandlers(sends []parityRestateSend) map[string]int {
 }
 
 // TestRestateOwnedLifecycleEdge drives every golden lifecycle's accept
-// points with restate_authoritative on and no pre-stamped context: each
-// event is stamped restate at accept time and queued webhook jobs are
-// replayed through their JetStream consumers. synapse must make zero
-// pr_registry calls and perform zero effects (no aerial.pr.> publish, no
+// points, replaying queued webhook jobs through their JetStream consumers.
+// synapse must perform zero effects (no aerial.pr.> publish, no
 // eri, GitHub, Flux or image call), and its restate-owned sends must equal
 // the golden's restate stream handler for handler (only a subset when the
 // golden also has non-accept steps). The prstate parity test replays that
@@ -304,9 +178,6 @@ func TestRestateOwnedLifecycleEdge(t *testing.T) {
 			t.Parallel()
 			e := newAcceptEdge(t)
 			driven := e.run(t.Context(), t, tc.Synapse)
-			if got := e.db.Load(); got != 0 {
-				t.Errorf("pr_registry calls = %d, want 0", got)
-			}
 			if got := e.synapseEffects(); got != 0 {
 				t.Errorf("synapse effects = %d, want 0", got)
 			}
@@ -368,7 +239,7 @@ func driveAcceptStep(ctx context.Context, t *testing.T, srv *RouterServer, step 
 }
 
 // replayAcceptJob runs one queued job through its JetStream consumer, the
-// way the worker would, so the publish-time stamp is the one in effect.
+// way the worker would.
 func replayAcceptJob(ctx context.Context, t *testing.T, srv *RouterServer, job any) {
 	t.Helper()
 	data, err := json.Marshal(job)
