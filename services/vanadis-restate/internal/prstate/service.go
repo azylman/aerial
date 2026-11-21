@@ -233,6 +233,9 @@ const (
 	// rollout (TransitionDeploying, reconcile requests, rollout progress,
 	// deploy failure). It is dropped for an untracked PR.
 	phaseRollout
+	// phaseMerge is a merge event (MergeDisposition): a live merge SHA on
+	// a non-terminal PR applies whatever head it carries.
+	phaseMerge
 )
 
 func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
@@ -288,7 +291,7 @@ func (s *PRObjectService) mutateEvent(ctx restate.ObjectContext, ev PREvent, pha
 	}
 	before := snapshotIndexView(st)
 	applyEventRow(st, ev)
-	if phase != phaseLifecycle {
+	if phase != phaseLifecycle && phase != phaseMerge {
 		recoverMergedHead(ctx, st, ev)
 	}
 	mutate(st, &ev)
@@ -303,8 +306,12 @@ func (s *PRObjectService) mutateEvent(ctx restate.ObjectContext, ev PREvent, pha
 }
 
 func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition {
-	if phase == phaseDeploy || phase == phaseRollout {
+	switch phase {
+	case phaseDeploy, phaseRollout:
 		return st.ApplyDeployEvent(ev)
+	case phaseMerge:
+		return st.MergeDisposition(ev)
+	case phaseLifecycle:
 	}
 	return st.ApplyEvent(ev)
 }
@@ -586,7 +593,11 @@ func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev P
 // its carried facts, because legacy synapse publishes a merged fact for both
 // (each keyed on its own head SHA, so true redeliveries still dedupe). That
 // closed event carries the real PR head, so it also repairs a head PRObject
-// left stale by a missed synchronize (RecoverMergedHead).
+// left stale by a missed synchronize (RecoverMergedHead). The first merge
+// of an open PR applies on its merge SHA even when PRObject's head is stale
+// (MergeDisposition) and adopts the carried head unless the PR already
+// moved past it (MergeEventHead); synapse also sends it when a deploy
+// commit lookup proves a merge whose webhooks were lost.
 func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
@@ -600,10 +611,15 @@ func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) er
 		s.handleSameMerge(ctx, st, ev)
 		return nil
 	}
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
+	ev, stale := st.MergeEventHead(ev)
+	prev := st.HeadSHA
+	return s.mutateEvent(ctx, ev, phaseMerge, "", func(st *PRState, _ *PREvent) {
 		st.ClearFailedCISHA()
 		st.MarkTerminal(TerminalMerged)
 		st.ApplyRegistryMerged(ev.MergeSHA)
+		if stale {
+			noteMergedHeadRecovered(ctx, st, prev)
+		}
 	})
 }
 
@@ -629,7 +645,7 @@ func (s *PRObjectService) handleSameMerge(ctx restate.ObjectContext, st *PRState
 // merge or deploy-phase event (RecoverMergedHead).
 var mergeHeadRecoveredTotal = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "prstate_merge_head_recovered_total",
-	Help: "Merged PRs whose stale stored head PRObject replaced with the real head carried by a same-merge closed event or an applied deploy-phase event.",
+	Help: "Merged PRs whose stale stored head PRObject replaced with the real head carried by a merge event or an applied deploy-phase event.",
 })
 
 func init() {

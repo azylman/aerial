@@ -779,6 +779,72 @@ func TestPRState_RecoverMergedHead(t *testing.T) {
 	}
 }
 
+func TestPRState_MergeDisposition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilState bool
+		terminal TerminalState
+		ev       PREvent
+		want     EventDisposition
+	}{
+		{name: "nil state drops", nilState: true, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, want: DispositionDropStale},
+		{name: "stale head with merge sha applies", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, want: DispositionApply},
+		{name: "stored head with merge sha applies", ev: PREvent{HeadSHA: "h1", MergeSHA: "m1"}, want: DispositionApply},
+		{name: "stale head without merge sha drops", ev: PREvent{HeadSHA: "h2"}, want: DispositionDropStale},
+		{name: "zero merge sha is no merge sha", ev: PREvent{HeadSHA: "h2", MergeSHA: "0000000000000000000000000000000000000000"}, want: DispositionDropStale},
+		{name: "merged pr absorbs", terminal: TerminalMerged, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, want: DispositionAbsorbTerminal},
+		{name: "closed pr absorbs", terminal: TerminalClosed, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, want: DispositionAbsorbTerminal},
+		{name: "closed pr newer epoch applies", terminal: TerminalClosed, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1", ReopenEpoch: 1}, want: DispositionApply},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s *PRState
+			if !tc.nilState {
+				s = rowState("h1", "", "")
+				s.Terminal = tc.terminal
+			}
+			require.Equal(t, tc.want, s.MergeDisposition(tc.ev))
+		})
+	}
+}
+
+func TestPRState_MergeEventHead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		nilState  bool
+		stored    string
+		prior     []string
+		ev        PREvent
+		wantHead  string
+		wantStale bool
+	}{
+		{name: "nil state keeps the event", nilState: true, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, wantHead: "h2"},
+		{name: "new head is a stale-head recovery", stored: "h1", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, wantHead: "h2", wantStale: true},
+		{name: "stored head is no recovery", stored: "h1", ev: PREvent{HeadSHA: "h1", MergeSHA: "m1"}, wantHead: "h1"},
+		{name: "merge-only ref is no recovery", stored: "h1", ev: PREvent{HeadSHA: "m1", MergeSHA: "m1"}, wantHead: "m1"},
+		{name: "empty head is no recovery", stored: "h1", ev: PREvent{MergeSHA: "m1"}},
+		{name: "unknown stored head is no recovery", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, wantHead: "h2"},
+		{name: "prior head is blanked", stored: "h1", prior: []string{"h0"}, ev: PREvent{HeadSHA: "h0", MergeSHA: "m1"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s *PRState
+			if !tc.nilState {
+				s = rowState(tc.stored, "", "")
+				s.PriorHeads = tc.prior
+			}
+			ev, stale := s.MergeEventHead(tc.ev)
+			require.Equal(t, tc.wantHead, ev.HeadSHA)
+			require.Equal(t, tc.wantStale, stale)
+			require.Equal(t, tc.ev.MergeSHA, ev.MergeSHA)
+		})
+	}
+}
+
 func TestPRState_SynchronizeDisposition(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

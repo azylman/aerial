@@ -833,6 +833,43 @@ func (s *PRState) ApplyEvent(ev PREvent) EventDisposition {
 	return DispositionApply
 }
 
+// MergeDisposition is the guard for a merge event (pull_request closed
+// merged, a squash-merge push, or a merge synapse recovered from a deploy
+// commit lookup). A live merge SHA on a PR that is not terminal is a GitHub
+// fact, so a head mismatch never drops it: PRObject may have missed the
+// synchronize that moved the head before the merge. Same-epoch terminal
+// states and merge events without a merge SHA keep ApplyEvent.
+func (s *PRState) MergeDisposition(ev PREvent) EventDisposition {
+	if s == nil {
+		return DispositionDropStale
+	}
+	if liveSHA(ev.MergeSHA) == "" || (s.Terminal.Absorbing() && ev.ReopenEpoch <= s.ReopenEpoch) {
+		return s.ApplyEvent(ev)
+	}
+	return DispositionApply
+}
+
+// MergeEventHead prepares a merge event's head for a first merge. A real
+// PR head (not a merge-only ref) that differs from the stored head is
+// adopted when it is new, reported by stale=true, or blanked when the PR
+// already moved past it (PriorHeads), so a late merge event never moves
+// the head backwards.
+func (s *PRState) MergeEventHead(ev PREvent) (PREvent, bool) {
+	if s == nil {
+		return ev, false
+	}
+	head := liveSHA(ev.HeadSHA)
+	stored := strings.TrimSpace(s.HeadSHA)
+	if head == "" || stored == "" || IsMergeOnlyRef(head, ev.MergeSHA) || strings.EqualFold(head, stored) {
+		return ev, false
+	}
+	if s.HasPriorHead(head) {
+		ev.HeadSHA = ""
+		return ev, false
+	}
+	return ev, true
+}
+
 // IsMergeOnlyRef reports whether an event's head SHA is only its merge SHA
 // (synapse resolves a squash-merge push or deploy alert to the PR and sends
 // the pushed commit as both).

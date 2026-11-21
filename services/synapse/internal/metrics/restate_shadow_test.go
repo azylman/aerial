@@ -64,7 +64,7 @@ func TestRecordRestateShadowDivergence(t *testing.T) {
 	}
 }
 
-// TestRecordRegistryAndLookupCounters pins the two string-labelled cutover
+// TestRecordRegistryAndLookupCounters pins the three string-labelled cutover
 // counters: each records its label and blank labels fall back to unknown.
 func TestRecordRegistryAndLookupCounters(t *testing.T) {
 	t.Parallel()
@@ -81,9 +81,14 @@ func TestRecordRegistryAndLookupCounters(t *testing.T) {
 			t.Parallel()
 			calls := RegistryCallsTotal.WithLabelValues(tc.label)
 			divergences := RestateLookupDivergenceTotal.WithLabelValues(tc.label)
-			beforeCalls, beforeDivergences := testutil.ToFloat64(calls), testutil.ToFloat64(divergences)
+			recovered := RestateMergeRecoveredTotal.WithLabelValues(tc.label)
+			beforeCalls, beforeDivergences, beforeRecovered := testutil.ToFloat64(calls), testutil.ToFloat64(divergences), testutil.ToFloat64(recovered)
 			RecordRegistryCall(tc.input)
 			RecordRestateLookupDivergence(tc.input)
+			RecordRestateMergeRecovered(tc.input)
+			if got := testutil.ToFloat64(recovered); got < beforeRecovered+1 {
+				t.Errorf("merges recovered = %v, want at least %v", got, beforeRecovered+1)
+			}
 			if got := testutil.ToFloat64(calls); got < beforeCalls+1 {
 				t.Errorf("registry calls = %v, want at least %v", got, beforeCalls+1)
 			}

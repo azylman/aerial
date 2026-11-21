@@ -555,7 +555,8 @@ func (s *RouterServer) backfillRegistryTargetID(ctx context.Context, repo string
 }
 
 // ResolveSHA resolves a commit SHA to its PR number, target Discord thread ID, and branch.
-// It checks local pr_registry first, then falls back to GitHub commit PR lookup and backfills pr_registry.
+// It checks local pr_registry first, then falls back to GitHub commit PR lookup and backfills pr_registry;
+// a GitHub answer proving a merge PRObject missed is mirrored to PRObject (recoverLostMerge).
 func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, string, string, error) {
 	if repo == "" || sha == "" || isZeroSHA(sha) {
 		return 0, "", "", nil
@@ -566,13 +567,14 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 		return prNum, targetID, branch, nil
 	}
 
-	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, repo, sha)
-	if err != nil || prNum == 0 {
+	pr, err := s.resolveCommitPR(ctx, repo, sha)
+	if err != nil || pr.Number == 0 {
 		return 0, "", "", err
 	}
 
-	targetID := s.backfillRegistryTargetID(ctx, repo, prNum, sha)
-	return prNum, targetID, branch, nil
+	targetID := s.backfillRegistryTargetID(ctx, repo, pr.Number, sha)
+	s.recoverLostMerge(ctx, mergeRecoveryPathDeploy, repo, sha, pr)
+	return pr.Number, targetID, pr.Branch, nil
 }
 
 // ResolveThreadForPR resolves the Discord thread snowflake (target_id) for a PR.

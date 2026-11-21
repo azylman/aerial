@@ -456,3 +456,109 @@ func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
 		})
 	}
 }
+
+// lostMergeWant is the PRObject end state after a merge recovered from a
+// deploy commit lookup, plus the status after each recovery/deploy step.
+type lostMergeWant struct {
+	Stages                 []string       `json:"stages"`
+	Status                 string         `json:"status"`
+	HeadSHA                string         `json:"head_sha"`
+	MergeSHA               string         `json:"merge_sha"`
+	PriorHeads             []string       `json:"prior_heads"`
+	DeployedJobs           []string       `json:"deployed_jobs"`
+	DeployedKustomizations []string       `json:"deployed_kustomizations"`
+	ResolvedMergePR        int            `json:"resolved_merge_pr"`
+	Rollouts               []RolloutRef   `json:"rollouts"`
+	Divergent              []string       `json:"divergent"`
+	Effects                []parityEffect `json:"effects"`
+}
+
+// lostMergeCase replays setup, the recovered merge and the deploy stream
+// once legacy-owned and once restate-owned; synapse-only fields (lookup)
+// are ignored.
+type lostMergeCase struct {
+	Name            string             `json:"name"`
+	Setup           []parityInvocation `json:"setup"`
+	RecoveryShadow  []parityInvocation `json:"recovery_shadow"`
+	RecoveryRestate []parityInvocation `json:"recovery_restate"`
+	DeployShadow    []parityInvocation `json:"deploy_shadow"`
+	DeployRestate   []parityInvocation `json:"deploy_restate"`
+	Late            []parityInvocation `json:"late"`
+	Want            lostMergeWant      `json:"want"`
+	Row             RegistryRow        `json:"row"`
+}
+
+// TestShadowLostMergeWebhooksGolden pins lost-merge-webhooks.json: a merge
+// synapse recovers from a deploy commit lookup lands PRObject merged ->
+// deploying -> deployed in both effect modes, on the legacy row, with the
+// same deploy_success, and the late real closed/push webhooks for that
+// merge change nothing and run no effects.
+func TestShadowLostMergeWebhooksGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/lost-merge-webhooks.json")
+	require.NoError(t, err)
+	var g struct {
+		Cases []lostMergeCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newParitySim(t)
+			for _, inv := range tc.Setup {
+				sim.send(inv)
+			}
+			var stages []string
+			for _, inv := range append(append([]parityInvocation(nil), tc.RecoveryShadow...), tc.DeployShadow...) {
+				sim.send(inv)
+				st := simPRState(t, sim, tc.Setup[0])
+				stages = append(stages, st.RegistryStatus())
+			}
+			st := simPRState(t, sim, tc.Setup[0])
+			got := lostMergeWant{
+				Stages: stages, Status: st.RegistryStatus(), HeadSHA: st.HeadSHA, MergeSHA: st.MergeSHA,
+				PriorHeads: st.PriorHeads, DeployedJobs: st.DeployedJobs, DeployedKustomizations: st.DeployedKustomizations,
+				Rollouts:  simActiveRollouts(t, sim),
+				Divergent: CompareProjection(BuildProjection(&st), tc.Row, true).Divergent,
+			}
+			repoRaw, ok := sim.kv[RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			require.True(t, ok, "RepoObject index committed")
+			repoSt, err := decodeInput[RepoState](repoRaw)
+			require.NoError(t, err)
+			if entry, found := repoSt.ResolveSHA(st.MergeSHA); found {
+				got.ResolvedMergePR = entry.PRNumber
+			}
+			for _, e := range st.IntendedEffects {
+				got.Effects = append(got.Effects, parityEffect{Kind: e.Kind, Key: e.MatchKey})
+			}
+			intended := len(st.IntendedEffects)
+			for _, inv := range tc.Late {
+				sim.send(inv)
+			}
+			late := simPRState(t, sim, tc.Setup[0])
+			require.Equal(t, st, late, "late closed/push for the recovered merge is a no-op")
+			require.Len(t, late.IntendedEffects, intended, "late closed/push records no effect")
+
+			owned := newParitySim(t)
+			for _, inv := range tc.Setup {
+				owned.send(inv)
+			}
+			owned.effects = nil
+			for _, inv := range append(append([]parityInvocation(nil), tc.RecoveryRestate...), tc.DeployRestate...) {
+				owned.send(inv)
+			}
+			ownedSt := simPRState(t, owned, tc.Setup[0])
+			require.Equal(t, got.Effects, owned.effects, "restate-owned replay publishes exactly the intended effects")
+			require.Equal(t, got.Status, ownedSt.RegistryStatus(), "both modes land on the same status")
+			require.Equal(t, got.DeployedJobs, ownedSt.DeployedJobs, "both modes deploy the same jobs")
+			owned.effects = nil
+			for _, inv := range tc.Late {
+				owned.send(inv)
+			}
+			require.Empty(t, owned.effects, "late closed/push runs no restate-owned effect")
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}

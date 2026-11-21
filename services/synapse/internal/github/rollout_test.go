@@ -679,3 +679,68 @@ func TestConflicts_DedupeCheckRuns(t *testing.T) {
 		t.Errorf("expected nil for nil runs in dedupeLatestCheckRuns")
 	}
 }
+
+func TestResolveCommitPR(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/azylman/aerial/commits/merge2327/pulls":
+			_, _ = w.Write([]byte(`[{"number":2327,"state":"closed","head":{"ref":"feat/purge","sha":" head2327 "},"merged_at":"2026-11-21T08:38:21Z","merge_commit_sha":"merge2327"}]`))
+		case "/repos/azylman/aerial/commits/head50/pulls":
+			_, _ = w.Write([]byte(`[{"number":50,"state":"open","head":{"ref":"feat/open","sha":"head50"},"merged_at":null,"merge_commit_sha":"testmerge50"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client := NewClient(srv.Client(), srv.URL, "token")
+	tests := []struct {
+		name    string
+		sha     string
+		want    CommitPR
+		wantErr bool
+	}{
+		{name: "merged pr carries head and merge commit", sha: "merge2327", want: CommitPR{Number: 2327, Branch: "feat/purge", HeadSHA: "head2327", Merged: true, MergeCommitSHA: "merge2327"}},
+		{name: "open pr is unmerged despite a test merge commit", sha: "head50", want: CommitPR{Number: 50, Branch: "feat/open", HeadSHA: "head50", MergeCommitSHA: "testmerge50"}},
+		{name: "lookup error", sha: "missing", wantErr: true},
+		{name: "zero sha is invalid", sha: "0000000000000000000000000000000000000000", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveCommitPR(context.Background(), client, "azylman/aerial", tc.sha)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ResolveCommitPR() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ResolveCommitPR() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommitPRMergedOn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		pr   CommitPR
+		sha  string
+		want bool
+	}{
+		{name: "merged on the sha", pr: CommitPR{Number: 7, Merged: true, MergeCommitSHA: "abc"}, sha: "abc", want: true},
+		{name: "case and space are ignored", pr: CommitPR{Number: 7, Merged: true, MergeCommitSHA: "ABC "}, sha: " abc", want: true},
+		{name: "unmerged test merge commit", pr: CommitPR{Number: 7, MergeCommitSHA: "abc"}, sha: "abc"},
+		{name: "merged on another commit", pr: CommitPR{Number: 7, Merged: true, MergeCommitSHA: "def"}, sha: "abc"},
+		{name: "no merge commit", pr: CommitPR{Number: 7, Merged: true}, sha: ""},
+		{name: "no pr", pr: CommitPR{Merged: true, MergeCommitSHA: "abc"}, sha: "abc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.pr.MergedOn(tc.sha); got != tc.want {
+				t.Errorf("MergedOn(%q) = %v, want %v", tc.sha, got, tc.want)
+			}
+		})
+	}
+}
