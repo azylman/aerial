@@ -69,14 +69,13 @@ func wrapHermeticTransport() {
 
 func init() {
 	wrapHermeticTransport()
-	tokenPath := os.Getenv("AERIAL_SA_TOKEN_PATH")
-	if tokenPath == "" {
-		if f, err := os.CreateTemp("", "console-test-sa-token-*"); err == nil {
-			_, _ = f.WriteString("test-sa-token")
-			_ = f.Close()
-			tokenPath = f.Name()
-			_ = os.Setenv("AERIAL_SA_TOKEN_PATH", tokenPath)
-		}
+	// Always use a temp token so a pod-provided AERIAL_SA_TOKEN_PATH is never read.
+	tokenPath := ""
+	if f, err := os.CreateTemp("", "console-test-sa-token-*"); err == nil {
+		_, _ = f.WriteString("test-sa-token")
+		_ = f.Close()
+		tokenPath = f.Name()
+		_ = os.Setenv("AERIAL_SA_TOKEN_PATH", tokenPath)
 	}
 	if brainHTTPClient != nil && tokenPath != "" {
 		brainHTTPClient = tracing.Client(&http.Client{

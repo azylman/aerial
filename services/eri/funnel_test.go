@@ -73,7 +73,7 @@ func setupTestConfig(t *testing.T, yamlContent string) {
 	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("Failed to write test config.yaml: %v", err)
 	}
-	cfg, err := config.LoadConfigFromPaths(yamlPath)
+	cfg, err := config.LoadConfigFromLookup(func(string) string { return "" }, yamlPath)
 	if err != nil {
 		t.Fatalf("Failed to load test config from %s: %v", yamlPath, err)
 	}

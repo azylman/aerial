@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
@@ -385,11 +386,13 @@ type appOptions struct {
 	appConfig      *config.Config
 }
 
-func createReloadFunc(ctx context.Context, appCfg *config.Config, provisioner *env.Provisioner, ephemeralPool *runner.InterchangeablePool, workerPool *queue.WorkerPool) func(string) {
+// createReloadFunc returns the reload callback; loadConfig supplies the fresh
+// config (config.New in production).
+func createReloadFunc(ctx context.Context, appCfg *config.Config, loadConfig func() (*config.Config, error), provisioner *env.Provisioner, ephemeralPool *runner.InterchangeablePool, workerPool *queue.WorkerPool) func(string) {
 	return func(source string) {
 		log.Printf("[eri-restate] Config reload triggered via %s", source)
 		if appCfg != nil {
-			if err := config.ReloadWithSupplier(appCfg, config.New); err != nil {
+			if err := config.ReloadWithSupplier(appCfg, loadConfig); err != nil {
 				log.Printf("[eri-restate] Error reloading config: %v", err)
 				return
 			}
@@ -645,6 +648,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
 		AmbientResolver:        ambientResolver.Resolve,
 		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
+		SATokenPath:            k8sauth.DefaultTokenPath,
 	})
 
 	if closeBus := wireOutboundIntegrations(ctx, cur, workerPool); closeBus != nil {
@@ -654,7 +658,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	workerPool.Start()
 	defer workerPool.Stop()
 
-	reloadTrigger := NewReloadTrigger(ctx, createReloadFunc(ctx, appCfg, provisioner, pools.ephemeralPool, workerPool))
+	reloadTrigger := NewReloadTrigger(ctx, createReloadFunc(ctx, appCfg, config.New, provisioner, pools.ephemeralPool, workerPool))
 
 	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName)
 	restateHandler, err := restateSrv.Handler()
