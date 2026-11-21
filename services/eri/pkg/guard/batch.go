@@ -66,9 +66,9 @@ var (
 	}
 )
 
-func envPositiveInt(fallback int, keys ...string) int {
+func envPositiveInt(getenv func(string) string, fallback int, keys ...string) int {
 	for _, k := range keys {
-		if raw := strings.TrimSpace(os.Getenv(k)); raw != "" {
+		if raw := strings.TrimSpace(getenv(k)); raw != "" {
 			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 				return n
 			}
@@ -77,13 +77,14 @@ func envPositiveInt(fallback int, keys ...string) int {
 	return fallback
 }
 
-func minAnchorReadLines() int {
-	return envPositiveInt(DefaultMinAnchorReadLines, "AERIAL_BATCH_MIN_ANCHOR_LINES", "AERIAL_BATCH_MIN_PAGINATED_LINES")
+func minAnchorReadLines(getenv func(string) string) int {
+	return envPositiveInt(getenv, DefaultMinAnchorReadLines, "AERIAL_BATCH_MIN_ANCHOR_LINES", "AERIAL_BATCH_MIN_PAGINATED_LINES")
 }
 
-// GetBatchDir returns the active directory for batch guard state persistence.
-func GetBatchDir() string {
-	if env := os.Getenv("AERIAL_BATCH_GUARD_DIR"); env != "" {
+// GetBatchDir returns the batch guard state directory: AERIAL_BATCH_GUARD_DIR resolved through
+// getenv, else DefaultBatchDir.
+func GetBatchDir(getenv func(string) string) string {
+	if env := getenv("AERIAL_BATCH_GUARD_DIR"); env != "" {
 		return env
 	}
 	return DefaultBatchDir
@@ -328,11 +329,11 @@ func isUnbatchedGitMutation(cmd string) bool {
 	return false
 }
 
-func expandScratchEnvPrefix(p string) string {
+func expandScratchEnvPrefix(p string, getenv func(string) string) string {
 	for _, sv := range scratchVarPrefixes {
 		if p == sv.prefix || strings.HasPrefix(p, sv.prefix+"/") {
 			rest := strings.TrimPrefix(p, sv.prefix)
-			base := filepath.ToSlash(strings.TrimSpace(os.Getenv(sv.envKey)))
+			base := filepath.ToSlash(strings.TrimSpace(getenv(sv.envKey)))
 			if base == "" {
 				base = sharedEngineRoot
 			}
@@ -356,12 +357,12 @@ func scratchSegmentRepo(seg string) string {
 	return ""
 }
 
-func normalizeBatchTarget(path string) string {
+func normalizeBatchTarget(path string, getenv func(string) string) string {
 	p := filepath.ToSlash(strings.TrimSpace(path))
 	if p == "" {
 		return ""
 	}
-	p = expandScratchEnvPrefix(p)
+	p = expandScratchEnvPrefix(p, getenv)
 	if strings.HasPrefix(p, "/") {
 		p = filepath.ToSlash(filepath.Clean(p))
 	}
@@ -372,7 +373,7 @@ func normalizeBatchTarget(path string) string {
 		}
 	}
 	for _, key := range []string{envScratchDir, envScratchDirCompact} {
-		envDir := strings.TrimRight(filepath.ToSlash(strings.TrimSpace(os.Getenv(key))), "/")
+		envDir := strings.TrimRight(filepath.ToSlash(strings.TrimSpace(getenv(key))), "/")
 		if envDir != "" && envDir != "/" && strings.HasPrefix(p, envDir+"/") {
 			return sharedEngineRoot + strings.TrimPrefix(p, envDir)
 		}
@@ -380,12 +381,12 @@ func normalizeBatchTarget(path string) string {
 	return p
 }
 
-func categorizeInvocation(toolName string, args ToolArgs) (category, target string) {
+func categorizeInvocation(toolName string, args ToolArgs, getenv func(string) string) (category, target string) {
 	switch normalizeToolName(toolName) {
 	case toolViewFile, toolReadFile, toolRead:
-		return categoryRead, normalizeBatchTarget(args.FilePath())
+		return categoryRead, normalizeBatchTarget(args.FilePath(), getenv)
 	case toolReplaceFileContent, toolWriteToFile, toolEditFile, toolWriteFile, toolEdit, toolMultiEdit, toolWrite:
-		return categoryEdit, normalizeBatchTarget(args.FilePath())
+		return categoryEdit, normalizeBatchTarget(args.FilePath(), getenv)
 	case toolRunCommand, toolBash:
 		cmd := strings.TrimSpace(args.CommandLine)
 		if isUnscopedTest(cmd) {
@@ -598,7 +599,7 @@ func promotePageRange(start, end int, touching *ToolInvocation) (int, int) {
 	return newStart, newStart + DefaultPageReadLines - 1
 }
 
-func shapeReadFileRange(target string, startLine, endLine int, priorRecords []ToolInvocation) (effStart, effEnd int, overwritten bool) {
+func shapeReadFileRange(target string, startLine, endLine int, priorRecords []ToolInvocation, getenv func(string) string) (effStart, effEnd int, overwritten bool) {
 	if target == "" {
 		return startLine, endLine, false
 	}
@@ -624,7 +625,7 @@ func shapeReadFileRange(target string, startLine, endLine int, priorRecords []To
 		return newStart, newEnd, newStart != startLine || newEnd != endLine
 	}
 
-	minAnchor := minAnchorReadLines()
+	minAnchor := minAnchorReadLines(getenv)
 	if span < minAnchor {
 		pad := (minAnchor - span + 1) / 2
 		newStart := max(1, start-pad)
@@ -644,11 +645,6 @@ func overwriteCommandLine(d *Decision, cmdLine string) {
 		return
 	}
 	d.Overwrite = map[string]any{argCommandLine: rewritten}
-}
-
-// CheckBatch evaluates tool batching and thrash invariants using the active state directory and system time.
-func CheckBatch(payload Payload, args ToolArgs) *Decision {
-	return CheckBatchWithDir(payload, args, GetBatchDir(), time.Now())
 }
 
 func findGitSubcommand(tokens []locatedToken, gitIdx int) int {
@@ -834,15 +830,16 @@ func resolvePriorRecords(state *BatchState, payload Payload, ts int64) (int, []T
 	return invNum, prior
 }
 
-// CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp.
+// CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp;
+// getenv resolves the scratch-dir and anchor-size settings.
 // Guaranteed fail-open: returns allow on unexpected errors or corrupted states.
-func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *Decision {
+func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time, getenv func(string) string) *Decision {
 	normalizedTool := normalizeToolName(payload.ToolCall.Name)
 	if dec := checkStatelessBatchRules(normalizedTool, args); dec != nil {
 		return dec
 	}
 
-	category, target := categorizeInvocation(payload.ToolCall.Name, args)
+	category, target := categorizeInvocation(payload.ToolCall.Name, args, getenv)
 	safeID := sanitizeID(payload.ConversationID)
 
 	var decision *Decision
@@ -856,7 +853,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		effStart, effEnd := args.StartLine, args.EndLine
 		var readOverwritten bool
 		if category == categoryRead {
-			effStart, effEnd, readOverwritten = shapeReadFileRange(target, args.StartLine, args.EndLine, priorRecords)
+			effStart, effEnd, readOverwritten = shapeReadFileRange(target, args.StartLine, args.EndLine, priorRecords, getenv)
 		}
 
 		// Allowed: invalidate prior reads on edit and record invocation
@@ -893,11 +890,6 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		return &Decision{Decision: DecisionAllow}
 	}
 	return decision
-}
-
-// RecordPreInvocation records the current turn invocationNum.
-func RecordPreInvocation(payload Payload) *InvocationResponse {
-	return RecordPreInvocationWithDir(payload, GetBatchDir(), time.Now())
 }
 
 // RecordPreInvocationWithDir records the active invocationNum in state.
@@ -1009,20 +1001,14 @@ func reapOrphanedParentChildren(procDir string) {
 	reapOrphanedChildProcessGroups(procDir, os.Getppid(), os.Getpid(), syscall.Kill)
 }
 
-// RecordPostBatch rolls back batch-guard edit state when an edit tool execution fails,
-// and reaps orphaned background command process groups after terminal PR or build submissions.
-func RecordPostBatch(payload Payload, args ToolArgs) *InvocationResponse {
-	return RecordPostBatchWithDir(payload, args, GetBatchDir(), time.Now())
-}
-
 // RecordPostBatchWithDir rolls back a failed edit invocation in the specified state directory,
 // and reaps orphaned background command process groups on successful terminal submit commands.
-func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *InvocationResponse {
+func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time, getenv func(string) string) *InvocationResponse {
 	normTool := normalizeToolName(payload.ToolCall.Name)
 	if strings.TrimSpace(payload.Error) == "" && (normTool == toolRunCommand || normTool == toolBash) && isTerminalSubmitCommand(args.CommandLine) {
 		reapOrphanedParentChildren(resolveProcDir(dir))
 	}
-	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == categoryEdit && target != "" {
+	if cat, target := categorizeInvocation(payload.ToolCall.Name, args, getenv); strings.TrimSpace(payload.Error) != "" && cat == categoryEdit && target != "" {
 		safeID := sanitizeID(payload.ConversationID)
 		if err := withStateLock(dir, safeID, func() error {
 			state := loadState(dir, safeID, now)
