@@ -493,6 +493,27 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		{name: "deployment new replica unavailable", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 1, false), wantReason: "1/1 updated, 0/1 available, 1 total"},
 		{name: "deployment with stale observed generation", workload: deployRollout("synapse", synapseImage, 4, 3, 1, 1, 1, 1, false), wantReason: "generation 4 not yet observed"},
 		{name: "deployment progress deadline exceeded", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true), wantFailed: true, wantReason: "progress deadline exceeded"},
+		{
+			name: "deployment terminating with finalizers fails fast on stale observed generation",
+			workload: func() model.WorkloadRollout {
+				w := deployRollout("synapse", synapseImage, 4, 3, 1, 1, 1, 1, false)
+				w.DeletionTimestamp = "2026-11-20T18:00:00Z"
+				w.Finalizers = []string{"deployments.restate.dev"}
+				return w
+			}(),
+			wantFailed: true,
+			wantReason: "terminating since 2026-11-20T18:00:00Z (blocked by finalizers [deployments.restate.dev]; generation 4 not observed)",
+		},
+		{
+			name: "deployment terminating without finalizers fails fast on stale observed generation",
+			workload: func() model.WorkloadRollout {
+				w := deployRollout("synapse", synapseImage, 4, 3, 1, 1, 1, 1, false)
+				w.DeletionTimestamp = "2026-11-20T18:00:00Z"
+				return w
+			}(),
+			wantFailed: true,
+			wantReason: "terminating since 2026-11-20T18:00:00Z (generation 4 not observed)",
+		},
 		{name: "statefulset rolled out", workload: stsRollout("db", synapseImage, 2, 2, 2, 2, "db-2", "db-2"), wantDone: true},
 		{name: "statefulset with old revision pods", workload: stsRollout("db", synapseImage, 2, 2, 2, 2, "db-2", "db-1"), wantReason: "revision db-1 of db-2, 2/2 available"},
 		{name: "daemonset rolled out", workload: dsRollout("agent", synapseImage, 5, 5, 3, 3, 3), wantDone: true},
@@ -557,6 +578,18 @@ func TestPRRolloutStatus(t *testing.T) {
 	}{
 		{name: "no workloads is done", commitSHA: rolloutSHA, wantDone: true},
 		{name: "image match pending", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total)"},
+		{
+			name: "terminating workload with new generation fails PR rollout status fast",
+			workloads: []model.WorkloadRollout{func() model.WorkloadRollout {
+				w := deployRollout("synapse", synapseImage, 4, 3, 1, 1, 1, 1, false)
+				w.DeletionTimestamp = "2026-11-20T18:00:00Z"
+				w.Finalizers = []string{"deployments.restate.dev"}
+				return w
+			}()},
+			commitSHA:  rolloutSHA,
+			wantFailed: true,
+			wantReason: "Deployment default/synapse: terminating since 2026-11-20T18:00:00Z (blocked by finalizers [deployments.restate.dev]; generation 4 not observed)",
+		},
 		{name: "image match done", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
 		{name: "image match failed", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/synapse: progress deadline exceeded"},
 		{name: "manifest-only change done", workloads: []model.WorkloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 1, 1, false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
@@ -658,6 +691,15 @@ func TestReadyForCommitServices(t *testing.T) {
 		{name: "multi-workload same image all ready returns candidates", workloads: []model.WorkloadRollout{
 			deployRollout("eri-1", eriImage, 3, 3, 1, 1, 1, 1, false),
 			deployRollout("eri-2", eriImage, 3, 3, 1, 1, 1, 1, false),
+		}, commitSHA: rolloutSHA, want: []string{"aerial-eri", "eri"}},
+		{name: "terminating duplicate workload skipped without blocking ready candidates", workloads: []model.WorkloadRollout{
+			deployRollout("eri-1", eriImage, 3, 3, 1, 1, 1, 1, false),
+			func() model.WorkloadRollout {
+				w := deployRollout("eri-terminating", eriImage, 4, 3, 1, 1, 0, 1, false)
+				w.DeletionTimestamp = "2026-11-20T18:00:00Z"
+				w.Finalizers = []string{"deployments.restate.dev"}
+				return w
+			}(),
 		}, commitSHA: rolloutSHA, want: []string{"aerial-eri", "eri"}},
 		{name: "awaiting Reloader restart excluded", workloads: []model.WorkloadRollout{
 			withChange(deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), rolloutClock(9, 0, 0), auto, "synapse-config"),

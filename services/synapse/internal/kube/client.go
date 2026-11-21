@@ -739,6 +739,9 @@ func KustomizationsForImages(workloads []model.WorkloadImageRef, imageNames []st
 	seen := make(map[model.FluxKustomizationRef]struct{})
 	var refs []model.FluxKustomizationRef
 	for _, w := range workloads {
+		if strings.TrimSpace(w.DeletionTimestamp) != "" {
+			continue
+		}
 		name := w.Labels[fluxKustomizationNameLabel]
 		if name == "" {
 			continue
@@ -801,7 +804,8 @@ func DecodeWorkloadImageRefs(body []byte) ([]model.WorkloadImageRef, error) {
 	var list struct {
 		Items []struct {
 			Metadata struct {
-				Labels map[string]string `json:"labels"`
+				Labels            map[string]string `json:"labels"`
+				DeletionTimestamp string            `json:"deletionTimestamp"`
 			} `json:"metadata"`
 			Spec struct {
 				Template struct {
@@ -856,8 +860,9 @@ func DecodeWorkloadImageRefs(body []byte) ([]model.WorkloadImageRef, error) {
 			images = append(images, item.Spec.Compute.Image)
 		}
 		refs = append(refs, model.WorkloadImageRef{
-			Labels: item.Metadata.Labels,
-			Images: images,
+			Labels:            item.Metadata.Labels,
+			Images:            images,
+			DeletionTimestamp: strings.TrimSpace(item.Metadata.DeletionTimestamp),
 		})
 	}
 	return refs, nil
@@ -1029,6 +1034,8 @@ func DecodeWorkloadRollouts(kind string, body []byte) ([]model.WorkloadRollout, 
 			ReadyConditionTrue: slices.ContainsFunc(st.Conditions, func(c model.FluxCondition) bool {
 				return c.Type == "Ready" && c.Status == "True"
 			}),
+			DeletionTimestamp: strings.TrimSpace(item.Metadata.DeletionTimestamp),
+			Finalizers:        slices.Clone(item.Metadata.Finalizers),
 		})
 	}
 	return workloads, nil
