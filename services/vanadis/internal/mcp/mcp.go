@@ -38,7 +38,8 @@ const (
 // still learn build/chunk lifecycle rules and ID provenance.
 const ServerInstructions = `Read state first: get_build (by build_id, or by thread_id which resolves to that thread's latest running build, else its most recent build) returns status and chunk IDs; get_chunk returns full instructions by chunk_id or build_id + chunk_ref (chunk ID or 0-based index).
 update_chunk and remove_chunk only work on chunks still pending; running, completed or failed chunks are rejected with a conflict. append_chunk adds pending chunks to the end of a build; update_build replaces the build title, objective or shared_context.
-fail_chunk is terminal: it fails the chunk and the whole build and wakes the build's thread. Call it only for an unrecoverable blocker in the chunk you are executing, never for fixable test, lint or CI failures; fix forward instead.`
+An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then paused as failed.
+fail_chunk fails the chunk and pauses the build for a resumable retry (retry_action_chunk). Use it for blockers, not for fixable test, lint or CI failures; fix forward instead.`
 
 // MCPChunkBrief captures the concise chunk fields exposed in MCP build listings.
 type MCPChunkBrief struct {
@@ -178,6 +179,37 @@ type MCPFailChunkOutput struct {
 	BuildID string `json:"build_id"`
 	ChunkID string `json:"chunk_id"`
 	Failed  bool   `json:"failed"`
+}
+
+// MCPCompleteChunkArgs defines arguments for complete_chunk tool.
+type MCPCompleteChunkArgs struct {
+	ChunkID    string `json:"chunk_id"    jsonschema:"Action chunk ID to complete"`
+	DispatchID string `json:"dispatch_id" jsonschema:"Current action dispatch identity"`
+	Summary    string `json:"summary"     jsonschema:"Summary of the PASS evidence"`
+}
+
+// MCPCompleteChunkOutput defines output for complete_chunk tool.
+type MCPCompleteChunkOutput struct {
+	Status    string `json:"status"`
+	BuildID   string `json:"build_id"`
+	ChunkID   string `json:"chunk_id"`
+	Completed bool   `json:"completed"`
+}
+
+// completeChunkPayload mirrors the Restate CompleteChunk ingress body.
+type completeChunkPayload struct {
+	BuildID    string `json:"build_id"`
+	ChunkID    string `json:"chunk_id"`
+	DispatchID string `json:"dispatch_id"`
+	Summary    string `json:"summary"`
+}
+
+// completeChunkResponse mirrors the Restate CompleteChunk ingress response.
+type completeChunkResponse struct {
+	Status    string `json:"status"`
+	BuildID   string `json:"build_id"`
+	ChunkID   string `json:"chunk_id"`
+	Completed bool   `json:"completed"`
 }
 
 // updateBuildPayload mirrors the Restate UpdateBuild ingress body.
@@ -713,6 +745,48 @@ func (h *Handler) handleMCPFailChunk(ctx context.Context, args MCPFailChunkArgs)
 	}, nil
 }
 
+func (h *Handler) handleMCPCompleteChunk(ctx context.Context, args MCPCompleteChunkArgs) (MCPCompleteChunkOutput, error) {
+	if h.Store == nil {
+		return MCPCompleteChunkOutput{}, errors.New("vanadis store not configured")
+	}
+	chunkID := strings.TrimSpace(args.ChunkID)
+	dispatchID := strings.TrimSpace(args.DispatchID)
+	summary := strings.TrimSpace(args.Summary)
+	if chunkID == "" || dispatchID == "" || summary == "" {
+		return MCPCompleteChunkOutput{}, fmt.Errorf("%w: chunk_id, dispatch_id and summary are required", model.ErrInvalidBuildInput)
+	}
+	var caller k8sauth.CallerIdentity
+	if h.authEnabled() {
+		var ok bool
+		if caller, ok = k8sauth.CallerFromContext(ctx); !ok {
+			return MCPCompleteChunkOutput{}, errors.New("unauthorized: missing caller identity")
+		}
+	}
+	_, targetBuild, err := h.Store.GetChunk(ctx, chunkID)
+	if err != nil {
+		return MCPCompleteChunkOutput{}, err
+	}
+	if targetBuild == nil {
+		return MCPCompleteChunkOutput{}, model.ErrBuildNotFound
+	}
+	if h.authEnabled() {
+		agent := defaultAgent
+		if targetBuild.Agent != "" {
+			agent = targetBuild.Agent
+		}
+		if err := h.Auth.Authorize(ctx, caller, "builds", "update", agent); err != nil {
+			return MCPCompleteChunkOutput{}, err
+		}
+	}
+	req := completeChunkPayload{BuildID: targetBuild.ID, ChunkID: chunkID, DispatchID: dispatchID, Summary: summary}
+	path := h.Restate.ObjectPath(config.BuildServiceName(targetBuild.RunnerAgent), targetBuild.ID, "CompleteChunk")
+	var resp completeChunkResponse
+	if err := h.Restate.CallIngressKeyed(ctx, path, "complete:"+dispatchID, req, &resp); err != nil {
+		return MCPCompleteChunkOutput{}, err
+	}
+	return MCPCompleteChunkOutput(resp), nil
+}
+
 // RegisterTools registers every Vanadis MCP tool on the given server.
 func (h *Handler) RegisterTools(mcpServer *mcp.Server) {
 	h.registerRetryActionTool(mcpServer)
@@ -766,9 +840,17 @@ func (h *Handler) RegisterTools(mcpServer *mcp.Server) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "fail_chunk",
-		Description: "Mark an unrecoverable action chunk as failed, terminating the build.",
+		Description: "Fail an action chunk and pause the build for a resumable retry (retry_action_chunk). Use for blockers, not for fixable test, lint or CI failures.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPFailChunkArgs) (*mcp.CallToolResult, MCPFailChunkOutput, error) {
 		out, err := h.handleMCPFailChunk(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "complete_chunk",
+		Description: "Complete an action chunk with an explicit verdict. An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then paused as failed.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPCompleteChunkArgs) (*mcp.CallToolResult, MCPCompleteChunkOutput, error) {
+		out, err := h.handleMCPCompleteChunk(ctx, args)
 		return nil, out, err
 	})
 }

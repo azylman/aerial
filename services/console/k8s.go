@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -22,26 +22,6 @@ var (
 	kubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	k8sHTTPClient = buildK8sHTTPClient()
 )
-
-func loadK8sCertPool(caPath string) *x509.CertPool {
-	if caPath == "" {
-		return nil
-	}
-	caData, err := os.ReadFile(caPath)
-	if err != nil || len(caData) == 0 {
-		return nil
-	}
-	certPool, err := x509.SystemCertPool()
-	if err != nil || certPool == nil {
-		certPool = x509.NewCertPool()
-	} else {
-		certPool = certPool.Clone()
-	}
-	if certPool.AppendCertsFromPEM(caData) {
-		return certPool
-	}
-	return nil
-}
 
 func buildK8sHTTPClient() *http.Client {
 	transport := &http.Transport{
@@ -52,7 +32,7 @@ func buildK8sHTTPClient() *http.Client {
 		}).DialContext,
 		IdleConnTimeout: 90 * time.Second,
 	}
-	if rootCAs := loadK8sCertPool(kubeCAPath); rootCAs != nil {
+	if rootCAs := k8sauth.LoadCAPool(kubeCAPath); rootCAs != nil {
 		transport.TLSClientConfig = &tls.Config{
 			RootCAs: rootCAs,
 		}

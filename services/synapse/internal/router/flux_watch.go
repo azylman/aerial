@@ -104,22 +104,22 @@ func (s *RouterServer) trackedRollouts(ctx context.Context) ([]trackedRollout, e
 // ApplyKustomizationList satisfies flux.RolloutSink.
 // Each sink call snapshots the effect owner once for everything it applies.
 func (s *RouterServer) ApplyKustomizationList(ctx context.Context, namespace string, observations []model.KustomizationObservation) error {
-	return s.applyKustomizationList(stampEffectsOwner(ctx), namespace, observations)
+	return s.applyKustomizationList(s.stampEffectsOwner(ctx), namespace, observations)
 }
 
 // ApplyKustomizationStatus satisfies flux.RolloutSink.
 func (s *RouterServer) ApplyKustomizationStatus(ctx context.Context, obs model.KustomizationObservation) error {
-	return s.applyKustomizationStatus(stampEffectsOwner(ctx), obs)
+	return s.applyKustomizationStatus(s.stampEffectsOwner(ctx), obs)
 }
 
 // ApplyKustomizationDeleted satisfies flux.RolloutSink.
 func (s *RouterServer) ApplyKustomizationDeleted(ctx context.Context, ref model.FluxKustomizationRef) error {
-	return s.applyKustomizationDeleted(stampEffectsOwner(ctx), ref)
+	return s.applyKustomizationDeleted(s.stampEffectsOwner(ctx), ref)
 }
 
 // HasPendingRollouts satisfies flux.RolloutSink.
 func (s *RouterServer) HasPendingRollouts(ctx context.Context) (bool, error) {
-	return s.hasPendingRollouts(stampEffectsOwner(ctx))
+	return s.hasPendingRollouts(s.stampEffectsOwner(ctx))
 }
 
 // applyKustomizationList reconciles a full LIST: every observation is applied, and any pending request
