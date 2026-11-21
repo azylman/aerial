@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -87,7 +88,9 @@ type DeployPublishedOutcome struct {
 
 // ResolveDeployDispatchDecision computes the deploy_success publish verdict
 // without recording anything. Stale SHAs drop and same-epoch terminal states
-// absorb with no publish. A dispatch is fully deduped only when the
+// absorb with no publish. A watcher-tracked rollout publishes only when
+// DeploySuccessDue (once per PR, on its last Kustomization). A dispatch is
+// fully deduped only when the
 // deploy_dispatch effect key is recorded and a WasDispatched slot hits;
 // every other applied dispatch must publish, so an unrecorded publish is
 // always retried instead of lost.
@@ -100,12 +103,37 @@ func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecisi
 	}
 	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
 	out := DeployDispatchDecision{Disposition: DispositionApply, EffectKey: key.String()}
+	if !s.DeploySuccessDue(ev.JobName) {
+		return out, nil
+	}
 	if s.WasEffectDispatched(key) && WasDispatched(s, ev.Repo, ev.JobName, ev.HeadSHA, ev.PRNumber) {
 		out.Deduped = true
 		return out, nil
 	}
 	out.ShouldPublish = true
 	return out, nil
+}
+
+// DeploySuccessDue reports whether a deploy_success for jobName may publish.
+// A PR without recorded Kustomization requests (direct alert, sync) always
+// may. A watcher-tracked rollout publishes once per PR, like the legacy
+// MarkKustomizationsDeployed transition: only while deploy_success_pending
+// is set (the last Kustomization already flipped the row) or when jobName is
+// the last outstanding request of a deploying rollout.
+func (s *PRState) DeploySuccessDue(jobName string) bool {
+	if s == nil || len(s.KustomizationRequests) == 0 || s.DeploySuccessPending {
+		return true
+	}
+	if !statusIn(s.Status, RegistryStatusDeploying, RegistryStatusDeployFailed) {
+		return false
+	}
+	done := unionStrings(s.DeployedKustomizations, jobName)
+	for name := range s.KustomizationRequests {
+		if !slices.Contains(done, name) {
+			return false
+		}
+	}
+	return true
 }
 
 // RecordDeployPublished marks one confirmed deploy_success publish: the
@@ -391,7 +419,9 @@ func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext,
 	if p == nil {
 		return nil
 	}
-	if !current || !st.ApplyRegistryDeployFailed(p.Banner) {
+	// Like legacy AtomicTransitionDeployFailed, exhaustion writes no banner;
+	// the failure detail rides the deploy_failed fact.
+	if !current || !st.ApplyRegistryDeployFailed("") {
 		restate.Set(ctx, s.stateKey, st)
 		return nil
 	}

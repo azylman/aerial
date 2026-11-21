@@ -734,16 +734,30 @@ func (s *PRState) ApplyEvent(ev PREvent) EventDisposition {
 	if s.Terminal.Absorbing() && ev.ReopenEpoch <= s.ReopenEpoch {
 		return DispositionAbsorbTerminal
 	}
-	if ref := strings.TrimSpace(ev.HeadSHA); ref == "" {
-		ref = strings.TrimSpace(ev.MergeSHA)
-		if ref != "" && s.HeadSHA != "" && !strings.EqualFold(s.HeadSHA, ref) {
+	head := strings.TrimSpace(ev.HeadSHA)
+	if head == "" || IsMergeOnlyRef(head, ev.MergeSHA) {
+		// A merge-only reference (direct deploy alert, sync success, or a
+		// squash-merge push) names the merge commit, which is never the PR
+		// head: judge it against the stored merge SHA, and apply while no
+		// merge SHA is known yet.
+		merge := strings.TrimSpace(ev.MergeSHA)
+		if merge != "" && !IsZeroSHA(merge) && s.MergeSHA != "" && !strings.EqualFold(s.MergeSHA, merge) && !strings.EqualFold(s.HeadSHA, merge) {
 			return DispositionDropStale
 		}
 		return DispositionApply
-	} else if s.HeadSHA != "" && IsStaleEvent(s.HeadSHA, ref) {
+	}
+	if s.HeadSHA != "" && IsStaleEvent(s.HeadSHA, head) {
 		return DispositionDropStale
 	}
 	return DispositionApply
+}
+
+// IsMergeOnlyRef reports whether an event's head SHA is only its merge SHA
+// (synapse resolves a squash-merge push or deploy alert to the PR and sends
+// the pushed commit as both).
+func IsMergeOnlyRef(headSHA, mergeSHA string) bool {
+	head, merge := strings.TrimSpace(headSHA), strings.TrimSpace(mergeSHA)
+	return head != "" && !IsZeroSHA(head) && strings.EqualFold(head, merge)
 }
 
 // RepoState is the Restate-owned per-repo state: the bounded main-push

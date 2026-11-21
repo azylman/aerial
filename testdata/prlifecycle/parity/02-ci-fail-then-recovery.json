@@ -1,0 +1,229 @@
+{
+  "name": "02-ci-fail-then-recovery",
+  "description": "A lint failure moves the PR to ci_failed, publishes ci_failed and triggers the auto-update cascade; the recovering success reopens it, publishes the recovery synchronize and check_updated facts, and re-triggers the cascade for the check.",
+  "github_routes": {
+    "GET /repos/azylman/aerial/pulls": "[]"
+  },
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 102,
+        "branch": "feat/ci",
+        "head_sha": "h102",
+        "target_id": "100000000000000001",
+        "title": "CI PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "check_run",
+      "payload": {
+        "action": "completed",
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "check_run": {
+          "name": "lint",
+          "head_sha": "h102",
+          "status": "completed",
+          "conclusion": "failure",
+          "pull_requests": [
+            {
+              "number": 102,
+              "head": {
+                "ref": "feat/ci",
+                "sha": "h102"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "github",
+      "event": "check_run",
+      "payload": {
+        "action": "completed",
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "check_run": {
+          "name": "lint",
+          "head_sha": "h102",
+          "status": "completed",
+          "conclusion": "success",
+          "pull_requests": [
+            {
+              "number": 102,
+              "head": {
+                "ref": "feat/ci",
+                "sha": "h102"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 102,
+        "branch": "feat/ci",
+        "head_sha": "h102",
+        "target_id": "100000000000000001",
+        "title": "CI PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        },
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleCheckFailed",
+      "event": {
+        "pr_number": 102,
+        "head_sha": "h102",
+        "check_name": "lint",
+        "branch": "feat/ci",
+        "facts": [
+          {
+            "event": "ci_failed",
+            "repo": "azylman/aerial",
+            "pr_number": 102,
+            "head_sha": "h102",
+            "check_name": "lint"
+          }
+        ],
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleAutoUpdate",
+      "event": {
+        "pr_number": 102,
+        "head_sha": "h102",
+        "auto_update": {
+          "authors": [
+            "azylman"
+          ],
+          "default_owner": true
+        },
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleCIRecovered",
+      "event": {
+        "pr_number": 102,
+        "head_sha": "h102",
+        "check_name": "lint",
+        "branch": "feat/ci",
+        "facts": [
+          {
+            "event": "synchronize",
+            "repo": "azylman/aerial",
+            "pr_number": 102,
+            "head_sha": "h102"
+          }
+        ],
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleCheckStatus",
+      "event": {
+        "pr_number": 102,
+        "head_sha": "h102",
+        "check_name": "lint",
+        "check_state": "passed",
+        "branch": "feat/ci",
+        "facts": [
+          {
+            "event": "check_updated",
+            "repo": "azylman/aerial",
+            "pr_number": 102,
+            "head_sha": "h102",
+            "check_name": "lint"
+          }
+        ],
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleAutoUpdate",
+      "event": {
+        "pr_number": 102,
+        "head_sha": "h102",
+        "check_name": "lint",
+        "auto_update": {
+          "authors": [
+            "azylman"
+          ],
+          "default_owner": true
+        },
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_ci_failed",
+      "key": "azylman/aerial#102@h102:pr_fact_ci_failed:check=lint"
+    },
+    {
+      "kind": "github_auto_update",
+      "key": "azylman/aerial#102@h102:github_auto_update"
+    },
+    {
+      "kind": "pr_fact_synchronize",
+      "key": "azylman/aerial#102@h102:pr_fact_synchronize"
+    },
+    {
+      "kind": "pr_fact_check_updated",
+      "key": "azylman/aerial#102@h102:pr_fact_check_updated:check=lint"
+    },
+    {
+      "kind": "github_auto_update",
+      "key": "azylman/aerial#102@h102:github_auto_update:check=lint"
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 102,
+      "branch": "feat/ci",
+      "head_sha": "h102",
+      "merge_sha": "",
+      "target_id": "100000000000000001",
+      "status": "open",
+      "title": "CI PR",
+      "metadata": {
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "ci_checks": {
+          "lint": "passed"
+        }
+      }
+    }
+  ]
+}

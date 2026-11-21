@@ -504,6 +504,7 @@ func TestPRStateApplyEventStale(t *testing.T) {
 	tests := []struct {
 		name    string
 		current string
+		stored  string
 		event   string
 		merge   string
 		want    EventDisposition
@@ -512,7 +513,11 @@ func TestPRStateApplyEventStale(t *testing.T) {
 		{name: "stale sha drops", current: "abc123", event: "def456", merge: "", want: DispositionDropStale},
 		{name: "no current head applies", current: "", event: "abc123", merge: "", want: DispositionApply},
 		{name: "merge sha match applies", current: "abc123", event: "", merge: "abc123", want: DispositionApply},
-		{name: "merge sha mismatch drops", current: "abc123", event: "", merge: "zzz999", want: DispositionDropStale},
+		{name: "merge-only sha before the merge is known applies", current: "abc123", event: "", merge: "zzz999", want: DispositionApply},
+		{name: "merge-only sha matching the stored merge applies", current: "abc123", stored: "zzz999", event: "", merge: "zzz999", want: DispositionApply},
+		{name: "merge-only sha against another stored merge drops", current: "abc123", stored: "mmm111", event: "", merge: "zzz999", want: DispositionDropStale},
+		{name: "squash push carrying the merge sha as head applies", current: "abc123", event: "zzz999", merge: "zzz999", want: DispositionApply},
+		{name: "squash push against another stored merge drops", current: "abc123", stored: "mmm111", event: "zzz999", merge: "zzz999", want: DispositionDropStale},
 		{name: "empty event applies", current: "abc123", event: "", merge: "", want: DispositionApply},
 	}
 	for _, tc := range tests {
@@ -520,6 +525,7 @@ func TestPRStateApplyEventStale(t *testing.T) {
 			t.Parallel()
 			s := NewPRState("aerial", 101)
 			s.RecordFailedCISHA(tc.current)
+			s.MergeSHA = tc.stored
 			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.event, MergeSHA: tc.merge}
 			if got := s.ApplyEvent(ev); got != tc.want {
 				t.Fatalf("ApplyEvent = %q, want %q", got, tc.want)
@@ -1056,6 +1062,52 @@ func TestPRState_OwnerAgent(t *testing.T) {
 			t.Parallel()
 			if got := tc.state.OwnerAgent(); got != tc.want {
 				t.Fatalf("OwnerAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsMergeOnlyRef(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		head  string
+		merge string
+		want  bool
+	}{
+		{name: "squash push carries the merge commit as head", head: "c112", merge: "c112", want: true},
+		{name: "case and space are ignored", head: " C112 ", merge: "c112", want: true},
+		{name: "distinct head is a real head", head: "h112", merge: "c112"},
+		{name: "empty head is not a ref", head: "", merge: ""},
+		{name: "zero head is not a ref", head: "0000000000000000000000000000000000000000", merge: "0000000000000000000000000000000000000000"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsMergeOnlyRef(tc.head, tc.merge); got != tc.want {
+				t.Fatalf("IsMergeOnlyRef(%q, %q) = %v, want %v", tc.head, tc.merge, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPRBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{name: "pr branch is kept", branch: "feat/x", want: "feat/x"},
+		{name: "main is dropped", branch: "main", want: ""},
+		{name: "main ref is dropped", branch: " refs/heads/main ", want: ""},
+		{name: "other refs are kept", branch: "refs/heads/feat/x", want: "refs/heads/feat/x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := prBranch(tc.branch); got != tc.want {
+				t.Fatalf("prBranch(%q) = %q, want %q", tc.branch, got, tc.want)
 			}
 		})
 	}

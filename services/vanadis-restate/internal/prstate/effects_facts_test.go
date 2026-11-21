@@ -330,8 +330,8 @@ func deployingMergedPR() *PRState {
 }
 
 // TestPRObjectServiceHandleDeploySuccess pins the merged deploy_success
-// verdict: an undispatched deploy commits the dispatch key, both dedup
-// slots and the deployed status, disarms a pending failure deadline, indexes
+// verdict: an undispatched deploy commits the dispatch key and both dedup
+// slots (leaving an untracked rollout's status alone), disarms a pending failure deadline, indexes
 // the PR as deployed, then publishes (restate) or records (legacy) the fact;
 // a fully deduped deploy commits nothing.
 func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
@@ -397,7 +397,9 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 			require.Equal(t, tc.wantCalls, pub.Calls())
 			require.Equal(t, tc.wantSet, rec.setCalled)
 			if tc.wantSet {
-				require.Equal(t, RegistryStatusDeployed, rec.saved.Status)
+				// No Kustomization requests: a direct-alert deploy never
+				// flips the registry status, matching legacy synapse.
+				require.Equal(t, RegistryStatusDeploying, rec.saved.Status)
 				require.True(t, rec.saved.WasDeployedPR())
 				require.Nil(t, rec.saved.PendingDeployFailure)
 				require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(factKey("pr_fact_deploy_success", "m1", "eri")))

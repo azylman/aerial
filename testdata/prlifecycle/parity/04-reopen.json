@@ -1,0 +1,140 @@
+{
+  "name": "04-reopen",
+  "description": "A closed-unmerged PR that is reopened starts a new reopen epoch; legacy publishes nothing on reopen and leaves the row closed.",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 104,
+        "branch": "feat/reopen",
+        "head_sha": "h104",
+        "target_id": "100000000000000001",
+        "title": "Reopen PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 104,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 104,
+          "title": "Reopen PR",
+          "state": "closed",
+          "merged": false,
+          "head": {
+            "ref": "feat/reopen",
+            "sha": "h104"
+          },
+          "base": {
+            "ref": "main"
+          }
+        }
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "reopened",
+        "number": 104,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 104,
+          "title": "Reopen PR",
+          "state": "open",
+          "merged": false,
+          "head": {
+            "ref": "feat/reopen",
+            "sha": "h104"
+          },
+          "base": {
+            "ref": "main"
+          }
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 104,
+        "branch": "feat/reopen",
+        "head_sha": "h104",
+        "target_id": "100000000000000001",
+        "title": "Reopen PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        },
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleClosed",
+      "event": {
+        "pr_number": 104,
+        "head_sha": "h104",
+        "branch": "feat/reopen",
+        "facts": [
+          {
+            "event": "closed_unmerged",
+            "repo": "azylman/aerial",
+            "pr_number": 104,
+            "head_sha": "h104"
+          }
+        ],
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleReopened",
+      "event": {
+        "pr_number": 104,
+        "head_sha": "h104",
+        "branch": "feat/reopen",
+        "title": "Reopen PR",
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_closed_unmerged",
+      "key": "azylman/aerial#104@h104:pr_fact_closed_unmerged"
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 104,
+      "branch": "feat/reopen",
+      "head_sha": "h104",
+      "merge_sha": "",
+      "target_id": "100000000000000001",
+      "status": "closed",
+      "title": "Reopen PR",
+      "metadata": {
+        "agent": "aerial",
+        "bot_id": "aerial"
+      }
+    }
+  ]
+}

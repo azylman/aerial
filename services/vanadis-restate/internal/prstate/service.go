@@ -44,6 +44,8 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // Frozen Restate service names. They match the synapse ingress invoker
@@ -135,6 +137,17 @@ func (s *PRObjectService) mutateDeployEvent(ctx restate.ObjectContext, ev PREven
 }
 
 func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, phase eventPhase, mutate func(*PRState)) error {
+	return s.mutatePhaseEvent(ctx, ev, phase, func(st *PRState, _ *PREvent) {
+		if mutate != nil {
+			mutate(st)
+		}
+	})
+}
+
+// mutatePhaseEvent is mutatePhase for handlers whose transition decides
+// which of the carried facts still apply: mutate may trim ev.Facts before
+// they run.
+func (s *PRObjectService) mutatePhaseEvent(ctx restate.ObjectContext, ev PREvent, phase eventPhase, mutate func(*PRState, *PREvent)) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -147,9 +160,7 @@ func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, pha
 	}
 	before := snapshotIndexView(st)
 	applyEventRow(st, ev)
-	if mutate != nil {
-		mutate(st)
-	}
+	mutate(st, &ev)
 	restate.Set(ctx, s.stateKey, st)
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
 		sendPRIndex(ctx, st, ev, lifecycle)
@@ -173,12 +184,25 @@ func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition 
 // changes arrive through HandleSynchronized or Register), branch/title
 // identity, and a missing target ID.
 func applyEventRow(st *PRState, ev PREvent) {
-	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) && st.Terminal != TerminalMerged {
+	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) && st.Terminal != TerminalMerged &&
+		(st.HeadSHA == "" || !IsMergeOnlyRef(head, ev.MergeSHA)) {
 		st.HeadSHA = head
 	}
-	st.ApplyIdentity(ev.Branch, ev.Title)
+	st.ApplyIdentity(prBranch(ev.Branch), ev.Title)
 	if tid := strings.TrimSpace(ev.TargetID); st.TargetID == "" && IsValidDiscordSnowflake(tid) {
 		st.TargetID = tid
+	}
+}
+
+// prBranch drops a main-branch ref: deploy-phase events and squash-merge
+// pushes carry the branch the workflow or push ran on, which is never the
+// PR head branch the registry row keeps.
+func prBranch(branch string) string {
+	switch strings.TrimSpace(branch) {
+	case "main", "refs/heads/main":
+		return ""
+	default:
+		return branch
 	}
 }
 
@@ -425,8 +449,25 @@ func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev P
 	})
 }
 
-// HandleMerged applies one merge event dark.
+// HandleMerged applies one merge event. A squash-merge push that arrives
+// before pull_request.closed merges the PR on its merge SHA; the later
+// closed event for the same merge SHA no longer changes state but still runs
+// its carried facts, because legacy synapse publishes a merged fact for both
+// (each keyed on its own head SHA, so true redeliveries still dedupe).
 func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) error {
+	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return nil
+	}
+	st, err := s.loadOrCreatePRState(ctx, ev)
+	if err != nil {
+		return err
+	}
+	if st.Terminal == TerminalMerged && ev.ReopenEpoch <= st.ReopenEpoch && len(ev.Facts) > 0 &&
+		st.MergeSHA != "" && strings.EqualFold(st.MergeSHA, strings.TrimSpace(ev.MergeSHA)) {
+		s.runFacts(ctx, st, ev.EffectsOwner, ev.Facts)
+		s.afterCommit(ctx, st, ev.EffectsOwner)
+		return nil
+	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearFailedCISHA()
 		st.MarkTerminal(TerminalMerged)
@@ -470,12 +511,33 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 // (flipping the PR to deployed once every request completed), and a carried
 // job state records into job_states. RepoObject kustomization-status
 // forwards carry no ready lists and only refresh the row.
+//
+// A carried rollout_updated fact publishes only while the rollout is still
+// deploying: once the last Kustomization flips the PR to deployed, the
+// deploy_success verdict publishes instead, exactly like the legacy watcher.
 func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+	return s.mutatePhaseEvent(ctx, ev, phaseDeploy, func(st *PRState, ev *PREvent) {
 		st.MarkJobsDeployed(ev.DeployedJobs)
 		st.MarkKustomizationsDeployed(ev.DeployedKustomizations)
 		st.RecordJobState(ev.JobName, ev.JobState)
+		if st.Status == RegistryStatusDeployed {
+			ev.Facts = withoutFactEvent(ev.Facts, FactRolloutUpdated)
+		}
 	})
+}
+
+// FactRolloutUpdated is the watcher's per-Kustomization progress fact.
+const FactRolloutUpdated = "rollout_updated"
+
+// withoutFactEvent drops every fact named event.
+func withoutFactEvent(facts []pubsub.PRLifecycleEvent, event string) []pubsub.PRLifecycleEvent {
+	var out []pubsub.PRLifecycleEvent
+	for _, f := range facts {
+		if !strings.EqualFold(strings.TrimSpace(f.Event), event) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // HandleSynchronized advances the PR head on a synchronize under the
@@ -564,7 +626,15 @@ func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRS
 	if err != nil || out.Disposition != DispositionApply {
 		return out, err
 	}
-	st.AckDeploySuccess()
+	// Only a watcher-tracked rollout flips the row: legacy records the
+	// completed Kustomization and clears deploy_success_pending, while direct
+	// alert and sync deploys never touch the registry status.
+	if len(st.KustomizationRequests) > 0 {
+		st.MarkKustomizationsDeployed([]string{ev.JobName})
+		if st.Status == RegistryStatusDeployed {
+			st.AckDeploySuccess()
+		}
+	}
 	st.DisarmDeployFailure()
 	restate.Set(ctx, s.stateKey, st)
 	if !out.Deduped {

@@ -64,6 +64,8 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	failedDeploy := svcRow("h1", "m1", RegistryStatusDeployFailed, TerminalMerged)
 	pendingDeployed := svcRow("h1", "m1", RegistryStatusDeployed, TerminalMerged)
 	pendingDeployed.DeploySuccessPending = true
+	pendingDeployed.KustomizationRequests = map[string]KustomizationRequest{"core": {Namespace: "flux-system"}}
+	pendingDeployed.DeployedKustomizations = []string{"core"}
 	conflicted := svcRow("h1", "", RegistryStatusConflict, TerminalNone)
 	conflicted.MarkConflictPublished("h1")
 	failedCI := svcRow("h1", "", RegistryStatusCIFailed, TerminalNone)
@@ -153,7 +155,7 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 		},
 		{
 			name: "deploy success ack clears pending", got: err12, rec: rec12, wantSet: true,
-			want: registryRowView{Status: RegistryStatusDeployed, HeadSHA: "h1", MergeSHA: "m1"},
+			want: registryRowView{Status: RegistryStatusDeployed, HeadSHA: "h1", MergeSHA: "m1", DeployedKustomizations: []string{"core"}},
 		},
 		{
 			name: "merged build metadata records on merge sha", got: svc.HandleBuildMetadata(restate.WithMockContext(mc13), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", BuildMetadata: meta("final", 9, 1, 90, "m1", 1)}), rec: rec13, wantSet: true,
