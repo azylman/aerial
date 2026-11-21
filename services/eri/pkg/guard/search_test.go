@@ -522,15 +522,6 @@ func TestPsqlGuard(t *testing.T) {
 
 	tests := psqlGuardTestCases(twoCols, threeCols, cteCols, embedCols, meta3, rel3, schemaRows, limitPlan, aggLimitPlan, overLimitPlan, unboundedPlan, pkPlan, dmlPlan)
 
-	t.Setenv("DATABASE_URL", "postgres://127.0.0.1:1/aerial?connect_timeout=1")
-	if d := CheckSearch("run_command", ToolArgs{CommandLine: `psql -c "SELECT id FROM messages LIMIT 1"`}); d.Decision != DecisionAllow {
-		t.Fatalf("expected allow on unreachable default describer, got %+v", d)
-	}
-	t.Setenv("DATABASE_URL", ":memory:")
-	if DefaultSQLDescriber() != nil {
-		t.Fatalf("expected nil describer for :memory:")
-	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runPsqlGuardCase(t, tc)
@@ -601,6 +592,37 @@ func TestSearchParsers(t *testing.T) {
 			args := ParseArgs([]byte(tc.rawJSON))
 			if args.FilePath() != tc.wantFile || args.CommandLine != tc.wantCmd {
 				t.Fatalf("ParseArgs(%q) = %+v, want file=%q cmd=%q", tc.rawJSON, args, tc.wantFile, tc.wantCmd)
+			}
+		})
+	}
+}
+
+func TestDefaultSQLDescriber(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		databaseURL string
+		wantNil     bool
+	}{
+		{"unset", "", true},
+		{"whitespace", "   ", true},
+		{"memory", ":memory:", true},
+		{"sqlite", "sqlite:///tmp/x.db", true},
+		{"postgres refused on loopback", "postgres://127.0.0.1:1/aerial?connect_timeout=1", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			desc := DefaultSQLDescriber(mapEnv(map[string]string{"DATABASE_URL": tc.databaseURL}))
+			if (desc == nil) != tc.wantNil {
+				t.Fatalf("DefaultSQLDescriber(%q) nil = %v, want %v", tc.databaseURL, desc == nil, tc.wantNil)
+			}
+			if desc == nil {
+				return
+			}
+			// A refused connection fails open: no statement info and no error.
+			if info, err := desc.Describe(context.Background(), "SELECT 1"); info != nil || err != nil {
+				t.Fatalf("Describe on refused loopback DSN = (%v, %v), want (nil, nil)", info, err)
 			}
 		})
 	}
