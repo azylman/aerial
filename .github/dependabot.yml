@@ -39,6 +39,7 @@ updates:
     directories:
       - "/pkg"
       - "/scripts/code-health"
+      - "/scripts/affected"
       - "/mcp/docket-mcp"
       - "/mcp/kernel-mcp"
       - "/services/coven"
