@@ -72,8 +72,6 @@ func (r *Router) dispatchCommand(ctx context.Context, s *discordgo.Session, i *d
 		r.handleStatus(ctx, s, i)
 	case "quota":
 		r.handleQuota(s, i)
-	case "rotate":
-		r.handleRotate(ctx, s, i, data)
 	case "interrupt":
 		r.handleInterrupt(ctx, s, i, data)
 	case optionMode:

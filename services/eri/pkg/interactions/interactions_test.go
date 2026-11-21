@@ -270,11 +270,10 @@ func TestApplicationCommandsAndHelpers(t *testing.T) {
 	}
 
 	tests := []appCommandHelperTestCase{
-		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 6},
+		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 5},
 		{"CmdDef_status", "cmd_opts", "status", 0, 0, "", false, 0},
 		{"CmdDef_quota", "cmd_opts", "quota", 0, 0, "", false, 0},
-		{"CmdDef_rotate", "cmd_opts", "rotate", 0, 0, "", false, 2},
-		{"CmdDef_interrupt", "cmd_opts", "interrupt", 0, 0, "", false, 2},
+		{"CmdDef_interrupt", "cmd_opts", "interrupt", 0, 0, "", false, 0},
 		{"CmdDef_mode", "cmd_opts", "mode", 0, 0, "", false, 2},
 		{"CmdDef_ignore_bots", "cmd_opts", "ignore_bots", 0, 0, "", false, 2},
 		{"GetBool_True", "bool", "opt_true", 0, 0, "", true, 0},
@@ -673,12 +672,8 @@ func runSessionAndQueueCommandCase(t *testing.T, tc sessionQueueTestCase) {
 
 func TestRouter_SessionAndQueueCommands(t *testing.T) {
 	tests := []sessionQueueTestCase{
-		{"Rotate_BareAndTopic", "rotate", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("bare", discordgo.ApplicationCommandOptionBoolean, true), mkOpt("topic", discordgo.ApplicationCommandOptionString, "refactor queue")}, false, false, false, 0, 2, []string{"Bare session wipe complete", "refactor queue"}, nil},
-		{"Rotate_NormalFresh", "rotate", nil, false, false, false, 0, 2, []string{"Fresh context initialized"}, nil},
-		{"Rotate_StoreFailureAndPools", "rotate", nil, false, true, true, 0, 2, nil, nil},
-		{"Interrupt_DrainAndReset", "interrupt", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("drain_queue", discordgo.ApplicationCommandOptionBoolean, true), mkOpt("reset", discordgo.ApplicationCommandOptionBoolean, true)}, true, false, false, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged", "Session rotated"}, nil},
-		{"Interrupt_NoFlagsAndFailures", "interrupt", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("drain_queue", discordgo.ApplicationCommandOptionBoolean, false), mkOpt("reset", discordgo.ApplicationCommandOptionBoolean, false)}, false, true, true, 0, 1, []string{"Interrupted active turn execution"}, []string{"Pending message backlog purged", "Session rotated"}},
-		{"ErrorLogging_RotateHttp500", "rotate", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
+		{"Interrupt_DrainsAndPurges", "interrupt", nil, true, false, false, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged"}, []string{"Session rotated"}},
+		{"Interrupt_StoreAndPoolFailures", "interrupt", nil, false, true, true, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged"}, []string{"Session rotated"}},
 		{"ErrorLogging_InterruptHttp500", "interrupt", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
 	}
 
