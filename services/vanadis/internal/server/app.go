@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
@@ -137,18 +137,11 @@ func (s *VanadisServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	promhttp.Handler().ServeHTTP(w, r)
 }
 
-var newPgxPoolFn = pgxpool.NewWithConfig
-
 // InitPostgres initializes the PostgreSQL store backing the server.
 func InitPostgres(ctx context.Context, server *VanadisServer, pgURL string) (func(context.Context), error) {
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	pool, err := pgutil.NewPool(ctx, pgURL, pgutil.PoolOptions{MaxConns: 10, MinConns: 2})
 	if err != nil {
-		return nil, fmt.Errorf("parse postgres url: %w", err)
-	}
-	poolConfig.MaxConns, poolConfig.MinConns = 10, 2
-	pool, err := newPgxPoolFn(ctx, poolConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create pgxpool: %w", err)
+		return nil, err
 	}
 	server.SetStore(NewPostgresVanadisStore(pool))
 	return func(context.Context) {

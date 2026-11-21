@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
@@ -44,14 +45,17 @@ func TestHealthEndpoints(t *testing.T) {
 
 func TestRunApp_Shutdown(t *testing.T) {
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
-	origPing, origBus := pingPgxPoolFn, newBusFn
+	origPool, origBus := newPoolFn, newBusFn
 	t.Cleanup(func() {
 		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
-		pingPgxPoolFn, newBusFn = origPing, origBus
+		newPoolFn, newBusFn = origPool, origBus
 	})
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 	httpkit.WriteCountersDirFn = func(string) error { return nil }
-	pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error { return nil }
+	newPoolFn = func(ctx context.Context, dsn string, opts pgutil.PoolOptions) (*pgxpool.Pool, error) {
+		opts.Ping = false
+		return pgutil.NewPool(ctx, dsn, opts)
+	}
 	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
 
 	// Find two free ports for health and restate
@@ -106,14 +110,17 @@ func TestRunApp_Shutdown(t *testing.T) {
 
 func TestRunApp_ErrorCases(t *testing.T) {
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
-	origPing, origBus := pingPgxPoolFn, newBusFn
+	origPool, origBus := newPoolFn, newBusFn
 	t.Cleanup(func() {
 		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
-		pingPgxPoolFn, newBusFn = origPing, origBus
+		newPoolFn, newBusFn = origPool, origBus
 	})
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 	httpkit.WriteCountersDirFn = func(string) error { return nil }
-	pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error { return nil }
+	newPoolFn = func(ctx context.Context, dsn string, opts pgutil.PoolOptions) (*pgxpool.Pool, error) {
+		opts.Ping = false
+		return pgutil.NewPool(ctx, dsn, opts)
+	}
 	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
 
 	// 1. Invalid health port causes listen error
@@ -495,43 +502,20 @@ func TestInitPostgres(t *testing.T) {
 	tests := []struct {
 		name       string
 		url        string
-		mockFail   bool
-		pingFail   bool
 		wantErr    bool
 		wantSubstr string
 	}{
 		{name: "invalid url", url: "://invalid-url", wantErr: true, wantSubstr: "parse postgres url"},
-		{name: "pool creation error", url: "postgres://user:pass@localhost:5432/db", mockFail: true, wantErr: true, wantSubstr: "create pgxpool"},
-		{name: "ping error closes pool", url: "postgres://user:pass@localhost:5432/db", pingFail: true, wantErr: true, wantSubstr: "ping postgres"},
+		{name: "ping error closes pool", url: "postgres://user:pass@127.0.0.1:1/db", wantErr: true, wantSubstr: "ping postgres"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			closed := false
-			origNew, origPing, origClose := newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn
-			defer func() { newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn = origNew, origPing, origClose }()
-			closePgxPoolFn = func(pool *pgxpool.Pool) {
-				closed = true
-				origClose(pool)
-			}
-			if tc.mockFail {
-				newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
-					return nil, errors.New("mock pool fail")
-				}
-			}
-			if tc.pingFail {
-				pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error {
-					return errors.New("ping refused")
-				}
-			}
 			_, _, err := initPostgres(ctx, tc.url)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("initPostgres() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-			}
-			if tc.pingFail && !closed {
-				t.Fatal("expected pool to be closed on ping failure")
 			}
 		})
 	}
