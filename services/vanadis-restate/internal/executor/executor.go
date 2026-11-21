@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/cilog"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -90,7 +90,7 @@ func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubTo
 		EriClient:    eriClient,
 		bus:          bus,
 		gitHubToken:  gitHubToken,
-		GitHubAPIURL: "https://api.github.com",
+		GitHubAPIURL: githubapi.DefaultAPIURL,
 		HTTPClient:   httpClient,
 		deployUIURL:  dURL,
 	}
@@ -296,26 +296,4 @@ func (e *Executor) PublishExternalEvent(ctx context.Context, source, eventType s
 // returning a retryable error when a GitHub API call fails with a transport error or retryable HTTP status.
 func (e *Executor) ResolveCIFailureDetailsChecked(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) (string, error) {
 	return e.ciClient().ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
-}
-
-// ResolveCIFailureDetails extracts failing logs or RoboRev findings for a PR check.
-func (e *Executor) ResolveCIFailureDetails(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) string {
-	res, err := e.ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
-	if err != nil {
-		return details
-	}
-	return res
-}
-
-func (e *Executor) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	apiURL := store.FirstNonEmpty(e.GitHubAPIURL, "https://api.github.com")
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(apiURL, "/")+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if token := strings.TrimSpace(e.gitHubToken); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	return req, nil
 }

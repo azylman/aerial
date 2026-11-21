@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -51,7 +52,7 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	req, err := e.newGitHubRequest(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(parts[0]), url.PathEscape(parts[1]), number), nil)
+	req, err := githubapi.NewRequest(ctx, e.GitHubAPIURL, e.gitHubToken, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(parts[0]), url.PathEscape(parts[1]), number), nil)
 	if err != nil {
 		return nil, "", "", err
 	}
