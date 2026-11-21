@@ -67,12 +67,15 @@ type PRObjectService struct {
 	reader      ProjectionReader
 	shadowDelay time.Duration
 	retryDelay  time.Duration
+
+	eri           EriEffector
+	eriRetryDelay time.Duration
 }
 
 // NewPRObjectService builds the single PRObject service. Without
 // WithProjection it writes no pr_registry rows and runs no shadow compare.
 func NewPRObjectService() *PRObjectService {
-	return &PRObjectService{stateKey: prObjectStateKey, shadowDelay: DefaultShadowCompareDelay, retryDelay: DefaultProjectionRetry}
+	return &PRObjectService{stateKey: prObjectStateKey, shadowDelay: DefaultShadowCompareDelay, retryDelay: DefaultProjectionRetry, eriRetryDelay: DefaultEriEffectRetryDelay}
 }
 
 // ServiceName returns the single PRObject service name for every agent.
@@ -134,6 +137,7 @@ func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, pha
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
 		sendPRIndex(ctx, st, ev, lifecycle)
 	}
+	s.runEriEffects(ctx, st, ev)
 	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return nil
 }
@@ -224,7 +228,8 @@ func (s *PRObjectService) applyPREvent(ctx restate.ObjectContext, ev PREvent) er
 	return s.mutatePREvent(ctx, ev, nil)
 }
 
-// HandleCheckFailed applies one check-failure event dark.
+// HandleCheckFailed applies one check-failure event. Eri wakes the event
+// carries (EriEffects) fire to the stored owner after the commit.
 func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
@@ -261,7 +266,10 @@ func (s *PRObjectService) HandleCheckRerunRequested(ctx restate.ObjectContext, e
 	return s.applyPREvent(ctx, ev)
 }
 
-// HandleCollaboratorAlert applies one collaborator alert dark.
+// HandleCollaboratorAlert applies one collaborator alert. The collaborator
+// DM synapse rendered (an eri_direct_message EriEffect) fires once per
+// generation-scoped EffectKey through the owner's Discord sender when
+// prstate owns the event's effects, and is recorded as intended otherwise.
 func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.MarkCollaboratorAlerted(ev.HeadSHA)

@@ -261,7 +261,7 @@ func TestBindRestateServices(t *testing.T) {
 			if tc.projection {
 				projection = prstate.NewPgProjectionStore(nil)
 			}
-			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection)
+			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil))
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -290,7 +290,8 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 26)
+			require.Len(t, byName["PRObject"], 27)
+			require.True(t, byName["PRObject"]["RetryEriEffect"])
 			require.True(t, byName["PRObject"]["Hydrate"])
 			require.True(t, byName["PRObject"]["Project"])
 			require.True(t, byName["PRObject"]["CompareProjection"])

@@ -111,8 +111,9 @@ func LoadConfigFromEnv() Config {
 // whichever deployment registered last.
 //
 // projection is the pr_registry writer/reader PRObject uses; nil leaves
-// PRObject without registry writes or shadow compares.
-func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore) *server.Restate {
+// PRObject without registry writes or shadow compares. eri is the effect
+// boundary for restate-owned eri wakes and DMs; nil leaves them unconfigured.
+func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector) *server.Restate {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))
@@ -120,6 +121,9 @@ func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc 
 		pr := prstate.NewPRObjectService()
 		if projection != nil {
 			pr = pr.WithProjection(projection, projection)
+		}
+		if eri != nil {
+			pr = pr.WithEriEffector(eri)
 		}
 		prstate.RegisterPRStateServices(srv, pr, prstate.NewRepoObjectService())
 	}
@@ -203,7 +207,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
-	restateServer := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()))
+	restateServer := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()), prstate.NewSessionEriEffector(eriClient))
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)
