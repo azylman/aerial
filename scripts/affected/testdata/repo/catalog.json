@@ -1,0 +1,8 @@
+[
+  { "service": "app", "context": ".", "file": "./app/Dockerfile", "image_name": "fx-app",
+    "select": { "go_roots": ["app", "lib/cli"], "inputs": ["app/**", "web/**"] } },
+  { "service": "tool", "context": ".", "file": "./tool/Dockerfile", "image_name": "fx-tool",
+    "select": { "go_roots": ["tool"], "inputs": ["tool/**"] } },
+  { "service": "static", "context": "./static", "file": "./static/Dockerfile", "image_name": "fx-static",
+    "select": { "go_roots": [], "inputs": ["static/**", "web/style.css"] } }
+]
