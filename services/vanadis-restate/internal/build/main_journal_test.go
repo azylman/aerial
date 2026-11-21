@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -280,6 +281,7 @@ func makeCreateJournalContext(t *testing.T, key string, journal *createJournal, 
 	mc := mocks.NewMockContext(t)
 	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe()
 	mc.EXPECT().Key().Return(key).Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-test"}).Maybe()
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get(deploygate.PendingDeploymentKey, mock.Anything).Return(false, nil).Maybe()
@@ -385,4 +387,93 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 
 func (*metadataMutationStore) GetBuild(_ context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	return &model.VanadisBuild{ID: id}, nil, nil
+}
+
+// makeDeferralJournalContext replays one journaled reconcile step and records
+// every Restate command the transition issues around it.
+func makeDeferralJournalContext(t *testing.T, prior *model.BuildObjectState, journaled reconcileStepOutput, commands *[]string) restate.ObjectContext {
+	t.Helper()
+	mc := mocks.NewMockContext(t)
+	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe()
+	mc.EXPECT().Key().Return("b").Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-1"}).Maybe()
+	mc.EXPECT().Get(mock.Anything, mock.Anything).RunAndReturn(func(key string, output any, _ ...restate.GetOption) (bool, restate.TerminalError) {
+		*commands = append(*commands, "get "+key)
+		if key == "state" && prior != nil {
+			setJournalOutput(output, prior)
+			return true, nil
+		}
+		return false, nil
+	}).Maybe()
+	mc.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key string, _ any, _ ...restate.SetOption) {
+		*commands = append(*commands, "set "+key)
+	}).Maybe()
+	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(_ func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
+		*commands = append(*commands, "run")
+		setJournalOutput(output, journaled)
+		return nil
+	}).Maybe()
+	mClient := mocks.NewMockClient(t)
+	mc.EXPECT().Object(mock.Anything, mock.Anything, mock.Anything).Return(mClient).Maybe()
+	mClient.EXPECT().Send(mock.Anything, mock.Anything).RunAndReturn(func(input any, opts ...restate.SendOption) restate.Invocation {
+		payload, err := json.Marshal(input)
+		require.NoError(t, err)
+		*commands = append(*commands, fmt.Sprintf("send %s %v", payload, opts))
+		return mocks.NewMockInvocation(t)
+	}).Maybe()
+	return restate.WithMockContext(mc)
+}
+
+// In-flight invocations journaled before the deferral lease replay the exact
+// legacy commands (1s send with the unchanged payload); new outputs only add
+// the DeferralSeq field and delay on the same send, never a new command.
+func TestReconcile_DeferralJournalCommandSequence(t *testing.T) {
+	t.Parallel()
+	running := model.VanadisBuild{ID: "b", Status: "running"}
+	active := "dispatch active; reconciliation deferred"
+	tests := []struct {
+		name      string
+		prior     *model.BuildObjectState
+		tick      int
+		journaled reconcileStepOutput
+		wantSend  string
+	}{
+		{
+			name:      "legacy deferral output replays 1s recovery send",
+			journaled: reconcileStepOutput{BuildStatus: "running", Error: active, LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: running}},
+			wantSend:  `send {"reason":"active dispatch recovery"} [{1000000000}]`,
+		},
+		{
+			name:      "lease output schedules chain tick",
+			journaled: reconcileStepOutput{BuildStatus: "running", Error: active, LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: running, DispatchDeferrals: map[string]model.DispatchDeferral{"c1": {Count: 1}}, DeferralReconcileSeq: 1}},
+			wantSend:  `send {"reason":"active dispatch recovery","deferral_seq":1} [{1000000000}]`,
+		},
+		{
+			name:      "lease tick backs off",
+			prior:     &model.BuildObjectState{Build: running, DeferralReconcileSeq: 3},
+			tick:      3,
+			journaled: reconcileStepOutput{BuildStatus: "running", Error: active, LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: running, DispatchDeferrals: map[string]model.DispatchDeferral{"c1": {Count: 4}}, DeferralReconcileSeq: 4}},
+			wantSend:  `send {"reason":"active dispatch recovery","deferral_seq":4} [{8000000000}]`,
+		},
+		{
+			name:      "lease output with pending chain sends nothing",
+			prior:     &model.BuildObjectState{Build: running, DeferralReconcileSeq: 3},
+			journaled: reconcileStepOutput{BuildStatus: "running", Error: active, LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: running, DispatchDeferrals: map[string]model.DispatchDeferral{"c1": {Count: 2}}, DeferralReconcileSeq: 3}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var commands []string
+			ctx := makeDeferralJournalContext(t, tc.prior, tc.journaled, &commands)
+			bo := NewBuildObject("", nil).WithAuthority(&leaseStore{}, nil)
+			_, err := bo.executeObjectTransitionTick(restateObjectRuntime{ctx: ctx}, labelReconcileBuild, nil, tc.tick)
+			require.NoError(t, err)
+			want := []string{"get state", "get launched", "run", "set state", "set launched"}
+			if tc.wantSend != "" {
+				want = append(want, tc.wantSend)
+			}
+			assert.Equal(t, want, commands)
+		})
+	}
 }
