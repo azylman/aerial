@@ -424,7 +424,7 @@ func TestCompleteKustomizationRequest(t *testing.T) {
 			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID, markKustomizationsRes: tc.transitioned}
 			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
 			pr := DeployingPR{Repo: "azylman/aerial", PRNumber: 42, TargetID: lifecycleTargetID, MergeSHA: "sha-merge"}
-			if err := srv.completeKustomizationRequest(context.Background(), pr, tc.kustomization); err != nil {
+			if err := srv.completeKustomizationRequest(context.Background(), pr, tc.kustomization, nil); err != nil {
 				t.Fatalf("completeKustomizationRequest() err = %v", err)
 			}
 			assertPREvents(t, bus, tc.want)

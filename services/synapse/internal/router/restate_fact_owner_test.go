@@ -315,7 +315,7 @@ func TestCompleteKustomizationRequestAuthoritativeEffectsOwner(t *testing.T) {
 			t.Parallel()
 			srv, bus, rec := ownerServer(t, true, tc.failing, &mockPRRegistry{})
 			pr := DeployingPR{Repo: "azylman/aerial", PRNumber: 42, HeadSHA: "h1", MergeSHA: "m1", TargetID: lifecycleTargetID}
-			err := srv.completeKustomizationRequestAuthoritative(ownerCtx(tc.owner), pr, "eri")
+			err := srv.completeKustomizationRequestAuthoritative(ownerCtx(tc.owner), pr, "eri", nil)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("completeKustomizationRequestAuthoritative() err = %v, wantErr %v", err, tc.wantErr)
 			}

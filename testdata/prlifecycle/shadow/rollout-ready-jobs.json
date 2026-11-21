@@ -1,0 +1,211 @@
+{
+  "description": "Legacy-owned (shadow) rollout completions. When the flux watcher sees a Kustomization finish, legacy synapse unions the ready jobs into pr_registry metadata.deployed_jobs (eligible jobs only) and then completes the Kustomization. Every HandleRolloutProgress it sends PRObject must carry those same ready jobs, so PRObject records the same deployed_jobs as the row. Regression: the completing tick sent deployed_jobs empty, leaving PRObject DeployedJobs null while the row had [\"prospera\"] (aerial#2301-#2303). On the completing tick the rollout progress is sent before the deploy_success verdict, so PRObject records the ready jobs while the PR is still deploying, in the order the legacy registry writes them.",
+  "pr": {
+    "repo": "azylman/aerial",
+    "pr_number": 2302,
+    "head_sha": "h2302",
+    "merge_sha": "m2302",
+    "target_id": "100000000000000001"
+  },
+  "setup": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 2302,
+        "branch": "feat/prospera",
+        "head_sha": "h2302",
+        "target_id": "100000000000000001",
+        "title": "Prospera fix",
+        "agent": "miorine",
+        "bot_id": "miorine",
+        "metadata": {
+          "agent": "miorine",
+          "bot_id": "miorine"
+        },
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 2302,
+        "head_sha": "h2302",
+        "merge_sha": "m2302",
+        "branch": "feat/prospera",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleKustomizationRequested",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 2302,
+        "head_sha": "m2302",
+        "branch": "main",
+        "jobs": [
+          "prospera"
+        ],
+        "kustomization_requests": {
+          "aerial-apps": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-21T04:34:51Z"
+          },
+          "aerial-core": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-21T04:34:51Z"
+          }
+        },
+        "effects_owner": "restate"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "first kustomization completes without flipping the PR",
+      "steps": [
+        {
+          "kustomization": "aerial-core",
+          "ready_jobs": [
+            "prospera",
+            "aerial-core"
+          ],
+          "legacy_transitioned": false
+        }
+      ],
+      "shadow": [
+        {
+          "object": "PRObject",
+          "handler": "HandleRolloutProgress",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2302,
+            "head_sha": "h2302",
+            "merge_sha": "m2302",
+            "job_name": "aerial-core",
+            "effects_owner": "legacy",
+            "deployed_jobs": [
+              "prospera",
+              "aerial-core"
+            ],
+            "deployed_kustomizations": [
+              "aerial-core"
+            ]
+          }
+        }
+      ],
+      "want_state": {
+        "status": "deploying",
+        "jobs": [
+          "prospera"
+        ],
+        "deployed_jobs": [
+          "prospera"
+        ],
+        "deployed_kustomizations": [
+          "aerial-core"
+        ]
+      }
+    },
+    {
+      "name": "last kustomization flips the PR to deployed",
+      "steps": [
+        {
+          "kustomization": "aerial-apps",
+          "ready_jobs": [
+            "aerial-apps"
+          ],
+          "legacy_transitioned": false
+        },
+        {
+          "kustomization": "aerial-core",
+          "ready_jobs": [
+            "prospera",
+            "aerial-core"
+          ],
+          "legacy_transitioned": true
+        }
+      ],
+      "shadow": [
+        {
+          "object": "PRObject",
+          "handler": "HandleRolloutProgress",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2302,
+            "head_sha": "h2302",
+            "merge_sha": "m2302",
+            "job_name": "aerial-apps",
+            "effects_owner": "legacy",
+            "deployed_jobs": [
+              "aerial-apps"
+            ],
+            "deployed_kustomizations": [
+              "aerial-apps"
+            ]
+          }
+        },
+        {
+          "object": "PRObject",
+          "handler": "HandleRolloutProgress",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2302,
+            "head_sha": "h2302",
+            "merge_sha": "m2302",
+            "job_name": "aerial-core",
+            "effects_owner": "legacy",
+            "deployed_jobs": [
+              "prospera",
+              "aerial-core"
+            ],
+            "deployed_kustomizations": [
+              "aerial-core"
+            ]
+          }
+        },
+        {
+          "object": "PRObject",
+          "handler": "HandleDeploySuccess",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2302,
+            "head_sha": "h2302",
+            "merge_sha": "m2302",
+            "job_name": "aerial-core",
+            "effects_owner": "legacy",
+            "facts": [
+              {
+                "event": "deploy_success",
+                "repo": "azylman/aerial",
+                "pr_number": 2302,
+                "head_sha": "h2302",
+                "merge_sha": "m2302",
+                "target_id": "100000000000000001",
+                "status": "deployed",
+                "job_name": "aerial-core"
+              }
+            ]
+          }
+        }
+      ],
+      "want_state": {
+        "status": "deployed",
+        "jobs": [
+          "prospera"
+        ],
+        "deployed_jobs": [
+          "prospera"
+        ],
+        "deployed_kustomizations": [
+          "aerial-apps",
+          "aerial-core"
+        ]
+      }
+    }
+  ]
+}

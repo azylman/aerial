@@ -37,6 +37,7 @@ package prstate
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -390,6 +391,74 @@ func CompareProjection(snap ProjectionSnapshot, row RegistryRow, found bool) Pro
 	}
 	sort.Strings(diverged)
 	return ProjectionComparison{Divergent: diverged}
+}
+
+// ShadowConfirm carries a first-pass divergence into the confirming
+// re-read: the digest of the row the first pass read and the fields that
+// diverged then.
+type ShadowConfirm struct {
+	RowDigest string   `json:"row_digest"`
+	Fields    []string `json:"fields"`
+}
+
+// ShadowCompareRequest is the CompareProjection input: the snapshot taken
+// at commit plus, on the confirming pass, the first pass's evidence. A
+// first-pass request is wire-identical to a bare ProjectionSnapshot.
+type ShadowCompareRequest struct {
+	ProjectionSnapshot
+
+	Confirm *ShadowConfirm `json:"confirm,omitempty"`
+}
+
+// ShadowVerdict is one shadow-compare pass outcome. Recheck is set when a
+// first-pass divergence must be confirmed by a delayed re-read before it
+// counts; Comparison is then empty and records nothing.
+type ShadowVerdict struct {
+	Comparison ProjectionComparison `json:"comparison"`
+	Recheck    *ShadowConfirm       `json:"recheck,omitempty"`
+}
+
+// ResolveShadowCompare decides one shadow-compare pass. The two writers
+// update the row and PRObject state for each event at slightly different
+// times, so a single read can land between them. A divergence therefore
+// counts only when it persists:
+//   - first pass: a missing, untracked, superseded or clean verdict records
+//     at once; a divergence asks for a delayed re-read (Recheck).
+//   - confirming pass: if the row changed between the two reads, or
+//     PRObject's projected state moved past the snapshot, the snapshot is
+//     superseded (the later event's own compare covers the newer state).
+//     Otherwise the row and state both stood still across the delay and
+//     the re-read's divergences are real.
+//
+// current is BuildProjection of the object's state at the confirming read.
+func ResolveShadowCompare(req ShadowCompareRequest, row RegistryRow, found bool, current ProjectionSnapshot) ShadowVerdict {
+	snap := req.ProjectionSnapshot
+	cmp := CompareProjection(snap, row, found)
+	if req.Confirm == nil {
+		if len(cmp.Divergent) > 0 {
+			return ShadowVerdict{Recheck: &ShadowConfirm{RowDigest: RegistryRowDigest(row), Fields: cmp.Divergent}}
+		}
+		return ShadowVerdict{Comparison: cmp}
+	}
+	if !found || cmp.Superseded {
+		return ShadowVerdict{Comparison: cmp}
+	}
+	if RegistryRowDigest(row) != req.Confirm.RowDigest || ProjectionJournalKey(current) != ProjectionJournalKey(snap) {
+		return ShadowVerdict{Comparison: ProjectionComparison{Superseded: true}}
+	}
+	return ShadowVerdict{Comparison: cmp}
+}
+
+// RegistryRowDigest is a content digest of one stored row: every column
+// plus the normalized metadata blob, NUL-delimited.
+func RegistryRowDigest(row RegistryRow) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
+		NormalizeRepo(row.Repo), row.PRNumber, strings.TrimSpace(row.Agent), strings.TrimSpace(row.Branch),
+		strings.TrimSpace(row.HeadSHA), strings.TrimSpace(row.MergeSHA), strings.TrimSpace(row.TargetID),
+		strings.TrimSpace(row.Status), strings.TrimSpace(row.Title), metadataJSON(normalizeMetadata(row.Metadata)))
+	sum := sha256.Sum256([]byte(sb.String()))
+	return hex.EncodeToString(sum[:16])
 }
 
 // metadataFields splits a normalized metadata blob into per-key canonical

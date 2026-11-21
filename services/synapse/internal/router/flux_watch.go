@@ -312,7 +312,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		}
 	}
 	if done {
-		return s.completeKustomizationRequest(ctx, pr, name)
+		return s.completeKustomizationRequest(ctx, pr, name, readyJobs)
 	}
 	if jobsUpdated {
 		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, readyJobs, nil)); err != nil {
@@ -387,11 +387,13 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 }
 
 // completeKustomizationRequest records one handled Kustomization; only the call that flips the PR to
-// deployed dispatches the success wake. Only a failed registry update is returned: once the PR is
+// deployed dispatches the success wake. readyJobs are the jobs the caller just recorded in the legacy
+// registry's deployed_jobs; every rollout event sent to PRObject carries them so its state records the
+// same set. Only a failed registry update is returned: once the PR is
 // deployed it leaves the deploying set, so a re-list could not retry a failed wake anyway.
-func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr DeployingPR, name string) error {
+func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr DeployingPR, name string, readyJobs []string) error {
 	if s.restateAuthoritative() {
-		return s.completeKustomizationRequestAuthoritative(ctx, pr, name)
+		return s.completeKustomizationRequestAuthoritative(ctx, pr, name, readyJobs)
 	}
 	var (
 		transitioned bool
@@ -408,7 +410,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 	if !transitioned {
 		// Journal before the legacy publish: a journal failure leaves no
 		// rollout_updated behind, so the watcher tick retries cleanly.
-		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, readyJobs, []string{name})); err != nil {
 			return err
 		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -440,10 +442,13 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 	// just recorded above always reads back as deployed. Publish errors
 	// return before pending is cleared so the watcher retries.
 	fact := s.watchDeploySuccessFact(ctx, pr, name, targetID)
-	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber, fact); err != nil {
+	// Rollout progress journals first, like the restate-owned path: PRObject
+	// records the ready jobs while the PR is still deploying (the order the
+	// legacy registry wrote them), then the deploy_success verdict.
+	if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, readyJobs, []string{name})); err != nil {
 		return err
 	}
-	if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
+	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber, fact); err != nil {
 		return err
 	}
 	if err := s.publishWatchDeploySuccess(ctx, fact); err != nil {
@@ -497,7 +502,7 @@ func (s *RouterServer) publishWatchDeploySuccess(ctx context.Context, fact pubsu
 // stale verdict skips the publish and only converges the projection; any
 // failure before the ack surfaces so the watcher retry re-resolves and
 // republishes instead of losing the signal.
-func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Context, pr DeployingPR, name string) error {
+func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Context, pr DeployingPR, name string, readyJobs []string) error {
 	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
 	targetID := pr.TargetID
 	if targetID == "" {
@@ -508,7 +513,7 @@ func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Con
 	fact := s.watchDeploySuccessFact(ctx, pr, name, targetID)
 	if restateOwnsEffects(ctx) {
 		// PRObject decides, commits, and publishes the carried fact.
-		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, readyJobs, []string{name})); err != nil {
 			return err
 		}
 		if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber, fact); err != nil {
@@ -524,7 +529,7 @@ func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Con
 		return err
 	}
 	if decision.ShouldPublish {
-		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, readyJobs, []string{name})); err != nil {
 			return err
 		}
 		if err := s.publishLegacyFact(ctx, fact); err != nil {
