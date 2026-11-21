@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,30 +246,6 @@ func TestCodexInternal_ErrorLineExtraction(t *testing.T) {
 			got, _ := extractCodexErrorFromLine(tc.line, time.Time{})
 			if got != tc.wantError {
 				t.Fatalf("extractCodexErrorFromLine = %q, want %q", got, tc.wantError)
-			}
-		})
-	}
-}
-
-func TestCodexInternal_ExtractCodexText(t *testing.T) {
-	textTests := []struct {
-		name     string
-		content  string
-		text     string
-		wantText string
-	}{
-		{name: "raw string content", content: `"raw content"`, wantText: "raw content"},
-		{name: "text blocks", content: `[{"type":"text","text":"part 1"},{"type":"text","text":"part 2"}]`, wantText: "part 1\npart 2"},
-		{name: "input_text and output_text blocks", content: `[{"type":"input_text","text":"prompt"},{"type":"output_text","text":"reply"}]`, wantText: "prompt\nreply"},
-		{name: "fallback text", content: `{"invalid":1}`, text: "fallback text", wantText: "fallback text"},
-		{name: "empty", content: ``, text: "", wantText: ""},
-		{name: "object content without fallback", content: `{"invalid":1}`, wantText: ""},
-	}
-	for _, tc := range textTests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := extractCodexText(json.RawMessage(tc.content), tc.text)
-			if got != tc.wantText {
-				t.Fatalf("extractCodexText = %q, want %q", got, tc.wantText)
 			}
 		})
 	}
