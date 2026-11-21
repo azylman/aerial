@@ -1,7 +1,7 @@
 // Package server holds the L3 Vanadis HTTP service: VanadisServer, routes and
 // handlers, PostgreSQL initialization, and the RunApp lifecycle (over the
 // unexported runServer).
-// It is the only package that wires L0 config/model, L1 dag/store/restate/
+// It is the only package that wires L0 config/model, L1 store/restate/
 // metrics, and the L2 MCP handler into HTTP endpoints.
 package server
 
@@ -18,8 +18,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	vanadismcp "github.com/azylman/aerial/services/vanadis/internal/mcp"
@@ -41,8 +43,6 @@ var (
 	LoadConfig = config.LoadConfig
 	// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 	LoadConfigFromEnv = config.LoadConfigFromEnv
-	// NormalizeAgentName trims whitespace for per-agent scoped Restate names.
-	NormalizeAgentName = config.NormalizeAgentName
 	// BuildServiceName derives the Restate Build Virtual Object name for an agent.
 	BuildServiceName = config.BuildServiceName
 	// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
@@ -60,8 +60,6 @@ var (
 	ErrBuildConflict = model.ErrBuildConflict
 	// ErrInvalidBuildInput indicates invalid inputs for a VanadisBuild or chunk mutation.
 	ErrInvalidBuildInput = model.ErrInvalidBuildInput
-
-	firstNonEmpty = model.FirstNonEmpty
 )
 
 type (
@@ -80,26 +78,10 @@ type (
 )
 
 var (
-	// NormalizeChunkEffort validates and normalizes a chunk effort value.
-	NormalizeChunkEffort = model.NormalizeChunkEffort
-	normalizeChunkEffort = model.NormalizeChunkEffort
 	// ClassifyBuildQueueState computes the overall queue state ("running", "queued", or "completed") based on buildStatus and child chunks.
 	ClassifyBuildQueueState = model.ClassifyBuildQueueState
 	// SummarizeBuildEntry constructs a VanadisBuildEntry with non-nil chunks, chunk status counts, and computed queue state.
 	SummarizeBuildEntry = model.SummarizeBuildEntry
-	// GenerateBuildID generates a unique build identifier.
-	GenerateBuildID = model.GenerateBuildID
-	generateBuildID = model.GenerateBuildID
-	// NormalizeRepo trims whitespace from a repository reference.
-	NormalizeRepo = model.NormalizeRepo
-	normalizeRepo = model.NormalizeRepo
-
-	normalizeChunkMode = model.NormalizeChunkMode
-
-	// ValidateChunkModeAndRepo validates the mode/repo/target combination for chunk idx.
-	ValidateChunkModeAndRepo = model.ValidateChunkModeAndRepo
-
-	isValidVanadisChunkID = model.IsValidVanadisChunkID
 )
 
 type (
@@ -345,7 +327,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "at least one chunk is required")
 		return
 	}
-	buildID := firstNonEmpty(strings.TrimSpace(req.ID), generateBuildID())
+	buildID := strutil.FirstNonEmpty(req.ID, buildplan.GenerateBuildID())
 	tier := req.Tier
 	if tier <= 0 {
 		tier = 2
@@ -359,7 +341,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		req.Title = objective
 	}
 
-	chunks, err := parseCreateBuildChunks(buildID, now, req.Chunks)
+	chunks, err := model.ParseCreateBuildChunks(buildID, now, req.Chunks)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
