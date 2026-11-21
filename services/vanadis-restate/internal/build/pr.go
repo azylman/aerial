@@ -9,6 +9,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prflow"
@@ -60,7 +61,7 @@ func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRe
 			Action:     mutationChunkFailed,
 			ChunkID:    strings.TrimSpace(ev.VanadisChunkID),
 			DispatchID: ev.DispatchID,
-			Reason:     store.FirstNonEmpty(ev.Error, "dispatch outcome failed"),
+			Reason:     strutil.FirstNonEmpty(ev.Error, "dispatch outcome failed"),
 		}
 	default:
 		return nil
@@ -476,10 +477,10 @@ func (b *BuildObject) applyDispatchOutcome(rc context.Context, buildID string, e
 		if chunk.Mode == chunkModeAction {
 			return false, nil
 		}
-		_, _, failed, err := b.store.FailChunk(rc, chunkID, store.FirstNonEmpty(ev.Error, "dispatch outcome failed"), ev.DispatchID)
+		_, _, failed, err := b.store.FailChunk(rc, chunkID, strutil.FirstNonEmpty(ev.Error, "dispatch outcome failed"), ev.DispatchID)
 		return failed, err
 	case statusFailed, statusCrashed:
-		reason := store.FirstNonEmpty(ev.Error, "dispatch outcome failed")
+		reason := strutil.FirstNonEmpty(ev.Error, "dispatch outcome failed")
 		if err := b.validateActionBuild(rc, buildID, chunkID); err != nil {
 			return false, err
 		}
