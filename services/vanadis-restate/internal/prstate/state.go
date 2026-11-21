@@ -71,6 +71,10 @@ type PRState struct {
 	CIFailCount            int
 	VanadisChunkID         string
 	WidgetState            string
+
+	// ProjectedKey is the ProjectionJournalKey of the last pr_registry row
+	// PRObject.Project wrote, so an identical snapshot is never rewritten.
+	ProjectedKey string
 }
 
 // NewPRState returns an empty PR state for repo#prNumber.
