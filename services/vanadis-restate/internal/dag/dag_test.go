@@ -1,6 +1,7 @@
 package dag
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -236,6 +237,39 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 			},
 			wantDeps: [][]string{nil, nil, nil},
 		},
+		{
+			name: "invalid_first_mode_skips_disjoint_check",
+			chunks: []model.VanadisChunk{
+				{ID: "c1", Mode: "bogus", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			},
+			wantDeps: [][]string{nil, nil},
+		},
+		{
+			name: "invalid_second_mode_skips_disjoint_check",
+			chunks: []model.VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+				{ID: "c2", Mode: "bogus", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			},
+			wantDeps: [][]string{nil, nil},
+		},
+		{
+			name: "earlier_chunk_depending_on_later_can_overlap_files",
+			chunks: []model.VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}, TargetFiles: []string{"a.go"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			},
+			wantDeps: [][]string{{"c2"}, nil},
+		},
+		{
+			name: "concurrent_second_chunk_missing_target_files_rejected",
+			chunks: []model.VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
+			},
+			wantErr:    true,
+			wantSubstr: `concurrent PR chunk "c2" on repo "aerial" must specify target_files`,
+		},
 	}
 	runDAGTestCases(t, tests)
 }
@@ -351,6 +385,24 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 			wantSubstr: "action chunk must have empty repo",
 		},
 		{
+			name:       "invalid mode rejected",
+			buildID:    "b1",
+			threadID:   "th1",
+			objective:  "obj",
+			chunks:     []model.VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Mode: "bogus", DependsOn: []string{}}},
+			wantErr:    true,
+			wantSubstr: "bogus",
+		},
+		{
+			name:       "invalid dag rejected",
+			buildID:    "b1",
+			threadID:   "th1",
+			objective:  "obj",
+			chunks:     []model.VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Mode: "action", DependsOn: []string{"c2"}}, {ID: "c2", Title: "t", Instructions: "i", Mode: "action", DependsOn: []string{"c1"}}},
+			wantErr:    true,
+			wantSubstr: "invalid vanadis build input: cycle detected in chunk dependencies",
+		},
+		{
 			name:      "valid build inputs",
 			buildID:   "b1",
 			threadID:  "th1",
@@ -418,5 +470,244 @@ func TestNormalizeAndValidateBuildDAG_TerminalSkip(t *testing.T) {
 	_, err := NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		t.Errorf("expected valid DAG when concurrent chunk is terminal, got %v", err)
+	}
+}
+
+func TestIsTerminalChunkStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{status: "pending", want: false},
+		{status: "running", want: false},
+		{status: "deploying", want: false},
+		{status: "", want: false},
+		{status: "other", want: false},
+		{status: "merged", want: true},
+		{status: "completed", want: true},
+		{status: "failed", want: true},
+		{status: "cancelled", want: true},
+		{status: "  FAILED  ", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			t.Parallel()
+			if got := IsTerminalChunkStatus(tc.status); got != tc.want {
+				t.Errorf("IsTerminalChunkStatus(%q) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildTransitiveClosure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		chunks    []model.VanadisChunk
+		wantReach [][]bool
+	}{
+		{name: "empty", chunks: nil, wantReach: [][]bool{}},
+		{
+			name: "chain plus isolated node",
+			chunks: []model.VanadisChunk{
+				{ID: "a", DependsOn: []string{"b"}},
+				{ID: "b", DependsOn: []string{"c"}},
+				{ID: "c", DependsOn: []string{}},
+				{ID: "d", DependsOn: []string{}},
+			},
+			wantReach: [][]bool{
+				{false, false, false, false},
+				{true, false, false, false},
+				{true, true, false, false},
+				{false, false, false, false},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			idMap := make(map[string]int, len(tc.chunks))
+			for i, c := range tc.chunks {
+				idMap[c.ID] = i
+			}
+			got := BuildTransitiveClosure(tc.chunks, idMap)
+			if len(got) != len(tc.wantReach) {
+				t.Fatalf("len(reach) = %d, want %d", len(got), len(tc.wantReach))
+			}
+			for i := range got {
+				if !slices.Equal(got[i], tc.wantReach[i]) {
+					t.Errorf("reach[%d] = %v, want %v", i, got[i], tc.wantReach[i])
+				}
+			}
+		})
+	}
+}
+
+func TestValidateUpdateChunkDAG(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		existing   []model.VanadisChunk
+		updatedIdx int
+		updated    model.VanadisChunk
+		wantSubstr string
+		wantDeps   []string
+	}{
+		{
+			name: "cycle rejected",
+			existing: []model.VanadisChunk{
+				{ID: "c1", Mode: "action", DependsOn: []string{}},
+				{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
+			},
+			updatedIdx: 0,
+			updated:    model.VanadisChunk{ID: "c1", Mode: "action", DependsOn: []string{"c2"}},
+			wantSubstr: "invalid vanadis build input: invalid vanadis build input: cycle detected",
+		},
+		{
+			name: "overlapping files rejected",
+			existing: []model.VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
+			},
+			updatedIdx: 1,
+			updated:    model.VanadisChunk{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			wantSubstr: "overlapping target_files",
+		},
+		{
+			name: "index dependency normalized",
+			existing: []model.VanadisChunk{
+				{ID: "c1", Mode: "action", DependsOn: []string{}},
+				{ID: "c3", Mode: "action", DependsOn: []string{"c1"}},
+			},
+			updatedIdx: 1,
+			updated:    model.VanadisChunk{ID: "c3", Title: "Updated C3", Mode: "action", DependsOn: []string{"0", "c1"}},
+			wantDeps:   []string{"c1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ValidateUpdateChunkDAG(tc.existing, tc.updatedIdx, tc.updated)
+			if tc.wantSubstr != "" {
+				if !errors.Is(err, model.ErrInvalidBuildInput) || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err = %v, want ErrInvalidBuildInput containing %q", err, tc.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !slices.Equal(got, tc.wantDeps) {
+				t.Errorf("deps = %v, want %v", got, tc.wantDeps)
+			}
+		})
+	}
+}
+
+func TestValidateAppendChunksDAG(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		existing   []model.VanadisChunk
+		appended   []model.VanadisChunk
+		wantSubstr string
+		wantDeps   [][]string
+	}{
+		{
+			name:     "cycle rejected",
+			existing: []model.VanadisChunk{{ID: "c1", Mode: "action", DependsOn: []string{}}},
+			appended: []model.VanadisChunk{
+				{ID: "c2", Mode: "action", DependsOn: []string{"c3"}},
+				{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
+			},
+			wantSubstr: "cycle detected",
+		},
+		{
+			name:     "sequential chain normalized",
+			existing: []model.VanadisChunk{{ID: "c1", Mode: "action", DependsOn: []string{}}},
+			appended: []model.VanadisChunk{
+				{ID: "c2", Mode: "action", DependsOn: []string{"0"}},
+				{ID: "c3", Mode: "action", DependsOn: []string{"c2", "c2"}},
+			},
+			wantDeps: [][]string{{"c1"}, {"c2"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ValidateAppendChunksDAG(tc.existing, tc.appended)
+			if tc.wantSubstr != "" {
+				if !errors.Is(err, model.ErrInvalidBuildInput) || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err = %v, want ErrInvalidBuildInput containing %q", err, tc.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tc.wantDeps) {
+				t.Fatalf("len = %d, want %d", len(got), len(tc.wantDeps))
+			}
+			for i := range got {
+				if got[i].ID != tc.appended[i].ID || !slices.Equal(got[i].DependsOn, tc.wantDeps[i]) {
+					t.Errorf("appended[%d] = %s %v, want %s %v", i, got[i].ID, got[i].DependsOn, tc.appended[i].ID, tc.wantDeps[i])
+				}
+			}
+		})
+	}
+}
+
+func TestRelinkDependenciesAfterRemoval(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		remaining   []model.VanadisChunk
+		removedID   string
+		removedDeps []string
+		wantDeps    [][]string
+	}{
+		{
+			name: "dependent inherits removed deps",
+			remaining: []model.VanadisChunk{
+				{ID: "c1", DependsOn: []string{}},
+				{ID: "c3", DependsOn: []string{"c2"}},
+			},
+			removedID:   "c2",
+			removedDeps: []string{"c1"},
+			wantDeps:    [][]string{{}, {"c1"}},
+		},
+		{
+			name:        "self dependency dropped",
+			remaining:   []model.VanadisChunk{{ID: "c2", DependsOn: []string{"c1"}}},
+			removedID:   "c1",
+			removedDeps: []string{"c2"},
+			wantDeps:    [][]string{{}},
+		},
+		{
+			name:        "duplicates collapsed in order",
+			remaining:   []model.VanadisChunk{{ID: "c3", DependsOn: []string{"c2", "c1", "c1"}}},
+			removedID:   "c2",
+			removedDeps: []string{"c0"},
+			wantDeps:    [][]string{{"c0", "c1"}},
+		},
+		{
+			name:        "unrelated chunk untouched",
+			remaining:   []model.VanadisChunk{{ID: "c3", DependsOn: []string{"c1", "c1"}}},
+			removedID:   "c2",
+			removedDeps: []string{"c0"},
+			wantDeps:    [][]string{{"c1", "c1"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			RelinkDependenciesAfterRemoval(tc.remaining, tc.removedID, tc.removedDeps)
+			for i, want := range tc.wantDeps {
+				if !slices.Equal(tc.remaining[i].DependsOn, want) {
+					t.Errorf("chunk[%d].DependsOn = %v, want %v", i, tc.remaining[i].DependsOn, want)
+				}
+			}
+		})
 	}
 }
