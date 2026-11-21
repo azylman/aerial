@@ -18,9 +18,13 @@ import (
 // deleted in chunk 12 after a clean soak; pr_registry is a read-only
 // projection and SHA lookup index, never a decision authority.
 //
-// What flips: with restate_authoritative: true in YAML, each entrypoint
-// routes its frozen PRObject/RepoObject event to Restate first via the
-// route* helpers below. Lifecycle events are one-way ingress sends keyed by
+// What flips: with restate_authoritative: true in YAML, every newly
+// accepted event is stamped effects_owner=restate at accept time (see
+// newEventEffectsOwner), so PRObject/RepoObject perform its effects and
+// write the pr_registry projection while synapse only normalizes and sends.
+// Events accepted before the flip keep their legacy stamp and finish on
+// the legacy pipeline, which routes its frozen PRObject/RepoObject event to
+// Restate first via the route* helpers below. Lifecycle events are one-way ingress sends keyed by
 // a deterministic Idempotency-Key; only verdicts stay request-response. A
 // Restate send failure returns an error (job retry, watcher tick retry,
 // readiness 503) so no event is silently lost: the ingress idempotency key
@@ -54,9 +58,10 @@ import (
 // Collaborator DMs are at-least-once: redelivery may resend because the
 // per-SHA DM marks died with the trackers.
 //
-// Rollback: consumer rebind via YAML config (restate_authoritative: false),
-// hot-reloaded without restart or code revert. Forward-fix only: the journal
-// owns effects that deleted in-memory state cannot replay.
+// Rollback: none once the first restate-owned effect has run. Setting
+// restate_authoritative back to false would only re-stamp new events
+// legacy; the projection and effect keys PRObject already owns cannot be
+// handed back to synapse's registry pipeline. Forward-fix only.
 //
 // Precondition: chunk-05 first-touch hydration must show zero divergence
 // (RestateShadowDivergenceTotal stays zero) before the flag flips;
@@ -75,17 +80,32 @@ import (
 // Effect ownership per event: every event is stamped legacy or restate
 // exactly once when synapse first accepts it (into the JetStream job at
 // publish time, or once per watcher call / HTTP request) and the stamp
-// rides ctx through every branch. Branches read the stamp, never the live
-// config, so a hot reload mid-job cannot split one event's effects between
-// synapse and prstate.
+// rides ctx through every branch. The stamp follows restate_authoritative
+// in the config snapshot taken at accept time: authoritative events are
+// restate-owned (PRObject/RepoObject perform their effects and write the
+// pr_registry projection), all others legacy. Branches read the stamp,
+// never the live config, so a hot reload mid-job cannot split one event's
+// effects between synapse and prstate; jobs already queued keep the stamp
+// they were published with.
 
 type effectsOwnerKey struct{}
 
-// newEventEffectsOwner is the single snapshot point for a newly accepted
-// event's effect owner. It is always legacy until the authority flip wires
-// it to config; prstate then only records intended effects.
-func newEventEffectsOwner() string {
+// newEventEffectsOwner is the single, pure decision for a newly accepted
+// event's effect owner: restate when the accept-time config snapshot has
+// restate_authoritative on, else legacy (prstate then only records the
+// intended effects).
+func newEventEffectsOwner(authoritative bool) string {
+	if authoritative {
+		return restateclient.EffectsOwnerRestate
+	}
 	return restateclient.EffectsOwnerLegacy
+}
+
+// acceptEffectsOwner snapshots the config once and decides the effect
+// owner for one newly accepted event. Nil-safe: a server without config
+// stays legacy.
+func (s *RouterServer) acceptEffectsOwner() string {
+	return newEventEffectsOwner(s.currentConfig().RestateAuthoritative)
 }
 
 // withEffectsOwner binds a normalized effect-owner stamp into ctx.
@@ -93,13 +113,14 @@ func withEffectsOwner(ctx context.Context, owner string) context.Context {
 	return context.WithValue(ctx, effectsOwnerKey{}, restateclient.NormalizeEffectsOwner(owner))
 }
 
-// stampEffectsOwner snapshots the effect owner into ctx unless an earlier
-// accept point already stamped it, so nested entrypoints never re-decide.
-func stampEffectsOwner(ctx context.Context) context.Context {
+// stampEffectsOwner snapshots the effect owner into ctx from one config
+// snapshot unless an earlier accept point already stamped it, so nested
+// entrypoints never re-decide.
+func (s *RouterServer) stampEffectsOwner(ctx context.Context) context.Context {
 	if _, ok := ctx.Value(effectsOwnerKey{}).(string); ok {
 		return ctx
 	}
-	return withEffectsOwner(ctx, newEventEffectsOwner())
+	return withEffectsOwner(ctx, s.acceptEffectsOwner())
 }
 
 // effectsOwnerFromContext returns the stamp bound into ctx; unstamped

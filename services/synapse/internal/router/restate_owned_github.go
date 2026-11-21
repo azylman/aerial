@@ -357,14 +357,7 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 	}
 	switch checkOutcomeHandler(res) {
 	case "HandleCheckPassed":
-		if action == ghStatusCompleted && res.PRNumber > 0 {
-			recovered := base
-			recovered.Facts = facts(ownedFact(res, ghActionSynchronize, prOpen))
-			if err := s.sendOwnedPR(ctx, "HandleCIRecovered", recovered); err != nil {
-				return err
-			}
-		}
-		return s.sendOwnedPROrSHA(ctx, shaHandler, "HandleCheckPassed", res.HeadSHA, base)
+		return s.sendOwnedCheckPassed(ctx, res, action, shaHandler, base)
 	case "HandleCheckFailed":
 		if isGateAggregatorCheck(res.CheckName) {
 			return nil
@@ -381,10 +374,63 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 		if err := s.sendOwnedPROrSHA(ctx, shaHandler, "HandleCheckFailed", res.HeadSHA, failed); err != nil {
 			return err
 		}
+		// Legacy's ci_failure auto-update trigger: RepoObject dedupes it
+		// per PR head, so every delivery may send it.
+		if res.PRNumber > 0 {
+			if err := s.sendOwnedAutoUpdate(ctx, res.Repo, res.PRNumber, res.HeadSHA, "", ""); err != nil {
+				return err
+			}
+		}
 		return s.notifyCollaboratorCIFailure(ctx, res, checkURL)
 	default:
 		return nil
 	}
+}
+
+// sendOwnedCheckPassed sends one passing check: the CI recovery verdict
+// with the recovery synchronize fact on a completed PR check, then the pass.
+// Legacy re-runs the open-PR auto-update cascade on a gate or RoboRev
+// success and on a recovered check_run success. Gate and RoboRev triggers
+// are stateless and go straight to RepoObject; only PRObject knows a check
+// recovered, so the recovery carries the policy and PRObject forwards the
+// trigger when it applies.
+func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGitHubEvent, action, shaHandler string, base restateclient.PREvent) error {
+	gateTrigger := ownedGateSuccessTrigger(res, action)
+	if action == ghStatusCompleted && res.PRNumber > 0 {
+		recovered := base
+		recovered.Facts = facts(ownedFact(res, ghActionSynchronize, prOpen))
+		if res.Event == ghEventCheckRun && !gateTrigger {
+			recovered.AutoUpdate = s.autoUpdatePolicy(normalizeRepo(res.Repo))
+		}
+		if err := s.sendOwnedPR(ctx, "HandleCIRecovered", recovered); err != nil {
+			return err
+		}
+	}
+	if err := s.sendOwnedPROrSHA(ctx, shaHandler, "HandleCheckPassed", res.HeadSHA, base); err != nil {
+		return err
+	}
+	if gateTrigger {
+		return s.sendOwnedAutoUpdate(ctx, res.Repo, res.PRNumber, res.HeadSHA, "", res.CheckName)
+	}
+	return nil
+}
+
+// ownedGateSuccessTrigger reports whether a check outcome is legacy's
+// stateless gate_success auto-update trigger: a completed, successful gate
+// aggregator or RoboRev check_run on a known PR.
+func ownedGateSuccessTrigger(res *ResolvedGitHubEvent, action string) bool {
+	return res.Event == ghEventCheckRun && action == ghStatusCompleted && res.Conclusion == conclusionSuccess &&
+		res.PRNumber > 0 && (isGateAggregatorCheck(res.CheckName) || isRoboRevCheck(res.CheckName))
+}
+
+// sendOwnedAutoUpdate sends one open-PR auto-update cascade trigger (a main
+// push, a CI failure or a gate success) to RepoObject with the rendered
+// policy; RepoObject runs the cascade and its update-branch calls.
+func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prNumber int, headSHA, mainSHA, checkName string) error {
+	normRepo := normalizeRepo(repo)
+	return s.sendOwnedRepo(ctx, "HandleAutoUpdate", restateclient.RepoEvent{
+		Repo: normRepo, PRNumber: prNumber, HeadSHA: headSHA, MainSHA: mainSHA, CheckName: checkName, AutoUpdate: s.autoUpdatePolicy(normRepo),
+	})
 }
 
 // sendOwnedCheckStatus records one pending or passed non-gate check_run on
@@ -470,6 +516,10 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, MergeSHA: res.MergeSHA, Branch: res.Branch,
 		Facts: facts(ownedFact(res, prMerged, prMerged)),
 	}); err != nil {
+		return nil, err
+	}
+	// Legacy's main_push auto-update trigger.
+	if err := s.sendOwnedAutoUpdate(ctx, res.Repo, 0, "", res.HeadSHA, ""); err != nil {
 		return nil, err
 	}
 	// Git-push dispatch is repo-level: RepoObject forwards the push to the

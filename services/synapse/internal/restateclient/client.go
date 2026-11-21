@@ -132,6 +132,10 @@ type PREvent struct {
 	Banner                 string                                `json:"banner,omitempty"`
 	Acknowledged           bool                                  `json:"acknowledged,omitempty"`
 	BuildMetadata          *model.BuildMetadata                  `json:"build_metadata,omitempty"`
+	// AutoUpdate rides a restate-owned HandleCIRecovered: when PRObject
+	// applies the recovery it forwards RepoObject.HandleAutoUpdate with this
+	// policy, the recovered-check cascade legacy synapse ran itself.
+	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
 	// EriEffects are the rendered eri-bound effects for this event; tags
 	// mirror the prstate EriEffect contract.
 	EriEffects []EriEffect `json:"eri_effects,omitempty"`

@@ -241,10 +241,8 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 	llmEffort := resolveFirstNonEmpty(getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
 	authCfg := ycfg.Auth
-	if envVal := strings.TrimSpace(getenv("K8S_AUTH_ENABLED")); envVal != "" {
-		if enabled, err := strconv.ParseBool(envVal); err == nil {
-			authCfg.Enabled = enabled
-		}
+	if err := k8sauth.ApplyEnvOverride(&authCfg, getenv); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	return &Config{

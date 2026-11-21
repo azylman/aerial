@@ -33,7 +33,7 @@ func TestRetryPRReadiness(t *testing.T) {
 		want              int
 	}{
 		{name: "original request retried", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"abc"}`, accepted: true, want: 202},
-		{name: "authoritative journal failure surfaces 503", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"abc"}`, accepted: true, authoritative: true, want: 503},
+		{name: "authoritative request is restate-owned and surfaces 503 without restate", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"abc"}`, authoritative: true, want: 503},
 		{name: "stale identity rejected", body: `{"repo":"owner/config","pr_number":42,"expected_merge_sha":"old"}`, want: 409},
 		{name: "missing identity", body: `{"repo":"owner/config","pr_number":42}`, want: 400},
 		{name: "invalid number", body: `{"repo":"owner/config","pr_number":0,"expected_merge_sha":"abc"}`, want: 400},
