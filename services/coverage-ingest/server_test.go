@@ -148,12 +148,12 @@ func TestPullLoop(t *testing.T) {
 	sampleRows := []CoverageRow{{File: "github.com/x/svc/a.go", Function: "Run", Percent: 75}, {File: "github.com/x/svc/a.go", Function: "Stop", Percent: 0}}
 	tests := []struct {
 		name         string
-		reload       string // config written after the first pull; "{srv}" becomes the flush server URL
-		wantPath     string // path pulled on rounds after the reload
-		wantServices []string
+		reload       string   // config written after the first pull; "{srv}" becomes the flush server URL
+		wantPath     string   // path pulled on rounds after the reload
+		wantServices []string // services holding rows at the end; "retired" is seeded after the reload took effect
 	}{
-		{name: "broken reload keeps last good targets", reload: "targets: [\n", wantPath: "/a", wantServices: []string{"a"}},
-		{name: "valid reload switches targets", reload: "targets:\n  - service: b\n    url: {srv}/b\npull_interval: 6ms\n", wantPath: "/b", wantServices: []string{"a", "b"}},
+		{name: "broken reload keeps last good targets and skips prune", reload: "targets: [\n", wantPath: "/a", wantServices: []string{"a", "retired"}},
+		{name: "valid reload switches targets and prunes the rest", reload: "targets:\n  - service: b\n    url: {srv}/b\npull_interval: 6ms\n", wantPath: "/b", wantServices: []string{"b"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,7 +176,7 @@ func TestPullLoop(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse initial config: %v", err)
 			}
-			store := &fakeStore{}
+			store := &fakeStore{upserts: map[string][]CoverageRow{"dashboard": sampleRows}}
 			s := NewServer(cfg, srv.Client(), &fakeRunner{out: []byte(sampleReport)}, store)
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -188,14 +188,49 @@ func TestPullLoop(t *testing.T) {
 			writeConfigAtomic(t, path, strings.ReplaceAll(tc.reload, "{srv}", srv.URL))
 			// The second post-write pull belongs to a round that reloaded after the write.
 			waitHits(t, hits, tc.wantPath, 2)
+			// Every round from here on reloads the written file; only a successful load
+			// may prune this seeded service. Two more pulls guarantee a full round ran.
+			if err := store.UpsertService(ctx, "retired", sampleRows); err != nil {
+				t.Fatalf("seed retired: %v", err)
+			}
+			waitHits(t, hits, tc.wantPath, 2)
 			cancel()
 			<-done
+			if got := store.services(); !reflect.DeepEqual(got, tc.wantServices) {
+				t.Fatalf("services = %v, want %v", got, tc.wantServices)
+			}
 			store.mu.Lock()
 			defer store.mu.Unlock()
 			for _, svc := range tc.wantServices {
 				if !reflect.DeepEqual(store.upserts[svc], sampleRows) {
 					t.Fatalf("upserts[%s] = %+v, want %+v", svc, store.upserts[svc], sampleRows)
 				}
+			}
+		})
+	}
+}
+
+func TestPruneRetired(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		cfg          Config
+		pruneErr     error
+		wantServices []string
+	}{
+		{name: "drops services outside the config", cfg: Config{Targets: []Target{{Service: "eri", URL: "http://eri"}}, PushServices: []string{"photos-sync"}}, wantServices: []string{"eri", "eri-restate", "photos-sync"}},
+		{name: "eri-restate survives without a target", cfg: Config{Targets: []Target{{Service: "eri", URL: "http://eri"}}}, wantServices: []string{"eri", "eri-restate"}},
+		{name: "empty keep set refuses", cfg: Config{}, wantServices: []string{"dashboard", "eri", "eri-restate", "hangar", "photos-sync"}},
+		{name: "store failure keeps rows", cfg: Config{Targets: []Target{{Service: "eri", URL: "http://eri"}}}, pruneErr: errors.New("conn refused"), wantServices: []string{"dashboard", "eri", "eri-restate", "hangar", "photos-sync"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := []CoverageRow{{File: "a.go", Function: "F", Percent: 50}}
+			store := &fakeStore{pruneErr: tc.pruneErr, upserts: map[string][]CoverageRow{"dashboard": row, "eri": row, "eri-restate": row, "hangar": row, "photos-sync": row}}
+			NewServer(tc.cfg, nil, &fakeRunner{}, store).pruneRetired(context.Background())
+			if got := store.services(); !reflect.DeepEqual(got, tc.wantServices) {
+				t.Fatalf("services = %v, want %v", got, tc.wantServices)
 			}
 		})
 	}

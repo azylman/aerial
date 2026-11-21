@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -107,21 +108,26 @@ func writeOK(w http.ResponseWriter) {
 	}
 }
 
-// PullLoop runs a pull round now and then every PullInterval until ctx ends. Before
+// PullLoop prunes retired services and runs a pull round now and then every PullInterval until ctx ends. Before
 // each later round it reloads configPath; a file that fails to read or parse is logged
 // and the last good snapshot stays in effect. Round failures are logged, never fatal.
 func (s *Server) PullLoop(ctx context.Context, configPath string) {
 	interval := s.Config().PullInterval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// The startup snapshot was loaded and validated by the caller.
+	loaded := true
 	for {
+		if loaded {
+			s.pruneRetired(ctx)
+		}
 		s.pullRound(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
-		s.reload(configPath)
+		loaded = s.reload(configPath)
 		if next := s.Config().PullInterval; next != interval {
 			interval = next
 			ticker.Reset(interval)
@@ -142,15 +148,35 @@ func (s *Server) pullRound(ctx context.Context) {
 	log.Printf("[coverage-ingest] pulled %d targets", len(cfg.Targets))
 }
 
-// reload replaces the snapshot with configPath's contents when they parse.
-func (s *Server) reload(configPath string) {
+// pruneRetired deletes rows of services the current snapshot no longer collects. It
+// refuses when the keep set is empty; failures are logged, never fatal.
+func (s *Server) pruneRetired(ctx context.Context) {
+	keep, err := PruneKeepSet(s.Config())
+	if err != nil {
+		log.Printf("[coverage-ingest] skipping prune: %v", err)
+		return
+	}
+	pruned, err := s.store.PruneServices(ctx, keep)
+	if err != nil {
+		log.Printf("[coverage-ingest] prune failed: %v", err)
+		return
+	}
+	for _, service := range slices.Sorted(maps.Keys(pruned)) {
+		log.Printf("[coverage-ingest] pruned %d rows of retired service %s", pruned[service], service)
+	}
+}
+
+// reload replaces the snapshot with configPath's contents when they parse and reports
+// whether it did.
+func (s *Server) reload(configPath string) bool {
 	data, err := os.ReadFile(configPath)
 	if err == nil {
 		var cfg Config
 		if cfg, err = ParseConfig(data); err == nil {
 			s.cfg.Store(&cfg)
-			return
+			return true
 		}
 	}
 	log.Printf("[coverage-ingest] keeping last good config: %v", err)
+	return false
 }

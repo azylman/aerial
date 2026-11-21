@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -257,6 +258,35 @@ func (e ExecCovdata) Func(ctx context.Context, dirs []string) ([]byte, error) {
 // CoverageStore persists per-service coverage rows.
 type CoverageStore interface {
 	UpsertService(ctx context.Context, service string, rows []CoverageRow) error
+	// PruneServices deletes every row whose service is not in keep and returns the
+	// deleted row count per pruned service.
+	PruneServices(ctx context.Context, keep []string) (map[string]int64, error)
+}
+
+// protectedServices are never pruned, even when absent from the collector config.
+var protectedServices = []string{"eri-restate"}
+
+// PruneKeepSet returns the sorted services whose rows survive a prune: every pull
+// target and push service in cfg plus protectedServices. An empty configured set is an
+// error so a broken config can never wipe the table.
+func PruneKeepSet(cfg Config) ([]string, error) {
+	var keep []string
+	for _, t := range cfg.Targets {
+		if name := strings.TrimSpace(t.Service); name != "" {
+			keep = append(keep, name)
+		}
+	}
+	for _, name := range cfg.PushServices {
+		if name = strings.TrimSpace(name); name != "" {
+			keep = append(keep, name)
+		}
+	}
+	if len(keep) == 0 {
+		return nil, errors.New("prune keep set is empty")
+	}
+	keep = append(keep, protectedServices...)
+	slices.Sort(keep)
+	return slices.Compact(keep), nil
 }
 
 // TxBeginner is the subset of a pgx pool the store needs.
@@ -321,6 +351,53 @@ func (s PostgresStore) UpsertService(ctx context.Context, service string, rows [
 		return fmt.Errorf("commit %s: %w", service, err)
 	}
 	return nil
+}
+
+// pruneServicesSQL deletes rows of services outside the keep set. eri-restate is
+// excluded in SQL as well as by PruneKeepSet.
+const pruneServicesSQL = `WITH pruned AS (
+    DELETE FROM production_code_coverage
+    WHERE service <> ALL($1::text[]) AND service <> 'eri-restate'
+    RETURNING service)
+SELECT service, count(*) FROM pruned GROUP BY service ORDER BY service`
+
+// PruneServices deletes rows for services outside keep in one transaction. An empty
+// keep set is refused.
+func (s PostgresStore) PruneServices(ctx context.Context, keep []string) (pruned map[string]int64, err error) {
+	if len(keep) == 0 {
+		return nil, errors.New("prune: refusing empty keep set")
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin prune: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, tx.Rollback(ctx))
+		}
+	}()
+	rows, err := tx.Query(ctx, pruneServicesSQL, keep)
+	if err != nil {
+		return nil, fmt.Errorf("prune: %w", err)
+	}
+	pruned = map[string]int64{}
+	for rows.Next() {
+		var service string
+		var n int64
+		if err = rows.Scan(&service, &n); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("prune scan: %w", err)
+		}
+		pruned[service] = n
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("prune rows: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit prune: %w", err)
+	}
+	return pruned, nil
 }
 
 // groupTargets returns service names in first-seen order and each service's targets.
