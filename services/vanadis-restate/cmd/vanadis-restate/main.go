@@ -15,14 +15,15 @@ import (
 )
 
 var (
-	loadConfigFn  = app.LoadConfigFromEnv
+	loadConfigFn  = app.LoadConfig
 	runAppFn      = app.RunApp
 	exitFn        = log.Fatalf
 	initTracingFn = tracing.Init
 )
 
 func main() {
-	cfg := loadConfigFn()
+	cfg := loadConfigFn(os.Getenv)
+	cfg.Environ = os.Environ()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
