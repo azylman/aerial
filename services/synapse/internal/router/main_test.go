@@ -200,6 +200,7 @@ type mockPRRegistry struct {
 	registerErr      error
 
 	ensureCalls    []prCall
+	ensureAgents   []string
 	ensureTargetID string
 	ensureErr      error
 
@@ -464,8 +465,9 @@ func (m *mockPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) 
 	return resolved, nil
 }
 
-func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error) {
+func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, agent string) (string, error) {
 	m.ensureCalls = append(m.ensureCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA})
+	m.ensureAgents = append(m.ensureAgents, agent)
 	if err := m.checkErr(m.ensureErr); err != nil {
 		return "", err
 	}
