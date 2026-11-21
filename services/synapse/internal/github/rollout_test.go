@@ -211,8 +211,8 @@ func TestFormatPromptsAndCollaboratorMessages(t *testing.T) {
 		t.Errorf("expected no findings block for empty comments")
 	}
 
-	alertMsg := BuildCollaboratorAlertMessage("@alex", "azylman/aerial", 42, "PR Title", "feat/branch", "headsha123", "lint", "https://url")
-	if !strings.Contains(alertMsg, "@alex") || !strings.Contains(alertMsg, "PR Title") || !strings.Contains(alertMsg, "lint") {
+	alertMsg := BuildCollaboratorAlertMessage("@collaborator", "azylman/aerial", 42, "PR Title", "feat/branch", "headsha123", "lint", "https://url")
+	if !strings.Contains(alertMsg, "@collaborator") || !strings.Contains(alertMsg, "PR Title") || !strings.Contains(alertMsg, "lint") {
 		t.Errorf("unexpected alert message: %s", alertMsg)
 	}
 
@@ -222,8 +222,8 @@ func TestFormatPromptsAndCollaboratorMessages(t *testing.T) {
 		t.Errorf("unexpected alert without mention: %s", alertNoMention)
 	}
 
-	conflictMsg := BuildCollaboratorConflictMessage("@alex", "azylman/aerial", 42, "PR Title", "feat/branch", "headsha123")
-	if !strings.Contains(conflictMsg, "@alex") || !strings.Contains(conflictMsg, "Merge conflict with `main`") {
+	conflictMsg := BuildCollaboratorConflictMessage("@collaborator", "azylman/aerial", 42, "PR Title", "feat/branch", "headsha123")
+	if !strings.Contains(conflictMsg, "@collaborator") || !strings.Contains(conflictMsg, "Merge conflict with `main`") {
 		t.Errorf("unexpected conflict message: %s", conflictMsg)
 	}
 
@@ -370,17 +370,17 @@ func TestConflicts_Helpers(t *testing.T) {
 	t.Parallel()
 
 	// IsAutoUpdateAuthorAllowed
-	allowed := []string{"alex", "dependabot[bot]"}
-	if !IsAutoUpdateAuthorAllowed("alex", allowed) {
-		t.Errorf("expected alex to be allowed")
+	allowed := []string{"octo-user", "dependabot[bot]"}
+	if !IsAutoUpdateAuthorAllowed("octo-user", allowed) {
+		t.Errorf("expected octo-user to be allowed")
 	}
-	if !IsAutoUpdateAuthorAllowed("ALEX", allowed) {
+	if !IsAutoUpdateAuthorAllowed("OCTO-USER", allowed) {
 		t.Errorf("expected case-insensitive match")
 	}
 	if IsAutoUpdateAuthorAllowed("mallory", allowed) {
 		t.Errorf("expected mallory to be denied")
 	}
-	if IsAutoUpdateAuthorAllowed("", allowed) || IsAutoUpdateAuthorAllowed("alex", nil) {
+	if IsAutoUpdateAuthorAllowed("", allowed) || IsAutoUpdateAuthorAllowed("octo-user", nil) {
 		t.Errorf("expected empty inputs to return false")
 	}
 
