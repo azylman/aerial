@@ -224,7 +224,7 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req model.PRRegiste
 	return targetID, nil
 }
 
-func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error) {
+func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, agent string) (string, error) {
 	metrics.RecordRegistryCall("EnsurePRRegistered")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
@@ -236,11 +236,28 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN COALESCE(pr_registry.metadata, '{}'::jsonb) || EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
-	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title)); err != nil {
+	// The owner is seeded on insert only (metadata.agent and bot_id, as
+	// register writes them); an existing row keeps its metadata untouched.
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, metadata = pr_registry.metadata, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title), ensureOwnerMetadata(agent)); err != nil {
 		return "", fmt.Errorf("ensure pr registered: %w", err)
 	}
 	return targetID, nil
+}
+
+// ensureOwnerMetadata renders the self-heal insert metadata: the owner
+// under agent and bot_id (lowercased like the cfg.Bots keys), or an empty
+// object when the owner is unknown.
+func ensureOwnerMetadata(agent string) string {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "" {
+		return "{}"
+	}
+	raw, err := json.Marshal(map[string]string{"agent": agent, "bot_id": agent})
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
