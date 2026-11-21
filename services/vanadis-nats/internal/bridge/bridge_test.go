@@ -706,19 +706,19 @@ func TestHandleDispatchOutcomeEvent_Errors(t *testing.T) {
 }
 
 type widgetSyncTestCase struct {
-	name          string
-	msgData       string
-	msgHeader     nats.Header
-	delivered     uint64
-	serverStatus  int
-	wantErr       bool
-	wantNaked     bool
-	wantNakDelay  time.Duration
-	wantRequests  int
-	wantKey       string
-	wantPath      string
-	wantReconcile map[string]string
-	wantPREvent   pubsub.PRLifecycleEvent
+	name         string
+	msgData      string
+	msgHeader    nats.Header
+	delivered    uint64
+	serverStatus int
+	wantErr      bool
+	wantNaked    bool
+	wantNakDelay time.Duration
+	wantRequests int
+	wantKey      string
+	wantPath     string
+	wantBuildID  string
+	wantPREvent  pubsub.PRLifecycleEvent
 }
 
 func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
@@ -769,10 +769,10 @@ func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
 		if tc.wantKey != "" {
 			assert.Equal(t, tc.wantKey, capturedKey)
 		}
-		if tc.wantReconcile != nil {
-			var m map[string]string
-			require.NoError(t, json.Unmarshal(capturedBody, &m))
-			assert.Equal(t, tc.wantReconcile, m)
+		if tc.wantBuildID != "" {
+			var id string
+			require.NoError(t, json.Unmarshal(capturedBody, &id))
+			assert.Equal(t, tc.wantBuildID, id)
 		}
 		if tc.wantPREvent.Repo != "" {
 			var pe pubsub.PRLifecycleEvent
@@ -805,48 +805,40 @@ func TestHandleWidgetSyncEvent(t *testing.T) {
 			msgData:      `{"build_id":"build-987"}`,
 			serverStatus: http.StatusOK,
 			wantRequests: 1,
-			wantPath:     "/Build/build-987/Reconcile/send",
+			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
 			wantKey:      "widget:build:build-987",
-			wantReconcile: map[string]string{
-				"reason": "widget_sync",
-			},
-			wantErr: false,
+			wantBuildID:  "build-987",
+			wantErr:      false,
 		},
 		{
-			name:         "special characters in build_id are path-escaped",
+			name:         "special characters in build_id are preserved in body and key",
 			msgData:      `{"build_id":"build/987#special"}`,
 			serverStatus: http.StatusOK,
 			wantRequests: 1,
-			wantPath:     "/Build/build%2F987%23special/Reconcile/send",
+			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
 			wantKey:      "widget:build:build/987#special",
-			wantReconcile: map[string]string{
-				"reason": "widget_sync",
-			},
-			wantErr: false,
+			wantBuildID:  "build/987#special",
+			wantErr:      false,
 		},
 		{
 			name:         "build_id routing with HeaderMsgID precedence",
 			msgData:      `{"build_id":"build-987"}`,
 			msgHeader:    nats.Header{pubsub.HeaderMsgID: []string{"custom-build-msgid"}},
 			wantRequests: 1,
-			wantPath:     "/Build/build-987/Reconcile/send",
+			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
 			wantKey:      "custom-build-msgid",
-			wantReconcile: map[string]string{
-				"reason": "widget_sync",
-			},
-			wantErr: false,
+			wantBuildID:  "build-987",
+			wantErr:      false,
 		},
 		{
 			name:         "build_id routing with Idempotency-Key header precedence",
 			msgData:      `{"build_id":"build-987"}`,
 			msgHeader:    nats.Header{"Idempotency-Key": []string{"custom-build-idem"}},
 			wantRequests: 1,
-			wantPath:     "/Build/build-987/Reconcile/send",
+			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
 			wantKey:      "custom-build-idem",
-			wantReconcile: map[string]string{
-				"reason": "widget_sync",
-			},
-			wantErr: false,
+			wantBuildID:  "build-987",
+			wantErr:      false,
 		},
 		{
 			name:         "repo and pr_number routing to RoutePREvent send with fallback key",
@@ -894,7 +886,7 @@ func TestHandleWidgetSyncEvent(t *testing.T) {
 			delivered:    1,
 			serverStatus: http.StatusInternalServerError,
 			wantRequests: 1,
-			wantPath:     "/Build/build-err/Reconcile/send",
+			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
 			wantErr:      true,
 			wantNaked:    true,
 			wantNakDelay: 1 * time.Second,
@@ -1064,26 +1056,21 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 	tests := []struct {
 		name           string
 		agent          string
-		wantBuild      string
 		wantRouter     string
-		wantObjectPath string
 		wantRouterPath string
 	}{
-		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Reconcile/send", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Reconcile/send", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantObjectPath: "/Build-agent-alpha/b1/Reconcile/send", wantRouterPath: "/BuildRouter-agent-alpha/RoutePREvent/send"},
-		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
+		{name: "empty defaults to legacy", agent: "", wantRouter: "BuildRouter", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
+		{name: "aerial defaults to legacy", agent: "aerial", wantRouter: "BuildRouter", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantRouterPath: "/BuildRouter-agent-alpha/RoutePREvent/send"},
+		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantRouter: "BuildRouter-agent-beta", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.wantBuild, config.BuildServiceName(tc.agent))
 			assert.Equal(t, tc.wantRouter, config.BuildRouterServiceName(tc.agent))
 			bridge := NewNATSBridge(config.Config{AgentName: tc.agent}, nil, nil)
-			assert.Equal(t, tc.wantBuild, bridge.buildServiceName())
 			assert.Equal(t, tc.wantRouter, bridge.buildRouterServiceName())
-			assert.Equal(t, tc.wantObjectPath, bridge.restateObjectSendPath("b1", "Reconcile"))
 			assert.Equal(t, tc.wantRouterPath, bridge.restateRouterSendPath("RoutePREvent"))
 		})
 	}

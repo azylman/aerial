@@ -46,16 +46,6 @@ func NormalizeAgentName(agent string) string {
 	return strings.ToLower(strings.TrimSpace(agent))
 }
 
-// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
-func BuildServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == "aerial" {
-		return "Build"
-	}
-	return "Build-" + name
-}
-
 // BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
 // Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
 func BuildRouterServiceName(agent string) string {

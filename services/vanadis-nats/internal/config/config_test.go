@@ -125,20 +125,18 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 	tests := []struct {
 		name       string
 		agent      string
-		wantBuild  string
 		wantRouter string
 	}{
-		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter"},
-		{name: "whitespace aerial defaults to legacy", agent: "  Aerial  ", wantBuild: "Build", wantRouter: "BuildRouter"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
-		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta"},
+		{name: "empty defaults to legacy", agent: "", wantRouter: "BuildRouter"},
+		{name: "aerial defaults to legacy", agent: "aerial", wantRouter: "BuildRouter"},
+		{name: "whitespace aerial defaults to legacy", agent: "  Aerial  ", wantRouter: "BuildRouter"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
+		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantRouter: "BuildRouter-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.wantBuild, BuildServiceName(tc.agent))
 			assert.Equal(t, tc.wantRouter, BuildRouterServiceName(tc.agent))
 			assert.Equal(t, NormalizeAgentName(tc.agent), NormalizeAgentName(tc.agent))
 		})
