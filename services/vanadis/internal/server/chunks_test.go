@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -90,40 +89,6 @@ func (m *memoryVanadisStore) GetChunk(_ context.Context, chunkID string) (*Vanad
 	return nil, nil, ErrChunkNotFound
 }
 
-func reposMatch(a, b string) bool {
-	if b = normalizeRepo(b); b == "" {
-		return false
-	}
-	return slices.Contains(repoMatchCandidates(a), b)
-}
-
-func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error) {
-	if m.getErr != nil {
-		return nil, m.getErr
-	}
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return &VanadisChunkPRLookup{Matched: false}, nil
-	}
-	for bID, list := range m.chunks {
-		b := m.builds[bID]
-		if b.Status == "cancelled" {
-			continue
-		}
-		for _, c := range list {
-			if reposMatch(c.Repo, repo) && c.PRNumber == prNumber {
-				return &VanadisChunkPRLookup{
-					Matched: true,
-					ChunkID: c.ID,
-					BuildID: bID,
-					Effort:  capChunkEffort(c.Effort),
-				}, nil
-			}
-		}
-	}
-	return &VanadisChunkPRLookup{Matched: false}, nil
-}
-
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) { return 0, errors.New("read error") }
@@ -171,54 +136,6 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 	}
 	_ = s.CreateBuild(context.Background(), b, []VanadisChunk{c1, c2})
 	return s, buildID, []string{"chunk-1", "chunk-2"}
-}
-
-func TestRepoMatching_TableDriven(t *testing.T) {
-	candidateTests := []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{
-			name:     "empty repo returns nil",
-			input:    "",
-			expected: nil,
-		},
-		{
-			name:     "bare repo adds default owner prefix",
-			input:    "aerial",
-			expected: []string{"aerial", "azylman/aerial"},
-		},
-		{
-			name:     "bare repo with whitespace trims and adds default owner prefix",
-			input:    "  aerial  ",
-			expected: []string{"aerial", "azylman/aerial"},
-		},
-		{
-			name:     "prefixed repo with default owner adds bare candidate",
-			input:    "azylman/aerial",
-			expected: []string{"azylman/aerial", "aerial"},
-		},
-		{
-			name:     "other org repo returns single candidate",
-			input:    "other-org/aerial",
-			expected: []string{"other-org/aerial"},
-		},
-		{
-			name:     "nested slash under default owner returns single candidate",
-			input:    "azylman/sub/repo",
-			expected: []string{"azylman/sub/repo"},
-		},
-	}
-
-	for _, tc := range candidateTests {
-		t.Run("candidates_"+tc.name, func(t *testing.T) {
-			got := repoMatchCandidates(tc.input)
-			if !slices.Equal(got, tc.expected) {
-				t.Errorf("repoMatchCandidates(%q) = %v, want %v", tc.input, got, tc.expected)
-			}
-		})
-	}
 }
 
 func TestValidateUpdateChunkInput_Validation(t *testing.T) {

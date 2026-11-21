@@ -13,7 +13,6 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/vanadis/internal/dag"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
-	"github.com/azylman/aerial/services/vanadis/internal/store"
 )
 
 const (
@@ -77,9 +76,6 @@ type VanadisAdvancementResult struct {
 	BuildCompleted   bool                  `json:"build_completed"`
 	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
 }
-
-// VanadisChunkPRLookup represents the result of looking up a chunk by repository and PR number.
-type VanadisChunkPRLookup = store.VanadisChunkPRLookup
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
 type AttachChunkPRRequest struct {

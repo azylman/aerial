@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 )
@@ -47,8 +48,6 @@ var (
 	QueueOldestAgeSeconds = metrics.QueueOldestAgeSeconds
 	// RecordBuildTotal increments the vanadis_builds_total counter for a given status.
 	RecordBuildTotal = metrics.RecordBuildTotal
-	// NewHandler returns the Prometheus metrics HTTP handler.
-	NewHandler = metrics.NewHandler
 )
 
 // consumerStatsQuerier reports pending and in-flight consumer counts.
@@ -158,6 +157,36 @@ func InitPostgres(ctx context.Context, server *VanadisServer, pgURL string) (fun
 
 var initPostgres = InitPostgres
 
+// queueStatsBus reads consumer backlog for the queue gauges and is closed on shutdown.
+type queueStatsBus interface {
+	consumerStatsQuerier
+	Close() error
+}
+
+var newQueueStatsBusFn = func(ctx context.Context, natsURL string) (queueStatsBus, error) {
+	return pubsub.NewJetStreamBus(ctx, natsURL)
+}
+
+// initQueueStats connects the JetStream stats reader behind vanadis_queue_* when a
+// NATS URL is configured. It is metrics-only, so a failure is logged, not fatal.
+func initQueueStats(ctx context.Context, server *VanadisServer, natsURL string, newBus func(context.Context, string) (queueStatsBus, error)) func() {
+	if natsURL == "" {
+		return func() {}
+	}
+	bus, err := newBus(ctx, natsURL)
+	if err != nil {
+		log.Printf("[vanadis] queue metrics disabled: %v", err)
+		return func() {}
+	}
+	server.queueStats = bus
+	log.Println("[vanadis] JetStream queue metrics initialized")
+	return func() {
+		if err := bus.Close(); err != nil {
+			log.Printf("[vanadis] JetStream close error: %v", err)
+		}
+	}
+}
+
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
 	server := NewVanadisServer(cfg, nil, nil)
 	var cleanupDB func(context.Context)
@@ -169,6 +198,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		cleanupDB = cleanup
 		log.Println("[vanadis] PostgreSQL store initialized")
 	}
+	closeQueueStats := initQueueStats(ctx, server, cfg.NATSURL, newQueueStatsBusFn)
+	defer closeQueueStats()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)

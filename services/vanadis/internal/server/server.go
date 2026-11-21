@@ -81,7 +81,6 @@ type (
 )
 
 var (
-	capChunkEffort = model.CapChunkEffort
 	// NormalizeChunkEffort validates and normalizes a chunk effort value.
 	NormalizeChunkEffort = model.NormalizeChunkEffort
 	normalizeChunkEffort = model.NormalizeChunkEffort
@@ -118,8 +117,6 @@ var (
 	ScanBuild = store.ScanBuild
 	// ScanChunks scans ordered vanadis_chunks rows into VanadisChunk values.
 	ScanChunks = store.ScanChunks
-	// repoMatchCandidates returns the repo spellings a PR lookup should match.
-	repoMatchCandidates = store.RepoMatchCandidates
 )
 
 // ExecuteChunkArgs defines the job payload for executing a single Vanadis build chunk.

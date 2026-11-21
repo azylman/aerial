@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -25,7 +26,7 @@ import (
 func scrapeRootMetrics(t *testing.T) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics handler status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -121,6 +122,47 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	srv.queueStats = mockQ
 	if srv.consumerStatsQuerier() != mockQ {
 		t.Errorf("expected queueStats override")
+	}
+}
+
+type fakeQueueStatsBus struct {
+	mockConsumerStatsQuerier
+
+	closeErr error
+}
+
+func (f *fakeQueueStatsBus) Close() error { return f.closeErr }
+
+func TestInitQueueStats(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		natsURL   string
+		bus       *fakeQueueStatsBus
+		busErr    error
+		wantStats bool
+	}{
+		{name: "no nats url leaves stats unset", natsURL: ""},
+		{name: "connect error leaves stats unset", natsURL: "nats://nats.test:4222", busErr: errors.New("connect refused")},
+		{name: "connected bus backs queue stats", natsURL: "nats://nats.test:4222", bus: &fakeQueueStatsBus{}, wantStats: true},
+		{name: "close error is logged not fatal", natsURL: "nats://nats.test:4222", bus: &fakeQueueStatsBus{closeErr: errors.New("already closed")}, wantStats: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewVanadisServer(Config{}, nil, nil)
+			newBus := func(context.Context, string) (queueStatsBus, error) {
+				if tc.busErr != nil {
+					return nil, tc.busErr
+				}
+				return tc.bus, nil
+			}
+			closeFn := initQueueStats(context.Background(), srv, tc.natsURL, newBus)
+			if got := srv.consumerStatsQuerier() != nil; got != tc.wantStats {
+				t.Errorf("queue stats configured = %v, want %v", got, tc.wantStats)
+			}
+			closeFn()
+		})
 	}
 }
 

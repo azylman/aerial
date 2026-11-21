@@ -781,6 +781,13 @@ spec:
               value: aerial
             - name: K8S_AUTH_ENABLED
               value: "true"
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
+            - name: NATS_URL
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
