@@ -379,3 +379,32 @@ func TestIngressURL(t *testing.T) {
 		})
 	}
 }
+
+func TestCallIngressKeyed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		key     string
+		wantKey string
+	}{
+		{"sends key", "complete:d1", "complete:d1"},
+		{"omits empty key", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Idempotency-Key")
+			}))
+			defer ts.Close()
+			c := NewClient(config.RestateConfig{RestateIngressURL: ts.URL}, ts.Client())
+			if err := c.CallIngressKeyed(context.Background(), "/Build/b/CompleteChunk", tc.key, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.wantKey {
+				t.Fatalf("Idempotency-Key = %q, want %q", got, tc.wantKey)
+			}
+		})
+	}
+}

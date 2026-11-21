@@ -128,14 +128,17 @@ func TestHandleJetStreamJobRestatePolicy(t *testing.T) {
 func TestStampEffectsOwner(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		preStamp   string
-		preStamped bool
-		want       string
+		name          string
+		authoritative bool
+		preStamp      string
+		preStamped    bool
+		want          string
 	}{
 		{name: "unstamped context snapshots legacy", want: "legacy"},
+		{name: "unstamped context under authority snapshots restate", authoritative: true, want: "restate"},
 		{name: "earlier restate stamp is kept", preStamp: "restate", preStamped: true, want: "restate"},
 		{name: "earlier legacy stamp is kept", preStamp: "legacy", preStamped: true, want: "legacy"},
+		{name: "earlier legacy stamp survives a reload to authority", authoritative: true, preStamp: "legacy", preStamped: true, want: "legacy"},
 		{name: "earlier garbage stamp normalizes to legacy", preStamp: "both", preStamped: true, want: "legacy"},
 	}
 	for _, tc := range tests {
@@ -145,7 +148,8 @@ func TestStampEffectsOwner(t *testing.T) {
 			if tc.preStamped {
 				ctx = withEffectsOwner(ctx, tc.preStamp)
 			}
-			if got := effectsOwnerFromContext(stampEffectsOwner(ctx)); got != tc.want {
+			srv := NewRouterServer(fixedConfig(Config{RestateAuthoritative: tc.authoritative}), nil)
+			if got := effectsOwnerFromContext(srv.stampEffectsOwner(ctx)); got != tc.want {
 				t.Errorf("effectsOwnerFromContext() = %q, want %q", got, tc.want)
 			}
 		})

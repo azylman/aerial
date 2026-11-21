@@ -293,6 +293,10 @@ type PREvent struct {
 	// Kustomization names the Flux Kustomization a forwarded
 	// kustomization status observed; empty for every other event.
 	Kustomization string `json:"kustomization,omitempty"`
+	// AutoUpdate is the auto-update policy a restate-owned
+	// HandleCIRecovered carries: when the recovery applies, PRObject
+	// forwards RepoObject.HandleAutoUpdate for the recovered check.
+	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
 
 	// Registry row payload. Each field is omitted when empty, so events
 	// that carry no registry data keep the frozen wire key set.
