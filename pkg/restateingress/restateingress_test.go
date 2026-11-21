@@ -23,8 +23,7 @@ var (
 	failReadClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: errBody{}, Header: make(http.Header)}, nil
 	})}
-	passthroughClient = &http.Client{Transport: roundTripFunc(http.DefaultTransport.RoundTrip)}
-	failDoClient      = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	failDoClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
 	})}
 )
@@ -72,7 +71,6 @@ func TestPost(t *testing.T) {
 		{name: "nil payload sends empty body", status: 200, respBody: `{"status":"accepted"}`, wantBody: `{"status":"accepted"}`},
 		{name: "payload marshaled with idempotency key", key: " prompt:1:2 ", payload: map[string]string{"prompt": "hi"}, status: 202, respBody: "ok", wantBody: "ok", wantSent: `{"prompt":"hi"}`, wantKey: "prompt:1:2", wantKeySet: true},
 		{name: "blank key omitted", key: "   ", payload: map[string]int{"n": 1}, status: 200, respBody: "ok", wantBody: "ok", wantSent: `{"n":1}`},
-		{name: "explicit client used", client: passthroughClient, status: 200, respBody: "ok", wantBody: "ok"},
 		{name: "max body truncates", maxBody: 4, status: 200, respBody: "abcdefgh", wantBody: "abcd"},
 		{name: "zero max body unbounded", status: 200, respBody: "abcdefgh", wantBody: "abcdefgh"},
 		{name: "json message error", status: 409, respBody: `{"message":" busy ","error":"other"}`, wantErr: "restate ingress returned HTTP 409: busy", wantStatus: 409},
