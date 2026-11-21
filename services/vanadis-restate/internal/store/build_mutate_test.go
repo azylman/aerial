@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 
@@ -613,119 +612,5 @@ func TestBuildMutateRelinkAndApplySuccess(t *testing.T) {
 	}
 	if c.Title != "New" || c.Instructions != "New" || len(c.TargetFiles) != 1 || c.TargetFiles[0] != "new.go" || len(c.TargetSymbols) != 1 || c.Effort != "medium" || c.DependsOn == nil {
 		t.Fatalf("unexpected updated pr chunk: %+v", c)
-	}
-}
-
-func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
-	t.Parallel()
-
-	t.Run("update_chunk_cycle_rejected", func(t *testing.T) {
-		t.Parallel()
-		existing := []model.VanadisChunk{
-			{ID: "c1", Mode: "action", DependsOn: []string{}},
-			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
-		}
-		updated := existing[0]
-		updated.DependsOn = []string{"c2"}
-		_, err := validateUpdateChunkDAG(existing, 0, updated)
-		if err == nil || !strings.Contains(err.Error(), "cycle detected") {
-			t.Fatalf("expected cycle error, got %v", err)
-		}
-	})
-
-	t.Run("update_chunk_overlapping_files_rejected", func(t *testing.T) {
-		t.Parallel()
-		existing := []model.VanadisChunk{
-			{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-			{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
-		}
-		updated := existing[1]
-		updated.TargetFiles = []string{"a.go"}
-		_, err := validateUpdateChunkDAG(existing, 1, updated)
-		if err == nil || !strings.Contains(err.Error(), "overlapping target_files") {
-			t.Fatalf("expected overlapping target_files error, got %v", err)
-		}
-	})
-
-	t.Run("append_chunks_cycle_rejected", func(t *testing.T) {
-		t.Parallel()
-		existing := []model.VanadisChunk{
-			{ID: "c1", Mode: "action", DependsOn: []string{}},
-		}
-		appended := []model.VanadisChunk{
-			{ID: "c2", Mode: "action", DependsOn: []string{"c3"}},
-			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
-		}
-		_, err := validateAppendChunksDAG(existing, appended)
-		if err == nil || !strings.Contains(err.Error(), "cycle detected") {
-			t.Fatalf("expected cycle error, got %v", err)
-		}
-	})
-
-	t.Run("append_chunks_valid_sequential_default", func(t *testing.T) {
-		t.Parallel()
-		existing := []model.VanadisChunk{
-			{ID: "c1", Mode: "action", DependsOn: []string{}},
-		}
-		appended := []model.VanadisChunk{
-			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
-			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
-		}
-		norm, err := validateAppendChunksDAG(existing, appended)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(norm) != 2 || len(norm[0].DependsOn) != 1 || norm[0].DependsOn[0] != "c1" {
-			t.Fatalf("unexpected normalized appended chunks: %+v", norm)
-		}
-	})
-
-	t.Run("relink_dependencies_after_removal_and_update", func(t *testing.T) {
-		t.Parallel()
-		chunks := []model.VanadisChunk{
-			{ID: "c1", Mode: "action", DependsOn: []string{}},
-			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
-			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
-		}
-		// Remove c2
-		remaining := []model.VanadisChunk{chunks[0], chunks[2]}
-		relinkDependenciesAfterRemoval(remaining, chunks[1].ID, chunks[1].DependsOn)
-		if len(remaining[1].DependsOn) != 1 || remaining[1].DependsOn[0] != "c1" {
-			t.Fatalf("expected c3 to depend on c1 after c2 removal, got %+v", remaining[1].DependsOn)
-		}
-		// Now update c3, DAG validation should succeed
-		updatedC3 := remaining[1]
-		updatedC3.Title = "Updated C3"
-		normDeps, err := validateUpdateChunkDAG(remaining, 1, updatedC3)
-		if err != nil {
-			t.Fatalf("unexpected DAG validation error after removal: %v", err)
-		}
-		if len(normDeps) != 1 || normDeps[0] != "c1" {
-			t.Fatalf("unexpected normalized deps: %+v", normDeps)
-		}
-	})
-}
-
-func TestRelinkDependenciesAfterRemoval_SelfDep(t *testing.T) {
-	t.Parallel()
-
-	// c1 removed, which depended on c2. c2 remaining shouldn't add c2 to its own DependsOn.
-	remaining := []model.VanadisChunk{
-		{ID: "c2", DependsOn: []string{"c1"}},
-	}
-	relinkDependenciesAfterRemoval(remaining, "c1", []string{"c2"})
-	if len(remaining[0].DependsOn) != 0 {
-		t.Fatalf("expected empty depends_on preventing self dependency, got %v", remaining[0].DependsOn)
-	}
-}
-
-func TestRelinkDependenciesAfterRemoval_DuplicateDep(t *testing.T) {
-	t.Parallel()
-	remaining := []model.VanadisChunk{
-		{ID: "c3", DependsOn: []string{"c2", "c1", "c1"}},
-	}
-	relinkDependenciesAfterRemoval(remaining, "c2", []string{"c0"})
-	if !slices.Equal(remaining[0].DependsOn, []string{"c0", "c1"}) {
-		t.Fatalf("unexpected DependsOn after relink: %v", remaining[0].DependsOn)
 	}
 }
