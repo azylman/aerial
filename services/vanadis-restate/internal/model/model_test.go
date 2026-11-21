@@ -13,8 +13,8 @@ func TestNormalizeAgentName(t *testing.T) {
 		name, agent, want string
 	}{
 		{"empty stays empty", "", ""},
-		{"trims whitespace", "  suletta  ", "suletta"},
-		{"lowercases", "Suletta", "suletta"},
+		{"trims whitespace", "  agent-beta  ", "agent-beta"},
+		{"lowercases", "Agent-Beta", "agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32,10 +32,10 @@ func TestServiceNameDerivation(t *testing.T) {
 		{"empty defaults to legacy", "", "Build", "BuildRouter"},
 		{"aerial defaults to legacy", "aerial", "Build", "BuildRouter"},
 		{"aerial case insensitive", "Aerial", "Build", "BuildRouter"},
-		{"suletta scoped", "suletta", "Build-suletta", "BuildRouter-suletta"},
-		{"miorine scoped", "miorine", "Build-miorine", "BuildRouter-miorine"},
-		{"whitespace trimmed", "  suletta  ", "Build-suletta", "BuildRouter-suletta"},
-		{"mixed case scoped normalized", "Suletta", "Build-suletta", "BuildRouter-suletta"},
+		{"agent-beta scoped", "agent-beta", "Build-agent-beta", "BuildRouter-agent-beta"},
+		{"agent-alpha scoped", "agent-alpha", "Build-agent-alpha", "BuildRouter-agent-alpha"},
+		{"whitespace trimmed", "  agent-beta  ", "Build-agent-beta", "BuildRouter-agent-beta"},
+		{"mixed case scoped normalized", "Agent-Beta", "Build-agent-beta", "BuildRouter-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

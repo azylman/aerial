@@ -72,9 +72,9 @@ func TestPRState_ResolveRegister(t *testing.T) {
 		{name: "no stored target falls back to system channel", state: owned("", ""), req: withTarget(base, "", snowC), wantVerdict: RegisterOK, wantTarget: snowC},
 		{name: "no valid target is rejected", state: owned("", ""), req: withTarget(base, "", ""), wantVerdict: RegisterBadTarget},
 		{name: "enforced owner matches stored owner", state: owned("aerial", ""), req: withOwner(withTarget(base, snowA, ""), "aerial"), wantVerdict: RegisterOK, wantTarget: snowA},
-		{name: "enforced owner mismatch rejected", state: owned("miorine", ""), req: withOwner(withTarget(base, snowA, ""), "aerial"), wantVerdict: RegisterOwnerMismatch},
+		{name: "enforced owner mismatch rejected", state: owned("agent-alpha", ""), req: withOwner(withTarget(base, snowA, ""), "aerial"), wantVerdict: RegisterOwnerMismatch},
 		{name: "enforced owner with no stored owner passes", state: owned("", ""), req: withOwner(withTarget(base, snowA, ""), ""), wantVerdict: RegisterOK, wantTarget: snowA},
-		{name: "unenforced owner mismatch passes", state: owned("miorine", ""), req: withTarget(base, snowA, ""), wantVerdict: RegisterOK, wantTarget: snowA},
+		{name: "unenforced owner mismatch passes", state: owned("agent-alpha", ""), req: withTarget(base, snowA, ""), wantVerdict: RegisterOK, wantTarget: snowA},
 		{name: "missing head is invalid", state: owned("", ""), req: RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", TargetID: snowA}, wantVerdict: RegisterInvalid},
 		{name: "missing branch is invalid", state: owned("", ""), req: RegisterRequest{Repo: "aerial", PRNumber: 7, HeadSHA: "h1", TargetID: snowA}, wantVerdict: RegisterInvalid},
 		{name: "nil state is invalid", req: withTarget(base, snowA, ""), wantVerdict: RegisterInvalid},
@@ -121,7 +121,7 @@ func TestPRState_ApplyRegister(t *testing.T) {
 	}{
 		{name: "new head clears head-scoped metadata and reopens", state: seeded("h0", RegistryStatusCIFailed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1", Title: "New", Agent: "aerial", Metadata: map[string]string{"vanadis_chunk_id": "chunk-1", "widget_state": "w", "other": "x"}}, wantStatus: RegistryStatusOpen, wantHead: "h1", wantTitle: "New", wantAgent: "aerial", wantBotID: "aerial", wantChunk: "chunk-1", wantWidget: "w"},
 		{name: "new head keeps low ci fail count", state: lowFails(), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusOpen, wantHead: "h1", wantTitle: "Old title", wantFailCount: 2},
-		{name: "same head clears only banner", state: seeded("h0", RegistryStatusConflict), req: RegisterRequest{Branch: "feat", HeadSHA: "h0", BotID: "miorine"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5, wantAgent: "miorine", wantBotID: "miorine"},
+		{name: "same head clears only banner", state: seeded("h0", RegistryStatusConflict), req: RegisterRequest{Branch: "feat", HeadSHA: "h0", BotID: "agent-alpha"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5, wantAgent: "agent-alpha", wantBotID: "agent-alpha"},
 		{name: "post-merge status and metadata are kept", state: seeded("h0", RegistryStatusDeployed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusDeployed, wantHead: "h1", wantTitle: "Old title", wantBanner: "boom", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5},
 		{name: "closed status reopens", state: seeded("h0", RegistryStatusClosed), req: RegisterRequest{Branch: "feat", HeadSHA: "h0"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5},
 	}
