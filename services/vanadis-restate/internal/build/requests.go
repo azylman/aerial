@@ -43,3 +43,19 @@ type CreateBuildRequest struct {
 type AppendChunksRequest struct {
 	Chunks []store.CreateChunkInput `json:"chunks"`
 }
+
+// CompleteChunkRequest is an action chunk's explicit completion verdict.
+type CompleteChunkRequest struct {
+	BuildID    string `json:"build_id"`
+	ChunkID    string `json:"chunk_id"`
+	DispatchID string `json:"dispatch_id"`
+	Summary    string `json:"summary"`
+}
+
+// CompleteChunkResponse reports whether the verdict completed the chunk.
+type CompleteChunkResponse struct {
+	Status    string `json:"status"`
+	BuildID   string `json:"build_id"`
+	ChunkID   string `json:"chunk_id"`
+	Completed bool   `json:"completed"`
+}
