@@ -1,47 +1,38 @@
 package prstate
 
-// Journaled pr_registry projection. Restate K/V in PRObject/RepoObject is the
-// ONLY writer/authority; Postgres pr_registry is a replayable read-only
-// projection plus SHA lookup index. Routing may use the projection; authority
-// may not.
+// Journaled pr_registry projection. Restate K/V in PRObject is the ONLY
+// lifecycle authority; Postgres pr_registry is a replayable projection of
+// committed PRObject state plus a SHA lookup index. Routing may use the
+// projection; authority may not.
 //
-// Ownership ruling: projection-key ownership of pr_registry transfers to the
-// prstate service under a per-key field-ownership partition. This file owns
-// ONLY the keys in OwnedMetadataKeys plus the head_sha/merge_sha/status
-// columns; every other metadata key (jobs, started_jobs, deployed_jobs,
-// job_states, kustomization_requests, deployed_kustomizations,
-// deploy_failed_published, deploy_success_pending, build_metadata) belongs to
-// later chunks or other writers, and the upsert never overwrites them.
-// Synapse registry code is read-only in this chunk: the SQL below mirrors its
-// metadata-blob idioms (jsonb_set per key, banner removal, ON CONFLICT
-// (repo, pr_number)) without importing it.
+// Ownership ruling: prstate owns every pr_registry column and every metadata
+// key in OwnedMetadataKeys, which is the full set of keys a registry row
+// carries in prod. BuildProjection maps the whole PRState row; the upsert
+// replaces the owned keys wholesale (an owned key absent from the snapshot
+// is removed, exactly like the registry's `- 'banner'` idioms) and leaves any
+// unknown key untouched. Synapse registry code is not imported: the SQL below
+// mirrors its metadata-blob idioms (jsonb `-` / `||`, ON CONFLICT (repo,
+// pr_number)).
 //
-// Ordering contract: ProjectRegistry runs as a journaled send AFTER the
-// Restate state commit. Projection failure never discards or gates the
-// transition; the caller keeps the committed state and retries the send.
-// Replay returns the recorded result and never re-fires the row write twice
-// observably (the upsert is idempotent per ProjectionJournalKey).
+// Ordering contract: for effects_owner=restate the projection runs as a
+// one-way PRObject self-send AFTER the state commit (PRObject.ProjectRegistry).
+// The send re-derives the snapshot from committed state at delivery time, so
+// a queued older send can never land a stale row: sends for one PR are
+// totally ordered by the PRObject queue and every one projects current
+// state. Projection failure never discards or gates the transition; the
+// committed state stays and a delayed self-send retries. The upsert is
+// idempotent per ProjectionJournalKey, and PRObject records the last
+// projected key so redundant sends never rewrite an identical row.
 // RebuildProjection enumerates only the RepoObject touched-PR index, never
-// the projection being rebuilt, so rebuild is non-circular; snapshot restore
-// remains the fallback.
+// the projection being rebuilt, so rebuild is non-circular.
 //
-// Live-send ordering: sends for one PR are totally ordered by the PRObject's
-// single-threaded journal — a retried unrecorded send completes before any
-// later invocation's send, and recorded sends never re-fire, so no stale
-// live send can land last. Rebuild replays current state through this same
-// send path and must run quiesced against live traffic; the cutover re-derives
-// the snapshot from current committed state at send time rather than
-// forwarding event-captured snapshots. The journal key below only ever
-// distinguishes content for dedup; it never decides a transition.
+// Shadow compare: for effects_owner=legacy synapse still writes the row, so
+// prstate never writes; a delayed shared-handler send compares the row
+// synapse wrote against the snapshot (CompareProjection).
 //
 // External idempotency tolerance: the registry upsert has no external
 // idempotency-key parameter, so at-least-once delivery is accepted here and
-// absorbed by the idempotent upsert (same journal key replays to the same
-// row). Later chunks pass the journaled EffectKey as the external
-// idempotency key wherever a Discord/GitHub API supports one, and state the
-// accepted at-least-once tolerance per effect where it does not.
-//
-// Dark only: no caller entrypoint wires this in; the cutover chunk does.
+// absorbed by the idempotent upsert (same snapshot, same row).
 
 import (
 	"context"
@@ -49,132 +40,162 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
+	"maps"
+	"sort"
 	"strings"
-	"sync"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// ProjectionKind is the journaled effect kind for registry projection sends.
-const ProjectionKind = "projection"
+// ProjectionMetadata is the typed pr_registry metadata blob. JSON tags match
+// the synapse registry keys exactly, and every field is omitempty so an empty
+// value projects as an absent key (the registry removes or never sets keys
+// it has no value for).
+type ProjectionMetadata struct {
+	Agent                  string                          `json:"agent,omitempty"`
+	BotID                  string                          `json:"bot_id,omitempty"`
+	Banner                 string                          `json:"banner,omitempty"`
+	BuildMetadata          *BuildMetadata                  `json:"build_metadata,omitempty"`
+	CIChecks               map[string]string               `json:"ci_checks,omitempty"`
+	CIFailCount            int                             `json:"ci_fail_count,omitempty"`
+	DeployFailedPublished  bool                            `json:"deploy_failed_published,omitempty"`
+	DeploySuccessPending   bool                            `json:"deploy_success_pending,omitempty"`
+	DeployedJobs           []string                        `json:"deployed_jobs,omitempty"`
+	DeployedKustomizations []string                        `json:"deployed_kustomizations,omitempty"`
+	JobStates              map[string]string               `json:"job_states,omitempty"`
+	Jobs                   []string                        `json:"jobs,omitempty"`
+	KustomizationRequests  map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
+	StartedJobs            []string                        `json:"started_jobs,omitempty"`
+	VanadisChunkID         string                          `json:"vanadis_chunk_id,omitempty"`
+	WidgetState            string                          `json:"widget_state,omitempty"`
+}
 
-// ProjectionStatusOpen is the default registry status for a tracked PR.
-const ProjectionStatusOpen = "open"
-
-// ProjectionSnapshot is one journaled row write derived from committed
-// Restate state. Metadata carries ONLY owned keys.
+// ProjectionSnapshot is one row write derived from committed PRObject state.
 type ProjectionSnapshot struct {
-	Repo       string
-	PRNumber   int
-	Agent      string
-	Branch     string
-	HeadSHA    string
-	MergeSHA   string
-	Title      string
-	TargetID   string
-	Status     string
-	Generation uint64
-	MetaEpoch  uint64
-	Metadata   map[string]any
+	Repo       string             `json:"repo"`
+	PRNumber   int                `json:"pr_number"`
+	Agent      string             `json:"agent"`
+	Branch     string             `json:"branch"`
+	HeadSHA    string             `json:"head_sha"`
+	MergeSHA   string             `json:"merge_sha"`
+	Title      string             `json:"title"`
+	TargetID   string             `json:"target_id"`
+	Status     string             `json:"status"`
+	Generation uint64             `json:"generation"`
+	MetaEpoch  uint64             `json:"meta_epoch"`
+	Metadata   ProjectionMetadata `json:"metadata"`
 }
 
-// OwnedMetadataKeys returns the metadata keys prstate may write. Every other
-// key in the blob belongs to another writer and is never touched.
+// RegistryRow is one pr_registry row as stored: the shadow compare reads it
+// and PRObject.Hydrate takes it as input. The agent column is informational
+// only (schema default 'aerial'); ownership comes from metadata.agent and
+// metadata.bot_id.
+type RegistryRow struct {
+	Repo     string             `json:"repo"`
+	PRNumber int                `json:"pr_number"`
+	Agent    string             `json:"agent"`
+	Branch   string             `json:"branch"`
+	HeadSHA  string             `json:"head_sha"`
+	MergeSHA string             `json:"merge_sha"`
+	TargetID string             `json:"target_id"`
+	Status   string             `json:"status"`
+	Title    string             `json:"title"`
+	Metadata ProjectionMetadata `json:"metadata"`
+}
+
+// OwnedMetadataKeys returns every metadata key prstate writes, sorted. The
+// upsert replaces exactly these keys; any other key in the blob survives.
 func OwnedMetadataKeys() []string {
-	return []string{"ci_checks"}
+	return []string{
+		"agent", "banner", "bot_id", "build_metadata", "ci_checks", "ci_fail_count",
+		"deploy_failed_published", "deploy_success_pending", "deployed_jobs",
+		"deployed_kustomizations", "job_states", "jobs", "kustomization_requests",
+		"started_jobs", "vanadis_chunk_id", "widget_state",
+	}
 }
 
-// IsOwnedMetadataKey reports whether key is in the prstate-owned partition.
-func IsOwnedMetadataKey(key string) bool {
-	return slices.Contains(OwnedMetadataKeys(), key)
-}
-
-// ProjectionStatus derives the registry status column purely from committed
-// Restate state. Every failure signal is scoped to the current head SHA:
-// stale markers recorded for a superseded SHA never project failure onto a
-// head that never failed. Post-merge registry statuses recorded by the
-// deploy-phase transitions (synced, deploying, deployed, deploy_failed) win;
-// then terminal states; conflict beats ci_failed.
-func ProjectionStatus(s *PRState) string {
-	if s == nil {
-		return ProjectionStatusOpen
-	}
-	if statusIn(s.Status, RegistryStatusSynced, RegistryStatusDeploying, RegistryStatusDeployed, RegistryStatusDeployFailed) {
-		return s.Status
-	}
-	switch s.Terminal {
-	case TerminalMerged:
-		return "merged"
-	case TerminalClosed:
-		return "closed"
-	case TerminalNone:
-	default:
-	}
-	if s.WasConflictPublished(s.HeadSHA) {
-		return "conflict"
-	}
-	if s.HasFailedCISHA(s.HeadSHA) || s.HasActiveFailedCheckRuns(s.HeadSHA) {
-		return "ci_failed"
-	}
-	return ProjectionStatusOpen
-}
-
-// BuildProjection maps committed PRState to a registry row write. It reads
-// only the state it is given and never consults the projection, so the
-// projection can never feed back into a transition decision.
-func BuildProjection(s *PRState, branch, title, targetID, mergeSHA string) ProjectionSnapshot {
-	agent := DefaultAgent
-	if s != nil && strings.TrimSpace(s.Agent) != "" {
-		agent = strings.TrimSpace(s.Agent)
-	}
-	snap := ProjectionSnapshot{
-		Agent:    agent,
-		Branch:   strings.TrimSpace(branch),
-		Title:    strings.TrimSpace(title),
-		TargetID: strings.TrimSpace(targetID),
-		MergeSHA: strings.TrimSpace(mergeSHA),
-		Status:   ProjectionStatusOpen,
-		Metadata: map[string]any{},
-	}
+// BuildProjection maps committed PRState to a full registry row write. It
+// reads only the state it is given and never consults the projection, so
+// the projection can never feed back into a transition decision.
+func BuildProjection(s *PRState) ProjectionSnapshot {
+	snap := ProjectionSnapshot{Agent: s.OwnerAgent(), Status: s.RegistryStatus()}
 	if s == nil {
 		return snap
 	}
 	snap.Repo = NormalizeRepo(s.Repo)
 	snap.PRNumber = s.PRNumber
+	snap.Branch = strings.TrimSpace(s.Branch)
 	snap.HeadSHA = strings.TrimSpace(s.HeadSHA)
+	snap.MergeSHA = strings.TrimSpace(s.MergeSHA)
+	snap.Title = strings.TrimSpace(s.Title)
+	snap.TargetID = strings.TrimSpace(s.TargetID)
 	snap.Generation = s.GateGeneration
 	snap.MetaEpoch = s.ReopenEpoch
-	snap.Status = ProjectionStatus(s)
-	checks := map[string]any{}
-	if head := strings.TrimSpace(s.HeadSHA); head != "" && !IsZeroSHA(head) &&
-		strings.EqualFold(strings.TrimSpace(s.Checks.HeadSHA), head) {
-		for name := range s.Checks.ActiveFailed {
-			checks[name] = "failed"
-		}
-		if s.Checks.RoboRevActiveFailed {
-			checks["roborev"] = "failed"
-		}
-	}
-	snap.Metadata["ci_checks"] = checks
+	snap.Metadata = normalizeMetadata(ProjectionMetadata{
+		Agent:                  strings.TrimSpace(s.Agent),
+		BotID:                  strings.TrimSpace(s.BotID),
+		Banner:                 strings.TrimSpace(s.Banner),
+		BuildMetadata:          s.BuildMetadata,
+		CIChecks:               s.CIChecks,
+		CIFailCount:            s.CIFailCount,
+		DeployFailedPublished:  s.DeployFailedPublished,
+		DeploySuccessPending:   s.DeploySuccessPending,
+		DeployedJobs:           s.DeployedJobs,
+		DeployedKustomizations: s.DeployedKustomizations,
+		JobStates:              s.JobStates,
+		Jobs:                   s.Jobs,
+		KustomizationRequests:  s.KustomizationRequests,
+		StartedJobs:            s.StartedJobs,
+		VanadisChunkID:         strings.TrimSpace(s.VanadisChunkID),
+		WidgetState:            strings.TrimSpace(s.WidgetState),
+	})
 	return snap
 }
 
-// ProjectionJournalKey scopes one projection send to its exact content:
-// repo+PR+headSHA+generation+reopen epoch plus a digest of every projected
-// field. Status, checks, and titles change many times within one generation
-// on one head SHA, so a generation-scoped key alone would suppress a newer
-// projection as a replay of an older one. Retries of the identical snapshot
-// reuse the key and dedupe; any content or epoch change mints a new key.
-// The digest input is length-delimited by NUL separators (mirroring
-// EffectKey.String's Builder pattern), so no marshaling error path exists.
-func ProjectionJournalKey(snap ProjectionSnapshot) string {
-	meta := snap.Metadata
-	if meta == nil {
-		meta = map[string]any{}
+// normalizeMetadata returns a copy with set-valued slices cleaned and
+// sorted and empty collections nil, so equal sets marshal identically no
+// matter which writer produced them.
+func normalizeMetadata(m ProjectionMetadata) ProjectionMetadata {
+	m.DeployedJobs = cleanStrings(m.DeployedJobs)
+	m.DeployedKustomizations = cleanStrings(m.DeployedKustomizations)
+	m.Jobs = cleanStrings(m.Jobs)
+	m.StartedJobs = cleanStrings(m.StartedJobs)
+	m.CIChecks = cloneNonEmpty(m.CIChecks)
+	m.JobStates = cloneNonEmpty(m.JobStates)
+	m.KustomizationRequests = cloneNonEmpty(m.KustomizationRequests)
+	if m.BuildMetadata != nil {
+		clone := *m.BuildMetadata
+		m.BuildMetadata = &clone
 	}
-	metaBytes, err := json.Marshal(meta)
+	return m
+}
+
+func cloneNonEmpty[V any](in map[string]V) map[string]V {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]V, len(in))
+	maps.Copy(out, in)
+	return out
+}
+
+// metadataJSON marshals the metadata blob. Every field type marshals
+// infallibly (strings, ints, bools, string maps and slices, plain structs),
+// so a failure is impossible; it still degrades to an empty object.
+func metadataJSON(m ProjectionMetadata) []byte {
+	raw, err := json.Marshal(m)
 	if err != nil {
-		metaBytes = []byte("{}")
+		return []byte("{}")
 	}
+	return raw
+}
+
+// ProjectionJournalKey scopes one projection to its exact content:
+// repo+PR+headSHA+generation+reopen epoch plus a digest of every projected
+// field. Identical snapshots share the key and dedupe; any content or epoch
+// change mints a new key. The digest input is NUL-delimited.
+func ProjectionJournalKey(snap ProjectionSnapshot) string {
 	agent := strings.TrimSpace(snap.Agent)
 	if agent == "" {
 		agent = DefaultAgent
@@ -185,7 +206,7 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.Title),
 		strings.TrimSpace(snap.TargetID), strings.TrimSpace(snap.Status),
-		snap.Generation, snap.MetaEpoch, metaBytes)
+		snap.Generation, snap.MetaEpoch, metadataJSON(normalizeMetadata(snap.Metadata)))
 	sum := sha256.Sum256([]byte(sb.String()))
 	return fmt.Sprintf("projection:%s:%s:%d@%s:gen%d:epoch%d:%x",
 		agent, NormalizeRepo(snap.Repo), snap.PRNumber,
@@ -193,66 +214,108 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 		sum[:8])
 }
 
-// ownedChecksMerge builds the per-key merge expression for the owned
-// ci_checks key over base: banner removed, a missing key defaulting to an
-// empty object so the merge can never null the blob.
-func ownedChecksMerge(base string) string {
-	return `jsonb_set(` + base + ` - 'banner', '{ci_checks}', COALESCE($10::jsonb->'ci_checks', '{}'::jsonb), true)`
-}
+// projectionUpsertSQL writes every column and replaces the owned metadata
+// keys ($11) wholesale with the snapshot blob ($10). A blank text column
+// never overwrites a stored value (state that has not learned a field yet
+// cannot erase it); status and agent always follow state.
+const projectionUpsertSQL = `INSERT INTO pr_registry (repo, pr_number, agent, branch, head_sha, merge_sha, target_id, title, status, metadata, created_at, updated_at) ` +
+	`VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
+	`ON CONFLICT (repo, pr_number) DO UPDATE SET ` +
+	`agent = EXCLUDED.agent, ` +
+	`branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, ` +
+	`head_sha = CASE WHEN EXCLUDED.head_sha != '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, ` +
+	`merge_sha = COALESCE(EXCLUDED.merge_sha, pr_registry.merge_sha), ` +
+	`target_id = CASE WHEN EXCLUDED.target_id != '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, ` +
+	`title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, ` +
+	`status = EXCLUDED.status, ` +
+	`metadata = (COALESCE(pr_registry.metadata, '{}'::jsonb) - $11::text[]) || EXCLUDED.metadata, ` +
+	`updated_at = CURRENT_TIMESTAMP;`
 
-// ProjectionUpsertQuery builds the real pr_registry upsert: column writes for
-// branch/head_sha/merge_sha/target_id/title/status plus a per-key
-// jsonb_set merge for owned metadata keys in BOTH the insert and the
-// conflict branch, so a first-time projection lands ci_checks instead of an
-// empty blob. Unowned keys are never mentioned, so they survive the merge
-// untouched.
+// ProjectionUpsertQuery builds the full-row pr_registry upsert for snap.
 func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
-	meta := snap.Metadata
-	if meta == nil {
-		meta = map[string]any{}
-	}
-	metaBytes, err := json.Marshal(meta)
-	if err != nil {
-		metaBytes = []byte("{}")
-	}
 	agent := strings.TrimSpace(snap.Agent)
 	if agent == "" {
 		agent = DefaultAgent
 	}
-	query := `INSERT INTO pr_registry (repo, pr_number, agent, branch, head_sha, merge_sha, target_id, title, status, metadata, created_at, updated_at) ` +
-		`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ` + ownedChecksMerge(`'{}'::jsonb`) + `, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
-		`ON CONFLICT (repo, pr_number) DO UPDATE SET ` +
-		`agent = CASE WHEN EXCLUDED.agent != '' THEN EXCLUDED.agent ELSE pr_registry.agent END, ` +
-		`branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, ` +
-		`head_sha = CASE WHEN EXCLUDED.head_sha != '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, ` +
-		`merge_sha = CASE WHEN EXCLUDED.merge_sha != '' THEN EXCLUDED.merge_sha ELSE pr_registry.merge_sha END, ` +
-		`target_id = CASE WHEN EXCLUDED.target_id != '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, ` +
-		`title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, ` +
-		`status = EXCLUDED.status, ` +
-		`metadata = ` + ownedChecksMerge(`COALESCE(metadata, '{}'::jsonb)`) + `, ` +
-		`updated_at = CURRENT_TIMESTAMP;`
 	args := []any{
 		NormalizeRepo(snap.Repo), snap.PRNumber,
 		agent,
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.TargetID),
 		strings.TrimSpace(snap.Title), strings.TrimSpace(snap.Status),
-		string(metaBytes),
+		string(metadataJSON(normalizeMetadata(snap.Metadata))),
+		OwnedMetadataKeys(),
 	}
-	return query, args
+	return projectionUpsertSQL, args
 }
 
-// ProjectionStore is the pr_registry write boundary. Production runs the
-// ProjectionUpsertQuery SQL; tests use FakeProjectionStore. There is no read
-// method by design: the projection never consults the registry.
+// registryRowSQL loads one pr_registry row for the shadow compare.
+const registryRowSQL = `SELECT agent, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2;`
+
+// ProjectionStore is the pr_registry write boundary.
 type ProjectionStore interface {
 	UpsertProjection(ctx context.Context, snap ProjectionSnapshot) error
 }
 
-// ProjectRegistry is the journaled projection send invoked AFTER the
-// Restate state commit. It validates the snapshot and performs exactly one
-// store write; on store failure it returns the error and the caller keeps
-// the already-committed state for a later retry under the same journal key.
+// ProjectionReader is the read-only pr_registry boundary the shadow compare
+// uses. It never feeds a transition decision.
+type ProjectionReader interface {
+	LoadRegistryRow(ctx context.Context, repo string, prNumber int) (RegistryRow, bool, error)
+}
+
+// ProjectionDB is the pgx surface the Postgres projection store needs;
+// *pgxpool.Pool satisfies it.
+type ProjectionDB interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// PgProjectionStore is the production ProjectionStore and ProjectionReader
+// over vanadis-restate's existing Postgres pool.
+type PgProjectionStore struct {
+	db ProjectionDB
+}
+
+// NewPgProjectionStore returns a projection store over db.
+func NewPgProjectionStore(db ProjectionDB) *PgProjectionStore {
+	return &PgProjectionStore{db: db}
+}
+
+// UpsertProjection runs the full-row upsert.
+func (p *PgProjectionStore) UpsertProjection(ctx context.Context, snap ProjectionSnapshot) error {
+	if p == nil || p.db == nil {
+		return errors.New("projection database is nil")
+	}
+	query, args := ProjectionUpsertQuery(snap)
+	if _, err := p.db.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("upsert pr_registry projection %s#%d: %w", snap.Repo, snap.PRNumber, err)
+	}
+	return nil
+}
+
+// LoadRegistryRow reads one row; a missing row returns found=false.
+func (p *PgProjectionStore) LoadRegistryRow(ctx context.Context, repo string, prNumber int) (RegistryRow, bool, error) {
+	if p == nil || p.db == nil {
+		return RegistryRow{}, false, errors.New("projection database is nil")
+	}
+	row := RegistryRow{Repo: NormalizeRepo(repo), PRNumber: prNumber}
+	var raw []byte
+	err := p.db.QueryRow(ctx, registryRowSQL, row.Repo, prNumber).Scan(&row.Agent, &row.Branch, &row.HeadSHA, &row.MergeSHA, &row.TargetID, &row.Status, &row.Title, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RegistryRow{}, false, nil
+	}
+	if err != nil {
+		return RegistryRow{}, false, fmt.Errorf("load pr_registry row %s#%d: %w", row.Repo, prNumber, err)
+	}
+	if err := json.Unmarshal(raw, &row.Metadata); err != nil {
+		return RegistryRow{}, true, fmt.Errorf("decode pr_registry metadata %s#%d: %w", row.Repo, prNumber, err)
+	}
+	return row, true, nil
+}
+
+// ProjectRegistry validates the snapshot and performs exactly one store
+// write; on store failure it returns the error and the caller keeps the
+// already-committed state for a later retry.
 func ProjectRegistry(ctx context.Context, store ProjectionStore, snap ProjectionSnapshot) error {
 	if store == nil {
 		return errors.New("projection store is nil")
@@ -267,6 +330,63 @@ func ProjectRegistry(ctx context.Context, store ProjectionStore, snap Projection
 		return err
 	}
 	return store.UpsertProjection(ctx, snap)
+}
+
+// ProjectionComparison is the shadow-compare verdict for one legacy event:
+// Missing when synapse wrote no row, Superseded when the row has already
+// moved past the snapshot (head/merge SHA or status differ), otherwise the
+// sorted list of fields whose values diverge.
+type ProjectionComparison struct {
+	Missing    bool     `json:"missing"`
+	Superseded bool     `json:"superseded"`
+	Divergent  []string `json:"divergent,omitempty"`
+}
+
+// CompareProjection compares the row synapse wrote with the snapshot
+// PRObject derived for the same event. It compares only when the row's
+// head/merge SHA and status match the snapshot; otherwise the row is
+// superseded and nothing is compared. The agent column is never compared
+// (synapse leaves it at the schema default); ownership is compared through
+// metadata.agent and metadata.bot_id.
+func CompareProjection(snap ProjectionSnapshot, row RegistryRow, found bool) ProjectionComparison {
+	if !found {
+		return ProjectionComparison{Missing: true}
+	}
+	if strings.TrimSpace(row.HeadSHA) != strings.TrimSpace(snap.HeadSHA) ||
+		strings.TrimSpace(row.MergeSHA) != strings.TrimSpace(snap.MergeSHA) ||
+		strings.TrimSpace(row.Status) != strings.TrimSpace(snap.Status) {
+		return ProjectionComparison{Superseded: true}
+	}
+	var diverged []string
+	columns := [][3]string{
+		{"branch", row.Branch, snap.Branch},
+		{"target_id", row.TargetID, snap.TargetID},
+		{"title", row.Title, snap.Title},
+	}
+	for _, c := range columns {
+		if strings.TrimSpace(c[1]) != strings.TrimSpace(c[2]) {
+			diverged = append(diverged, c[0])
+		}
+	}
+	got := metadataFields(row.Metadata)
+	want := metadataFields(snap.Metadata)
+	for _, key := range OwnedMetadataKeys() {
+		if string(got[key]) != string(want[key]) {
+			diverged = append(diverged, "metadata."+key)
+		}
+	}
+	sort.Strings(diverged)
+	return ProjectionComparison{Divergent: diverged}
+}
+
+// metadataFields splits a normalized metadata blob into per-key canonical
+// JSON values; empty values are absent (omitempty).
+func metadataFields(m ProjectionMetadata) map[string]json.RawMessage {
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(metadataJSON(normalizeMetadata(m)), &fields); err != nil {
+		return map[string]json.RawMessage{}
+	}
+	return fields
 }
 
 // SnapshotLoader resolves one touched PR key to its projection snapshot.
@@ -303,41 +423,12 @@ func RebuildProjection(ctx context.Context, store ProjectionStore, repo *RepoSta
 	return nil
 }
 
-// FakeProjectionStore is the hermetic ProjectionStore fake: it records
-// snapshots on success and fails closed with Err without recording.
-type FakeProjectionStore struct {
-	mu       sync.Mutex
-	Err      error
-	Recorded []ProjectionSnapshot
-}
-
-// Compile-time freeze: the fake must satisfy the store interface.
-var _ ProjectionStore = (*FakeProjectionStore)(nil)
-
-// UpsertProjection records the snapshot or returns the configured error.
-func (f *FakeProjectionStore) UpsertProjection(_ context.Context, snap ProjectionSnapshot) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.Err != nil {
-		return f.Err
-	}
-	f.Recorded = append(f.Recorded, snap)
-	return nil
-}
-
-// RecordedCount returns the number of recorded projection writes.
-func (f *FakeProjectionStore) RecordedCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.Recorded)
-}
-
-// MapSnapshotLoader is the hermetic SnapshotLoader fake backed by a map.
+// MapSnapshotLoader is the hermetic SnapshotLoader backed by a map.
 type MapSnapshotLoader struct {
 	Snaps map[string]ProjectionSnapshot
 }
 
-// Compile-time freeze: the fake must satisfy the loader interface.
+// Compile-time freeze: the loader must satisfy the interface.
 var _ SnapshotLoader = MapSnapshotLoader{}
 
 // LoadPR resolves one PR key from the map.
@@ -345,3 +436,9 @@ func (m MapSnapshotLoader) LoadPR(prKey string) (ProjectionSnapshot, bool) {
 	snap, ok := m.Snaps[prKey]
 	return snap, ok
 }
+
+// Compile-time freeze: the Postgres store satisfies both boundaries.
+var (
+	_ ProjectionStore  = (*PgProjectionStore)(nil)
+	_ ProjectionReader = (*PgProjectionStore)(nil)
+)

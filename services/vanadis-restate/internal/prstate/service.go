@@ -62,12 +62,17 @@ const (
 // PRObjectService is the dark PRObject Virtual Object. Handlers persist
 // first-touch and applied state to Restate K/V and fire nothing.
 type PRObjectService struct {
-	stateKey string
+	stateKey    string
+	projection  ProjectionStore
+	reader      ProjectionReader
+	shadowDelay time.Duration
+	retryDelay  time.Duration
 }
 
-// NewPRObjectService builds the single dark PRObject service.
+// NewPRObjectService builds the single PRObject service. Without
+// WithProjection it writes no pr_registry rows and runs no shadow compare.
 func NewPRObjectService() *PRObjectService {
-	return &PRObjectService{stateKey: prObjectStateKey}
+	return &PRObjectService{stateKey: prObjectStateKey, shadowDelay: DefaultShadowCompareDelay, retryDelay: DefaultProjectionRetry}
 }
 
 // ServiceName returns the single PRObject service name for every agent.
@@ -129,6 +134,7 @@ func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, pha
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
 		sendPRIndex(ctx, st, ev, lifecycle)
 	}
+	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return nil
 }
 
@@ -293,6 +299,7 @@ func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev 
 	if out.Disposition == DispositionApply {
 		st.ApplyRegistryConflict()
 		restate.Set(ctx, s.stateKey, st)
+		s.afterCommit(ctx, st, ev.EffectsOwner)
 	}
 	return out, nil
 }
@@ -388,6 +395,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
 		sendPRIndex(ctx, st, ev, lifecycle)
 	}
+	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return nil
 }
 
@@ -458,6 +466,7 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 		if !out.Deduped {
 			sendPRIndex(ctx, st, ev, IndexDeployed)
 		}
+		s.afterCommit(ctx, st, ev.EffectsOwner)
 	}
 	return out, nil
 }
@@ -507,6 +516,7 @@ func (s *PRObjectService) Register(ctx restate.ObjectContext, req RegisterReques
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
 		sendPRIndex(ctx, st, PREvent{Repo: repo, PRNumber: req.PRNumber, Branch: st.Branch}, lifecycle)
 	}
+	s.afterCommit(ctx, st, req.EffectsOwner)
 	return RegisterResponse{TargetID: targetID, Agent: st.OwnerAgent(), Status: st.RegistryStatus()}, nil
 }
 
