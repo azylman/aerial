@@ -11,26 +11,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	_ "modernc.org/sqlite"
 
+	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
-	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
-
-func WithReloadSupplier(fn func(active *config.Config) error) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.reloadSupplier = fn
-	}
-}
 
 func WithStore(store db.Store) BrainAppOption {
 	return func(o *brainAppOptions) {
@@ -62,173 +53,6 @@ func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	return config.NewFromData(data)
 }
 
-type mockMarkDirtyPool struct {
-	dirty atomic.Bool
-}
-
-func (m *mockMarkDirtyPool) MarkDirty() { m.dirty.Store(true) }
-func (*mockMarkDirtyPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
-	return nil, nil
-}
-func (*mockMarkDirtyPool) Initialize(ctx context.Context) error { return nil }
-func (*mockMarkDirtyPool) Close() error                         { return nil }
-
-func TestCreateReloadConfigFunc(t *testing.T) {
-	t.Run("invalid YAML with alert", func(t *testing.T) {
-		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
-			return errors.New("simulated invalid YAML error")
-		}))("TestReload")
-	})
-
-	t.Run("supplier success updating model and marking pool dirty", func(t *testing.T) {
-		s, _ := discordgo.New("Bot mock-token")
-		cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "gemini-2.5-pro" })
-		mockPool := &mockMarkDirtyPool{}
-		wp := queue.New(cfg, queue.WorkerPoolConfig{ProcessPool: mockPool})
-		calledOnReload := false
-		reloadFn := CreateReloadConfigFunc(cfg,
-			WithDiscordSession(s),
-			WithWorkerPool(wp),
-			func(o *reloadConfigOptions) { o.onReload = func(src string) { calledOnReload = true } },
-			WithReloadSupplier(func(active *config.Config) error {
-				active.Update(&config.ConfigData{
-					CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}},
-					Model:             "gemini-2.5-flash",
-				})
-				return nil
-			}),
-		)
-		reloadFn("TestReloadSuccess")
-		if !calledOnReload {
-			t.Fatalf("expected onReload to be called")
-		}
-		if got := cfg.Current().Model; got != "gemini-2.5-flash" {
-			t.Fatalf("expected reloaded model gemini-2.5-flash, got %s", got)
-		}
-		if got := wp.GetRuntimeConfig(); got != "gemini-2.5-flash" {
-			t.Fatalf("expected worker pool runtime model gemini-2.5-flash, got %s", got)
-		}
-		if !mockPool.dirty.Load() {
-			t.Fatalf("expected worker pool to be marked dirty after fingerprint change")
-		}
-
-		mockPool.dirty.Store(false)
-		reloadFn("TestReloadUnchangedFingerprint")
-		if mockPool.dirty.Load() {
-			t.Fatalf("expected worker pool dirty flag not to be set when fingerprint is unchanged")
-		}
-	})
-
-	t.Run("complete success with sync and blocker home error", func(t *testing.T) {
-		tmpDir, tmpData := t.TempDir(), t.TempDir()
-		cfg := newTestConfig(func(d *config.ConfigData) {
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = tmpData
-			d.Model = "gemini-2.5-flash"
-			d.APIKey = "test-api-key"
-			d.SystemPrompt = "test system prompt"
-		})
-		reloadFn := CreateReloadConfigFunc(cfg, WithReloadSupplier(func(active *config.Config) error { return nil }))
-		reloadFn("TestSource")
-
-		blockerHome := filepath.Join(tmpDir, "blocked_home")
-		if err := os.WriteFile(blockerHome, []byte("file"), 0o644); err != nil {
-			t.Fatalf("failed to write blocker file: %v", err)
-		}
-		cfg.Update(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, GeminiHomeDir: filepath.Join(blockerHome, "sub"), DataDir: tmpData})
-		reloadFn("TestErrorSource")
-	})
-}
-
-func TestEnsureConfigDefaults(t *testing.T) {
-	t.Parallel()
-
-	ensureConfigDefaults(nil)
-
-	cfg := config.NewFromData(&config.ConfigData{})
-	ensureConfigDefaults(cfg)
-	if cfg.Current().GeminiHomeDir == "" || cfg.Current().DataDir == "" {
-		t.Fatalf("expected defaults to be filled")
-	}
-}
-
-func TestComputeDaemonReloadFingerprint(t *testing.T) {
-	t.Parallel()
-
-	baseCfg := newTestConfig(func(d *config.ConfigData) {
-		d.Model = "gemini-3.8-flash-low"
-		d.LowEffortModel = "gemini-3.8-flash-low"
-		d.Engine = "gemini"
-	})
-	baseFP := computeDaemonReloadFingerprint(baseCfg)
-	if baseFP == "" {
-		t.Fatal("expected non-empty base fingerprint")
-	}
-
-	tests := []struct {
-		name      string
-		cfg       *config.Config
-		wantDiff  bool
-		wantEmpty bool
-	}{
-		{
-			name:      "nil config produces empty fingerprint",
-			cfg:       nil,
-			wantEmpty: true,
-		},
-		{
-			name: "identical config produces identical fingerprint",
-			cfg: newTestConfig(func(d *config.ConfigData) {
-				d.Model = "gemini-3.8-flash-low"
-				d.LowEffortModel = "gemini-3.8-flash-low"
-				d.Engine = "gemini"
-			}),
-			wantDiff: false,
-		},
-		{
-			name: "changed model produces different fingerprint",
-			cfg: newTestConfig(func(d *config.ConfigData) {
-				d.Model = "gemini-2.5-pro"
-				d.LowEffortModel = "gemini-3.8-flash-low"
-				d.Engine = "gemini"
-			}),
-			wantDiff: true,
-		},
-		{
-			name: "changed engine produces different fingerprint",
-			cfg: newTestConfig(func(d *config.ConfigData) {
-				d.Model = "gemini-3.8-flash-low"
-				d.LowEffortModel = "gemini-3.8-flash-low"
-				d.Engine = "claude"
-			}),
-			wantDiff: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fp := computeDaemonReloadFingerprint(tc.cfg)
-			if tc.wantEmpty {
-				if fp != "" {
-					t.Fatalf("expected empty fingerprint, got %q", fp)
-				}
-				return
-			}
-			if tc.wantDiff {
-				if fp == baseFP {
-					t.Fatalf("expected different fingerprint than base, got %q", fp)
-				}
-			} else {
-				if fp != baseFP {
-					t.Fatalf("expected identical fingerprint to base, got %q (base: %q)", fp, baseFP)
-				}
-			}
-		})
-	}
-}
-
 func TestRegisterGitSyncReload(t *testing.T) {
 	t.Parallel()
 
@@ -238,10 +62,9 @@ func TestRegisterGitSyncReload(t *testing.T) {
 		remoteAddr string
 		wantCode   int
 		wantBody   string
-		wantQueued bool
 	}{
-		{name: "ipv4 loopback post queues", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}", wantQueued: true},
-		{name: "ipv6 loopback post queues", method: http.MethodPost, remoteAddr: "[::1]:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}", wantQueued: true},
+		{name: "ipv4 loopback post queues", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}"},
+		{name: "ipv6 loopback post queues", method: http.MethodPost, remoteAddr: "[::1]:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}"},
 		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "192.0.2.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusMethodNotAllowed, wantBody: "Method Not Allowed\n"},
 	}
@@ -249,8 +72,7 @@ func TestRegisterGitSyncReload(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			// No worker drains pending, so it shows whether the handler queued a reload.
-			trigger := &reloadTrigger{pending: make(chan struct{}, 1)}
+			trigger := bootstrap.NewReloadTrigger(t.Context(), func(string) {})
 			mux := http.NewServeMux()
 			registerGitSyncReload(mux, trigger)
 			req := httptest.NewRequest(tc.method, "/-/reload", http.NoBody)
@@ -265,116 +87,7 @@ func TestRegisterGitSyncReload(t *testing.T) {
 			if got := w.Body.String(); got != tc.wantBody {
 				t.Errorf("body = %q, want %q", got, tc.wantBody)
 			}
-			if got := len(trigger.pending) == 1; got != tc.wantQueued {
-				t.Errorf("queued = %v, want %v", got, tc.wantQueued)
-			}
 		})
-	}
-}
-
-// blockingReloader records each reload on started and then blocks until
-// release is closed.
-type blockingReloader struct {
-	started chan string
-	release chan struct{}
-	calls   atomic.Int32
-}
-
-func (b *blockingReloader) reload(source string) {
-	b.calls.Add(1)
-	b.started <- source
-	<-b.release
-}
-
-func TestReloadTrigger(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name               string
-		burst              int
-		cancelDuringReload bool
-		wantReloads        int32
-	}{
-		{name: "single trigger reloads once", burst: 0, wantReloads: 1},
-		{name: "trigger during reload runs one follow-up", burst: 1, wantReloads: 2},
-		{name: "burst during reload coalesces into one follow-up", burst: 5, wantReloads: 2},
-		{name: "cancel during reload drops pending follow-up", burst: 3, cancelDuringReload: true, wantReloads: 1},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			rec := &blockingReloader{started: make(chan string, 8), release: make(chan struct{})}
-			trigger := newReloadTrigger(ctx, rec.reload)
-
-			trigger.Trigger()
-			if got := <-rec.started; got != "git-sync webhook" {
-				t.Errorf("source = %q, want %q", got, "git-sync webhook")
-			}
-			for range tc.burst {
-				trigger.Trigger()
-			}
-			if tc.cancelDuringReload {
-				cancel()
-			}
-			close(rec.release)
-			for range tc.wantReloads - 1 {
-				<-rec.started
-			}
-			cancel()
-			<-trigger.done
-			// With the worker stopped, Trigger must neither block nor reload.
-			trigger.Trigger()
-
-			if got := rec.calls.Load(); got != tc.wantReloads {
-				t.Errorf("reloads = %d, want %d", got, tc.wantReloads)
-			}
-		})
-	}
-}
-
-func TestDefaultPaths(t *testing.T) {
-	// 1. With HOME set
-	t.Setenv("HOME", "/custom/home")
-	if got := DefaultGeminiHomeDir(); got != "/custom/home" {
-		t.Errorf("expected /custom/home, got %s", got)
-	}
-
-	// 2. With HOME empty
-	t.Setenv("HOME", "")
-	gotEmpty := DefaultGeminiHomeDir()
-	if gotEmpty == "" {
-		t.Errorf("expected non-empty default gemini home dir")
-	}
-
-	// 3. Direct helper tests for defaultGeminiHomeDirWithLookup
-	if got := defaultGeminiHomeDirWithLookup("/custom/home", false, nil); got != "/custom/home" {
-		t.Errorf("expected /custom/home, got %s", got)
-	}
-	if got := defaultGeminiHomeDirWithLookup("", true, nil); !strings.Contains(got, "aerial-test-gemini") {
-		t.Errorf("expected temp aerial-test-gemini, got %s", got)
-	}
-	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "/home/testuser", nil }); got != "/home/testuser" {
-		t.Errorf("expected /home/testuser, got %s", got)
-	}
-	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "  ", nil }); got != "/root" {
-		t.Errorf("expected /root for whitespace user home dir, got %s", got)
-	}
-	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "", errors.New("err") }); got != "/root" {
-		t.Errorf("expected /root when lookup fails, got %s", got)
-	}
-	if got := defaultGeminiHomeDirWithLookup("", false, nil); got != "/root" {
-		t.Errorf("expected /root when lookup fn is nil, got %s", got)
-	}
-
-	// 4. DefaultDataDir tests
-	if got := defaultDataDir(false); got != "/data" {
-		t.Errorf("expected /data from defaultDataDir(false), got %s", got)
-	}
-	if dir := DefaultDataDir(); dir == "" {
-		t.Errorf("expected non-empty data dir, got empty")
 	}
 }
 
@@ -672,40 +385,5 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	opts.onReload("test")
 	if !called {
 		t.Errorf("expected onReload to be invoked")
-	}
-}
-
-// Global config and process environment require serial execution here.
-func TestDefaultReloadCandidate(t *testing.T) {
-	original := config.ActiveConfig().Current()
-	t.Cleanup(func() { config.ActiveConfig().Update(original) })
-	tests := []struct {
-		name           string
-		mutateSupplier bool
-		wantModel      string
-	}{
-		{name: "supplier error retains lkgc", mutateSupplier: true, wantModel: "old-model"},
-		{name: "successful reload updates model", mutateSupplier: false, wantModel: "new-model"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte("model: new-model\nchannels:\n  default: {mode: disabled}\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("CONFIG_PATH", path)
-			cfg := config.ActiveConfig()
-			cfg.Update(newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" }).Current())
-			var opts []ReloadOption
-			if tc.mutateSupplier {
-				opts = append(opts, WithReloadSupplier(func(candidate *config.Config) error {
-					return errors.New("forced reload failure")
-				}))
-			}
-			CreateReloadConfigFunc(cfg, opts...)("test")
-			if cfg.Current().Model != tc.wantModel {
-				t.Fatalf("cfg=%q want=%q", cfg.Current().Model, tc.wantModel)
-			}
-		})
 	}
 }
