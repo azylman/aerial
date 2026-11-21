@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -240,6 +241,50 @@ func TestStore_MultiAgentIsolation_TurnCounts(t *testing.T) {
 			countB, errB := storeBeta.GetSessionTurnCount(ctx, tc.threadID)
 			if errB != nil || countB != tc.wantBetaTurn {
 				t.Errorf("storeBeta turn count = %d (err: %v), want %d", countB, errB, tc.wantBetaTurn)
+			}
+		})
+	}
+}
+
+func TestStore_MultiAgentIsolation_Records(t *testing.T) {
+	t.Parallel()
+	database := setupTestDB(t)
+	t.Cleanup(func() { _ = database.Close() })
+
+	storeAlpha := NewSQLStore(database).WithAgent("agent-alpha")
+	storeBeta := NewSQLStore(database).WithAgent("agent-beta")
+	ctx := context.Background()
+
+	tests := []struct {
+		name, msgID, threadID string
+	}{
+		{name: "by-id record ops never touch another agent's rows", msgID: "msg-rec-1", threadID: "thread-rec-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := storeAlpha.InsertMessage(ctx, Message{ID: tc.msgID, ThreadID: tc.threadID, Status: StatusProcessing}); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+			if ids, err := storeBeta.ListPendingMessageIDsForThread(ctx, tc.threadID); err != nil || len(ids) != 0 {
+				t.Errorf("beta ListPendingMessageIDsForThread = (%v, %v), want none", ids, err)
+			}
+			if ids, err := storeBeta.FailMessagesIfActive(ctx, []string{tc.msgID}, "x"); err != nil || len(ids) != 0 {
+				t.Errorf("beta FailMessagesIfActive = (%v, %v), want none", ids, err)
+			}
+			if ids, err := storeBeta.RequeueProcessingMessages(ctx, []string{tc.msgID}, "x"); err != nil || len(ids) != 0 {
+				t.Errorf("beta RequeueProcessingMessages = (%v, %v), want none", ids, err)
+			}
+			if _, err := storeBeta.BeginMessageAttempt(ctx, tc.msgID, 1); !errors.Is(err, ErrRecordNotFound) {
+				t.Errorf("beta BeginMessageAttempt err = %v, want ErrRecordNotFound", err)
+			}
+			if msgs, err := storeBeta.GetMessagesByID(ctx, []string{tc.msgID}); err != nil || len(msgs) != 0 {
+				t.Errorf("beta GetMessagesByID = (%v, %v), want none", msgs, err)
+			}
+			assertIsolatedMessageContent(ctx, t, storeAlpha, tc.msgID, "", "agent-alpha")
+			msg, _ := storeAlpha.GetMessage(ctx, tc.msgID)
+			if msg.Status != StatusProcessing || msg.RetryCount != 0 || msg.RestartCount != 0 {
+				t.Errorf("alpha row changed: status %s retry %d restart %d", msg.Status, msg.RetryCount, msg.RestartCount)
 			}
 		})
 	}

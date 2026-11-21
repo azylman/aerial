@@ -56,6 +56,17 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
 	requireErr(t, c1(s.AcquireLeaderLock(ctx)), "AcquireLeaderLock")
+	requireErr(t, c1(s.ListPendingMessageIDsForThread(ctx, "t")), "ListPendingMessageIDsForThread")
+	requireErr(t, c1(s.GetMessagesByID(ctx, []string{"id"})), "GetMessagesByID")
+	requireErr(t, c1(s.FailMessagesIfActive(ctx, []string{"id"}, "r")), "FailMessagesIfActive")
+	requireErr(t, c1(s.FailMessagesIfPending(ctx, []string{"id"}, "r")), "FailMessagesIfPending")
+	requireErr(t, c1(s.RequeueProcessingMessages(ctx, []string{"id"}, "r")), "RequeueProcessingMessages")
+	requireErr(t, c1(s.BeginMessageAttempt(ctx, "id", 1)), "BeginMessageAttempt")
+	requireErr(t, c1(s.ListPendingDispatchIDsForSession(ctx, "k")), "ListPendingDispatchIDsForSession")
+	requireErr(t, c1(s.FailDispatchesIfActive(ctx, []string{"id"}, "r")), "FailDispatchesIfActive")
+	requireErr(t, c1(s.FailDispatchesIfPending(ctx, []string{"id"}, "r")), "FailDispatchesIfPending")
+	requireErr(t, c1(s.BeginDispatchAttempt(ctx, "id", 1)), "BeginDispatchAttempt")
+	requireErr(t, c1(s.ListActiveDispatchSessionKeys(ctx, "d", "b")), "ListActiveDispatchSessionKeys")
 }
 
 func TestFakeStore_HasActiveThreadTurn(t *testing.T) {
@@ -1361,4 +1372,9 @@ func TestFakeStore_GetKnownTurnSessionIDs(t *testing.T) {
 			runFakeStoreKnownTurnCase(t, tc)
 		})
 	}
+}
+
+func TestFakeStore_RecordConformance(t *testing.T) {
+	t.Parallel()
+	RunRecordStoreConformance(t, func(*testing.T) db.Store { return NewFakeStore() })
 }

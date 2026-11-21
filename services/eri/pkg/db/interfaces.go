@@ -36,6 +36,18 @@ type TurnTelemetry struct {
 	TotalTokens     int   `json:"total_tokens,omitempty"`
 }
 
+// AttemptStart reports the result of BeginMessageAttempt / BeginDispatchAttempt.
+// Reentry is true when the row's retry_count already reached the requested ordinal
+// (the attempt started before a crash), in which case restart_count was incremented.
+type AttemptStart struct {
+	Reentry      bool `json:"reentry"`
+	RetryCount   int  `json:"retry_count"`
+	RestartCount int  `json:"restart_count"`
+}
+
+// ErrRecordNotFound is returned by by-ID record operations when the row does not exist.
+var ErrRecordNotFound = errors.New("record not found")
+
 // MessageStore handles message queue lifecycle and turn history.
 type MessageStore interface {
 	InsertMessage(ctx context.Context, msg Message) error
@@ -51,6 +63,12 @@ type MessageStore interface {
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
 	HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error)
 	GetActiveTasks(ctx context.Context, filter ...TasksFilter) ([]ActiveTask, error)
+	ListPendingMessageIDsForThread(ctx context.Context, threadID string) ([]string, error)
+	GetMessagesByID(ctx context.Context, ids []string) ([]Message, error)
+	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	RequeueProcessingMessages(ctx context.Context, ids []string, reason string) ([]string, error)
+	BeginMessageAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
 }
 
 // DispatchStore handles headless background dispatch execution.
@@ -66,6 +84,11 @@ type DispatchStore interface {
 	GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error)
 	HasActiveDispatchTurn(ctx context.Context, sessionID, id string) (bool, error)
 	CancelPendingDispatches(ctx context.Context, dispatchID, buildID, reason string) ([]string, error)
+	ListPendingDispatchIDsForSession(ctx context.Context, sessionKey string) ([]string, error)
+	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	FailDispatchesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	BeginDispatchAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
+	ListActiveDispatchSessionKeys(ctx context.Context, dispatchID, buildID string) ([]string, error)
 }
 
 // SessionStore handles thread turn counts and session rotations.
