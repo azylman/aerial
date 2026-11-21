@@ -56,7 +56,7 @@ test('candidateCookieDomains', async (t) => {
     { name: 'trailing dot and upper case', host: 'App.Example.COM.', want: ['example.com', 'app.example.com'] },
     { name: 'single label', host: 'intranet', want: [] },
     { name: 'localhost', host: 'localhost', want: [] },
-    { name: 'IPv4', host: '192.168.1.20', want: [] },
+    { name: 'IPv4', host: '192.0.2.20', want: [] },
     { name: 'IPv6', host: '[::1]', want: [] },
     { name: 'empty', host: '', want: [] },
     { name: 'non-string', host: undefined, want: [] },

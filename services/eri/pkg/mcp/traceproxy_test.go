@@ -428,8 +428,8 @@ func TestTraceProxy_Routes(t *testing.T) {
 		body       string
 		wantStatus int
 	}{
-		{name: "proxy rejects non-loopback", remoteAddr: "10.0.0.7:5555", path: "/internal/mcp-proxy/discord/docket", body: toolsList, wantStatus: http.StatusForbidden},
-		{name: "announce rejects non-loopback", remoteAddr: "10.0.0.7:5555", path: "/internal/mcp-proxy/announce", body: `{"daemon_id":"d1","server":"docket","tool":"create"}`, wantStatus: http.StatusForbidden},
+		{name: "proxy rejects non-loopback", remoteAddr: "192.0.2.7:5555", path: "/internal/mcp-proxy/discord/docket", body: toolsList, wantStatus: http.StatusForbidden},
+		{name: "announce rejects non-loopback", remoteAddr: "192.0.2.7:5555", path: "/internal/mcp-proxy/announce", body: `{"daemon_id":"d1","server":"docket","tool":"create"}`, wantStatus: http.StatusForbidden},
 		{name: "unknown server is not found", remoteAddr: "127.0.0.1:5555", path: "/internal/mcp-proxy/discord/nope", body: toolsList, wantStatus: http.StatusNotFound},
 		{name: "malformed announcement is rejected", remoteAddr: "127.0.0.1:5555", path: "/internal/mcp-proxy/announce", body: `{`, wantStatus: http.StatusBadRequest},
 		{name: "unreachable upstream is a bad gateway", remoteAddr: "127.0.0.1:5555", path: "/internal/mcp-proxy/discord/down", body: toolsCall("create"), wantStatus: http.StatusBadGateway},

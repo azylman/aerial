@@ -355,7 +355,7 @@ func loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir string) []loadCo
 			name: "KUBERNETES_SERVICE_HOST and PORT env fallback",
 			path: validPath,
 			env: map[string]string{
-				"KUBERNETES_SERVICE_HOST": "10.43.0.1",
+				"KUBERNETES_SERVICE_HOST": "192.0.2.1",
 				"KUBERNETES_SERVICE_PORT": "6443",
 			},
 			wantPort:          "8084",
@@ -365,14 +365,14 @@ func loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir string) []loadCo
 			wantVanadisURL:    "http://vanadis.aerial",
 			wantGHRepo:        "azylman/aerial",
 			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantKubeAPIServer: "https://10.43.0.1:6443",
+			wantKubeAPIServer: "https://192.0.2.1:6443",
 			wantConfigPath:    validPath,
 		},
 		{
 			name: "KUBERNETES_SERVICE_HOST default port 443 fallback",
 			path: validPath,
 			env: map[string]string{
-				"KUBERNETES_SERVICE_HOST": "10.43.0.1",
+				"KUBERNETES_SERVICE_HOST": "192.0.2.1",
 			},
 			wantPort:          "8084",
 			wantBrainURL:      "http://eri.aerial",
@@ -381,7 +381,7 @@ func loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir string) []loadCo
 			wantVanadisURL:    "http://vanadis.aerial",
 			wantGHRepo:        "azylman/aerial",
 			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantKubeAPIServer: "https://10.43.0.1:443",
+			wantKubeAPIServer: "https://192.0.2.1:443",
 			wantConfigPath:    validPath,
 		},
 		{

@@ -243,7 +243,7 @@ func TestResolveCDPHost(t *testing.T) {
 		{"empty string defaults to 127.0.0.1", "", "127.0.0.1"},
 		{"localhost passes through", "localhost", "localhost"},
 		{"::1 passes through", "::1", "::1"},
-		{"literal IPv4 passes through", "192.168.1.100", "192.168.1.100"},
+		{"literal IPv4 passes through", "192.0.2.100", "192.0.2.100"},
 		{"literal IPv6 passes through", "2001:db8::1", "2001:db8::1"},
 		{"unresolvable domain returns host", "nonexistent.domain.invalid", "nonexistent.domain.invalid"},
 	}
