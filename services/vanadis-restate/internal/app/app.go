@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -49,6 +51,16 @@ type Config struct {
 	RestateIngressURL string
 	NATSURL           string
 	GitHubToken       string
+	// GitHubAppID, GitHubAppInstallationID and GitHubAppPrivateKey are the
+	// GitHub App secrets (env); all empty keeps every GitHub REST call on
+	// GitHubToken exactly as before.
+	GitHubAppID             string
+	GitHubAppInstallationID string
+	GitHubAppPrivateKey     string
+	// ServiceConfigPath is the non-secret YAML whose
+	// vanadis_restate.github_credential (app|pat, default app) picks the
+	// GitHub REST credential, re-read JIT.
+	ServiceConfigPath string
 	DiscordToken      string
 	ShareRoot         string
 	AgentName         string
@@ -97,20 +109,24 @@ func LoadConfig(getenv func(string) string) Config {
 	configPath := strings.TrimSpace(store.FirstNonEmpty(getenv("CONFIG_PATH"), DefaultConfigPath))
 
 	return Config{
-		RestatePort:       restatePort,
-		HealthPort:        healthPort,
-		VanadisURL:        vanadisURL,
-		PostgresURL:       pgURL,
-		EriURL:            eriURL,
-		RestateIngressURL: restateIngressURL,
-		NATSURL:           natsURL,
-		GitHubToken:       ghToken,
-		DiscordToken:      discordToken,
-		ShareRoot:         shareRoot,
-		AgentName:         agentName,
-		ConfigPath:        configPath,
-		KubeAPIServer:     prstate.InClusterAPIServer(getenv("KUBERNETES_SERVICE_HOST"), getenv("KUBERNETES_SERVICE_PORT")),
-		FluxReceiverURL:   strings.TrimSpace(getenv("FLUX_RECEIVER_URL")),
+		RestatePort:             restatePort,
+		HealthPort:              healthPort,
+		VanadisURL:              vanadisURL,
+		PostgresURL:             pgURL,
+		EriURL:                  eriURL,
+		RestateIngressURL:       restateIngressURL,
+		NATSURL:                 natsURL,
+		GitHubToken:             ghToken,
+		GitHubAppID:             strings.TrimSpace(getenv("GITHUB_APP_ID")),
+		GitHubAppInstallationID: strings.TrimSpace(getenv("GITHUB_APP_INSTALLATION_ID")),
+		GitHubAppPrivateKey:     strings.TrimSpace(getenv("GITHUB_APP_PRIVATE_KEY")),
+		ServiceConfigPath:       DefaultServiceConfigPath,
+		DiscordToken:            discordToken,
+		ShareRoot:               shareRoot,
+		AgentName:               agentName,
+		ConfigPath:              configPath,
+		KubeAPIServer:           prstate.InClusterAPIServer(getenv("KUBERNETES_SERVICE_HOST"), getenv("KUBERNETES_SERVICE_PORT")),
+		FluxReceiverURL:         strings.TrimSpace(getenv("FLUX_RECEIVER_URL")),
 	}
 }
 
@@ -242,12 +258,21 @@ func RunApp(ctx context.Context, cfg Config) error {
 	if strings.TrimSpace(cfg.DiscordToken) != "" {
 		eriClient.SetDiscordAuth(true)
 	}
-	exec := executor.NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}))
+	// Every GitHub REST client shares one credential source; the transport
+	// injects the token, so the clients get no token of their own.
+	ghSource := newGitHubTokenSource(gitHubAuthValues{
+		AppID:          cfg.GitHubAppID,
+		InstallationID: cfg.GitHubAppInstallationID,
+		PrivateKeyPEM:  cfg.GitHubAppPrivateKey,
+		PAT:            cfg.GitHubToken,
+	}, newCredentialSetting(cfg.ServiceConfigPath, os.ReadFile, time.Now, slog.Default()).Current,
+		tracing.ExternalClient(&http.Client{Timeout: 10 * time.Second}), slog.Default())
+	exec := executor.NewExecutor(cfg.ShareRoot, eriClient, bus, "", newGitHubHTTPClient(ghSource, nil, 30*time.Second))
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
 	restateServer := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()), prstate.NewSessionEriEffector(eriClient), prstate.NewBusFactPublisher(bus),
-		prstate.NewGitHubClient(tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}), "", cfg.GitHubToken),
+		prstate.NewGitHubClient(newGitHubHTTPClient(ghSource, nil, 30*time.Second), "", ""),
 		prstate.NewKubeClient(tracing.ExternalClient(&http.Client{Timeout: 15 * time.Second}), cfg.KubeAPIServer, prstate.DefaultKubeTokenPath, prstate.DefaultKubeCAPath, cfg.FluxReceiverURL))
 
 	go func() {
