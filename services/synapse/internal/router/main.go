@@ -375,10 +375,7 @@ func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo strin
 			}
 		}
 	}
-	if sys := model.NormalizeDiscordTargetID(s.cfgSrc.Current().SystemChannelID); isValidDiscordSnowflake(sys) {
-		return sys
-	}
-	return ""
+	return s.systemChannelTarget()
 }
 
 // readPRRegisterRequest decodes one register body and trims every field,

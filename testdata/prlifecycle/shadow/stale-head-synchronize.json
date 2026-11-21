@@ -50,6 +50,20 @@
       "shadow": [
         {
           "object": "PRObject",
+          "handler": "HandleSelfRegistered",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2308,
+            "head_sha": "701c341c00000000000000000000000000002308",
+            "branch": "feat/miorine-stale-head",
+            "title": "Miorine stale head",
+            "target_id": "100000000000000002",
+            "agent": "miorine",
+            "effects_owner": "legacy"
+          }
+        },
+        {
+          "object": "PRObject",
           "handler": "HandleSynchronized",
           "event": {
             "repo": "azylman/aerial",
@@ -202,6 +216,20 @@
       "shadow": [
         {
           "object": "PRObject",
+          "handler": "HandleSelfRegistered",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2308,
+            "head_sha": "79e9dfc200000000000000000000000000002308",
+            "branch": "feat/miorine-stale-head",
+            "title": "Miorine stale head",
+            "target_id": "100000000000000002",
+            "agent": "miorine",
+            "effects_owner": "legacy"
+          }
+        },
+        {
+          "object": "PRObject",
           "handler": "HandleSynchronized",
           "event": {
             "repo": "azylman/aerial",
@@ -307,6 +335,20 @@
         ]
       },
       "shadow": [
+        {
+          "object": "PRObject",
+          "handler": "HandleSelfRegistered",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2308,
+            "head_sha": "79e9dfc200000000000000000000000000002308",
+            "branch": "feat/miorine-stale-head",
+            "title": "Miorine stale head",
+            "target_id": "100000000000000002",
+            "agent": "miorine",
+            "effects_owner": "legacy"
+          }
+        },
         {
           "object": "PRObject",
           "handler": "HandleSynchronized",

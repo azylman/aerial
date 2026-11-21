@@ -259,14 +259,20 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 }
 
 func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHubEvent) {
-	if s == nil || !s.cfgSrc.Current().DefaultOwner || !strings.HasPrefix(strings.TrimSpace(res.Branch), "dependabot/") {
+	if s == nil {
 		return
 	}
-	targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
-	if targetID == "" {
+	reg, ok := s.dependabotCIHealRegistration(ctx, res, s.resolveHeadlessPRTargetID)
+	if !ok {
 		return
 	}
-	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID, ""); err != nil {
+	// Journal before the legacy write: a journal failure leaves the
+	// registry untouched, so the redelivery retries both.
+	if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] dependabot CI-failure self-registration journal failed", "repo", res.Repo, "pr", res.PRNumber, "error", err)
+		return
+	}
+	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, reg.Title, reg.TargetID, reg.Agent); err != nil {
 		slog.WarnContext(ctx, "[synapse] [registry] error self-healing dependabot PR on CI failure", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 	}
 }
@@ -359,30 +365,25 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 }
 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
-	cfg := s.cfgSrc.Current()
 	meta := ParseAerialPRMetadata(pr.GetBody())
-	var defaultOwner bool
-	if cfg != nil {
-		defaultOwner = cfg.DefaultOwner
-	}
 	// Same multi-bot predicate as processPullRequest and the restate-owned
 	// path: a PR owned by any configured bot (siblings included) is
 	// processed; only a bot outside cfg.Bots is dropped.
 	if s.isForeignBotEvent(meta) {
 		return nil
 	}
-	shouldRegister := meta.BotID != "" || defaultOwner
-	targetID := meta.TargetID
-	if IsHeadlessSessionKey(targetID) {
-		targetID = s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
-	}
-	if shouldRegister && s.registry != nil && targetID != "" && (res.Action != ghActionClosed || pr.Merged) {
+	if reg, ok := s.metadataSelfRegistration(ctx, res, pr, s.resolveHeadlessPRTargetID); ok && s.registry != nil {
 		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
-		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, targetID, meta.OwningAgent())
+		// Journal before the legacy write: a journal failure leaves the
+		// registry untouched, so the redelivery retries both.
+		if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
+			return err
+		}
+		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, reg.TargetID, meta.OwningAgent())
 		if err != nil {
 			return err
 		}
-		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
+		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, reg.TargetID)
 	}
 	switch res.Action {
 	case ghActionClosed:
@@ -438,22 +439,25 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 }
 
 func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPullRequestPayload) {
-	if s == nil || !s.cfgSrc.Current().DefaultOwner || !isDependabotPR(p) || (res.Action != ghActionOpened && res.Action != ghActionReopened && res.Action != ghActionSynchronize) {
+	if s == nil || s.registry == nil {
 		return
 	}
-	if s.registry == nil || res.PRNumber <= 0 {
+	reg, ok := s.dependabotSelfRegistration(ctx, res, p, s.resolveHeadlessPRTargetID)
+	if !ok {
 		return
 	}
-	targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
-	if targetID == "" {
+	// Journal before the legacy write: a journal failure leaves the
+	// registry untouched, so the redelivery retries both.
+	if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] dependabot self-registration journal failed", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 		return
 	}
-	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID, "")
+	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, reg.Title, reg.TargetID, reg.Agent)
 	if err != nil {
 		slog.WarnContext(ctx, "[synapse] [registry] error registering dependabot PR", "repo", res.Repo, "pr", res.PRNumber, "error", err)
 		return
 	}
-	res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
+	res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, reg.TargetID)
 }
 
 // routeConflictCheck journals the mergeability conflict check synapse would

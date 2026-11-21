@@ -138,25 +138,6 @@ func ownedFact(res *ResolvedGitHubEvent, event, status string) pubsub.PRLifecycl
 	}
 }
 
-// ownedTargetHint resolves the target a pull_request event may fill without
-// the registry: a snowflake from the PR-body metadata, else the system
-// channel for headless metadata or a default-owned dependabot PR (the
-// legacy headless fallback once no stored target exists). PRObject only
-// fills a missing target, so a stored one always wins.
-func (s *RouterServer) ownedTargetHint(meta AerialPRMetadata, p GitHubPullRequestPayload) string {
-	if isValidDiscordSnowflake(meta.TargetID) {
-		return meta.TargetID
-	}
-	cfg := s.currentConfig()
-	if !IsHeadlessSessionKey(meta.TargetID) && (!cfg.DefaultOwner || !isDependabotPR(p)) {
-		return ""
-	}
-	if sys := model.NormalizeDiscordTargetID(cfg.SystemChannelID); isValidDiscordSnowflake(sys) {
-		return sys
-	}
-	return ""
-}
-
 // processOwnedPullRequest normalizes one pull_request webhook into its
 // PRObject event and the fact the legacy pipeline would have published.
 func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
@@ -170,11 +151,24 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 	if s.isForeignBotEvent(meta) || res.PRNumber <= 0 {
 		return res, nil
 	}
-	res.TargetID = s.ownedTargetHint(meta, p)
+	// Self-registration first, from legacy's exact rule (stored target
+	// wins in PRObject, see ownedHeadlessTarget): it alone fills the target
+	// and the opened/merged title, so every action fills them exactly where
+	// legacy's EnsurePRRegistered does, unmerged closes included (none).
+	res.TargetID = ""
+	if reg, ok := s.pullRequestSelfRegistration(ctx, res, p, s.ownedHeadlessTarget); ok {
+		if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
+			return nil, err
+		}
+		res.TargetID = reg.TargetID
+	}
 	title := p.PullRequest.Title
+	// Reopened and synchronize carry the title like the legacy shadow
+	// sends do (PRObject fills it only when empty); every other action
+	// leaves it to the self-registration.
 	ev := restateclient.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
-		Title: title, TargetID: res.TargetID, Agent: meta.OwningAgent(),
+		Agent: meta.OwningAgent(),
 	}
 	var handler string
 	switch res.Action {
@@ -188,8 +182,10 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 			return res, nil
 		}
 		handler = "HandleReopened"
+		ev.Title = title
 	case ghActionSynchronize:
 		handler = "HandleSynchronized"
+		ev.Title = title
 		ev.BeforeSHA = res.BeforeSHA
 		fact := ownedFact(res, ghActionSynchronize, prOpen)
 		fact.Title = title
@@ -372,6 +368,13 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 	case "HandleCheckFailed":
 		if isGateAggregatorCheck(res.CheckName) {
 			return nil
+		}
+		// healDependabotPR's self-registration, ahead of the failure as in
+		// legacy's handleCIFailureByPRNumber.
+		if reg, ok := s.dependabotCIHealRegistration(ctx, res, s.ownedHeadlessTarget); ok {
+			if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
+				return err
+			}
 		}
 		failed := base
 		failed.Facts = facts(s.ownedCIFailedFact(ctx, res, details, checkURL))

@@ -290,6 +290,49 @@ func (s *PRState) ApplyIdentity(branch, title string) {
 	}
 }
 
+// ApplySelfRegistration mirrors synapse's EnsurePRRegistered self-heal
+// upsert (pull_request self-registration of default-owner dependabot PRs and
+// PR-body metadata PRs, and the dependabot CI-failure heal). Like that
+// upsert it is fill-only: an invalid target writes nothing; otherwise the
+// branch is replaced when set, and head, target and title fill only when
+// empty. The owner is seeded only when the registration creates the row,
+// which for PRObject means no target was stored yet (Register and Hydrate
+// always store one): it is then claimed like a Hydrate of the inserted row
+// (hydrateOwner) and also fills BotID, the two keys the insert writes. The
+// status is untouched. Filling the target makes the PR tracked, so the
+// untracked guard stops applying and Project writes the row legacy writes.
+// Returns true when the state changed.
+func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent string) bool {
+	targetID = strings.TrimSpace(targetID)
+	if s == nil || !IsValidDiscordSnowflake(targetID) {
+		return false
+	}
+	changed := false
+	if b := strings.TrimSpace(branch); b != "" && s.Branch != b {
+		s.Branch = b
+		changed = true
+	}
+	if h := strings.TrimSpace(head); h != "" && !IsZeroSHA(h) && strings.TrimSpace(s.HeadSHA) == "" {
+		s.SetHead(h)
+		changed = true
+	}
+	if t := strings.TrimSpace(title); t != "" && strings.TrimSpace(s.Title) == "" {
+		s.Title = t
+		changed = true
+	}
+	if strings.TrimSpace(s.TargetID) != "" {
+		return changed
+	}
+	s.TargetID = targetID
+	if agent = strings.ToLower(strings.TrimSpace(agent)); agent != "" {
+		s.hydrateOwner(agent)
+		if strings.TrimSpace(s.BotID) == "" {
+			s.BotID = agent
+		}
+	}
+	return true
+}
+
 // ApplyRegistrySync mirrors UpdatePRSync: an open (non-merged, non-locked)
 // PR moves to head and reopens; a head change clears head-scoped metadata,
 // otherwise only the banner clears. Returns true when the row changed.

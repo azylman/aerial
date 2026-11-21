@@ -39,6 +39,20 @@
       "shadow": [
         {
           "object": "PRObject",
+          "handler": "HandleSelfRegistered",
+          "event": {
+            "repo": "azylman/aerial",
+            "pr_number": 2308,
+            "head_sha": "79e9dfc200000000000000000000000000002308",
+            "branch": "feat/miorine-sibling-sync",
+            "title": "Miorine sibling sync",
+            "target_id": "100000000000000002",
+            "agent": "miorine",
+            "effects_owner": "legacy"
+          }
+        },
+        {
+          "object": "PRObject",
           "handler": "HandleSynchronized",
           "event": {
             "repo": "azylman/aerial",

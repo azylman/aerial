@@ -140,7 +140,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
+			wantPRHandlers:  "CompareProjection,DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
 			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA",
 		},
 	}
@@ -999,6 +999,61 @@ func TestPRObjectService_HandleOpened(t *testing.T) {
 			require.NotNil(t, rec.saved)
 			require.Equal(t, tc.wantAgent, rec.saved.Agent)
 			require.Equal(t, tc.wantBotID, rec.saved.BotID)
+		})
+	}
+}
+
+// TestPRObjectService_HandleSelfRegistered pins the self-registration
+// handler: it fills target/title/head without the lifecycle agent hint,
+// indexes a newly filled head, and commits nothing when nothing changed.
+func TestPRObjectService_HandleSelfRegistered(t *testing.T) {
+	t.Parallel()
+	tracked := &PRState{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1", TargetID: "100000000000000009", Title: "T"}
+	tests := []struct {
+		name       string
+		existing   *PRState
+		kvErr      bool
+		ev         PREvent
+		wantErr    bool
+		wantSet    bool
+		wantTarget string
+		wantAgent  string
+		wantSends  []sentCall
+	}{
+		{name: "missing repo is ignored", ev: PREvent{PRNumber: 2329, TargetID: "100000000000000009"}},
+		{name: "missing pr is ignored", ev: PREvent{Repo: "azylman/aerial", TargetID: "100000000000000009"}},
+		{name: "kv failure surfaces", kvErr: true, ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, TargetID: "100000000000000009"}, wantErr: true},
+		{
+			name: "unregistered dependabot is registered and indexed", ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1", Branch: "dependabot/x", Title: "T", TargetID: "100000000000000009"},
+			wantSet: true, wantTarget: "100000000000000009",
+			wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2329, Branch: "dependabot/x", HeadSHA: "h1", Lifecycle: IndexActive})},
+		},
+		{
+			name: "agent seeds the owner, never as a lifecycle hint", existing: &PRState{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1"}, ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, TargetID: "100000000000000002", Agent: "miorine"},
+			wantSet: true, wantTarget: "100000000000000002", wantAgent: "miorine",
+		},
+		{name: "already registered PR commits nothing", existing: tracked, ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1", Title: "T", TargetID: "100000000000000009", Agent: "aerial"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.kvErr {
+				require.Error(t, NewPRObjectService().HandleSelfRegistered(restate.WithMockContext(newStateErrorMock(t)), tc.ev))
+				return
+			}
+			existing := tc.existing
+			if existing != nil {
+				clone := *existing
+				existing = &clone
+			}
+			mc, rec := newStateMock(t, existing)
+			require.NoError(t, NewPRObjectService().HandleSelfRegistered(restate.WithMockContext(mc), tc.ev))
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			if tc.wantSet {
+				require.Equal(t, tc.wantTarget, rec.saved.TargetID)
+				require.Equal(t, tc.wantAgent, rec.saved.Agent)
+			}
+			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
 	}
 }

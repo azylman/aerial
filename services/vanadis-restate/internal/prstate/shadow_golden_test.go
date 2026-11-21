@@ -10,6 +10,7 @@ package prstate
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -558,6 +559,115 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 				owned.send(inv)
 			}
 			require.Empty(t, owned.effects, "late closed/push runs no restate-owned effect")
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}
+
+// selfRegisteredWant is the PRObject end state of one dependabot-opened
+// case, identical in both effect modes.
+type selfRegisteredWant struct {
+	Status       string         `json:"status"`
+	TargetID     string         `json:"target_id"`
+	Title        string         `json:"title"`
+	Tracked      bool           `json:"tracked"`
+	DeployedJobs []string       `json:"deployed_jobs"`
+	Rollouts     []RolloutRef   `json:"rollouts"`
+	Divergent    []string       `json:"divergent"`
+	Effects      []parityEffect `json:"effects"`
+}
+
+// selfRegisteredCase replays the opened sends and the lifecycle once
+// legacy-owned and once restate-owned; synapse-only fields (pull_request,
+// legacy) are ignored. A nil Row means neither writer keeps a row.
+type selfRegisteredCase struct {
+	Name             string             `json:"name"`
+	PullRequest      PREvent            `json:"pull_request"`
+	OpenedShadow     []parityInvocation `json:"opened_shadow"`
+	OpenedRestate    []parityInvocation `json:"opened_restate"`
+	LifecycleShadow  []parityInvocation `json:"lifecycle_shadow"`
+	LifecycleRestate []parityInvocation `json:"lifecycle_restate"`
+	Want             selfRegisteredWant `json:"want"`
+	Row              *RegistryRow       `json:"row"`
+}
+
+// simSelfRegisteredState reads the PR's committed state, or a fresh state
+// when no send ever committed one (a PR synapse journaled nothing for).
+func simSelfRegisteredState(t *testing.T, sim *paritySim, pr PREvent) PRState {
+	t.Helper()
+	raw, ok := sim.kv[PRObjectServiceName+"/"+PRObjectKey(pr.Repo, pr.PRNumber)+"/"+prObjectStateKey]
+	if !ok {
+		return *NewPRState(pr.Repo, pr.PRNumber)
+	}
+	st, err := decodeInput[PRState](raw)
+	require.NoError(t, err)
+	return st
+}
+
+// deployEffects drops the opened fact: legacy publishes it without a
+// PRObject send, so it has no intended twin; every lifecycle effect stays.
+func deployEffects(effects []parityEffect) []parityEffect {
+	var out []parityEffect
+	for _, e := range effects {
+		if !strings.HasSuffix(e.Kind, "_opened") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestShadowDependabotOpenedGolden pins dependabot-opened.json: a
+// self-registered dependabot PR lands in PRObject with the target and title
+// legacy writes, is tracked, projects the legacy row and deploys with the
+// same effects in both modes, while a PR nobody registers stays untracked
+// with no row on either writer.
+func TestShadowDependabotOpenedGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/dependabot-opened.json")
+	require.NoError(t, err)
+	var g struct {
+		Cases []selfRegisteredCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newParitySim(t)
+			for _, inv := range append(append([]parityInvocation(nil), tc.OpenedShadow...), tc.LifecycleShadow...) {
+				sim.send(inv)
+			}
+			st := simSelfRegisteredState(t, sim, tc.PullRequest)
+			snap := BuildProjection(&st)
+			row, found := RegistryRow{}, tc.Row != nil
+			if found {
+				row = *tc.Row
+			}
+			cmp := CompareProjection(snap, row, found)
+			require.Equal(t, !found, cmp.Untracked, "untracked verdict only without a row")
+			got := selfRegisteredWant{
+				Status: st.RegistryStatus(), TargetID: st.TargetID, Title: st.Title, Tracked: snap.Tracked(),
+				DeployedJobs: st.DeployedJobs, Rollouts: simActiveRollouts(t, sim), Divergent: cmp.Divergent,
+			}
+			for _, e := range st.IntendedEffects {
+				got.Effects = append(got.Effects, parityEffect{Kind: e.Kind, Key: e.MatchKey})
+			}
+
+			owned := newParitySim(t)
+			for _, inv := range append(append([]parityInvocation(nil), tc.OpenedRestate...), tc.LifecycleRestate...) {
+				owned.send(inv)
+			}
+			ownedSt := simSelfRegisteredState(t, owned, tc.PullRequest)
+			ownedSnap := BuildProjection(&ownedSt)
+			require.Equal(t, got.Effects, deployEffects(owned.effects), "restate-owned replay publishes exactly the intended effects")
+			require.Equal(t, got.Status, ownedSt.RegistryStatus(), "both modes land on the same status")
+			require.Equal(t, got.TargetID, ownedSt.TargetID, "both modes store the legacy target")
+			require.Equal(t, got.Title, ownedSt.Title, "both modes store the legacy title")
+			require.Equal(t, got.Tracked, ownedSnap.Tracked(), "both modes agree on tracking")
+			require.Equal(t, got.DeployedJobs, ownedSt.DeployedJobs, "both modes deploy the same jobs")
+			require.Empty(t, simActiveRollouts(t, owned), "restate-owned ListRollouts is empty")
+			require.Equal(t, cmp, CompareProjection(ownedSnap, row, found), "both modes project the legacy row")
 			require.Equal(t, tc.Want, got)
 		})
 	}
