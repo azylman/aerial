@@ -186,6 +186,8 @@ type WorkloadRollout struct {
 	ManagedWorkloads                                                []WorkloadRollout
 	Env                                                             map[string]string
 	Resources                                                       KubeResourceRequirements
+	DeletionTimestamp                                               string
+	Finalizers                                                      []string
 }
 
 // ConfigMapChange records when a Flux-managed ConfigMap was last written.
@@ -197,8 +199,9 @@ type ConfigMapChange struct {
 
 // WorkloadImageRef is the subset of a workload needed to map images to their owning Kustomization.
 type WorkloadImageRef struct {
-	Labels map[string]string `json:"labels"`
-	Images []string          `json:"images"`
+	Labels            map[string]string `json:"labels"`
+	Images            []string          `json:"images"`
+	DeletionTimestamp string            `json:"deletion_timestamp,omitempty"`
 }
 
 // KubeLabelSelector defines Kubernetes label match requirements.
@@ -228,14 +231,16 @@ type KubeManagedField struct {
 
 // KubeObjectMeta is the object metadata read from Kubernetes workloads and ConfigMaps.
 type KubeObjectMeta struct {
-	UID             string               `json:"uid"`
-	Labels          map[string]string    `json:"labels"`
-	OwnerReferences []KubeOwnerReference `json:"ownerReferences"`
-	Name            string               `json:"name"`
-	Namespace       string               `json:"namespace"`
-	Generation      int64                `json:"generation"`
-	Annotations     map[string]string    `json:"annotations"`
-	ManagedFields   []KubeManagedField   `json:"managedFields"`
+	UID               string               `json:"uid"`
+	Labels            map[string]string    `json:"labels"`
+	OwnerReferences   []KubeOwnerReference `json:"ownerReferences"`
+	Name              string               `json:"name"`
+	Namespace         string               `json:"namespace"`
+	Generation        int64                `json:"generation"`
+	Annotations       map[string]string    `json:"annotations"`
+	ManagedFields     []KubeManagedField   `json:"managedFields"`
+	DeletionTimestamp string               `json:"deletionTimestamp,omitempty"`
+	Finalizers        []string             `json:"finalizers,omitempty"`
 }
 
 // KubeResourceRequirements defines CPU and memory limits and requests.
