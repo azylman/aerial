@@ -34,11 +34,49 @@ type shadowGoldenSend struct {
 	Event   map[string]any `json:"event"`
 }
 
-// shadowGoldenCase is one legacy-owned sequence; prstate-only fields are ignored.
+// shadowGoldenCase is one legacy-owned sequence; prstate-only fields are
+// ignored. PR, when set, overrides the file-level deploying PR.
 type shadowGoldenCase struct {
 	Name   string             `json:"name"`
+	PR     *DeployingPR       `json:"pr"`
 	Steps  []shadowGoldenStep `json:"steps"`
 	Shadow []shadowGoldenSend `json:"shadow"`
+}
+
+// rolloutGoldenRow is one watcher-completion golden case with its
+// deploying PR resolved.
+type rolloutGoldenRow struct {
+	golden shadowGoldenCase
+	pr     DeployingPR
+}
+
+// loadRolloutGoldens flattens every case of the named watcher-completion
+// goldens into one table, names prefixed by file.
+func loadRolloutGoldens(t *testing.T, files ...string) []rolloutGoldenRow {
+	t.Helper()
+	rows := make([]rolloutGoldenRow, 0, len(files))
+	for _, f := range files {
+		raw, err := os.ReadFile(shadowGoldenDir + f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var g shadowGolden
+		if err := json.Unmarshal(raw, &g); err != nil {
+			t.Fatal(err)
+		}
+		if len(g.Cases) == 0 {
+			t.Fatalf("no cases in %s", f)
+		}
+		for _, c := range g.Cases {
+			pr := g.PR
+			if c.PR != nil {
+				pr = *c.PR
+			}
+			c.Name = f + "/" + c.Name
+			rows = append(rows, rolloutGoldenRow{golden: c, pr: pr})
+		}
+	}
+	return rows
 }
 
 // shadowGolden is one shadow golden file.
@@ -115,42 +153,34 @@ func capturedShadowSends(t *testing.T, shot *shadowCapture) []shadowGoldenSend {
 // TestShadowRolloutReadyJobsGolden pins that every legacy-owned rollout
 // completion carries the ready jobs the legacy registry recorded, and that
 // the completing tick journals rollout progress before deploy_success.
+// merged-stale-head-deploy.json pins that those sends carry the row head
+// and merge SHA even when PRObject's head is stale (prstate's
+// TestShadowMergedStaleHeadDeployGolden replays them).
 func TestShadowRolloutReadyJobsGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(shadowGoldenDir + "rollout-ready-jobs.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var g shadowGolden
-	if err := json.Unmarshal(raw, &g); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.Cases) == 0 {
-		t.Fatal("no shadow golden cases")
-	}
-	tests := g.Cases
+	tests := loadRolloutGoldens(t, "rollout-ready-jobs.json", "merged-stale-head-deploy.json")
 	for _, tc := range tests {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.golden.Name, func(t *testing.T) {
 			t.Parallel()
 			shot, srv := newShadowCapture()
 			defer srv.Close()
 			cfg := Config{RestateURL: srv.URL}
-			reg := &mockPRRegistry{resolveTargetID: g.PR.TargetID, resolveHeadSHA: g.PR.HeadSHA, resolveMergeSHA: g.PR.MergeSHA}
+			reg := &mockPRRegistry{resolveTargetID: tc.pr.TargetID, resolveHeadSHA: tc.pr.HeadSHA, resolveMergeSHA: tc.pr.MergeSHA}
 			r := newTestRouter(cfg, srv.Client(), reg, &mockOutboundDispatcher{}, &mockEventBus{})
 			r.SetRestateShadow(newShadowRestateReporter(cfg, srv.Client()))
-			for _, step := range tc.Steps {
+			for _, step := range tc.golden.Steps {
 				reg.markKustomizationsRes = step.LegacyTransitioned
-				if err := r.completeKustomizationRequest(context.Background(), g.PR, step.Kustomization, step.ReadyJobs); err != nil {
+				if err := r.completeKustomizationRequest(context.Background(), tc.pr, step.Kustomization, step.ReadyJobs); err != nil {
 					t.Fatalf("completeKustomizationRequest(%s) err = %v", step.Kustomization, err)
 				}
 			}
 			got := capturedShadowSends(t, shot)
-			if len(got) != len(tc.Shadow) {
-				t.Fatalf("shadow sends = %d, want %d: %+v", len(got), len(tc.Shadow), got)
+			if len(got) != len(tc.golden.Shadow) {
+				t.Fatalf("shadow sends = %d, want %d: %+v", len(got), len(tc.golden.Shadow), got)
 			}
 			for i := range got {
 				gotJSON, _ := json.Marshal([]any{got[i].Object, got[i].Handler, normalizeShadowWire(got[i].Event)})
-				wantJSON, _ := json.Marshal([]any{tc.Shadow[i].Object, tc.Shadow[i].Handler, normalizeShadowWire(tc.Shadow[i].Event)})
+				wantJSON, _ := json.Marshal([]any{tc.golden.Shadow[i].Object, tc.golden.Shadow[i].Handler, normalizeShadowWire(tc.golden.Shadow[i].Event)})
 				if !bytes.Equal(gotJSON, wantJSON) {
 					t.Errorf("shadow send %d:\n got  %s\n want %s", i, gotJSON, wantJSON)
 				}

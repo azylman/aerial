@@ -155,7 +155,7 @@ func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, erro
 	if cleanJob, cleanHead := strings.TrimSpace(ev.JobName), strings.TrimSpace(ev.HeadSHA); cleanJob != "" && cleanHead != "" && !IsZeroSHA(cleanHead) {
 		s.RecordDeployedSHAJob(cleanJob, cleanHead)
 	}
-	syncHeadSHA(s, ev.HeadSHA)
+	syncHeadSHA(s, ev)
 	out.Recorded = true
 	return out, nil
 }
@@ -224,13 +224,15 @@ func firePromoteEffect(ctx context.Context, s *PRState, ev PREvent, key EffectKe
 }
 
 // syncHeadSHA records the observed head SHA after a successful apply so
-// later events judge staleness against it. A merged PR keeps its head:
-// deploy events may carry the merge commit, which must not rewrite it.
-func syncHeadSHA(s *PRState, headSHA string) {
+// later events judge staleness against it. A merged PR keeps its head
+// unless the event repairs a stale one (RecoverMergedHead): deploy events
+// may carry the merge commit, which must not rewrite it.
+func syncHeadSHA(s *PRState, ev PREvent) {
 	if s.Terminal == TerminalMerged {
+		s.RecoverMergedHead(ev)
 		return
 	}
-	if clean := strings.TrimSpace(headSHA); clean != "" && !IsZeroSHA(clean) {
+	if clean := strings.TrimSpace(ev.HeadSHA); clean != "" && !IsZeroSHA(clean) {
 		s.SetHead(clean)
 	}
 }
@@ -253,7 +255,7 @@ func HandleRolloutEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxFor
 	if err := fireFluxEffect(ctx, s, ev, key, fwd); err != nil {
 		return out, err
 	}
-	syncHeadSHA(s, ev.HeadSHA)
+	syncHeadSHA(s, ev)
 	out.Forwarded = true
 	out.Deduped = already
 	return out, nil
@@ -303,7 +305,7 @@ func HandleDeployEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxForw
 			s.RecordDeployedSHAJob(cleanJob, cleanHead)
 		}
 	}
-	syncHeadSHA(s, ev.HeadSHA)
+	syncHeadSHA(s, ev)
 	out.Dispatched = true
 	return out, nil
 }

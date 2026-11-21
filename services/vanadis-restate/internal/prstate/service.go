@@ -288,6 +288,9 @@ func (s *PRObjectService) mutateEvent(ctx restate.ObjectContext, ev PREvent, pha
 	}
 	before := snapshotIndexView(st)
 	applyEventRow(st, ev)
+	if phase != phaseLifecycle {
+		recoverMergedHead(ctx, st, ev)
+	}
 	mutate(st, &ev)
 	restate.Set(ctx, s.stateKey, st)
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
@@ -581,7 +584,9 @@ func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev P
 // before pull_request.closed merges the PR on its merge SHA; the later
 // closed event for the same merge SHA no longer changes state but still runs
 // its carried facts, because legacy synapse publishes a merged fact for both
-// (each keyed on its own head SHA, so true redeliveries still dedupe).
+// (each keyed on its own head SHA, so true redeliveries still dedupe). That
+// closed event carries the real PR head, so it also repairs a head PRObject
+// left stale by a missed synchronize (RecoverMergedHead).
 func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
@@ -590,10 +595,9 @@ func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) er
 	if err != nil {
 		return err
 	}
-	if st.Terminal == TerminalMerged && ev.ReopenEpoch <= st.ReopenEpoch && len(ev.Facts) > 0 &&
+	if st.Terminal == TerminalMerged && ev.ReopenEpoch <= st.ReopenEpoch &&
 		st.MergeSHA != "" && strings.EqualFold(st.MergeSHA, strings.TrimSpace(ev.MergeSHA)) {
-		s.runFacts(ctx, st, ev.EffectsOwner, ev.Facts)
-		s.afterCommit(ctx, st, ev.EffectsOwner)
+		s.handleSameMerge(ctx, st, ev)
 		return nil
 	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
@@ -601,6 +605,53 @@ func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) er
 		st.MarkTerminal(TerminalMerged)
 		st.ApplyRegistryMerged(ev.MergeSHA)
 	})
+}
+
+// handleSameMerge handles a merge event for the merge SHA the PR already
+// merged on: it repairs a stale head the event corrects (persisted and
+// indexed for RepoObject SHA routing) and runs the facts it carries.
+func (s *PRObjectService) handleSameMerge(ctx restate.ObjectContext, st *PRState, ev PREvent) {
+	before := snapshotIndexView(st)
+	recovered := recoverMergedHead(ctx, st, ev)
+	if recovered {
+		restate.Set(ctx, s.stateKey, st)
+		sendPRIndex(ctx, st, ev, indexLifecycle(before, snapshotIndexView(st)))
+	}
+	if len(ev.Facts) > 0 {
+		s.runFacts(ctx, st, ev.EffectsOwner, ev.Facts)
+	}
+	if recovered || len(ev.Facts) > 0 {
+		s.afterCommit(ctx, st, ev.EffectsOwner)
+	}
+}
+
+// mergeHeadRecoveredTotal counts stale heads of merged PRs repaired from a
+// merge or deploy-phase event (RecoverMergedHead).
+var mergeHeadRecoveredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "prstate_merge_head_recovered_total",
+	Help: "Merged PRs whose stale stored head PRObject replaced with the real head carried by a same-merge closed event or an applied deploy-phase event.",
+})
+
+func init() {
+	registerCollector(mergeHeadRecoveredTotal)
+}
+
+// recoverMergedHead applies RecoverMergedHead to st and, when it moved the
+// head, counts and logs the repair (noteMergedHeadRecovered). The caller persists st and sends the
+// head change to RepoObject.
+func recoverMergedHead(ctx context.Context, st *PRState, ev PREvent) bool {
+	prev, ok := st.RecoverMergedHead(ev)
+	if ok {
+		noteMergedHeadRecovered(ctx, st, prev)
+	}
+	return ok
+}
+
+// noteMergedHeadRecovered counts and logs one merged stale head repair.
+func noteMergedHeadRecovered(ctx context.Context, st *PRState, prev string) {
+	mergeHeadRecoveredTotal.Inc()
+	slog.WarnContext(ctx, "[prstate] merged stale head recovered", "pr", PRObjectKey(st.Repo, st.PRNumber),
+		"stored", prev, "head", st.HeadSHA, "merge", st.MergeSHA)
 }
 
 // HandleClosed applies one close event dark.
@@ -771,9 +822,14 @@ func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREv
 // the deployed row status, disarms any pending deploy-failure deadline, and
 // persists them on apply. A first record indexes the PR as deployed.
 func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRState, ev PREvent) (DeployPublishedOutcome, error) {
+	before := snapshotIndexView(st)
 	out, err := RecordDeployPublished(st, ev)
 	if err != nil || out.Disposition != DispositionApply {
 		return out, err
+	}
+	headRecovered := st.Terminal == TerminalMerged && st.HeadSHA != before.head
+	if headRecovered {
+		noteMergedHeadRecovered(ctx, st, before.head)
 	}
 	// Only a watcher-tracked rollout flips the row: legacy records the
 	// completed Kustomization and clears deploy_success_pending, while direct
@@ -786,8 +842,11 @@ func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRS
 	}
 	st.DisarmDeployFailure()
 	restate.Set(ctx, s.stateKey, st)
-	if !out.Deduped {
+	switch {
+	case !out.Deduped:
 		sendPRIndex(ctx, st, ev, IndexDeployed)
+	case headRecovered:
+		sendPRIndex(ctx, st, ev, IndexActive)
 	}
 	return out, nil
 }

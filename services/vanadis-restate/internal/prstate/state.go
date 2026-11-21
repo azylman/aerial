@@ -741,10 +741,14 @@ func (s *PRState) Reopen() {
 // ApplyDeployEvent computes the disposition for one deploy-phase event
 // (kustomization requested/status, rollout progress, deploy dispatched,
 // success, or failure, build metadata). Deploys happen after merge, so a
-// same-epoch merged PR still applies them as long as every carried SHA is
-// the PR head or merge SHA (or the merge SHA is not known yet); a mismatch
-// drops stale. Closed-unmerged PRs stay fully absorbing, and every other
-// state falls through to ApplyEvent.
+// same-epoch merged PR still applies them. Once its merge SHA is known the
+// merge commit is the PR's post-merge identity, because the stored head can
+// be stale (a missed synchronize before merge): an event carrying the stored
+// merge SHA applies whatever head it carries, an event naming a different
+// merge commit drops stale, and an event with no merge SHA drops only when
+// its head is one the PR already moved past (PriorHeads). While the merge
+// SHA is unknown every merged deploy event applies. Closed-unmerged PRs
+// stay fully absorbing, and every other state falls through to ApplyEvent.
 func (s *PRState) ApplyDeployEvent(ev PREvent) EventDisposition {
 	if s == nil {
 		return DispositionDropStale
@@ -752,16 +756,53 @@ func (s *PRState) ApplyDeployEvent(ev PREvent) EventDisposition {
 	if s.Terminal != TerminalMerged || ev.ReopenEpoch > s.ReopenEpoch {
 		return s.ApplyEvent(ev)
 	}
-	for _, ref := range []string{ev.HeadSHA, ev.MergeSHA} {
-		clean := strings.TrimSpace(ref)
-		if clean == "" || IsZeroSHA(clean) || strings.TrimSpace(s.MergeSHA) == "" {
-			continue
-		}
-		if !strings.EqualFold(clean, s.HeadSHA) && !strings.EqualFold(clean, s.MergeSHA) {
-			return DispositionDropStale
-		}
+	stored := strings.TrimSpace(s.MergeSHA)
+	if stored == "" {
+		return DispositionApply
 	}
-	return DispositionApply
+	if merge := liveSHA(ev.MergeSHA); merge != "" {
+		if strings.EqualFold(merge, stored) {
+			return DispositionApply
+		}
+		return DispositionDropStale
+	}
+	head := liveSHA(ev.HeadSHA)
+	if head == "" || strings.EqualFold(head, s.HeadSHA) || strings.EqualFold(head, stored) || !s.HasPriorHead(head) {
+		return DispositionApply
+	}
+	return DispositionDropStale
+}
+
+// liveSHA trims sha and blanks the all-zero SHA.
+func liveSHA(sha string) string {
+	clean := strings.TrimSpace(sha)
+	if IsZeroSHA(clean) {
+		return ""
+	}
+	return clean
+}
+
+// RecoverMergedHead repairs the stale head of a same-epoch merged PR from
+// an event that belongs to its merge: it adopts the event head when the PR
+// merge SHA is known, the event names that merge SHA or none, and the head
+// is a real PR head (not a merge-only ref, not the merge commit, not the
+// stored head, and not one the PR already moved past). It returns the
+// replaced head and true when it moved HeadSHA (through SetHead, so the
+// stale head joins PriorHeads).
+func (s *PRState) RecoverMergedHead(ev PREvent) (string, bool) {
+	if s == nil || s.Terminal != TerminalMerged || ev.ReopenEpoch > s.ReopenEpoch {
+		return "", false
+	}
+	stored := strings.TrimSpace(s.MergeSHA)
+	head, merge := liveSHA(ev.HeadSHA), liveSHA(ev.MergeSHA)
+	if stored == "" || head == "" || (merge != "" && !strings.EqualFold(merge, stored)) ||
+		IsMergeOnlyRef(head, merge) || strings.EqualFold(head, stored) ||
+		strings.EqualFold(head, s.HeadSHA) || s.HasPriorHead(head) {
+		return "", false
+	}
+	prev := s.HeadSHA
+	s.SetHead(head)
+	return prev, true
 }
 
 // ApplyEvent computes the pure disposition for one inbound PR-lifecycle

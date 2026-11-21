@@ -357,3 +357,102 @@ func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 		})
 	}
 }
+
+// mergedStaleHeadWant is the hand-derived outcome of one merged-stale-head
+// case: PRObject after the legacy-owned shadow sends, the RepoObject lookup
+// of its head, the active rollouts, and the deploy_success effect, both as
+// recorded intended (legacy) and as published by the restate-owned replay.
+type mergedStaleHeadWant struct {
+	Status                 string         `json:"status"`
+	HeadSHA                string         `json:"head_sha"`
+	PriorHeads             []string       `json:"prior_heads"`
+	DeployedJobs           []string       `json:"deployed_jobs"`
+	DeployedKustomizations []string       `json:"deployed_kustomizations"`
+	ResolvedPR             int            `json:"resolved_pr"`
+	Rollouts               []RolloutRef   `json:"rollouts"`
+	Divergent              []string       `json:"divergent"`
+	Effects                []parityEffect `json:"effects"`
+}
+
+// mergedStaleHeadCase replays setup plus the legacy-owned shadow sends, and
+// separately setup plus the restate-owned stream; synapse-only fields are
+// ignored. A case without a row skips the projection compare.
+type mergedStaleHeadCase struct {
+	Name    string              `json:"name"`
+	Setup   []parityInvocation  `json:"setup"`
+	Shadow  []parityInvocation  `json:"shadow"`
+	Restate []parityInvocation  `json:"restate"`
+	Want    mergedStaleHeadWant `json:"want"`
+	Row     *RegistryRow        `json:"row"`
+}
+
+// simActiveRollouts reads the active rollout index, nil when never written.
+func simActiveRollouts(t *testing.T, sim *paritySim) []RolloutRef {
+	t.Helper()
+	raw, ok := sim.kv[RepoObjectServiceName+"/"+RolloutIndexKey+"/"+rolloutIndexStateKey]
+	if !ok {
+		return nil
+	}
+	idx, err := decodeInput[RolloutIndexState](raw)
+	require.NoError(t, err)
+	return idx.Active()
+}
+
+// TestShadowMergedStaleHeadDeployGolden pins that a PR merged while
+// PRObject's head was stale still completes its rollout: the same-merge
+// closed event or the first applied deploy event repairs the head, every
+// rollout progress and deploy_success applies on the merge SHA, the PR
+// leaves ListRollouts, and the deploy_success effect matches in both
+// ownership modes; deploy events naming another merge commit or a prior
+// head with no merge SHA still drop stale.
+func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/merged-stale-head-deploy.json")
+	require.NoError(t, err)
+	var g struct {
+		Cases []mergedStaleHeadCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newParitySim(t)
+			for _, inv := range append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...) {
+				sim.send(inv)
+			}
+			st := simPRState(t, sim, tc.Setup[0])
+			got := mergedStaleHeadWant{
+				Status: st.RegistryStatus(), HeadSHA: st.HeadSHA, PriorHeads: st.PriorHeads,
+				DeployedJobs: st.DeployedJobs, DeployedKustomizations: st.DeployedKustomizations,
+				Rollouts: simActiveRollouts(t, sim),
+			}
+			if tc.Row != nil {
+				got.Divergent = CompareProjection(BuildProjection(&st), *tc.Row, true).Divergent
+			}
+			repoRaw, ok := sim.kv[RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			require.True(t, ok, "RepoObject index committed")
+			repoSt, err := decodeInput[RepoState](repoRaw)
+			require.NoError(t, err)
+			if entry, found := repoSt.ResolveSHA(st.HeadSHA); found {
+				got.ResolvedPR = entry.PRNumber
+			}
+			for _, e := range st.IntendedEffects {
+				if e.Kind == "pr_fact_deploy_success" {
+					got.Effects = append(got.Effects, parityEffect{Kind: e.Kind, Key: e.MatchKey})
+				}
+			}
+			owned := newParitySim(t)
+			for _, inv := range tc.Setup {
+				owned.send(inv)
+			}
+			owned.effects = nil
+			for _, inv := range tc.Restate {
+				owned.send(inv)
+			}
+			require.Equal(t, got.Effects, owned.effects, "restate-owned replay publishes exactly the intended effects")
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}
