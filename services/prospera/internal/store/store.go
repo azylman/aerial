@@ -74,13 +74,13 @@ func (s *PGStore) IsSQLite() bool {
 // OpenDB opens a database connection from a connection string: sqlite://,
 // file: and :memory: URLs open SQLite, everything else goes through
 // pgutil.OpenSQL (postgres:// or postgresql:// only, pinged at open).
-func OpenDB(databaseURL string) (*sql.DB, error) {
+func OpenDB(ctx context.Context, databaseURL string) (*sql.DB, error) {
 	trimmed := strings.TrimSpace(databaseURL)
 	if strings.HasPrefix(trimmed, "sqlite://") || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ":memory:") {
 		sqlitePath := strings.TrimPrefix(trimmed, "sqlite://")
 		return sql.Open("sqlite", sqlitePath)
 	}
-	return pgutil.OpenSQL(context.Background(), trimmed, pgutil.SQLOptions{})
+	return pgutil.OpenSQL(ctx, trimmed, pgutil.SQLOptions{})
 }
 
 const selectCallFields = `call_id, provider_call_sid, direction, state, end_reason,

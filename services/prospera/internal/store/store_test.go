@@ -608,7 +608,7 @@ func TestOpenDB(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := store.OpenDB(tc.url)
+			db, err := store.OpenDB(context.Background(), tc.url)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("OpenDB(%q) err = %v, wantErr = %v", tc.url, err, tc.wantErr)
 			}

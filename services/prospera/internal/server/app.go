@@ -158,7 +158,7 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config]) erro
 		return fmt.Errorf("app: port cannot be empty")
 	}
 
-	db, err := store.OpenDB(cfg.DatabaseURL)
+	db, err := store.OpenDB(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("app: open db: %w", err)
 	}
