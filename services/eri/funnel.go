@@ -175,6 +175,9 @@ func checkCachedThreadForMessage(s *discordgo.Session, msgID string) (string, bo
 }
 
 func resolveNewThreadTitle(ctx context.Context, content, msgID string, shouldSummarize bool) string {
+	// Redact before summarizing or truncating so a secret cut at the title length limit
+	// cannot survive as an unmatchable fragment; StartMessageThread redacts again on write.
+	content = delivery.RedactOutbound(content)
 	title := ""
 	if shouldSummarize {
 		if cls := currentFunnelClassifier(); cls != nil {

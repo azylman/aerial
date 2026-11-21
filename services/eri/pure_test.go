@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 func TestDeriveThreadTitle_TableDriven(t *testing.T) {
@@ -141,6 +144,26 @@ func TestValidatePromptEffort(t *testing.T) {
 			err := validatePromptEffort(tc.effort)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validatePromptEffort(%q) error = %v, wantErr = %v", tc.effort, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestResolveNewThreadTitle(t *testing.T) {
+	sanitizer.RegisterSensitiveTokens("plain-dummy-boundary-secret")
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"clean content derives title", "Plan the weekly groceries", "Plan the weekly groceries"},
+		{"secret straddling truncation limit is redacted first", strings.Repeat("B", 40) + " plain-dummy-boundary-secret", strings.Repeat("B", 40) + " [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveNewThreadTitle(context.Background(), tc.content, "msg-1", false); got != tc.want {
+				t.Errorf("resolveNewThreadTitle(%q) = %q, want %q", tc.content, got, tc.want)
 			}
 		})
 	}

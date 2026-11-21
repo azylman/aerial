@@ -429,7 +429,9 @@ func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID str
 }
 
 // FormatThreadTitle formats the thread title for a thread trigger, clamped to at most 100 runes.
+// Inputs are redacted before clamping so a secret straddling the limit cannot leave a fragment.
 func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
+	titlePrefix, prompt = delivery.RedactOutbound(titlePrefix), delivery.RedactOutbound(prompt)
 	dateStr := now.Format("Jan 02, 2006")
 	trimmed := strings.TrimSpace(titlePrefix)
 	var title string
@@ -543,7 +545,7 @@ func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now ti
 	if !ShouldCreateThread(ok && snap.IsThread, policy.Mode) {
 		return channelID
 	}
-	threadTitle := delivery.RedactOutbound(FormatThreadTitle(title, prompt, now))
+	threadTitle := FormatThreadTitle(title, prompt, now)
 	if p.createThreadFn != nil {
 		if tid, err := p.createThreadFn(channelID, threadTitle); err == nil && tid != "" {
 			return tid
