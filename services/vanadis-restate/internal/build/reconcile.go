@@ -13,8 +13,8 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -246,7 +246,7 @@ func isLaunchCandidate(chunk model.VanadisChunk, chunks []model.VanadisChunk, la
 	if s != statusPending && s != "queued" && !res && !unlaunched {
 		return false, false
 	}
-	if dag.CheckChunkDependenciesReady(chunk, chunks) != nil {
+	if buildplan.CheckChunkDependenciesReady(chunk, chunks) != nil {
 		return false, false
 	}
 	return true, res || unlaunched
