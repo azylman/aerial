@@ -13,14 +13,18 @@ import (
 	"strings"
 )
 
-// Route/handler ordering check and -fix sorter, ported as-is from
-// mirrormere. Runs when -fix is set or the config enables check_ordering.
+// Route/handler ordering check and -fix sorter, ported from mirrormere.
+// Runs when -fix is set or the config enables check_ordering. -fix leaves
+// runs that carry comments (between, beside or directly above items) alone
+// and keeps reporting them, because comments are not part of an item's span
+// and would be dropped or left behind by the sort.
 
 type orderingItem struct {
-	key   string
-	start int
-	end   int
-	line  int
+	key     string
+	start   int
+	end     int
+	line    int
+	endLine int
 }
 
 type orderingRun struct {
@@ -54,10 +58,11 @@ func isMuxRouteCall(stmt ast.Stmt, fset *token.FileSet) (orderingItem, bool) {
 		val = lit.Value
 	}
 	return orderingItem{
-		key:   val,
-		start: fset.Position(stmt.Pos()).Offset,
-		end:   fset.Position(stmt.End()).Offset,
-		line:  fset.Position(stmt.Pos()).Line,
+		key:     val,
+		start:   fset.Position(stmt.Pos()).Offset,
+		end:     fset.Position(stmt.End()).Offset,
+		line:    fset.Position(stmt.Pos()).Line,
+		endLine: fset.Position(stmt.End()).Line,
 	}, true
 }
 
@@ -70,10 +75,11 @@ func isHandlerField(f *ast.Field, fset *token.FileSet) (orderingItem, bool) {
 		return orderingItem{}, false
 	}
 	return orderingItem{
-		key:   name,
-		start: fset.Position(f.Pos()).Offset,
-		end:   fset.Position(f.End()).Offset,
-		line:  fset.Position(f.Pos()).Line,
+		key:     name,
+		start:   fset.Position(f.Pos()).Offset,
+		end:     fset.Position(f.End()).Offset,
+		line:    fset.Position(f.Pos()).Line,
+		endLine: fset.Position(f.End()).Line,
 	}, true
 }
 
@@ -87,10 +93,11 @@ func isHandlerKeyValue(expr ast.Expr, fset *token.FileSet) (orderingItem, bool) 
 		return orderingItem{}, false
 	}
 	return orderingItem{
-		key:   ident.Name,
-		start: fset.Position(kv.Pos()).Offset,
-		end:   fset.Position(kv.End()).Offset,
-		line:  fset.Position(kv.Pos()).Line,
+		key:     ident.Name,
+		start:   fset.Position(kv.Pos()).Offset,
+		end:     fset.Position(kv.End()).Offset,
+		line:    fset.Position(kv.Pos()).Line,
+		endLine: fset.Position(kv.End()).Line,
 	}, true
 }
 
@@ -253,7 +260,20 @@ func checkOrFixFileOrdering(fullPath, rel string, fix bool) ([]string, error) {
 		return violations, nil
 	}
 
-	formatted, err := applyOrderingFixes(src, unsorted)
+	var fixable []orderingRun
+	violations = nil
+	for _, r := range unsorted {
+		if runHasComments(r, f, fset) {
+			violations = append(violations, fmt.Sprintf("%s:%d: contiguous %s run is unsorted and carries comments; -fix skips it, sort it by hand", rel, r.items[0].line, r.kind))
+			continue
+		}
+		fixable = append(fixable, r)
+	}
+	if len(fixable) == 0 {
+		return violations, nil
+	}
+
+	formatted, err := applyOrderingFixes(src, fixable)
 	if err != nil {
 		return nil, fmt.Errorf("format %s after sorting: %w", rel, err)
 	}
@@ -264,5 +284,18 @@ func checkOrFixFileOrdering(fullPath, rel string, fix bool) ([]string, error) {
 		}
 	}
 
-	return nil, nil
+	return violations, nil
+}
+
+// runHasComments reports whether any comment sits on a line from the one
+// directly above the run's first item through the run's last line.
+func runHasComments(r orderingRun, f *ast.File, fset *token.FileSet) bool {
+	from := r.items[0].line - 1
+	to := r.items[len(r.items)-1].endLine
+	for _, cg := range f.Comments {
+		if fset.Position(cg.End()).Line >= from && fset.Position(cg.Pos()).Line <= to {
+			return true
+		}
+	}
+	return false
 }
