@@ -7,16 +7,9 @@ import (
 	"log"
 	"strings"
 	"time"
-)
 
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
+	"github.com/azylman/aerial/pkg/strutil"
+)
 
 // MemorySearchArgs defines inputs for the memory_search MCP tool.
 type MemorySearchArgs struct {
@@ -205,7 +198,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	if h != nil && h.cfg != nil && h.cfg.Stack != "" {
 		agent = h.cfg.EffectiveStack()
 	}
-	agent = firstNonEmpty(args.TargetAgent, agent, DefaultStack)
+	agent = strutil.FirstNonEmpty(args.TargetAgent, agent, DefaultStack)
 	return h.MemoryStoreWithInput(ctx, FactInput{
 		FactText:     args.FactText,
 		SupersedesID: args.SupersedesID,

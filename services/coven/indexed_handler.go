@@ -5,19 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
-
-var validAgentSlugRegex = regexp.MustCompile("^[a-z0-9-]+$")
-
-// IsValidAgentSlug reports whether an agent slug is a valid non-empty DNS-compatible slug.
-func IsValidAgentSlug(slug string) bool {
-	return validAgentSlugRegex.MatchString(strings.TrimSpace(slug))
-}
 
 // ParseCovenExtractSubject extracts agent and threadID from a 5-token NATS subject:
 // aerial.coalesced.coven_extract.<agent>.<thread_id>.
@@ -28,28 +21,16 @@ func ParseCovenExtractSubject(subject string) (agent, threadID string, ok bool) 
 	}
 	agent = strings.TrimSpace(tokens[3])
 	threadID = strings.TrimSpace(tokens[4])
-	if !IsValidAgentSlug(agent) || threadID == "" {
+	if !k8sauth.IsValidAgentSlug(strings.TrimSpace(agent)) || threadID == "" {
 		return "", "", false
 	}
 	return agent, threadID, true
 }
 
-// covenMaxNakDelay caps the retry-forever backoff for indexed events.
-const covenMaxNakDelay = 1 * time.Hour
-
-// covenNakDelay returns min(1s*2^(n-1), 1h) for delivery count n.
+// covenMaxNakDelay caps the retry-forever pubsub.NakBackoff curve for indexed events.
 // Coven never gives up on a decodable event: failures always NakWithDelay,
 // so every delay value feeds a retry, never a drop.
-func covenNakDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 20)
-	if d := (1 * time.Second) << shift; d > 0 && d < covenMaxNakDelay {
-		return d
-	}
-	return covenMaxNakDelay
-}
+const covenMaxNakDelay = 1 * time.Hour
 
 // HandleTranscriptsIndexed routes one TranscriptsIndexedEvent to extraction or job publishing.
 // When role is "all", it accepts events for any valid agent slug. When role is not "all",
@@ -68,7 +49,7 @@ func HandleTranscriptsIndexed(ctx context.Context, msg pubsub.Message, stack, ro
 		return nil
 	}
 	agent := ev.EffectiveAgent()
-	if !IsValidAgentSlug(agent) {
+	if !k8sauth.IsValidAgentSlug(strings.TrimSpace(agent)) {
 		return nil
 	}
 	isAll := strings.EqualFold(strings.TrimSpace(role), "all")
@@ -76,7 +57,7 @@ func HandleTranscriptsIndexed(ctx context.Context, msg pubsub.Message, stack, ro
 		return nil
 	}
 	if err := extract(ctx, agent, threadID); err != nil {
-		if nakErr := msg.NakWithDelay(covenNakDelay(msg.NumDelivered())); nakErr != nil {
+		if nakErr := msg.NakWithDelay(pubsub.NakBackoff(msg.NumDelivered(), covenMaxNakDelay)); nakErr != nil {
 			slog.WarnContext(ctx, "[Coven] error naking transcripts indexed event", "error", nakErr)
 		}
 		return err
