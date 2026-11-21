@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubauth"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prompt"
 )
 
@@ -60,18 +61,14 @@ func NewClient(gitHubToken string, httpClient *http.Client) *Client {
 	}
 }
 
-// IsRetryableGitHubResponse reports whether a GitHub response warrants a retry.
+// IsRetryableGitHubResponse reports whether a GitHub response warrants a
+// retry: a 5xx or a rate limit as githubauth.IsRateLimited classifies it (a
+// permission 403 is not retryable).
 func IsRetryableGitHubResponse(resp *http.Response) bool {
 	if resp == nil {
 		return false
 	}
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return true
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-Ratelimit-Remaining") == "0"
-	}
-	return false
+	return resp.StatusCode >= 500 || githubauth.IsRateLimited(resp)
 }
 
 // ResolveCIFailureDetailsChecked extracts failing logs or RoboRev findings for a PR check,
