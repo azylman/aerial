@@ -325,13 +325,9 @@ func tokenizeQuoteAware(sub string) []string {
 	return tokens
 }
 
-// CheckSearch evaluates search and psql commands in run_command against unconstrained root, missing maxdepth,
-// binary scanning, and SQL context-bloat invariants.
-func CheckSearch(toolName string, args ToolArgs) *Decision {
-	return CheckSearchWithSQL(toolName, args, DefaultSQLDescriber())
-}
-
-// CheckSearchWithSQL evaluates search and psql commands using the provided SQLDescriber.
+// CheckSearchWithSQL evaluates search and psql commands in run_command against unconstrained root, missing
+// maxdepth, binary scanning, and SQL context-bloat invariants, describing psql queries with describer
+// (nil skips plan validation).
 func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) *Decision {
 	normalizedName := normalizeToolName(toolName)
 	if normalizedName == toolCallMCPTool || isClaudeMCPToolName(toolName) {
