@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/mcpkit"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -69,16 +69,6 @@ func NewServer(cfg *Config, client *CDPClient) *Server {
 		return mcpServer
 	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return s
-}
-
-// HandleHealth handles the GET /health readiness endpoint.
-func (*Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // HandleMCPStreamable serves MCP over streamable HTTP, accepting legacy kernel_-prefixed tool names.
@@ -137,80 +127,57 @@ type AmazonAddToCartArgs struct {
 }
 
 func (s *Server) registerTools(srv *mcp.Server) {
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "browser_navigate",
 		Description: "Navigate the active browser page to a URL.",
-		InputSchema: inputSchema[NavigateArgs](),
+		InputSchema: mcpkit.InputSchema[NavigateArgs](),
 	}, s.toolBrowserNavigate)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "browser_evaluate",
 		Description: "Evaluate a JavaScript expression in the active page and return the result as JSON. Card-like 13-16 digit numbers in the output are redacted.",
-		InputSchema: inputSchema[EvaluateArgs](),
+		InputSchema: mcpkit.InputSchema[EvaluateArgs](),
 	}, s.toolBrowserEvaluate)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "browser_get_content",
 		Description: `Return the active page's visible text (innerText without scripts/styles) as JSON {title,url,text}, with card-like numbers redacted. Text over the limit is cut and ends with "...[truncated]".`,
-		InputSchema: inputSchema[GetContentArgs](),
+		InputSchema: mcpkit.InputSchema[GetContentArgs](),
 	}, s.toolBrowserGetContent)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "browser_click",
 		Description: "Click the element matching a CSS selector, using a trusted mouse event when it has a visible box.",
-		InputSchema: inputSchema[ClickArgs](),
+		InputSchema: mcpkit.InputSchema[ClickArgs](),
 	}, s.toolBrowserClick)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "browser_type",
 		Description: "Type text into the input matching a CSS selector, then dispatch input/change events.",
-		InputSchema: inputSchema[TypeArgs](),
+		InputSchema: mcpkit.InputSchema[TypeArgs](),
 	}, s.toolBrowserType)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "browser_screenshot",
 		Description: "Capture the current viewport (not the full page) as an image.",
-		InputSchema: inputSchema[ScreenshotArgs](),
+		InputSchema: mcpkit.InputSchema[ScreenshotArgs](),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScreenshotArgs) (*mcp.CallToolResult, any, error) {
 		return s.toolBrowserScreenshot(ctx, args), nil, nil
 	})
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "amazon_search",
 		Description: "Search Amazon and return structured product results (title, ASIN, price, prime eligibility, rating, URL).",
-		InputSchema: inputSchema[AmazonSearchArgs](),
+		InputSchema: mcpkit.InputSchema[AmazonSearchArgs](),
 	}, s.toolAmazonSearch)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "amazon_get_cart",
 		Description: "Read the Amazon cart without changing it: item count, subtotal, and items with title, price, quantity, and ASIN.",
-		InputSchema: inputSchema[AmazonGetCartArgs](),
+		InputSchema: mcpkit.InputSchema[AmazonGetCartArgs](),
 	}, s.toolAmazonGetCart)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "amazon_add_to_cart",
 		Description: "Add a product to the Amazon cart by ASIN, returning the product title and resulting cart count.",
-		InputSchema: inputSchema[AmazonAddToCartArgs](),
+		InputSchema: mcpkit.InputSchema[AmazonAddToCartArgs](),
 	}, s.toolAmazonAddToCart)
-}
-
-// addTextTool registers a tool whose logic returns its result text and whether it is an error.
-func addTextTool[In any](srv *mcp.Server, tool *mcp.Tool, run func(context.Context, In) (string, bool)) {
-	mcp.AddTool(srv, tool, func(ctx context.Context, _ *mcp.CallToolRequest, args In) (*mcp.CallToolResult, any, error) {
-		text, isErr := run(ctx, args)
-		return textResult(text, isErr), nil, nil
-	})
 }
 
 func textResult(text string, isErr bool) *mcp.CallToolResult {
 	return &mcp.CallToolResult{IsError: isErr, Content: []mcp.Content{&mcp.TextContent{Text: text}}}
-}
-
-// inputSchema infers T's input schema and collapses the ["null", X] unions inferred
-// for pointer fields to plain X, matching the types clients have always seen.
-func inputSchema[T any]() *jsonschema.Schema {
-	schema, err := jsonschema.For[T](nil)
-	if err != nil {
-		panic(fmt.Sprintf("kernel-mcp: infer input schema: %v", err))
-	}
-	for _, prop := range schema.Properties {
-		if len(prop.Types) == 2 && prop.Types[0] == "null" {
-			prop.Type, prop.Types = prop.Types[1], nil
-		}
-	}
-	return schema
 }
 
 func (s *Server) toolBrowserNavigate(ctx context.Context, args NavigateArgs) (string, bool) {
@@ -483,7 +450,7 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, args AmazonAddToCartAr
 // NewHTTPMux builds and registers HTTP routes for kernel-mcp.
 func NewHTTPMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", srv.HandleHealth)
+	mux.HandleFunc("/health", mcpkit.HandleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("kernel-mcp"))
 	mux.Handle("/mcp", tracing.Middleware("kernel-mcp", http.HandlerFunc(srv.HandleMCPStreamable)))
 	return mux
