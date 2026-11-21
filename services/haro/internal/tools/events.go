@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 )
@@ -221,7 +222,7 @@ func (a CancelEventWatchArgs) ToMap() map[string]any {
 // HandleScheduleHeartbeat handles the schedule_heartbeat MCP tool call.
 func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, args map[string]any) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id")
-	if !model.IsNumericSnowflake(channelID) {
+	if !discordutil.IsSnowflake(strings.TrimSpace(channelID)) {
 		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
 	}
 
@@ -324,7 +325,7 @@ func applyHeartbeatTimingUpdates(args map[string]any, sched *model.HeartbeatSche
 
 func applyHeartbeatContentUpdates(args map[string]any, sched *model.HeartbeatSchedule) error {
 	if channelID := getMapString(args, "channel_id", "target_id"); channelID != "" {
-		if !model.IsNumericSnowflake(channelID) {
+		if !discordutil.IsSnowflake(strings.TrimSpace(channelID)) {
 			return fmt.Errorf("'channel_id' must be a valid numeric snowflake")
 		}
 		sched.TargetID = channelID
@@ -403,7 +404,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 // HandleWatchEvent registers a deterministic one-shot event watch trigger.
 func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extraSources ...string) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id", "thread_id")
-	if !model.IsNumericSnowflake(channelID) {
+	if !discordutil.IsSnowflake(strings.TrimSpace(channelID)) {
 		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
 	}
 
