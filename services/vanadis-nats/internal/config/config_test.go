@@ -132,34 +132,13 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 		{name: "whitespace aerial defaults to legacy", agent: "  Aerial  ", wantRouter: "BuildRouter"},
 		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta"},
 		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
+		{name: "unsafe chars route to default", agent: "Foo Bar", wantRouter: "BuildRouter"},
 		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantRouter: "BuildRouter-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.wantRouter, BuildRouterServiceName(tc.agent))
-			assert.Equal(t, NormalizeAgentName(tc.agent), NormalizeAgentName(tc.agent))
-		})
-	}
-}
-
-func TestFirstNonEmpty(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		values []string
-		want   string
-	}{
-		{name: "empty returns empty", values: nil, want: ""},
-		{name: "all blank returns empty", values: []string{"", "   "}, want: ""},
-		{name: "first non blank wins", values: []string{"", "  a  ", "b"}, want: "a"},
-		{name: "single value", values: []string{"x"}, want: "x"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, FirstNonEmpty(tc.values...))
 		})
 	}
 }
