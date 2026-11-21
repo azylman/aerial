@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
@@ -298,36 +298,15 @@ func RunApp(ctx context.Context, cfg Config) error {
 	return err
 }
 
-var (
-	newPgxPoolFn  = pgxpool.NewWithConfig
-	pingPgxPoolFn = func(ctx context.Context, pool *pgxpool.Pool) error {
-		return pool.Ping(ctx)
-	}
-	closePgxPoolFn = func(pool *pgxpool.Pool) {
-		if pool != nil {
-			pool.Close()
-		}
-	}
-)
+var newPoolFn = pgutil.NewPool
 
 var initPostgres = func(ctx context.Context, pgURL string) (*store.Store, func(context.Context), error) {
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	pool, err := newPoolFn(ctx, pgURL, pgutil.PoolOptions{MaxConns: 10, MinConns: 2, Ping: true})
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse postgres url: %w", err)
-	}
-	poolConfig.MaxConns, poolConfig.MinConns = 10, 2
-	pool, err := newPgxPoolFn(ctx, poolConfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
-	}
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := pingPgxPoolFn(pingCtx, pool); err != nil {
-		closePgxPoolFn(pool)
-		return nil, nil, fmt.Errorf("ping postgres: %w", err)
+		return nil, nil, err
 	}
 	st := store.New(pool)
 	return st, func(context.Context) {
-		closePgxPoolFn(pool)
+		pool.Close()
 	}, nil
 }
