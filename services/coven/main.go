@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
@@ -51,7 +52,7 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 		}
 		return nil
 	}
-	if !IsValidAgentSlug(targetAgent) {
+	if !k8sauth.IsValidAgentSlug(strings.TrimSpace(targetAgent)) {
 		slog.WarnContext(ctx, "[Coven] invalid agent slug in coven extract job", "agent", targetAgent)
 		if termErr := msg.Term(); termErr != nil {
 			slog.WarnContext(ctx, "[Coven] error terming invalid agent slug coven extract job", "error", termErr)
@@ -71,7 +72,7 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 			}
 			return err
 		}
-		if nakErr := msg.NakWithDelay(covenNakDelay(msg.NumDelivered())); nakErr != nil {
+		if nakErr := msg.NakWithDelay(pubsub.NakBackoff(msg.NumDelivered(), covenMaxNakDelay)); nakErr != nil {
 			slog.WarnContext(ctx, "[Coven] error naking coven extract job", "error", nakErr)
 		}
 		return err

@@ -250,8 +250,7 @@ func TestOpenDB(t *testing.T) {
 		wantErr bool
 	}{
 		{"NilConfig", nil, true},
-		{"EmptyDSN", &Config{DatabaseURL: "   "}, true},
-		{"UnreachableDSN", &Config{DatabaseURL: "postgres://127.0.0.1:1/bad?connect_timeout=1"}, true},
+		{"UnsupportedScheme", &Config{DatabaseURL: "mysql://mock_user@" + addr + "/mock_db"}, true},
 		{"ValidMockPostgres", &Config{DatabaseURL: validDSN}, false},
 	}
 

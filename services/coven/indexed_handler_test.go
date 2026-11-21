@@ -28,30 +28,6 @@ func indexedTestEvent(t *testing.T, stack, threadID string) []byte {
 	return data
 }
 
-func TestCovenNakDelay(t *testing.T) {
-	tests := []struct {
-		name      string
-		delivered uint64
-		want      time.Duration
-	}{
-		{name: "zero delivers one second", delivered: 0, want: 1 * time.Second},
-		{name: "first delivers one second", delivered: 1, want: 1 * time.Second},
-		{name: "second delivers two seconds", delivered: 2, want: 2 * time.Second},
-		{name: "third delivers four seconds", delivered: 3, want: 4 * time.Second},
-		{name: "seventh delivers sixty four seconds", delivered: 7, want: 64 * time.Second},
-		{name: "twelfth delivers thirty four minutes", delivered: 12, want: 2048 * time.Second},
-		{name: "caps at one hour", delivered: 13, want: 1 * time.Hour},
-		{name: "large deliveries stay capped", delivered: 40, want: 1 * time.Hour},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := covenNakDelay(tc.delivered); got != tc.want {
-				t.Errorf("covenNakDelay(%d) = %v, want %v", tc.delivered, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -278,33 +254,6 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 	}
 }
 
-func TestIsValidAgentSlug(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		slug string
-		want bool
-	}{
-		{name: "standard alpha slug", slug: "agent-alpha", want: true},
-		{name: "standard beta slug", slug: "agent-beta", want: true},
-		{name: "single word slug", slug: "aerial", want: true},
-		{name: "slug with numbers", slug: "agent-42", want: true},
-		{name: "empty slug", slug: "", want: false},
-		{name: "spaces only", slug: "   ", want: false},
-		{name: "uppercase disallowed", slug: "Agent-Alpha", want: false},
-		{name: "underscores disallowed", slug: "agent_alpha", want: false},
-		{name: "special chars disallowed", slug: "agent@alpha", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsValidAgentSlug(tc.slug); got != tc.want {
-				t.Errorf("IsValidAgentSlug(%q) = %v, want %v", tc.slug, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestParseCovenExtractSubject(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -346,6 +295,16 @@ func TestParseCovenExtractSubject(t *testing.T) {
 		{
 			name:    "invalid agent slug",
 			subject: "aerial.coalesced.coven_extract.Agent_Alpha.th-100",
+			wantOK:  false,
+		},
+		{
+			name:    "agent slug ending in hyphen rejected",
+			subject: "aerial.coalesced.coven_extract.agent-.th-100",
+			wantOK:  false,
+		},
+		{
+			name:    "agent slug over 63 chars rejected",
+			subject: "aerial.coalesced.coven_extract.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.th-100",
 			wantOK:  false,
 		},
 		{

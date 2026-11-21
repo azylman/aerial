@@ -11,7 +11,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pgvector/pgvector-go"
 
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 )
 
 var (
@@ -675,21 +675,6 @@ func openDB(ctx context.Context, connStr string) (*sql.DB, error) {
 	if sqliteTestInitHook != nil {
 		return sqliteTestInitHook(connStr)
 	}
-	clean := strings.TrimSpace(connStr)
-	if clean == "" {
-		return nil, fmt.Errorf("database connection string is required")
-	}
-	db, err := sql.Open("pgx", clean)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-	// The ping keeps its own 5s budget even if ctx is already canceled; RunApp's lifecycle handles
-	// shutdown right after startup.
-	pingCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if err := db.PingContext(pingCtx); err != nil {
-		httpkit.CloseWarn(db, "database on ping failure")
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-	return db, nil
+	// Startup ignores cancellation; RunApp's lifecycle handles shutdown right after startup.
+	return pgutil.OpenSQL(context.WithoutCancel(ctx), connStr, pgutil.SQLOptions{})
 }
