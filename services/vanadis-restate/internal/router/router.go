@@ -35,37 +35,31 @@ type restateBuildObjectInvoker struct {
 	ctx restate.Context
 }
 
-// serviceName targets the runner's Build service: "" and the default agent
-// resolve to Build, any other agent to Build-<agent>.
-func (restateBuildObjectInvoker) serviceName(runner string) string {
-	return model.BuildServiceName(runner)
-}
-
 func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, runner, buildID string, ev pubsub.PRLifecycleEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, r.serviceName(runner), buildID, "OnPREvent").Send(ev)
+	_ = restate.ObjectSend(r.ctx, model.BuildServiceName(runner), buildID, "OnPREvent").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, runner, buildID string, ev pubsub.DispatchOutcomeEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, r.serviceName(runner), buildID, "OnDispatchOutcome").Send(ev)
+	_ = restate.ObjectSend(r.ctx, model.BuildServiceName(runner), buildID, "OnDispatchOutcome").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, runner, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
 	_ = ctx
-	return restate.Object[model.AttachChunkPRResponse](r.ctx, r.serviceName(runner), buildID, "AttachPR").Request(req)
+	return restate.Object[model.AttachChunkPRResponse](r.ctx, model.BuildServiceName(runner), buildID, "AttachPR").Request(req)
 }
 
 func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, runner, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
 	_ = ctx
-	return restate.Object[model.FailChunkResponse](r.ctx, r.serviceName(runner), buildID, "FailChunk").Request(req)
+	return restate.Object[model.FailChunkResponse](r.ctx, model.BuildServiceName(runner), buildID, "FailChunk").Request(req)
 }
 
 func (r restateBuildObjectInvoker) RouteReconcile(ctx context.Context, runner, buildID string, req build.ReconcileBuildRequest) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, r.serviceName(runner), buildID, "Reconcile").Send(req)
+	_ = restate.ObjectSend(r.ctx, model.BuildServiceName(runner), buildID, "Reconcile").Send(req)
 	return nil
 }
 

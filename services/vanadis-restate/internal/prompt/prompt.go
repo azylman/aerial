@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -34,8 +35,8 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	}
 	extraLine := strings.Join(extraParts, "\n")
 
-	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
-	branchArg := store.FirstNonEmpty(cleanBranch, "<branch>")
+	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
+	branchArg := strutil.FirstNonEmpty(cleanBranch, "<branch>")
 	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
 
 	directive := "[VANADIS CI REMEDIATION — MANDATORY]\n" +
@@ -104,8 +105,8 @@ The original chunk instructions follow.
 
 // FormatConflictPrompt formats the conflict prompt when merge conflict is detected.
 func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
-	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
-	cleanBranch := store.FirstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
+	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
+	cleanBranch := strutil.FirstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
 	return fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", ev.PRNumber, ev.Repo, cleanBranch, ev.HeadSHA, shortRepo, cleanBranch)
 }
 
@@ -134,7 +135,7 @@ func formatDeployFailureHeader(repo, commit, jobName string, prNumber int) strin
 
 // FormatDeployFailurePrompt formats the failure prompt when deployment or git sync fails.
 func FormatDeployFailurePrompt(ev pubsub.PRLifecycleEvent) string {
-	commit := store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA)
+	commit := strutil.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA)
 	cleanEvent := strings.ToLower(strings.TrimSpace(ev.Event))
 	var extraLine string
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
@@ -327,7 +328,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 	isActionChunk := active.Mode == chunkModeAction
 	activeRepo := ""
 	if !isActionChunk {
-		activeRepo = store.FirstNonEmpty(model.CleanRepoName(active.Repo), "aerial")
+		activeRepo = strutil.FirstNonEmpty(model.CleanRepoName(active.Repo), "aerial")
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: %s\n", build.ID)
@@ -355,7 +356,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 		sb.WriteString("\n")
 	}
 
-	targetFilesStr := store.FirstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
+	targetFilesStr := strutil.FirstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
 	fmt.Fprintf(&sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\n", activeIdx+1, total, active.ID, active.Title)
 	if isActionChunk {
 		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", model.ActionDispatchID(active))
