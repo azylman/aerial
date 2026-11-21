@@ -73,34 +73,9 @@ func SetupHealthMux(service string, metrics http.Handler) *http.ServeMux {
 // back as an application/x-tar archive.
 func HandleCoverageFlush(service string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tmpDir, err := os.MkdirTemp("", "covflush-*")
-		if err != nil {
-			log.Printf("[%s] coverage flush mkdir error: %v", service, err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer func() {
-			if err := os.RemoveAll(tmpDir); err != nil {
-				log.Printf("[%s] coverage flush cleanup error: %v", service, err)
-			}
-		}()
-
-		if WriteMetaDirFn != nil {
-			if err := WriteMetaDirFn(tmpDir); err != nil {
-				log.Printf("[%s] coverage flush meta error: %v", service, err)
-			}
-		}
-		if WriteCountersDirFn != nil {
-			if err := WriteCountersDirFn(tmpDir); err != nil {
-				log.Printf("[%s] coverage flush error: %v", service, err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
 		var buf bytes.Buffer
-		if err := archiveCoverageDir(&buf, tmpDir); err != nil {
-			log.Printf("[%s] coverage archive error: %v", service, err)
+		if err := ArchiveCoverage(&buf, WriteMetaDirFn, WriteCountersDirFn); err != nil {
+			log.Printf("[%s] coverage flush error: %v", service, err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -109,6 +84,35 @@ func HandleCoverageFlush(service string) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		WriteResponse(w, r, service, buf.Bytes())
 	}
+}
+
+// ArchiveCoverage writes coverage metadata and counters into an ephemeral
+// directory and streams them to w as a tar archive. A writeMeta error is
+// logged and tolerated (metadata may already have been written); mkdir,
+// writeCounters and archive errors are returned unwrapped. Nil funcs are
+// skipped.
+func ArchiveCoverage(w io.Writer, writeMeta, writeCounters func(dir string) error) error {
+	tmpDir, err := os.MkdirTemp("", "covflush-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			log.Printf("coverage flush cleanup error: %v", err)
+		}
+	}()
+
+	if writeMeta != nil {
+		if err := writeMeta(tmpDir); err != nil {
+			log.Printf("coverage flush meta error: %v", err)
+		}
+	}
+	if writeCounters != nil {
+		if err := writeCounters(tmpDir); err != nil {
+			return err
+		}
+	}
+	return archiveCoverageDir(w, tmpDir)
 }
 
 // IsClientDisconnect reports whether err or r.Context() indicates an aborted client connection
