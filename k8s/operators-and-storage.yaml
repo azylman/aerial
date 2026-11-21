@@ -348,6 +348,11 @@ spec:
                     name: roborev-runner-secret
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: 250m
             volumeMounts:
               - mountPath: /cache
                 name: ci-cache
@@ -570,6 +575,11 @@ spec:
                 value: self-hosted,ci
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: 250m
             volumeMounts:
               - mountPath: /var/run/docker.sock
                 name: docker-sock
