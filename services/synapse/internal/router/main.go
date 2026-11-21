@@ -596,6 +596,8 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	if dmMsg != "" && s.isValidAlertTarget(targetID) {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
 			slog.WarnContext(ctx, "[synapse] [dispatcher] error dispatching direct message", "label", label, "error", err)
+		} else {
+			recordLegacyEffect(ctx, systemEffectKind(restateclient.EffectEriDirectMessage), "", "", 0)
 		}
 	}
 	if opt.silent {
@@ -611,6 +613,7 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 			slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching background prompt", "label", label, "error", err)
 			return fmt.Errorf("dispatch background %s prompt: %w", label, err)
 		}
+		recordLegacyEffect(ctx, systemEffectKind(restateclient.EffectEriBackground), "", "", 0)
 		return nil
 	}
 	if !s.isValidAlertTarget(targetID) {
@@ -621,7 +624,17 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching prompt", "label", label, "error", err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
 	}
+	recordLegacyEffect(ctx, systemEffectKind(restateclient.EffectEriPrompt), "", "", 0)
 	return nil
+}
+
+// systemEffectKind labels the PR-less alert effects dispatchAlertWithPrompt
+// performs. Every caller reaches it only with no PR number (PR deploy and
+// sync alerts return before it), so no PRObject key exists and prstate
+// never records a counterpart; the system_ prefix keeps them out of the
+// per-kind shadow comparison.
+func systemEffectKind(kind string) string {
+	return "system_" + kind
 }
 
 func (s *RouterServer) resolveDeployEventPRNumber(ctx context.Context, evt *DeployEvent) {

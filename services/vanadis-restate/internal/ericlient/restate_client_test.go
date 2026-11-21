@@ -776,6 +776,15 @@ func TestRestateEriClient_NilReceiver(t *testing.T) {
 	if err := nilClient.Message(ctx, "ch1", "m"); err == nil {
 		t.Error("expected error on nil client Message")
 	}
+	if err := nilClient.PromptAgent(ctx, "a", "th1", "p", "k"); err == nil {
+		t.Error("expected error on nil client PromptAgent")
+	}
+	if err := nilClient.DispatchRestate(ctx, BrainDispatchRequest{}); err == nil {
+		t.Error("expected error on nil client DispatchRestate")
+	}
+	if err := nilClient.MessageAgent(ctx, "a", "ch1", "m"); err == nil {
+		t.Error("expected error on nil client MessageAgent")
+	}
 }
 
 func TestRestateEriClient_EdgeBehaviors(t *testing.T) {

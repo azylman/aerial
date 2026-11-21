@@ -408,18 +408,97 @@ func (c *RestateEriClient) Prompt(ctx context.Context, threadID, prompt string) 
 	}
 
 	msgID := deterministicPromptMessageID(cleanThreadID, cleanPrompt)
-	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, ThreadSessionServiceName(c.agentName), url.PathEscape(cleanThreadID))
+	return c.enqueueThreadPrompt(ctx, c.agentName, cleanThreadID, cleanPrompt, msgID, "prompt:"+cleanThreadID+":"+msgID)
+}
+
+// enqueueThreadPrompt enqueues one prompt turn on agent's ThreadSession
+// Virtual Object keyed by the thread.
+func (c *RestateEriClient) enqueueThreadPrompt(ctx context.Context, agent, threadID, prompt, msgID, idempotencyKey string) error {
+	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, ThreadSessionServiceName(agent), url.PathEscape(threadID))
 	reqBody := struct {
 		ChannelID string `json:"channel_id"`
 		Prompt    string `json:"prompt"`
 		MessageID string `json:"message_id"`
 	}{
-		ChannelID: cleanThreadID,
-		Prompt:    cleanPrompt,
+		ChannelID: threadID,
+		Prompt:    prompt,
 		MessageID: msgID,
 	}
-	_, err := c.postRestateJSON(ctx, endpoint, "prompt:"+cleanThreadID+":"+msgID, "prompt", reqBody)
+	_, err := c.postRestateJSON(ctx, endpoint, idempotencyKey, "prompt", reqBody)
 	return err
+}
+
+// errRestateNotConfigured rejects the agent-scoped Restate-only paths when
+// no ingress URL is configured; they never fall back to eri HTTP.
+var errRestateNotConfigured = errors.New("restate url not configured")
+
+// PromptAgent enqueues a prompt turn on agent's ThreadSession through
+// Restate ingress, keyed by the caller's deterministic idempotency key (the
+// message ID derives from it too, so a resend is one turn). It never falls
+// back to eri HTTP.
+func (c *RestateEriClient) PromptAgent(ctx context.Context, agent, threadID, prompt, idempotencyKey string) error {
+	if c == nil {
+		return errors.New("restate eri client is nil")
+	}
+	cleanThreadID, cleanPrompt, cleanKey := strings.TrimSpace(threadID), strings.TrimSpace(prompt), strings.TrimSpace(idempotencyKey)
+	if cleanThreadID == "" || cleanPrompt == "" {
+		return nil
+	}
+	if c.restateURL == "" {
+		return errRestateNotConfigured
+	}
+	if cleanKey == "" {
+		return errors.New("prompt idempotency key is required")
+	}
+	return c.enqueueThreadPrompt(ctx, c.resolveAgent(agent), cleanThreadID, cleanPrompt, deterministicPromptMessageID(cleanThreadID, cleanKey), cleanKey)
+}
+
+// DispatchRestate enqueues a background dispatch on req.Agent's
+// DispatchSession through Restate ingress with Dispatch's status mapping.
+// It never falls back to eri HTTP.
+func (c *RestateEriClient) DispatchRestate(ctx context.Context, req BrainDispatchRequest) error {
+	if c == nil {
+		return errors.New("restate eri client is nil")
+	}
+	if c.restateURL == "" {
+		return errRestateNotConfigured
+	}
+	return c.Dispatch(ctx, req)
+}
+
+// MessageAgent delivers a plain direct message through agent's Discord
+// sender. It requires direct Discord auth and an agent-routing deliverer and
+// never falls back to eri HTTP.
+func (c *RestateEriClient) MessageAgent(ctx context.Context, agent, channelID, content string) error {
+	if c == nil {
+		return errors.New("restate eri client is nil")
+	}
+	cleanChannelID, cleanContent := strings.TrimSpace(channelID), strings.TrimSpace(content)
+	if cleanChannelID == "" || cleanContent == "" {
+		return nil
+	}
+	c.widgetMu.RLock()
+	deliverer := c.widgetDeliverer
+	hasDiscordAuth := c.hasDiscordAuth
+	c.widgetMu.RUnlock()
+	mda, ok := deliverer.(agentMessageDeliverer)
+	if !hasDiscordAuth || !ok || mda == nil {
+		return errors.New("no agent direct message deliverer configured")
+	}
+	return mda.DeliverDirectMessageWithAgent(ctx, c.resolveAgent(agent), cleanChannelID, cleanContent)
+}
+
+// agentMessageDeliverer is the agent-routing direct message surface.
+type agentMessageDeliverer interface {
+	DeliverDirectMessageWithAgent(ctx context.Context, agent, channelID, content string) error
+}
+
+// resolveAgent normalizes agent, falling back to the client's own agent.
+func (c *RestateEriClient) resolveAgent(agent string) string {
+	if clean := NormalizeAgentName(agent); clean != "" {
+		return clean
+	}
+	return c.agentName
 }
 
 func (c *RestateEriClient) Widget(ctx context.Context, req StatusWidgetRequest) (string, error) {
@@ -460,9 +539,7 @@ func (c *RestateEriClient) Message(ctx context.Context, channelID, content strin
 	c.widgetMu.RUnlock()
 
 	if c.restateURL != "" && hasDiscordAuth {
-		if mda, ok := deliverer.(interface {
-			DeliverDirectMessageWithAgent(ctx context.Context, agent, channelID, content string) error
-		}); ok && mda != nil {
+		if mda, ok := deliverer.(agentMessageDeliverer); ok && mda != nil {
 			return mda.DeliverDirectMessageWithAgent(ctx, c.agentName, cleanChannelID, cleanContent)
 		}
 		if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {

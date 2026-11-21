@@ -119,6 +119,17 @@ var (
 		},
 		[]string{fieldReason},
 	)
+
+	// LegacyEffectsTotal counts side effects synapse really performed on
+	// the legacy pipeline, by effect kind. Shadow gates compare it with
+	// prstate_intended_effects_total{kind} and the [synapse-effect] log.
+	LegacyEffectsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_legacy_effects_total",
+			Help: "Total number of side effects synapse performed on the legacy pipeline by effect kind.",
+		},
+		[]string{"kind"},
+	)
 )
 
 var (
@@ -141,6 +152,7 @@ func registerCollector(c prometheus.Collector) {
 func init() {
 	registerCollector(RestateShadowSendsTotal)
 	registerCollector(RestateShadowDivergenceTotal)
+	registerCollector(LegacyEffectsTotal)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
@@ -219,6 +231,14 @@ func RecordRestateShadowDivergence(reason string) {
 		reason = unknownLabel
 	}
 	RestateShadowDivergenceTotal.WithLabelValues(reason).Inc()
+}
+
+// RecordLegacyEffect increments the LegacyEffectsTotal counter for kind.
+func RecordLegacyEffect(kind string) {
+	if kind == "" {
+		kind = unknownLabel
+	}
+	LegacyEffectsTotal.WithLabelValues(kind).Inc()
 }
 
 // SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.

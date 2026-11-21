@@ -46,7 +46,7 @@ var (
 	projectionWritesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "prstate_projection_writes_total",
 		Help: "pr_registry projection writes by PRObject, by result (ok, error, unchanged).",
-	}, []string{"result"})
+	}, []string{metricLabelResult})
 	projectionComparedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "prstate_projection_compared_total",
 		Help: "Legacy pr_registry rows compared field by field against the PRObject snapshot.",

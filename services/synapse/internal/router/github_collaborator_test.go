@@ -604,8 +604,16 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 		nilDispatcher bool
 		channelID     string
 		sha           string
+		owner         string
 		wantDispatch  bool
 	}{
+		{
+			name:         "restate-owned event skips the legacy send",
+			channelID:    "111111111111111111",
+			sha:          "abcdef1",
+			owner:        "restate",
+			wantDispatch: false,
+		},
 		{
 			name:         "nil server returns nil",
 			nilServer:    true,
@@ -660,7 +668,11 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 			if tc.nilDispatcher {
 				srv = &RouterServer{}
 			}
-			if err := srv.dispatchCollaboratorDM(ctx, "repo", 1, tc.sha, tc.channelID, "msg"); err != nil {
+			callCtx := ctx
+			if tc.owner != "" {
+				callCtx = withEffectsOwner(ctx, tc.owner)
+			}
+			if err := srv.dispatchCollaboratorDM(callCtx, "repo", 1, tc.sha, "", tc.channelID, "msg"); err != nil {
 				t.Errorf("dispatchCollaboratorDM error = %v, want nil", err)
 			}
 			want := 0
@@ -677,11 +689,11 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 	dupSrv := &RouterServer{dispatcher: dupDisp}
 	// Without the deleted per-SHA dedup map, repeat deliveries resend
 	// (at-least-once); the Restate journal owns dedup.
-	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "", "111111111111111111", "msg"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	beforeCalls := len(dupDisp.DirectMessageCalls())
-	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "111111111111111111", "msg"); err != nil {
+	if err := dupSrv.dispatchCollaboratorDM(ctx, "repo", 1, "sha1", "", "111111111111111111", "msg"); err != nil {
 		t.Fatalf("unexpected error on duplicate: %v", err)
 	}
 	if len(dupDisp.DirectMessageCalls()) != beforeCalls+1 {
@@ -690,7 +702,7 @@ func TestDispatchCollaboratorDM_Guards(t *testing.T) {
 
 	failDisp := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
 	srvFail := &RouterServer{dispatcher: failDisp}
-	if err := srvFail.dispatchCollaboratorDM(ctx, "repo", 1, "sha2", "111111111111111111", "msg"); err == nil {
+	if err := srvFail.dispatchCollaboratorDM(ctx, "repo", 1, "sha2", "", "111111111111111111", "msg"); err == nil {
 		t.Fatalf("expected error from failed dispatch")
 	}
 }

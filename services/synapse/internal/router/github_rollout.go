@@ -410,19 +410,38 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 	return pr, channelID, mention, true, nil
 }
 
+// collaboratorDMEffect renders the collaborator DM as the eri effect the
+// HandleCollaboratorAlert event carries to PRObject.
+func collaboratorDMEffect(channelID, msg string) []restateclient.EriEffect {
+	return []restateclient.EriEffect{{Kind: restateclient.EffectEriDirectMessage, ChannelID: channelID, Content: msg}}
+}
+
 // dispatchCollaboratorDM sends one collaborator DM. Per-SHA dispatch dedup
 // died with the tracker; redeliveries may resend (accepted at-least-once:
 // the Restate journal and effect keys own dedup, delivery retries the send).
-func (s *RouterServer) dispatchCollaboratorDM(ctx context.Context, _repo string, _prNumber int, sha, channelID, msg string) error {
+// An effects_owner=restate event skips the send: PRObject fires the DM
+// carried on the HandleCollaboratorAlert event to the stored owner. A
+// legacy send logs [synapse-effect] with the match key prstate records.
+func (s *RouterServer) dispatchCollaboratorDM(ctx context.Context, repo string, prNumber int, sha, checkName, channelID, msg string) error {
 	normSHA := strings.TrimSpace(sha)
 	if s == nil || s.dispatcher == nil || channelID == "" || normSHA == "" || isZeroSHA(normSHA) {
+		return nil
+	}
+	effectKey := restateclient.EffectMatchKey(repo, prNumber, normSHA, restateclient.EffectEriDirectMessage, "", checkName)
+	if effectsOwnerFromContext(ctx) == restateclient.EffectsOwnerRestate {
+		slog.InfoContext(ctx, "[synapse] [restate-cutover] collaborator DM owned by prstate; skipping legacy send",
+			"repo", repo, "pr", prNumber, "effect_key", effectKey)
 		return nil
 	}
 	req := DirectMessageRequest{
 		ChannelID: channelID,
 		Content:   msg,
 	}
-	return s.dispatcher.DispatchDirectMessage(ctx, req)
+	if err := s.dispatcher.DispatchDirectMessage(ctx, req); err != nil {
+		return err
+	}
+	recordLegacyEffect(ctx, restateclient.EffectEriDirectMessage, effectKey, repo, prNumber)
+	return nil
 }
 
 func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo string, pr GitHubPullRequest) error {
@@ -445,16 +464,18 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 	if resolvedPR.Head.Ref != "" {
 		branch = resolvedPR.Head.Ref
 	}
+	msg := formatCollaboratorConflictMessage(mention, repo, prNum, resolvedPR.Title, branch, sha)
 	// Journal before the DM: the Restate journal is the ordered record and
-	// owns alert dedup; the DM below is at-least-once on redelivery.
+	// owns alert dedup; the DM below is at-least-once on redelivery. The
+	// event carries the rendered DM so PRObject can own it.
 	if err := s.routePREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
 		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
 		Title: resolvedPR.Title, Unmanaged: true,
+		EriEffects: collaboratorDMEffect(channelID, msg),
 	}); err != nil {
 		return err
 	}
-	msg := formatCollaboratorConflictMessage(mention, repo, prNum, resolvedPR.Title, branch, sha)
-	return s.dispatchCollaboratorDM(ctx, repo, prNum, sha, channelID, msg)
+	return s.dispatchCollaboratorDM(ctx, repo, prNum, sha, "", channelID, msg)
 }
 
 func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, checkURL string) error {
@@ -470,15 +491,16 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 	}
 	branch := firstNonEmpty(resolvedPR.Head.Ref, res.Branch)
 	sha := firstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
+	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
 	// Journal before the DM, matching the conflict notifier above.
 	if err := s.routePREvent(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
 		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
 		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
+		EriEffects: collaboratorDMEffect(channelID, msg),
 	}); err != nil {
 		return err
 	}
-	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
-	return s.dispatchCollaboratorDM(ctx, res.Repo, resolvedPR.Number, sha, channelID, msg)
+	return s.dispatchCollaboratorDM(ctx, res.Repo, resolvedPR.Number, sha, res.CheckName, channelID, msg)
 }
 
 func (s *RouterServer) handleMergeOrPromotionFailure(ctx context.Context, res *ResolvedGitHubEvent, details string) (bool, error) {

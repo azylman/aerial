@@ -163,6 +163,16 @@ func TestRecordJobHelpers(t *testing.T) {
 		t.Errorf("JobsDroppedTotal default/unknown/unknown = %v, want >= 1", v)
 	}
 
+	RecordLegacyEffect("")
+	if v := testutil.ToFloat64(LegacyEffectsTotal.WithLabelValues("unknown")); v < 1 {
+		t.Errorf("LegacyEffectsTotal unknown = %v, want >= 1", v)
+	}
+	before := testutil.ToFloat64(LegacyEffectsTotal.WithLabelValues("eri_direct_message"))
+	RecordLegacyEffect("eri_direct_message")
+	if v := testutil.ToFloat64(LegacyEffectsTotal.WithLabelValues("eri_direct_message")); v != before+1 {
+		t.Errorf("LegacyEffectsTotal eri_direct_message = %v, want %v", v, before+1)
+	}
+
 	SetDiscordGatewayLatency(0.42)
 	if v := testutil.ToFloat64(DiscordGatewayLatencySeconds); v != 0.42 {
 		t.Errorf("DiscordGatewayLatencySeconds = %v, want 0.42", v)

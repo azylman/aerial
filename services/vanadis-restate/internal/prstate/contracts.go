@@ -47,6 +47,18 @@ const (
 	EffectDeployDispatch     = "deploy_dispatch"
 )
 
+// Eri-bound effect kinds. They run through the owner's Restate session path
+// (ThreadSession, DispatchSession, and the agent-routed Discord sender),
+// never eri HTTP.
+const (
+	// EffectEriPrompt is the owning agent's prompt turn in a thread.
+	EffectEriPrompt = "eri_prompt"
+	// EffectEriBackground is a headless background dispatch.
+	EffectEriBackground = "eri_background"
+	// EffectEriDirectMessage is a plain Discord direct message.
+	EffectEriDirectMessage = "eri_direct_message"
+)
+
 // DefaultAgent is the fallback agent identifier.
 const DefaultAgent = "aerial"
 
@@ -111,8 +123,24 @@ type EffectKey struct {
 
 // String renders the canonical journaled key.
 func (k EffectKey) String() string {
+	return k.render(true)
+}
+
+// MatchKey renders the key without the gate generation. Synapse never knows
+// the generation, so its [synapse-effect] log and prstate's intended-effect
+// record meet on this form (repo#pr@sha:kind[:job=..][:check=..]); the
+// synapse restateclient EffectMatchKey renders the identical string.
+func (k EffectKey) MatchKey() string {
+	return k.render(false)
+}
+
+func (k EffectKey) render(withGeneration bool) string {
 	sb := strings.Builder{}
-	fmt.Fprintf(&sb, "%s#%d@%s:gen%d:%s", NormalizeRepo(k.Repo), k.PRNumber, strings.TrimSpace(k.HeadSHA), k.GateGeneration, strings.TrimSpace(k.Kind))
+	fmt.Fprintf(&sb, "%s#%d@%s:", NormalizeRepo(k.Repo), k.PRNumber, strings.TrimSpace(k.HeadSHA))
+	if withGeneration {
+		fmt.Fprintf(&sb, "gen%d:", k.GateGeneration)
+	}
+	sb.WriteString(strings.TrimSpace(k.Kind))
 	if clean := strings.TrimSpace(k.JobName); clean != "" {
 		fmt.Fprintf(&sb, ":job=%s", clean)
 	}
@@ -274,6 +302,22 @@ type PREvent struct {
 	Acknowledged bool `json:"acknowledged,omitempty"`
 	// BuildMetadata is one build-metadata snapshot for the PR revision.
 	BuildMetadata *BuildMetadata `json:"build_metadata,omitempty"`
+	// EriEffects are the rendered eri-bound effects synapse resolved for
+	// this event (collaborator DMs today). PRObject executes them for
+	// effects_owner=restate and records them as intended otherwise.
+	EriEffects []EriEffect `json:"eri_effects,omitempty"`
+}
+
+// EriEffect is one rendered eri-bound effect. Synapse renders it from
+// stateless inputs (config lookups, GitHub payloads, message templates);
+// PRObject decides whether and to which owner it fires. An empty ChannelID
+// falls back to the PR's stored target.
+type EriEffect struct {
+	Kind         string `json:"kind"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	Content      string `json:"content"`
+	Effort       string `json:"effort,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,

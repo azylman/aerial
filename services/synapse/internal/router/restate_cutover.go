@@ -98,6 +98,16 @@ func effectsOwnerFromContext(ctx context.Context) string {
 	return restateclient.NormalizeEffectsOwner(owner)
 }
 
+// recordLegacyEffect records one side effect synapse really performed on
+// the legacy pipeline: synapse_legacy_effects_total{kind} plus a
+// [synapse-effect] line carrying the generation-free match key prstate
+// records for the same effect, so shadow gates compare key for key.
+func recordLegacyEffect(ctx context.Context, kind, effectKey, repo string, prNumber int) {
+	metrics.RecordLegacyEffect(kind)
+	slog.InfoContext(ctx, "[synapse] [synapse-effect] legacy effect performed",
+		"kind", kind, "effect_key", effectKey, "repo", repo, "pr", prNumber)
+}
+
 // restateOwnedSendError is a Restate send failure on an effects_owner=restate
 // event. Nothing else performs the event's effects, so the job retries it
 // with the long restate backoff; a terminal failure drops the job instead.

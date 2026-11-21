@@ -75,6 +75,11 @@ type PRState struct {
 	// ProjectedKey is the ProjectionJournalKey of the last pr_registry row
 	// PRObject.Project wrote, so an identical snapshot is never rewritten.
 	ProjectedKey string
+
+	// IntendedEffects is the bounded ring of effects prstate recorded but
+	// skipped because synapse owned the event's effects (legacy). Shadow
+	// gates compare it key for key with synapse's [synapse-effect] log.
+	IntendedEffects []IntendedEffect
 }
 
 // NewPRState returns an empty PR state for repo#prNumber.

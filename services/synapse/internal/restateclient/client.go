@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -106,6 +107,43 @@ type PREvent struct {
 	Banner                 string                                `json:"banner,omitempty"`
 	Acknowledged           bool                                  `json:"acknowledged,omitempty"`
 	BuildMetadata          *model.BuildMetadata                  `json:"build_metadata,omitempty"`
+	// EriEffects are the rendered eri-bound effects for this event; tags
+	// mirror the prstate EriEffect contract.
+	EriEffects []EriEffect `json:"eri_effects,omitempty"`
+}
+
+// Eri effect kinds; values mirror the prstate Effect* constants.
+const (
+	EffectEriPrompt        = "eri_prompt"
+	EffectEriBackground    = "eri_background"
+	EffectEriDirectMessage = "eri_direct_message"
+)
+
+// EriEffect is one rendered eri-bound effect synapse attaches to a PREvent.
+// PRObject fires it to the stored owner when it owns the event's effects
+// and records it as intended otherwise. JSON tags mirror prstate exactly.
+type EriEffect struct {
+	Kind         string `json:"kind"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	Content      string `json:"content"`
+	Effort       string `json:"effort,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+}
+
+// EffectMatchKey renders the generation-free effect key
+// (repo#pr@sha:kind[:job=..][:check=..]) that prstate's EffectKey.MatchKey
+// renders for the same inputs. Synapse never knows the gate generation, so
+// the [synapse-effect] log and prstate's intended-effect record meet here.
+func EffectMatchKey(repo string, prNumber int, headSHA, kind, jobName, checkName string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s#%d@%s:%s", model.NormalizeRepo(repo), prNumber, strings.TrimSpace(headSHA), strings.TrimSpace(kind))
+	if clean := strings.TrimSpace(jobName); clean != "" {
+		fmt.Fprintf(&sb, ":job=%s", clean)
+	}
+	if canon := github.CanonicalFailedCheckKey(checkName); canon != "" {
+		fmt.Fprintf(&sb, ":check=%s", canon)
+	}
+	return sb.String()
 }
 
 // RegisterRequest is the PRObject.Register payload: the normalized register
