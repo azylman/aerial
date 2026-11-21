@@ -1252,3 +1252,40 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 		t.Errorf("expected 500 on flush error, got %d", w.Code)
 	}
 }
+
+func TestHandlePromptDispatch_RestatePathSkipsStorePrechecks(t *testing.T) {
+	tests := []struct {
+		name       string
+		dispatch   bool
+		serverResp string
+		body       string
+		wantCode   int
+		wantSubstr string
+	}{
+		{"prompt skipped_active relayed", false, `{"status":"skipped_active"}`, `{"prompt":"p","channel_id":"1542423172400291873","skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
+		{"prompt accepted despite store error", false, `{"status":"accepted"}`, `{"prompt":"p","channel_id":"1542423172400291873","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
+		{"dispatch skipped_active relayed", true, `{"status":"skipped_active"}`, `{"source":"heartbeat","session_id":"s1","prompt":"p","skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
+		{"dispatch accepted despite store error", true, `{"status":"accepted"}`, `{"source":"heartbeat","session_id":"s1","prompt":"p","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := dbtest.NewFakeStore()
+			// Any consultation of the HasActive* checks would surface as a 500.
+			store.FailNext("HasActiveThreadTurn", errors.New("must not be consulted"))
+			store.FailNext("HasActiveDispatchTurn", errors.New("must not be consulted"))
+			runWithMockRestate(http.StatusOK, tc.serverResp, func() {
+				h := handlePrompt(store, nil)
+				path := "/prompt"
+				if tc.dispatch {
+					h = handleDispatch(store, nil)
+					path = "/dispatch"
+				}
+				w := httptest.NewRecorder()
+				h(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(tc.body)))
+				if w.Code != tc.wantCode || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+					t.Fatalf("got %d %s", w.Code, w.Body.String())
+				}
+			})
+		})
+	}
+}

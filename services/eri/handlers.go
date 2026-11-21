@@ -169,6 +169,15 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
 		}
 
+		if handleDuplicatePrompt(r.Context(), w, store, req.MessageID, channelID) {
+			return
+		}
+
+		if client := resolveRestateClient(); client != nil {
+			handleRestatePrompt(r.Context(), w, client, req, channelID)
+			return
+		}
+
 		active, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, channelID)
 		if err != nil {
 			log.Printf("[HTTP] Failed to check active turn for %s: %v", channelID, err)
@@ -181,15 +190,6 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 				jsonKeyChannelID: channelID,
 				jsonKeySessionID: channelID,
 			})
-			return
-		}
-
-		if handleDuplicatePrompt(r.Context(), w, store, req.MessageID, channelID) {
-			return
-		}
-
-		if client := resolveRestateClient(); client != nil {
-			handleRestatePrompt(r.Context(), w, client, req, channelID)
 			return
 		}
 
@@ -387,12 +387,12 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
+		if client := resolveRestateClient(); client != nil {
+			handleRestateDispatch(r.Context(), w, client, req, sessionID, dispatchID)
 			return
 		}
 
-		if client := resolveRestateClient(); client != nil {
-			handleRestateDispatch(r.Context(), w, client, req, sessionID, dispatchID)
+		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
 			return
 		}
 
