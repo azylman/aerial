@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/twilio"
@@ -439,7 +440,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if bus := s.EventBus(); bus != nil {
-		msgID := "prospera:sms:" + firstNonEmpty(msgSid, strconv.FormatInt(time.Now().UnixNano(), 10))
+		msgID := "prospera:sms:" + strutil.FirstNonEmpty(msgSid, strconv.FormatInt(time.Now().UnixNano(), 10))
 		args := pubsub.ProsperaSMSJobArgs{
 			MessageSID:    msgSid,
 			FromNumber:    normFrom,
