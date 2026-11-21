@@ -316,6 +316,23 @@ func handleMCPMockFailChunk(w http.ResponseWriter, r *http.Request, actionGen *i
 	})
 }
 
+func handleMCPMockCompleteChunk(w http.ResponseWriter, r *http.Request, body []byte) {
+	var req completeChunkPayload
+	_ = json.Unmarshal(body, &req)
+	if req.DispatchID == "stale-dispatch" {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"vanadis build state conflict"}`))
+		return
+	}
+	if r.Header.Get("Idempotency-Key") != "complete:"+req.DispatchID {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"bad idempotency key"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(completeChunkResponse{Status: "completed", BuildID: req.BuildID, ChunkID: req.ChunkID, Completed: true})
+}
+
 func mockMCPRestateHandler(actionGen *int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -357,6 +374,10 @@ func mockMCPRestateHandler(actionGen *int) http.HandlerFunc {
 		}
 		if strings.Contains(path, "RouteFailChunk") {
 			handleMCPMockFailChunk(w, r, actionGen)
+			return
+		}
+		if strings.Contains(path, "CompleteChunk") {
+			handleMCPMockCompleteChunk(w, r, bodyBytes)
 			return
 		}
 		if strings.Contains(path, "UpdateBuild") {
@@ -779,6 +800,25 @@ func TestMCP_FailChunk(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertMCPToolResult(t, callMCPTool(t, tc, "fail_chunk"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestMCP_CompleteChunk(t *testing.T) {
+	t.Parallel()
+	tests := []mcpToolCase{
+		{name: "nil store", nilStore: true, args: `{"chunk_id":"chunk-1","dispatch_id":"d1","summary":"ok"}`, wantToolErr: true, wantSubstr: "vanadis store not configured"},
+		{name: "missing chunk_id", args: `{"chunk_id":"","dispatch_id":"d1","summary":"ok"}`, wantToolErr: true, wantSubstr: "chunk_id, dispatch_id and summary are required"},
+		{name: "missing dispatch_id", args: `{"chunk_id":"chunk-1","dispatch_id":"","summary":"ok"}`, wantToolErr: true, wantSubstr: "chunk_id, dispatch_id and summary are required"},
+		{name: "missing summary", args: `{"chunk_id":"chunk-1","dispatch_id":"d1","summary":" "}`, wantToolErr: true, wantSubstr: "chunk_id, dispatch_id and summary are required"},
+		{name: "chunk not found", args: `{"chunk_id":"nonexistent-chunk","dispatch_id":"d1","summary":"ok"}`, wantToolErr: true, wantSubstr: "chunk not found"},
+		{name: "stale dispatch conflict", args: `{"chunk_id":"chunk-1","dispatch_id":"stale-dispatch","summary":"ok"}`, wantToolErr: true, wantSubstr: "conflict"},
+		{name: "success with idempotency key", args: `{"chunk_id":"chunk-1","dispatch_id":"vanadis-chunk-1-turn-0","summary":"all green"}`, wantSubstr: `"completed":true`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertMCPToolResult(t, callMCPTool(t, tc, "complete_chunk"), tc.wantToolErr, tc.wantSubstr)
 		})
 	}
 }
