@@ -47,6 +47,14 @@ const (
 	EffectDeployDispatch     = "deploy_dispatch"
 )
 
+// GitHub effect kinds beyond update-branch and rerun. The auto-update
+// cascade is one repo-level effect per trigger; the conflict check is the
+// per-PR mergeability read.
+const (
+	EffectGitHubAutoUpdate    = "github_auto_update"
+	EffectGitHubConflictCheck = "github_conflict_check"
+)
+
 // Eri-bound effect kinds. They run through the owner's Restate session path
 // (ThreadSession, DispatchSession, and the agent-routed Discord sender),
 // never eri HTTP.
@@ -338,6 +346,66 @@ type RepoEvent struct {
 	EffectsOwner EffectsOwner `json:"effects_owner,omitempty"`
 	// Kustomization names the Flux Kustomization a status event observed.
 	Kustomization string `json:"kustomization,omitempty"`
+
+	// GitHub effect payload, omitted when empty so other repo events keep
+	// the frozen wire key set.
+	//
+	// CheckName is the check whose outcome triggered an auto-update
+	// cascade or a workflow rerun; it scopes the repo effect key.
+	CheckName string `json:"check_name,omitempty"`
+	// RunID is the workflow run HandleWorkflowRerun reruns.
+	RunID int64 `json:"run_id,omitempty"`
+	// Attempt is the delayed-retry ordinal of a repo GitHub effect.
+	Attempt int `json:"attempt,omitempty"`
+	// AutoUpdate is the auto-update policy synapse rendered from its
+	// config for HandleAutoUpdate.
+	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
+}
+
+// AutoUpdatePolicy is the stateless config the auto-update cascade needs:
+// which PR authors get automatic branch updates, whether this deployment is
+// the default owner (every eligible open PR, not only indexed ones), and the
+// collaborator alert rules for the repo's conflict DMs.
+type AutoUpdatePolicy struct {
+	Authors       []string            `json:"authors,omitempty"`
+	DefaultOwner  bool                `json:"default_owner,omitempty"`
+	Collaborators []CollaboratorAlert `json:"collaborators,omitempty"`
+}
+
+// CollaboratorAlert routes one collaborator's conflict DM: the channel and
+// the mention to prefix.
+type CollaboratorAlert struct {
+	Author    string `json:"author"`
+	ChannelID string `json:"channel_id"`
+	Mention   string `json:"mention"`
+}
+
+// authorAllowed reports whether author is on the auto-update allowlist.
+func (p *AutoUpdatePolicy) authorAllowed(author string) bool {
+	clean := strings.TrimSpace(author)
+	if p == nil || clean == "" {
+		return false
+	}
+	for _, a := range p.Authors {
+		if strings.EqualFold(clean, strings.TrimSpace(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// collaborator returns the alert rule for author, case-insensitively.
+func (p *AutoUpdatePolicy) collaborator(author string) (CollaboratorAlert, bool) {
+	clean := strings.TrimSpace(author)
+	if p == nil || clean == "" {
+		return CollaboratorAlert{}, false
+	}
+	for _, c := range p.Collaborators {
+		if strings.EqualFold(clean, strings.TrimSpace(c.Author)) && strings.TrimSpace(c.ChannelID) != "" && strings.TrimSpace(c.Mention) != "" {
+			return c, true
+		}
+	}
+	return CollaboratorAlert{}, false
 }
 
 // PRObject handler names RepoObject targets with one-way sends.
@@ -361,6 +429,13 @@ const (
 	PRHandlerCIRecovered           = "HandleCIRecovered"
 	PRHandlerDeployAttemptFailed   = "HandleDeployAttemptFailed"
 	PRHandlerDeployFailureDeadline = "HandleDeployFailureDeadline"
+	// PRHandlerConflictCheck is the per-PR mergeability check and its
+	// delayed recheck; PRHandlerBranchConflict applies a conflict a branch
+	// update observed; PRHandlerHeadRefMissing closes a PR whose head ref
+	// vanished.
+	PRHandlerConflictCheck  = "HandleConflictCheck"
+	PRHandlerBranchConflict = "HandleBranchConflict"
+	PRHandlerHeadRefMissing = "HandleHeadRefMissing"
 )
 
 // RepoObject handler names PRObject and RepoObject itself target with
@@ -369,6 +444,11 @@ const (
 	RepoHandlerPRIndex    = "HandlePRIndex"
 	RepoHandlerHeldReplay = "HandleHeldReplay"
 	RepoHandlerHeldExpiry = "HandleHeldExpiry"
+	// RepoHandlerAutoUpdate is the open-PR auto-update cascade and
+	// RepoHandlerWorkflowRerun the workflow rerun-failed-jobs call; both
+	// also receive their own delayed retries.
+	RepoHandlerAutoUpdate    = "HandleAutoUpdate"
+	RepoHandlerWorkflowRerun = "HandleWorkflowRerun"
 )
 
 // SHA-only event kinds RepoObject routes through its SHA index.

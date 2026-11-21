@@ -79,6 +79,7 @@ var prHandlers = map[string]bool{
 	"HandleBuildMetadata":          true,
 	"HandleSynchronized":           true,
 	"HandleCheckStatus":            true,
+	"HandleConflictCheck":          true,
 }
 
 // Frozen RepoObject handler surface from chunk-01. SendRepoEvent rejects
@@ -87,6 +88,8 @@ var repoHandlers = map[string]bool{
 	"HandleMainPush":            true,
 	"HandleFanout":              true,
 	"HandleKustomizationStatus": true,
+	"HandleAutoUpdate":          true,
+	"HandleWorkflowRerun":       true,
 }
 
 // PREvent is the canonical PRObject payload. Field names and JSON tags
@@ -137,6 +140,15 @@ const (
 	EffectEriPrompt        = "eri_prompt"
 	EffectEriBackground    = "eri_background"
 	EffectEriDirectMessage = "eri_direct_message"
+)
+
+// GitHub effect kinds; values mirror the prstate Effect* constants. Synapse
+// logs each legacy GitHub call as [synapse-effect] under these kinds.
+const (
+	EffectGitHubAutoUpdate    = "github_auto_update"
+	EffectGitHubUpdateBranch  = "github_update_branch"
+	EffectGitHubConflictCheck = "github_conflict_check"
+	EffectGitHubRerun         = "github_rerun"
 )
 
 // EriEffect is one rendered eri-bound effect synapse attaches to a PREvent.
@@ -275,6 +287,30 @@ type RepoEvent struct {
 	HeadSHA      string `json:"head_sha"`
 	Agent        string `json:"agent"`
 	EffectsOwner string `json:"effects_owner"`
+
+	// GitHub effect payload, omitted when empty; tags mirror the prstate
+	// RepoEvent contract. CheckName scopes an auto-update or rerun trigger,
+	// RunID names the workflow run to rerun, and AutoUpdate carries the
+	// policy synapse renders from its config.
+	CheckName  string            `json:"check_name,omitempty"`
+	RunID      int64             `json:"run_id,omitempty"`
+	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
+}
+
+// AutoUpdatePolicy is the stateless auto-update config RepoObject's cascade
+// needs: allowlisted PR authors, whether this synapse is the default owner,
+// and the repo's collaborator alert rules. JSON tags mirror prstate.
+type AutoUpdatePolicy struct {
+	Authors       []string            `json:"authors,omitempty"`
+	DefaultOwner  bool                `json:"default_owner,omitempty"`
+	Collaborators []CollaboratorAlert `json:"collaborators,omitempty"`
+}
+
+// CollaboratorAlert routes one collaborator's conflict DM.
+type CollaboratorAlert struct {
+	Author    string `json:"author"`
+	ChannelID string `json:"channel_id"`
+	Mention   string `json:"mention"`
 }
 
 // Effect ownership values carried in PREvent/RepoEvent.EffectsOwner. Each

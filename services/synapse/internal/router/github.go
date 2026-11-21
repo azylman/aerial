@@ -436,11 +436,13 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		}
 	}
 	// The registry atomic transition is the once-per-failure gate for the
-	// open-PR conflict cascade the deleted failed-CISHA mark used to own.
-	if updated {
-		if cascadeErr := s.checkOpenPRConflicts(ctx, res.Repo); cascadeErr != nil {
-			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on ci failure", "repo", res.Repo, "error", cascadeErr)
-		}
+	// legacy open-PR conflict cascade the deleted failed-CISHA mark used to
+	// own. A restate-owned failure triggers on every delivery instead:
+	// RepoObject dedupes the trigger per PR head, and a retried job (whose
+	// transition already committed, so updated is false) must re-send a
+	// HandleAutoUpdate whose first send failed.
+	if updated || (restateOwnsEffects(ctx) && res.PRNumber > 0) {
+		return logAutoUpdateError(ctx, res.Repo, "ci_failure", s.autoUpdateOpenPRs(ctx, res.Repo, res.PRNumber, res.HeadSHA, "", ""))
 	}
 	return nil
 }
@@ -675,8 +677,8 @@ func (s *RouterServer) recoverCheckRun(ctx context.Context, res *ResolvedGitHubE
 // Restate journal in authoritative mode or the shadow mirror otherwise.
 func (s *RouterServer) reportCheckRunGateSuccess(ctx context.Context, p GitHubCheckRunPayload, res *ResolvedGitHubEvent, recovered bool) error {
 	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && (isGateAggregatorCheck(res.CheckName) || isRoboRevCheck(res.CheckName) || recovered) && res.PRNumber > 0 {
-		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts on gate success", "repo", res.Repo, "error", err)
+		if err := logAutoUpdateError(ctx, res.Repo, "gate_success", s.autoUpdateOpenPRs(ctx, res.Repo, res.PRNumber, res.HeadSHA, "", res.CheckName)); err != nil {
+			return err
 		}
 	}
 	return s.routeCheckOutcome(ctx, res)
@@ -767,8 +769,8 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 		return nil, err
 	}
 
-	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-		slog.ErrorContext(ctx, "[synapse] [github] error checking open pr conflicts", "repo", res.Repo, "error", err)
+	if err := logAutoUpdateError(ctx, res.Repo, "main_push", s.autoUpdateOpenPRs(ctx, res.Repo, 0, "", res.HeadSHA, "")); err != nil {
+		return nil, err
 	}
 	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 		return nil, err

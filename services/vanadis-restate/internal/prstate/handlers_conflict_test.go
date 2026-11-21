@@ -70,7 +70,7 @@ func seedConflictPR(store *MemPRStore, head string, gen, epoch uint64, terminal 
 		ps.MarkCollaboratorConflict(conflictMark)
 	}
 	if dispatched {
-		ps.MarkEffectDispatched(ps.EffectKeyFor(EffectGitHubUpdateBranch, head, "", ""))
+		ps.MarkEffectDispatched(ps.EffectKeyFor(EffectGitHubConflictCheck, head, "", ""))
 	}
 	store.SavePR(ps)
 	return key

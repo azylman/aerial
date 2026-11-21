@@ -65,6 +65,9 @@ const eriEffectSource = "prstate"
 // metricLabelResult is the outcome label on prstate counters.
 const metricLabelResult = "result"
 
+// metricLabelKind is the effect-kind label on prstate counters and logs.
+const metricLabelKind = "kind"
+
 // Effect execution outcomes for prstate_effects_total.
 const (
 	effectResultOK           = "ok"
@@ -78,11 +81,11 @@ var (
 	intendedEffectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "prstate_intended_effects_total",
 		Help: "Effects PRObject recorded but skipped because synapse owned the event (effects_owner=legacy), by kind.",
-	}, []string{"kind"})
+	}, []string{metricLabelKind})
 	effectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "prstate_effects_total",
 		Help: "Restate-owned effects PRObject executed, by kind and result.",
-	}, []string{"kind", metricLabelResult})
+	}, []string{metricLabelKind, metricLabelResult})
 )
 
 func init() {

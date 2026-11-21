@@ -514,8 +514,10 @@ func TestAuthoritativePushJournalsBeforeDispatch(t *testing.T) {
 			if got := len(reg.backfillCalls); got != 1 {
 				t.Fatalf("backfill calls after retry = %d, want 1", got)
 			}
-			if got := calls.Load(); got != 3 {
-				t.Fatalf("journal calls = %d, want 3", got)
+			// Failed HandleMainPush, retried HandleMainPush, the squash
+			// backfill, and the HandleAutoUpdate cascade trigger.
+			if got := calls.Load(); got != 4 {
+				t.Fatalf("journal calls = %d, want 4", got)
 			}
 		})
 	}
@@ -552,8 +554,9 @@ func TestAuthoritativeRerunRetriesAfterJournalSuccess(t *testing.T) {
 	if err == nil || handled {
 		t.Fatalf("first tryRerunFailedMainWorkflowRun() handled = %v, err = %v, want retryable failure", handled, err)
 	}
-	if got := journalCalls.Load(); got != 1 {
-		t.Fatalf("journal calls after first attempt = %d, want 1", got)
+	// HandleCheckRerunRequested plus the HandleWorkflowRerun journal.
+	if got := journalCalls.Load(); got != 2 {
+		t.Fatalf("journal calls after first attempt = %d, want 2", got)
 	}
 	if got := rerunCalls.Load(); got != 1 {
 		t.Fatalf("rerun calls after first attempt = %d, want 1", got)
@@ -562,8 +565,8 @@ func TestAuthoritativeRerunRetriesAfterJournalSuccess(t *testing.T) {
 	if err != nil || !handled {
 		t.Fatalf("second tryRerunFailedMainWorkflowRun() handled = %v, err = %v, want success on redelivery", handled, err)
 	}
-	if got := journalCalls.Load(); got != 2 {
-		t.Fatalf("journal calls after redelivery = %d, want 2", got)
+	if got := journalCalls.Load(); got != 4 {
+		t.Fatalf("journal calls after redelivery = %d, want 4", got)
 	}
 	if got := rerunCalls.Load(); got != 2 {
 		t.Fatalf("rerun calls after redelivery = %d, want 2", got)

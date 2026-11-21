@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -151,6 +152,7 @@ type RepoHandlers struct {
 	project RepoProjector
 	prs     PRSender
 	self    RepoSelfScheduler
+	github  GitHubEffector
 }
 
 // Compile-time freeze: the handlers satisfy the full RepoObject surface.
@@ -445,4 +447,263 @@ func (h *RepoHandlers) ResolvePRBySHA(ctx context.Context, repo, sha string) (in
 		return 0, "", false
 	}
 	return entry.PRNumber, entry.Branch, true
+}
+
+// GitHubEffector is the GitHub boundary for restate-owned GitHub effects.
+// *GitHubClient satisfies it directly; the Restate binding wraps every call
+// in one journaled restate.Run so a replay returns the recorded result.
+type GitHubEffector interface {
+	ListOpenPRs(ctx context.Context, repo string) ([]GitHubPR, *GitHubError)
+	HeadChecksBlocked(ctx context.Context, repo, sha string) bool
+	UpdateBranch(ctx context.Context, repo string, prNumber int) (UpdateBranchOutcome, *GitHubError)
+	FetchPR(ctx context.Context, repo string, prNumber int) (GitHubPR, *GitHubError)
+	FetchPRMergeability(ctx context.Context, repo string, prNumber int) (GitHubPR, *GitHubError)
+	RerunFailedJobs(ctx context.Context, repo string, runID int64) *GitHubError
+}
+
+var _ GitHubEffector = (*GitHubClient)(nil)
+
+// errGitHubUnconfigured is the retryable failure a restate-owned GitHub
+// effect reports when no client is wired.
+var errGitHubUnconfigured = &GitHubError{Message: "prstate: no github client configured"}
+
+// WithGitHub injects the GitHub boundary and returns h.
+func (h *RepoHandlers) WithGitHub(gh GitHubEffector) *RepoHandlers {
+	h.github = gh
+	return h
+}
+
+// BranchUpdate is one update-branch call the cascade made.
+type BranchUpdate struct {
+	PRNumber int
+	HeadSHA  string
+	Outcome  UpdateBranchOutcome
+}
+
+// RepoEffectOutcome reports one repo-level GitHub effect: deduped, recorded
+// as intended (legacy), skipped, executed, or failed. Retry means the
+// failure is retryable and the effect key was NOT committed, so the binding
+// schedules a delayed retry.
+type RepoEffectOutcome struct {
+	Key      EffectKey
+	Deduped  bool
+	Intended *IntendedEffect
+	Skipped  bool
+	Executed bool
+	Retry    bool
+	Err      *GitHubError
+	Updates  []BranchUpdate
+	Forwards int
+}
+
+// repoEffectTrigger returns the SHA a repo effect is keyed on: the head SHA
+// of the triggering PR event, falling back to the main push SHA.
+func repoEffectTrigger(ev RepoEvent) string {
+	if sha := usableHeadSHA(ev.HeadSHA); sha != "" {
+		return sha
+	}
+	return usableHeadSHA(ev.MainSHA)
+}
+
+// RepoEffectKey keys one repo effect: repo + triggering PR (0 for a main
+// push) + trigger SHA + kind + trigger check. Repo effects have no gate
+// generation. Synapse's [synapse-effect] line renders the same match key.
+func RepoEffectKey(kind string, ev RepoEvent) EffectKey {
+	return EffectKey{Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: repoEffectTrigger(ev), Kind: kind, CheckName: ev.CheckName}
+}
+
+// AutoUpdatePolicyDigest fingerprints the policy an auto-update ran under.
+func AutoUpdatePolicyDigest(p *AutoUpdatePolicy) string {
+	if p == nil {
+		return digestStrings(EffectGitHubAutoUpdate)
+	}
+	parts := []string{EffectGitHubAutoUpdate, strconv.FormatBool(p.DefaultOwner)}
+	parts = append(parts, p.Authors...)
+	for _, c := range p.Collaborators {
+		parts = append(parts, c.Author, c.ChannelID, c.Mention)
+	}
+	return digestStrings(parts...)
+}
+
+// beginRepoEffect loads the repo state and resolves dedup and the legacy
+// record for one repo effect. done reports that the outcome is final (deduped
+// or recorded as intended); otherwise the caller executes the effect.
+func (h *RepoHandlers) beginRepoEffect(kind, digest string, ev RepoEvent) (*RepoState, RepoEffectOutcome, bool, error) {
+	repo := NormalizeRepo(ev.Repo)
+	if repo == "" || repoEffectTrigger(ev) == "" {
+		return nil, RepoEffectOutcome{}, true, fmt.Errorf("%w: repo and trigger sha are required for %s", ErrInvalidRepoEvent, kind)
+	}
+	st, err := h.loadOrNew(repo)
+	if err != nil {
+		return nil, RepoEffectOutcome{}, true, err
+	}
+	out := RepoEffectOutcome{Key: RepoEffectKey(kind, ev)}
+	if st.WasRepoEffect(out.Key) {
+		out.Deduped = true
+		return st, out, true, nil
+	}
+	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
+		intended := IntendedEffect{Kind: kind, EffectKey: out.Key.String(), MatchKey: out.Key.MatchKey(), Digest: digest}
+		st.RecordIntendedEffect(intended)
+		st.MarkRepoEffect(out.Key)
+		h.store.SaveRepo(st)
+		out.Intended = &intended
+		return st, out, true, nil
+	}
+	return st, out, false, nil
+}
+
+// HandleAutoUpdate runs the open-PR auto-update cascade synapse's
+// checkOpenPRConflicts runs, once per trigger key. Legacy-owned triggers
+// only record the intended cascade. Restate-owned triggers list open PRs
+// targeting main and, for each eligible PR (not draft, allowlisted author,
+// and indexed here unless the policy is the default owner) whose head checks
+// are neither pending nor failed, update the branch: a conflict forwards
+// HandleBranchConflict (carrying the collaborator DM when a rule matches), a
+// missing head ref closes the PR via HandleHeadRefMissing when GitHub shows
+// it closed unmerged, and the first successful update ends the cascade. A
+// rate limit or retryable list failure stops without committing the key so
+// the binding retries; other per-PR failures are skipped.
+func (h *RepoHandlers) HandleAutoUpdate(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
+	st, out, done, err := h.beginRepoEffect(EffectGitHubAutoUpdate, AutoUpdatePolicyDigest(ev.AutoUpdate), ev)
+	if done || err != nil {
+		return out, err
+	}
+	if ev.AutoUpdate == nil || len(ev.AutoUpdate.Authors) == 0 {
+		out.Skipped = true
+		st.MarkRepoEffect(out.Key)
+		h.store.SaveRepo(st)
+		return out, nil
+	}
+	if h.github == nil {
+		out.Retry, out.Err = true, errGitHubUnconfigured
+		return out, nil
+	}
+	sendErr := h.runAutoUpdate(ctx, st, ev.AutoUpdate, &out)
+	if !out.Retry {
+		out.Executed = true
+		st.MarkRepoEffect(out.Key)
+		h.store.SaveRepo(st)
+	}
+	return out, sendErr
+}
+
+// runAutoUpdate walks the open PRs for one restate-owned cascade.
+func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy *AutoUpdatePolicy, out *RepoEffectOutcome) error {
+	repo := st.Repo
+	prs, gerr := h.github.ListOpenPRs(ctx, repo)
+	if gerr != nil {
+		out.Err, out.Retry = gerr, gerr.Retryable()
+		return nil
+	}
+	var errs []error
+	for _, pr := range prs {
+		if !autoUpdateEligible(st, policy, pr) || h.github.HeadChecksBlocked(ctx, repo, pr.Head.SHA) {
+			continue
+		}
+		outcome, gerr := h.github.UpdateBranch(ctx, repo, pr.Number)
+		if gerr != nil {
+			out.Err = gerr
+			if gerr.RateLimited {
+				out.Retry = true
+				break
+			}
+			continue
+		}
+		out.Updates = append(out.Updates, BranchUpdate{PRNumber: pr.Number, HeadSHA: strings.TrimSpace(pr.Head.SHA), Outcome: outcome})
+		switch outcome {
+		case UpdateBranchConflict:
+			errs = append(errs, h.forward(ctx, PRHandlerBranchConflict, branchConflictEvent(policy, repo, pr), out))
+			continue
+		case UpdateBranchHeadMissing:
+			if ev, ok := h.staleCloseEvent(ctx, repo, pr.Number); ok {
+				errs = append(errs, h.forward(ctx, PRHandlerHeadRefMissing, ev, out))
+			}
+			continue
+		case UpdateBranchUpdated, UpdateBranchUpToDate:
+		}
+		break
+	}
+	return errors.Join(errs...)
+}
+
+// forward sends one restate-owned PRObject event and counts it.
+func (h *RepoHandlers) forward(ctx context.Context, handler string, ev PREvent, out *RepoEffectOutcome) error {
+	if err := h.prs.SendPR(ctx, handler, ev); err != nil {
+		return fmt.Errorf("%s %s: %w", handler, PRObjectKey(ev.Repo, ev.PRNumber), err)
+	}
+	out.Forwards++
+	return nil
+}
+
+// autoUpdateEligible mirrors synapse isEligibleAutoUpdatePR: not a draft,
+// an allowlisted author, and owned here (default owner, or a PR this repo
+// object has indexed).
+func autoUpdateEligible(st *RepoState, policy *AutoUpdatePolicy, pr GitHubPR) bool {
+	if pr.Draft || pr.Number <= 0 || !policy.authorAllowed(pr.User.Login) {
+		return false
+	}
+	if policy.DefaultOwner {
+		return true
+	}
+	_, indexed := st.PRStatus(pr.Number)
+	return indexed
+}
+
+// branchConflictEvent is the restate-owned conflict an update-branch call
+// observed, carrying the collaborator DM when the policy routes one.
+func branchConflictEvent(policy *AutoUpdatePolicy, repo string, pr GitHubPR) PREvent {
+	ev := PREvent{
+		Event: "branch_conflict", Repo: repo, PRNumber: pr.Number, HeadSHA: strings.TrimSpace(pr.Head.SHA),
+		Branch: strings.TrimSpace(pr.Head.Ref), Title: strings.TrimSpace(pr.Title), EffectsOwner: EffectsOwnerRestate,
+	}
+	if dm, ok := collaboratorConflictDM(policy, repo, pr); ok {
+		ev.EriEffects = []EriEffect{dm}
+	}
+	return ev
+}
+
+// staleCloseEvent mirrors synapse handleStaleOpenPR: a PR whose head ref is
+// gone closes only when GitHub shows it closed and unmerged (a 404 counts as
+// closed); a read failure, a merge, or a still-open PR closes nothing.
+func (h *RepoHandlers) staleCloseEvent(ctx context.Context, repo string, prNumber int) (PREvent, bool) {
+	fetched, gerr := h.github.FetchPR(ctx, repo, prNumber)
+	if (gerr != nil && !gerr.NotFound()) || fetched.Merged || strings.EqualFold(strings.TrimSpace(fetched.State), "open") {
+		return PREvent{}, false
+	}
+	return PREvent{
+		Event: "head_ref_missing", Repo: repo, PRNumber: prNumber, HeadSHA: strings.TrimSpace(fetched.Head.SHA),
+		Branch: strings.TrimSpace(fetched.Head.Ref), EffectsOwner: EffectsOwnerRestate,
+	}, true
+}
+
+// HandleWorkflowRerun reruns the failed jobs of one workflow run once per
+// trigger key (repo, PR, head SHA, workflow name). Legacy-owned reruns only
+// record the intended effect. A retryable failure leaves the key
+// uncommitted for the binding's delayed retry; a terminal 4xx commits it and
+// reports the error, since no retry can succeed.
+func (h *RepoHandlers) HandleWorkflowRerun(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
+	if ev.RunID <= 0 {
+		return RepoEffectOutcome{}, fmt.Errorf("%w: run id is required for workflow rerun", ErrInvalidRepoEvent)
+	}
+	st, out, done, err := h.beginRepoEffect(EffectGitHubRerun, digestStrings(EffectGitHubRerun, strconv.FormatInt(ev.RunID, 10)), ev)
+	if done || err != nil {
+		return out, err
+	}
+	if h.github == nil {
+		out.Retry, out.Err = true, errGitHubUnconfigured
+		return out, nil
+	}
+	if gerr := h.github.RerunFailedJobs(ctx, st.Repo, ev.RunID); gerr != nil {
+		out.Err = gerr
+		if gerr.Retryable() {
+			out.Retry = true
+			return out, nil
+		}
+	} else {
+		out.Executed = true
+	}
+	st.MarkRepoEffect(out.Key)
+	h.store.SaveRepo(st)
+	return out, nil
 }

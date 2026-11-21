@@ -165,7 +165,7 @@ func (h *ConflictHandlers) HandleConflictCheck(ctx context.Context, prKey string
 	if headSHA == "" || IsZeroSHA(headSHA) {
 		return ConflictOutcome{Disposition: DispositionDropStale}, nil
 	}
-	key := pr.EffectKeyFor(EffectGitHubUpdateBranch, headSHA, "", "")
+	key := pr.EffectKeyFor(EffectGitHubConflictCheck, headSHA, "", "")
 	if pr.WasEffectDispatched(key) {
 		return ConflictOutcome{Disposition: DispositionApply, AlreadyDispatched: true}, nil
 	}
