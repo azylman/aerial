@@ -55,6 +55,10 @@ var (
 		Name: "prstate_projection_superseded_total",
 		Help: "Legacy pr_registry rows skipped by the shadow compare because head/merge SHA or status moved past the snapshot.",
 	})
+	projectionUntrackedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "prstate_projection_untracked_total",
+		Help: "Shadow compares of untracked PRs (no target thread) for which synapse also kept no pr_registry row.",
+	})
 	projectionDivergenceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "prstate_projection_divergence_total",
 		Help: "Fields where the legacy pr_registry row diverged from the PRObject snapshot (field=row when the row is missing).",
@@ -62,7 +66,7 @@ var (
 )
 
 func init() {
-	for _, c := range []prometheus.Collector{projectionWritesTotal, projectionComparedTotal, projectionSupersededTotal, projectionDivergenceTotal} {
+	for _, c := range []prometheus.Collector{projectionWritesTotal, projectionComparedTotal, projectionSupersededTotal, projectionUntrackedTotal, projectionDivergenceTotal} {
 		registerCollector(c)
 	}
 }
@@ -110,7 +114,10 @@ func (s *PRObjectService) afterCommit(ctx restate.ObjectContext, st *PRState, ow
 type ProjectRequest struct{}
 
 // Project upserts the full pr_registry row from committed state. An
-// identical snapshot already projected is skipped. A write that exhausts its
+// identical snapshot already projected is skipped, and so is an untracked
+// PR: synapse only keeps rows for registered PRs, which always carry a
+// target thread, so a PR no Register, Hydrate or target-carrying event
+// reached gets no row until one does. A write that exhausts its
 // journaled retries schedules a delayed re-projection instead of failing, so
 // a database outage never gates later transitions for the PR.
 func (s *PRObjectService) Project(ctx restate.ObjectContext, _ ProjectRequest) error {
@@ -123,7 +130,7 @@ func (s *PRObjectService) Project(ctx restate.ObjectContext, _ ProjectRequest) e
 	}
 	snap := BuildProjection(st)
 	key := ProjectionJournalKey(snap)
-	if st.ProjectedKey == key {
+	if !snap.Tracked() || st.ProjectedKey == key {
 		return nil
 	}
 	_, runErr := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
@@ -174,6 +181,8 @@ func recordComparison(ctx restate.RunContext, snap ProjectionSnapshot, cmp Proje
 	case cmp.Missing:
 		projectionDivergenceTotal.WithLabelValues("row").Inc()
 		slog.WarnContext(ctx, "[prstate-shadow] projection divergence: legacy registry row missing", "pr", pr, "fields", "row")
+	case cmp.Untracked:
+		projectionUntrackedTotal.Inc()
 	case cmp.Superseded:
 		projectionSupersededTotal.Inc()
 	case len(cmp.Divergent) > 0:
