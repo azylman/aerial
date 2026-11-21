@@ -291,6 +291,8 @@ func TestBindRestateServices(t *testing.T) {
 			require.Len(t, byName, tc.wantServices)
 			require.Contains(t, byName, tc.wantBuild)
 			require.Contains(t, byName, tc.wantRouter)
+			require.True(t, byName[tc.wantBuild]["CompleteChunk"])
+			require.True(t, byName[tc.wantBuild]["FailChunk"])
 			if !tc.wantPRState {
 				require.NotContains(t, byName, "PRObject")
 				require.NotContains(t, byName, "RepoObject")
