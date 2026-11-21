@@ -71,9 +71,9 @@ REMOTE_OUTPUT=$(bash -c "
     echo \"url4:\${PARSED_OWNER}/\${PARSED_REPO}\"
     extract_remote_repo \"https://github.com/myorg/repo.with.dots.git\"
     echo \"url5:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"http://127.0.0.1:8088/internal/github-git/azylman/aerial.git\"
+    extract_remote_repo \"http://127.0.0.1:4028/internal/github-git/azylman/aerial.git\"
     echo \"url6:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"http://127.0.0.1:8088/internal/github-git/azylman/aerial\"
+    extract_remote_repo \"http://127.0.0.1:4028/internal/github-git/azylman/aerial\"
     echo \"url7:\${PARSED_OWNER}/\${PARSED_REPO}\"
 ")
 
@@ -90,14 +90,13 @@ LOOPBACK_OUTPUT=$(bash -c "
     REPO_TEST_MODE=1
     unset GITHUB_PAT
     export AERIAL_USE_LOOPBACK_GITHUB=1
-    export AERIAL_INTERNAL_ERI_URL=\"http://127.0.0.1:9099\"
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
     echo \"loopback_flag:\${USE_LOOPBACK_GITHUB}\"
     echo \"api_base:\${GITHUB_API_BASE}\"
     echo \"auth_hdr:\$(build_auth_header)\"
 ")
 assert_eq "loopback_flag:1" "$(echo "$LOOPBACK_OUTPUT" | grep '^loopback_flag:')" "USE_LOOPBACK_GITHUB set when AERIAL_USE_LOOPBACK_GITHUB=1"
-assert_eq "api_base:http://127.0.0.1:9099/internal/github-api" "$(echo "$LOOPBACK_OUTPUT" | grep '^api_base:')" "GITHUB_API_BASE set to loopback endpoint"
+assert_eq "api_base:http://127.0.0.1:4028/internal/github-api" "$(echo "$LOOPBACK_OUTPUT" | grep '^api_base:')" "GITHUB_API_BASE set to loopback endpoint"
 assert_eq "auth_hdr:loopback" "$(echo "$LOOPBACK_OUTPUT" | grep '^auth_hdr:')" "build_auth_header returns loopback when USE_LOOPBACK_GITHUB=1"
 
 # Test 4: Pre-dispatch flag parsing works with invalid command (should show usage without erroring on --repo)

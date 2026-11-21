@@ -209,7 +209,7 @@ func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
 	case "search":
 		return CheckSearch(payload.ToolCall.Name, args)
 	case string(ModeCommit):
-		return CheckCommit(payload.ToolCall.Name, args)
+		return CheckOutboundSecrets(payload.ToolCall.Name, args)
 	default:
 		return evaluateAllGuards(payload, args)
 	}
@@ -222,7 +222,7 @@ func evaluateAllGuards(payload Payload, args ToolArgs) *Decision {
 		func() *Decision { return CheckSchedule(payload, args) },
 		func() *Decision { return CheckBatch(payload, args) },
 		func() *Decision { return CheckSearch(payload.ToolCall.Name, args) },
-		func() *Decision { return CheckCommit(payload.ToolCall.Name, args) },
+		func() *Decision { return CheckOutboundSecrets(payload.ToolCall.Name, args) },
 	}
 	var lastDecision *Decision
 	var mergedOverwrite map[string]any

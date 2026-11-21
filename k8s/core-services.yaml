@@ -120,8 +120,6 @@ spec:
                   name: nats-eri-aerial-client
             - name: NATS_URL
               value: nats://nats.aerial:4222
-            - name: AERIAL_INTERNAL_ERI_URL
-              value: http://127.0.0.1:8080
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: DISCORD_BOT_TOKEN
@@ -410,8 +408,6 @@ spec:
                   name: nats-eri-aerial-client
             - name: NATS_URL
               value: nats://nats.aerial:4222
-            - name: AERIAL_INTERNAL_ERI_URL
-              value: http://eri.aerial
             - name: RESTATE_INGRESS_URL
               value: http://restate.aerial:8080
             - name: RESTATE_ADMIN_URL

@@ -1284,7 +1284,7 @@ func (rec *statusRecorder) Flush() {
 func normalizeRoute(path string) string {
 	switch {
 	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/metrics", path == "/internal/llm",
-		path == "/internal/discord/message", path == "/internal/discord/interaction", path == "/internal/guard/scan":
+		path == "/internal/discord/message", path == "/internal/discord/interaction":
 		return path
 	case path == "/health" || path == "/healthz":
 		return "/health"
@@ -1294,10 +1294,6 @@ func normalizeRoute(path string) string {
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
-	case path == "/internal/github-api" || strings.HasPrefix(path, "/internal/github-api/"):
-		return "/internal/github-api"
-	case path == "/internal/github-git" || strings.HasPrefix(path, "/internal/github-git/"):
-		return "/internal/github-git"
 	default:
 		return "unmatched"
 	}
@@ -1333,7 +1329,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
 	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))
 	mux.HandleFunc("/internal/discord/interaction", handleInternalDiscordInteraction(store, pool))
-	mux.HandleFunc("/internal/guard/scan", handleInternalGuardScan())
 
 	var cfg *config.Config
 	if pool != nil && pool.AppConfig() != nil {
@@ -1341,12 +1336,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	} else {
 		cfg = config.ActiveConfig()
 	}
-	// eri-restate pods still reach this proxy cross-pod (AERIAL_INTERNAL_ERI_URL)
-	// until the cutover, so plain eri mounts the shared handlers without the
-	// loopback guard that githubproxy.Register applies inside eri-restate.
-	mux.HandleFunc(githubproxy.APIPrefix, githubproxy.APIHandler(cfg))
-	mux.HandleFunc(githubproxy.GitPrefix, githubproxy.GitHandler(cfg))
-
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	indexerURL := resolveTranscriptsIndexerURL(cfg, pool)
