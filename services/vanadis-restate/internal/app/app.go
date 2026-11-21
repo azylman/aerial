@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -37,6 +36,9 @@ var (
 	newDiscordWidgetDelivererFn = widget.NewDiscordWidgetDeliverer
 )
 
+// DefaultConfigPath is the agent config.yaml used when CONFIG_PATH is unset.
+const DefaultConfigPath = "/share/aerial-config/config.yaml"
+
 // Config holds runtime configuration for the vanadis-restate worker service.
 type Config struct {
 	RestatePort       string
@@ -52,6 +54,9 @@ type Config struct {
 	AgentName         string
 	// ConfigPath is the agent config.yaml read for widget channel policy (shared CONFIG_PATH convention).
 	ConfigPath string
+	// Environ is the process environment (os.Environ form) the widget deliverer scans for
+	// DISCORD_TOKEN_<AGENT> bot tokens; main fills it, tests pass literals.
+	Environ []string
 	// KubeAPIServer is the in-cluster API server restate-owned Flux and
 	// image effects write to; empty outside a cluster.
 	KubeAPIServer string
@@ -60,35 +65,36 @@ type Config struct {
 	FluxReceiverURL string
 }
 
-// LoadConfigFromEnv loads configuration from environment variables with defaults.
-func LoadConfigFromEnv() Config {
-	restatePort := strings.TrimSpace(os.Getenv("RESTATE_PORT"))
+// LoadConfig loads configuration through getenv (getenv in main) with defaults. Environ is
+// left for main to fill from os.Environ.
+func LoadConfig(getenv func(string) string) Config {
+	restatePort := strings.TrimSpace(getenv("RESTATE_PORT"))
 	if restatePort == "" {
-		restatePort = strings.TrimSpace(os.Getenv("PORT"))
+		restatePort = strings.TrimSpace(getenv("PORT"))
 	}
 	if restatePort == "" {
 		restatePort = "9080"
 	}
 
-	healthPort := strings.TrimSpace(os.Getenv("HEALTH_PORT"))
+	healthPort := strings.TrimSpace(getenv("HEALTH_PORT"))
 	if healthPort == "" {
 		healthPort = "4026"
 	}
 
-	vanadisURL := strings.TrimRight(strings.TrimSpace(os.Getenv("VANADIS_URL")), "/")
+	vanadisURL := strings.TrimRight(strings.TrimSpace(getenv("VANADIS_URL")), "/")
 	if vanadisURL == "" {
 		vanadisURL = "http://vanadis.aerial:4025"
 	}
 
-	pgURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
-	eriURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
-	restateIngressURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), "http://restate.aerial:8080")), "/")
-	natsURL := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
-	ghToken := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
-	discordToken := strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
-	shareRoot := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("SHARE_ROOT"), executor.DefaultShareRoot))
-	agentName := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
-	configPath := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("CONFIG_PATH"), widget.DefaultWidgetConfigPath))
+	pgURL := strings.TrimSpace(store.FirstNonEmpty(getenv("DATABASE_URL"), getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(getenv, "aerial")))
+	eriURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(getenv("ERI_URL"), "http://eri.aerial")), "/")
+	restateIngressURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(getenv("RESTATE_INGRESS_URL"), "http://restate.aerial:8080")), "/")
+	natsURL := strings.TrimSpace(store.FirstNonEmpty(getenv("NATS_URL"), "nats://nats.aerial:4222"))
+	ghToken := strings.TrimSpace(store.FirstNonEmpty(getenv("GITHUB_TOKEN"), getenv("GITHUB_PAT")))
+	discordToken := strings.TrimSpace(getenv("DISCORD_TOKEN"))
+	shareRoot := strings.TrimSpace(store.FirstNonEmpty(getenv("SHARE_ROOT"), executor.DefaultShareRoot))
+	agentName := strings.TrimSpace(store.FirstNonEmpty(getenv("AGENT_NAME"), "aerial"))
+	configPath := strings.TrimSpace(store.FirstNonEmpty(getenv("CONFIG_PATH"), DefaultConfigPath))
 
 	return Config{
 		RestatePort:       restatePort,
@@ -103,8 +109,8 @@ func LoadConfigFromEnv() Config {
 		ShareRoot:         shareRoot,
 		AgentName:         agentName,
 		ConfigPath:        configPath,
-		KubeAPIServer:     prstate.InClusterAPIServer(os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")),
-		FluxReceiverURL:   strings.TrimSpace(os.Getenv("FLUX_RECEIVER_URL")),
+		KubeAPIServer:     prstate.InClusterAPIServer(getenv("KUBERNETES_SERVICE_HOST"), getenv("KUBERNETES_SERVICE_PORT")),
+		FluxReceiverURL:   strings.TrimSpace(getenv("FLUX_RECEIVER_URL")),
 	}
 }
 
@@ -225,7 +231,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	// Internal clients propagate traceparent; GitHub calls record spans without leaking headers.
 	var widgetDeliverer ericlient.StatusWidgetDeliverer
-	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.AgentName, cfg.DiscordToken, cfg.ConfigPath); dErr != nil {
+	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.AgentName, cfg.DiscordToken, cfg.Environ, cfg.ConfigPath); dErr != nil {
 		log.Printf("[vanadis-restate] warning: failed to construct discord widget deliverer: %v", dErr)
 	} else {
 		widgetDeliverer = deliverer
