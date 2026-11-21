@@ -269,3 +269,65 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
+func TestNonNilSlice(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    []string
+		wantLen  int
+		wantVals []string
+	}{
+		{name: "nil becomes empty", input: nil, wantLen: 0, wantVals: []string{}},
+		{name: "empty stays empty", input: []string{}, wantLen: 0, wantVals: []string{}},
+		{name: "values preserved", input: []string{"a", "b"}, wantLen: 2, wantVals: []string{"a", "b"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := NonNilSlice(tc.input)
+			if got == nil || len(got) != tc.wantLen {
+				t.Fatalf("NonNilSlice(%v) = %v, want len %d non-nil", tc.input, got, tc.wantLen)
+			}
+			for i, want := range tc.wantVals {
+				if got[i] != want {
+					t.Errorf("NonNilSlice(%v)[%d] = %q, want %q", tc.input, i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveChunkRef(t *testing.T) {
+	t.Parallel()
+	chunks := []VanadisChunk{
+		{ID: "chunk-a", ChunkIndex: 0},
+		{ID: "chunk-b", ChunkIndex: 1},
+		{ID: "10", ChunkIndex: 2},
+	}
+	tests := []struct {
+		name     string
+		chunks   []VanadisChunk
+		chunkRef string
+		wantIdx  int
+	}{
+		{"empty_ref", chunks, "", -1},
+		{"whitespace_ref", chunks, "   ", -1},
+		{"match_id_exact", chunks, "chunk-a", 0},
+		{"match_id_with_whitespace", chunks, "  chunk-b  ", 1},
+		{"match_index_string", chunks, "0", 0},
+		{"match_index_second", chunks, "1", 1},
+		{"match_id_takes_precedence_over_index", chunks, "10", 2},
+		{"no_match_index_out_of_bounds", chunks, "99", -1},
+		{"no_match_unknown_id", chunks, "unknown", -1},
+		{"empty_slice", nil, "chunk-a", -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ResolveChunkRef(tc.chunks, tc.chunkRef); got != tc.wantIdx {
+				t.Errorf("ResolveChunkRef() = %d, want %d", got, tc.wantIdx)
+			}
+		})
+	}
+}

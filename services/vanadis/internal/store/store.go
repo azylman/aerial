@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
@@ -88,8 +89,8 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 		if completedAt.Valid {
 			c.CompletedAt = completedAt.Time
 		}
-		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = model.NonNilSlice(c.TargetFiles), model.NonNilSlice(c.TargetSymbols), model.NonNilSlice(c.AcceptanceCriteria)
-		c.DependsOn = model.NonNilSlice(c.DependsOn)
+		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), buildplan.NonNilSlice(c.AcceptanceCriteria)
+		c.DependsOn = buildplan.NonNilSlice(c.DependsOn)
 		c.Effort = model.CapChunkEffort(c.Effort)
 		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
 			var checks map[string]string
@@ -187,7 +188,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]mod
 	}
 	entries := make([]model.VanadisBuildEntry, len(builds))
 	for i, b := range builds {
-		entries[i] = model.SummarizeBuildEntry(b, model.NonNilSlice(chunksByBuild[b.ID]))
+		entries[i] = model.SummarizeBuildEntry(b, buildplan.NonNilSlice(chunksByBuild[b.ID]))
 	}
 	return entries, nil
 }

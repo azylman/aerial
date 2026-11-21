@@ -9,10 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
-	"github.com/azylman/aerial/services/vanadis/internal/dag"
-	"github.com/azylman/aerial/services/vanadis/internal/model"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 const (
@@ -134,31 +135,7 @@ type AppendChunksRequest struct {
 	Chunks []CreateChunkInput `json:"chunks"`
 }
 
-var (
-	resolveChunkRef = model.ResolveChunkRef
-
-	// ResolveChunkRef resolves a chunk ID or chunk index reference to a slice position.
-	ResolveChunkRef = model.ResolveChunkRef
-
-	// NormalizeAndValidateBuildDAG validates the build DAG: explicit depends_on, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
-	NormalizeAndValidateBuildDAG = dag.NormalizeAndValidateBuildDAG
-	normalizeAndValidateBuildDAG = dag.NormalizeAndValidateBuildDAG
-
-	// ResolveChunkDependencies normalizes explicit depends_on references to chunk IDs.
-	ResolveChunkDependencies = dag.ResolveChunkDependencies
-
-	// CheckKahnDAGCycles detects cycles in chunk dependencies via Kahn's algorithm.
-	CheckKahnDAGCycles = dag.CheckKahnDAGCycles
-
-	// ValidateConcurrentDisjointPRChunks rejects concurrent same-repo PR chunks with overlapping target_files.
-	ValidateConcurrentDisjointPRChunks = dag.ValidateConcurrentDisjointPRChunks
-
-	// ParseCreateBuildChunks validates raw chunk inputs and normalizes the build DAG.
-	ParseCreateBuildChunks = dag.ParseCreateBuildChunks
-	parseCreateBuildChunks = dag.ParseCreateBuildChunks
-)
-
-func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, agent string) error {
+func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, buildAgent string) error {
 	if !s.authEnabled() {
 		return nil
 	}
@@ -166,10 +143,7 @@ func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, agent string) 
 	if !ok {
 		return &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity}
 	}
-	if agent == "" {
-		agent = "aerial"
-	}
-	return s.auth.Authorize(ctx, caller, "builds", "update", agent)
+	return s.auth.Authorize(ctx, caller, "builds", "update", strutil.FirstNonEmpty(buildAgent, agent.Default))
 }
 
 // authorizeBuildMutation loads the build and authorizes the caller to update
@@ -332,12 +306,12 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	agent, err := s.resolveAttachCallerAgent(r.Context(), req.Agent)
+	attachAgent, err := s.resolveAttachCallerAgent(r.Context(), req.Agent)
 	if err != nil {
 		writeAuthErr(w, err)
 		return
 	}
-	req.Agent = agent
+	req.Agent = attachAgent
 	var resp AttachChunkPRResponse
 	if err := s.callRestateIngress(r.Context(), s.restateRouterPath("RouteAttachPR"), req, &resp); err != nil {
 		writeStoreErr(r.Context(), w, err)
@@ -356,20 +330,20 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 // are pinned to their own ServiceAccount agent; service principals and
 // unauthenticated deployments may name one, defaulting to the default agent.
 func (s *VanadisServer) resolveAttachCallerAgent(ctx context.Context, requested string) (string, error) {
-	requested = NormalizeAgentName(requested)
+	requested = agent.Clean(requested)
 	if s.authEnabled() {
 		caller, ok := k8sauth.CallerFromContext(ctx)
 		if !ok {
 			return "", &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity}
 		}
 		if !caller.IsService {
-			requested = NormalizeAgentName(caller.CallerAgent)
+			requested = agent.Clean(caller.CallerAgent)
 		}
 	}
 	if requested != "" && !k8sauth.IsValidAgentSlug(requested) {
 		return "", &k8sauth.ValidationError{Message: fmt.Sprintf("invalid agent %q", requested)}
 	}
-	return firstNonEmpty(requested, "aerial"), nil
+	return strutil.FirstNonEmpty(requested, agent.Default), nil
 }
 
 func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) (string, error) {
@@ -388,12 +362,12 @@ func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 		if strings.TrimSpace(*req.Mode) == "" {
 			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", ErrInvalidBuildInput)
 		}
-		if _, err := normalizeChunkMode(*req.Mode); err != nil {
+		if _, err := buildplan.NormalizeChunkMode(*req.Mode); err != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 		}
 	}
 	if effortStr != "" {
-		normEffort, effErr := normalizeChunkEffort(effortStr)
+		normEffort, effErr := buildplan.NormalizeChunkEffort(effortStr)
 		if effErr != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
 		}
@@ -468,7 +442,7 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
-	idx := resolveChunkRef(chunks, chunkRef)
+	idx := buildplan.ResolveChunkRef(chunks, chunkRef)
 	if idx < 0 {
 		writeStoreErr(r.Context(), w, ErrChunkNotFound)
 		return
@@ -514,7 +488,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	removedID := chunkRef
-	if idx := resolveChunkRef(chs, chunkRef); idx >= 0 {
+	if idx := buildplan.ResolveChunkRef(chs, chunkRef); idx >= 0 {
 		removedID = chs[idx].ID
 	}
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
