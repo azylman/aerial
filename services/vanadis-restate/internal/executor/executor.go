@@ -55,6 +55,7 @@ var (
 	ResolveSymbolSpans        = prompt.ResolveSymbolSpans
 	FormatCIFailurePrompt     = prompt.FormatCIFailurePrompt
 	FormatNoPRResumePrompt    = prompt.FormatNoPRResumePrompt
+	FormatActionResumePrompt  = prompt.FormatActionResumePrompt
 	FormatConflictPrompt      = prompt.FormatConflictPrompt
 	FormatDeployFailureBanner = prompt.FormatDeployFailureBanner
 	FormatDeployFailurePrompt = prompt.FormatDeployFailurePrompt
