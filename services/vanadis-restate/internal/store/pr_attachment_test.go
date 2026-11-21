@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
@@ -237,6 +238,46 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 				t.Errorf("AttachChunkPR = %+v, want %+v", got, tc.want)
 			}
 			assertCandidates(t, candidates, tc.wantCandidates)
+		})
+	}
+}
+
+func TestAttachStandalonePR_RecordsOwnerAndRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		agent      string
+		runner     string
+		wantAgent  string
+		wantRunner string
+	}{
+		{name: "defaults to the default agent", wantAgent: "aerial", wantRunner: "aerial"},
+		{name: "caller owns and its runner executes", agent: "agent-alpha", runner: "agent-alpha", wantAgent: "agent-alpha", wantRunner: "agent-alpha"},
+		{name: "names are normalized", agent: " Agent-Beta ", runner: "AGENT-BETA", wantAgent: "agent-beta", wantRunner: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buildArgs []any
+			queryRow := func(context.Context, string, ...any) pgx.Row { return errRow(pgx.ErrNoRows) }
+			exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+				if strings.Contains(query, "INSERT INTO vanadis_builds") {
+					buildArgs = args
+				}
+				return pgconn.NewCommandTag("INSERT 0 1"), nil
+			}
+			tx := &mockTx{queryRowFn: queryRow, execFn: exec}
+			st := New(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
+			req := AttachChunkPRRequest{Repo: "aerial", PRNumber: 9, Agent: tc.agent, RunnerAgent: tc.runner}
+			if _, _, _, err := st.AttachChunkPR(context.Background(), req); err != nil {
+				t.Fatalf("AttachChunkPR: %v", err)
+			}
+			if len(buildArgs) < 3 {
+				t.Fatalf("build insert args = %v, want id, agent, runner_agent first", buildArgs)
+			}
+			if buildArgs[1] != tc.wantAgent || buildArgs[2] != tc.wantRunner {
+				t.Errorf("inserted agent, runner_agent = %v, %v; want %q, %q", buildArgs[1], buildArgs[2], tc.wantAgent, tc.wantRunner)
+			}
 		})
 	}
 }

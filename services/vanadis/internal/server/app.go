@@ -94,8 +94,11 @@ func (s *VanadisServer) restateClient() *Client {
 	return NewClient(s.restateCfg, s.httpClient)
 }
 
-func (s *VanadisServer) restateObjectPath(buildID, handler string) string {
-	return s.restateClient().ObjectPath(buildID, handler)
+// restateObjectPath targets the Build object of the runner that executes the
+// build. runnerAgent is the build's runner_agent ("" and the default agent
+// resolve to the legacy Build service).
+func (s *VanadisServer) restateObjectPath(runnerAgent, buildID, handler string) string {
+	return s.restateClient().ObjectPath(BuildServiceName(runnerAgent), buildID, handler)
 }
 
 func (s *VanadisServer) restateRouterPath(handler string) string {

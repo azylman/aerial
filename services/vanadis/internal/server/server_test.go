@@ -40,7 +40,7 @@ func TestServerDelegateEdges(t *testing.T) {
 		{name: "nil server leaves gauges unchanged", target: "build-metrics", storeKind: "nil-server", want: `vanadis_builds_active{queue_state="running"} 7`},
 		{name: "nil store leaves gauges unchanged", target: "build-metrics", storeKind: "nil-store", want: `vanadis_builds_active{queue_state="running"} 7`},
 		{name: "store error leaves gauges unchanged", target: "build-metrics", storeKind: "list-error", want: `vanadis_builds_active{queue_state="running"} 7`},
-		{name: "restate client inherits server config", target: "restate-client", want: "/Build-agent-beta/b1/Create"},
+		{name: "restate object path follows the build runner, not server config", target: "restate-client", want: "/Build-agent-alpha/b1/Create"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,8 +61,8 @@ func TestServerDelegateEdges(t *testing.T) {
 			case "restate-client":
 				srv := NewVanadisServer(Config{}, nil, nil)
 				srv.restateCfg = RestateConfig{AgentName: "agent-beta", RestateIngressURL: "http://restate.test"}
-				if got := srv.restateClient().ObjectPath("b1", "Create"); got != tc.want {
-					t.Errorf("restateClient().ObjectPath() = %q, want %q", got, tc.want)
+				if got := srv.restateObjectPath("agent-alpha", "b1", "Create"); got != tc.want {
+					t.Errorf("restateObjectPath() = %q, want %q", got, tc.want)
 				}
 			}
 		})
@@ -231,8 +231,18 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 	memStore.getErr = errors.New("get error")
 	checkCode(http.MethodGet, "/builds/"+buildID, nil, http.StatusInternalServerError)
 	memStore.getErr = nil
+	if err := memStore.CreateBuild(context.Background(), mkBuild("b-conflict", "1555999", "Conflict", "obj", "completed"), nil); err != nil {
+		t.Fatalf("seed conflict build: %v", err)
+	}
+	runnerBuild := mkBuild("b-runner-alpha", "1555999", "Runner", "obj", "running")
+	runnerBuild.Agent, runnerBuild.RunnerAgent = "agent-alpha", "agent-alpha"
+	if err := memStore.CreateBuild(context.Background(), runnerBuild, nil); err != nil {
+		t.Fatalf("seed runner build: %v", err)
+	}
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
 	checkCode(http.MethodPost, "/builds/b-conflict/cancel", bytes.NewReader(nil), http.StatusConflict)
+	checkCode(http.MethodPost, "/builds/b-runner-alpha/cancel", bytes.NewReader(nil), http.StatusOK)
+	checkCode(http.MethodPost, "/builds/b-missing-build/cancel", bytes.NewReader(nil), http.StatusNotFound)
 }
 
 func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
@@ -414,6 +424,9 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	}
 
 	// 3. handleBuildCancel -> cancelled
+	if err := memStore.CreateBuild(context.Background(), mkBuild("b-to-cancel", "123456789012345678", "Cancel", "obj", "running"), nil); err != nil {
+		t.Fatalf("seed cancel build: %v", err)
+	}
 	recCancel := httptest.NewRecorder()
 	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", http.NoBody), "b-to-cancel")
 	if recCancel.Code != http.StatusOK {
@@ -653,7 +666,11 @@ func TestRetryActionRouteWiring(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil)
+			mem := newMemoryVanadisStore()
+			if err := mem.CreateBuild(context.Background(), mkBuild("b1", "1555999", "Retry", "obj", "failed"), nil); err != nil {
+				t.Fatalf("seed retry build: %v", err)
+			}
+			srv := NewVanadisServer(Config{Port: "0"}, mem, nil)
 			srv.restateCfg = RestateConfig{}
 			ts := httptest.NewServer(srv.Routes())
 			t.Cleanup(ts.Close)
@@ -675,8 +692,8 @@ func TestRetryActionRouteWiring(t *testing.T) {
 
 // TestMCPHandlerReceivers pins the observable wiring of the root MCP
 // delegation helpers: which store instance is propagated, the RestateEnabled
-// flag value, and that a nil server reports ingress unavailable instead of
-// panicking.
+// flag value, and that a nil server reports a missing store (it cannot
+// resolve the build's runner) instead of panicking.
 func TestMCPHandlerReceivers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -722,8 +739,8 @@ func TestMCPHandlerReceivers(t *testing.T) {
 				r.Header.Set("Content-Type", "application/json")
 				w := httptest.NewRecorder()
 				h.NewHTTPHandler()(w, r)
-				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "durable Restate ingress is required") {
-					t.Fatalf("nil-server retry status=%d body=%s, want ingress-unavailable tool error", w.Code, w.Body.String())
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "vanadis store not configured") {
+					t.Fatalf("nil-server retry status=%d body=%s, want store-unavailable tool error", w.Code, w.Body.String())
 				}
 			}
 		})

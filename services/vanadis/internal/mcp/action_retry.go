@@ -65,13 +65,14 @@ func (h *Handler) RetryActionChunk(ctx context.Context, req RetryActionChunkRequ
 	if err := validateRetryActionRequest(req); err != nil {
 		return nil, err
 	}
-	if err := h.authorizeBuildMutation(ctx, req.BuildID); err != nil {
+	buildService, err := h.authorizeBuildMutation(ctx, req.BuildID)
+	if err != nil {
 		return nil, err
 	}
 	if h == nil || !h.RestateEnabled || h.Restate == nil || strings.TrimSpace(h.Restate.IngressURL()) == "" {
 		return nil, ErrRetryIngressUnavailable
 	}
-	if err := h.ValidateRetryEligibility(ctx, req); err != nil {
+	if err = h.ValidateRetryEligibility(ctx, req); err != nil {
 		return nil, err
 	}
 	body, err := json.Marshal(req)
@@ -79,7 +80,7 @@ func (h *Handler) RetryActionChunk(ctx context.Context, req RetryActionChunkRequ
 		return nil, err
 	}
 	var result RetryActionChunkResult
-	if err := h.Restate.CallRetryAction(ctx, req.BuildID, body, retryActionIdempotencyKey(req), &result); err != nil {
+	if err := h.Restate.CallRetryAction(ctx, buildService, req.BuildID, body, retryActionIdempotencyKey(req), &result); err != nil {
 		return nil, err
 	}
 	if !result.Accepted || result.BuildID != req.BuildID || result.ChunkID != req.ChunkID || result.DispatchID == "" {

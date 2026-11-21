@@ -1049,8 +1049,11 @@ func TestBuildRouterService_RouteAttachPRRunner(t *testing.T) {
 	}{
 		{name: "existing chunk on sibling runner", row: valuesRow("b1", "agent-alpha"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7}, wantBuildID: "b1", wantRunner: "agent-alpha"},
 		{name: "existing pr on default runner", routerAgent: "agent-beta", row: valuesRow("c1", "b2", 0, "medium", false, "aerial"), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2", wantRunner: "aerial"},
-		{name: "new build stays on default router", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "aerial"},
-		{name: "new build stays on scoped router", routerAgent: "agent-beta", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "agent-beta"},
+		{name: "new build without caller runs on default agent", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "aerial"},
+		{name: "new build without caller ignores scoped router", routerAgent: "agent-beta", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "aerial"},
+		{name: "new build runs on caller runner", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: "agent-alpha"}, wantRunner: "agent-alpha"},
+		{name: "new build caller agent normalized", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: " Agent-Alpha "}, wantRunner: "agent-alpha"},
+		{name: "existing build ignores caller agent", row: valuesRow("b1", "aerial"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1", wantRunner: "aerial"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

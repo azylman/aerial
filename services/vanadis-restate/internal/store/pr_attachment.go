@@ -169,15 +169,17 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 	threadID := model.NormalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
 	build := model.VanadisBuild{
-		ID:        buildID,
-		ThreadID:  threadID,
-		Tier:      0,
-		Title:     title,
-		Objective: title,
-		Status:    statusRunning,
-		Quiet:     req.Quiet,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          buildID,
+		Agent:       NormalizeRunnerAgent(req.Agent),
+		RunnerAgent: NormalizeRunnerAgent(req.RunnerAgent),
+		ThreadID:    threadID,
+		Tier:        0,
+		Title:       title,
+		Objective:   title,
+		Status:      statusRunning,
+		Quiet:       req.Quiet,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	chunk := model.VanadisChunk{
 		ID:           chunkID,
@@ -195,8 +197,8 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`
-	if _, err := tx.Exec(ctx, bQ, build.ID, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
+	bQ := `INSERT INTO vanadis_builds (id, agent, runner_agent, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);`
+	if _, err := tx.Exec(ctx, bQ, build.ID, build.Agent, build.RunnerAgent, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone build %s: %w", buildID, err)
 	}
 	if err := InsertBuildChunk(ctx, tx, buildID, chunk, InsertChunkSQL); err != nil {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
@@ -481,26 +482,36 @@ func (h *Handler) requireStoreAndBuildID(buildID string) (string, error) {
 	return trimmed, nil
 }
 
-func (h *Handler) authorizeBuildMutation(ctx context.Context, buildID string) error {
-	if !h.authEnabled() {
-		return nil
+// authorizeBuildMutation loads the build, authorizes the caller to update it,
+// and returns the Restate Build service of the runner that executes it.
+func (h *Handler) authorizeBuildMutation(ctx context.Context, buildID string) (string, error) {
+	var caller k8sauth.CallerIdentity
+	if h.authEnabled() {
+		var ok bool
+		if caller, ok = k8sauth.CallerFromContext(ctx); !ok {
+			return "", errors.New("unauthorized: missing caller identity")
+		}
 	}
-	caller, ok := k8sauth.CallerFromContext(ctx)
-	if !ok {
-		return errors.New("unauthorized: missing caller identity")
-	}
-	if h.Store == nil {
-		return errors.New("vanadis store not configured")
+	if h == nil || h.Store == nil {
+		return "", errors.New("vanadis store not configured")
 	}
 	targetBuild, _, err := h.Store.GetBuild(ctx, buildID)
 	if err != nil {
-		return err
+		return "", err
 	}
-	agent := targetBuild.Agent
-	if agent == "" {
-		agent = defaultAgent
+	if targetBuild == nil {
+		return "", model.ErrBuildNotFound
 	}
-	return h.Auth.Authorize(ctx, caller, "builds", "update", agent)
+	if h.authEnabled() {
+		agent := targetBuild.Agent
+		if agent == "" {
+			agent = defaultAgent
+		}
+		if err := h.Auth.Authorize(ctx, caller, "builds", "update", agent); err != nil {
+			return "", err
+		}
+	}
+	return config.BuildServiceName(targetBuild.RunnerAgent), nil
 }
 
 func (h *Handler) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildArgs) (MCPUpdateBuildOutput, error) {
@@ -508,12 +519,13 @@ func (h *Handler) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildA
 	if err != nil {
 		return MCPUpdateBuildOutput{}, err
 	}
-	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
+	buildService, err := h.authorizeBuildMutation(ctx, buildID)
+	if err != nil {
 		return MCPUpdateBuildOutput{}, err
 	}
 
 	var updated model.VanadisBuild
-	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildID, "UpdateBuild"), updateBuildPayload{
+	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildService, buildID, "UpdateBuild"), updateBuildPayload{
 		Title:         args.Title,
 		Objective:     args.Objective,
 		SharedContext: args.SharedContext,
@@ -544,7 +556,8 @@ func (h *Handler) handleMCPUpdateChunk(ctx context.Context, args MCPUpdateChunkA
 	if err != nil {
 		return MCPUpdateChunkOutput{}, err
 	}
-	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
+	buildService, err := h.authorizeBuildMutation(ctx, buildID)
+	if err != nil {
 		return MCPUpdateChunkOutput{}, err
 	}
 
@@ -567,7 +580,7 @@ func (h *Handler) handleMCPUpdateChunk(ctx context.Context, args MCPUpdateChunkA
 	}
 
 	var updated model.VanadisChunk
-	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildID, "UpdateChunk"), req, &updated); err != nil {
+	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildService, buildID, "UpdateChunk"), req, &updated); err != nil {
 		return MCPUpdateChunkOutput{}, err
 	}
 
@@ -582,7 +595,8 @@ func (h *Handler) handleMCPAppendChunk(ctx context.Context, args MCPAppendChunkA
 	if err != nil {
 		return MCPAppendChunkOutput{}, err
 	}
-	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
+	buildService, err := h.authorizeBuildMutation(ctx, buildID)
+	if err != nil {
 		return MCPAppendChunkOutput{}, err
 	}
 	if len(args.Chunks) == 0 {
@@ -606,7 +620,7 @@ func (h *Handler) handleMCPAppendChunk(ctx context.Context, args MCPAppendChunkA
 	}
 
 	var appended []model.VanadisChunk
-	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildID, "AppendChunks"), appendChunksPayload{Chunks: inputs}, &appended); err != nil {
+	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildService, buildID, "AppendChunks"), appendChunksPayload{Chunks: inputs}, &appended); err != nil {
 		return MCPAppendChunkOutput{}, err
 	}
 
@@ -622,7 +636,8 @@ func (h *Handler) handleMCPRemoveChunk(ctx context.Context, args MCPRemoveChunkA
 	if err != nil {
 		return MCPRemoveChunkOutput{}, err
 	}
-	if err := h.authorizeBuildMutation(ctx, buildID); err != nil {
+	buildService, err := h.authorizeBuildMutation(ctx, buildID)
+	if err != nil {
 		return MCPRemoveChunkOutput{}, err
 	}
 
@@ -634,7 +649,7 @@ func (h *Handler) handleMCPRemoveChunk(ctx context.Context, args MCPRemoveChunkA
 	}
 
 	req := removeChunkPayload{ChunkRef: chunkRef}
-	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildID, "RemoveChunk"), req, nil); err != nil {
+	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildService, buildID, "RemoveChunk"), req, nil); err != nil {
 		return MCPRemoveChunkOutput{}, err
 	}
 
