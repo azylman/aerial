@@ -7,23 +7,21 @@ package store
 // embedded *Store. SQL text, validation rules, chunk index semantics and
 // error behavior are byte-identical to the root copies they replace.
 //
-// DAG helpers below (validateUpdateChunkDAG, validateAppendChunksDAG,
-// relinkDependenciesAfterRemoval) mirror the frozen root dag.go copies
-// byte-for-byte; dag.go stays frozen until the facade-removal chunk unifies
-// both copies.
+// DAG validation and dependency relinking live in internal/dag, the single
+// copy of the build-DAG rules shared by store and build.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -248,7 +246,7 @@ func (s *Store) UpdateChunk(ctx context.Context, buildID, chunkRef string, req U
 		return nil, applyErr
 	}
 
-	normalizedDeps, err := validateUpdateChunkDAG(existingChunks, targetIdx, updatedCandidate)
+	normalizedDeps, err := dag.ValidateUpdateChunkDAG(existingChunks, targetIdx, updatedCandidate)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +380,7 @@ func (s *Store) AppendChunks(ctx context.Context, buildID string, inputs []Creat
 		return nil, err
 	}
 
-	validatedNew, err := validateAppendChunksDAG(existingChunks, newChunks)
+	validatedNew, err := dag.ValidateAppendChunksDAG(existingChunks, newChunks)
 	if err != nil {
 		return nil, err
 	}
@@ -439,9 +437,9 @@ func (s *Store) RemoveChunk(ctx context.Context, buildID, chunkRef string) (*mod
 	remaining = append(remaining, existingChunks[:targetIdx]...)
 	remaining = append(remaining, existingChunks[targetIdx+1:]...)
 
-	relinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
+	dag.RelinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
 
-	validatedRemaining, err := normalizeAndValidateBuildDAG(remaining)
+	validatedRemaining, err := dag.NormalizeAndValidateBuildDAG(remaining)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: removing chunk causes invalid DAG: %w", ErrBuildConflict, err)
 	}
@@ -495,62 +493,4 @@ func reindexRemainingChunks(ctx context.Context, tx pgx.Tx, buildID string, chun
 		}
 	}
 	return nil
-}
-
-// validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
-func validateUpdateChunkDAG(existing []model.VanadisChunk, updatedIdx int, updated model.VanadisChunk) ([]string, error) {
-	candidateChunks := make([]model.VanadisChunk, len(existing))
-	copy(candidateChunks, existing)
-	candidateChunks[updatedIdx] = updated
-
-	validated, err := normalizeAndValidateBuildDAG(candidateChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-	}
-	return validated[updatedIdx].DependsOn, nil
-}
-
-// validateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
-func validateAppendChunksDAG(existing []model.VanadisChunk, appended []model.VanadisChunk) ([]model.VanadisChunk, error) {
-	allChunks := make([]model.VanadisChunk, 0, len(existing)+len(appended))
-	allChunks = append(allChunks, existing...)
-	allChunks = append(allChunks, appended...)
-
-	validatedAll, err := normalizeAndValidateBuildDAG(allChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-	}
-	out := make([]model.VanadisChunk, len(appended))
-	copy(out, appended)
-	for i := range out {
-		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
-	}
-	return out, nil
-}
-
-// relinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
-// removing removedID and replacing it with removedDeps.
-func relinkDependenciesAfterRemoval(remaining []model.VanadisChunk, removedID string, removedDeps []string) {
-	for i := range remaining {
-		c := &remaining[i]
-		if !slices.Contains(c.DependsOn, removedID) {
-			continue
-		}
-		newDeps := make([]string, 0, len(c.DependsOn)+len(removedDeps))
-		seen := make(map[string]bool)
-		for _, dep := range c.DependsOn {
-			if dep == removedID {
-				for _, rd := range removedDeps {
-					if rd != c.ID && !seen[rd] {
-						seen[rd] = true
-						newDeps = append(newDeps, rd)
-					}
-				}
-			} else if !seen[dep] {
-				seen[dep] = true
-				newDeps = append(newDeps, dep)
-			}
-		}
-		c.DependsOn = newDeps
-	}
 }
