@@ -756,10 +756,18 @@ func TestPureDecoders(t *testing.T) {
 			},
 			Images: []string{"ghcr.io/azylman/aerial-synapse:latest"},
 		},
+		{
+			Labels: map[string]string{
+				"kustomize.toolkit.fluxcd.io/name":      "terminating-app",
+				"kustomize.toolkit.fluxcd.io/namespace": "flux-system",
+			},
+			Images:            []string{"ghcr.io/azylman/aerial-synapse:latest"},
+			DeletionTimestamp: "2026-11-20T18:00:00Z",
+		},
 	}
 	refs := KustomizationsForImages(workloads, []string{"aerial-synapse"})
 	if len(refs) != 1 || refs[0].Name != "core" {
-		t.Errorf("KustomizationsForImages = %v, want 1 core ref", refs)
+		t.Errorf("KustomizationsForImages = %v, want 1 core ref (excluding terminating)", refs)
 	}
 
 	// CompareKustomizationRefs
@@ -791,6 +799,8 @@ func TestDecodeWorkloadRolloutsAndImages(t *testing.T) {
 			"namespace":"default",
 			"uid":"u1",
 			"generation":2,
+			"deletionTimestamp":"2026-11-20T18:00:00Z",
+			"finalizers":["deployments.restate.dev"],
 			"managedFields":[{"time":"2026-11-18T00:00:00Z"}]
 		},
 		"spec":{
@@ -808,12 +818,15 @@ func TestDecodeWorkloadRolloutsAndImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeWorkloadRollouts err = %v", err)
 	}
-	if len(workloads) != 1 || !workloads[0].ReadyConditionTrue || len(workloads[0].Images) != 3 {
+	if len(workloads) != 1 || !workloads[0].ReadyConditionTrue || len(workloads[0].Images) != 3 || workloads[0].DeletionTimestamp != "2026-11-20T18:00:00Z" || len(workloads[0].Finalizers) != 1 || workloads[0].Finalizers[0] != "deployments.restate.dev" {
 		t.Fatalf("unexpected decoded workload: %+v", workloads)
 	}
 
 	jobListJSON := []byte(`{"items":[{
-		"metadata":{"labels":{"app":"test"}},
+		"metadata":{
+			"labels":{"app":"test"},
+			"deletionTimestamp":" 2026-11-20T18:00:00Z "
+		},
 		"spec":{
 			"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"image":"job1"}],"initContainers":[{"image":"jobinit1"}]}}}},
 			"compute":{"image":"comp2"}
@@ -823,7 +836,7 @@ func TestDecodeWorkloadRolloutsAndImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeWorkloadImageRefs err = %v", err)
 	}
-	if len(imageRefs) != 1 || len(imageRefs[0].Images) != 3 {
+	if len(imageRefs) != 1 || len(imageRefs[0].Images) != 3 || imageRefs[0].DeletionTimestamp != "2026-11-20T18:00:00Z" {
 		t.Fatalf("unexpected image refs: %+v", imageRefs)
 	}
 }

@@ -150,19 +150,36 @@ func StoppedWorkloadRolloutComplete(w model.WorkloadRollout) (done, failed bool,
 	return false, false, "waiting for all replicas to stop"
 }
 
+func terminatingWorkloadReason(w model.WorkloadRollout) string {
+	ts := strings.TrimSpace(w.DeletionTimestamp)
+	if len(w.Finalizers) > 0 {
+		return fmt.Sprintf("terminating since %s (blocked by finalizers %v; generation %d not observed)", ts, w.Finalizers, w.Generation)
+	}
+	return fmt.Sprintf("terminating since %s (generation %d not observed)", ts, w.Generation)
+}
+
+func deploymentRolloutComplete(w model.WorkloadRollout) (done, failed bool, reason string) {
+	if w.ProgressDeadlineExceeded {
+		return false, true, "progress deadline exceeded"
+	}
+	if w.UpdatedReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.StatusReplicas == w.Replicas {
+		return true, false, ""
+	}
+	return false, false, fmt.Sprintf("%d/%d updated, %d/%d available, %d total", w.UpdatedReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.StatusReplicas)
+}
+
 // WorkloadRolloutComplete reports whether the workload controller has observed its latest spec and
 // every desired pod runs the current template and is available, with no old pods left.
 func WorkloadRolloutComplete(w model.WorkloadRollout) (done, failed bool, reason string) {
 	if w.Kind != kindRestateCluster && w.ObservedGeneration < w.Generation {
+		if strings.TrimSpace(w.DeletionTimestamp) != "" {
+			return false, true, terminatingWorkloadReason(w)
+		}
 		return false, false, fmt.Sprintf("generation %d not yet observed", w.Generation)
 	}
 	switch w.Kind {
 	case "Deployment":
-		if w.ProgressDeadlineExceeded {
-			return false, true, "progress deadline exceeded"
-		}
-		done = w.UpdatedReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.StatusReplicas == w.Replicas
-		reason = fmt.Sprintf("%d/%d updated, %d/%d available, %d total", w.UpdatedReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.StatusReplicas)
+		return deploymentRolloutComplete(w)
 	case kindStatefulSet:
 		if w.Replicas == 0 {
 			return StoppedWorkloadRolloutComplete(w)
@@ -282,6 +299,9 @@ func ReadyForCommitServices(in PRRolloutInput) []string {
 	)
 
 	for _, w := range in.Workloads {
+		if strings.TrimSpace(w.DeletionTimestamp) != "" {
+			continue
+		}
 		commitImages := commitMatchingImages(w.Images, in.CommitSHA)
 		if len(commitImages) == 0 {
 			continue
