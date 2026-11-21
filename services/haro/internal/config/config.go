@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -123,9 +122,9 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	natsURL := resolveEnvOrDefault("NATS_URL", ycfg.NATSURL, "nats://nats.aerial:4222")
 	restateURL := strings.TrimRight(resolveEnvOrDefault("RESTATE_INGRESS_URL", ycfg.RestateURL, ""), "/")
 	agentName := resolveEnvOrDefault("AGENT_NAME", ycfg.AgentName, "aerial")
-	authCfg, err := resolveAuthConfig(ycfg.Auth)
-	if err != nil {
-		return nil, err
+	authCfg := ycfg.Auth
+	if err := k8sauth.ApplyEnvOverride(&authCfg, os.Getenv); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	cfg := &Config{
@@ -168,18 +167,6 @@ func resolveEnvOrDefault(envKey, fileVal, defaultVal string) string {
 		return defaultVal
 	}
 	return val
-}
-
-func resolveAuthConfig(base k8sauth.Config) (k8sauth.Config, error) {
-	authCfg := base
-	if envVal := strings.TrimSpace(os.Getenv("K8S_AUTH_ENABLED")); envVal != "" {
-		enabled, err := strconv.ParseBool(envVal)
-		if err != nil {
-			return authCfg, fmt.Errorf("config: invalid K8S_AUTH_ENABLED value %q: %w", envVal, err)
-		}
-		authCfg.Enabled = enabled
-	}
-	return authCfg, nil
 }
 
 // RegisterConfigTokens registers sensitive tokens from Haro's configuration,

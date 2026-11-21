@@ -20,10 +20,7 @@ import (
 	"strings"
 	"time"
 
-	// pgx driver backing store.OpenDB postgres connections.
-	_ "github.com/jackc/pgx/v5/stdlib"
-
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 )
@@ -33,69 +30,12 @@ func OpenDB(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	return openDB(ctx, cfg.DatabaseURL)
-}
-
-// NewDB opens the scheduler database from cfg.
-func NewDB(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
-	return OpenDB(ctx, cfg)
-}
-
-var (
-	postgresMaxAttempts = 10
-	postgresRetryBase   = 500 * time.Millisecond
-	// postgresRetryAfter is the clock openDB waits on between connection
-	// attempts; tests swap it for an immediately-firing channel.
-	postgresRetryAfter = time.After
-)
-
-func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
-	trimmed := strings.TrimSpace(dsn)
-	if trimmed == "" {
-		return nil, fmt.Errorf("db: connection string cannot be empty")
-	}
-	trimmed = strings.TrimPrefix(trimmed, "sqlite://")
-	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("db: unsupported database scheme in %q: only postgres:// or postgresql:// supported", model.RedactDSN(trimmed))
-	}
-
-	var database *sql.DB
-	var err error
-	maxAttempts, backoff := postgresMaxAttempts, postgresRetryBase
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		database, err = sql.Open("pgx", trimmed)
-		if err == nil {
-			pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			err = database.PingContext(pingCtx)
-			cancel()
-			if err == nil {
-				break
-			}
-			httpkit.CloseWarn(database, "database on ping failure")
-		}
-		log.Printf("[Scheduler DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, maxAttempts, err)
-		if attempt == maxAttempts {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			// Shutdown during startup: stop retrying instead of sleeping out the backoff.
-			return nil, fmt.Errorf("gave up waiting for PostgreSQL after %d attempts: %w", attempt, errors.Join(err, ctx.Err()))
-		case <-postgresRetryAfter(backoff):
-		}
-		backoff = min(time.Duration(float64(backoff)*1.5), 5*time.Second)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to PostgreSQL after %d attempts: %w", maxAttempts, err)
-	}
-
-	database.SetMaxOpenConns(10)
-	database.SetMaxIdleConns(5)
-	database.SetConnMaxLifetime(30 * time.Minute)
-	database.SetConnMaxIdleTime(5 * time.Minute)
-
-	log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", model.RedactDSN(trimmed))
-	return database, nil
+	return pgutil.OpenSQL(ctx, cfg.DatabaseURL, pgutil.SQLOptions{
+		MaxOpenConns:    10,
+		MaxIdleConns:    5,
+		ConnMaxLifetime: 30 * time.Minute,
+		ConnMaxIdleTime: 5 * time.Minute,
+	})
 }
 
 func normCtxAndDB(ctx context.Context, database *sql.DB) (context.Context, error) {

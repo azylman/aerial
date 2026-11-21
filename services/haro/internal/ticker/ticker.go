@@ -22,7 +22,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/metrics"
 	"github.com/azylman/aerial/services/haro/internal/model"
@@ -362,7 +364,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 	}
 
 	wrappedPrompt := model.BuildHeartbeatPrompt(hb, now)
-	req := dispatch.DispatchRequest{
+	req := eriwire.BrainDispatchRequest{
 		ID:           runID,
 		Source:       model.ScheduleTypeHeartbeat,
 		SessionID:    "",
@@ -374,11 +376,11 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 	}
 
 	dispatchStart := time.Now()
-	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeHeartbeat, hb.ID, func(ctx context.Context) (dispatch.DispatchResponse, error) {
+	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeHeartbeat, hb.ID, func(ctx context.Context) (eriwire.DispatchEnqueueResponse, error) {
 		return t.dispatcher.Dispatch(ctx, req)
 	})
 	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeHeartbeat, time.Since(dispatchStart).Seconds())
-	if dispatchErr == nil && resp.Status == model.StatusSkippedActive {
+	if dispatchErr == nil && resp.Status == eriwire.StatusSkippedActive {
 		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusSkippedActive)
 		slog.Info("Skipping heartbeat run: thread has an active turn in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
 		return
@@ -411,7 +413,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSche
 		return
 	}
 
-	msgID := model.FirstNonEmpty(resp.DispatchID, resp.MessageID, runID)
+	msgID := strutil.FirstNonEmpty(resp.DispatchID, runID)
 	run := model.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   hb.ID,
