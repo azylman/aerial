@@ -878,14 +878,14 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 			if tc.nudges > 0 {
 				launched["retry"] = true
 			}
-			_, err := bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
+			_, _, err := bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantDispatched, dispatched)
 			if len(tc.wantDispatched) > 0 {
 				// Repeated reconciliation after acceptance must leave the generation acknowledged
 				// and keep the 4-chunk cap intact against pending siblings.
 				dispatched = nil
-				_, err = bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
+				_, _, err = bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
 				assert.NoError(t, err)
 				assert.Empty(t, dispatched)
 			}
@@ -1284,7 +1284,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 	}
 	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 	launched := map[string]bool{}
-	_, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
+	_, _, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
 	assert.ErrorIs(t, err, executor.ErrDispatchActive)
 	assert.False(t, launched["dispatch:vanadis-retry-turn-1"])
 	assert.True(t, launched["sibling"])
