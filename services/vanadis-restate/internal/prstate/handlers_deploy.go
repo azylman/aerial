@@ -390,11 +390,11 @@ func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, e
 	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate || NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
-	st, err := s.loadOrCreatePRState(ctx, ev)
+	st, stored, err := s.loadPRState(ctx, ev)
 	if err != nil {
 		return err
 	}
-	if st.ApplyDeployEvent(ev) != DispositionApply {
+	if s.dropUntrackedRollout(ctx, st, stored, PRHandlerDeployAttemptFailed) || st.ApplyDeployEvent(ev) != DispositionApply {
 		return nil
 	}
 	seq, armed := st.ArmDeployFailure(ev)

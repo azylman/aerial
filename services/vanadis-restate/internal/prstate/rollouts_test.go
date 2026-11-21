@@ -255,6 +255,7 @@ func TestPRObjectServiceGetDeployView(t *testing.T) {
 	}{
 		{name: "unknown pr", want: DeployView{}},
 		{name: "merged pr", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), want: DeployView{Found: true, Repo: "azylman/aerial", PRNumber: 101, Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1", Agent: "aerial"}},
+		{name: "untracked deploying pr is not found", seed: untrackedResidue(), want: DeployView{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -341,6 +342,7 @@ func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 		{name: "unknown kustomization does nothing", seed: deployingRollout(), ev: ev(EffectsOwnerRestate, "api")},
 		{name: "pr out of rollout does nothing", seed: deployedRollout(), ev: ev(EffectsOwnerRestate, "core")},
 		{name: "missing name does nothing", seed: deployingRollout(), ev: ev(EffectsOwnerRestate, "")},
+		{name: "untracked rollout does nothing", seed: untrackedResidue(), ev: ev(EffectsOwnerRestate, "gateway-api-crds")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -425,4 +427,97 @@ func factEvents(calls []factCall) []string {
 		events = append(events, c.fact.Event)
 	}
 	return events
+}
+
+// untrackedResidue is the live kubernetes-sigs/gateway-api#5433 object a
+// pre-guard HandleKustomizationRequested left behind: deploying, one
+// recorded request, indexed as a rollout, with no head, merge, target or
+// register (g3-shadow-soak-r5).
+func untrackedResidue() *PRState {
+	s := NewPRState("kubernetes-sigs/gateway-api", 5433)
+	s.Agent = "aerial"
+	s.Status = RegistryStatusDeploying
+	s.Jobs, s.StartedJobs = []string{"gateway-api-crds"}, []string{"gateway-api-crds"}
+	s.KustomizationRequests = map[string]KustomizationRequest{"gateway-api-crds": {Namespace: "flux-system", RequestedAt: "2026-11-21T04:55:46Z"}}
+	s.GateGeneration, s.RolloutIndexed, s.RolloutIndexSeq = 1, true, 1
+	return s
+}
+
+// untrackedCleaned is untrackedResidue after the cleanup: rollout fields
+// cleared, generation kept, index membership dropped at the next sequence.
+func untrackedCleaned() *PRState {
+	s := NewPRState("kubernetes-sigs/gateway-api", 5433)
+	s.Agent = "aerial"
+	s.GateGeneration, s.RolloutIndexSeq = 1, 2
+	return s
+}
+
+// untrackedCleanupSends are the index closes the cleanup sends.
+var untrackedCleanupSends = []sentCall{
+	{service: RepoObjectServiceName, key: RolloutIndexKey, method: RepoHandlerRolloutIndex, input: RolloutIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Seq: 2}},
+	{service: RepoObjectServiceName, key: "kubernetes-sigs/gateway-api", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Generation: 1, Lifecycle: IndexDeployed}},
+}
+
+func TestPRObjectServiceDropUntracked(t *testing.T) {
+	t.Parallel()
+	tracked := svcRow("h1", "m1", RegistryStatusDeploying, TerminalMerged)
+	tests := []struct {
+		name      string
+		seed      *PRState
+		want      DropUntrackedResponse
+		wantSaved *PRState
+		wantSends []sentCall
+	}{
+		{name: "unknown pr is untouched"},
+		{name: "tracked pr is untouched", seed: tracked},
+		{name: "untracked rollout is cleaned and leaves both indexes", seed: untrackedResidue(), want: DropUntrackedResponse{Untracked: true, Cleaned: true}, wantSaved: untrackedCleaned(), wantSends: untrackedCleanupSends},
+		{name: "cleaned untracked pr is idempotent", seed: untrackedCleaned(), want: DropUntrackedResponse{Untracked: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := newStateMock(t, tc.seed)
+			got, err := NewPRObjectService().DropUntracked(restate.WithMockContext(mc), DropUntrackedRequest{})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.wantSaved, rec.saved)
+			require.Equal(t, tc.wantSends, rec.sends.snapshot())
+		})
+	}
+}
+
+// TestPRObjectServiceHandleKustomizationRequestedUntracked pins the drop
+// for an untracked PR: a fresh state persists and sends nothing, and a
+// stored pre-guard rollout is cleaned on the next request instead of
+// re-recorded or patched.
+func TestPRObjectServiceHandleKustomizationRequestedUntracked(t *testing.T) {
+	t.Parallel()
+	started := pubsub.PRLifecycleEvent{Event: "deploy_started", Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Status: "deploying"}
+	requests := map[string]KustomizationRequest{"gateway-api-crds": {Namespace: "flux-system", RequestedAt: "2026-11-21T05:57:27Z"}}
+	tests := []struct {
+		name      string
+		seed      *PRState
+		owner     EffectsOwner
+		wantSaved *PRState
+		wantSends []sentCall
+	}{
+		{name: "fresh legacy request persists nothing", owner: EffectsOwnerLegacy},
+		{name: "fresh restate request persists nothing", owner: EffectsOwnerRestate},
+		{name: "stored pre-guard rollout is cleaned", seed: untrackedResidue(), owner: EffectsOwnerLegacy, wantSaved: untrackedCleaned(), wantSends: untrackedCleanupSends},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := newStateMock(t, tc.seed)
+			stubRunKeepTerminal(mc)
+			kube := &fakeKube{}
+			pub := &fakeFactPublisher{}
+			ev := PREvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Jobs: []string{"gateway-api-crds"}, KustomizationRequests: requests, EffectsOwner: tc.owner, Facts: []pubsub.PRLifecycleEvent{started}}
+			require.NoError(t, NewPRObjectService().WithKube(kube).WithFactPublisher(pub).HandleKustomizationRequested(restate.WithMockContext(mc), ev))
+			require.Equal(t, tc.wantSaved, rec.saved)
+			require.Equal(t, tc.wantSends, rec.sends.snapshot())
+			require.Empty(t, kube.Calls())
+			require.Empty(t, pub.Calls())
+		})
+	}
 }

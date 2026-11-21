@@ -50,7 +50,8 @@ const MaxRolloutIndexEntries = 512
 type DeployViewRequest struct{}
 
 // DeployView is the per-PR deploy read model. Found is false for a PR
-// Restate has never seen.
+// Restate has never seen and for an untracked PR (PRState.Untracked), for
+// which the legacy registry keeps no row either.
 type DeployView struct {
 	Found                  bool                            `json:"found"`
 	Repo                   string                          `json:"repo"`
@@ -73,7 +74,7 @@ type DeployView struct {
 // mirrors the registry HasExpectedDeployJobs query: recorded jobs, deployed
 // jobs, or a deploying/deployed status.
 func DeployViewOf(st *PRState) DeployView {
-	if st == nil {
+	if st == nil || st.Untracked() {
 		return DeployView{}
 	}
 	return DeployView{
@@ -317,7 +318,7 @@ func (s *PRObjectService) HandleDeployObserved(ctx restate.ObjectContext, ev PRE
 	var transitioned bool
 	ev.Facts = nil
 	var committed *PRState
-	if err := s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+	if err := s.mutateRolloutEvent(ctx, ev, "HandleDeployObserved", func(st *PRState) {
 		transitioned = st.ApplyDeployObserved(ev)
 		committed = st
 	}); err != nil || committed == nil {
@@ -356,7 +357,7 @@ func (s *PRObjectService) HandleReconcileLost(ctx restate.ObjectContext, ev PREv
 		return nil
 	}
 	st, err := restate.Get[*PRState](ctx, s.stateKey)
-	if err != nil || st == nil || !st.InRollout() {
+	if err != nil || st == nil || !st.InRollout() || st.Untracked() {
 		return err
 	}
 	req, ok := st.KustomizationRequests[name]
