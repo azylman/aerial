@@ -401,6 +401,49 @@ spec:
     - Ingress
     - Egress
 ---
+# The redacting otel-collector is the only trace writer. OTLP gRPC (4317) is
+# collector-only. The HTTP port (10428) serves both OTLP HTTP ingest and the
+# query API, so it is limited to the collector plus read-only consumers:
+# Grafana, victoriatraces-mcp, the lan-gateway data plane (vtraces.lan), the
+# vmsingle scraper, and the gatus/homepage health probes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: victoriatraces-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otel-collector
+      ports:
+        - port: 4317
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - otel-collector
+                  - grafana
+                  - victoriatraces-mcp
+                  - vmsingle
+                  - gatus
+                  - homepage
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: lan-gateway
+      ports:
+        - port: 10428
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: victoriatraces
+  policyTypes:
+    - Ingress
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
