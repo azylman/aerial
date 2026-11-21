@@ -592,6 +592,8 @@ func TestThreadSessionObject_RunTurn(t *testing.T) {
 
 func TestDispatchSessionObject_Enqueue(t *testing.T) {
 	t.Parallel()
+	insertAndSend := []string{"Run [{insert-pending-dispatch}]", "Send RunTurn"}
+	skipCheck := []string{"Get active_invocation_id", "Run [{check-active-dispatch-turn}]"}
 
 	tests := []struct {
 		name           string
@@ -605,39 +607,52 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		nilPool        bool
 		wantStatus     string
 		wantErrorSub   string
+		wantRowPending bool
+		wantCommands   []string
 	}{
 		{
-			name:       "normal dispatch enqueue accepted",
-			sessionKey: "dispatch-100",
-			req:        BrainDispatchRequest{ID: "d-100", Source: "vanadis", Prompt: "build chunk 1"},
-			wantStatus: "accepted",
+			name:           "normal dispatch enqueue accepted",
+			sessionKey:     "dispatch-100",
+			req:            BrainDispatchRequest{ID: "d-100", Source: "vanadis", Prompt: "build chunk 1"},
+			wantStatus:     "accepted",
+			wantRowPending: true,
+			wantCommands:   insertAndSend,
+		},
+		{name: "empty key and empty id generates dispatch key and id", req: BrainDispatchRequest{Prompt: "auto dispatch"}, wantStatus: "accepted", wantCommands: insertAndSend},
+		{
+			name:           "already existing dispatch returns already_exists",
+			sessionKey:     "dispatch-200",
+			req:            BrainDispatchRequest{ID: "d-200", Source: "vanadis", Prompt: "build chunk 2"},
+			seedExisting:   true,
+			wantStatus:     "already_exists",
+			wantRowPending: true,
+			wantCommands:   insertAndSend,
 		},
 		{
-			name:       "empty key and empty id generates dispatch key and id",
-			sessionKey: "",
-			req:        BrainDispatchRequest{Prompt: "auto dispatch"},
-			wantStatus: "accepted",
+			name:           "stale marker without active row is accepted and inserts row",
+			sessionKey:     "vanadis-g3-shadow-soak-r11",
+			req:            BrainDispatchRequest{ID: "d-300", Source: "vanadis", Prompt: "retry chunk", SkipIfActive: true},
+			activeInvID:    "inv-cancelled-300",
+			wantStatus:     "accepted",
+			wantRowPending: true,
+			wantCommands:   []string{"Get active_invocation_id", "Run [{check-active-dispatch-turn}]", "Run [{insert-pending-dispatch}]", "Send RunTurn"},
 		},
 		{
-			name:         "already existing dispatch returns already_exists",
-			sessionKey:   "dispatch-200",
-			req:          BrainDispatchRequest{ID: "d-200", Source: "vanadis", Prompt: "build chunk 2"},
-			seedExisting: true,
-			wantStatus:   "already_exists",
+			name:         "marker with active row still skips",
+			sessionKey:   "dispatch-350",
+			req:          BrainDispatchRequest{ID: "d-350", Source: "vanadis", Prompt: "build chunk 35", SkipIfActive: true},
+			activeInvID:  "inv-disp-350",
+			storeActive:  true,
+			wantStatus:   "skipped_active",
+			wantCommands: skipCheck,
 		},
 		{
-			name:        "skip if active when invocation state active",
-			sessionKey:  "dispatch-300",
-			req:         BrainDispatchRequest{ID: "d-300", Source: "vanadis", Prompt: "build chunk 3", SkipIfActive: true},
-			activeInvID: "inv-disp-300",
-			wantStatus:  "skipped_active",
-		},
-		{
-			name:        "skip if active when store has active dispatch turn",
-			sessionKey:  "dispatch-400",
-			req:         BrainDispatchRequest{ID: "d-400", Source: "vanadis", Prompt: "build chunk 4", SkipIfActive: true},
-			storeActive: true,
-			wantStatus:  "skipped_active",
+			name:         "skip if active when store has active dispatch turn",
+			sessionKey:   "dispatch-400",
+			req:          BrainDispatchRequest{ID: "d-400", Source: "vanadis", Prompt: "build chunk 4", SkipIfActive: true},
+			storeActive:  true,
+			wantStatus:   "skipped_active",
+			wantCommands: skipCheck,
 		},
 		{
 			name:           "skip if active fails when store active check errors",
@@ -645,6 +660,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 			req:            BrainDispatchRequest{ID: "d-450", Source: "vanadis", Prompt: "skip err", SkipIfActive: true},
 			storeActiveErr: true,
 			wantErrorSub:   "active check error",
+			wantCommands:   skipCheck,
 		},
 		{
 			name:         "store insert failure returns error",
@@ -652,20 +668,16 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 			req:          BrainDispatchRequest{ID: "d-500", Source: "vanadis", Prompt: "fail me"},
 			storeFail:    true,
 			wantErrorSub: "db error",
+			wantCommands: []string{"Run [{insert-pending-dispatch}]"},
 		},
+		{name: "nil pool accepted without store insertion", sessionKey: "dispatch-600", req: BrainDispatchRequest{ID: "d-600", Prompt: "nil pool"}, nilPool: true, wantStatus: "accepted", wantCommands: insertAndSend},
 		{
-			name:       "nil pool accepted without store insertion",
-			sessionKey: "dispatch-600",
-			req:        BrainDispatchRequest{ID: "d-600", Prompt: "nil pool"},
-			nilPool:    true,
-			wantStatus: "accepted",
-		},
-		{
-			name:       "skip if active with nil pool returns accepted",
-			sessionKey: "dispatch-skip-nil",
-			req:        BrainDispatchRequest{ID: "d-skip-nil", Prompt: "nil pool skip", SkipIfActive: true},
-			nilPool:    true,
-			wantStatus: "accepted",
+			name:         "skip if active with nil pool returns accepted",
+			sessionKey:   "dispatch-skip-nil",
+			req:          BrainDispatchRequest{ID: "d-skip-nil", Prompt: "nil pool skip", SkipIfActive: true},
+			nilPool:      true,
+			wantStatus:   "accepted",
+			wantCommands: []string{"Get active_invocation_id", "Run [{insert-pending-dispatch}]", "Send RunTurn"},
 		},
 	}
 
@@ -704,6 +716,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 
 			mc, _ := setupActorMockContext(t, tc.sessionKey, tc.activeInvID)
 			resp, err := obj.Enqueue(restate.WithMockContext(mc), tc.req)
+			assert.Equal(t, tc.wantCommands, actorJournalCommands(mc))
 			if tc.wantErrorSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrorSub)
@@ -712,55 +725,65 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, resp.Status)
+			row, gErr := store.GetDispatch(context.Background(), tc.req.ID)
+			require.NoError(t, gErr)
+			assert.Equal(t, tc.wantRowPending, row != nil && row.Status == db.StatusPending)
 		})
 	}
 }
 
 func TestDispatchSessionObject_RunTurn(t *testing.T) {
 	t.Parallel()
+	drainedOne := []string{"Set active_invocation_id", "Run [{execute-dispatch}]", "Run [{execute-dispatch}]", "ClearAll"}
+	idle := []string{"Set active_invocation_id", "Run [{execute-dispatch}]", "ClearAll"}
+	failedCleared := []string{"Set active_invocation_id", "Run [{execute-dispatch}]", "Clear active_invocation_id"}
 
 	tests := []struct {
 		name           string
 		sessionKey     string
 		pendingCount   int
-		storeErr       bool
+		storeErr       error
 		claimFail      bool
 		nilPool        bool
 		withRunner     bool
 		unfinalized    bool
 		wantDisparches int
 		wantErrorSub   string
+		wantCommands   []string
 	}{
 		{
-			name:           "no pending dispatches breaks immediately",
-			sessionKey:     "dispatch-empty",
-			pendingCount:   0,
-			wantDisparches: 0,
+			name:         "no pending dispatches breaks immediately",
+			sessionKey:   "dispatch-empty",
+			wantCommands: idle,
 		},
 		{
 			name:           "claims and drains matching pending dispatch",
 			sessionKey:     "vanadis-chunk-1",
 			pendingCount:   1,
 			wantDisparches: 1,
+			wantCommands:   drainedOne,
 		},
 		{
-			name:           "claim failure skips dispatch",
-			sessionKey:     "dispatch-claim-fail",
-			pendingCount:   1,
-			claimFail:      true,
-			wantDisparches: 0,
+			name:         "claim failure skips dispatch",
+			sessionKey:   "dispatch-claim-fail",
+			pendingCount: 1,
+			claimFail:    true,
+			wantCommands: idle,
 		},
+		{name: "nil pool breaks immediately", sessionKey: "dispatch-nil", nilPool: true, wantCommands: []string{"Set active_invocation_id", "ClearAll"}},
 		{
-			name:           "nil pool breaks immediately",
-			sessionKey:     "dispatch-nil",
-			nilPool:        true,
-			wantDisparches: 0,
-		},
-		{
-			name:         "store get pending error returns error",
+			name:         "store get pending error clears marker",
 			sessionKey:   "dispatch-err",
-			storeErr:     true,
+			storeErr:     errors.New("disp read error"),
 			wantErrorSub: "disp read error",
+			wantCommands: failedCleared,
+		},
+		{
+			name:         "cancelled turn clears marker",
+			sessionKey:   "vanadis-g3-shadow-soak-r11",
+			storeErr:     restate.ToTerminalError(errors.New("invocation cancelled"), restate.WithErrorCode(409)),
+			wantErrorSub: "invocation cancelled",
+			wantCommands: failedCleared,
 		},
 		{
 			name:           "dispatch executes with runner pool and finalizes successfully",
@@ -768,14 +791,16 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 			pendingCount:   1,
 			withRunner:     true,
 			wantDisparches: 1,
+			wantCommands:   drainedOne,
 		},
 		{
-			name:         "dispatch aborts unfinalized when store fails to update status",
+			name:         "dispatch aborts unfinalized and clears marker",
 			sessionKey:   "vanadis-runner-unfinalized",
 			pendingCount: 1,
 			withRunner:   true,
 			unfinalized:  true,
 			wantErrorSub: "dispatch execution aborted unfinalized",
+			wantCommands: failedCleared,
 		},
 	}
 
@@ -793,8 +818,8 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 					Status:         db.StatusPending,
 				})
 			}
-			if tc.storeErr {
-				store.FailNext("GetPendingOrProcessingDispatches", errors.New("disp read error"))
+			if tc.storeErr != nil {
+				store.FailNext("GetPendingOrProcessingDispatches", tc.storeErr)
 			}
 			if tc.claimFail {
 				store.FailNext("ClaimPendingDispatch", errors.New("claim disp fail"))
@@ -818,6 +843,7 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 
 			mc, _ := setupActorMockContext(t, tc.sessionKey, "")
 			res, err := obj.RunTurn(restate.WithMockContext(mc), BrainDispatchRequest{VanadisChunkID: "chunk-1"})
+			assert.Equal(t, tc.wantCommands, actorJournalCommands(mc))
 			if tc.wantErrorSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrorSub)
