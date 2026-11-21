@@ -23,7 +23,7 @@ func TestMain_Execution(t *testing.T) {
 		return tracing.Config{}, func() { flushes++ }
 	}
 
-	loadConfigFn = func() app.Config {
+	loadConfigFn = func(func(string) string) app.Config {
 		return app.Config{HealthPort: "4026", RestatePort: "9080", VanadisURL: "http://vanadis.aerial:4025"}
 	}
 

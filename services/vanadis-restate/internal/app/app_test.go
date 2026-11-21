@@ -24,37 +24,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/widget"
 )
 
-func TestConfig_LoadConfigFromEnv(t *testing.T) {
-	t.Setenv("RESTATE_PORT", "9999")
-	t.Setenv("HEALTH_PORT", "4444")
-	t.Setenv("VANADIS_URL", "http://test-vanadis:4025/")
-	t.Setenv("RESTATE_INGRESS_URL", "http://test-restate:8080/")
-	t.Setenv("DISCORD_TOKEN", "test-token")
-	cfg := LoadConfigFromEnv()
-	assert.Equal(t, "9999", cfg.RestatePort)
-	assert.Equal(t, "4444", cfg.HealthPort)
-	assert.Equal(t, "http://test-vanadis:4025", cfg.VanadisURL)
-	assert.Equal(t, "http://test-restate:8080", cfg.RestateIngressURL)
-	assert.Equal(t, "test-token", cfg.DiscordToken)
-
-	t.Setenv("RESTATE_PORT", "")
-	t.Setenv("PORT", "9191")
-	t.Setenv("HEALTH_PORT", "")
-	t.Setenv("VANADIS_URL", "")
-	t.Setenv("RESTATE_INGRESS_URL", "")
-	t.Setenv("DISCORD_TOKEN", "")
-	cfgDefault := LoadConfigFromEnv()
-	assert.Equal(t, "9191", cfgDefault.RestatePort)
-	assert.Equal(t, "4026", cfgDefault.HealthPort)
-	assert.Equal(t, "http://vanadis.aerial:4025", cfgDefault.VanadisURL)
-	assert.Equal(t, "http://restate.aerial:8080", cfgDefault.RestateIngressURL)
-	assert.Equal(t, "", cfgDefault.DiscordToken)
-
-	t.Setenv("PORT", "")
-	cfgFallback := LoadConfigFromEnv()
-	assert.Equal(t, "9080", cfgFallback.RestatePort)
-}
-
 func TestHealthEndpoints(t *testing.T) {
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
 	t.Cleanup(func() {
@@ -175,7 +144,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 	// 3. Widget deliverer constructor error logs warning without failing RunApp
 	origDeliverer := newDiscordWidgetDelivererFn
 	defer func() { newDiscordWidgetDelivererFn = origDeliverer }()
-	newDiscordWidgetDelivererFn = func(string, string, ...string) (*widget.DiscordWidgetDeliverer, error) {
+	newDiscordWidgetDelivererFn = func(string, string, []string, string) (*widget.DiscordWidgetDeliverer, error) {
 		return nil, errors.New("mock deliverer fail")
 	}
 
@@ -342,47 +311,101 @@ func TestBindRestateServices(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
-	t.Setenv("RESTATE_PORT", "9999")
-	t.Setenv("HEALTH_PORT", "8888")
-	t.Setenv("VANADIS_URL", "http://vanadis.local:4025")
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
-	t.Setenv("ERI_URL", "http://eri.local")
-	t.Setenv("RESTATE_INGRESS_URL", "http://restate.local:8080")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("GITHUB_TOKEN", "token-xyz")
-	t.Setenv("DISCORD_TOKEN", "discord-xyz")
-	t.Setenv("SHARE_ROOT", "/tmp/share")
-	t.Setenv("POSTGRES_DB", "")
-	t.Setenv("KUBERNETES_SERVICE_HOST", "")
-	t.Setenv("KUBERNETES_SERVICE_PORT", "")
-	t.Setenv("FLUX_RECEIVER_URL", "")
-	t.Setenv("POSTGRES_HOST", "")
-	cfg := LoadConfigFromEnv()
-	assert.Equal(t, "9999", cfg.RestatePort)
-	assert.Equal(t, "8888", cfg.HealthPort)
-	assert.Equal(t, "http://vanadis.local:4025", cfg.VanadisURL)
-	assert.Equal(t, "postgres://user:pass@localhost:5432/db", cfg.PostgresURL)
-	assert.Equal(t, "http://eri.local", cfg.EriURL)
-	assert.Equal(t, "http://restate.local:8080", cfg.RestateIngressURL)
-	assert.Equal(t, "nats://localhost:4222", cfg.NATSURL)
-	assert.Equal(t, "token-xyz", cfg.GitHubToken)
-	assert.Equal(t, "discord-xyz", cfg.DiscordToken)
-	assert.Equal(t, "/tmp/share", cfg.ShareRoot)
-
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("POSTGRES_URL", "")
-	t.Setenv("POSTGRES_PASSWORD", "secret-pass")
-	cfgDSN := LoadConfigFromEnv()
-	assert.Equal(t, "postgres://aerial:secret-pass@postgres:5432/aerial?sslmode=disable", cfgDSN.PostgresURL)
-	assert.Empty(t, cfgDSN.KubeAPIServer)
-
-	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
-	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-	t.Setenv("FLUX_RECEIVER_URL", " http://receiver.local/hook ")
-	cfgKube := LoadConfigFromEnv()
-	assert.Equal(t, "https://10.43.0.1:443", cfgKube.KubeAPIServer)
-	assert.Equal(t, "http://receiver.local/hook", cfgKube.FluxReceiverURL)
+func TestLoadConfig(t *testing.T) {
+	t.Parallel()
+	defaults := Config{
+		RestatePort:       "9080",
+		HealthPort:        "4026",
+		VanadisURL:        "http://vanadis.aerial:4025",
+		PostgresURL:       "",
+		EriURL:            "http://eri.aerial",
+		RestateIngressURL: "http://restate.aerial:8080",
+		NATSURL:           "nats://nats.aerial:4222",
+		ShareRoot:         "/share",
+		AgentName:         "aerial",
+		ConfigPath:        "/share/aerial-config/config.yaml",
+	}
+	tests := []struct {
+		name string
+		env  map[string]string
+		want Config
+	}{
+		{"empty env uses defaults", map[string]string{}, defaults},
+		{"explicit values trimmed and authoritative", map[string]string{
+			"RESTATE_PORT":            "9999",
+			"PORT":                    "9191",
+			"HEALTH_PORT":             "8888",
+			"VANADIS_URL":             "http://vanadis.local:4025/",
+			"DATABASE_URL":            "postgres://user:pass@localhost:5432/db",
+			"POSTGRES_URL":            "postgres://ignored",
+			"POSTGRES_USER":           "leaked-user",
+			"ERI_URL":                 "http://eri.local/",
+			"RESTATE_INGRESS_URL":     "http://restate.local:8080/",
+			"NATS_URL":                "nats://localhost:4222",
+			"GITHUB_TOKEN":            "token-xyz",
+			"GITHUB_PAT":              "pat-ignored",
+			"DISCORD_TOKEN":           " discord-xyz ",
+			"SHARE_ROOT":              "/tmp/share",
+			"AGENT_NAME":              "agent-alpha",
+			"CONFIG_PATH":             "/tmp/share/agent-alpha/config.yaml",
+			"KUBERNETES_SERVICE_HOST": "kube.test",
+			"KUBERNETES_SERVICE_PORT": "443",
+			"FLUX_RECEIVER_URL":       " http://receiver.local/hook ",
+		}, Config{
+			RestatePort:       "9999",
+			HealthPort:        "8888",
+			VanadisURL:        "http://vanadis.local:4025",
+			PostgresURL:       "postgres://user:pass@localhost:5432/db",
+			EriURL:            "http://eri.local",
+			RestateIngressURL: "http://restate.local:8080",
+			NATSURL:           "nats://localhost:4222",
+			GitHubToken:       "token-xyz",
+			DiscordToken:      "discord-xyz",
+			ShareRoot:         "/tmp/share",
+			AgentName:         "agent-alpha",
+			ConfigPath:        "/tmp/share/agent-alpha/config.yaml",
+			KubeAPIServer:     "https://kube.test:443",
+			FluxReceiverURL:   "http://receiver.local/hook",
+		}},
+		{"PORT fallback, POSTGRES_URL and GITHUB_PAT fallbacks", map[string]string{
+			"PORT":         "9191",
+			"POSTGRES_URL": "postgres://pg-url",
+			"GITHUB_PAT":   "pat-xyz",
+		}, Config{
+			RestatePort:       "9191",
+			HealthPort:        "4026",
+			VanadisURL:        "http://vanadis.aerial:4025",
+			PostgresURL:       "postgres://pg-url",
+			EriURL:            "http://eri.aerial",
+			RestateIngressURL: "http://restate.aerial:8080",
+			NATSURL:           "nats://nats.aerial:4222",
+			GitHubToken:       "pat-xyz",
+			ShareRoot:         "/share",
+			AgentName:         "aerial",
+			ConfigPath:        "/share/aerial-config/config.yaml",
+		}},
+		{"DSN built from POSTGRES_* parts", map[string]string{
+			"POSTGRES_PASSWORD": "secret-pass",
+		}, Config{
+			RestatePort:       "9080",
+			HealthPort:        "4026",
+			VanadisURL:        "http://vanadis.aerial:4025",
+			PostgresURL:       "postgres://aerial:secret-pass@postgres:5432/aerial?sslmode=disable",
+			EriURL:            "http://eri.aerial",
+			RestateIngressURL: "http://restate.aerial:8080",
+			NATSURL:           "nats://nats.aerial:4222",
+			ShareRoot:         "/share",
+			AgentName:         "aerial",
+			ConfigPath:        "/share/aerial-config/config.yaml",
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := LoadConfig(func(k string) string { return tc.env[k] })
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestRunApp_ContextCancellation(t *testing.T) {
