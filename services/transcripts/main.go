@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -14,42 +13,20 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (
-	openDBFn = openDB
+	openDBFn = pgutil.OpenSQL
 	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 		return pubsub.NewJetStreamBus(ctx, url)
 	}
 	httpShutdown = (*http.Server).Shutdown
 )
-
-func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
-	trimmed := strings.TrimSpace(dsn)
-	if trimmed == "" {
-		return nil, fmt.Errorf("db: connection string cannot be empty")
-	}
-	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("db: unsupported database scheme: only postgres:// or postgresql:// supported")
-	}
-	database, err := sql.Open("pgx", trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("db: open failed: %w", err)
-	}
-	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := database.PingContext(pingCtx); err != nil {
-		httpkit.CloseWarn(database, "database on ping failure")
-		return nil, fmt.Errorf("db: ping failed: %w", err)
-	}
-	return database, nil
-}
 
 // RunApp bootstraps the transcripts indexer: JetStream step-batch consumer plus
 // HTTP read API, with graceful shutdown.
@@ -62,9 +39,9 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("app: port cannot be empty")
 	}
 
-	database, err := openDBFn(ctx, cfg.DatabaseURL)
+	database, err := openDBFn(ctx, cfg.DatabaseURL, pgutil.SQLOptions{})
 	if err != nil {
-		return err
+		return fmt.Errorf("db: %w", err)
 	}
 	defer httpkit.CloseWarn(database, "database on shutdown")
 
