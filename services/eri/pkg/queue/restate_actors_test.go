@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -598,7 +599,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 	tests := []struct {
 		name           string
 		sessionKey     string
-		req            BrainDispatchRequest
+		req            eriwire.BrainDispatchRequest
 		activeInvID    string
 		storeActive    bool
 		storeActiveErr bool
@@ -613,16 +614,16 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		{
 			name:           "normal dispatch enqueue accepted",
 			sessionKey:     "dispatch-100",
-			req:            BrainDispatchRequest{ID: "d-100", Source: "vanadis", Prompt: "build chunk 1"},
+			req:            eriwire.BrainDispatchRequest{ID: "d-100", Source: "vanadis", Prompt: "build chunk 1"},
 			wantStatus:     "accepted",
 			wantRowPending: true,
 			wantCommands:   insertAndSend,
 		},
-		{name: "empty key and empty id generates dispatch key and id", req: BrainDispatchRequest{Prompt: "auto dispatch"}, wantStatus: "accepted", wantCommands: insertAndSend},
+		{name: "empty key and empty id generates dispatch key and id", req: eriwire.BrainDispatchRequest{Prompt: "auto dispatch"}, wantStatus: "accepted", wantCommands: insertAndSend},
 		{
 			name:           "already existing dispatch returns already_exists",
 			sessionKey:     "dispatch-200",
-			req:            BrainDispatchRequest{ID: "d-200", Source: "vanadis", Prompt: "build chunk 2"},
+			req:            eriwire.BrainDispatchRequest{ID: "d-200", Source: "vanadis", Prompt: "build chunk 2"},
 			seedExisting:   true,
 			wantStatus:     "already_exists",
 			wantRowPending: true,
@@ -631,7 +632,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		{
 			name:           "stale marker without active row is accepted and inserts row",
 			sessionKey:     "vanadis-g3-shadow-soak-r11",
-			req:            BrainDispatchRequest{ID: "d-300", Source: "vanadis", Prompt: "retry chunk", SkipIfActive: true},
+			req:            eriwire.BrainDispatchRequest{ID: "d-300", Source: "vanadis", Prompt: "retry chunk", SkipIfActive: true},
 			activeInvID:    "inv-cancelled-300",
 			wantStatus:     "accepted",
 			wantRowPending: true,
@@ -640,7 +641,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		{
 			name:         "marker with active row still skips",
 			sessionKey:   "dispatch-350",
-			req:          BrainDispatchRequest{ID: "d-350", Source: "vanadis", Prompt: "build chunk 35", SkipIfActive: true},
+			req:          eriwire.BrainDispatchRequest{ID: "d-350", Source: "vanadis", Prompt: "build chunk 35", SkipIfActive: true},
 			activeInvID:  "inv-disp-350",
 			storeActive:  true,
 			wantStatus:   "skipped_active",
@@ -649,7 +650,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		{
 			name:         "skip if active when store has active dispatch turn",
 			sessionKey:   "dispatch-400",
-			req:          BrainDispatchRequest{ID: "d-400", Source: "vanadis", Prompt: "build chunk 4", SkipIfActive: true},
+			req:          eriwire.BrainDispatchRequest{ID: "d-400", Source: "vanadis", Prompt: "build chunk 4", SkipIfActive: true},
 			storeActive:  true,
 			wantStatus:   "skipped_active",
 			wantCommands: skipCheck,
@@ -657,7 +658,7 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		{
 			name:           "skip if active fails when store active check errors",
 			sessionKey:     "dispatch-450",
-			req:            BrainDispatchRequest{ID: "d-450", Source: "vanadis", Prompt: "skip err", SkipIfActive: true},
+			req:            eriwire.BrainDispatchRequest{ID: "d-450", Source: "vanadis", Prompt: "skip err", SkipIfActive: true},
 			storeActiveErr: true,
 			wantErrorSub:   "active check error",
 			wantCommands:   skipCheck,
@@ -665,16 +666,16 @@ func TestDispatchSessionObject_Enqueue(t *testing.T) {
 		{
 			name:         "store insert failure returns error",
 			sessionKey:   "dispatch-500",
-			req:          BrainDispatchRequest{ID: "d-500", Source: "vanadis", Prompt: "fail me"},
+			req:          eriwire.BrainDispatchRequest{ID: "d-500", Source: "vanadis", Prompt: "fail me"},
 			storeFail:    true,
 			wantErrorSub: "db error",
 			wantCommands: []string{"Run [{insert-pending-dispatch}]"},
 		},
-		{name: "nil pool accepted without store insertion", sessionKey: "dispatch-600", req: BrainDispatchRequest{ID: "d-600", Prompt: "nil pool"}, nilPool: true, wantStatus: "accepted", wantCommands: insertAndSend},
+		{name: "nil pool accepted without store insertion", sessionKey: "dispatch-600", req: eriwire.BrainDispatchRequest{ID: "d-600", Prompt: "nil pool"}, nilPool: true, wantStatus: "accepted", wantCommands: insertAndSend},
 		{
 			name:         "skip if active with nil pool returns accepted",
 			sessionKey:   "dispatch-skip-nil",
-			req:          BrainDispatchRequest{ID: "d-skip-nil", Prompt: "nil pool skip", SkipIfActive: true},
+			req:          eriwire.BrainDispatchRequest{ID: "d-skip-nil", Prompt: "nil pool skip", SkipIfActive: true},
 			nilPool:      true,
 			wantStatus:   "accepted",
 			wantCommands: []string{"Get active_invocation_id", "Run [{insert-pending-dispatch}]", "Send RunTurn"},
@@ -842,7 +843,7 @@ func TestDispatchSessionObject_RunTurn(t *testing.T) {
 			obj := NewDispatchSessionObject(pool, "aerial")
 
 			mc, _ := setupActorMockContext(t, tc.sessionKey, "")
-			res, err := obj.RunTurn(restate.WithMockContext(mc), BrainDispatchRequest{VanadisChunkID: "chunk-1"})
+			res, err := obj.RunTurn(restate.WithMockContext(mc), eriwire.BrainDispatchRequest{VanadisChunkID: "chunk-1"})
 			assert.Equal(t, tc.wantCommands, actorJournalCommands(mc))
 			if tc.wantErrorSub != "" {
 				require.Error(t, err)
@@ -1025,13 +1026,13 @@ func TestDispatchSessionObject_Enqueue_IdempotentRetry(t *testing.T) {
 	sharedCtx := restate.WithMockContext(mc)
 
 	// First attempt without caller-supplied dispatch ID
-	resp1, err1 := obj.Enqueue(sharedCtx, BrainDispatchRequest{Source: "vanadis", Prompt: "idempotent dispatch"})
+	resp1, err1 := obj.Enqueue(sharedCtx, eriwire.BrainDispatchRequest{Source: "vanadis", Prompt: "idempotent dispatch"})
 	require.NoError(t, err1)
 	assert.Equal(t, "accepted", resp1.Status)
 	assert.NotEmpty(t, resp1.DispatchID)
 
 	// Retry of the same Restate invocation (same mock context with same Request.ID)
-	resp2, err2 := obj.Enqueue(sharedCtx, BrainDispatchRequest{Source: "vanadis", Prompt: "idempotent dispatch"})
+	resp2, err2 := obj.Enqueue(sharedCtx, eriwire.BrainDispatchRequest{Source: "vanadis", Prompt: "idempotent dispatch"})
 	require.NoError(t, err2)
 	assert.Equal(t, "accepted", resp2.Status)
 	assert.Equal(t, resp1.DispatchID, resp2.DispatchID)
@@ -1145,7 +1146,7 @@ func TestDispatchSessionObject_RunTurn_Exceeds100PendingDispatches(t *testing.T)
 	obj := NewDispatchSessionObject(pool, "aerial")
 
 	mc, _ := setupActorMockContext(t, "vanadis-target", "")
-	res, err := obj.RunTurn(restate.WithMockContext(mc), BrainDispatchRequest{VanadisChunkID: "target-chunk-1"})
+	res, err := obj.RunTurn(restate.WithMockContext(mc), eriwire.BrainDispatchRequest{VanadisChunkID: "target-chunk-1"})
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Status)
 	assert.Equal(t, 1, res.DispatchesExecuted)
@@ -1192,7 +1193,7 @@ func TestAtLeastOnceRecovery(t *testing.T) {
 		obj := NewDispatchSessionObject(pool, "aerial")
 
 		mc, _ := setupActorMockContext(t, "sess-recover", "")
-		res, err := obj.RunTurn(restate.WithMockContext(mc), BrainDispatchRequest{})
+		res, err := obj.RunTurn(restate.WithMockContext(mc), eriwire.BrainDispatchRequest{})
 		require.NoError(t, err)
 		assert.Equal(t, 1, res.DispatchesExecuted)
 		savedDisp, dErr := store.GetDispatch(context.Background(), "d-proc-1")
@@ -1213,7 +1214,7 @@ func TestAtLeastOnceRecovery(t *testing.T) {
 		obj := NewDispatchSessionObject(pool, "aerial")
 
 		mc, client := setupActorMockContext(t, "sess-conflict", "")
-		resp, err := obj.Enqueue(restate.WithMockContext(mc), BrainDispatchRequest{ID: "d-conflict", Prompt: "conflict"})
+		resp, err := obj.Enqueue(restate.WithMockContext(mc), eriwire.BrainDispatchRequest{ID: "d-conflict", Prompt: "conflict"})
 		require.NoError(t, err)
 		assert.Equal(t, "already_exists", resp.Status)
 		client.AssertCalled(t, "Send", mock.Anything)
