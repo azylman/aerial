@@ -661,6 +661,10 @@ console:
 	callCountSidecars := 0
 	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer token" || r.Header.Get("Accept") != "application/vnd.github+json" || r.Header.Get("X-Github-Api-Version") != "2022-11-28" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		switch r.URL.Path {
 		case "/repos/azylman/aerial/actions/runs":
 			callCountAerial++

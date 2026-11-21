@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/githubapi"
 )
 
 type GitHubRun struct {
@@ -83,15 +85,6 @@ type GitHubPoller struct {
 }
 
 var globalGHPoller *GitHubPoller
-
-const defaultGitHubAPIBaseURL = "https://api.github.com"
-
-func (p *GitHubPoller) apiBase() string {
-	if p.apiBaseURL != "" {
-		return p.apiBaseURL
-	}
-	return defaultGitHubAPIBaseURL
-}
 
 func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	var cleaned []string
@@ -271,12 +264,11 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 		return false
 	}
 
-	baseURL := p.apiBase()
 	allActiveRunIDs := make(map[int64]bool)
 	hasActive := false
 
 	for _, repo := range repos {
-		if p.pollRepo(ctx, repo, baseURL, allActiveRunIDs) {
+		if p.pollRepo(ctx, repo, allActiveRunIDs) {
 			hasActive = true
 		}
 	}
@@ -342,17 +334,11 @@ func parseMergedPullHeadRef(body []byte) (string, error) {
 
 // fetchMergedFromBranch looks up which pull request a main commit merged.
 func (p *GitHubPoller) fetchMergedFromBranch(ctx context.Context, repo, sha string) (string, error) {
-	baseURL := p.apiBase()
-	reqURL := fmt.Sprintf("%s/repos/%s/commits/%s/pulls", baseURL, repo, sha)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+	req, err := githubapi.NewRequest(ctx, p.apiBaseURL, p.token, http.MethodGet, fmt.Sprintf("/repos/%s/commits/%s/pulls", repo, sha), http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("build commit pulls request: %w", err)
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
-	if p.token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.token)
-	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("query commit pulls: %w", err)
@@ -451,18 +437,13 @@ func (p *GitHubPoller) processPolledWorkflowRuns(ctx context.Context, repo, newE
 	return hasActive
 }
 
-func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allActiveRunIDs map[int64]bool) bool {
-	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=10", baseURL, repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+func (p *GitHubPoller) pollRepo(ctx context.Context, repo string, allActiveRunIDs map[int64]bool) bool {
+	req, err := githubapi.NewRequest(ctx, p.apiBaseURL, p.token, http.MethodGet, fmt.Sprintf("/repos/%s/actions/runs?per_page=10", repo), http.NoBody)
 	if err != nil {
 		return false
 	}
 
-	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
-	if p.token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.token)
-	}
 
 	p.mu.RLock()
 	etag := p.runsETagMap[repo]
@@ -520,7 +501,6 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 }
 
 func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optionalRepo ...string) {
-	baseURL := p.apiBase()
 	repo := ""
 	if len(optionalRepo) > 0 && optionalRepo[0] != "" {
 		repo = optionalRepo[0]
@@ -534,17 +514,12 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optiona
 		return
 	}
 
-	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs", baseURL, repo, runID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+	req, err := githubapi.NewRequest(ctx, p.apiBaseURL, p.token, http.MethodGet, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs", repo, runID), http.NoBody)
 	if err != nil {
 		return
 	}
 
-	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
-	if p.token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.token)
-	}
 
 	p.mu.RLock()
 	etag := p.jobsETagMap[runID]

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/githubauth"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prompt"
 )
 
@@ -56,19 +56,9 @@ func NewClient(gitHubToken string, httpClient *http.Client) *Client {
 	}
 	return &Client{
 		GitHubToken:  gitHubToken,
-		GitHubAPIURL: "https://api.github.com",
+		GitHubAPIURL: githubapi.DefaultAPIURL,
 		HTTPClient:   httpClient,
 	}
-}
-
-// IsRetryableGitHubResponse reports whether a GitHub response warrants a
-// retry: a 5xx or a rate limit as githubauth.IsRateLimited classifies it (a
-// permission 403 is not retryable).
-func IsRetryableGitHubResponse(resp *http.Response) bool {
-	if resp == nil {
-		return false
-	}
-	return resp.StatusCode >= 500 || githubauth.IsRateLimited(resp)
 }
 
 // ResolveCIFailureDetailsChecked extracts failing logs or RoboRev findings for a PR check,
@@ -103,31 +93,6 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	return details, nil
 }
 
-// ResolveCIFailureDetails extracts failing logs or RoboRev findings for a PR check.
-func (c *Client) ResolveCIFailureDetails(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) string {
-	res, err := c.ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
-	if err != nil {
-		return details
-	}
-	return res
-}
-
-func (c *Client) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	apiURL := strings.TrimSpace(c.GitHubAPIURL)
-	if apiURL == "" {
-		apiURL = "https://api.github.com"
-	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(apiURL, "/")+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if token := strings.TrimSpace(c.GitHubToken); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	return req, nil
-}
-
 // ResolveGitHubRepoPath normalizes a repo slug to an owner/repo path.
 func ResolveGitHubRepoPath(repo string) string {
 	clean := strings.Trim(strings.TrimSpace(repo), "/")
@@ -151,7 +116,7 @@ func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo strin
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := c.newGitHubRequest(timeoutCtx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repoPath, jobID), nil)
+	req, err := githubapi.NewRequest(timeoutCtx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repoPath, jobID), nil)
 	if err != nil {
 		return "", err
 	}
@@ -161,7 +126,7 @@ func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo strin
 	}
 	defer resp.Body.Close()
 
-	if IsRetryableGitHubResponse(resp) {
+	if githubapi.IsRetryable(resp) {
 		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -189,7 +154,7 @@ func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo stri
 	}
 	var comments []gitHubIssueComment
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoPath, prNumber)
-	req, err := c.newGitHubRequest(ctx, http.MethodGet, path, nil)
+	req, err := githubapi.NewRequest(ctx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, path, nil)
 	if err != nil {
 		return "", err
 	}
@@ -199,7 +164,7 @@ func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo stri
 	}
 	defer resp.Body.Close()
 
-	if IsRetryableGitHubResponse(resp) {
+	if githubapi.IsRetryable(resp) {
 		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
