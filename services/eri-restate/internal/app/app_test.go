@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -50,10 +50,6 @@ func WithAppConfig(cfg *config.Config) AppOption {
 	return func(o *appOptions) {
 		o.appConfig = cfg
 	}
-}
-
-func (t *ReloadTrigger) Done() <-chan struct{} {
-	return t.done
 }
 
 func TestNewEriRestateServer(t *testing.T) {
@@ -356,7 +352,7 @@ func runHealthEndpointCase(t *testing.T, tc healthEndpointCase) {
 		}
 	}
 
-	reloadTrigger := NewReloadTrigger(context.Background(), func(source string) {})
+	reloadTrigger := bootstrap.NewReloadTrigger(context.Background(), func(source string) {})
 	mux := SetupHealthMux(HealthMuxOptions{
 		AgentName:     "aerial",
 		LLMFunc:       llmFn,
@@ -642,34 +638,6 @@ func (*dummySpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.Wri
 	return nil, nil, nil, nil, errors.New("dummy spawn")
 }
 
-func TestReloadTrigger(t *testing.T) {
-	t.Parallel()
-
-	called := make(chan string, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	trig := NewReloadTrigger(ctx, func(s string) {
-		called <- s
-	})
-	require.NotNil(t, trig)
-	assert.NotNil(t, trig.Done())
-
-	trig.Trigger()
-	select {
-	case s := <-called:
-		assert.Equal(t, "git-sync webhook", s)
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload trigger did not fire")
-	}
-
-	cancel()
-	trig.Trigger()
-	<-trig.Done()
-
-	var nilTrig *ReloadTrigger
-	nilTrig.Trigger() // safe no-op
-}
-
 type usagePollerCase struct {
 	name        string
 	cur         *config.ConfigData
@@ -767,7 +735,7 @@ func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
 	mcpRoutes := &env.MCPProxyRoutes{}
 
 	reloadCalled := make(chan bool, 1)
-	reloadTrigger := NewReloadTrigger(context.Background(), func(source string) {
+	reloadTrigger := bootstrap.NewReloadTrigger(context.Background(), func(source string) {
 		reloadCalled <- true
 	})
 
@@ -873,65 +841,6 @@ func TestRunApp_ListenFailures(t *testing.T) {
 	assert.Contains(t, err.Error(), "listen on health port")
 }
 
-func TestInitDatabaseAndStores(t *testing.T) {
-	tests := []struct {
-		name       string
-		dbURL      string
-		stack      string
-		openFn     func(*config.Config) (*sql.DB, error)
-		wantErrSub string
-	}{
-		{
-			name:       "DBOpenError",
-			dbURL:      "",
-			wantErrSub: "failed to initialize database",
-		},
-		{
-			name:  "ResolveTranscriptStackError",
-			dbURL: "",
-			stack: "",
-			openFn: func(*config.Config) (*sql.DB, error) {
-				return sql.Open("pgx", "postgres://localhost/test")
-			},
-			wantErrSub: "failed to resolve transcript stack",
-		},
-		{
-			name:  "Success",
-			dbURL: "postgres://localhost/test",
-			stack: "aerial-test",
-			openFn: func(*config.Config) (*sql.DB, error) {
-				return sql.Open("pgx", "postgres://localhost/test")
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.openFn != nil {
-				oldOpen := openDefaultDB
-				openDefaultDB = tc.openFn
-				defer func() { openDefaultDB = oldOpen }()
-			}
-			appCfg := config.NewFromData(&config.ConfigData{
-				DatabaseURL: tc.dbURL,
-				Transcripts: config.TranscriptsConfig{Stack: tc.stack},
-			})
-			cur := appCfg.Current()
-			dbConn, s, tx, err := initDatabaseAndStores(context.Background(), appCfg, cur, "")
-			if tc.wantErrSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrSub)
-				return
-			}
-			require.NoError(t, err)
-			assert.NotNil(t, dbConn)
-			assert.NotNil(t, s)
-			assert.NotNil(t, tx)
-			_ = dbConn.Close()
-		})
-	}
-}
-
 func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 	t.Run("InitDBError", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -999,20 +908,6 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 	})
 }
 
-func TestReloadTrigger_ContextCanceledEarly(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	trigger := NewReloadTrigger(ctx, func(string) {})
-	cancel()
-	trigger.Trigger()
-	select {
-	case <-trigger.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for trigger.Done()")
-	}
-}
-
 func TestWrapDiscoveryTimeoutReconciler_NonDiscoverPath(t *testing.T) {
 	t.Parallel()
 	called := false
@@ -1047,119 +942,12 @@ func TestWireOutboundIntegrations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pool := queue.New(nil, queue.WorkerPoolConfig{})
-			closeFn := wireOutboundIntegrations(context.Background(), tc.cur, pool)
-			assert.Equal(t, tc.wantSession, pool.DiscordSession() != nil)
+			dg, closeFn := wireOutboundIntegrations(context.Background(), tc.cur, pool)
+			assert.Equal(t, tc.wantSession, dg != nil)
+			assert.Same(t, dg, pool.DiscordSession())
 			assert.Equal(t, closeFn != nil, pool.EventBus() != nil)
 			if closeFn != nil {
 				closeFn()
-			}
-		})
-	}
-}
-
-type reloadFuncTestCase struct {
-	name          string
-	withAppCfg    bool
-	corruptConfig bool
-	withProv      bool
-	provSyncError bool
-	withEphem     bool
-	withWorker    bool
-}
-
-func TestCreateReloadFunc(t *testing.T) {
-	tests := []reloadFuncTestCase{
-		{
-			name: "all nil components is safe no-op",
-		},
-		{
-			name:          "corrupt config fails and returns early",
-			withAppCfg:    true,
-			corruptConfig: true,
-			withEphem:     true,
-			withWorker:    true,
-		},
-		{
-			name:       "successful reload marks pools dirty",
-			withAppCfg: true,
-			withProv:   true,
-			withEphem:  true,
-			withWorker: true,
-		},
-		{
-			name:          "provisioner sync error logs warning and continues",
-			withAppCfg:    true,
-			withProv:      true,
-			provSyncError: true,
-			withEphem:     true,
-			withWorker:    true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			tmpDir := t.TempDir()
-
-			var appCfg *config.Config
-			cfgPath := filepath.Join(tmpDir, "config.yaml")
-			loadConfig := func() (*config.Config, error) {
-				return config.LoadConfigFromLookup(func(string) string { return "" }, cfgPath)
-			}
-			if tc.withAppCfg {
-				switch {
-				case tc.corruptConfig:
-					_ = os.WriteFile(cfgPath, []byte("invalid: yaml: ["), 0o644)
-				case tc.provSyncError:
-					invalidCredYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    path: /fake/oauth\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
-					_ = os.WriteFile(cfgPath, []byte(invalidCredYAML), 0o644)
-				default:
-					validYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
-					_ = os.WriteFile(cfgPath, []byte(validYAML), 0o644)
-				}
-				appCfg = config.NewFromData(&config.ConfigData{
-					DataDir:       tmpDir,
-					GeminiHomeDir: tmpDir,
-					CredentialSources: config.CredentialSources{
-						OAuth: config.CredentialSource{Disabled: true},
-						Codex: config.CredentialSource{Disabled: true},
-						Muse:  config.CredentialSource{Disabled: true},
-					},
-				})
-			}
-
-			var prov *env.Provisioner
-			if tc.withProv && appCfg != nil {
-				prov, _ = env.NewFromConfig(appCfg)
-			}
-
-			var ephemPool *runner.InterchangeablePool
-			if tc.withEphem {
-				underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
-					GeminiHomeDir: tmpDir,
-					Cwd:           tmpDir,
-				}, &dummySpawner{})
-				ephemPool = runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
-					WorkerCount: 1,
-					KeyPrefix:   "ephem:test",
-				})
-				t.Cleanup(func() { _ = ephemPool.Close() })
-			}
-
-			var workerPool *queue.WorkerPool
-			if tc.withWorker {
-				workerPool = queue.New(appCfg, queue.WorkerPoolConfig{
-					ParentContext: ctx,
-					Store:         dbtest.NewFakeStore(),
-				})
-			}
-
-			fn := createReloadFunc(ctx, appCfg, loadConfig, prov, ephemPool, workerPool)
-			require.NotNil(t, fn)
-			fn("test-source")
-
-			if tc.withAppCfg && !tc.corruptConfig {
-				assert.Equal(t, "test-model", appCfg.Current().Model)
 			}
 		})
 	}
@@ -1188,26 +976,5 @@ func TestStartDiscoveryTimeoutReconciler_ContextCanceledDuringRetry(t *testing.T
 	case <-trigger.Done():
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for trigger.Done()")
-	}
-}
-
-func TestFirstNonEmpty(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		vals []string
-		want string
-	}{
-		{name: "no values", vals: nil, want: ""},
-		{name: "all blank", vals: []string{"", "  ", "\t"}, want: ""},
-		{name: "first non-blank is trimmed", vals: []string{" ", "  alpha  ", "beta"}, want: "alpha"},
-		{name: "first value wins", vals: []string{"gamma", "delta"}, want: "gamma"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, FirstNonEmpty(tc.vals...))
-		})
 	}
 }

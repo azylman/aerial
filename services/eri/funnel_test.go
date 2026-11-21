@@ -869,9 +869,6 @@ func TestSyncBotMemberRoles(t *testing.T) {
 	}
 
 	syncBotMemberRoles(context.Background(), s, "guild-not-in-state", "bot-1")
-
-	_ = DefaultGeminiHomeDir()
-	_ = DefaultDataDir()
 }
 
 type populateDiscordMessageCase struct {
