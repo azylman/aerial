@@ -242,7 +242,7 @@ func TestRegisterGitSyncReload(t *testing.T) {
 	}{
 		{name: "ipv4 loopback post queues", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}", wantQueued: true},
 		{name: "ipv6 loopback post queues", method: http.MethodPost, remoteAddr: "[::1]:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}", wantQueued: true},
-		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "10.42.0.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "192.0.2.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusMethodNotAllowed, wantBody: "Method Not Allowed\n"},
 	}
 

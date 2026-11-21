@@ -204,7 +204,7 @@ func TestReloadable_Handler(t *testing.T) {
 		{name: "ipv6 loopback unchanged", method: http.MethodPost, remoteAddr: "[::1]:5555", nextCfg: &testCfg{Port: "8080", Model: "a"}, wantCode: http.StatusOK, wantStatus: "unchanged", wantPort: "8080"},
 		{name: "bad config still 200", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", loadErr: errors.New("yaml: line 3: bad"), wantCode: http.StatusOK, wantStatus: "lkgc_retained", wantErrBody: "yaml: line 3: bad", wantPort: "8080"},
 		{name: "restart field change", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", nextCfg: &testCfg{Port: "9090", Model: "a"}, wantCode: http.StatusOK, wantStatus: "restarting", wantPort: "8080"},
-		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "10.42.0.9:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
+		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "192.0.2.9:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
 		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusMethodNotAllowed, wantPort: "8080"},
 	}
 
@@ -254,7 +254,7 @@ func TestLoopbackOnly(t *testing.T) {
 		{name: "ipv4 loopback passes", remoteAddr: "127.0.0.1:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
 		{name: "ipv4 loopback range passes", remoteAddr: "127.0.0.2:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
 		{name: "ipv6 loopback passes", remoteAddr: "[::1]:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
-		{name: "pod network rejected", remoteAddr: "10.42.0.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "pod network rejected", remoteAddr: "192.0.2.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "ipv6 non-loopback rejected", remoteAddr: "[fd00::1]:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "unparseable remote rejected", remoteAddr: "garbage", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "hostname remote rejected", remoteAddr: "localhost:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},

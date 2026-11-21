@@ -61,8 +61,8 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		},
 		{
 			name:           "fallback kube host and port",
-			env:            map[string]string{"KUBERNETES_SERVICE_HOST": "10.43.0.1", "KUBERNETES_SERVICE_PORT": "443"},
-			wantKubeServer: "https://10.43.0.1:443",
+			env:            map[string]string{"KUBERNETES_SERVICE_HOST": "192.0.2.1", "KUBERNETES_SERVICE_PORT": "443"},
+			wantKubeServer: "https://192.0.2.1:443",
 		},
 		{
 			name:      "github and postgres primary envs",
@@ -478,7 +478,7 @@ func TestRestartRequired(t *testing.T) {
 		BrainURL:            "http://eri:8080",
 		EriURL:              "http://eri:8080",
 		FluxReceiverURL:     "http://flux/hook",
-		KubeAPIServer:       "https://10.0.0.1:443",
+		KubeAPIServer:       "https://192.0.2.1:443",
 		KubeToken:           "kube",
 		SystemChannelID:     "111",
 		AutoUpdatePRAuthors: []string{"a"},
@@ -502,7 +502,7 @@ func TestRestartRequired(t *testing.T) {
 		{name: "bot id requires restart", next: withField(base, Config{BotID: "agent-gamma"}), want: true},
 		{name: "eri url requires restart", next: withField(base, Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), want: true},
 		{name: "flux receiver url requires restart", next: withField(base, Config{FluxReceiverURL: "http://flux2/hook"}), want: true},
-		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
+		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://192.0.2.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
 		{name: "k8s auth enabled requires restart", next: withField(base, Config{K8sAuthEnabled: true}), want: true},

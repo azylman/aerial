@@ -1385,9 +1385,9 @@ func TestNewAuthenticator_APIServerURL(t *testing.T) {
 		},
 		{
 			name:    "environment service host and port used",
-			envHost: "10.96.0.1",
+			envHost: "192.0.2.1",
 			envPort: "443",
-			wantURL: "https://10.96.0.1:443",
+			wantURL: "https://192.0.2.1:443",
 		},
 	}
 
