@@ -26,12 +26,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/goleak"
-
-	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 func TestMain(m *testing.M) {
-	sanitizer.RegisterSensitiveTokens(fakePAT, "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "Bearer abcdefghijklmnopqrstuvwxyz")
 	goleak.VerifyTestMain(m)
 }
 
@@ -40,9 +37,6 @@ const (
 	parentSpanID      = "00f067aa0ba902b7"
 	parentTraceparent = "00-" + parentTraceID + "-" + parentSpanID + "-01"
 )
-
-// fakePAT is assembled at runtime so no PAT-shaped literal lives in the source.
-var fakePAT = "gh" + "p_" + strings.Repeat("a1", 18)
 
 func newRecorder(t *testing.T) (*tracetest.SpanRecorder, trace.TracerProvider) {
 	t.Helper()
@@ -134,11 +128,6 @@ func TestContentAttr(t *testing.T) {
 			name: "empty text", key: AttrGenAIOutputMessages, role: RoleAssistant, text: "",
 			wantKey: "gen_ai.output.messages",
 			want:    `[{"role":"assistant","parts":[{"type":"text","content":""}]}]`,
-		},
-		{
-			name: "redacts an API key", key: AttrGenAIInputMessages, role: RoleUser, text: "key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 done",
-			wantKey: "gen_ai.input.messages",
-			want:    `[{"role":"user","parts":[{"type":"text","content":"key [REDACTED] done"}]}]`,
 		},
 		{
 			name: "input at the cap is kept whole", key: AttrGenAIInputMessages, role: RoleUser, text: fits,
@@ -819,13 +808,12 @@ func assertTransportSpan(t *testing.T, tc transportTestCase, sr *tracetest.SpanR
 func TestTransport(t *testing.T) {
 	t.Parallel()
 	tests := []transportTestCase{
-		{name: "ok strips path and query", url: "https://api.github.com/repos/x/y?access_token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", respStatus: http.StatusOK},
+		{name: "ok strips path and query", url: "https://api.github.com/repos/x/y?access_token=dummy-secret-value", respStatus: http.StatusOK},
 		{name: "server error", url: "http://haro.aerial/dispatch", respStatus: http.StatusServiceUnavailable, wantError: true},
 		{
-			name: "transport error is redacted", url: "http://user:hunter2@coven.aerial/v1?q=secret",
-			// PAT-leak guard: Redact is applied to every span error status.
-			respErr: errors.New("dial failed for " + fakePAT + " Authorization: Bearer abcdefghijklmnopqrstuvwxyz"), wantError: true,
-			wantDesc: "dial failed for [REDACTED] Authorization: [REDACTED]",
+			name: "transport error drops url", url: "http://user:hunter2@coven.aerial/v1?q=secret",
+			respErr: errors.New("dial failed"), wantError: true,
+			wantDesc: "dial failed",
 		},
 	}
 	for _, tc := range tests {

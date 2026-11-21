@@ -328,12 +328,6 @@ func SanitizeString(input string) string {
 	return sanitizeInternal(input, "[REDACTED]")
 }
 
-// SanitizeLog scrubs registered sensitive tokens and their encoded variants from logs, error traces,
-// and subprocess output, replacing them with "[REDACTED_TOKEN]".
-func SanitizeLog(input string) string {
-	return sanitizeInternal(input, "[REDACTED_TOKEN]")
-}
-
 // SanitizeMentions strips Discord user mentions (<@123>, <@!123>), role mentions (<@&123>),
 // channel mentions (<#123>), and broadcast mentions (@everyone, @here).
 func SanitizeMentions(input string) string {

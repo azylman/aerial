@@ -761,7 +761,6 @@ func TestParseAndFilterStderrLine(t *testing.T) {
 		{name: "benign noise unauthenticated", engine: "agy", line: "I1118 09:24:54.123456 12345 client.go:42] You are not logged into Antigravity.", wantKeep: false},
 		{name: "benign noise auth mode unspecified", engine: "agy", line: "I1118 09:24:54.123456 12345 client.go:42] Auth mode is unspecified, skipping fetchAvailableModels", wantKeep: false},
 		{name: "benign noise non-glog", engine: "agy", line: "Warning: You are not logged into Antigravity. Please login.", wantKeep: false},
-		{name: "secret redaction in glog", engine: "agy", line: "I1118 09:24:54.123456 12345 auth.go:42] User token is ghp_1234567890abcdefghijklmnopqrstuvwxyz for request", wantLevel: slog.LevelInfo, wantMsg: "User token is [REDACTED] for request", wantSource: "auth.go:42", wantKeep: true},
 		{name: "non-glog warning on error keyword", engine: "claude", line: "An error occurred while reading config file", wantLevel: slog.LevelWarn, wantMsg: "An error occurred while reading config file", wantKeep: true},
 		{name: "non-glog warning on fatal keyword", engine: "codex", line: "fatal: branch not found", wantLevel: slog.LevelWarn, wantMsg: "fatal: branch not found", wantKeep: true},
 		{name: "non-glog warning on panic keyword", engine: "muse", line: "panic: runtime error dereference", wantLevel: slog.LevelWarn, wantMsg: "panic: runtime error dereference", wantKeep: true},

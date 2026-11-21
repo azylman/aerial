@@ -107,7 +107,7 @@ func runInSpan[T any](rc restate.RunContext, name string, fn func(restate.RunCon
 	defer span.End()
 	out, err := fn(tracedRunContext{Context: ctx, base: rc})
 	if err != nil {
-		span.SetStatus(codes.Error, tracing.Redact(err.Error()))
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return out, err
 }

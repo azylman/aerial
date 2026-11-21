@@ -15,7 +15,6 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
@@ -492,7 +491,7 @@ func injectRetrievedContext(ctx context.Context, prompt, memQuery string, amb Am
 		c, span := tracer.Start(c, spanName)
 		defer span.End()
 		if block, err := run(c); err != nil {
-			span.SetStatus(codes.Error, tracing.Redact(err.Error()))
+			span.SetStatus(codes.Error, err.Error())
 			log.Printf("%s Warning: %s failed: %v", logPrefix, name, err)
 		} else if b := strings.TrimSpace(block); b != "" {
 			payloadPrompt = b + "\n\n" + payloadPrompt
@@ -564,7 +563,7 @@ func deduplicateRetrievedMemory(prompt string, seen map[string]bool) string {
 
 var glogHeaderRegexp = regexp.MustCompile(`^([IWEF])\d{4}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+([^:\s]+:\d+)\]\s*(.*)$`)
 
-// ParseAndFilterStderrLine parses and redacts a single line of agent stderr, mapping glog
+// ParseAndFilterStderrLine parses a single line of agent stderr, mapping glog
 // severities to slog levels, filtering benign authentication noise, and detecting warnings.
 func ParseAndFilterStderrLine(engine, rawLine string) (level slog.Level, msg, sourceFile string, keep bool) {
 	_ = engine
@@ -572,12 +571,12 @@ func ParseAndFilterStderrLine(engine, rawLine string) (level slog.Level, msg, so
 	if strings.TrimSpace(trimmed) == "" {
 		return slog.LevelInfo, "", "", false
 	}
-	redacted := strings.TrimSpace(tracing.Redact(trimmed))
-	if redacted == "" {
+	line := strings.TrimSpace(trimmed)
+	if line == "" {
 		return slog.LevelInfo, "", "", false
 	}
 
-	if submatches := glogHeaderRegexp.FindStringSubmatch(redacted); len(submatches) == 4 {
+	if submatches := glogHeaderRegexp.FindStringSubmatch(line); len(submatches) == 4 {
 		severity := submatches[1]
 		sourceFile = submatches[2]
 		msg = strings.TrimSpace(submatches[3])
@@ -600,7 +599,7 @@ func ParseAndFilterStderrLine(engine, rawLine string) (level slog.Level, msg, so
 		return level, msg, sourceFile, true
 	}
 
-	msg = redacted
+	msg = line
 	if strings.Contains(msg, "You are not logged into Antigravity.") || strings.Contains(msg, "Auth mode is unspecified, skipping fetchAvailableModels") {
 		return slog.LevelInfo, "", "", false
 	}

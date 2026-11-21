@@ -36,7 +36,7 @@ func isPoisonPillMessage(m db.Message, maxAttempts int) (isPoison bool, reason s
 
 func handlePoisonPillMessage(ctx context.Context, store db.Store, pool *WorkerPool, m db.Message, reason string) {
 	log.Printf("[Startup Recovery] Poison pill detected for message %s (restart_count=%d, retry_count=%d): %s. Dropping message.", m.ID, m.RestartCount, m.RetryCount, reason)
-	cleanSnippet := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(sanitizeErrorText(m.Content), "\r", ""), "\n", " "))
+	cleanSnippet := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(m.Content, "\r", ""), "\n", " "))
 	if runes := []rune(cleanSnippet); len(runes) > 60 {
 		cleanSnippet = string(runes[:57]) + "..."
 	}
