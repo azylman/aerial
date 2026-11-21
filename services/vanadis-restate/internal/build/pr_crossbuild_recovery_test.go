@@ -14,8 +14,9 @@ import (
 )
 
 // Regression coverage for cross-build deploy sweeps: retry recovery for
-// side-effect losses, terminal-build skipping, mutation rollout overlay,
-// and processing swept chunks before surfacing a store error.
+// side-effect losses, mutation rollout overlay, processing swept chunks
+// before surfacing a store error, and handing every other build to its own
+// runner via a queued Reconcile instead of evaluating it locally.
 func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 	t.Parallel()
 	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
@@ -30,44 +31,53 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 		foreignStatus      string
 		foreignChunkStatus string
 		wantDeployJobs     []string
-		wantStatusUpdates  []string
+		wantReconciles     []store.BuildRoute
 		wantEvents         []string
 		wantErr            bool
 	}{
 		{
-			name: "terminal foreign build is skipped entirely", deployJobs: []string{"eri"},
-			crossSwept:     []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			name: "recovered chunk re-queues its build reconcile on retry", deployJobs: []string{"eri"},
 			crossRecovered: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
-			foreignStatus:  statusCompleted, foreignChunkStatus: statusCompleted,
-			wantDeployJobs: []string{"eri"},
+			foreignStatus:  statusRunning, foreignChunkStatus: statusCompleted,
+			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 		{
-			name: "failed foreign build publishes chunk completion and syncs widget without re-failing build", deployJobs: []string{"eri"},
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			name: "failed foreign build on sibling runner is reconciled there, not locally", deployJobs: []string{"eri"},
+			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}},
 			foreignStatus: statusFailed, foreignChunkStatus: statusMerged,
 			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}},
+		},
+		{
+			name: "swept and recovered chunks of one build queue one reconcile", deployJobs: []string{"eri"},
+			crossSwept:     []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			crossRecovered: []store.SweptChunk{{ChunkID: "f0", BuildID: "b2"}},
+			foreignStatus:  statusRunning, foreignChunkStatus: statusMerged,
+			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1", "f0"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 		{
 			name:          "mutation rollout jobs overlay onto stale deploying snapshot",
 			mutationJobs:  []string{"eri"},
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			foreignStatus: statusRunning, foreignChunkStatus: statusMerged,
-			wantDeployJobs:    []string{"eri"},
-			wantStatusUpdates: []string{"b2=completed"}, wantEvents: []string{"f1"},
+			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 		{
 			name: "absent mutation jobs keep stored jobs", deployJobs: []string{"worker"},
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			foreignStatus: statusRunning, foreignChunkStatus: statusMerged,
-			wantDeployJobs:    []string{"worker"},
-			wantStatusUpdates: []string{"b2=completed"}, wantEvents: []string{"f1"},
+			wantDeployJobs: []string{"worker"}, wantEvents: []string{"f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 		{
 			name: "store error after partial sweep still processes swept chunks", deployJobs: []string{"eri"},
 			crossSwept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, crossErr: true,
 			foreignStatus: statusRunning, foreignChunkStatus: statusMerged,
-			wantDeployJobs:    []string{"eri"},
-			wantStatusUpdates: []string{"b2=completed"}, wantEvents: []string{"f1"}, wantErr: true,
+			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"}, wantErr: true,
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 	}
 	for _, tc := range tests {
@@ -93,14 +103,17 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 			exec := executor.NewExecutor("", &mockEriClient{}, bus, "token", nil)
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 			mutation := &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying", RolloutState: mutated}
-			err := bo.completePRDeploymentMutation(context.Background(), "b1", mutation)
+			ctx, crossBuild := withCrossBuildReconciles(context.Background())
+			err := bo.completePRDeploymentMutation(ctx, "b1", mutation)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 			}
 			assert.Equal(t, tc.wantDeployJobs, spy.crossDeployJobs)
-			assert.Equal(t, tc.wantStatusUpdates, spy.statusUpdates)
+			assert.Equal(t, tc.wantReconciles, crossBuild.list())
+			assert.Empty(t, spy.statusUpdates, "other builds must never be evaluated by this runner")
+			assert.Empty(t, spy.foreignReads, "other builds must never be read for local evaluation")
 			for _, id := range tc.wantEvents {
 				assert.True(t, bus.sweptEvent(id), "expected vanadis_chunk completed event for %q, got %+v", id, bus.events)
 			}

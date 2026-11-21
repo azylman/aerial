@@ -20,27 +20,29 @@ func TestPostgresVanadisStore_LookupsAndAppend(t *testing.T) {
 		db        dbScript
 		wantErr   bool
 		wantErrIs error
-		wantBuild string
+		wantRoute BuildRoute
 	}{
 		{name: "lookup pr chunk not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup pr chunk success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantBuild: "b1"},
+		{name: "lookup pr chunk success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false, "aerial")}, wantRoute: BuildRoute{BuildID: "b1", RunnerAgent: "aerial"}},
+		{name: "lookup pr chunk sibling runner", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false, " Agent-Alpha ")}, wantRoute: BuildRoute{BuildID: "b1", RunnerAgent: "agent-alpha"}},
 		{name: "lookup chunk build id not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup chunk build id success", db: dbScript{row: valuesRow("b1")}, wantBuild: "b1"},
+		{name: "lookup chunk build id success", db: dbScript{row: valuesRow("b1", "aerial")}, wantRoute: BuildRoute{BuildID: "b1", RunnerAgent: "aerial"}},
+		{name: "lookup chunk build id sibling runner", db: dbScript{row: valuesRow("b1", "agent-alpha")}, wantRoute: BuildRoute{BuildID: "b1", RunnerAgent: "agent-alpha"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := tc.db.open()
 			switch tc.name {
-			case "lookup pr chunk not found", "lookup pr chunk success":
-				bID, _, err := st.LookupPRChunk(context.Background(), "aerial", 123)
-				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && bID != tc.wantBuild {
-					t.Errorf("LookupPRChunk = %q, want %q", bID, tc.wantBuild)
+			case "lookup pr chunk not found", "lookup pr chunk success", "lookup pr chunk sibling runner":
+				route, _, err := st.LookupPRChunk(context.Background(), "aerial", 123)
+				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && route != tc.wantRoute {
+					t.Errorf("LookupPRChunk = %+v, want %+v", route, tc.wantRoute)
 				}
-			case "lookup chunk build id not found", "lookup chunk build id success":
-				bID, err := st.LookupChunkBuildID(context.Background(), "c1")
-				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && bID != tc.wantBuild {
-					t.Errorf("LookupChunkBuildID = %q, want %q", bID, tc.wantBuild)
+			case "lookup chunk build id not found", "lookup chunk build id success", "lookup chunk build id sibling runner":
+				route, err := st.LookupChunkBuildID(context.Background(), "c1")
+				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && route != tc.wantRoute {
+					t.Errorf("LookupChunkBuildID = %+v, want %+v", route, tc.wantRoute)
 				}
 			}
 		})
@@ -147,12 +149,12 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := tc.db.open()
-			bID, cID, err := st.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
+			route, cID, err := st.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}
-			if bID != tc.wantBuild || cID != tc.wantChunk {
-				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%q, %q), want (%q, %q)", bID, cID, tc.wantBuild, tc.wantChunk)
+			if route.BuildID != tc.wantBuild || cID != tc.wantChunk || route.RunnerAgent != "aerial" {
+				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%+v, %q), want (%q, %q, aerial)", route, cID, tc.wantBuild, tc.wantChunk)
 			}
 		})
 	}

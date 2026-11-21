@@ -67,8 +67,9 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 // SweptChunk identifies one cross-build swept chunk and the foreign build
 // that owns it.
 type SweptChunk struct {
-	ChunkID string
-	BuildID string
+	ChunkID     string
+	BuildID     string
+	RunnerAgent string
 }
 
 // buildPushJobRegex mirrors the widget Build-and-Push check-name parser so
@@ -235,28 +236,44 @@ func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deployi
 	if len(repos) == 0 {
 		return nil, nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
+	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at, COALESCE(NULLIF(b.runner_agent, ''), 'aerial') FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
 	}
 	defer rows.Close()
-	candidates, err := ScanChunks(rows)
-	if err != nil {
-		return nil, nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
+	var candidates []model.VanadisChunk
+	runners := make(map[string]string)
+	for rows.Next() {
+		var runner string
+		c, err := scanChunkRow(rows, &runner)
+		if err != nil {
+			return nil, nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
+		}
+		runners[c.BuildID] = NormalizeRunnerAgent(runner)
+		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
 	}
-	for _, sw := range CrossBuildDeploymentSweepIDs(deploying, candidates) {
+	for _, sw := range withSweptRunners(CrossBuildDeploymentSweepIDs(deploying, candidates), runners) {
 		if err := s.CompletePRDeployment(ctx, sw.ChunkID, nil); err != nil {
 			if errors.Is(err, ErrPRTransitionSkipped) {
 				continue
 			}
-			return swept, recoveredCrossBuildChunks(deploying, candidates), err
+			return swept, withSweptRunners(recoveredCrossBuildChunks(deploying, candidates), runners), err
 		}
 		swept = append(swept, sw)
 	}
-	return swept, recoveredCrossBuildChunks(deploying, candidates), nil
+	return swept, withSweptRunners(recoveredCrossBuildChunks(deploying, candidates), runners), nil
+}
+
+// withSweptRunners stamps each swept chunk with its build's runner agent so
+// side effects for that build route to the runner that executes it.
+func withSweptRunners(chunks []SweptChunk, runners map[string]string) []SweptChunk {
+	for i := range chunks {
+		chunks[i].RunnerAgent = NormalizeRunnerAgent(runners[chunks[i].BuildID])
+	}
+	return chunks
 }
 
 // recoveredCrossBuildChunks re-derives already-completed chunks matching
