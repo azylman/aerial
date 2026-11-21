@@ -106,27 +106,6 @@ func TestPureHelpers_ShouldPruneRuns(t *testing.T) {
 	}
 }
 
-func TestFirstNonEmpty(t *testing.T) {
-	tests := []struct {
-		name string
-		vals []string
-		want string
-	}{
-		{name: "no values", vals: nil, want: ""},
-		{name: "all blank", vals: []string{"", "   "}, want: ""},
-		{name: "first wins", vals: []string{"a", "b"}, want: "a"},
-		{name: "skips blanks and trims", vals: []string{"  ", " b ", "c"}, want: "b"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := FirstNonEmpty(tc.vals...); got != tc.want {
-				t.Errorf("FirstNonEmpty(%q) = %q, want %q", tc.vals, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
 	completedTime := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -471,28 +450,6 @@ func TestFormatScheduleHelpers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runFormatScheduleCase(t, tc)
-		})
-	}
-}
-
-func TestRedactDSN(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		dsn  string
-		want string
-	}{
-		{"query removed", "postgresql://app:hunter2@db:5432/app?sslmode=disable&password=hunter2", "postgresql://app:xxxxx@db:5432/app"},
-		{"empty", "", "[redacted]"},
-		{"key value dsn", "host=db password=hunter2", "[redacted]"},
-		{"whitespace trimmed", "  postgres://app:hunter2@db:5432/app#frag \n", "postgres://app:xxxxx@db:5432/app"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := RedactDSN(tc.dsn); got != tc.want {
-				t.Errorf("RedactDSN(%q) = %q, want %q", tc.dsn, got, tc.want)
-			}
 		})
 	}
 }

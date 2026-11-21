@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/haro/internal/model"
 )
@@ -111,9 +112,9 @@ func validateVanadisTarget(ctx context.Context, baseURL, source, target string) 
 	}
 	var status string
 	if source == model.SourceVanadisChunk {
-		status = model.FirstNonEmpty(res.Chunk.Status, res.Status)
+		status = strutil.FirstNonEmpty(res.Chunk.Status, res.Status)
 	} else {
-		status = model.FirstNonEmpty(res.Build.Status, res.Status)
+		status = strutil.FirstNonEmpty(res.Build.Status, res.Status)
 	}
 	if terminalStates[strings.ToLower(strings.TrimSpace(status))] {
 		return fmt.Errorf("%s %q is already in terminal state %q", entityName, target, status)
