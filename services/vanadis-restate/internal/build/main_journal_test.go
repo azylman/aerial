@@ -568,3 +568,36 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 		})
 	}
 }
+
+// A repair PR's deploy_success changes only what the journaled
+// handle-pr-event-postgres step writes: invocations already in flight replay
+// the same command sequence whether the deploying chunk is a PR chunk that
+// completed or an action chunk moved back to running.
+func TestOnPREvent_RepairDeployJournalCommandSequence(t *testing.T) {
+	t.Parallel()
+	transition := reconcileStepOutput{BuildStatus: "running", LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: model.VanadisBuild{ID: "b1", Status: "running"}}}
+	tests := []struct {
+		name    string
+		outcome prEventOutcome
+		want    []string
+	}{
+		{name: "action repair deploy reconciles", outcome: prEventOutcome{Applied: true}, want: []string{"run runner-guard", "run handle-pr-event-postgres", "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+		{name: "action repair deploy with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}}, want: []string{"run runner-guard", "run handle-pr-event-postgres", `send {"reason":"widget_sync"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var commands []string
+			journal := map[string]any{
+				labelRunnerGuard:           runnerGuardResult{},
+				"handle-pr-event-postgres": tc.outcome,
+				labelReconcileAfterPREvent: transition,
+			}
+			ctx := makeOutcomeJournalContext(t, journal, &commands)
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", nil))
+			err := bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 9, Event: "deploy_success"})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, commands)
+		})
+	}
+}

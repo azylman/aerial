@@ -45,7 +45,7 @@ func (s *verdictStore) CompleteActionChunk(_ context.Context, chunkID, dispatchI
 	}
 	res := &store.VanadisAdvancementResult{Matched: true, BuildID: s.build.ID}
 	for i, c := range s.chunks {
-		if c.ID != chunkID || dispatchID != model.ActionDispatchID(c) || c.Mode != "action" || c.PRNumber != 0 {
+		if c.ID != chunkID || dispatchID != model.ActionDispatchID(c) || c.Mode != "action" {
 			continue
 		}
 		switch {
@@ -121,6 +121,8 @@ func TestBuildObject_CompleteChunk(t *testing.T) {
 		{name: "pr mode chunk refused", buildStatus: "running", chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "running"}}, req: verdict, calls: 1, wantErrText: "invalid vanadis build input", wantTerminal: true, wantChunk: "running", wantBuild: "running"},
 		{name: "stale dispatch conflicts", buildStatus: "running", chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, req: verdict, calls: 1, wantErrText: "vanadis build state conflict", wantTerminal: true, wantChunk: "running", wantBuild: "running"},
 		{name: "failed chunk conflicts", buildStatus: "failed", chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}}, req: verdict, calls: 1, wantErrText: "vanadis build state conflict", wantTerminal: true, wantChunk: "failed", wantBuild: "failed"},
+		{name: "repair pr in flight conflicts", buildStatus: "running", chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "deploying", PRNumber: 9}}, req: verdict, calls: 1, wantErrText: "repair PR not deployed yet", wantTerminal: true, wantChunk: "deploying", wantBuild: "running"},
+		{name: "verdict completes chunk after repair deployed", buildStatus: "running", chunks: []model.VanadisChunk{done, {ID: "c1", BuildID: "b1", ChunkIndex: 1, Mode: "action", Status: "running", PRNumber: 9}}, req: verdict, calls: 1, want: CompleteChunkResponse{Status: "completed", BuildID: "b1", ChunkID: "c1", Completed: true}, wantChunk: "completed", wantBuild: "completed", wantBanner: "Build completed", wantEvent: "aerial.events.vanadis_chunk.completed"},
 		{name: "store read error retries", buildStatus: "running", chunks: []model.VanadisChunk{running}, req: verdict, calls: 1, getBuildFailFrom: 2, wantRetriable: true, wantChunk: "running", wantBuild: "running"},
 		{name: "completion write error retries", buildStatus: "running", chunks: []model.VanadisChunk{running}, req: verdict, calls: 1, completeErr: errors.New("tx aborted"), wantRetriable: true, wantChunk: "running", wantBuild: "running"},
 		{name: "transition read error after verdict", buildStatus: "running", chunks: []model.VanadisChunk{done, running, opened}, req: verdict, calls: 1, getBuildFailFrom: 3, wantRetriable: true, wantChunk: "completed", wantBuild: "running"},

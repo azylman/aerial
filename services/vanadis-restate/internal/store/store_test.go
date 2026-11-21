@@ -427,6 +427,16 @@ func TestEarlierDeploymentSweepIDs(t *testing.T) {
 			want:     []string{"early-deploying", "early-synced"},
 		},
 		{
+			name: "earlier merged action repair is swept but plain action is not",
+			chunks: []model.VanadisChunk{
+				{ID: "repair", BuildID: "b1", ChunkIndex: 0, Mode: "action", Repo: "aerial", Status: "merged", PRNumber: 7, CompletedAt: mergeBase},
+				{ID: "plain", BuildID: "b1", ChunkIndex: 1, Mode: "action", Repo: "aerial", Status: "merged", CompletedAt: mergeBase},
+				sweepChunk("deploying", 2, "pr", "aerial", "deploying", mergeLater),
+			},
+			deployID: "deploying",
+			want:     []string{"repair"},
+		},
+		{
 			name: "later merged same repo stays untouched",
 			chunks: []model.VanadisChunk{
 				sweepChunk("earlier", 0, "pr", "aerial", "merged", mergeBase),
