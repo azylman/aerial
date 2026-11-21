@@ -20,6 +20,12 @@ Both tests assert the same `effects` multiset and the same final `rows`.
   `[synapse-effect]` and `[prstate-shadow]` lines on this same key. Facts are
   `pr_fact_<event>`. Repo effects (`github_auto_update`, `flux_git_push`,
   `image_promote`, `flux_reconcile` with no PR) use PR 0.
+- `fact_rollout_states`: the `rollout_state` every published fact carries,
+  keyed by the fact's match key and compared as a multiset. Legacy renders
+  it from the registry row (`buildPRRolloutState`); prstate renders it from
+  committed PRObject state (`BuildPRRolloutState`) when the restate-owned
+  fact carries none. Build VO stores a chunk's rollout state only from these
+  facts. `../rollout_state/render.json` pins the render per row.
 - `rows`: the final pr_registry rows, written out by hand. Metadata leaves
   out empty values because prstate projects them as absent keys.
 - `restate`: the wire contract synapse must send once it owns the event as
