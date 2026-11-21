@@ -4,9 +4,11 @@ package prstate
 // pure fill-if-empty transition: a field PRObject already holds is never
 // overwritten, so replaying a Hydrate (or hydrating after live events have
 // landed) is idempotent and can never roll committed state back to a stale
-// row. Ownership comes from metadata.agent, falling back to metadata.bot_id;
-// the agent column is ignored because its schema default ('aerial') makes it
-// unreliable. Hydrate is an authoritative owner source, so it replaces an
+// row. Ownership comes from metadata.agent, falling back to metadata.bot_id,
+// then to the agent column only when it holds a non-default value: the
+// retired per-stack synapses recorded the owning stack only in that column,
+// while today's single synapse never writes it, so its schema default
+// ('aerial') carries no information and is ignored. Hydrate is an authoritative owner source, so it replaces an
 // owner that only an event hint filled, but never an owner Register claimed.
 
 import "strings"
@@ -24,12 +26,19 @@ type HydrateResponse struct {
 }
 
 // RowOwner returns the owning agent a registry row records:
-// metadata.agent, else metadata.bot_id, else "".
+// metadata.agent, else metadata.bot_id, else a non-default agent column,
+// else "" (an unknown owner resolves to DefaultAgent and stays hintable).
 func RowOwner(row RegistryRow) string {
 	if agent := strings.TrimSpace(row.Metadata.Agent); agent != "" {
 		return agent
 	}
-	return strings.TrimSpace(row.Metadata.BotID)
+	if bot := strings.TrimSpace(row.Metadata.BotID); bot != "" {
+		return bot
+	}
+	if column := strings.TrimSpace(row.Agent); column != DefaultAgent {
+		return column
+	}
+	return ""
 }
 
 // hydrateTerminal maps a registry status to the terminal state it implies:

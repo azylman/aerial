@@ -14,7 +14,7 @@ func hydrateState(agent string, registered bool) *PRState {
 
 // TestApplyHydrate pins fill-if-empty hydration: every empty field fills
 // from the row, held fields are never overwritten, ownership comes from
-// metadata.agent then bot_id (never the agent column), Register-claimed
+// metadata.agent then bot_id then a non-default agent column, Register-claimed
 // owners survive, zero SHAs are ignored, and the terminal state follows
 // the registry status.
 func TestApplyHydrate(t *testing.T) {
@@ -68,6 +68,7 @@ func TestApplyHydrate(t *testing.T) {
 		{name: "held fields and registered owner survive", state: held, row: fullRow, wantChanged: true, want: wantHeld},
 		{name: "hydrate twice is a no-op", state: wantFull, row: fullRow, wantChanged: false, want: wantFull},
 		{name: "bot id owner replaces a hinted owner and closed row closes", state: hinted, row: RegistryRow{Repo: "aerial", PRNumber: 101, Agent: "aerial", HeadSHA: "h1", MergeSHA: "0000000", Status: RegistryStatusClosed, Metadata: ProjectionMetadata{BotID: "agent-beta"}}, wantChanged: true, want: wantHinted},
+		{name: "legacy stack column owner claims a fresh state", state: NewPRState("aerial", 101), row: RegistryRow{Repo: "aerial", PRNumber: 101, Agent: "agent-gamma", Status: RegistryStatusOpen}, wantChanged: true, want: &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-gamma", Status: RegistryStatusOpen, Checks: FailedCheckState{EverFailed: map[string]bool{}, ActiveFailed: map[string]bool{}}, DispatchedEffects: map[string]bool{}, DeploySHAJob: map[string]bool{}}},
 		{name: "open row keeps no terminal", state: NewPRState("aerial", 101), row: RegistryRow{Repo: "aerial", PRNumber: 101, Status: RegistryStatusOpen}, wantChanged: true, want: &PRState{Repo: "azylman/aerial", PRNumber: 101, Status: RegistryStatusOpen, Checks: FailedCheckState{EverFailed: map[string]bool{}, ActiveFailed: map[string]bool{}}, DispatchedEffects: map[string]bool{}, DeploySHAJob: map[string]bool{}}},
 	}
 	for _, tc := range tests {
@@ -83,6 +84,32 @@ func TestApplyHydrate(t *testing.T) {
 			}
 			if !reflect.DeepEqual(st, tc.want) {
 				t.Fatalf("state =\n%+v\nwant\n%+v", st, tc.want)
+			}
+		})
+	}
+}
+
+// TestRowOwner pins the owner precedence: metadata.agent, then
+// metadata.bot_id, then the agent column only when it is not the schema
+// default, else unknown.
+func TestRowOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		row  RegistryRow
+		want string
+	}{
+		{name: "metadata agent wins", row: RegistryRow{Agent: "agent-gamma", Metadata: ProjectionMetadata{Agent: "agent-alpha", BotID: "agent-beta"}}, want: "agent-alpha"},
+		{name: "bot id beats the column", row: RegistryRow{Agent: "agent-gamma", Metadata: ProjectionMetadata{Agent: "  ", BotID: " agent-beta "}}, want: "agent-beta"},
+		{name: "non-default column is the legacy stack owner", row: RegistryRow{Agent: " agent-gamma "}, want: "agent-gamma"},
+		{name: "default column is unknown", row: RegistryRow{Agent: "aerial"}, want: ""},
+		{name: "blank everything is unknown", row: RegistryRow{Agent: " "}, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RowOwner(tc.row); got != tc.want {
+				t.Fatalf("RowOwner = %q, want %q", got, tc.want)
 			}
 		})
 	}

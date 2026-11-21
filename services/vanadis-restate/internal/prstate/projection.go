@@ -88,9 +88,9 @@ type ProjectionSnapshot struct {
 }
 
 // RegistryRow is one pr_registry row as stored: the shadow compare reads it
-// and PRObject.Hydrate takes it as input. The agent column is informational
-// only (schema default 'aerial'); ownership comes from metadata.agent and
-// metadata.bot_id.
+// and PRObject.Hydrate takes it as input. Ownership comes from
+// metadata.agent and metadata.bot_id; the agent column is an owner source
+// only when it holds a non-default value (see RowOwner).
 type RegistryRow struct {
 	Repo     string             `json:"repo"`
 	PRNumber int                `json:"pr_number"`
