@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -20,13 +21,8 @@ import (
 )
 
 const (
-	statusSkippedActive = "skipped_active"
-	statusAccepted      = "accepted"
-	statusCompleted     = "completed"
+	statusCompleted = "completed"
 )
-
-// ErrDispatchActive reports that Eri skipped a dispatch because a session is already active.
-var ErrDispatchActive = errors.New("dispatch active; reconciliation deferred")
 
 // NormalizeAgentName trims and lowercases an agent / stack bot identifier.
 func NormalizeAgentName(agent string) string {
@@ -284,7 +280,7 @@ func (t *ThreadSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Threa
 		}
 		if skip {
 			return ThreadEnqueueResponse{
-				Status:   statusSkippedActive,
+				Status:   eriwire.StatusSkippedActive,
 				ThreadID: targetThreadID,
 			}, nil
 		}
@@ -356,7 +352,7 @@ func (t *ThreadSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Threa
 	_ = restate.ObjectSend(ctx, svcName, insertRes.ThreadID, "RunTurn").Send(ThreadTurnRequest{Trigger: req.Trigger})
 
 	return ThreadEnqueueResponse{
-		Status:    statusAccepted,
+		Status:    eriwire.StatusAccepted,
 		ThreadID:  insertRes.ThreadID,
 		MessageID: insertRes.MessageID,
 	}, nil
@@ -596,27 +592,6 @@ func (t *ThreadSessionObject) RotateSession(ctx restate.ObjectSharedContext, req
 	return performThreadSessionRotate(ctx, t.pool, threadID, activeInvID, "ThreadSession")
 }
 
-// BrainDispatchRequest represents a headless dispatch payload.
-type BrainDispatchRequest struct {
-	ID             string `json:"id,omitempty"`
-	Source         string `json:"source"`
-	SessionID      string `json:"session_id,omitempty"`
-	TargetID       string `json:"target_id,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	VanadisBuildID string `json:"vanadis_build_id,omitempty"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	Model          string `json:"model,omitempty"`
-	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
-}
-
-// DispatchEnqueueResponse defines the enqueue result for a dispatch.
-type DispatchEnqueueResponse struct {
-	Status     string `json:"status"` // "accepted", "skipped_active", "already_exists"
-	DispatchID string `json:"dispatch_id,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-}
-
 // DispatchTurnResult defines the execution outcome of dispatch draining.
 type DispatchTurnResult struct {
 	Status             string `json:"status"`
@@ -636,21 +611,6 @@ type CancelDispatchResponse struct {
 	Status         string   `json:"status"`
 	CancelledCount int      `json:"cancelled_count"`
 	CancelledIDs   []string `json:"cancelled_ids,omitempty"`
-}
-
-// ResolveDispatchSessionKey determines the canonical Virtual Object key for a dispatch.
-func ResolveDispatchSessionKey(req BrainDispatchRequest) string {
-	if s := strings.TrimSpace(req.SessionID); s != "" {
-		return s
-	}
-	if c := strings.TrimSpace(req.VanadisChunkID); c != "" {
-		return "vanadis-" + c
-	}
-	id := strings.TrimSpace(req.ID)
-	if id == "" {
-		id = uuid.New().String()
-	}
-	return "dispatch-" + id
 }
 
 // DispatchSessionObject implements the Restate Virtual Object keyed by dispatch session key.
@@ -699,10 +659,14 @@ func (d *DispatchSessionObject) shouldSkipActive(ctx restate.ObjectSharedContext
 }
 
 // Enqueue inserts a pending dispatch and triggers exclusive RunTurn processing.
-func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req BrainDispatchRequest) (DispatchEnqueueResponse, error) {
+func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	sessionKey := restate.Key(ctx)
 	if sessionKey == "" {
-		sessionKey = ResolveDispatchSessionKey(req)
+		keyReq := req
+		if strings.TrimSpace(keyReq.ID) == "" {
+			keyReq.ID = uuid.New().String()
+		}
+		sessionKey = eriwire.ResolveDispatchSessionKey(keyReq)
 	}
 	callerSuppliedID := strings.TrimSpace(req.ID) != ""
 	dispID := strings.TrimSpace(req.ID)
@@ -715,11 +679,11 @@ func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Bra
 	if req.SkipIfActive {
 		skip, sErr := d.shouldSkipActive(ctx, sessionKey, dispID)
 		if sErr != nil {
-			return DispatchEnqueueResponse{}, sErr
+			return eriwire.DispatchEnqueueResponse{}, sErr
 		}
 		if skip {
-			return DispatchEnqueueResponse{
-				Status:     statusSkippedActive,
+			return eriwire.DispatchEnqueueResponse{
+				Status:     eriwire.StatusSkippedActive,
 				DispatchID: dispID,
 				SessionID:  sessionKey,
 			}, nil
@@ -757,7 +721,7 @@ func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Bra
 		return dispatchInsertResult{Inserted: true}, nil
 	}, restate.WithName("insert-pending-dispatch"))
 	if rErr != nil {
-		return DispatchEnqueueResponse{}, rErr
+		return eriwire.DispatchEnqueueResponse{}, rErr
 	}
 
 	// 3. Fire restate.ObjectSend(ctx, svcName, sessionKey, 'RunTurn').Send(req) ALWAYS,
@@ -766,15 +730,15 @@ func (d *DispatchSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Bra
 	_ = restate.ObjectSend(ctx, svcName, sessionKey, "RunTurn").Send(req)
 
 	if !insertRes.Inserted && callerSuppliedID {
-		return DispatchEnqueueResponse{
-			Status:     "already_exists",
+		return eriwire.DispatchEnqueueResponse{
+			Status:     eriwire.StatusAlreadyExists,
 			DispatchID: dispID,
 			SessionID:  sessionKey,
 		}, nil
 	}
 
-	return DispatchEnqueueResponse{
-		Status:     statusAccepted,
+	return eriwire.DispatchEnqueueResponse{
+		Status:     eriwire.StatusAccepted,
 		DispatchID: dispID,
 		SessionID:  sessionKey,
 	}, nil
@@ -826,7 +790,7 @@ func (d *DispatchSessionObject) claimNextDispatch(ctx context.Context, sessionKe
 }
 
 // RunTurn drains pending dispatches for sessionKey via turnExecution inside restate.Run.
-func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDispatchRequest) (DispatchTurnResult, error) {
+func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req eriwire.BrainDispatchRequest) (DispatchTurnResult, error) {
 	sessionKey := restate.Key(ctx)
 	invID := ctx.Request().ID
 	restate.Set(ctx, "active_invocation_id", invID)
