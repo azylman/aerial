@@ -189,3 +189,91 @@ func TestIdempotencyPayload(t *testing.T) {
 		})
 	}
 }
+
+func TestClientSendSHAEvent(t *testing.T) {
+	t.Parallel()
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	tests := []struct {
+		name         string
+		unconfigured bool
+		handler      string
+		ev           SHAEvent
+		status       int
+		wantErrSub   string
+		wantTerminal bool
+		wantCalls    int
+		wantPath     string
+		wantBodySub  string
+	}{
+		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: PREvent{HeadSHA: sha, CheckName: "ci", EffectsOwner: "restate"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"azylman/aerial","pr_number":0`},
+		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandlePushBySHA/send", wantBodySub: `"effects_owner":"legacy"`},
+		{name: "unknown sha handler rejected without request", handler: "HandleMainPush", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "unknown repo sha handler", wantTerminal: true},
+		{name: "unroutable pr handler rejected without request", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckStatus"}, wantErrSub: "not routable", wantTerminal: true},
+		{name: "zero sha rejected without request", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: "0000000", Handler: "HandleMerged"}, wantErrSub: "sha is required", wantTerminal: true},
+		{name: "empty repo rejected without request", handler: "HandlePushBySHA", ev: SHAEvent{SHA: sha, Handler: "HandleMerged"}, wantErrSub: "repo is required", wantTerminal: true},
+		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "status 500", wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleWorkflowRunBySHA/send"},
+		{name: "unconfigured fails closed", unconfigured: true, handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "not configured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []registryCall
+			var mu sync.Mutex
+			baseURL := ""
+			if !tc.unconfigured {
+				baseURL = newRegistryServer(t, tc.status, "", &calls, &mu)
+			}
+			err := NewClient(baseURL, "", "", nil).SendSHAEvent(t.Context(), tc.handler, tc.ev)
+			assertErrSub(t, "SendSHAEvent", err, tc.wantErrSub)
+			if tc.wantErrSub != "" && IsTerminal(err) != tc.wantTerminal {
+				t.Fatalf("IsTerminal = %v, want %v", IsTerminal(err), tc.wantTerminal)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(calls) != tc.wantCalls {
+				t.Fatalf("calls = %d, want %d", len(calls), tc.wantCalls)
+			}
+			if tc.wantCalls > 0 && (calls[0].path != tc.wantPath || calls[0].idKey == "" || !strings.Contains(calls[0].body, tc.wantBodySub)) {
+				t.Fatalf("call = %+v, want path %q, an idempotency key, body containing %q", calls[0], tc.wantPath, tc.wantBodySub)
+			}
+		})
+	}
+}
+
+func TestClientResolvePRBySHA(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		unconfigured bool
+		repo         string
+		sha          string
+		status       int
+		body         string
+		wantErrSub   string
+		wantCalls    int
+		want         ResolveSHAResponse
+	}{
+		{name: "indexed sha resolves", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":7,"branch":"feat","found":true}`, wantCalls: 1, want: ResolveSHAResponse{PRNumber: 7, Branch: "feat", Found: true}},
+		{name: "unknown sha is zero", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":0,"branch":"","found":false}`, wantCalls: 1},
+		{name: "ingress 500 surfaces", repo: "aerial", sha: "abc", status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
+		{name: "empty sha rejected without request", repo: "aerial", wantErrSub: "required"},
+		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", sha: "abc", wantErrSub: "not configured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []registryCall
+			var mu sync.Mutex
+			baseURL := ""
+			if !tc.unconfigured {
+				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
+			}
+			got, err := NewClient(baseURL, "", "", nil).ResolvePRBySHA(t.Context(), tc.repo, tc.sha)
+			assertErrSub(t, "ResolvePRBySHA", err, tc.wantErrSub)
+			if got != tc.want {
+				t.Fatalf("ResolvePRBySHA() = %+v, want %+v", got, tc.want)
+			}
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/RepoObject/azylman%2Faerial/ResolvePRBySHA", `"sha":"abc"`)
+		})
+	}
+}

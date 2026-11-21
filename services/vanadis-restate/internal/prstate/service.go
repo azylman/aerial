@@ -443,6 +443,19 @@ func (s *PRObjectService) HandleReopened(ctx restate.ObjectContext, ev PREvent) 
 	})
 }
 
+// HandleOpened applies one pull_request opened event. The agent it carries
+// comes only from the PR-body bot metadata, one of the three authoritative
+// ownership sources, so it claims the owner instead of acting as a hint.
+// The opened fact it carries publishes (restate) or records (legacy).
+func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) error {
+	return s.mutatePREvent(ctx, ev, func(st *PRState) {
+		if agent := strings.TrimSpace(ev.Agent); agent != "" {
+			st.ClaimOwner(agent)
+			st.BotID = agent
+		}
+	})
+}
+
 // HandleReadinessRetry applies one readiness retry dark. Retry never mints
 // a generation and never clears effect keys, per the frozen contract.
 func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PREvent) error {

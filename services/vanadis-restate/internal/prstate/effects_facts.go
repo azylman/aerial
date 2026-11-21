@@ -162,6 +162,12 @@ func (s *PRObjectService) runFacts(ctx restate.ObjectContext, st *PRState, owner
 	}
 	for _, p := range planned {
 		if ParseEffectsOwner(string(owner)) == EffectsOwnerRestate {
+			// Restate-owned synapse renders facts without the registry, so
+			// a published fact with no target takes the stored one. The key
+			// and the legacy digest never include it.
+			if strings.TrimSpace(p.Fact.TargetID) == "" {
+				p.Fact.TargetID = st.TargetID
+			}
 			if !s.publishFact(ctx, p) {
 				s.scheduleFactRetry(ctx, FactEffectRetry{Fact: p.Fact, Generation: p.Key.GateGeneration})
 				continue

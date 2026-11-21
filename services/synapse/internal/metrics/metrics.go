@@ -130,6 +130,27 @@ var (
 		},
 		[]string{"kind"},
 	)
+
+	// RegistryCallsTotal counts every pr_registry call synapse makes, by
+	// registry method. Restate-owned events must leave it flat; the
+	// authoritative soak gates on it before the registry is deleted.
+	RegistryCallsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_registry_calls_total",
+			Help: "Total number of pr_registry calls synapse made by registry method.",
+		},
+		[]string{"method"},
+	)
+
+	// RestateLookupDivergenceTotal counts shadow read-only lookups where the
+	// legacy registry and Restate disagree (SHA->PR resolution or owner).
+	RestateLookupDivergenceTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_restate_lookup_divergence_total",
+			Help: "Total number of shadow lookups where pr_registry and Restate disagreed, by lookup kind.",
+		},
+		[]string{"kind"},
+	)
 )
 
 var (
@@ -153,6 +174,8 @@ func init() {
 	registerCollector(RestateShadowSendsTotal)
 	registerCollector(RestateShadowDivergenceTotal)
 	registerCollector(LegacyEffectsTotal)
+	registerCollector(RegistryCallsTotal)
+	registerCollector(RestateLookupDivergenceTotal)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
@@ -239,6 +262,23 @@ func RecordLegacyEffect(kind string) {
 		kind = unknownLabel
 	}
 	LegacyEffectsTotal.WithLabelValues(kind).Inc()
+}
+
+// RecordRegistryCall increments the RegistryCallsTotal counter for method.
+func RecordRegistryCall(method string) {
+	if method == "" {
+		method = unknownLabel
+	}
+	RegistryCallsTotal.WithLabelValues(method).Inc()
+}
+
+// RecordRestateLookupDivergence increments the RestateLookupDivergenceTotal
+// counter for kind.
+func RecordRestateLookupDivergence(kind string) {
+	if kind == "" {
+		kind = unknownLabel
+	}
+	RestateLookupDivergenceTotal.WithLabelValues(kind).Inc()
 }
 
 // SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.
