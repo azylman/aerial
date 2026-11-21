@@ -66,19 +66,6 @@ func validateSnowflakeID(w http.ResponseWriter, id, field string) bool {
 	return true
 }
 
-func resolvePromptEffort(model, effort string) string {
-	if effort != "" {
-		return effort
-	}
-	if strings.Contains(strings.ToLower(model), "medium") {
-		return config.EffortMedium
-	}
-	if strings.Contains(strings.ToLower(model), "flash") {
-		return config.EffortLow
-	}
-	return ""
-}
-
 func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive bool, channelID string) (bool, error) {
 	if !skipIfActive || store == nil {
 		return false, nil
@@ -173,7 +160,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		model := strings.TrimSpace(req.Model)
-		effort := resolvePromptEffort(model, strings.TrimSpace(req.Effort))
+		effort := queue.ResolvePromptEffort(model, strings.TrimSpace(req.Effort))
 		req.Model = model
 		req.Effort = effort
 
