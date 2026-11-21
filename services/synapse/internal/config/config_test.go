@@ -170,6 +170,7 @@ type loadConfigCase struct {
 	wantDefaultOwner       bool
 	wantCollaboratorAlerts []CollaboratorCIAlertRule
 	wantStrictErr          bool
+	wantGHCredential       string
 }
 
 func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
@@ -230,6 +231,7 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 		{cfg.EriURL, tc.wantBrainURL, "EriURL"},
 		{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
 		{cfg.BotID, tc.wantBotID, "BotID"},
+		{cfg.GitHubCredential, tc.wantGHCredential, "GitHubCredential"},
 	} {
 		if check.want != "" && check.got != check.want {
 			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
@@ -276,6 +278,27 @@ func loadConfigYAMLTestCases() []loadConfigCase {
 
 func loadConfigYAMLBasicCases() []loadConfigCase {
 	return []loadConfigCase{
+		{
+			name:             "github_credential unset defaults to app",
+			localYAML:        "port: \"4020\"\n",
+			wantGHCredential: "app",
+		},
+		{
+			name:             "github_credential pat is trimmed and lowercased",
+			localYAML:        "github_credential: \" PAT \"\n",
+			wantGHCredential: "pat",
+		},
+		{
+			name:             "github_credential app",
+			localYAML:        "github_credential: app\n",
+			wantGHCredential: "app",
+		},
+		{
+			name:             "invalid github_credential rejected by strict and app at startup",
+			localYAML:        "github_credential: token\n",
+			wantStrictErr:    true,
+			wantGHCredential: "app",
+		},
 		{
 			name: "yaml config without overrides",
 			localYAML: `port: "4099"
@@ -974,6 +997,31 @@ func TestNormalizeLegacyBuildWorkflows(t *testing.T) {
 			_, err := NormalizeLegacyBuildWorkflows([]LegacyBuildWorkflow{{Repository: tc.repo, WorkflowPath: tc.path, BlobSHA: tc.sha}})
 			if (err == nil) != tc.valid {
 				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeGitHubCredential(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		raw    string
+		want   string
+		wantOK bool
+	}{
+		{name: "empty selects app", raw: "", want: "app", wantOK: true},
+		{name: "whitespace selects app", raw: "   ", want: "app", wantOK: true},
+		{name: "app", raw: "app", want: "app", wantOK: true},
+		{name: "upper pat", raw: " PAT ", want: "pat", wantOK: true},
+		{name: "unknown value", raw: "Token", want: "token", wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := NormalizeGitHubCredential(tc.raw)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("NormalizeGitHubCredential(%q) = (%q, %v), want (%q, %v)", tc.raw, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

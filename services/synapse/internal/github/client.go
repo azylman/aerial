@@ -9,16 +9,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/githubauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 // StatusError captures a non-success HTTP status code from the GitHub API.
+// RateLimited is set when githubauth.IsRateLimited classified the response
+// as a rate limit (429, or 403 with remaining 0 or Retry-After).
 type StatusError struct {
-	StatusCode int
-	Message    string
+	StatusCode  int
+	Message     string
+	RateLimited bool
 }
 
 func (e *StatusError) Error() string {
@@ -90,11 +95,8 @@ func GetJSON(ctx context.Context, client *http.Client, req *http.Request, maxByt
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusForbidden {
-		return &StatusError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("github api rate limit or forbidden (remaining: %s)", resp.Header.Get("X-Ratelimit-Remaining")),
-		}
+	if forbiddenErr := classifyForbidden(ctx, resp, req.URL.Path); forbiddenErr != nil {
+		return forbiddenErr
 	}
 	if resp.StatusCode != http.StatusOK {
 		return &StatusError{
@@ -113,6 +115,59 @@ func GetJSON(ctx context.Context, client *http.Client, req *http.Request, maxByt
 		return fmt.Errorf("unmarshal github api response: %w", err)
 	}
 	return nil
+}
+
+// maxForbiddenMessageRunes caps GitHub's error message in errors and logs.
+const maxForbiddenMessageRunes = 200
+
+// classifyForbidden returns a *StatusError for a rate-limited response (any
+// 429, or a 403 githubauth.IsRateLimited flags) or a plain 403 permission
+// error, and nil otherwise. A plain 403 logs GitHub's JSON message, capped;
+// the request headers (and so the credential) are never logged.
+func classifyForbidden(ctx context.Context, resp *http.Response, path string) error {
+	if githubauth.IsRateLimited(resp) {
+		return &StatusError{
+			StatusCode:  resp.StatusCode,
+			Message:     fmt.Sprintf("github api rate limit (status %d, remaining: %s)", resp.StatusCode, resp.Header.Get("X-Ratelimit-Remaining")),
+			RateLimited: true,
+		}
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		return nil
+	}
+	msg := forbiddenMessage(resp.Body)
+	slog.WarnContext(ctx, "[synapse] [github] forbidden", "path", path, "message", msg)
+	return &StatusError{
+		StatusCode: resp.StatusCode,
+		Message:    "github api forbidden (status 403): " + msg,
+	}
+}
+
+// forbiddenMessage extracts GitHub's JSON "message" field from body, capped
+// at maxForbiddenMessageRunes. Non-JSON bodies yield an empty string so raw
+// response bytes never reach logs.
+func forbiddenMessage(body io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(body, 64<<10))
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &parsed) != nil {
+		return ""
+	}
+	msg := strings.TrimSpace(parsed.Message)
+	if r := []rune(msg); len(r) > maxForbiddenMessageRunes {
+		msg = string(r[:maxForbiddenMessageRunes])
+	}
+	return msg
+}
+
+// IsRateLimitError reports whether err is a GitHub rate-limit StatusError.
+func IsRateLimitError(err error) bool {
+	statusErr, ok := errors.AsType[*StatusError](err)
+	return ok && statusErr.RateLimited
 }
 
 // Client wraps an HTTP client and credentials for GitHub REST API calls.

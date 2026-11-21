@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/githubauth"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -146,15 +148,28 @@ func (s *RouterServer) buildConsumer() *buildmeta.Consumer {
 	return buildmeta.NewConsumer(s, reg, s.cfgSrc, s.resolveLegacyWorkflowRunImages)
 }
 
-// NewRouterServer constructs a new RouterServer instance.
-func NewRouterServer(cfgSrc ConfigSource, client *http.Client) *RouterServer {
+// NewRouterServer constructs a new RouterServer instance. Every GitHub REST
+// call goes through githubClient, whose githubauth.Transport attaches the
+// credential (WithGitHubTokenSource, else the static PAT) and records
+// github_requests_by_source_total / github_rate_limit_remaining.
+func NewRouterServer(cfgSrc ConfigSource, client *http.Client, opts ...RouterOption) *RouterServer {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
+	var o routerOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	tokens := o.githubTokens
+	if tokens == nil {
+		tokens = configPATSource{cfgSrc: cfgSrc}
+	}
+	ghHTTP := *client
+	ghHTTP.Transport = githubauth.NewTransport(client.Transport, tokens, githubAPIHost(cfgSrc), githubauth.WithMetrics(metrics.GitHubAuthMetrics{}))
 	srv := &RouterServer{
 		cfgSrc:       cfgSrc,
 		httpClient:   tracing.Client(client),
-		githubClient: tracing.ExternalClient(client),
+		githubClient: tracing.ExternalClient(&ghHTTP),
 	}
 	if cfgSrc != nil {
 		if cfg := cfgSrc.Current(); cfg != nil && cfg.K8sAuthEnabled {
@@ -363,6 +378,11 @@ func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if s != nil && s.gatewayLatencyFn != nil {
 		setDiscordGatewayLatency(s.gatewayLatencyFn().Seconds())
+	}
+	if s != nil && s.cfgSrc != nil {
+		if cfg := s.cfgSrc.Current(); cfg != nil {
+			metrics.SetGitHubCredentialConfigured(cfg.GitHubCredential)
+		}
 	}
 	promhttp.Handler().ServeHTTP(w, r)
 }
@@ -1342,7 +1362,11 @@ func RunServer(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config], o
 	defer cancel()
 
 	cfg := cfgSrc.Current()
-	server := NewRouterServer(cfgSrc, nil)
+	server := NewRouterServer(cfgSrc, nil, WithGitHubTokenSource(newGitHubTokenSource(cfgSrc, gitHubAppEnv{
+		AppID:          os.Getenv("GITHUB_APP_ID"),
+		InstallationID: os.Getenv("GITHUB_APP_INSTALLATION_ID"),
+		PrivateKeyPEM:  os.Getenv("GITHUB_APP_PRIVATE_KEY"),
+	})))
 	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)
 	dispatcher.SetConfigSource(cfgSrc)
 	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)

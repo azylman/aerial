@@ -32,6 +32,7 @@ type Config struct {
 	KubeToken            string
 	GitHubToken          string
 	GitHubAPIURL         string
+	GitHubCredential     string
 	GitHubWebhookSecret  string
 	RestateURL           string
 	RestatePRService     string
@@ -88,6 +89,32 @@ type RouterYAMLConfig struct {
 	K8sAuthEnabled       bool                      `yaml:"k8s_auth_enabled"`
 	K8sAuthConfig        k8sauth.Config            `yaml:"k8s_auth"`
 	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
+	// GitHubCredential picks the credential synapse attaches to GitHub REST
+	// calls: "app" (GitHub App installation token, the default when unset)
+	// or "pat" (GITHUB_PAT). It is read per request, so an aerial-config PR
+	// moves traffic without a restart. With the GITHUB_APP_* env unset,
+	// "app" also stays on the PAT. A hot reload carrying any other value is
+	// rejected and the last good config stays live.
+	GitHubCredential string `yaml:"github_credential"`
+}
+
+// GitHub credential choices for github_credential.
+const (
+	GitHubCredentialApp = "app"
+	GitHubCredentialPAT = "pat"
+)
+
+// NormalizeGitHubCredential lowercases and trims a github_credential value;
+// unset selects app. ok is false for anything other than app or pat.
+func NormalizeGitHubCredential(raw string) (string, bool) {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "", GitHubCredentialApp:
+		return GitHubCredentialApp, true
+	case GitHubCredentialPAT:
+		return v, true
+	default:
+		return v, false
+	}
 }
 
 // LegacyBuildWorkflow pins one immutable historical producer revision.
@@ -128,6 +155,9 @@ func LoadConfigStrict(configPath string) (Config, error) {
 	}
 	if _, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows); err != nil {
 		return Config{}, err
+	}
+	if v, ok := NormalizeGitHubCredential(fileCfg.GitHubCredential); !ok {
+		return Config{}, fmt.Errorf("github_credential %q is not app or pat", v)
 	}
 	return buildConfig(fileCfg), nil
 }
@@ -491,6 +521,12 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 
 	k8sAuthEnabled, k8sCfg := resolveK8sAuthConfig(fileCfg, kubeServer)
 
+	ghCredential, ok := NormalizeGitHubCredential(fileCfg.GitHubCredential)
+	if !ok {
+		log.Printf("[Synapse] config error: github_credential %q is not app or pat; using app", ghCredential)
+		ghCredential = GitHubCredentialApp
+	}
+
 	return Config{
 		LegacyBuildWorkflows: legacy,
 		Port:                 model.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
@@ -498,6 +534,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		KubeToken:            kubeToken,
 		GitHubToken:          os.Getenv("GITHUB_PAT"),
 		GitHubAPIURL:         strings.TrimRight(model.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		GitHubCredential:     ghCredential,
 		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
 		PostgresURL:          pgURL,
 		FluxReceiverURL:      strings.TrimRight(model.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
