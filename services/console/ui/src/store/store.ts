@@ -10,6 +10,7 @@ import type {
   ScheduleRunsAPIResponse,
   SchedulesAPIResponse,
 } from '../api/types';
+import { buildsPayloadError } from '../lib/builds';
 import { reconcile } from './reconcile';
 
 /** Last poll outcome for one endpoint. `data` survives errors so views keep the stale snapshot. */
@@ -127,7 +128,12 @@ export const useConsoleStore = create<ConsoleStore>()((set) => {
     failScheduleRuns: (error) => patchSlice('schedules', 'runs', (prev) => fault(prev, error)),
     setFacts: (data) => patchSlice('memory', 'facts', (prev) => settle(prev, data)),
     failFacts: (error) => patchSlice('memory', 'facts', (prev) => fault(prev, error)),
-    setBuilds: (data) => patchSlice('builds', 'list', (prev) => settle(prev, data)),
+    // An in-band degraded/error payload is a failed poll: keep the last snapshot, record the error.
+    setBuilds: (data) =>
+      patchSlice('builds', 'list', (prev) => {
+        const error = buildsPayloadError(data);
+        return error === null ? settle(prev, data) : fault(prev, error);
+      }),
     failBuilds: (error) => patchSlice('builds', 'list', (prev) => fault(prev, error)),
     setBuildDetail: (data) => patchSlice('builds', 'detail', (prev) => settle(prev, data)),
     failBuildDetail: (error) => patchSlice('builds', 'detail', (prev) => fault(prev, error)),
