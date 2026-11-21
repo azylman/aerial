@@ -2,13 +2,18 @@ package githubproxy
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
@@ -26,6 +31,10 @@ func newEchoUpstream(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
+		if parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/"); r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "repos" {
+			_, _ = fmt.Fprintf(w, `{"private":%t}`, strings.HasPrefix(parts[2], "private"))
+			return
+		}
 		w.Header().Set("X-Upstream", "echo")
 		_ = json.NewEncoder(w).Encode(upstreamEcho{
 			Auth:       r.Header.Get("Authorization"),
@@ -80,11 +89,11 @@ func TestRegister(t *testing.T) {
 		},
 		{
 			name: "git injects basic auth and forwards body", cfg: cfgWithPAT(pat), method: http.MethodPost,
-			target: "/internal/github-git/org/repo.git/git-receive-pack", remoteAddr: "127.0.0.1:5000",
+			target: "/internal/github-git/org/repo.git/git-upload-pack", remoteAddr: "127.0.0.1:5000",
 			headers:    map[string]string{"Authorization": "Basic Y2xpZW50OmNsaWVudA=="},
 			body:       "0000PACK",
 			wantStatus: http.StatusOK,
-			wantEcho:   &upstreamEcho{Auth: gitBasic, Path: "/org/repo.git/git-receive-pack", Method: http.MethodPost, Body: "0000PACK"},
+			wantEcho:   &upstreamEcho{Auth: gitBasic, Path: "/org/repo.git/git-upload-pack", Method: http.MethodPost, Body: "0000PACK"},
 		},
 		{
 			name: "git passes service query", cfg: cfgWithPAT(pat), method: http.MethodGet,
@@ -245,5 +254,262 @@ func TestStreamResponse(t *testing.T) {
 				t.Fatalf("unexpected headers: %v", h)
 			}
 		})
+	}
+}
+
+const proxySecret = "dummy-proxy-secret-value"
+
+func pktFixture(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
+
+// receivePackBody builds a one-ref push whose pack holds one object per blob.
+func receivePackBody(caps string, blobs ...string) []byte {
+	var buf bytes.Buffer
+	buf.WriteString(pktFixture(strings.Repeat("0", 40) + " " + strings.Repeat("a", 40) + " refs/heads/main\x00" + caps + "\n"))
+	buf.WriteString("0000PACK")
+	buf.Write([]byte{0, 0, 0, 2, 0, 0, 0, byte(len(blobs))})
+	for _, blob := range blobs {
+		size := len(blob)
+		c := byte(3<<4) | byte(size&0x0f)
+		for size >>= 4; size > 0; size >>= 7 {
+			buf.WriteByte(c | 0x80)
+			c = byte(size & 0x7f)
+		}
+		buf.WriteByte(c)
+		zw := zlib.NewWriter(&buf)
+		_, _ = zw.Write([]byte(blob))
+		_ = zw.Close()
+	}
+	buf.Write(make([]byte, 20))
+	return buf.Bytes()
+}
+
+func jsonLossy(s string) string {
+	b, _ := json.Marshal(s)
+	var out string
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func gzipped(b []byte) string {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	_ = zw.Close()
+	return buf.String()
+}
+
+func TestScanWrites(t *testing.T) {
+	sanitizer.ResetSensitiveTokensForTest()
+	sanitizer.RegisterSensitiveTokens(proxySecret)
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	upstream := newEchoUpstream(t)
+	t.Setenv("GITHUB_API_URL", upstream.URL)
+	t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", upstream.URL)
+
+	cleanPush := string(receivePackBody("report-status side-band-64k", "hello\n"))
+	secretBlob := "key: " + proxySecret + "\n"
+	contentsBody := `{"message":"add","content":"` + base64.StdEncoding.EncodeToString([]byte(secretBlob)) + `"}`
+
+	tests := []struct {
+		name        string
+		method      string
+		target      string
+		encoding    string
+		body        string
+		wantStatus  int
+		wantEcho    bool
+		wantBody    string
+		wantSubstrs []string
+	}{
+		{
+			name: "clean push forwarded with original bytes", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
+			body: cleanPush, wantStatus: http.StatusOK, wantEcho: true, wantBody: cleanPush,
+		},
+		{
+			name: "secret push rejected over side-band", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
+			body: string(receivePackBody("report-status side-band-64k", secretBlob)), wantStatus: http.StatusOK,
+			wantSubstrs: []string{"\x02secret scan blocked push: blob ", "[InfisicalSecret]", "sample du***ue", "\x01000eunpack ok\n", "ng refs/heads/main secret scan blocked push"},
+		},
+		{
+			name: "secret push rejected over small side-band", method: http.MethodPost, target: "/internal/github-git/acme/repo/git-receive-pack",
+			body: string(receivePackBody("report-status side-band", secretBlob)), wantStatus: http.StatusOK,
+			wantSubstrs: []string{"\x02secret scan blocked push", "\x01000eunpack ok\n"},
+		},
+		{
+			name: "secret push rejected without side-band", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
+			body: string(receivePackBody("report-status", secretBlob)), wantStatus: http.StatusOK,
+			wantSubstrs: []string{"000eunpack ok\n", "ng refs/heads/main secret scan blocked push: blob "},
+		},
+		{
+			name: "gzip secret push decoded and rejected", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
+			encoding: "gzip", body: gzipped(receivePackBody("report-status", secretBlob)), wantStatus: http.StatusOK,
+			wantSubstrs: []string{"ng refs/heads/main secret scan blocked push"},
+		},
+		{
+			name: "corrupt pack fails closed", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
+			body: pktFixture(strings.Repeat("0", 40)+" "+strings.Repeat("a", 40)+" refs/heads/main\x00report-status\n") + "0000PACKjunk", wantStatus: http.StatusOK,
+			wantSubstrs: []string{"ng refs/heads/main secret scan failed: missing PACK header"},
+		},
+		{
+			name: "malformed receive-pack is 400", method: http.MethodPost, target: "/internal/github-git/acme/repo.git/git-receive-pack",
+			body: "zz", wantStatus: http.StatusBadRequest, wantSubstrs: []string{"malformed receive-pack request"},
+		},
+		{
+			name: "push path without repo is 400", method: http.MethodPost, target: "/internal/github-git/git-receive-pack",
+			body: cleanPush, wantStatus: http.StatusBadRequest, wantSubstrs: []string{"cannot determine repository"},
+		},
+		{
+			name: "bad gzip is rejected", method: http.MethodPost, target: "/internal/github-git/acme/repo.git/git-receive-pack",
+			encoding: "gzip", body: "not gzip", wantStatus: http.StatusRequestEntityTooLarge, wantSubstrs: []string{"decode gzip body"},
+		},
+		{
+			name: "issue comment secret rejected", method: http.MethodPost, target: "/internal/github-api/repos/acme/private-repo/issues/1/comments",
+			body: `{"body":"` + proxySecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{`"category":"InfisicalSecret"`, "du***ue"},
+		},
+		{
+			name: "contents put decodes base64", method: http.MethodPut, target: "/internal/github-api/repos/acme/private-repo/contents/docs/key.md",
+			body: contentsBody, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"docs/key.md:1 [InfisicalSecret]"},
+		},
+		{
+			name: "utf-8 blob create rejected", method: http.MethodPost, target: "/internal/github-api/repos/acme/repo/git/blobs",
+			body: `{"content":"` + proxySecret + `","encoding":"utf-8"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "graphql gets value match", method: http.MethodPost, target: "/internal/github-api/graphql",
+			body: `{"query":"` + proxySecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"request body:1 [InfisicalSecret]"},
+		},
+		{
+			name: "gzip api body decoded and rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/repo/pulls/2",
+			encoding: "gzip", body: gzipped([]byte(`{"body":"` + proxySecret + `"}`)), wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "bad gzip api body rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/repo/pulls/2",
+			encoding: "gzip", body: "nope", wantStatus: http.StatusRequestEntityTooLarge, wantSubstrs: []string{"decode gzip body"},
+		},
+		{
+			name: "clean api write forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/acme/repo/pulls/2",
+			body: `{"title":"hi"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"title":"hi"}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			Register(mux, cfgWithPAT("dummy-proxy-pat"))
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			req.RemoteAddr = "127.0.0.1:5000"
+			if tc.encoding != "" {
+				req.Header.Set("Content-Encoding", tc.encoding)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if got := rec.Header().Get("X-Upstream") == "echo"; got != tc.wantEcho {
+				t.Fatalf("forwarded = %v, want %v (body: %q)", got, tc.wantEcho, rec.Body.String())
+			}
+			if tc.wantEcho {
+				var echo upstreamEcho
+				// The echo upstream JSON-encodes the body, which maps invalid UTF-8
+				// bytes to U+FFFD; apply the same mapping to the expectation.
+				if err := json.Unmarshal(rec.Body.Bytes(), &echo); err != nil || echo.Body != jsonLossy(tc.wantBody) {
+					t.Fatalf("upstream body = %q (err %v), want %q", echo.Body, err, tc.wantBody)
+				}
+			}
+			for _, s := range tc.wantSubstrs {
+				if !strings.Contains(rec.Body.String(), s) {
+					t.Errorf("body %q missing %q", rec.Body.String(), s)
+				}
+			}
+			if strings.Contains(rec.Body.String(), proxySecret) && !tc.wantEcho {
+				t.Errorf("rejection leaked the raw secret: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAPIFetcher(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widgets/git/blobs/b64":
+			_, _ = io.WriteString(w, `{"content":"aGVs\nbG8K","encoding":"base64"}`)
+		case "/repos/acme/widgets/git/blobs/utf8":
+			_, _ = io.WriteString(w, `{"content":"plain","encoding":"utf-8"}`)
+		case "/repos/acme/widgets/git/trees/t1":
+			_, _ = io.WriteString(w, `{"tree":[{"mode":"100644","path":"a.txt","sha":"1111111111111111111111111111111111111111"},{"mode":"040000","path":"d","sha":"2222222222222222222222222222222222222222"}]}`)
+		case "/repos/acme/widgets/git/trees/bad":
+			_, _ = io.WriteString(w, `{"tree":[{"mode":"100644","path":"a.txt","sha":"zz"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		name     string
+		base     string
+		sha      string
+		wantType string
+		wantData string
+		wantErr  string
+	}{
+		{name: "base64 blob", base: srv.URL, sha: "b64", wantType: "blob", wantData: "hello\n"},
+		{name: "utf-8 blob", base: srv.URL, sha: "utf8", wantType: "blob", wantData: "plain"},
+		{
+			name: "tree rebuilt from json", base: srv.URL, sha: "t1", wantType: "tree",
+			wantData: "100644 a.txt\x00" + strings.Repeat("\x11", 20) + "40000 d\x00" + strings.Repeat("\x22", 20),
+		},
+		{name: "invalid tree sha", base: srv.URL, sha: "bad", wantErr: "invalid sha"},
+		{name: "unknown object", base: srv.URL, sha: "missing", wantErr: "GitHub API returned 404"},
+		{name: "transport error", base: "http://127.0.0.1:0", sha: "b64", wantErr: "connect"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			typ, data, err := apiFetcher{base: tc.base, pat: "p"}.Fetch(t.Context(), "acme", "widgets", tc.sha)
+			if (err == nil) != (tc.wantErr == "") || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if typ != tc.wantType || string(data) != tc.wantData {
+				t.Fatalf("got %q %q, want %q %q", typ, data, tc.wantType, tc.wantData)
+			}
+		})
+	}
+}
+
+func TestVisibilityCacheIsPublic(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/open":
+			_, _ = io.WriteString(w, `{"private":false}`)
+		case "/repos/acme/closed":
+			_, _ = io.WriteString(w, `{"private":true}`)
+		case "/repos/acme/nofield":
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		name string
+		repo string
+		want bool
+	}{
+		{name: "public repo", repo: "open", want: true},
+		{name: "private repo", repo: "closed", want: false},
+		{name: "private repo served from cache", repo: "closed", want: false},
+		{name: "missing field treated as public", repo: "nofield", want: true},
+		{name: "lookup error treated as public", repo: "broken", want: true},
+	}
+	cache := &visibilityCache{entries: map[string]visibilityEntry{}}
+	for _, tc := range tests {
+		if got := cache.isPublic(t.Context(), srv.URL, "acme", tc.repo, "p"); got != tc.want {
+			t.Errorf("%s: isPublic = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
