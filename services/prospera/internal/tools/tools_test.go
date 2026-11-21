@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/services/prospera/internal/config"
@@ -337,7 +336,7 @@ func setupTestToolHandler() (*ToolHandler, *mockStoreForDelivery, *mockTwilioFor
 	}
 	store := newMockStoreForDelivery()
 	twilioMock := &mockTwilioForDelivery{}
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	sessionMgr := mediastream.NewCallSessionManager(staticTestConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr)
 	reporter := delivery.NewReporter(staticTestConfig{cfg: cfg}, store, twilioMock)
 
@@ -531,39 +530,14 @@ func TestToolHandler_SteerCall(t *testing.T) {
 	}
 }
 
+// steerableSession is a minimal live session whose Steer succeeds.
+type steerableSession struct{ mediastream.Session }
+
+func (steerableSession) Steer(string, string) error { return nil }
+
 func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
 	t.Helper()
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		for {
-			var msg any
-			if err := conn.ReadJSON(&msg); err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(geminiServer.Close)
-
-	wsURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	wsConn, dialResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if dialResp != nil && dialResp.Body != nil {
-		_ = dialResp.Body.Close()
-	}
-	if err != nil {
-		t.Fatalf("dial mock gemini: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = wsConn.Close()
-	})
-
-	sess := mediastream.NewMediaStreamSession(mediastream.MediaStreamSessionConfig{CallID: callID})
-	sess.SetGeminiConnForTest(wsConn)
-	handler.sessionMgr.RegisterSession(callID, sess)
+	handler.sessionMgr.RegisterSession(callID, steerableSession{})
 }
 
 func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) {

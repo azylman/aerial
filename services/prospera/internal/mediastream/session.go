@@ -135,15 +135,6 @@ func (s *MediaStreamSession) Done() <-chan struct{} {
 	return s.doneCh
 }
 
-// SetGeminiConnForTest installs a pre-connected Gemini Live conn without
-// running the dial handshake. Test support only; production code obtains the
-// conn through Run/dialGemini.
-func (s *MediaStreamSession) SetGeminiConnForTest(conn *websocket.Conn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.geminiConn = conn
-}
-
 // Run executes the session until context cancellation or session completion.
 func (s *MediaStreamSession) Run(parentCtx context.Context) {
 	ctx, cancel := context.WithCancel(parentCtx)

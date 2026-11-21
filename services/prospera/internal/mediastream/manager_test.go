@@ -99,7 +99,7 @@ func (s *fakeManagedSession) Run(_ context.Context) {
 }
 
 func newTestManager() *CallSessionManager {
-	return NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now))
+	return NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
 }
 
 func TestCallSessionManager_GetSession(t *testing.T) {
@@ -398,7 +398,7 @@ func TestCallSessionManager_SteerCall(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st := makeSteerStore(t, tc.withStore)
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now))
+			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
 			sess := newFakeManagedSession("", nil)
 			if tc.steerErr {
 				sess.steerErr = errors.New("bridge offline")
@@ -488,7 +488,7 @@ func TestCallSessionManager_HandleAMDWebhook(t *testing.T) {
 			if tc.storeErr {
 				st = errStore{Store: st}
 			}
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now))
+			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
 			sid := "CA_missing"
 			sess := newFakeManagedSession("CA_direct", nil)
 			if tc.directHit {
@@ -678,7 +678,7 @@ func TestCallSessionManager_HandleMediaWebSocketRejects(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now),
+			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now, nil),
 				WithSessionFactory(func(_ SessionConfig) Session { return newFakeManagedSession("", nil) }),
 			)
 			rec := httptest.NewRecorder()
@@ -694,7 +694,7 @@ func TestCallSessionManager_HandleMediaWebSocketRejects(t *testing.T) {
 func TestCallSessionManager_HandleMediaWebSocketRequiresFactory(t *testing.T) {
 	t.Parallel()
 
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, tokenMgr)
 	validTok, err := tokenMgr.Issue("call-no-factory", 10*time.Second)
 	if err != nil {
@@ -829,7 +829,7 @@ func TestCallSessionManager_HandleMediaWebSocketServesStream(t *testing.T) {
 			t.Parallel()
 			callID := "call-ws-" + strings.ReplaceAll(strings.ToLower(tc.name), " ", "-")
 			st := makeServeStore(t, tc, callID)
-			tokenMgr := twilio.NewStreamTokenManager(time.Now)
+			tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 			fc := &captureFactory{sess: newFakeManagedSession("", nil)}
 			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, tokenMgr,
 				WithPacerInterval(1*time.Millisecond),
