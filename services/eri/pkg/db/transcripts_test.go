@@ -800,7 +800,6 @@ func TestSQLTranscriptStore_ReadOnlyGuardsAndExecFailures(t *testing.T) {
 		"GetSessionSyncStates":       c1(s.GetSessionSyncStates(ctx)),
 		"GetKnownTurnSessionIDs":     c1(s.GetKnownTurnSessionIDs(ctx)),
 		"UpsertSessionSummary":       s.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"}),
-		"SetSessionEngine":           s.SetSessionEngine(ctx, "s", "agy"),
 		"BatchInsertTranscriptSteps": s.BatchInsertTranscriptSteps(ctx, []TranscriptStep{{SessionID: "s"}}),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "stack cannot be empty") {
@@ -818,12 +817,6 @@ func TestSQLTranscriptStore_ReadOnlyGuardsAndExecFailures(t *testing.T) {
 	}
 	if _, err := newTestTranscriptStore(t, "stack-a").BackfillToolKinds(ctx, nil); err == nil || !strings.Contains(err.Error(), "mapper cannot be nil") {
 		t.Errorf("expected nil mapper rejection, got %v", err)
-	}
-	failing := NewSQLTranscriptStore(testMockDBTX{execFn: func(context.Context, string, ...any) (sql.Result, error) {
-		return nil, errors.New("exec down")
-	}}, "stack-a")
-	if err := failing.SetSessionEngine(ctx, "s", "agy"); err == nil || !strings.Contains(err.Error(), "set session engine failed") {
-		t.Errorf("expected exec failure, got %v", err)
 	}
 }
 

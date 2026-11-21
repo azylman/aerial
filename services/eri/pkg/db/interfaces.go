@@ -130,7 +130,6 @@ type TranscriptStore interface {
 	GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error)
 	GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error)
 	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
-	SetSessionEngine(ctx context.Context, sessionID, engine string) error
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
 	BackfillToolKinds(ctx context.Context, mapper func(toolName string) string) (int64, error)
 	BackfillSessionEngines(ctx context.Context, infer func(toolNames []string) string) (int64, error)

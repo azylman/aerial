@@ -97,7 +97,7 @@ func runMusePipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx 
 	}
 	scanner := bufio.NewScanner(inR)
 	for scanner.Scan() {
-		var req museRPCRequest
+		var req codexRPCRequest
 		if err := json.Unmarshal([]byte(scanner.Text()), &req); err != nil {
 			continue
 		}

@@ -92,70 +92,7 @@ func writeConversationFile(t *testing.T, dir, sessionID, ext string, size int) s
 	return p
 }
 
-type managerInitActivityCase struct {
-	name              string
-	isNilMgr          bool
-	sessionID         string
-	roots             []string
-	setupLogs         bool
-	setupTasks        bool
-	setupClaudeDirect bool
-	wantErr           bool
-	wantZero          bool
-}
-
-func setupManagerInitActivityFixtures(tc managerInitActivityCase, tmp string) {
-	if tc.setupClaudeDirect && len(tc.roots) > 0 {
-		_ = os.MkdirAll(tc.roots[0], 0o755)
-		_ = os.WriteFile(filepath.Join(tc.roots[0], tc.sessionID+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
-	}
-	if tc.setupLogs {
-		sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
-		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-		_ = os.MkdirAll(logsDir, 0o755)
-		_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte("line1\n"), 0o644)
-	}
-	if tc.setupTasks {
-		sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
-		tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-		_ = os.MkdirAll(tasksDir, 0o755)
-		_ = os.WriteFile(filepath.Join(tasksDir, "task-1.log"), []byte("log\n"), 0o644)
-		_ = os.MkdirAll(filepath.Join(tasksDir, "nested-dir"), 0o755)
-		_ = os.WriteFile(filepath.Join(tasksDir, "ignore.txt"), []byte("txt"), 0o644)
-	}
-}
-
-func runManagerInitAndActivityCase(t *testing.T, m *Manager, tmp string, tc managerInitActivityCase) {
-	t.Helper()
-	mgr := m
-	if tc.isNilMgr {
-		mgr = nil
-	}
-	roots := tc.roots
-	if roots == nil && mgr != nil {
-		roots = mgr.Roots()
-	}
-	setupManagerInitActivityFixtures(tc, tmp)
-	ts, err := mgr.GetSessionLastActivity(tc.sessionID, roots...)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GetSessionLastActivity error=%v, wantErr=%v", err, tc.wantErr)
-	}
-	if tc.wantZero && !ts.IsZero() {
-		t.Fatalf("expected zero timestamp, got %v", ts)
-	} else if !tc.wantZero && ts.IsZero() {
-		t.Fatalf("expected non-zero timestamp")
-	}
-
-	tsDirect, errDirect := LastActivityFromRoots(tc.sessionID, roots)
-	if (errDirect != nil) != tc.wantErr {
-		t.Fatalf("LastActivityFromRoots error=%v", errDirect)
-	}
-	if tc.wantZero && !tsDirect.IsZero() {
-		t.Fatalf("LastActivityFromRoots expected zero, got %v", tsDirect)
-	}
-}
-
-func TestManager_InitAndActivity(t *testing.T) {
+func TestManager_Init(t *testing.T) {
 	tmp := t.TempDir()
 	m := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
 	if m == nil || m.homeDir == "" || m.dataDir == "" || len(m.Roots()) == 0 {
@@ -164,27 +101,6 @@ func TestManager_InitAndActivity(t *testing.T) {
 	var nilMgr *Manager
 	if len(nilMgr.Roots()) != 0 {
 		t.Fatalf("nil Manager should return nil roots")
-	}
-
-	tests := []managerInitActivityCase{
-		{name: "nil manager", isNilMgr: true, sessionID: "sess-1", wantZero: true},
-		{name: "empty session ID", sessionID: "", wantZero: true},
-		{name: "path traversal ID", sessionID: "../bad", wantZero: true},
-		{name: "empty roots", sessionID: "sess-1", roots: []string{}, wantZero: true},
-		{name: "empty string root", sessionID: "sess-1", roots: []string{""}, wantZero: true},
-		{name: "nonexistent roots", sessionID: "sess-1", roots: []string{filepath.Join(tmp, "missing")}, wantZero: true},
-		{name: "percent s placeholder", sessionID: "sess-logs", roots: []string{filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "%s")}, setupLogs: true},
-		{name: "session placeholder", sessionID: "sess-logs", roots: []string{filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "{session}")}, setupLogs: true},
-		{name: "direct session root", sessionID: "sess-logs", roots: []string{filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "sess-logs")}, setupLogs: true},
-		{name: "direct logs root", sessionID: "sess-logs", roots: []string{filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "sess-logs", ".system_generated", "logs")}, setupLogs: true},
-		{name: "logs activity timestamp", sessionID: "sess-logs", setupLogs: true},
-		{name: "task activity timestamp", sessionID: "sess-tasks", setupTasks: true},
-		{name: "direct claude jsonl root", sessionID: "sess-claude-root", roots: []string{filepath.Join(tmp, "claude-direct")}, setupClaudeDirect: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runManagerInitAndActivityCase(t, m, tmp, tc)
-		})
 	}
 }
 
@@ -682,7 +598,6 @@ type extractResponseSinceCase struct {
 	codexTranscript  string
 	since            time.Time
 	cancelCtx        bool
-	useCtx           bool
 	wantResp         string
 }
 
@@ -722,14 +637,8 @@ func runExtractResponseSinceCase(t *testing.T, tc extractResponseSinceCase) {
 		ctx, cancel = context.WithCancel(ctx)
 		cancel()
 	}
-	var got string
-	if tc.useCtx {
-		got = mgr.ExtractResponseSinceContext(ctx, tc.convID, tc.since)
-	} else {
-		got = mgr.ExtractResponseSince(tc.convID, tc.since)
-	}
-	if got != tc.wantResp {
-		t.Fatalf("ExtractResponseSince=%q, want %q", got, tc.wantResp)
+	if got := mgr.ExtractResponseSinceContext(ctx, tc.convID, tc.since); got != tc.wantResp {
+		t.Fatalf("ExtractResponseSinceContext=%q, want %q", got, tc.wantResp)
 	}
 }
 
@@ -758,7 +667,7 @@ func TestExtractResponseSince(t *testing.T) {
 		{name: "nil manager", isNilMgr: true, convID: "s1", since: t0},
 		{name: "empty convID", convID: "", since: t0},
 		{name: "path traversal", convID: "../bad", since: t0},
-		{name: "canceled context", convID: "s1", since: t0, cancelCtx: true, useCtx: true},
+		{name: "canceled context", convID: "s1", since: t0, cancelCtx: true},
 		{name: "rescues response created after since", convID: "s-after", transcript: fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"Turn 1\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"substantive answer\",\"created_at\":%q}\ninvalid-json-line\n", t0.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano)), since: t0, wantResp: "substantive answer"},
 		{name: "rfc3339 without nanos format", convID: "s-rfc3339", transcript: fmt.Sprintf("{\"type\":\"PLANNER_RESPONSE\",\"content\":\"rfc3339 answer\",\"created_at\":%q}\n", t1.Format(time.RFC3339)), since: t0, wantResp: "rfc3339 answer"},
 		{name: "response created before since", convID: "s-before", transcript: fmt.Sprintf("{\"type\":\"PLANNER_RESPONSE\",\"content\":\"stale answer\",\"created_at\":%q}\n", t0.Format(time.RFC3339Nano)), since: t1, wantResp: ""},
@@ -823,7 +732,6 @@ func TestExtractResponseSince(t *testing.T) {
 			claudeTranscript: `{"type":"assistant","timestamp":"2026-10-19T12:01:00Z","message":{"role":"assistant","content":"reply"}}` + "\n",
 			since:            t0,
 			cancelCtx:        true,
-			useCtx:           true,
 			wantResp:         "",
 		},
 		{
@@ -1085,19 +993,18 @@ func TestSanitizeClaudeProjectPath(t *testing.T) {
 }
 
 type claudeSessionLifecycleCase struct {
-	name            string
-	isNilMgr        bool
-	sessionID       string
-	location        string
-	content         string
-	zeroByte        bool
-	age             time.Duration
-	wantExists      bool
-	wantPaths       int
-	wantSize        int64
-	wantSteps       int
-	wantTurns       int
-	wantNonZeroTime bool
+	name       string
+	isNilMgr   bool
+	sessionID  string
+	location   string
+	content    string
+	zeroByte   bool
+	age        time.Duration
+	wantExists bool
+	wantPaths  int
+	wantSize   int64
+	wantSteps  int
+	wantTurns  int
 }
 
 func resolveClaudeWriteDir(location, homeDir, dataDir string) string {
@@ -1170,22 +1077,6 @@ func assertClaudeSessionMetrics(t *testing.T, mgr *Manager, tc claudeSessionLife
 	if turns != tc.wantTurns {
 		t.Errorf("CountTranscriptTurns=%d, want %d", turns, tc.wantTurns)
 	}
-
-	var lastAct time.Time
-	var err error
-	if tc.name == "custom roots override in GetSessionLastActivity" {
-		lastAct, err = mgr.GetSessionLastActivity(tc.sessionID, filepath.Join(dataDir, "claude", "projects"))
-	} else {
-		lastAct, err = mgr.GetSessionLastActivity(tc.sessionID)
-	}
-	if err != nil {
-		t.Fatalf("GetSessionLastActivity error: %v", err)
-	}
-	if tc.wantNonZeroTime && lastAct.IsZero() {
-		t.Errorf("GetSessionLastActivity expected non-zero, got zero")
-	} else if !tc.wantNonZeroTime && !lastAct.IsZero() {
-		t.Errorf("GetSessionLastActivity expected zero, got %v", lastAct)
-	}
 }
 
 func runClaudeSessionLifecycleCase(t *testing.T, tc claudeSessionLifecycleCase, t0 time.Time) {
@@ -1227,12 +1118,11 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Initial prompt"}}`,
 				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}`,
 			}, "\n") + "\n",
-			age:             10 * time.Minute,
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			age:        10 * time.Minute,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  1,
 		},
 		{
 			name:      "data runtime claude projects session with tool results and ambient",
@@ -1246,11 +1136,10 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 				`{"type":"assistant","timestamp":"2026-11-07T10:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Final answer"}]}}`,
 				`{"type":"tool_result","timestamp":"2026-11-07T10:00:07Z","content":"extra tool"}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       4,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  4,
+			wantTurns:  1,
 		},
 		{
 			name:      "home claude projects session",
@@ -1259,11 +1148,10 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 			content: strings.Join([]string{
 				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Home prompt"}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       0,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  0,
+			wantTurns:  1,
 		},
 		{
 			name:      "direct in claude projects base directory",
@@ -1272,10 +1160,9 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 			content: strings.Join([]string{
 				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Direct prompt"}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantTurns:  1,
 		},
 		{
 			name:       "zero byte file does not exist",
@@ -1285,16 +1172,6 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 			wantExists: false,
 			wantPaths:  1,
 			wantSize:   0,
-		},
-		{
-			name:            "custom roots override in GetSessionLastActivity",
-			sessionID:       "sess-claude-custom-root",
-			location:        "data_claude",
-			content:         `{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Hello"}}` + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
 		},
 		{
 			name:      "claude transcript with empty lines and invalid lines",
@@ -1308,11 +1185,10 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Valid reply"}]}}`,
 				"",
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  1,
 		},
 	}
 

@@ -119,11 +119,6 @@ func NewSQLStore(database *sql.DB) *SQLStore {
 	return &SQLStore{db: database}
 }
 
-// NewStore is an alias for NewSQLStore.
-func NewStore(database *sql.DB) *SQLStore {
-	return NewSQLStore(database)
-}
-
 func isPostgresDriver(d driver.Driver) bool {
 	if d == nil {
 		return false

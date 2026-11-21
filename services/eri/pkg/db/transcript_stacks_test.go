@@ -334,41 +334,6 @@ func TestSharedTranscripts_BackfillSessionEnginesScopedToStack(t *testing.T) {
 	}
 }
 
-func TestSQLTranscriptStore_SetSessionEngine(t *testing.T) {
-	tests := []struct {
-		name        string
-		session     string
-		engine      string
-		wantErr     string
-		wantEngines map[string]string
-	}{
-		{name: "stamps only the own-stack row", session: "a-only", engine: "claude", wantEngines: map[string]string{"stack_a/a-only": "claude", "stack_a/dup-sess": "agy", "stack_b/dup-sess": "claude", "stack_b/b-only": "claude"}},
-		{name: "same id on another stack is untouched", session: "dup-sess", engine: "claude", wantEngines: map[string]string{"stack_a/a-only": "", "stack_a/dup-sess": "claude", "stack_b/dup-sess": "claude", "stack_b/b-only": "claude"}},
-		{name: "empty engine rejected", session: "a-only", engine: " ", wantErr: "cannot be empty"},
-		{name: "empty session rejected", engine: "agy", wantErr: "cannot be empty"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			shared, a, b := newSharedStackPair(t)
-			seedSharedStacks(t, a, b)
-			err := a.SetSessionEngine(context.Background(), tc.session, tc.engine)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("SetSessionEngine: %v", err)
-			}
-			got := readStackKeyed(t, shared, "SELECT agent, session_id, engine FROM session_summaries")
-			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
-				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
-			}
-		})
-	}
-}
-
 // readStackKeyed maps "stack/session_id" to the third selected column.
 func readStackKeyed(t *testing.T, database *sql.DB, query string) map[string]string {
 	t.Helper()

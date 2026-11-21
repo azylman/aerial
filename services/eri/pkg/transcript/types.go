@@ -75,12 +75,10 @@ const (
 	DefaultBatchLimit = 1000
 )
 
-// DefaultSyncOptions returns safe defaults for transcript syncing.
-func DefaultSyncOptions() SyncOptions {
-	return SyncOptions{
-		BatchLimit:    DefaultBatchLimit,
-		IdleThreshold: 10 * time.Minute,
-		HeadLimit:     15000,
-		TailLimit:     35000,
-	}
-}
+// Engine values recorded per session.
+const (
+	EngineAgy    = "agy"
+	EngineClaude = "claude"
+	EngineCodex  = "codex"
+	EngineMuse   = "muse"
+)

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestExtractCodexSessionID_TableDriven(t *testing.T) {
@@ -252,31 +251,6 @@ func assertParsedCodexStep(t *testing.T, step rawTranscriptStep, wantType, wantS
 	}
 	if wantThink != "" && step.Thinking != wantThink {
 		t.Errorf("step.Thinking = %q, want %q", step.Thinking, wantThink)
-	}
-}
-
-func populateSyncTranscriptsEngineFixtures(t *testing.T, tmp, brainDir, projDir string, tc syncTranscriptsEngineCase) {
-	t.Helper()
-	for _, f := range tc.brainFiles {
-		writeTranscriptFile(t, brainDir, f.sessionID, f.content, time.Now().Add(-f.age))
-	}
-	writeDatedSessionFiles(t, projDir, tc.claudeFiles)
-	codexDir := filepath.Join(tmp, "codex", "sessions")
-	_ = os.MkdirAll(codexDir, 0o755)
-	writeDatedSessionFiles(t, codexDir, tc.codexFiles)
-}
-
-func writeDatedSessionFiles(t *testing.T, dir string, files []sessionFileFixture) {
-	t.Helper()
-	for _, f := range files {
-		p := filepath.Join(dir, f.sessionID+".jsonl")
-		if err := os.WriteFile(p, []byte(f.content), 0o644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		mtime := time.Now().Add(-f.age).Truncate(time.Second)
-		if err := os.Chtimes(p, mtime, mtime); err != nil {
-			t.Fatalf("chtimes: %v", err)
-		}
 	}
 }
 

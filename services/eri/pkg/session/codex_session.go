@@ -144,22 +144,6 @@ func (m *Manager) CodexSessionExistsOnDisk(sessionID string) bool {
 	return false
 }
 
-func isCodexSessionDir(root string) bool {
-	base := filepath.Base(root)
-	return base == "sessions" || base == ".codex" || strings.Contains(root, "codex")
-}
-
-func checkCodexSubdirsActivity(root, cleanID string, current time.Time) time.Time {
-	if !isCodexSessionDir(root) {
-		return current
-	}
-	seen := make(map[string]bool)
-	for _, p := range scanCodexBaseForSession(root, cleanID, seen) {
-		current = checkFileMtime(p, current)
-	}
-	return current
-}
-
 func isCodexStepLine(line string) bool {
 	var entry codexTranscriptEntry
 	if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Type != entryTypeResponseItem {

@@ -1,13 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -36,22 +32,10 @@ func WithReloadSupplier(fn func(active *config.Config) error) ReloadOption {
 	}
 }
 
-func WithSkipEnvironmentSync() ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.skipEnvironmentSync = true
-	}
-}
-
 func WithStore(store db.Store) BrainAppOption {
 	return func(o *brainAppOptions) {
 		o.store = store
 		o.txStore, _ = store.(db.TranscriptStore)
-	}
-}
-
-func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
-	return func(o *brainAppOptions) {
-		o.processSpawner = spawner
 	}
 }
 
@@ -78,94 +62,6 @@ func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	return config.NewFromData(data)
 }
 
-type mockMainProcessHandle struct{ pid int }
-
-func (m *mockMainProcessHandle) Pid() int  { return m.pid }
-func (*mockMainProcessHandle) Kill() error { return nil }
-func (*mockMainProcessHandle) Wait() error { return nil }
-
-type mockMainDaemonSpawner struct {
-	SpawnFn func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error)
-}
-
-func newMockMainDaemonSpawner() *mockMainDaemonSpawner { return &mockMainDaemonSpawner{} }
-
-func serveMockCodexMain(inR io.Reader, outW io.Writer, sessID string) {
-	if sessID == "" {
-		sessID = "th_mock_12345"
-	}
-	scanner := bufio.NewScanner(inR)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var req struct {
-			ID     int64  `json:"id"`
-			Method string `json:"method"`
-		}
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			continue
-		}
-		switch req.Method {
-		case "initialize":
-			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
-		case "thread/start", "thread/resume":
-			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"thread\":{\"id\":%q}}}\n", req.ID, sessID)
-		}
-	}
-}
-
-func serveMockMuseMain(inR io.Reader, outW io.Writer, sessID string) {
-	if sessID == "" {
-		sessID = "018f0000-0000-7000-8000-000000000001"
-	}
-	scanner := bufio.NewScanner(inR)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var req struct {
-			ID     int64  `json:"id"`
-			Method string `json:"method"`
-		}
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			continue
-		}
-		switch req.Method {
-		case "initialize":
-			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
-		case "session/start", "session/resume":
-			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"session\":{\"sessionId\":%q}}}\n", req.ID, sessID)
-		case "session/setApprovalMode":
-			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
-		}
-	}
-}
-
-func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-	if m != nil && m.SpawnFn != nil {
-		return m.SpawnFn(ctx, cfg)
-	}
-	inR, inW := io.Pipe()
-	outR, outW := io.Pipe()
-	errR, errW := io.Pipe()
-	go func() {
-		defer outW.Close()
-		defer errW.Close()
-		if cfg.IsCodex() {
-			serveMockCodexMain(inR, outW, cfg.SessionID)
-			return
-		}
-		if cfg.IsMuse() {
-			serveMockMuseMain(inR, outW, cfg.SessionID)
-			return
-		}
-		sessID := cfg.SessionID
-		if sessID == "" || !runner.IsValidUUID(sessID) {
-			sessID = "550e8400-e29b-41d4-a716-446655440000"
-		}
-		_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
-		_, _ = io.Copy(io.Discard, inR)
-	}()
-	return inW, outR, errR, &mockMainProcessHandle{pid: 12345}, nil
-}
-
 type mockMarkDirtyPool struct {
 	dirty atomic.Bool
 }
@@ -182,7 +78,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
 		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			return errors.New("simulated invalid YAML error")
-		}), WithSkipEnvironmentSync())("TestReload")
+		}))("TestReload")
 	})
 
 	t.Run("supplier success updating model and marking pool dirty", func(t *testing.T) {
@@ -202,7 +98,6 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 				})
 				return nil
 			}),
-			WithSkipEnvironmentSync(),
 		)
 		reloadFn("TestReloadSuccess")
 		if !calledOnReload {
@@ -653,12 +548,6 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 	})
 }
 
-type mockErrProcessHandle struct{}
-
-func (*mockErrProcessHandle) Pid() int    { return 99999 }
-func (*mockErrProcessHandle) Kill() error { return errors.New("simulated kill error") }
-func (*mockErrProcessHandle) Wait() error { return nil }
-
 func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -725,44 +614,6 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			t.Fatalf("unexpected error from RunBrainApp: %v", err)
 		}
 	})
-
-	t.Run("ProcessPoolInitErrors", func(t *testing.T) {
-		_, cfg := newLifecycleCfg(t)
-		failingSpawner := &mockMainDaemonSpawner{
-			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-				return nil, nil, nil, nil, errors.New("simulated spawn failure")
-			},
-		}
-
-		_, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(failingSpawner))
-		cancel()
-		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("unexpected error from RunBrainApp: %v", err)
-		}
-	})
-
-	t.Run("DaemonCloseErrors", func(t *testing.T) {
-		_, cfg := newLifecycleCfg(t)
-		spawner := &mockMainDaemonSpawner{
-			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-				inR, inW := io.Pipe()
-				outR, outW := io.Pipe()
-				errR, errW := io.Pipe()
-				_ = inR
-				_ = errW
-				go func() {
-					_, _ = outW.Write([]byte("ready\n"))
-				}()
-				return inW, outR, errR, &mockErrProcessHandle{}, nil
-			},
-		}
-
-		_, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(spawner))
-		cancel()
-		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("unexpected error from RunBrainApp: %v", err)
-		}
-	})
 }
 
 func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
@@ -777,9 +628,10 @@ func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
 	defer ts.Close()
 	t.Setenv("ERI_RESTATE_URL", ts.URL)
 
+	t.Setenv("RESTATE_INGRESS_URL", "http://127.0.0.1:8080")
+
 	_, cfg := newLifecycleCfg(t)
-	client := NewRestateIngressClient("http://127.0.0.1:8080", "aerial-test")
-	_, cancel, wait := runBrainAppUntilReady(t, cfg, WithRestateIngressClient(client))
+	_, cancel, wait := runBrainAppUntilReady(t, cfg)
 
 	qp := currentFunnelQuotaProvider()
 	if qp == nil {
@@ -802,12 +654,6 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	WithStore(store)(&opts)
 	if opts.store != store {
 		t.Errorf("expected store to be set")
-	}
-
-	spawner := newMockMainDaemonSpawner()
-	WithProcessSpawner(spawner)(&opts)
-	if opts.processSpawner != spawner {
-		t.Errorf("expected processSpawner to be set")
 	}
 
 	hupChan := make(chan os.Signal, 1)
@@ -851,7 +697,6 @@ func TestDefaultReloadCandidate(t *testing.T) {
 			cfg := config.ActiveConfig()
 			cfg.Update(newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" }).Current())
 			var opts []ReloadOption
-			opts = append(opts, WithSkipEnvironmentSync())
 			if tc.mutateSupplier {
 				opts = append(opts, WithReloadSupplier(func(candidate *config.Config) error {
 					return errors.New("forced reload failure")

@@ -970,7 +970,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	}
 
 	var nilPool *WorkerPool
-	nilPool.HoldUntilLeader()
 	_ = nilPool.ReleaseLeaderHold()
 	_ = nilPool.DeliverDirect("c", "t")
 	pEmpty := &WorkerPool{}

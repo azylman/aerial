@@ -15,11 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -566,18 +564,6 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
-	// Test DiscordSession and EventBus injection in RunApp
-	bus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = bus.Close() })
-	err = RunApp(ctx, cfg,
-		WithStore(fakeStore, nil),
-		WithAppConfig(appCfg),
-		WithDaemonSpawner(&dummySpawner{}),
-		WithDiscordSession(&discordgo.Session{}),
-		WithEventBus(bus),
-	)
-	assert.NoError(t, err)
-
 	// Test config DiscordToken and NATSURL in RunApp
 	appCfgWithTokens := config.NewFromData(&config.ConfigData{
 		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
@@ -612,8 +598,6 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to initialize database")
-
-	defaultReloadLogger("test")
 }
 
 type dummySpawner struct{}
@@ -793,6 +777,8 @@ func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
 }
 
 func TestRunApp_ConfigLoadError(t *testing.T) {
+	// ResolveConfigSearchPaths prepends CONFIG_PATH; clear it so the real config never loads.
+	t.Setenv("CONFIG_PATH", "")
 	oldPaths := config.ConfigSearchPaths
 	config.ConfigSearchPaths = []string{filepath.Join(t.TempDir(), "nonexistent.yaml")}
 	t.Cleanup(func() { config.ConfigSearchPaths = oldPaths })
@@ -1012,31 +998,25 @@ func TestWrapDiscoveryTimeoutReconciler_NonDiscoverPath(t *testing.T) {
 func TestWireOutboundIntegrations(t *testing.T) {
 	t.Parallel()
 
-	pool := queue.New(nil, queue.WorkerPoolConfig{})
-	cur := &config.ConfigData{
-		DiscordToken: "token-1",
-		NATSURL:      "nats://127.0.0.1:65530",
+	tests := []struct {
+		name        string
+		cur         *config.ConfigData
+		wantSession bool
+	}{
+		{name: "token and nats url", cur: &config.ConfigData{DiscordToken: "token-1", NATSURL: "nats://127.0.0.1:65530"}, wantSession: true},
+		{name: "no token and no nats url", cur: &config.ConfigData{}},
 	}
-
-	// 1. With explicit discord session and bus
-	s := &discordgo.Session{}
-	bus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = bus.Close() })
-	closeFn := wireOutboundIntegrations(context.Background(), cur, pool, appOptions{
-		discordSession: s,
-		eventBus:       bus,
-	})
-	assert.Nil(t, closeFn)
-	assert.Equal(t, s, pool.DiscordSession())
-	assert.Equal(t, bus, pool.EventBus())
-
-	// 2. With token and NATS URL
-	pool2 := queue.New(nil, queue.WorkerPoolConfig{})
-	closeFn2 := wireOutboundIntegrations(context.Background(), cur, pool2, appOptions{})
-	assert.NotNil(t, pool2.DiscordSession())
-	if closeFn2 != nil {
-		assert.NotNil(t, pool2.EventBus())
-		closeFn2()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := queue.New(nil, queue.WorkerPoolConfig{})
+			closeFn := wireOutboundIntegrations(context.Background(), tc.cur, pool)
+			assert.Equal(t, tc.wantSession, pool.DiscordSession() != nil)
+			assert.Equal(t, closeFn != nil, pool.EventBus() != nil)
+			if closeFn != nil {
+				closeFn()
+			}
+		})
 	}
 }
 

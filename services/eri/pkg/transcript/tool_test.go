@@ -577,23 +577,6 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 	}
 }
 
-func TestDefaultSyncOptions(t *testing.T) {
-	t.Parallel()
-	opts := DefaultSyncOptions()
-	if opts.BatchLimit != DefaultBatchLimit {
-		t.Errorf("expected BatchLimit = %d, got %d", DefaultBatchLimit, opts.BatchLimit)
-	}
-	if opts.IdleThreshold != 10*time.Minute {
-		t.Errorf("expected IdleThreshold = 10m, got %v", opts.IdleThreshold)
-	}
-	if opts.HeadLimit != 15000 {
-		t.Errorf("expected HeadLimit = 15000, got %d", opts.HeadLimit)
-	}
-	if opts.TailLimit != 35000 {
-		t.Errorf("expected TailLimit = 35000, got %d", opts.TailLimit)
-	}
-}
-
 type getTranscriptStepWindowCase struct {
 	name        string
 	nilStore    bool

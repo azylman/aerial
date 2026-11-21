@@ -524,12 +524,6 @@ func TestFakeStoreCloneNil(t *testing.T) {
 		cloneSessionSummary(nil) != nil {
 		t.Errorf("expected nil clones for nil inputs")
 	}
-	if got := cloneSliceNonNil[string](nil); got == nil || len(got) != 0 {
-		t.Errorf("cloneSliceNonNil(nil) = %v, want empty slice", got)
-	}
-	if got := cloneSliceNonNil([]string{"a"}); len(got) != 1 || got[0] != "a" {
-		t.Errorf("cloneSliceNonNil non-nil failed: %v", got)
-	}
 }
 
 func TestCosineSimilarity(t *testing.T) {
@@ -1191,9 +1185,6 @@ func assertFakeStoreEngineLifecycleAndErrors(ctx context.Context, t *testing.T, 
 	if _, err := store.BackfillSessionEngines(ctx, nil); err == nil {
 		t.Error("expected error for nil infer")
 	}
-	if err := store.SetSessionEngine(ctx, "", "agy"); err == nil {
-		t.Error("expected error for empty session ID")
-	}
 	if _, err := store.BackfillToolKinds(ctx, nil); err == nil {
 		t.Error("expected error for nil mapper")
 	}
@@ -1213,15 +1204,13 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	if stats, err := store.GetTranscriptStats(ctx, ""); err != nil || stats != nil {
 		t.Fatalf("empty index stats = %+v err=%v, want none", stats, err)
 	}
-	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-e", Summary: "engine session"}), "UpsertSessionSummary")
+	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-e", Engine: "claude", Summary: "engine session"}), "UpsertSessionSummary")
 	mustOK(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 		{SessionID: "sess-e", StepIndex: 0, ToolName: "Bash"},
 		{SessionID: "sess-e", StepIndex: 1, ToolName: "unmapped_tool"},
 		{SessionID: "sess-e", StepIndex: 2, ToolName: "Read", ToolKind: "read"},
 		{SessionID: "sess-e", StepIndex: 3},
 	}), "BatchInsertTranscriptSteps")
-	mustOK(t, store.SetSessionEngine(ctx, "sess-e", "claude"), "SetSessionEngine")
-	mustOK(t, store.SetSessionEngine(ctx, "sess-missing", "claude"), "SetSessionEngine on missing session")
 	mapper := func(name string) string {
 		if name == "Bash" {
 			return "shell"

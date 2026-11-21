@@ -225,13 +225,6 @@ func cloneSessionSummary(s *db.SessionSummary) *db.SessionSummary {
 	return &cp
 }
 
-func cloneSliceNonNil[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return cloneSlice(s)
-}
-
 func textMatchScore(text, qLower string, words []string) float64 {
 	lower := strings.ToLower(text)
 	if strings.Contains(lower, qLower) {
@@ -1123,19 +1116,6 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.Session
 		}
 		cp.UpdatedAt = now
 		f.sessionSummaries[summary.SessionID] = cloneSessionSummary(&cp)
-		return nil
-	})
-}
-
-func (f *FakeStore) SetSessionEngine(ctx context.Context, sessionID, engine string) error {
-	return f.withLockErr("SetSessionEngine", func() error {
-		sessionID, engine = strings.TrimSpace(sessionID), strings.TrimSpace(engine)
-		if sessionID == "" || engine == "" {
-			return fmt.Errorf("session ID and engine cannot be empty")
-		}
-		if existing := f.sessionSummaries[sessionID]; existing != nil {
-			existing.Engine = engine
-		}
 		return nil
 	})
 }

@@ -11,19 +11,18 @@ import (
 )
 
 type codexSessionLifecycleCase struct {
-	name            string
-	isNilMgr        bool
-	sessionID       string
-	location        string
-	content         string
-	zeroByte        bool
-	age             time.Duration
-	wantExists      bool
-	wantPaths       int
-	wantSize        int64
-	wantSteps       int
-	wantTurns       int
-	wantNonZeroTime bool
+	name       string
+	isNilMgr   bool
+	sessionID  string
+	location   string
+	content    string
+	zeroByte   bool
+	age        time.Duration
+	wantExists bool
+	wantPaths  int
+	wantSize   int64
+	wantSteps  int
+	wantTurns  int
 }
 
 func resolveCodexWriteDir(location, homeDir, dataDir string) (string, string) {
@@ -36,6 +35,8 @@ func resolveCodexWriteDir(location, homeDir, dataDir string) (string, string) {
 		return filepath.Join(homeDir, ".codex", "sessions"), "rollout-"
 	case "direct_codex":
 		return filepath.Join(dataDir, "codex", "sessions"), ""
+	case "direct_codex_dated":
+		return filepath.Join(dataDir, "codex", "sessions"), "rollout-2026-11-07T10-00-00-"
 	default:
 		return "", ""
 	}
@@ -84,25 +85,6 @@ func assertCodexSessionMetrics(t *testing.T, mgr *Manager, tc codexSessionLifecy
 	if stepTotal != tc.wantSteps || turnTotal != tc.wantTurns {
 		t.Errorf("[%s] count mismatch: steps=%d/%d turns=%d/%d", tc.name, stepTotal, tc.wantSteps, turnTotal, tc.wantTurns)
 	}
-
-	targetRoot := ""
-	if tc.name == "custom roots override in GetSessionLastActivity" {
-		targetRoot = filepath.Join(dataDir, "codex", "sessions")
-	}
-	lastAct, err := evaluateCodexLastActivity(mgr, tc.sessionID, targetRoot)
-	if err != nil {
-		t.Fatalf("[%s] GetSessionLastActivity error: %v", tc.name, err)
-	}
-	if (tc.wantNonZeroTime && lastAct.IsZero()) || (!tc.wantNonZeroTime && !lastAct.IsZero()) {
-		t.Errorf("[%s] lastActivity time unexpected: zero=%v wantNonZero=%v", tc.name, lastAct.IsZero(), tc.wantNonZeroTime)
-	}
-}
-
-func evaluateCodexLastActivity(mgr *Manager, sessionID, customRoot string) (time.Time, error) {
-	if customRoot != "" {
-		return mgr.GetSessionLastActivity(sessionID, customRoot)
-	}
-	return mgr.GetSessionLastActivity(sessionID)
 }
 
 func runCodexSessionLifecycleCase(t *testing.T, tc codexSessionLifecycleCase, t0 time.Time) {
@@ -137,6 +119,19 @@ func TestCodexSessionLifecycle(t *testing.T) {
 			sessionID: "../bad-id",
 		},
 		{
+			name:      "direct codex timestamped rollout session",
+			sessionID: "sess-codex-dated",
+			location:  "direct_codex_dated",
+			content: strings.Join([]string{
+				`{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Initial prompt"}]}}`,
+				`{"type":"response_item","timestamp":"2026-11-07T10:00:02Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Done"}]}}`,
+			}, "\n") + "\n",
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  1,
+		},
+		{
 			name:      "data codex nested rollout session",
 			sessionID: "sess-codex-data",
 			location:  "data_codex",
@@ -144,12 +139,11 @@ func TestCodexSessionLifecycle(t *testing.T) {
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Initial prompt"}]}}`,
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:02Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Done"}]}}`,
 			}, "\n") + "\n",
-			age:             10 * time.Minute,
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			age:        10 * time.Minute,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  1,
 		},
 		{
 			name:      "data runtime codex session with tool calls and ambient",
@@ -162,11 +156,10 @@ func TestCodexSessionLifecycle(t *testing.T) {
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:05Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"[Chat ambient message]"}]}}`,
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:06Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Final answer"}]}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       3,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  3,
+			wantTurns:  1,
 		},
 		{
 			name:      "home codex rollout session",
@@ -175,11 +168,10 @@ func TestCodexSessionLifecycle(t *testing.T) {
 			content: strings.Join([]string{
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Home prompt"}]}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       0,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  0,
+			wantTurns:  1,
 		},
 		{
 			name:      "direct in codex base directory",
@@ -188,10 +180,9 @@ func TestCodexSessionLifecycle(t *testing.T) {
 			content: strings.Join([]string{
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Direct prompt"}]}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantTurns:  1,
 		},
 		{
 			name:       "zero byte file does not exist",
@@ -201,16 +192,6 @@ func TestCodexSessionLifecycle(t *testing.T) {
 			wantExists: false,
 			wantPaths:  1,
 			wantSize:   0,
-		},
-		{
-			name:            "custom roots override in GetSessionLastActivity",
-			sessionID:       "sess-codex-custom-root",
-			location:        "data_codex",
-			content:         `{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Hello"}]}}` + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
 		},
 		{
 			name:      "codex transcript with empty lines and invalid lines",
@@ -224,11 +205,10 @@ func TestCodexSessionLifecycle(t *testing.T) {
 				`{"type":"response_item","timestamp":"2026-11-07T10:00:02Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Valid reply"}]}}`,
 				"",
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  1,
 		},
 	}
 
@@ -284,6 +264,7 @@ func TestCodexInternal_ExtractCodexText(t *testing.T) {
 		{name: "input_text and output_text blocks", content: `[{"type":"input_text","text":"prompt"},{"type":"output_text","text":"reply"}]`, wantText: "prompt\nreply"},
 		{name: "fallback text", content: `{"invalid":1}`, text: "fallback text", wantText: "fallback text"},
 		{name: "empty", content: ``, text: "", wantText: ""},
+		{name: "object content without fallback", content: `{"invalid":1}`, wantText: ""},
 	}
 	for _, tc := range textTests {
 		t.Run(tc.name, func(t *testing.T) {

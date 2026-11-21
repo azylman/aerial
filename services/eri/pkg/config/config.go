@@ -17,7 +17,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
-	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
 // Channel effort tiers returned by ChannelPolicy.GetEffort.
@@ -286,15 +285,6 @@ func (c *TranscriptsConfig) UnmarshalJSON(b []byte) error {
 	c.IndexerURL = strings.TrimRight(strings.TrimSpace(raw.IndexerURL), "/")
 	c.MaxBatchBytes = raw.MaxBatchBytes
 	return nil
-}
-
-// EffectiveMaxBatchBytes returns the configured per-batch byte budget, falling
-// back to the shared wire budget when unset or non-positive.
-func (c TranscriptsConfig) EffectiveMaxBatchBytes() int {
-	if c.MaxBatchBytes > 0 {
-		return c.MaxBatchBytes
-	}
-	return transcriptwire.MaxBatchBytes
 }
 
 // CredentialSource selects an explicit credential file or disables provisioning.
@@ -1036,14 +1026,6 @@ func ActiveConfig() *Config {
 
 func GetRuntimeConfig() ConfigData {
 	return *activeGlobalConfig.Current()
-}
-
-func GetTimezone() string {
-	cfg := activeGlobalConfig.Current()
-	if cfg != nil && strings.TrimSpace(cfg.Timezone) != "" {
-		return cfg.Timezone
-	}
-	return "America/Los_Angeles"
 }
 
 func isContainerColdBoot(paths ...string) bool {

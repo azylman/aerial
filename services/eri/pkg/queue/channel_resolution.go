@@ -557,9 +557,3 @@ func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now ti
 	}
 	return channelID
 }
-
-var _ = func() bool {
-	_ = FormatThreadTitle("", "", time.Time{})
-	_ = ShouldCreateThread(false, "")
-	return true
-}()

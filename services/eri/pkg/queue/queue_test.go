@@ -828,7 +828,7 @@ func waitPoolIdle(t *testing.T, pool *WorkerPool, timeout time.Duration) {
 	t.Fatalf("timed out waiting for worker pool to become idle")
 }
 
-func TestWorkerPool_HoldUntilLeaderAndRecovery_Isolation(t *testing.T) {
+func TestWorkerPool_LeaderHoldAndRecovery_Isolation(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	ctx := context.Background()
@@ -875,7 +875,9 @@ func TestWorkerPool_HoldUntilLeaderAndRecovery_Isolation(t *testing.T) {
 			}
 		},
 	})
-	pool.HoldUntilLeader()
+	pool.mu.Lock()
+	pool.leaderHold = true
+	pool.mu.Unlock()
 	pool.Start()
 	defer pool.Stop()
 
