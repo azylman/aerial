@@ -13,14 +13,6 @@ import (
 	"github.com/azylman/aerial/services/prospera/internal/model"
 )
 
-func nakBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
-
 func nakOrDropJob(ctx context.Context, msg pubsub.Message, jobName, entityID string, err error) error {
 	if msg == nil {
 		return err
@@ -33,7 +25,7 @@ func nakOrDropJob(ctx context.Context, msg pubsub.Message, jobName, entityID str
 		}
 		return nil
 	}
-	if nakErr := msg.NakWithDelay(nakBackoffDelay(delivered)); nakErr != nil {
+	if nakErr := msg.NakWithDelay(pubsub.NakBackoff(delivered, 16*time.Second)); nakErr != nil {
 		slog.WarnContext(ctx, "prospera: nak job error", "job", jobName, "error", nakErr)
 	}
 	return err
