@@ -628,6 +628,18 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedRepoK + "HandlePushBySHA/send"},
 			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`},
 		},
+		{
+			name: "default owner direct commit dispatches the git push with no pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
+			body:       pushPayload("refs/heads/main", "Direct commit"),
+			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedRepoK + "HandlePushBySHA/send", ownedRepoK + "HandleGitPush/send"},
+			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`, `"main_sha":"` + ownedMerge + `","generation":0,"pr_number":0,"head_sha":"","agent":"","effects_owner":"restate","ref":"refs/heads/main"`},
+		},
+		{
+			name: "default owner squash push dispatches the git push for the pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
+			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
+			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleGitPush/send"},
+			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"pr_number":42,"head_sha":"","agent":"","effects_owner":"restate","ref":"refs/heads/main"`},
+		},
 		{name: "branch push sends nothing", event: "push", body: pushPayload("refs/heads/feat", "wip")},
 		{name: "tag push sends nothing", event: "push", body: pushPayload("refs/tags/v1", "tag")},
 		{name: "deleted branch sends nothing", event: "push", body: []byte(`{"ref":"refs/heads/main","deleted":true,"after":"0000000000000000000000000000000000000000","repository":{"full_name":"azylman/aerial"}}`)},

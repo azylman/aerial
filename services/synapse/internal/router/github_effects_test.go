@@ -366,14 +366,25 @@ func TestRestateOwnedAutoUpdateFailureRetriesPush(t *testing.T) {
 		failHandler string
 		wantErr     bool
 		wantPushes  int
+		wantPaths   []string
 	}{
-		{name: "failed cascade journal fails the push job before the git_push dispatch", failHandler: "HandleAutoUpdate", wantErr: true},
-		{name: "journaled cascade lets the push dispatch", wantPushes: 1},
+		{
+			name: "failed cascade journal fails the push job before the git_push dispatch", failHandler: "HandleAutoUpdate", wantErr: true,
+			wantPaths: []string{"/RepoObject/azylman%2Faerial/HandleMainPush/send", "/RepoObject/azylman%2Faerial/HandleAutoUpdate/send"},
+		},
+		{
+			name:      "journaled cascade hands the git_push dispatch to RepoObject",
+			wantPaths: []string{"/RepoObject/azylman%2Faerial/HandleMainPush/send", "/RepoObject/azylman%2Faerial/HandleAutoUpdate/send", "/RepoObject/azylman%2Faerial/HandleGitPush/send"},
+		},
+		{
+			name: "failed git_push journal fails the push job", failHandler: "HandleGitPush", wantErr: true,
+			wantPaths: []string{"/RepoObject/azylman%2Faerial/HandleMainPush/send", "/RepoObject/azylman%2Faerial/HandleAutoUpdate/send", "/RepoObject/azylman%2Faerial/HandleGitPush/send"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, srv := newGitHubIngress(t, http.StatusAccepted, tc.failHandler)
+			ingress, srv := newGitHubIngress(t, http.StatusAccepted, tc.failHandler)
 			disp := &mockOutboundDispatcher{}
 			router := newTestRouter(Config{RestateAuthoritative: true, RestateURL: srv.URL, DefaultOwner: true}, nil, &mockPRRegistry{}, disp, &mockEventBus{})
 			body := []byte(`{"ref":"refs/heads/main","after":"main123","head_commit":{"id":"main123","message":"chore: direct push"},"repository":{"full_name":"azylman/aerial"}}`)
@@ -383,6 +394,9 @@ func TestRestateOwnedAutoUpdateFailureRetriesPush(t *testing.T) {
 			}
 			if got := len(disp.GitPushCalls()); got != tc.wantPushes {
 				t.Errorf("git pushes = %d, want %d", got, tc.wantPushes)
+			}
+			if got := ingress.Paths(); !reflect.DeepEqual(got, tc.wantPaths) {
+				t.Errorf("journal paths = %v, want %v", got, tc.wantPaths)
 			}
 		})
 	}

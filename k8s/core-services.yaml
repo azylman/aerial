@@ -2677,6 +2677,47 @@ spec:
     app.kubernetes.io/name: vanadis-restate
   type: ClusterIP
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vanadis-restate-flux-effects
+  namespace: flux-system
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aerial-image-tags
+    resources:
+      - configmaps
+    verbs:
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resources:
+      - kustomizations
+    verbs:
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vanadis-restate-flux-effects-binding
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vanadis-restate-flux-effects
+subjects:
+  - kind: ServiceAccount
+    name: vanadis-restate
+    namespace: default
+---
 apiVersion: restate.dev/v1beta1
 kind: RestateDeployment
 metadata:
@@ -2744,6 +2785,12 @@ spec:
                 secretKeyRef:
                   key: GITHUB_PAT
                   name: vanadis-secret
+            - name: FLUX_RECEIVER_URL
+              valueFrom:
+                secretKeyRef:
+                  key: FLUX_RECEIVER_URL
+                  name: synapse-secret
+                  optional: true
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:

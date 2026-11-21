@@ -55,6 +55,14 @@ const (
 	EffectGitHubConflictCheck = "github_conflict_check"
 )
 
+// Flux effect kinds. Git-push dispatch and untracked reconciles are
+// repo-level (RepoObject); a PR rollout's reconcile requests are per-PR
+// (PRObject). Image promotion uses EffectImagePromote.
+const (
+	EffectFluxGitPush   = "flux_git_push"
+	EffectFluxReconcile = "flux_reconcile"
+)
+
 // Eri-bound effect kinds. They run through the owner's Restate session path
 // (ThreadSession, DispatchSession, and the agent-routed Discord sender),
 // never eri HTTP.
@@ -360,6 +368,29 @@ type RepoEvent struct {
 	// AutoUpdate is the auto-update policy synapse rendered from its
 	// config for HandleAutoUpdate.
 	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
+
+	// Flux and image effect payload, omitted when empty.
+	//
+	// Ref is the pushed ref HandleGitPush forwards (main only).
+	Ref string `json:"ref,omitempty"`
+	// TargetID is the Discord target synapse resolved for the push or
+	// promotion; it rides the Flux receiver payload.
+	TargetID string `json:"target_id,omitempty"`
+	// Branch is the PR head branch a promotion's rollout forward carries.
+	Branch string `json:"branch,omitempty"`
+	// Images are the image refs HandleImagePromotion promotes to HeadSHA.
+	Images []string `json:"images,omitempty"`
+	// Jobs are the deploy jobs a promoted PR rollout starts.
+	Jobs []string `json:"jobs,omitempty"`
+	// KustomizationRequests are the reconcile requests a promotion's
+	// rollout patches, keyed by Kustomization name.
+	KustomizationRequests map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
+	// Facts ride the PRObject rollout forward a successful promotion sends
+	// (the deploy_started fact).
+	Facts []pubsub.PRLifecycleEvent `json:"facts,omitempty"`
+	// DeployFailedFacts arm the PRObject deploy-failure deadline when a
+	// restate-owned promotion fails; the failure fills their details.
+	DeployFailedFacts []pubsub.PRLifecycleEvent `json:"deploy_failed_facts,omitempty"`
 }
 
 // AutoUpdatePolicy is the stateless config the auto-update cascade needs:
@@ -436,6 +467,12 @@ const (
 	PRHandlerConflictCheck  = "HandleConflictCheck"
 	PRHandlerBranchConflict = "HandleBranchConflict"
 	PRHandlerHeadRefMissing = "HandleHeadRefMissing"
+	// PRHandlerKustomizationRequested records a rollout's reconcile
+	// requests (and, restate-owned, patches them); a promoted rollout's
+	// RepoObject forward targets it. PRHandlerRetryFluxReconcile is the
+	// delayed retry of a failed PR reconcile.
+	PRHandlerKustomizationRequested = "HandleKustomizationRequested"
+	PRHandlerRetryFluxReconcile     = "RetryFluxReconcile"
 )
 
 // RepoObject handler names PRObject and RepoObject itself target with
@@ -449,6 +486,9 @@ const (
 	// also receive their own delayed retries.
 	RepoHandlerAutoUpdate    = "HandleAutoUpdate"
 	RepoHandlerWorkflowRerun = "HandleWorkflowRerun"
+
+	RepoHandlerGitPush        = "HandleGitPush"
+	RepoHandlerImagePromotion = "HandleImagePromotion"
 )
 
 // SHA-only event kinds RepoObject routes through its SHA index.

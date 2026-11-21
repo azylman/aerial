@@ -86,6 +86,11 @@ type PRState struct {
 	// the deadlines so a stale timer never fires a newer attempt.
 	PendingDeployFailure *PendingDeployFailure
 	DeployFailureSeq     uint64
+
+	// ReadinessRetries numbers the accepted readiness retries, so each
+	// operator retry re-requests its reconcile under its own effect key
+	// without minting a generation.
+	ReadinessRetries uint64
 }
 
 // NewPRState returns an empty PR state for repo#prNumber.

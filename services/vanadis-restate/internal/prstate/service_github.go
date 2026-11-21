@@ -173,6 +173,9 @@ func (s *RepoObjectService) reportRepoEffect(ctx restate.ObjectContext, handler 
 	switch {
 	case out.Intended != nil:
 		recordIntendedEffect(ctx, *out.Intended)
+		for _, more := range out.MoreIntended {
+			recordIntendedEffect(ctx, more)
+		}
 	case out.Retry:
 		s.scheduleRepoEffectRetry(ctx, handler, ev, out)
 	case out.Deduped:
@@ -200,8 +203,11 @@ func logRepoEffect(ctx restate.ObjectContext, out RepoEffectOutcome) {
 			effectsTotal.WithLabelValues(kind, effectResultError).Inc()
 		}
 		attrs := []any{"repo", out.Key.Repo, metricLabelKind, kind, "effect_key", out.Key.String(), "match_key", out.Key.MatchKey(), "skipped", out.Skipped, "forwards", out.Forwards}
-		if out.Err != nil {
-			attrs = append(attrs, "error", out.Err.Error())
+		if msg := out.errText(); msg != "" {
+			attrs = append(attrs, "error", msg)
+		}
+		if len(out.Promoted) > 0 {
+			attrs = append(attrs, "promoted", strings.Join(out.Promoted, ","))
 		}
 		slog.InfoContext(rc, "[prstate] repo effect executed", attrs...)
 		for _, u := range out.Updates {
@@ -218,10 +224,7 @@ func logRepoEffect(ctx restate.ObjectContext, out RepoEffectOutcome) {
 // drops it once maxRepoEffectRetries delayed retries failed.
 func (s *RepoObjectService) scheduleRepoEffectRetry(ctx restate.ObjectContext, handler string, ev RepoEvent, out RepoEffectOutcome) {
 	kind := out.Key.Kind
-	msg := ""
-	if out.Err != nil {
-		msg = out.Err.Error()
-	}
+	msg := out.errText()
 	if ev.Attempt >= maxRepoEffectRetries {
 		_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
 			effectsTotal.WithLabelValues(kind, effectResultDropped).Inc()

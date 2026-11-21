@@ -82,6 +82,7 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	mc05, rec05 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc06, rec06 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc07, rec07 := newStateMock(t, svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged))
+	stubRun(mc07)
 	mc08, rec08 := newStateMock(t, deployingMerged())
 	mc09, rec09 := newStateMock(t, deployingMerged())
 	mc10, rec10 := newStateMock(t, deployingMerged())

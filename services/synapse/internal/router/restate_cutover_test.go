@@ -515,9 +515,10 @@ func TestAuthoritativePushJournalsBeforeDispatch(t *testing.T) {
 				t.Fatalf("backfill calls after retry = %d, want 1", got)
 			}
 			// Failed HandleMainPush, retried HandleMainPush, the squash
-			// backfill, and the HandleAutoUpdate cascade trigger.
-			if got := calls.Load(); got != 4 {
-				t.Fatalf("journal calls = %d, want 4", got)
+			// backfill, the HandleAutoUpdate cascade trigger, and the
+			// HandleGitPush dispatch journal.
+			if got := calls.Load(); got != 5 {
+				t.Fatalf("journal calls = %d, want 5", got)
 			}
 		})
 	}
@@ -583,8 +584,8 @@ func TestAuthoritativeKustomizationJournalsBeforeRecord(t *testing.T) {
 	disp := &mockOutboundDispatcher{}
 	srv := newTestRouter(cfg, nil, reg, disp, &mockEventBus{})
 	refs := []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}
-	if err := srv.recordAndReconcileKustomizations(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", []string{"eri"}, refs, true, false); err == nil {
-		t.Fatal("first recordAndReconcileKustomizations() err = nil, want journal failure")
+	if err := srv.recordAndReconcileRequests(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", []string{"eri"}, refs, newKustomizationRequests(refs, time.Now().UTC()), true, false); err == nil {
+		t.Fatal("first recordAndReconcileRequests() err = nil, want journal failure")
 	}
 	if got := len(reg.kustomizationRequestCalls); got != 0 {
 		t.Fatalf("recorded requests after failed journal = %d, want 0", got)
@@ -592,8 +593,8 @@ func TestAuthoritativeKustomizationJournalsBeforeRecord(t *testing.T) {
 	if got := len(disp.ReconcileCalls()); got != 0 {
 		t.Fatalf("reconciles after failed journal = %d, want 0", got)
 	}
-	if err := srv.recordAndReconcileKustomizations(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", []string{"eri"}, refs, true, false); err != nil {
-		t.Fatalf("second recordAndReconcileKustomizations() err = %v, want success", err)
+	if err := srv.recordAndReconcileRequests(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", []string{"eri"}, refs, newKustomizationRequests(refs, time.Now().UTC()), true, false); err != nil {
+		t.Fatalf("second recordAndReconcileRequests() err = %v, want success", err)
 	}
 	if got := len(reg.kustomizationRequestCalls); got != 1 {
 		t.Fatalf("recorded requests after retry = %d, want 1", got)

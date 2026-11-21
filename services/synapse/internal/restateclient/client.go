@@ -90,6 +90,8 @@ var repoHandlers = map[string]bool{
 	"HandleKustomizationStatus": true,
 	"HandleAutoUpdate":          true,
 	"HandleWorkflowRerun":       true,
+	"HandleGitPush":             true,
+	"HandleImagePromotion":      true,
 }
 
 // PREvent is the canonical PRObject payload. Field names and JSON tags
@@ -150,6 +152,21 @@ const (
 	EffectGitHubConflictCheck = "github_conflict_check"
 	EffectGitHubRerun         = "github_rerun"
 )
+
+// Flux and image effect kinds, matching prstate EffectFluxGitPush,
+// EffectImagePromote and EffectFluxReconcile.
+const (
+	// EffectFluxGitPush is the repo-level git-push dispatch to the Flux receiver.
+	EffectFluxGitPush = "flux_git_push"
+	// EffectImagePromote is the repo-level image-tag promotion.
+	EffectImagePromote = "image_promote"
+	// EffectFluxReconcile is a Flux Kustomization reconcile request.
+	EffectFluxReconcile = "flux_reconcile"
+)
+
+// ReadinessJobName scopes the readiness reconcile match key, matching
+// prstate ReadinessJobName.
+const ReadinessJobName = "readiness"
 
 // EriEffect is one rendered eri-bound effect synapse attaches to a PREvent.
 // PRObject fires it to the stored owner when it owns the event's effects
@@ -295,6 +312,20 @@ type RepoEvent struct {
 	CheckName  string            `json:"check_name,omitempty"`
 	RunID      int64             `json:"run_id,omitempty"`
 	AutoUpdate *AutoUpdatePolicy `json:"auto_update,omitempty"`
+
+	// Flux and image effect payload, omitted when empty; tags mirror the
+	// prstate RepoEvent contract. Ref and TargetID ride HandleGitPush;
+	// Images, the PR rollout (Branch, Jobs, KustomizationRequests, the
+	// deploy_started Facts) and the DeployFailedFacts ride
+	// HandleImagePromotion.
+	Ref                   string                                `json:"ref,omitempty"`
+	TargetID              string                                `json:"target_id,omitempty"`
+	Branch                string                                `json:"branch,omitempty"`
+	Images                []string                              `json:"images,omitempty"`
+	Jobs                  []string                              `json:"jobs,omitempty"`
+	KustomizationRequests map[string]model.KustomizationRequest `json:"kustomization_requests,omitempty"`
+	Facts                 []pubsub.PRLifecycleEvent             `json:"facts,omitempty"`
+	DeployFailedFacts     []pubsub.PRLifecycleEvent             `json:"deploy_failed_facts,omitempty"`
 }
 
 // AutoUpdatePolicy is the stateless auto-update config RepoObject's cascade
@@ -633,6 +664,45 @@ func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber in
 	var out BuildLifecycle
 	if err := c.call(ctx, PRObjectKey(repo, prNumber), "GetBuildLifecycle", struct{}{}, &out); err != nil {
 		return BuildLifecycle{}, err
+	}
+	return out, nil
+}
+
+// RetryReadinessRequest is the PRObject.RetryReadiness payload: the merge
+// SHA the operator expects the gate at, the caller's agent hint, and the
+// effects owner stamped once for the request.
+type RetryReadinessRequest struct {
+	MergeSHA      string `json:"merge_sha"`
+	Agent         string `json:"agent,omitempty"`
+	EffectsOwner  string `json:"effects_owner,omitempty"`
+	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
+	ExpectedOwner string `json:"expected_owner,omitempty"`
+}
+
+// RetryReadinessResponse is PRObject's readiness decision: 202 with the
+// re-requested Kustomizations, or 409 when no matching merged rollout gate
+// exists.
+type RetryReadinessResponse struct {
+	Status    int                                   `json:"status"`
+	Requests  map[string]model.KustomizationRequest `json:"kustomization_requests,omitempty"`
+	EffectKey string                                `json:"effect_key,omitempty"`
+}
+
+// RetryReadiness invokes PRObject.RetryReadiness (request-response,
+// exclusive) and returns the 409/202 readiness decision. A missing merge
+// SHA comes back as a terminal 400 StatusError, a fenced caller not
+// authorized for the stored owner as a terminal 409.
+func (c *Client) RetryReadiness(ctx context.Context, repo string, prNumber int, req RetryReadinessRequest) (RetryReadinessResponse, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return RetryReadinessResponse{}, errors.New("restate is not configured")
+	}
+	repo = model.NormalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return RetryReadinessResponse{}, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	}
+	var out RetryReadinessResponse
+	if err := c.call(ctx, PRObjectKey(repo, prNumber), "RetryReadiness", req, &out); err != nil {
+		return RetryReadinessResponse{}, err
 	}
 	return out, nil
 }

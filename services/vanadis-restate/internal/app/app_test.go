@@ -263,10 +263,11 @@ func TestBindRestateServices(t *testing.T) {
 				projection = prstate.NewPgProjectionStore(nil)
 			}
 			gh := prstate.NewGitHubClient(nil, "", "")
+			kube := prstate.NewKubeClient(nil, "", "", "", "")
 			if tc.noGitHub {
-				gh = nil
+				gh, kube = nil, nil
 			}
-			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh)
+			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh, kube)
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -295,7 +296,9 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 37)
+			require.Len(t, byName["PRObject"], 39)
+			require.True(t, byName["PRObject"]["RetryReadiness"])
+			require.True(t, byName["PRObject"]["RetryFluxReconcile"])
 			require.True(t, byName["PRObject"]["HandleConflictCheck"])
 			require.True(t, byName["PRObject"]["HandleBranchConflict"])
 			require.True(t, byName["PRObject"]["HandleHeadRefMissing"])
@@ -316,7 +319,9 @@ func TestBindRestateServices(t *testing.T) {
 			require.True(t, byName["PRObject"]["HandleCheckStatus"])
 			require.True(t, byName["PRObject"]["HandleDeployFailed"])
 			require.True(t, byName["PRObject"]["HandleBuildMetadata"])
-			require.Len(t, byName["RepoObject"], 13)
+			require.Len(t, byName["RepoObject"], 15)
+			require.True(t, byName["RepoObject"]["HandleGitPush"])
+			require.True(t, byName["RepoObject"]["HandleImagePromotion"])
 			require.True(t, byName["RepoObject"]["HandleAutoUpdate"])
 			require.True(t, byName["RepoObject"]["HandleWorkflowRerun"])
 			require.True(t, byName["RepoObject"]["ResolvePRBySHA"])
@@ -340,7 +345,10 @@ func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "discord-xyz")
 	t.Setenv("SHARE_ROOT", "/tmp/share")
 	t.Setenv("POSTGRES_DB", "")
-
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	t.Setenv("FLUX_RECEIVER_URL", "")
+	t.Setenv("POSTGRES_HOST", "")
 	cfg := LoadConfigFromEnv()
 	assert.Equal(t, "9999", cfg.RestatePort)
 	assert.Equal(t, "8888", cfg.HealthPort)
@@ -358,6 +366,14 @@ func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
 	t.Setenv("POSTGRES_PASSWORD", "secret-pass")
 	cfgDSN := LoadConfigFromEnv()
 	assert.Equal(t, "postgres://aerial:secret-pass@postgres:5432/aerial?sslmode=disable", cfgDSN.PostgresURL)
+	assert.Empty(t, cfgDSN.KubeAPIServer)
+
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	t.Setenv("FLUX_RECEIVER_URL", " http://receiver.local/hook ")
+	cfgKube := LoadConfigFromEnv()
+	assert.Equal(t, "https://10.43.0.1:443", cfgKube.KubeAPIServer)
+	assert.Equal(t, "http://receiver.local/hook", cfgKube.FluxReceiverURL)
 }
 
 func TestRunApp_ContextCancellation(t *testing.T) {
