@@ -450,6 +450,20 @@ func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitH
 	}); err != nil {
 		return false, err
 	}
+	// The rerun itself journals to RepoObject.HandleWorkflowRerun: a
+	// restate-owned run is rerun there (a send failure retries the job); a
+	// legacy-owned run reruns here as today and logs [synapse-effect].
+	if err := s.routeRepoEvent(ctx, "HandleWorkflowRerun", restateclient.RepoEvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, CheckName: res.CheckName, RunID: p.WorkflowRun.ID,
+	}); err != nil {
+		if restateOwnsEffects(ctx) {
+			return false, err
+		}
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] workflow rerun journal failed; legacy rerun continues", "run_id", p.WorkflowRun.ID, "repo", res.Repo, "error", err)
+	}
+	if restateOwnsEffects(ctx) {
+		return true, nil
+	}
 	if err := s.rerunWorkflowRunFailedJobs(ctx, res.Repo, p.WorkflowRun.ID); err != nil {
 		slog.WarnContext(ctx, "[synapse] [github] failed auto-rerunning failed jobs for workflow run", "run_id", p.WorkflowRun.ID, "repo", res.Repo, "error", err)
 		if s.restateAuthoritative() {
@@ -457,6 +471,8 @@ func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitH
 		}
 		return false, nil
 	}
+	recordLegacyEffect(ctx, restateclient.EffectGitHubRerun,
+		restateclient.EffectMatchKey(res.Repo, res.PRNumber, res.HeadSHA, restateclient.EffectGitHubRerun, "", res.CheckName), normalizeRepo(res.Repo), res.PRNumber)
 	slog.InfoContext(ctx, "[synapse] [github] successfully triggered rerun-failed-jobs for workflow run (attempt 1)", "run_id", p.WorkflowRun.ID, "repo", res.Repo)
 	return true, nil
 }

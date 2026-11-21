@@ -652,6 +652,8 @@ func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *Reso
 	if err != nil {
 		return pr, false, err
 	}
+	recordLegacyEffect(ctx, restateclient.EffectGitHubConflictCheck,
+		restateclient.EffectMatchKey(res.Repo, res.PRNumber, res.HeadSHA, restateclient.EffectGitHubConflictCheck, "", ""), normalizeRepo(res.Repo), res.PRNumber)
 	if fetchedModel.Merged || (fetchedModel.State != "" && !strings.EqualFold(fetchedModel.State, "open")) {
 		return pr, false, nil
 	}

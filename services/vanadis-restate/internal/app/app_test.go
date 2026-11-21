@@ -245,9 +245,10 @@ func TestBindRestateServices(t *testing.T) {
 		wantPRState  bool
 		wantServices int
 		projection   bool
+		noGitHub     bool
 	}{
 		{name: "aerial agent with projection store owns pr state", agent: "aerial", projection: true, wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
-		{name: "empty agent owns pr state", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
+		{name: "empty agent owns pr state", agent: "", noGitHub: true, wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "aerial agent owns pr state", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "sibling agent never binds pr state", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantPRState: false, wantServices: 2},
@@ -261,7 +262,11 @@ func TestBindRestateServices(t *testing.T) {
 			if tc.projection {
 				projection = prstate.NewPgProjectionStore(nil)
 			}
-			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil))
+			gh := prstate.NewGitHubClient(nil, "", "")
+			if tc.noGitHub {
+				gh = nil
+			}
+			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh)
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -290,7 +295,10 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 34)
+			require.Len(t, byName["PRObject"], 37)
+			require.True(t, byName["PRObject"]["HandleConflictCheck"])
+			require.True(t, byName["PRObject"]["HandleBranchConflict"])
+			require.True(t, byName["PRObject"]["HandleHeadRefMissing"])
 			require.True(t, byName["PRObject"]["RetryEriEffect"])
 			require.True(t, byName["PRObject"]["Hydrate"])
 			require.True(t, byName["PRObject"]["Project"])
@@ -308,7 +316,9 @@ func TestBindRestateServices(t *testing.T) {
 			require.True(t, byName["PRObject"]["HandleCheckStatus"])
 			require.True(t, byName["PRObject"]["HandleDeployFailed"])
 			require.True(t, byName["PRObject"]["HandleBuildMetadata"])
-			require.Len(t, byName["RepoObject"], 11)
+			require.Len(t, byName["RepoObject"], 13)
+			require.True(t, byName["RepoObject"]["HandleAutoUpdate"])
+			require.True(t, byName["RepoObject"]["HandleWorkflowRerun"])
 			require.True(t, byName["RepoObject"]["ResolvePRBySHA"])
 			require.True(t, byName["RepoObject"]["HandlePRIndex"])
 			require.True(t, byName["RepoObject"]["HandleHeldReplay"])

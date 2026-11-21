@@ -117,3 +117,47 @@ func TestPREventEriEffectsWire(t *testing.T) {
 		})
 	}
 }
+
+// TestRepoEventAutoUpdateWire pins the HandleAutoUpdate payload carrying the
+// rendered auto-update policy: synapse marshals it key for key to the shared
+// golden event prstate decodes.
+func TestRepoEventAutoUpdateWire(t *testing.T) {
+	t.Parallel()
+	var fx struct {
+		Event map[string]any `json:"event"`
+	}
+	readFixture(t, "github_effect_wire.json", &fx)
+	tests := []struct {
+		name string
+		ev   RepoEvent
+		want map[string]any
+	}{
+		{
+			name: "gate-success trigger matches the golden event",
+			ev: RepoEvent{
+				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", Agent: "aerial", EffectsOwner: EffectsOwnerRestate, CheckName: "CI Gate",
+				AutoUpdate: &AutoUpdatePolicy{
+					Authors: []string{"aerial-bot", "dependabot[bot]"}, DefaultOwner: true,
+					Collaborators: []CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},
+				},
+			},
+			want: fx.Event,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := json.Marshal(tc.ev)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("wire = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

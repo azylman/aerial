@@ -140,8 +140,8 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect",
-			wantRepoHandler: "HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRunBySHA,ResolvePRBySHA",
+			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect",
+			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRerun,HandleWorkflowRunBySHA,ResolvePRBySHA",
 		},
 	}
 	for _, tc := range tests {

@@ -769,6 +769,46 @@ type RepoState struct {
 	// Seq is the monotonic write counter ordering index entries, closes,
 	// and held event IDs. It replaces wall-clock updated_at ordering.
 	Seq uint64
+	// RepoEffects are the keys of repo-level GitHub effects (auto-update
+	// cascades, workflow reruns) already executed or recorded, oldest
+	// first, bounded by MaxRepoEffects.
+	RepoEffects []string
+	// IntendedEffects is the bounded ring of repo effects recorded but
+	// skipped because synapse owned the triggering event (legacy).
+	IntendedEffects []IntendedEffect
+}
+
+// MaxRepoEffects bounds the RepoObject repo-effect key history.
+const MaxRepoEffects = 64
+
+// WasRepoEffect reports whether the repo effect key already fired or was
+// recorded.
+func (s *RepoState) WasRepoEffect(k EffectKey) bool {
+	return s != nil && slices.Contains(s.RepoEffects, k.String())
+}
+
+// MarkRepoEffect records one repo effect key, keeping the newest
+// MaxRepoEffects keys.
+func (s *RepoState) MarkRepoEffect(k EffectKey) {
+	if s == nil || s.WasRepoEffect(k) {
+		return
+	}
+	s.RepoEffects = append(s.RepoEffects, k.String())
+	if over := len(s.RepoEffects) - MaxRepoEffects; over > 0 {
+		s.RepoEffects = append([]string(nil), s.RepoEffects[over:]...)
+	}
+}
+
+// RecordIntendedEffect appends one intended repo effect, keeping the newest
+// MaxIntendedEffects entries.
+func (s *RepoState) RecordIntendedEffect(e IntendedEffect) {
+	if s == nil {
+		return
+	}
+	s.IntendedEffects = append(s.IntendedEffects, e)
+	if over := len(s.IntendedEffects) - MaxIntendedEffects; over > 0 {
+		s.IntendedEffects = append([]IntendedEffect(nil), s.IntendedEffects[over:]...)
+	}
 }
 
 // NewRepoState returns an empty repo state.

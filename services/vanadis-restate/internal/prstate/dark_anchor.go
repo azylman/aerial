@@ -28,16 +28,9 @@ func init() {
 		HandleRolloutEvent,
 		HandleDeployEvent,
 
-		// Per-PR conflict check: constructor plus zero values root the
-		// handler method set, the in-memory PR store, and the no-op
-		// conflict/rescheduler defaults. RepoHandlers is live through
-		// RepoObjectService; only its in-memory test store needs a root.
-		NewConflictHandlers,
-		NewMemPRStore,
-		ConflictHandlers{},
-		MemPRStore{},
-		noopConflictChecker{},
-		noopRescheduler{},
+		// RepoHandlers and ConflictHandlers are live through
+		// RepoObjectService and PRObject.HandleConflictCheck; only the
+		// in-memory repo test store needs a root.
 		NewMemRepoStore,
 		MemRepoStore{},
 

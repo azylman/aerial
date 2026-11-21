@@ -18,8 +18,9 @@ package prstate
 // (effects_eri.go) and aerial.pr.> lifecycle facts, whose publish also
 // carries the BuildRouter route via vanadis-nats (effects_facts.go). Verdict
 // handlers (HandleConflict, HandleDeploySuccess, HandleCIRecovered) decide,
-// commit, then execute in one exclusive invocation. GitHub, Flux, and image
-// effects land in later chunks.
+// commit, then execute in one exclusive invocation. GitHub effects
+// (auto-update cascade, update-branch, conflict checks, workflow reruns)
+// run in service_github.go; Flux and image effects land in a later chunk.
 //
 // The only cross-object traffic is one-way sends: PRObject sends RepoObject
 // a HandlePRIndex update after each commit that changes a routed field, and
@@ -76,6 +77,8 @@ type PRObjectService struct {
 	facts                 FactPublisher
 	factRetryDelay        time.Duration
 	deployFailureDeadline time.Duration
+
+	github GitHubEffector
 }
 
 // NewPRObjectService builds the single PRObject service. Without
@@ -693,12 +696,14 @@ func (s *PRObjectService) HandleMainAdvanced(ctx restate.ObjectContext, ev PREve
 // touches only its own repo-keyed state and reaches PRObject only through
 // one-way sends. Malformed input fails terminally instead of retrying.
 type RepoObjectService struct {
-	stateKey string
+	stateKey   string
+	github     GitHubEffector
+	retryDelay time.Duration
 }
 
 // NewRepoObjectService builds the single RepoObject service.
 func NewRepoObjectService() *RepoObjectService {
-	return &RepoObjectService{stateKey: repoObjectStateKey}
+	return &RepoObjectService{stateKey: repoObjectStateKey, retryDelay: DefaultRepoEffectRetryDelay}
 }
 
 // ServiceName returns the single RepoObject service name for every agent.
@@ -708,7 +713,8 @@ func (*RepoObjectService) ServiceName() string {
 }
 
 func (s *RepoObjectService) handlers(ctx restate.ObjectContext) *RepoHandlers {
-	return NewRepoHandlers(restateRepoStore{ctx: ctx, key: s.stateKey}, nil, restatePRSender{ctx: ctx}, restateSelfScheduler{ctx: ctx})
+	return NewRepoHandlers(restateRepoStore{ctx: ctx, key: s.stateKey}, nil, restatePRSender{ctx: ctx}, restateSelfScheduler{ctx: ctx}).
+		WithGitHub(journaled(ctx, s.github))
 }
 
 // terminalOnInvalid converts malformed-input errors to terminal errors so
