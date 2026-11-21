@@ -58,7 +58,8 @@ func TestResolveDeployDispatchDecision(t *testing.T) {
 		{name: "dispatch key without slots republishes at-least-once", stateHead: "aaa111", stateGen: 2, recordDispatch: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionApply, wantShouldPublish: true, wantKeyRecorded: true},
 		{name: "commit-only dispatch publishes", stateGen: 2, evMerge: "mmm999", evJob: "brain", wantDisposition: DispositionApply, wantShouldPublish: true, wantKeyRecorded: false},
 		{name: "stale head drops without publish", stateHead: "aaa111", stateGen: 2, evHead: "zzz999", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionDropStale},
-		{name: "merged terminal absorbs deploy", stateHead: "aaa111", stateGen: 2, terminal: TerminalMerged, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionAbsorbTerminal},
+		{name: "merged terminal publishes post-merge deploy", stateHead: "aaa111", stateGen: 2, terminal: TerminalMerged, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionApply, wantShouldPublish: true, wantKeyRecorded: false},
+		{name: "closed terminal absorbs deploy", stateHead: "aaa111", stateGen: 2, terminal: TerminalClosed, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionAbsorbTerminal},
 		{name: "nil state drops with error", nilState: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionDropStale, wantErr: true},
 	}
 	for _, tc := range tests {
@@ -115,7 +116,8 @@ func TestRecordDeployPublished(t *testing.T) {
 		{name: "recorded publish acks idempotent", stateHead: "aaa111", stateGen: 2, recordDispatch: true, recordPRSlot: true, recordSHASlot: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionApply, wantRecorded: true, wantDeduped: true, wantPRSlot: true, wantSHASlot: true, wantHead: "aaa111"},
 		{name: "empty job records dispatch without sha slot", stateHead: "aaa111", stateGen: 2, evHead: "aaa111", evMerge: "mmm999", wantDisposition: DispositionApply, wantRecorded: true, wantPRSlot: true, wantHead: "aaa111"},
 		{name: "stale head drops without recording", stateHead: "aaa111", stateGen: 2, evHead: "zzz999", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionDropStale, wantHead: "aaa111"},
-		{name: "merged terminal absorbs without recording", stateHead: "aaa111", stateGen: 2, terminal: TerminalMerged, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionAbsorbTerminal, wantHead: "aaa111"},
+		{name: "merged terminal records post-merge publish", stateHead: "aaa111", stateGen: 2, terminal: TerminalMerged, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionApply, wantRecorded: true, wantPRSlot: true, wantSHASlot: true, wantHead: "aaa111"},
+		{name: "closed terminal absorbs without recording", stateHead: "aaa111", stateGen: 2, terminal: TerminalClosed, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionAbsorbTerminal, wantHead: "aaa111"},
 		{name: "nil state drops with error", nilState: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDisposition: DispositionDropStale, wantErr: true},
 	}
 	for _, tc := range tests {

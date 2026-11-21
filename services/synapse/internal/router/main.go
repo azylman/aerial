@@ -30,6 +30,7 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/registry"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 var (
@@ -92,6 +93,9 @@ func (s *RouterServer) FetchRunLogsArchive(ctx context.Context, repo string, run
 
 type buildMetadataRegistryAdapter struct {
 	inner PRRegistryUpdater
+	// srv journals each snapshot into PRObject before the legacy write; nil
+	// skips the journal (hermetic tests).
+	srv *RouterServer
 }
 
 func (a buildMetadataRegistryAdapter) LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error) {
@@ -114,6 +118,16 @@ func (a buildMetadataRegistryAdapter) RecordPRBuildMetadata(ctx context.Context,
 	if a.inner == nil {
 		return false, nil
 	}
+	if a.srv != nil {
+		// PRObject applies its own revision/order fence, so every snapshot
+		// is journaled; a journal failure surfaces so the consumer retries.
+		snapshot := metadata
+		if err := a.srv.routePREvent(ctx, "HandleBuildMetadata", restateclient.PREvent{
+			Repo: repo, PRNumber: prNumber, HeadSHA: metadata.SourceSHA, BuildMetadata: &snapshot,
+		}); err != nil {
+			return false, err
+		}
+	}
 	return a.inner.RecordPRBuildMetadata(ctx, repo, prNumber, metadata)
 }
 
@@ -127,7 +141,7 @@ func (a buildMetadataRegistryAdapter) LoadPRBuildMetadata(ctx context.Context, r
 func (s *RouterServer) buildConsumer() *buildmeta.Consumer {
 	var reg buildmeta.PRMetadataRegistry
 	if s.registry != nil {
-		reg = buildMetadataRegistryAdapter{inner: s.registry}
+		reg = buildMetadataRegistryAdapter{inner: s.registry, srv: s}
 	}
 	return buildmeta.NewConsumer(s, reg, s.cfgSrc, s.resolveLegacyWorkflowRunImages)
 }
@@ -413,6 +427,10 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "Failed to register PR"})
 		return
 	}
+	// The legacy registry response stays authoritative; PRObject.Register
+	// runs beside it so Restate holds the owner and row, and any mismatch is
+	// logged and counted.
+	s.shadowRegisterPR(r.Context(), req, targetID)
 
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		fieldStatus:   "registered",
@@ -684,6 +702,9 @@ func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt Dep
 func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt DeployEvent, prefix string) error {
 	targetID := evt.TargetID
 	if s.registry != nil && evt.PRNumber > 0 {
+		if err := s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, false); err != nil {
+			return err
+		}
 		tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
 		if err != nil || !updated {
 			return err
@@ -694,6 +715,9 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		return fmt.Errorf("publish deploy lifecycle event: %w", err)
 	}
 	if s.registry != nil && evt.PRNumber > 0 {
+		if ackErr := s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, true); ackErr != nil {
+			slog.WarnContext(ctx, "[synapse] [restate-cutover] failed journaling deploy_failed ack", "repo", evt.Repo, "pr", evt.PRNumber, "error", ackErr)
+		}
 		if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, evt.Repo, evt.PRNumber); ackErr != nil {
 			slog.WarnContext(ctx, "[synapse] [registry] failed acknowledging deploy_failed_published", "repo", evt.Repo, "pr", evt.PRNumber, "error", ackErr)
 		}

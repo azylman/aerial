@@ -91,7 +91,25 @@ func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, e
 	return st, nil
 }
 
+// eventPhase selects the disposition guard for one handler: PR-lifecycle
+// events are absorbed by any same-epoch terminal state, while deploy-phase
+// events still apply to merged PRs (deploys happen after merge).
+type eventPhase int
+
+const (
+	phaseLifecycle eventPhase = iota
+	phaseDeploy
+)
+
 func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
+	return s.mutatePhase(ctx, ev, phaseLifecycle, mutate)
+}
+
+func (s *PRObjectService) mutateDeployEvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
+	return s.mutatePhase(ctx, ev, phaseDeploy, mutate)
+}
+
+func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, phase eventPhase, mutate func(*PRState)) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -99,13 +117,11 @@ func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, m
 	if err != nil {
 		return err
 	}
-	if st.ApplyEvent(ev) != DispositionApply {
+	if dispositionFor(st, ev, phase) != DispositionApply {
 		return nil
 	}
 	before := snapshotIndexView(st)
-	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) {
-		st.HeadSHA = head
-	}
+	applyEventRow(st, ev)
 	if mutate != nil {
 		mutate(st)
 	}
@@ -114,6 +130,28 @@ func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, m
 		sendPRIndex(ctx, st, ev, lifecycle)
 	}
 	return nil
+}
+
+func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition {
+	if phase == phaseDeploy {
+		return st.ApplyDeployEvent(ev)
+	}
+	return st.ApplyEvent(ev)
+}
+
+// applyEventRow applies the registry-row fields every applied event may
+// carry: the first-seen head SHA (never moved once merged, so a deploy
+// event carrying the merge commit cannot rewrite the PR head; later head
+// changes arrive through HandleSynchronized or Register), branch/title
+// identity, and a missing target ID.
+func applyEventRow(st *PRState, ev PREvent) {
+	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) && st.Terminal != TerminalMerged {
+		st.HeadSHA = head
+	}
+	st.ApplyIdentity(ev.Branch, ev.Title)
+	if tid := strings.TrimSpace(ev.TargetID); st.TargetID == "" && IsValidDiscordSnowflake(tid) {
+		st.TargetID = tid
+	}
 }
 
 // prIndexView is the slice of PRState RepoObject routes on.
@@ -159,9 +197,16 @@ func sendPRIndex(ctx restate.ObjectContext, st *PRState, ev PREvent, lifecycle s
 		Lifecycle:   lifecycle,
 	}
 	if lifecycle == IndexMerged || lifecycle == IndexDeploying || lifecycle == IndexDeployed {
-		if merge := strings.TrimSpace(ev.MergeSHA); merge != "" && !IsZeroSHA(merge) {
+		merge := strings.TrimSpace(ev.MergeSHA)
+		if merge == "" || IsZeroSHA(merge) {
+			merge = strings.TrimSpace(st.MergeSHA)
+		}
+		if merge != "" && !IsZeroSHA(merge) {
 			idx.MergeSHA = merge
 		}
+	}
+	if idx.Branch == "" {
+		idx.Branch = st.Branch
 	}
 	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerPRIndex).Send(idx)
 }
@@ -183,6 +228,7 @@ func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREven
 			}
 		}
 		st.RecordFailedCISHA(ev.HeadSHA)
+		st.ApplyRegistryCIFailed()
 	})
 }
 
@@ -197,6 +243,9 @@ func (s *PRObjectService) HandleCheckPassed(ctx restate.ObjectContext, ev PREven
 		}
 		if !st.HasActiveFailedCheckRuns(ev.HeadSHA) {
 			st.ClearFailedCISHA()
+		}
+		if !st.IsCIFailedForSHA(st.HeadSHA) {
+			st.ApplyRegistryRecovered(RegistryStatusCIFailed)
 		}
 	})
 }
@@ -242,6 +291,7 @@ func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev 
 		return out, recErr
 	}
 	if out.Disposition == DispositionApply {
+		st.ApplyRegistryConflict()
 		restate.Set(ctx, s.stateKey, st)
 	}
 	return out, nil
@@ -264,6 +314,7 @@ func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev P
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearConflictPublished()
 		st.ClearCollaboratorConflict(ev.HeadSHA)
+		st.ApplyRegistryRecovered(RegistryStatusConflict)
 	})
 }
 
@@ -272,6 +323,7 @@ func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) er
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearFailedCISHA()
 		st.MarkTerminal(TerminalMerged)
+		st.ApplyRegistryMerged(ev.MergeSHA)
 	})
 }
 
@@ -280,6 +332,7 @@ func (s *PRObjectService) HandleClosed(ctx restate.ObjectContext, ev PREvent) er
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearFailedCISHA()
 		st.MarkTerminal(TerminalClosed)
+		st.ApplyRegistryClosed()
 	})
 }
 
@@ -298,9 +351,77 @@ func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PRE
 	})
 }
 
-// HandleRolloutProgress applies one rollout-progress event dark.
+// HandleRolloutProgress applies one rollout-progress event. It is a
+// deploy-phase event, so merged PRs apply it: ready jobs union into
+// deployed_jobs, completed Kustomizations into deployed_kustomizations
+// (flipping the PR to deployed once every request completed), and a carried
+// job state records into job_states. RepoObject kustomization-status
+// forwards carry no ready lists and only refresh the row.
 func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PREvent) error {
-	return s.applyPREvent(ctx, ev)
+	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		st.MarkJobsDeployed(ev.DeployedJobs)
+		st.MarkKustomizationsDeployed(ev.DeployedKustomizations)
+		st.RecordJobState(ev.JobName, ev.JobState)
+	})
+}
+
+// HandleSynchronized advances the PR head on a synchronize under the
+// BeforeSHA compare-and-set guard and applies the UpdatePRSync row
+// transition. The new head is indexed for RepoObject SHA routing.
+func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREvent) error {
+	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return nil
+	}
+	st, err := s.loadOrCreatePRState(ctx, ev)
+	if err != nil {
+		return err
+	}
+	if st.SynchronizeDisposition(ev) != DispositionApply {
+		return nil
+	}
+	before := snapshotIndexView(st)
+	prevHead := st.HeadSHA
+	st.HeadSHA = strings.TrimSpace(ev.HeadSHA)
+	st.ApplyRegistrySync(prevHead, st.HeadSHA)
+	st.ApplyIdentity(ev.Branch, ev.Title)
+	restate.Set(ctx, s.stateKey, st)
+	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
+		sendPRIndex(ctx, st, ev, lifecycle)
+	}
+	return nil
+}
+
+// HandleDeployFailed applies one deploy failure (AtomicTransitionDeployFailed)
+// or, when Acknowledged, the confirmed deploy_failed publish
+// (AcknowledgeDeployFailedPublished). Merged PRs apply it.
+func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREvent) error {
+	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		if ev.Acknowledged {
+			st.AckDeployFailedPublished()
+			return
+		}
+		st.ApplyRegistryDeployFailed(ev.Banner)
+	})
+}
+
+// HandleBuildMetadata records one build-metadata snapshot under the
+// RecordPRBuildMetadata revision and ordering fence. Merged PRs apply it,
+// since post-merge builds fence on the merge SHA.
+func (s *PRObjectService) HandleBuildMetadata(ctx restate.ObjectContext, ev PREvent) error {
+	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		st.RecordBuildMetadata(ev.BuildMetadata)
+	})
+}
+
+// HandleCheckStatus records one ci_checks value (RecordPRCheckStatus): the
+// check state on an open PR's head SHA or a merged/synced PR's merge SHA.
+// Synapse sends it exactly where the legacy registry records a check
+// status (pending and passed runs, never gate aggregators). Merged PRs
+// apply it; closed PRs absorb it.
+func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREvent) error {
+	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		st.RecordCheckState(ev.HeadSHA, ev.CheckName, ev.CheckState)
+	})
 }
 
 // HandleDeployDispatched resolves the deploy_success publish verdict without
@@ -332,6 +453,7 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 		return out, recErr
 	}
 	if out.Disposition == DispositionApply {
+		st.AckDeploySuccess()
 		restate.Set(ctx, s.stateKey, st)
 		if !out.Deduped {
 			sendPRIndex(ctx, st, ev, IndexDeployed)
@@ -340,11 +462,77 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 	return out, nil
 }
 
-// HandleKustomizationRequested applies one kustomization request dark.
+// HandleKustomizationRequested starts a new gate generation for one
+// kustomization request. It is a deploy-phase event, so merged PRs apply
+// it: carried jobs move the PR to deploying (TransitionDeploying) and the
+// carried requests replace the recorded set (RecordKustomizationRequests),
+// in the registry's order. The generation bump sends RepoObject a deploying
+// index update so kustomization status fans out to this PR.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
+	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		st.TransitionDeploying(ev.Jobs)
+		st.RecordKustomizationRequestSet(ev.KustomizationRequests)
 		st.RecordKustomizationRequests()
 	})
+}
+
+// Register is the request-response PR register: it fences the existing
+// owner (authorizeExistingPROwner), resolves the headless target (request
+// snowflake, stored target, system-channel fallback), applies the
+// RegisterPR upsert to state, and returns the resolved target ID. Invalid
+// requests and bad targets fail terminally with 400, an owner mismatch
+// with 409, so no retry repeats them.
+func (s *PRObjectService) Register(ctx restate.ObjectContext, req RegisterRequest) (RegisterResponse, error) {
+	repo := NormalizeRepo(req.Repo)
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return RegisterResponse{}, err
+	}
+	if st == nil {
+		st = NewPRState(repo, req.PRNumber)
+	}
+	verdict, targetID := st.ResolveRegister(req)
+	switch verdict {
+	case RegisterOK:
+	case RegisterOwnerMismatch:
+		return RegisterResponse{}, restate.ToTerminalError(errRegisterOwnerMismatch, restate.WithErrorCode(409))
+	case RegisterBadTarget:
+		return RegisterResponse{}, restate.ToTerminalError(errRegisterBadTarget, restate.WithErrorCode(400))
+	default:
+		return RegisterResponse{}, restate.ToTerminalError(errRegisterInvalid, restate.WithErrorCode(400))
+	}
+	before := snapshotIndexView(st)
+	st.ApplyRegister(req, targetID)
+	restate.Set(ctx, s.stateKey, st)
+	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
+		sendPRIndex(ctx, st, PREvent{Repo: repo, PRNumber: req.PRNumber, Branch: st.Branch}, lifecycle)
+	}
+	return RegisterResponse{TargetID: targetID, Agent: st.OwnerAgent(), Status: st.RegistryStatus()}, nil
+}
+
+// Register error causes, wrapped as terminal errors.
+var (
+	errRegisterInvalid       = errors.New("prstate: register requires repo, pr_number, branch and head_sha")
+	errRegisterOwnerMismatch = errors.New("prstate: register caller is not authorized for the existing owner")
+	errRegisterBadTarget     = errors.New("prstate: target_id must be a valid Discord snowflake (17-20 digits)")
+)
+
+// BuildLifecycleRequest is the empty GetBuildLifecycle input; the object
+// key already names the PR.
+type BuildLifecycleRequest struct{}
+
+// GetBuildLifecycle is the shared, read-only build-lifecycle query matching
+// LoadPRBuildLifecycle plus LoadPRBuildMetadata. A PR with no state yields
+// the zero lifecycle (Found false). It never takes the exclusive lock.
+func (s *PRObjectService) GetBuildLifecycle(ctx restate.ObjectSharedContext, _ BuildLifecycleRequest) (BuildLifecycle, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return BuildLifecycle{}, err
+	}
+	if st == nil {
+		return BuildLifecycle{}, nil
+	}
+	return st.BuildLifecycleView(), nil
 }
 
 // HandleMainAdvanced clears updated-for-main after RepoObject recorded a new

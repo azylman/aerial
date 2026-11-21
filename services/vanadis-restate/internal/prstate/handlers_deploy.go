@@ -88,7 +88,7 @@ func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecisi
 	if s == nil {
 		return DeployDispatchDecision{Disposition: DispositionDropStale}, errNilPRState
 	}
-	if disp := s.ApplyEvent(ev); disp != DispositionApply {
+	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
 		return DeployDispatchDecision{Disposition: disp}, nil
 	}
 	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
@@ -109,7 +109,7 @@ func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, erro
 	if s == nil {
 		return DeployPublishedOutcome{Disposition: DispositionDropStale}, errNilPRState
 	}
-	if disp := s.ApplyEvent(ev); disp != DispositionApply {
+	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
 		return DeployPublishedOutcome{Disposition: disp}, nil
 	}
 	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
@@ -189,8 +189,12 @@ func firePromoteEffect(ctx context.Context, s *PRState, ev PREvent, key EffectKe
 }
 
 // syncHeadSHA records the observed head SHA after a successful apply so
-// later events judge staleness against it.
+// later events judge staleness against it. A merged PR keeps its head:
+// deploy events may carry the merge commit, which must not rewrite it.
 func syncHeadSHA(s *PRState, headSHA string) {
+	if s.Terminal == TerminalMerged {
+		return
+	}
 	if clean := strings.TrimSpace(headSHA); clean != "" && !IsZeroSHA(clean) {
 		s.HeadSHA = clean
 	}
@@ -205,7 +209,7 @@ func HandleRolloutEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxFor
 	if s == nil {
 		return RolloutOutcome{Disposition: DispositionDropStale}, errNilPRState
 	}
-	if disp := s.ApplyEvent(ev); disp != DispositionApply {
+	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
 		return RolloutOutcome{Disposition: disp}, nil
 	}
 	key := s.EffectKeyFor(EffectFluxForward, ev.HeadSHA, ev.JobName, "")
@@ -236,7 +240,7 @@ func HandleDeployEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxForw
 	if s == nil {
 		return DeployOutcome{Disposition: DispositionDropStale}, errNilPRState
 	}
-	if disp := s.ApplyEvent(ev); disp != DispositionApply {
+	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
 		return DeployOutcome{Disposition: disp}, nil
 	}
 	fluxKey := s.EffectKeyFor(EffectFluxForward, ev.HeadSHA, ev.JobName, "")

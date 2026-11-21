@@ -48,6 +48,20 @@ func seedMerged() *PRState {
 	return s
 }
 
+func seedMergedAt(mergeSHA string) *PRState {
+	s := seedMerged()
+	s.MergeSHA = mergeSHA
+	return s
+}
+
+func seedClosed() *PRState {
+	s := seedFresh()
+	s.MarkTerminal(TerminalClosed)
+	return s
+}
+
+func seedMergedKnown() *PRState { return seedMergedAt("mmm999") }
+
 func seedKeysOnly() *PRState {
 	s := seedFresh()
 	s.MarkEffectDispatched(s.EffectKeyFor(EffectFluxForward, "aaa111", "flux-a", ""))
@@ -111,7 +125,10 @@ func TestHandleDeployEvent(t *testing.T) {
 		{name: "merge arriving after empty-merge dispatch retries promotion", seed: seedEmptyMergeDispatched, ev: full, wantDisposition: DispositionApply, wantDispatched: true, wantPromCalls: 1, wantPRDispatched: true},
 		{name: "pr slot with recorded flux fully dedupes no-merge redelivery", seed: seedDedupedNoMerge, ev: deployEv("aaa111", "", "flux-b", 2), wantDisposition: DispositionApply, wantDispatched: true, wantDeduped: true, wantPRDispatched: true},
 		{name: "stale head drops without effects", seed: seedFresh, ev: deployEv("zzz999", "mmm999", "flux-a", 2), wantDisposition: DispositionDropStale},
-		{name: "merged terminal absorbs deploy", seed: seedMerged, ev: full, wantDisposition: DispositionAbsorbTerminal},
+		{name: "merged terminal applies post-merge deploy", seed: seedMerged, ev: full, wantDisposition: DispositionApply, wantDispatched: true, wantFwdCalls: 1, wantPromCalls: 1, wantPRDispatched: true},
+		{name: "merged terminal applies deploy of its merge sha", seed: seedMergedKnown, ev: deployEv("mmm999", "mmm999", "flux-a", 2), wantDisposition: DispositionApply, wantDispatched: true, wantFwdCalls: 1, wantPromCalls: 1, wantPRDispatched: true},
+		{name: "merged terminal drops foreign sha deploy", seed: seedMergedKnown, ev: deployEv("zzz999", "zzz999", "flux-a", 2), wantDisposition: DispositionDropStale},
+		{name: "closed terminal absorbs deploy", seed: seedClosed, ev: full, wantDisposition: DispositionAbsorbTerminal},
 		{name: "reopen epoch applies after terminal", seed: seedMerged, ev: PREvent{Event: "deploy_success", Repo: "aerial", PRNumber: 7, HeadSHA: "aaa111", MergeSHA: "mmm999", JobName: "flux-a", GateGeneration: 2, ReopenEpoch: 1}, wantDisposition: DispositionApply, wantDispatched: true, wantFwdCalls: 1, wantPromCalls: 1, wantPRDispatched: true},
 		{name: "flux error propagates without dispatch", seed: seedFresh, ev: full, fwdErr: errBoom, wantDisposition: DispositionApply, wantErr: true, wantFwdCalls: 1},
 		{name: "promotion error propagates after flux recorded", seed: seedFresh, ev: full, promErr: errBoom, wantDisposition: DispositionApply, wantErr: true, wantFwdCalls: 1, wantPromCalls: 1},

@@ -161,7 +161,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	// Phases d+e: durably record every reconcile request before patching any of them, so a watch event can
 	// never observe a request that is not yet recorded. A crash or failure between record and patch is
 	// repaired by the watcher re-patching the recorded value. Sync the widget after recording (rollout lines).
-	return s.recordAndReconcileKustomizations(ctx, repo, prNum, headBranch, headSHA, targetID, refs, trackPR, finalAttempt)
+	return s.recordAndReconcileKustomizations(ctx, repo, prNum, headBranch, headSHA, targetID, workloads, refs, trackPR, finalAttempt)
 }
 
 // hasUnrecordedKustomizationRequests is projection-safe: pure workflow
@@ -178,18 +178,21 @@ func (s *RouterServer) handleFinalAttemptDeployFailure(ctx context.Context, repo
 	}
 }
 
-func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, refs []fluxKustomizationRef, trackPR, finalAttempt bool) error {
+func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, jobs []string, refs []fluxKustomizationRef, trackPR, finalAttempt bool) error {
+	requests := newKustomizationRequests(refs, time.Now().UTC())
 	// Journal before recording or reconciling: a journal failure leaves
 	// nothing recorded, so redelivery re-journals (idempotent) and retries
-	// the record/reconcile instead of repeating an unjournaled effect.
+	// the record/reconcile instead of repeating an unjournaled effect. The
+	// event carries the deploying jobs and the exact requests so PRObject
+	// records the same row the registry does.
 	if trackPR {
 		if err := s.routePREvent(ctx, "HandleKustomizationRequested", restateclient.PREvent{
 			Repo: repo, PRNumber: prNum, HeadSHA: headSHA, Branch: headBranch,
+			Jobs: jobs, KustomizationRequests: requests,
 		}); err != nil {
 			return err
 		}
 	}
-	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			slog.ErrorContext(ctx, "[synapse] [dispatcher] error recording kustomization requests", "repo", repo, "pr", prNum, "error", err)
@@ -230,6 +233,9 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		mergeSHA = headSHA
 	}
 
+	if err := s.routeDeployFailed(ctx, repo, prNum, headSHA, mergeSHA, false); err != nil {
+		return err
+	}
 	newTID, updated, fErr := s.registry.AtomicTransitionDeployFailed(ctx, repo, prNum)
 	if fErr != nil {
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error transitioning pr to deploy_failed", "repo", repo, "pr", prNum, "error", fErr)
@@ -265,6 +271,9 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		OccurredAt:   time.Now().UTC(),
 	}); pErr != nil {
 		return fmt.Errorf("publish deploy failed event: %w", pErr)
+	}
+	if ackErr := s.routeDeployFailed(ctx, repo, prNum, headSHA, mergeSHA, true); ackErr != nil {
+		slog.WarnContext(ctx, "[synapse] [dispatcher] failed journaling deploy_failed ack", "repo", repo, "pr", prNum, "error", ackErr)
 	}
 	if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, repo, prNum); ackErr != nil {
 		slog.WarnContext(ctx, "[synapse] [dispatcher] failed acknowledging deploy_failed_published", "repo", repo, "pr", prNum, "error", ackErr)

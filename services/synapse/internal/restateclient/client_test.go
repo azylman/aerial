@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 func marshalKeys(t *testing.T, v any) string {
@@ -270,6 +272,8 @@ func TestPayloadJSONShape(t *testing.T) {
 	}{
 		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `agent,branch,build_id,check_name,effects_owner,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
 		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `agent,effects_owner,generation,head_sha,main_sha,pr_number,repo`},
+		{name: "registry payload keys match prstate contract", got: marshalKeys(t, PREvent{BeforeSHA: "b", TargetID: "t", CheckState: "passed", Jobs: []string{"a"}, DeployedJobs: []string{"a"}, JobState: "running", KustomizationRequests: map[string]model.KustomizationRequest{"k": {}}, DeployedKustomizations: []string{"k"}, Banner: "b", Acknowledged: true, BuildMetadata: &model.BuildMetadata{}}), want: `acknowledged,agent,banner,before_sha,branch,build_id,build_metadata,check_name,check_state,deployed_jobs,deployed_kustomizations,effects_owner,event,gate_generation,head_sha,job_name,job_state,jobs,kustomization_requests,merge_sha,pr_number,reopen_epoch,repo,target_id,title,unmanaged`},
+		{name: "register request keys match prstate contract", got: marshalKeys(t, RegisterRequest{Title: "t", Agent: "a", BotID: "a", Metadata: map[string]string{"k": "v"}, FallbackTargetID: "f", EnforceOwner: true, ExpectedOwner: "a"}), want: `agent,bot_id,branch,enforce_owner,expected_owner,fallback_target_id,head_sha,metadata,pr_number,repo,target_id,title`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -185,6 +185,11 @@ func (s *RouterServer) routeEvent(ctx context.Context, handler string, journal f
 // routePREvent journals one PRObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev restateclient.PREvent) error {
+	// With Restate neither authoritative nor shadowing, the legacy path
+	// stays exactly as it was: no owner lookup, no request.
+	if !s.restateAuthoritative() && !s.restateShadow().Enabled() {
+		return nil
+	}
 	ev.EffectsOwner = effectsOwnerFromContext(ctx)
 	if ev.Agent == "" {
 		if s.registry != nil && ev.Repo != "" && ev.PRNumber > 0 {
@@ -434,20 +439,40 @@ func (s *RouterServer) publishConflictAuthoritative(ctx context.Context, repo st
 	return true, nil
 }
 
-// routeRolloutProgress journals one kustomization progress observation.
-// Like shadowRolloutProgress, deploy failures have no frozen PRObject
-// handler, so only progress and dispatch observations route.
-func (s *RouterServer) routeRolloutProgress(ctx context.Context, repo string, prNumber int, headSHA, mergeSHA, jobName string) error {
+// routeRolloutProgress journals one rollout observation: the
+// kustomization (job) name plus any ready jobs or completed Kustomizations
+// the legacy registry recorded for it, so PRObject records the same row.
+// Deploy failures route through routeDeployFailed instead.
+func (s *RouterServer) routeRolloutProgress(ctx context.Context, ev restateclient.PREvent) error {
 	if !s.restateAuthoritative() {
-		s.shadowRolloutProgress(ctx, repo, prNumber, headSHA, mergeSHA, jobName)
+		s.shadowRolloutProgress(ctx, ev)
 		return nil
 	}
 	// PR-less progress has no PRObject key; journal nothing rather than
 	// redelivery-loop on an unfixable payload.
+	if ev.PRNumber <= 0 {
+		return nil
+	}
+	return s.routePREvent(ctx, "HandleRolloutProgress", ev)
+}
+
+// rolloutEvent builds the rollout observation for one deploying PR.
+func rolloutEvent(pr DeployingPR, name string, deployedJobs, deployedKustomizations []string) restateclient.PREvent {
+	return restateclient.PREvent{
+		Repo: pr.Repo, PRNumber: pr.PRNumber, HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA, JobName: name,
+		DeployedJobs: deployedJobs, DeployedKustomizations: deployedKustomizations,
+	}
+}
+
+// routeDeployFailed journals one deploy failure (or, when acknowledged,
+// the confirmed deploy_failed publish) into PRObject, mirroring
+// AtomicTransitionDeployFailed and AcknowledgeDeployFailedPublished.
+// PR-less failures have no PRObject key and journal nothing.
+func (s *RouterServer) routeDeployFailed(ctx context.Context, repo string, prNumber int, headSHA, mergeSHA string, acknowledged bool) error {
 	if prNumber <= 0 {
 		return nil
 	}
-	return s.routePREvent(ctx, "HandleRolloutProgress", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
+	return s.routePREvent(ctx, "HandleDeployFailed", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, Acknowledged: acknowledged,
 	})
 }
