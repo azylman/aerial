@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,9 +13,10 @@ import (
 
 // apiResponse is one canned GitHub response.
 type apiResponse struct {
-	status    int
-	body      string
-	remaining string
+	status     int
+	body       string
+	remaining  string
+	retryAfter string
 }
 
 // apiRequest is one request the fake GitHub API saw.
@@ -49,6 +51,9 @@ func (f *fakeGitHubAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.remaining != "" {
 		w.Header().Set("X-Ratelimit-Remaining", resp.remaining)
+	}
+	if resp.retryAfter != "" {
+		w.Header().Set("Retry-After", resp.retryAfter)
 	}
 	w.WriteHeader(resp.status)
 	_, _ = w.Write([]byte(resp.body))
@@ -171,11 +176,30 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 		wantErrStatus   int
 		wantRateLimited bool
 		wantRequests    int
+		wantMessage     string
 	}{
 		{name: "accepted", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 202}}}, want: UpdateBranchUpdated, wantRequests: 1},
 		{name: "conflict", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 409}}}, want: UpdateBranchConflict, wantRequests: 1},
-		{name: "rate limited", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "0"}}}, wantErrStatus: 403, wantRateLimited: true, wantRequests: 1},
-		{name: "too many requests", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 429}}}, wantErrStatus: 429, wantRateLimited: true, wantRequests: 1},
+		{
+			name: "rate limited", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "0", body: `{"message":"API rate limit exceeded for installation."}`}}},
+			wantErrStatus: 403, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: 0): API rate limit exceeded for installation.",
+		},
+		{
+			name: "secondary rate limit", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, retryAfter: "60", body: `{"message":"You have exceeded a secondary rate limit."}`}}},
+			wantErrStatus: 403, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: ): You have exceeded a secondary rate limit.",
+		},
+		{
+			name: "permission 403 is terminal with github message", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "4999", body: `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com"}`}}},
+			wantErrStatus: 403, wantRequests: 1, wantMessage: "github api forbidden PUT /repos/azylman/aerial/pulls/7/update-branch (status 403): Resource not accessible by integration",
+		},
+		{
+			name: "403 without json body", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, body: "forbidden"}}},
+			wantErrStatus: 403, wantRequests: 1, wantMessage: "github api forbidden PUT /repos/azylman/aerial/pulls/7/update-branch (status 403): no message",
+		},
+		{
+			name: "too many requests", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 429, body: `{"message":""}`}}},
+			wantErrStatus: 429, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 429, remaining: ): no message",
+		},
 		{name: "invalid input never calls github", repo: "", prNumber: 7, wantErrStatus: 400},
 	}
 	for _, tc := range tests {
@@ -192,6 +216,10 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 			}
 			require.Equal(t, tc.wantErrStatus, gerr.Status)
 			require.Equal(t, tc.wantRateLimited, gerr.RateLimited)
+			require.Equal(t, tc.wantRateLimited, gerr.Retryable())
+			if tc.wantMessage != "" {
+				require.Equal(t, tc.wantMessage, gerr.Message)
+			}
 		})
 	}
 }
@@ -369,7 +397,7 @@ func TestGitHubClientRerunFailedJobs(t *testing.T) {
 		wantNil       bool
 	}{
 		{name: "created", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{status: 201}}}, wantNil: true},
-		{name: "forbidden is rate limited", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{status: 403}}}, wantErrStatus: 403},
+		{name: "forbidden is a terminal error", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{status: 403}}}, wantErrStatus: 403},
 		{name: "not found", runID: 55, wantErrStatus: 404},
 		{name: "invalid run id", runID: 0, wantErrStatus: 400},
 	}
@@ -474,6 +502,28 @@ func TestIsMergeabilityUnknown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, IsMergeabilityUnknown(tc.pr))
+		})
+	}
+}
+
+func TestGitHubMessage(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("é", 205)
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "message field only", raw: `{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest"}`, want: "Bad credentials"},
+		{name: "whitespace collapses", raw: `{"message":" Resource\n not  accessible "}`, want: "Resource not accessible"},
+		{name: "long message is capped", raw: `{"message":"` + long + `"}`, want: strings.Repeat("é", 200) + "…"},
+		{name: "non json body is never echoed", raw: "Bearer ghs_secret", want: "no message"},
+		{name: "empty message", raw: `{}`, want: "no message"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, gitHubMessage([]byte(tc.raw)))
 		})
 	}
 }

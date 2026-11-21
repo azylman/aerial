@@ -8,8 +8,9 @@ package prstate
 //
 // Error classification is data, not error types, so a journaled result
 // replays identically: GitHubResult carries the HTTP status and whether a
-// retry can help. Rate limits (403/429) and 5xx/transport failures are
-// retryable; every other 4xx is terminal.
+// retry can help. Rate limits (429, or a 403 githubauth.IsRateLimited
+// classifies as primary or secondary limit) and 5xx/transport failures are
+// retryable; every other 4xx, including a permission 403, is terminal.
 
 import (
 	"context"
@@ -20,6 +21,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/azylman/aerial/pkg/githubauth"
 )
 
 // DefaultGitHubAPIURL is the public GitHub REST endpoint.
@@ -133,14 +136,43 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, body io.Read
 	if err != nil {
 		return resp.StatusCode, nil, &GitHubError{Message: fmt.Sprintf("read github response %s %s: %v", method, path, err)}
 	}
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+	if githubauth.IsRateLimited(resp) {
 		return resp.StatusCode, raw, &GitHubError{
 			Status:      resp.StatusCode,
 			RateLimited: true,
-			Message:     fmt.Sprintf("github api rate limit or forbidden (status %d, remaining: %s)", resp.StatusCode, resp.Header.Get("X-Ratelimit-Remaining")),
+			Message:     fmt.Sprintf("github api rate limited (status %d, remaining: %s): %s", resp.StatusCode, resp.Header.Get("X-Ratelimit-Remaining"), gitHubMessage(raw)),
+		}
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return resp.StatusCode, raw, &GitHubError{
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("github api forbidden %s %s (status %d): %s", method, path, resp.StatusCode, gitHubMessage(raw)),
 		}
 	}
 	return resp.StatusCode, raw, nil
+}
+
+// maxGitHubMessage caps the GitHub error message carried in a GitHubError.
+const maxGitHubMessage = 200
+
+// gitHubMessage extracts GitHub's JSON "message" field from an error body,
+// capped at maxGitHubMessage runes. GitHubError.Message is journaled, so it
+// carries only this field: never the raw body, a JWT, a key or a token.
+func gitHubMessage(raw []byte) string {
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return "no message"
+	}
+	msg := strings.Join(strings.Fields(body.Message), " ")
+	if msg == "" {
+		return "no message"
+	}
+	if r := []rune(msg); len(r) > maxGitHubMessage {
+		msg = string(r[:maxGitHubMessage]) + "…"
+	}
+	return msg
 }
 
 // getJSON GETs path and decodes a 200 body into out.
