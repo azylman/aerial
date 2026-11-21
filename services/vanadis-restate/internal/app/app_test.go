@@ -290,7 +290,7 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 33)
+			require.Len(t, byName["PRObject"], 34)
 			require.True(t, byName["PRObject"]["RetryEriEffect"])
 			require.True(t, byName["PRObject"]["Hydrate"])
 			require.True(t, byName["PRObject"]["Project"])
