@@ -1,21 +1,16 @@
 package prstate
 
-// Rollout/deploy-dedup handlers. PRObject is the single ordered authority
-// for per-PR deploy state; Postgres pr_registry stays a read-only
-// projection fed by a journaled send after the state commit.
+// Deploy verdicts, dedup slots and the deploy-failure deadline. PRObject is
+// the single ordered authority for per-PR deploy state; Postgres pr_registry
+// is a projection fed by a journaled send after the state commit.
 //
-// Both handlers preserve the BOTH-key deploy dedup from
-// services/synapse/internal/flux/dedup.go: a deploy counts as fully
-// dispatched only when a PR-keyed or job-plus-SHA slot hit coincides with
-// every applicable recorded effect key. Every external effect (Flux
-// forward, image promotion) runs once per generation-scoped EffectKey;
-// replay returns the recorded result and never re-fires. Terminal states
-// absorb same-epoch events; a newer reopen epoch applies. Readiness retry
-// never mints a generation and never clears effect keys, via the frozen
-// PRState.RetryPRReadiness no-op covered in state_test.go.
+// The deploy_success verdict preserves the BOTH-key deploy dedup legacy
+// synapse used: a deploy counts as fully dispatched only when a PR-keyed or
+// job-plus-SHA slot hit coincides with every applicable recorded effect
+// key. Readiness retry never mints a generation and never clears effect
+// keys.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -27,42 +22,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
-
-// FluxForwarder is the journaled Flux-forward boundary. Implementations
-// must forward exactly once per EffectKey; handlers guarantee they are
-// called at most once per key per process by recording the key before
-// returning success.
-type FluxForwarder interface {
-	ForwardFlux(ctx context.Context, key EffectKey, ev PREvent) error
-}
-
-// ImagePromoter is the journaled image-promotion boundary. Promotion is
-// naturally idempotent on the merge SHA: the effect key carries the
-// merge SHA, so a retry for the same merge replays the recorded result
-// instead of promoting twice. Where the GitHub API accepts an external
-// idempotency key, callers pass key.String(); otherwise the handler
-// accepts at-most-once-per-key firing with at-least-once delivery on
-// transport failure before the key is recorded.
-type ImagePromoter interface {
-	PromoteImages(ctx context.Context, key EffectKey, ev PREvent) error
-}
-
-// RolloutOutcome is the result of one rollout-progress event.
-type RolloutOutcome struct {
-	Disposition EventDisposition
-	EffectKey   string
-	Forwarded   bool
-	Deduped     bool
-}
-
-// DeployOutcome is the result of one deploy event.
-type DeployOutcome struct {
-	Disposition      EventDisposition
-	FluxEffectKey    string
-	PromoteEffectKey string
-	Dispatched       bool
-	Deduped          bool
-}
 
 // DeployDispatchDecision is the synapse deploy_success publish verdict. The
 // PRObject computes it from the deploy_dispatch effect key plus both
@@ -189,40 +148,6 @@ func WasDispatched(s *PRState, repo, jobName, sha string, prNumber int) bool {
 	return s.DeploySHAJob[DeploySHAJobKey(repo, cleanJob, cleanSHA)]
 }
 
-// fireFluxEffect fires the Flux-forward effect once per key: a recorded
-// key replays without calling the runner, otherwise the runner fires and
-// the key is recorded on success.
-func fireFluxEffect(ctx context.Context, s *PRState, ev PREvent, key EffectKey, fwd FluxForwarder) error {
-	if s.WasEffectDispatched(key) {
-		return nil
-	}
-	if fwd == nil {
-		return errNilPRState
-	}
-	if err := fwd.ForwardFlux(ctx, key, ev); err != nil {
-		return err
-	}
-	s.MarkEffectDispatched(key)
-	return nil
-}
-
-// firePromoteEffect fires image promotion once per merge-SHA key. An
-// empty key (no merge SHA) is a no-op so promotion is skipped while the
-// Flux-forward and deploy-dedup effects still apply.
-func firePromoteEffect(ctx context.Context, s *PRState, ev PREvent, key EffectKey, prom ImagePromoter) error {
-	if key.Kind == "" || s.WasEffectDispatched(key) {
-		return nil
-	}
-	if prom == nil {
-		return errNilPRState
-	}
-	if err := prom.PromoteImages(ctx, key, ev); err != nil {
-		return err
-	}
-	s.MarkEffectDispatched(key)
-	return nil
-}
-
 // syncHeadSHA records the observed head SHA after a successful apply so
 // later events judge staleness against it. A merged PR keeps its head
 // unless the event repairs a stale one (RecoverMergedHead): deploy events
@@ -235,79 +160,6 @@ func syncHeadSHA(s *PRState, ev PREvent) {
 	if clean := strings.TrimSpace(ev.HeadSHA); clean != "" && !IsZeroSHA(clean) {
 		s.SetHead(clean)
 	}
-}
-
-// HandleRolloutEvent applies one rollout-progress event: stale SHAs drop,
-// same-epoch terminal states absorb, and the Flux-forward effect fires
-// exactly once per generation-scoped key (repo+PR+headSHA+generation+
-// flux_forward+jobName). Replay of a recorded key reports Forwarded
-// without calling the runner again.
-func HandleRolloutEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxForwarder) (RolloutOutcome, error) {
-	if s == nil {
-		return RolloutOutcome{Disposition: DispositionDropStale}, errNilPRState
-	}
-	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
-		return RolloutOutcome{Disposition: disp}, nil
-	}
-	key := s.EffectKeyFor(EffectFluxForward, ev.HeadSHA, ev.JobName, "")
-	out := RolloutOutcome{Disposition: DispositionApply, EffectKey: key.String()}
-	already := s.WasEffectDispatched(key)
-	if err := fireFluxEffect(ctx, s, ev, key, fwd); err != nil {
-		return out, err
-	}
-	syncHeadSHA(s, ev)
-	out.Forwarded = true
-	out.Deduped = already
-	return out, nil
-}
-
-// HandleDeployEvent applies one deploy event, preserving BOTH dedup keys.
-// Stale SHAs drop and same-epoch terminal states absorb with no effects.
-// A deploy is fully deduped (Dispatched+Deduped, no re-fire) only when a
-// dedup slot hit coincides with every applicable effect key recorded;
-// otherwise the unrecorded effects fire, so a merge SHA that arrived after
-// an empty-merge dispatch still gets its promotion. The Flux-forward
-// effect fires once per its generation-scoped key and image promotion
-// fires once per merge SHA; each recorded key replays without re-firing,
-// so a retry after a partial failure replays Flux and retries only the
-// unrecorded promotion. Deploy dedup slots are recorded only once no
-// promotion remains pending; any runner error propagates with the keys
-// recorded so far.
-func HandleDeployEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxForwarder, prom ImagePromoter) (DeployOutcome, error) {
-	if s == nil {
-		return DeployOutcome{Disposition: DispositionDropStale}, errNilPRState
-	}
-	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
-		return DeployOutcome{Disposition: disp}, nil
-	}
-	fluxKey := s.EffectKeyFor(EffectFluxForward, ev.HeadSHA, ev.JobName, "")
-	mergeSHA := strings.TrimSpace(ev.MergeSHA)
-	var promoteKey EffectKey
-	if mergeSHA != "" && !IsZeroSHA(mergeSHA) {
-		promoteKey = s.EffectKeyFor(EffectImagePromote, mergeSHA, "", "")
-	}
-	out := DeployOutcome{Disposition: DispositionApply, FluxEffectKey: fluxKey.String(), PromoteEffectKey: promoteKey.String()}
-	promotionDone := promoteKey.Kind == "" || s.WasEffectDispatched(promoteKey)
-	if WasDispatched(s, ev.Repo, ev.JobName, ev.HeadSHA, ev.PRNumber) && s.WasEffectDispatched(fluxKey) && promotionDone {
-		out.Dispatched = true
-		out.Deduped = true
-		return out, nil
-	}
-	if err := fireFluxEffect(ctx, s, ev, fluxKey, fwd); err != nil {
-		return out, err
-	}
-	if err := firePromoteEffect(ctx, s, ev, promoteKey, prom); err != nil {
-		return out, err
-	}
-	if promoteKey.Kind == "" || s.WasEffectDispatched(promoteKey) {
-		s.RecordDeployedPR()
-		if cleanJob, cleanHead := strings.TrimSpace(ev.JobName), strings.TrimSpace(ev.HeadSHA); cleanJob != "" && cleanHead != "" && !IsZeroSHA(cleanHead) {
-			s.RecordDeployedSHAJob(cleanJob, cleanHead)
-		}
-	}
-	syncHeadSHA(s, ev)
-	out.Dispatched = true
-	return out, nil
 }
 
 // DefaultDeployFailureDeadline bounds how long a restate-owned deploy
@@ -382,14 +234,15 @@ func (s *PRState) TakeDeployFailure(seq uint64) (*PendingDeployFailure, bool) {
 	return p, p.Generation == s.GateGeneration
 }
 
-// HandleDeployAttemptFailed records one failed restate-owned deploy attempt
-// (image resolve, promotion, or reconcile-request record) and arms a bounded
+// HandleDeployAttemptFailed records one failed deploy attempt (image
+// resolve, promotion, or reconcile-request record) and arms a bounded
 // deploy-failure deadline as a delayed self-send; the deadline, not a
-// delivery count, decides deploy_failed. Legacy-owned attempts are ignored:
-// synapse's final-attempt rule still owns them and journals the outcome
-// through HandleDeployFailed.
+// delivery count, decides deploy_failed.
 func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, ev PREvent) error {
-	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate || NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if err := rejectLegacyOwner(ctx, "HandleDeployAttemptFailed", ev.EffectsOwner); err != nil {
+		return err
+	}
+	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)
@@ -428,10 +281,10 @@ func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext,
 		return nil
 	}
 	restate.Set(ctx, s.stateKey, st)
-	s.runFacts(ctx, st, EffectsOwnerRestate, p.Facts)
+	s.runFacts(ctx, st, p.Facts)
 	st.AckDeployFailedPublished()
 	restate.Set(ctx, s.stateKey, st)
-	s.afterCommit(ctx, st, EffectsOwnerRestate)
+	s.afterCommit(ctx, st)
 	return nil
 }
 

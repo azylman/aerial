@@ -107,27 +107,17 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 		Content: "<@1> Merge conflict with `main` detected on [azylman/aerial#4](https://github.com/azylman/aerial/pull/4) (\"PR 4\", branch: b4, commit: h4) — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
 	}
 	tests := []struct {
-		name         string
-		ev           RepoEvent
-		seed         *RepoState
-		gh           *fakeGitHub
-		noGitHub     bool
-		wantErr      error
-		wantOutcome  RepoEffectOutcome
-		wantCalls    []string
-		wantSent     []sentPR
-		wantEffects  []string
-		wantIntended []IntendedEffect
+		name        string
+		ev          RepoEvent
+		seed        *RepoState
+		gh          *fakeGitHub
+		noGitHub    bool
+		wantErr     error
+		wantOutcome RepoEffectOutcome
+		wantCalls   []string
+		wantSent    []sentPR
+		wantEffects []string
 	}{
-		{
-			name: "legacy trigger records the intended cascade", ev: mainPush(EffectsOwnerLegacy, defaultPolicy), gh: &fakeGitHub{},
-			wantOutcome: RepoEffectOutcome{
-				Key:      EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate},
-				Intended: &IntendedEffect{Kind: EffectGitHubAutoUpdate, EffectKey: autoUpdateKeyMain, MatchKey: "azylman/aerial#0@m1:github_auto_update", Digest: AutoUpdatePolicyDigest(defaultPolicy)},
-			},
-			wantEffects:  []string{autoUpdateKeyMain},
-			wantIntended: []IntendedEffect{{Kind: EffectGitHubAutoUpdate, EffectKey: autoUpdateKeyMain, MatchKey: "azylman/aerial#0@m1:github_auto_update", Digest: AutoUpdatePolicyDigest(defaultPolicy)}},
-		},
 		{
 			name: "fired trigger dedupes", ev: mainPush(EffectsOwnerRestate, defaultPolicy), gh: &fakeGitHub{},
 			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{autoUpdateKeyMain}},
@@ -239,22 +229,21 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 				require.Equal(t, tc.wantCalls, tc.gh.Calls())
 			}
 			require.Equal(t, tc.wantSent, prs.calls)
-			effects, intended := storedRepoEffects(t, store)
+			effects := storedRepoEffects(t, store)
 			require.Equal(t, tc.wantEffects, effects)
-			require.Equal(t, tc.wantIntended, intended)
 		})
 	}
 }
 
-// storedRepoEffects loads the committed repo-effect keys and intended ring.
-func storedRepoEffects(t *testing.T, store *MemRepoStore) ([]string, []IntendedEffect) {
+// storedRepoEffects loads the committed repo-effect keys.
+func storedRepoEffects(t *testing.T, store *MemRepoStore) []string {
 	t.Helper()
 	st, err := store.LoadRepo("aerial")
 	require.NoError(t, err)
 	if st == nil {
-		return nil, nil
+		return nil
 	}
-	return st.RepoEffects, st.IntendedEffects
+	return st.RepoEffects
 }
 
 func TestRepoHandlersHandleAutoUpdateForwardFailure(t *testing.T) {
@@ -293,27 +282,20 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 		return RepoEvent{Repo: "aerial", PRNumber: 12, HeadSHA: "s1", CheckName: "CI", RunID: 55, EffectsOwner: owner}
 	}
 	tests := []struct {
-		name         string
-		ev           RepoEvent
-		gh           *fakeGitHub
-		noGitHub     bool
-		storeErr     error
-		wantErr      error
-		wantOutcome  RepoEffectOutcome
-		wantCalls    []string
-		wantEffects  []string
-		wantIntended int
+		name        string
+		ev          RepoEvent
+		gh          *fakeGitHub
+		noGitHub    bool
+		storeErr    error
+		wantErr     error
+		wantOutcome RepoEffectOutcome
+		wantCalls   []string
+		wantEffects []string
 	}{
 		{name: "restate rerun executes", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{}, wantOutcome: RepoEffectOutcome{Key: key, Executed: true}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
 		{name: "retryable failure leaves the key open", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{rerunErr: errGHServer}, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGHServer}, wantCalls: []string{"rerun 55"}},
 		{name: "terminal failure commits the key", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{rerunErr: errGHNotFound}, wantOutcome: RepoEffectOutcome{Key: key, Err: errGHNotFound}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
 		{name: "missing client retries", ev: ev(EffectsOwnerRestate), noGitHub: true, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGitHubUnconfigured}},
-		{
-			name: "legacy rerun records intent", ev: ev(EffectsOwnerLegacy), gh: &fakeGitHub{},
-			wantOutcome:  RepoEffectOutcome{Key: key, Intended: &IntendedEffect{Kind: EffectGitHubRerun, EffectKey: rerunKey, MatchKey: "azylman/aerial#12@s1:github_rerun:check=ci", Digest: digestStrings(EffectGitHubRerun, "55")}},
-			wantEffects:  []string{rerunKey},
-			wantIntended: 1,
-		},
 		{name: "missing run id is invalid", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
 		{name: "store failure surfaces", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{}, storeErr: errKVUnavailable, wantErr: errKVUnavailable},
 	}
@@ -340,29 +322,24 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 			st, lerr := store.LoadRepo("aerial")
 			require.NoError(t, lerr)
 			var effects []string
-			intended := 0
 			if st != nil {
-				effects, intended = st.RepoEffects, len(st.IntendedEffects)
+				effects = st.RepoEffects
 			}
 			require.Equal(t, tc.wantEffects, effects)
-			require.Equal(t, tc.wantIntended, intended)
 		})
 	}
 }
 
-func TestRepoStateRepoEffectRings(t *testing.T) {
+func TestRepoStateRepoEffectRing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		marks         int
-		intended      int
-		wantEffects   int
-		wantFirst     string
-		wantIntended  int
-		wantFirstKind string
+		name        string
+		marks       int
+		wantEffects int
+		wantFirst   string
 	}{
-		{name: "under the bound keeps everything", marks: 2, intended: 2, wantEffects: 2, wantFirst: "azylman/aerial#0@s0:gen0:github_rerun", wantIntended: 2, wantFirstKind: "k0"},
-		{name: "over the bound keeps the newest", marks: MaxRepoEffects + 3, intended: MaxIntendedEffects + 2, wantEffects: MaxRepoEffects, wantFirst: "azylman/aerial#0@s3:gen0:github_rerun", wantIntended: MaxIntendedEffects, wantFirstKind: "k2"},
+		{name: "under the bound keeps everything", marks: 2, wantEffects: 2, wantFirst: "azylman/aerial#0@s0:gen0:github_rerun"},
+		{name: "over the bound keeps the newest", marks: MaxRepoEffects + 3, wantEffects: MaxRepoEffects, wantFirst: "azylman/aerial#0@s3:gen0:github_rerun"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,37 +350,11 @@ func TestRepoStateRepoEffectRings(t *testing.T) {
 				st.MarkRepoEffect(k)
 				st.MarkRepoEffect(k)
 			}
-			for i := range tc.intended {
-				st.RecordIntendedEffect(IntendedEffect{Kind: fmt.Sprintf("k%d", i)})
-			}
 			require.Len(t, st.RepoEffects, tc.wantEffects)
 			require.Equal(t, tc.wantFirst, st.RepoEffects[0])
-			require.Len(t, st.IntendedEffects, tc.wantIntended)
-			require.Equal(t, tc.wantFirstKind, st.IntendedEffects[0].Kind)
 			var nilState *RepoState
 			nilState.MarkRepoEffect(EffectKey{})
-			nilState.RecordIntendedEffect(IntendedEffect{})
 			require.False(t, nilState.WasRepoEffect(EffectKey{}))
-		})
-	}
-}
-
-func TestAutoUpdatePolicyDigest(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		a, b     *AutoUpdatePolicy
-		wantSame bool
-	}{
-		{name: "nil policies match", wantSame: true},
-		{name: "same policy matches", a: &AutoUpdatePolicy{Authors: []string{"x"}}, b: &AutoUpdatePolicy{Authors: []string{"x"}}, wantSame: true},
-		{name: "default owner changes the digest", a: &AutoUpdatePolicy{Authors: []string{"x"}}, b: &AutoUpdatePolicy{Authors: []string{"x"}, DefaultOwner: true}},
-		{name: "collaborators change the digest", a: &AutoUpdatePolicy{}, b: &AutoUpdatePolicy{Collaborators: []CollaboratorAlert{{Author: "o"}}}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, tc.wantSame, AutoUpdatePolicyDigest(tc.a) == AutoUpdatePolicyDigest(tc.b))
 		})
 	}
 }

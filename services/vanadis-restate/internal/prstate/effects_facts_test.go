@@ -13,16 +13,13 @@ import (
 )
 
 const (
-	testConflictKey    = "azylman/aerial#101@h1:gen0:pr_fact_conflict"
-	testConflictMatch  = "azylman/aerial#101@h1:pr_fact_conflict"
-	testConflictIdem   = "prstate-0e1440d980ffeb727b4c449454e78ef2"
-	testConflictDigest = "9a6e2355deac6f09"
-	testDeployKey      = "azylman/aerial#101@m1:gen0:pr_fact_deploy_success:job=eri"
-	testDeployIdem     = "prstate-42ee6b4f8424a360d332e93c0fca0597"
-	testDeployDigest   = "d2bbc5155dcdb282"
-	testSyncKey        = "azylman/aerial#101@h1:gen0:pr_fact_synchronize"
-	testSyncIdem       = "prstate-48ff1705266d6f67bd96deaf2b89ebb8"
-	testFailedIdem     = "prstate-d7665dabf8bc19c3fe142a14cc6c3a50"
+	testConflictKey  = "azylman/aerial#101@h1:gen0:pr_fact_conflict"
+	testConflictIdem = "prstate-0e1440d980ffeb727b4c449454e78ef2"
+	testDeployKey    = "azylman/aerial#101@m1:gen0:pr_fact_deploy_success:job=eri"
+	testDeployIdem   = "prstate-42ee6b4f8424a360d332e93c0fca0597"
+	testSyncKey      = "azylman/aerial#101@h1:gen0:pr_fact_synchronize"
+	testSyncIdem     = "prstate-48ff1705266d6f67bd96deaf2b89ebb8"
+	testFailedIdem   = "prstate-d7665dabf8bc19c3fe142a14cc6c3a50"
 )
 
 // conflictFact is the rendered conflict fact synapse attaches.
@@ -147,30 +144,24 @@ func TestPlanFacts(t *testing.T) {
 	}
 }
 
-// TestFactFingerprints pins the fact idempotency key and payload digest
-// against externally computed sha256 literals; OccurredAt never moves them.
+// TestFactFingerprints pins the fact effect key and idempotency key against
+// externally computed sha256 literals.
 func TestFactFingerprints(t *testing.T) {
 	t.Parallel()
-	stamped := conflictFact()
-	stamped.OccurredAt = stamped.OccurredAt.AddDate(1, 0, 0)
 	tests := []struct {
-		name       string
-		key        EffectKey
-		fact       pubsub.PRLifecycleEvent
-		wantKey    string
-		wantIdem   string
-		wantDigest string
+		name     string
+		key      EffectKey
+		wantKey  string
+		wantIdem string
 	}{
-		{name: "conflict", key: factKey("pr_fact_conflict", "h1", ""), fact: conflictFact(), wantKey: testConflictKey, wantIdem: testConflictIdem, wantDigest: testConflictDigest},
-		{name: "occurred at is excluded", key: factKey("pr_fact_conflict", "h1", ""), fact: stamped, wantKey: testConflictKey, wantIdem: testConflictIdem, wantDigest: testConflictDigest},
-		{name: "deploy success", key: factKey("pr_fact_deploy_success", "m1", "eri"), fact: deployFact(), wantKey: testDeployKey, wantIdem: testDeployIdem, wantDigest: testDeployDigest},
+		{name: "conflict", key: factKey("pr_fact_conflict", "h1", ""), wantKey: testConflictKey, wantIdem: testConflictIdem},
+		{name: "deploy success", key: factKey("pr_fact_deploy_success", "m1", "eri"), wantKey: testDeployKey, wantIdem: testDeployIdem},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.wantKey, tc.key.String())
 			require.Equal(t, tc.wantIdem, EffectIdempotencyKey(tc.key))
-			require.Equal(t, tc.wantDigest, FactDigest(tc.fact))
 		})
 	}
 }
@@ -225,10 +216,10 @@ func TestBusFactPublisherPublishFact(t *testing.T) {
 }
 
 // TestPRObjectServiceHandleConflict pins the merged conflict verdict: a new
-// SHA commits the conflict SHA and row status, then a restate owner
-// publishes the fact with the EffectKey message ID while a legacy owner
-// records it as intended; a failed publish keeps the commit and schedules a
-// retry; deduped, terminal, and malformed events commit nothing.
+// SHA commits the conflict SHA and row status, then publishes the fact with
+// the EffectKey message ID; a legacy-stamped event is rejected; a failed
+// publish keeps the commit and schedules a retry; deduped, terminal, and
+// malformed events commit nothing.
 func TestPRObjectServiceHandleConflict(t *testing.T) {
 	t.Parallel()
 	published := func() *PRState {
@@ -251,7 +242,6 @@ func TestPRObjectServiceHandleConflict(t *testing.T) {
 		wantSet        bool
 		wantStatus     string
 		wantDispatched bool
-		wantIntended   []IntendedEffect
 		wantSends      []sentCall
 	}{
 		{
@@ -261,10 +251,8 @@ func TestPRObjectServiceHandleConflict(t *testing.T) {
 			wantSet: true, wantStatus: RegistryStatusConflict, wantDispatched: true,
 		},
 		{
-			name: "legacy owner commits and records the intended fact", state: effectPR(), pub: &fakeFactPublisher{},
-			ev:   PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EffectsOwner: EffectsOwnerLegacy, Facts: []pubsub.PRLifecycleEvent{conflictFact()}},
-			want: ConflictDispatchDecision{Disposition: DispositionApply, ShouldPublish: true}, wantSet: true, wantStatus: RegistryStatusConflict, wantDispatched: true,
-			wantIntended: []IntendedEffect{{Kind: "pr_fact_conflict", Agent: "agent-alpha", EffectKey: testConflictKey, MatchKey: testConflictMatch, Digest: testConflictDigest}},
+			name: "legacy owner is rejected", state: effectPR(), pub: &fakeFactPublisher{}, wantErr: true,
+			ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EffectsOwner: EffectsOwnerLegacy, Facts: []pubsub.PRLifecycleEvent{conflictFact()}},
 		},
 		{
 			name: "failed publish keeps the commit and schedules a retry", state: effectPR(), pub: &fakeFactPublisher{err: errFakeBus},
@@ -315,7 +303,6 @@ func TestPRObjectServiceHandleConflict(t *testing.T) {
 				require.Equal(t, tc.wantStatus, rec.saved.Status)
 				require.True(t, rec.saved.WasConflictPublished("h1"))
 				require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(factKey("pr_fact_conflict", "h1", "")))
-				require.Equal(t, tc.wantIntended, rec.saved.IntendedEffects)
 			}
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
@@ -332,8 +319,8 @@ func deployingMergedPR() *PRState {
 // TestPRObjectServiceHandleDeploySuccess pins the merged deploy_success
 // verdict: an undispatched deploy commits the dispatch key and both dedup
 // slots (leaving an untracked rollout's status alone), disarms a pending failure deadline, indexes
-// the PR as deployed, then publishes (restate) or records (legacy) the fact;
-// a fully deduped deploy commits nothing.
+// the PR as deployed, then publishes the fact; a legacy-stamped event is
+// rejected and a fully deduped deploy commits nothing.
 func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 	t.Parallel()
 	armed := func() *PRState {
@@ -362,15 +349,17 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 		wantCalls      []factCall
 		wantSet        bool
 		wantDispatched bool
-		wantIntended   int
 		wantSends      []sentCall
 	}{
 		{
 			name: "restate owner commits indexes and publishes", state: deployingMergedPR(), ev: ev(EffectsOwnerRestate), want: applied,
 			wantCalls: []factCall{{msgID: testDeployIdem, fact: pinned(deployFact())}}, wantSet: true, wantDispatched: true, wantSends: indexed,
 		},
-		{name: "legacy owner records the intended fact", state: deployingMergedPR(), ev: ev(EffectsOwnerLegacy), want: applied, wantSet: true, wantDispatched: true, wantIntended: 1, wantSends: indexed},
-		{name: "pending failure deadline is disarmed", state: armed(), ev: ev(EffectsOwnerLegacy), want: applied, wantSet: true, wantDispatched: true, wantIntended: 1, wantSends: indexed},
+		{name: "legacy owner is rejected", state: deployingMergedPR(), ev: ev(EffectsOwnerLegacy), wantErr: true},
+		{
+			name: "pending failure deadline is disarmed", state: armed(), ev: ev(EffectsOwnerRestate), want: applied,
+			wantCalls: []factCall{{msgID: testDeployIdem, fact: pinned(deployFact())}}, wantSet: true, wantDispatched: true, wantSends: indexed,
+		},
 		{
 			name: "fully deduped deploy commits nothing", state: deduped(), ev: ev(EffectsOwnerRestate),
 			want: DeployDispatchDecision{Disposition: DispositionApply, Deduped: true, EffectKey: "azylman/aerial#101@:gen0:deploy_dispatch:job=eri"},
@@ -403,7 +392,6 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 				require.True(t, rec.saved.WasDeployedPR())
 				require.Nil(t, rec.saved.PendingDeployFailure)
 				require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(factKey("pr_fact_deploy_success", "m1", "eri")))
-				require.Len(t, rec.saved.IntendedEffects, tc.wantIntended)
 			}
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
@@ -423,8 +411,9 @@ func ciFailedPR(checks ...string) *PRState {
 
 // TestPRObjectServiceHandleCIRecovered pins the merged CI-recovery verdict:
 // a CI-failed head clears the recovered check (and the failed-CI SHA once
-// no failed check remains), reopens the row, and publishes or records the
-// recovery fact; a healthy PR commits and publishes nothing.
+// no failed check remains), reopens the row, and publishes the recovery
+// fact; a healthy PR commits and publishes nothing and a legacy stamp is
+// rejected.
 func TestPRObjectServiceHandleCIRecovered(t *testing.T) {
 	t.Parallel()
 	ev := func(owner EffectsOwner, check string) PREvent {
@@ -441,14 +430,13 @@ func TestPRObjectServiceHandleCIRecovered(t *testing.T) {
 		wantCalls      []factCall
 		wantSet        bool
 		wantFailedSHA  string
-		wantIntended   int
 		wantDispatched bool
 	}{
 		{
 			name: "restate owner recovers and publishes", state: ciFailedPR("lint"), ev: ev(EffectsOwnerRestate, "lint"), want: recovered,
 			wantCalls: []factCall{{msgID: testSyncIdem, fact: targeted(pinned(syncFact()))}}, wantSet: true, wantDispatched: true,
 		},
-		{name: "legacy owner records the intended fact", state: ciFailedPR(), ev: ev(EffectsOwnerLegacy, ""), want: recovered, wantSet: true, wantIntended: 1, wantDispatched: true},
+		{name: "legacy owner is rejected", state: ciFailedPR(), ev: ev(EffectsOwnerLegacy, ""), wantErr: true},
 		{
 			name: "another failing check keeps the failed sha", state: ciFailedPR("lint", "test"), ev: ev(EffectsOwnerRestate, "lint"), want: recovered,
 			wantCalls: []factCall{{msgID: testSyncIdem, fact: targeted(pinned(syncFact()))}}, wantSet: true, wantFailedSHA: "h1", wantDispatched: true,
@@ -477,7 +465,6 @@ func TestPRObjectServiceHandleCIRecovered(t *testing.T) {
 			if tc.wantSet {
 				require.Equal(t, RegistryStatusOpen, rec.saved.Status)
 				require.Equal(t, tc.wantFailedSHA, rec.saved.FailedCISHA)
-				require.Len(t, rec.saved.IntendedEffects, tc.wantIntended)
 				require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(factKey("pr_fact_synchronize", "h1", "")))
 			}
 		})
@@ -652,7 +639,7 @@ func TestPRObjectServiceHandleDeployAttemptFailed(t *testing.T) {
 			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: PRHandlerDeployFailureDeadline, input: DeployFailureDeadlineRequest{Seq: 1}, delayed: true}},
 		},
 		{name: "repeat failure refreshes without a second timer", state: armed(), ev: attempt(EffectsOwnerRestate, "m1"), wantSet: true, wantBanner: "boom"},
-		{name: "legacy attempt is ignored", state: deployingMergedPR(), ev: attempt(EffectsOwnerLegacy, "m1")},
+		{name: "legacy attempt is rejected", state: deployingMergedPR(), ev: attempt(EffectsOwnerLegacy, "m1"), wantErr: true},
 		{name: "stale sha drops", state: deployingMergedPR(), ev: attempt(EffectsOwnerRestate, "m9")},
 		{name: "malformed attempt is ignored", state: deployingMergedPR(), ev: PREvent{Repo: "aerial", EffectsOwner: EffectsOwnerRestate}},
 		{name: "kv failure surfaces", failGet: true, ev: attempt(EffectsOwnerRestate, "m1"), wantErr: true},
@@ -743,39 +730,37 @@ func TestPRObjectServiceHandleDeployFailureDeadline(t *testing.T) {
 }
 
 // TestPRObjectServiceLifecycleFacts pins that lifecycle handlers run the
-// facts their events carry after the state commit: restate publishes,
-// legacy records the intended fact, and a dropped event fires nothing.
+// facts their events carry after the state commit: the fact publishes, a
+// legacy-stamped event is rejected, and a dropped event fires nothing.
 func TestPRObjectServiceLifecycleFacts(t *testing.T) {
 	t.Parallel()
 	merged := pubsub.PRLifecycleEvent{Event: "merged", HeadSHA: "h1", MergeSHA: "m1", Status: "merged"}
 	carried := merged
 	carried.TargetID = "333333333333333333"
 	tests := []struct {
-		name         string
-		ev           PREvent
-		wantCalls    int
-		wantIntended int
-		wantTarget   string
+		name       string
+		ev         PREvent
+		wantCalls  int
+		wantErr    bool
+		wantTarget string
 	}{
 		{name: "restate owner publishes the fact with the stored target", ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate, Facts: []pubsub.PRLifecycleEvent{merged}}, wantCalls: 1, wantTarget: testTarget},
 		{name: "restate owner keeps a carried target", ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate, Facts: []pubsub.PRLifecycleEvent{carried}}, wantCalls: 1, wantTarget: "333333333333333333"},
-		{name: "legacy owner records the intended fact", ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy, Facts: []pubsub.PRLifecycleEvent{merged}}, wantIntended: 1},
+		{name: "legacy owner is rejected", ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy, Facts: []pubsub.PRLifecycleEvent{merged}}, wantErr: true},
 		{name: "stale event fires nothing", ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h9", EffectsOwner: EffectsOwnerRestate, Facts: []pubsub.PRLifecycleEvent{merged}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &fakeFactPublisher{}
-			mc, rec := newStateMock(t, effectPR())
+			mc, _ := newStateMock(t, effectPR())
 			stubRun(mc)
-			require.NoError(t, NewPRObjectService().WithFactPublisher(pub).HandleMerged(restate.WithMockContext(mc), tc.ev))
+			err := NewPRObjectService().WithFactPublisher(pub).HandleMerged(restate.WithMockContext(mc), tc.ev)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			calls := pub.Calls()
 			require.Len(t, calls, tc.wantCalls)
 			if tc.wantCalls > 0 {
 				require.Equal(t, tc.wantTarget, calls[0].fact.TargetID)
-			}
-			if rec.saved != nil {
-				require.Len(t, rec.saved.IntendedEffects, tc.wantIntended)
 			}
 		})
 	}

@@ -45,20 +45,9 @@ func stubRun(mc *mocks.MockContext) *runCapture {
 	return rec
 }
 
-// fakeProjectionReader is the hermetic ProjectionReader.
-type fakeProjectionReader struct {
-	row   RegistryRow
-	found bool
-	err   error
-}
-
-func (f fakeProjectionReader) LoadRegistryRow(context.Context, string, int) (RegistryRow, bool, error) {
-	return f.row, f.found, f.err
-}
-
-// projSvc builds a PRObject service with the requested projection deps.
-func projSvc(store ProjectionStore, reader ProjectionReader) *PRObjectService {
-	return NewPRObjectService().WithProjection(store, reader)
+// projSvc builds a PRObject service with the requested projection store.
+func projSvc(store ProjectionStore) *PRObjectService {
+	return NewPRObjectService().WithProjection(store)
 }
 
 // openPR seeds an open PR on head h1.
@@ -66,34 +55,34 @@ func openPR() *PRState {
 	return svcRow("h1", "", RegistryStatusOpen, TerminalNone)
 }
 
-// TestPRObjectServiceAfterCommit pins effect-owner routing after a commit:
-// restate events self-send Project when a store is wired, legacy events
-// send a delayed CompareProjection carrying the commit snapshot when a
-// reader is wired, and unwired services send nothing.
+// TestPRObjectServiceAfterCommit pins the post-commit projection send: a
+// restate-stamped or unstamped event self-sends Project when a store is
+// wired, an unwired service sends nothing, and a legacy-stamped event is
+// rejected terminally before any state write or send.
 func TestPRObjectServiceAfterCommit(t *testing.T) {
 	t.Parallel()
-	store := &FakeProjectionStore{}
-	reader := fakeProjectionReader{}
-	pendingSnap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Agent: "aerial", HeadSHA: "h1", Status: "open", Metadata: ProjectionMetadata{CIChecks: map[string]string{"ci": "pending"}}}
+	project := []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: "Project", input: ProjectRequest{}}}
 	tests := []struct {
 		name      string
 		svc       *PRObjectService
 		owner     EffectsOwner
+		wantErr   bool
+		wantSet   bool
 		wantSends []sentCall
 	}{
-		{name: "restate owner projects", svc: projSvc(store, reader), owner: EffectsOwnerRestate, wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: "Project", input: ProjectRequest{}}}},
-		{name: "legacy owner shadow compares", svc: projSvc(store, reader), owner: EffectsOwnerLegacy, wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: "CompareProjection", input: pendingSnap, delayed: true}}},
-		{name: "unknown stamp is legacy", svc: projSvc(store, reader), owner: "bogus", wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: "CompareProjection", input: pendingSnap, delayed: true}}},
-		{name: "restate owner without store sends nothing", svc: projSvc(nil, reader), owner: EffectsOwnerRestate, wantSends: nil},
-		{name: "legacy owner without reader sends nothing", svc: projSvc(store, nil), owner: EffectsOwnerLegacy, wantSends: nil},
+		{name: "restate owner projects", svc: projSvc(&FakeProjectionStore{}), owner: EffectsOwnerRestate, wantSet: true, wantSends: project},
+		{name: "unstamped event projects", svc: projSvc(&FakeProjectionStore{}), owner: "", wantSet: true, wantSends: project},
+		{name: "unknown stamp projects", svc: projSvc(&FakeProjectionStore{}), owner: "bogus", wantSet: true, wantSends: project},
+		{name: "no store sends nothing", svc: projSvc(nil), owner: EffectsOwnerRestate, wantSet: true},
+		{name: "legacy owner is rejected", svc: projSvc(&FakeProjectionStore{}), owner: EffectsOwnerLegacy, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, openPR())
 			err := tc.svc.HandleCheckStatus(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending", EffectsOwner: tc.owner})
-			require.NoError(t, err)
-			require.True(t, rec.setCalled)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
+			require.Equal(t, tc.wantSet, rec.setCalled)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
 	}
@@ -114,7 +103,7 @@ func TestAfterCommitSkipsInvalidState(t *testing.T) {
 			t.Parallel()
 			mc := mocks.NewMockContext(t)
 			sends := captureSends(t, mc)
-			projSvc(&FakeProjectionStore{}, fakeProjectionReader{}).afterCommit(restate.WithMockContext(mc), tc.state, EffectsOwnerRestate)
+			projSvc(&FakeProjectionStore{}).afterCommit(restate.WithMockContext(mc), tc.state)
 			require.Empty(t, sends.snapshot())
 		})
 	}
@@ -176,7 +165,7 @@ func TestPRObjectServiceProject(t *testing.T) {
 			run := stubRun(mc)
 			svc := NewPRObjectService()
 			if tc.store != nil {
-				svc = svc.WithProjection(tc.store, nil)
+				svc = svc.WithProjection(tc.store)
 			}
 			err := svc.Project(restate.WithMockContext(mc), ProjectRequest{})
 			require.Equal(t, tc.failGet, err != nil, "err = %v", err)
@@ -193,73 +182,29 @@ func TestPRObjectServiceProject(t *testing.T) {
 	}
 }
 
-// TestPRObjectServiceCompareProjection pins the shared shadow compare: it
-// reads the legacy row through a journaled run for every verdict, sends one
-// delayed confirming re-read for a first-pass divergence (never on the
-// confirming pass), reads object state only when confirming, never fails
-// the invocation on a read error, and skips unwired or unkeyed input.
+// TestPRObjectServiceCompareProjection pins that the retired shadow compare
+// is a no-op: queued sends, first-pass or confirming, drain without a
+// journaled read, a state read, or a re-send.
 func TestPRObjectServiceCompareProjection(t *testing.T) {
 	t.Parallel()
 	snap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Agent: "aerial", Branch: "feat", HeadSHA: "h1", Status: "open"}
-	divergent := RegistryRow{Branch: "old", HeadSHA: "h1", Status: "open"}
-	confirm := &ShadowConfirm{RowDigest: "stale", Fields: []string{"branch"}}
-	tests := []struct {
-		name       string
-		reader     ProjectionReader
-		req        ShadowCompareRequest
-		state      *PRState
-		wantRun    bool
-		wantResend []string
-	}{
-		{name: "matching row", reader: fakeProjectionReader{row: RegistryRow{Branch: "feat", HeadSHA: "h1", Status: "open"}, found: true}, req: ShadowCompareRequest{ProjectionSnapshot: snap}, wantRun: true},
-		{name: "first-pass divergence schedules a confirming re-read", reader: fakeProjectionReader{row: divergent, found: true}, req: ShadowCompareRequest{ProjectionSnapshot: snap}, wantRun: true, wantResend: []string{"branch"}},
-		{name: "confirming pass never re-sends", reader: fakeProjectionReader{row: divergent, found: true}, req: ShadowCompareRequest{ProjectionSnapshot: snap, Confirm: confirm}, state: openPR(), wantRun: true},
-		{name: "superseded row", reader: fakeProjectionReader{row: RegistryRow{HeadSHA: "h2", Status: "open"}, found: true}, req: ShadowCompareRequest{ProjectionSnapshot: snap}, wantRun: true},
-		{name: "missing row", reader: fakeProjectionReader{}, req: ShadowCompareRequest{ProjectionSnapshot: snap}, wantRun: true},
-		{name: "missing row for a tracked pr", reader: fakeProjectionReader{}, req: ShadowCompareRequest{ProjectionSnapshot: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", TargetID: snowA, Status: "open"}}, wantRun: true},
-		{name: "read failure is dropped", reader: fakeProjectionReader{err: errFakeProjection}, req: ShadowCompareRequest{ProjectionSnapshot: snap}, wantRun: true},
-		{name: "no reader skips", reader: nil, req: ShadowCompareRequest{ProjectionSnapshot: snap}, wantRun: false},
-		{name: "unkeyed snapshot skips", reader: fakeProjectionReader{}, req: ShadowCompareRequest{ProjectionSnapshot: ProjectionSnapshot{Status: "open"}}, wantRun: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := newKeyedStateMock(t, "azylman/aerial#101", tc.state)
-			run := stubRun(mc)
-			require.NoError(t, projSvc(nil, tc.reader).CompareProjection(restate.WithMockContext(mc), tc.req))
-			require.Equal(t, tc.wantRun, run.ran)
-			sends := rec.sends.snapshot()
-			if tc.wantResend == nil {
-				require.Empty(t, sends)
-				return
-			}
-			require.Len(t, sends, 1)
-			got := sends[0]
-			require.Equal(t, []any{"PRObject", "azylman/aerial#101", "CompareProjection", true}, []any{got.service, got.key, got.method, got.delayed})
-			req, ok := got.input.(ShadowCompareRequest)
-			require.True(t, ok)
-			require.Equal(t, tc.req.ProjectionSnapshot, req.ProjectionSnapshot)
-			require.NotNil(t, req.Confirm)
-			require.Equal(t, tc.wantResend, req.Confirm.Fields)
-		})
-	}
-}
-
-// TestPRObjectServiceCompareProjectionStateError pins that a confirming
-// pass surfaces a state read failure for Restate to retry.
-func TestPRObjectServiceCompareProjectionStateError(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name string
 		req  ShadowCompareRequest
 	}{
-		{name: "confirming pass state read fails", req: ShadowCompareRequest{ProjectionSnapshot: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Status: "open"}, Confirm: &ShadowConfirm{}}},
+		{name: "first pass drains", req: ShadowCompareRequest{ProjectionSnapshot: snap}},
+		{name: "confirming pass drains", req: ShadowCompareRequest{ProjectionSnapshot: snap, Confirm: &ShadowConfirm{RowDigest: "stale", Fields: []string{"branch"}}}},
+		{name: "unkeyed snapshot drains", req: ShadowCompareRequest{ProjectionSnapshot: ProjectionSnapshot{Status: "open"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc := newStateErrorMock(t)
-			require.Error(t, projSvc(nil, fakeProjectionReader{}).CompareProjection(restate.WithMockContext(mc), tc.req))
+			mc := mocks.NewMockContext(t)
+			sends := captureSends(t, mc)
+			run := stubRun(mc)
+			require.NoError(t, projSvc(&FakeProjectionStore{}).CompareProjection(restate.WithMockContext(mc), tc.req))
+			require.False(t, run.ran)
+			require.Empty(t, sends.snapshot())
 		})
 	}
 }

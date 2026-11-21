@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -72,7 +71,7 @@ func TestPREventEriEffectsDecode(t *testing.T) {
 			name: "golden collaborator DM event", raw: fx.Event, wantOwner: EffectsOwnerRestate,
 			wantEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: "111111111111111111", Content: "<@42> CI check lint failed on mirrormere#1010"}},
 		},
-		{name: "event without effects", raw: []byte(`{"repo":"azylman/aerial","pr_number":1,"head_sha":"h1"}`), wantOwner: EffectsOwnerLegacy},
+		{name: "event without effects", raw: []byte(`{"repo":"azylman/aerial","pr_number":1,"head_sha":"h1"}`), wantOwner: EffectsOwnerRestate},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,11 +85,9 @@ func TestPREventEriEffectsDecode(t *testing.T) {
 }
 
 const (
-	testChannel  = "111111111111111111"
-	testTarget   = "222222222222222222"
-	testDMKey    = "azylman/aerial#101@h1:gen0:eri_direct_message"
-	testDMMatch  = "azylman/aerial#101@h1:eri_direct_message"
-	testDMDigest = "80f00e04fa3df572"
+	testChannel = "111111111111111111"
+	testTarget  = "222222222222222222"
+	testDMKey   = "azylman/aerial#101@h1:gen0:eri_direct_message"
 )
 
 // effectPR seeds an open PR on head h1 owned by agent-alpha with a thread target.
@@ -183,58 +180,17 @@ func TestPlanEriEffects(t *testing.T) {
 func TestEffectFingerprints(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		key        EffectKey
-		eff        EriEffect
-		wantIdem   string
-		wantDigest string
+		name     string
+		key      EffectKey
+		wantIdem string
 	}{
-		{name: "collaborator DM", key: dmKey("h1", 0, ""), eff: dmEffect(), wantIdem: "prstate-54d500d389704715f4c085c744f8e1c8", wantDigest: testDMDigest},
+		{name: "collaborator DM", key: dmKey("h1", 0, ""), wantIdem: "prstate-54d500d389704715f4c085c744f8e1c8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, testDMKey, tc.key.String())
 			require.Equal(t, tc.wantIdem, EffectIdempotencyKey(tc.key))
-			require.Equal(t, tc.wantDigest, EriEffectDigest(tc.eff))
-		})
-	}
-}
-
-// TestRecordIntendedEffect pins the bounded ring: it keeps the newest
-// MaxIntendedEffects entries and tolerates a nil state.
-func TestRecordIntendedEffect(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		nilState  bool
-		appends   int
-		wantLen   int
-		wantFirst string
-		wantLast  string
-	}{
-		{name: "nil state records nothing", nilState: true, appends: 1},
-		{name: "under capacity keeps all", appends: 3, wantLen: 3, wantFirst: "k0", wantLast: "k2"},
-		{name: "at capacity keeps all", appends: 32, wantLen: 32, wantFirst: "k0", wantLast: "k31"},
-		{name: "over capacity drops the oldest", appends: 35, wantLen: 32, wantFirst: "k3", wantLast: "k34"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var st *PRState
-			if !tc.nilState {
-				st = NewPRState("aerial", 1)
-			}
-			for i := range tc.appends {
-				st.RecordIntendedEffect(IntendedEffect{EffectKey: fmt.Sprintf("k%d", i)})
-			}
-			if tc.nilState {
-				require.Nil(t, st)
-				return
-			}
-			require.Len(t, st.IntendedEffects, tc.wantLen)
-			require.Equal(t, tc.wantFirst, st.IntendedEffects[0].EffectKey)
-			require.Equal(t, tc.wantLast, st.IntendedEffects[len(st.IntendedEffects)-1].EffectKey)
 		})
 	}
 }
@@ -271,8 +227,8 @@ var errFakeEri = errors.New("eri unavailable")
 // TestPRObjectServiceEriEffects pins effect ownership on the collaborator
 // alert handler: restate events deliver to the stored owner and commit the
 // key, a failed or unconfigured delivery schedules a delayed retry without
-// committing, legacy events commit the key and record the intended effect,
-// and a fired key never re-fires.
+// committing, a legacy-stamped event is rejected terminally before any
+// write, and a fired key never re-fires.
 func TestPRObjectServiceEriEffects(t *testing.T) {
 	t.Parallel()
 	dispatched := func() *PRState {
@@ -289,7 +245,7 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 		wantCalls      []eriCall
 		wantRun        bool
 		wantDispatched bool
-		wantIntended   []IntendedEffect
+		wantErr        bool
 		wantSends      []sentCall
 	}{
 		{
@@ -301,10 +257,7 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 			wantCalls: []eriCall{{agent: "agent-alpha", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantSends: retrySend,
 		},
 		{name: "unconfigured effector schedules a retry", state: effectPR(), owner: EffectsOwnerRestate, wantRun: true, wantSends: retrySend},
-		{
-			name: "legacy owner records the intended effect", state: effectPR(), owner: EffectsOwnerLegacy, eri: &fakeEriEffector{}, wantRun: true, wantDispatched: true,
-			wantIntended: []IntendedEffect{{Kind: EffectEriDirectMessage, Agent: "agent-alpha", EffectKey: testDMKey, MatchKey: testDMMatch, Digest: testDMDigest}},
-		},
+		{name: "legacy owner is rejected", state: effectPR(), owner: EffectsOwnerLegacy, eri: &fakeEriEffector{}, wantErr: true},
 		{name: "fired key never re-fires", state: dispatched(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{}, wantDispatched: true},
 	}
 	for _, tc := range tests {
@@ -317,14 +270,13 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 				svc = svc.WithEriEffector(tc.eri)
 			}
 			err := svc.HandleCollaboratorAlert(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EffectsOwner: tc.owner, EriEffects: []EriEffect{dmEffect()}})
-			require.NoError(t, err)
-			require.True(t, rec.setCalled)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
+			require.Equal(t, !tc.wantErr, rec.setCalled)
 			if tc.eri != nil {
 				require.Equal(t, tc.wantCalls, tc.eri.Calls())
 			}
 			require.Equal(t, tc.wantRun, run.ran)
 			require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(dmKey("h1", 0, "")))
-			require.Equal(t, tc.wantIntended, rec.saved.IntendedEffects)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
 	}
