@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
@@ -217,42 +218,18 @@ func NonNilSlice[T any](s []T) []T {
 	return s
 }
 
-// NormalizeRepo trims repo whitespace. Canonical implementation lives in
-// internal/model; this alias preserves the store surface for existing callers.
-func NormalizeRepo(repo string) string {
-	return model.NormalizeRepo(repo)
-}
-
-// NormalizeChunkMode validates and normalizes a chunk mode. Canonical
-// implementation lives in internal/model.
-func NormalizeChunkMode(raw string) (string, error) {
-	return model.NormalizeChunkMode(raw)
-}
-
-// NormalizeChunkEffort validates and normalizes a chunk effort. Canonical
-// implementation lives in internal/model.
-func NormalizeChunkEffort(effort string) (string, error) {
-	return model.NormalizeChunkEffort(effort)
-}
-
 // CapChunkEffort clamps an effort value to a valid effort.
 func CapChunkEffort(effort string) string {
-	eff, err := NormalizeChunkEffort(effort)
+	eff, err := buildplan.NormalizeChunkEffort(effort)
 	if err != nil {
 		return effortMedium
 	}
 	return eff
 }
 
-// IsValidVanadisChunkID reports whether id is a valid chunk identifier.
-// Canonical implementation lives in internal/model.
-func IsValidVanadisChunkID(id string) bool {
-	return model.IsValidVanadisChunkID(id)
-}
-
 // RepoMatchCandidates returns the repo spellings a chunk lookup should match.
 func RepoMatchCandidates(repo string) []string {
-	repo = NormalizeRepo(repo)
+	repo = buildplan.NormalizeRepo(repo)
 	if repo == "" {
 		return nil
 	}
@@ -263,12 +240,6 @@ func RepoMatchCandidates(repo string) []string {
 		return []string{repo, bare}
 	}
 	return []string{repo}
-}
-
-// ValidateChunkModeAndRepo validates mode/repo coherence for a chunk input.
-// Canonical implementation lives in internal/model.
-func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
-	return model.ValidateChunkModeAndRepo(idx, modeStr, repo, targetFiles, targetSymbols)
 }
 
 // ScanBuild scans a single build row.

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -113,74 +112,6 @@ func TestExtractChunkIDFromBranch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, ExtractChunkIDFromBranch(tc.repo, tc.branch))
-		})
-	}
-}
-
-func TestGenerateBuildID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, wantPrefix string
-	}{
-		{name: "build prefix", wantPrefix: "build-"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			id := GenerateBuildID()
-			assert.True(t, strings.HasPrefix(id, tc.wantPrefix), "id %q missing prefix %q", id, tc.wantPrefix)
-			parts := strings.Split(id, "-")
-			assert.Len(t, parts, 3, "id %q must match build-<unix>-<8hex>", id)
-			assert.Len(t, parts[2], 8, "id %q must carry an 8-char hex suffix", id)
-		})
-	}
-}
-
-// TestNormalizeChunkModeAndEffort covers both validators in one table; they
-// share the exact same data contract of raw string to normalized string.
-func TestNormalizeChunkModeAndEffort(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, rawMode, wantMode, rawEffort, wantEffort string
-		wantModeErr, wantEffortErr                     bool
-	}{
-		{name: "defaults", rawMode: "", wantMode: "pr", rawEffort: "", wantEffort: "medium"},
-		{name: "mixed case values", rawMode: "Action", wantMode: "action", rawEffort: "LOW", wantEffort: "low"},
-		{name: "invalid values", rawMode: "bogus", wantModeErr: true, rawEffort: "bogus", wantEffortErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotMode, modeErr := NormalizeChunkMode(tc.rawMode)
-			assert.Equal(t, tc.wantModeErr, modeErr != nil)
-			assert.Equal(t, tc.wantMode, gotMode)
-			gotEffort, effortErr := NormalizeChunkEffort(tc.rawEffort)
-			assert.Equal(t, tc.wantEffortErr, effortErr != nil)
-			assert.Equal(t, tc.wantEffort, gotEffort)
-		})
-	}
-}
-
-func TestValidateChunkModeAndRepo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name           string
-		mode, repo     string
-		files, symbols []string
-		wantErr        bool
-	}{
-		{name: "default mode with repo", mode: "", repo: "aerial", wantErr: false},
-		{name: "pr missing repo", mode: "pr", repo: "   ", wantErr: true},
-		{name: "invalid mode", mode: "bogus", repo: "aerial", wantErr: true},
-		{name: "action with repo", mode: "action", repo: "aerial", wantErr: true},
-		// Retained although the store table covers the same path: per-package
-		// statement coverage requires executing this branch in-package.
-		{name: "action with files", mode: "action", files: []string{"f.go"}, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantErr, ValidateChunkModeAndRepo(0, tc.mode, tc.repo, tc.files, tc.symbols) != nil)
 		})
 	}
 }

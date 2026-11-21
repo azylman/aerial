@@ -8,6 +8,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -221,7 +222,7 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 	// A new standalone build runs on the caller agent's own Build service;
 	// an empty caller means the default agent.
 	newBuild := func() store.BuildRoute {
-		return store.BuildRoute{BuildID: build.GenerateBuildID(), RunnerAgent: store.NormalizeRunnerAgent(req.Agent)}
+		return store.BuildRoute{BuildID: buildplan.GenerateBuildID(), RunnerAgent: store.NormalizeRunnerAgent(req.Agent)}
 	}
 	route, err := build.RunJournaled(ctx, build.LabelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {

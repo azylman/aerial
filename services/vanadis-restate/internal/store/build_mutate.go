@@ -21,7 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -93,14 +93,14 @@ func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 		if strings.TrimSpace(*req.Mode) == "" {
 			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", ErrInvalidBuildInput)
 		}
-		if _, err := NormalizeChunkMode(*req.Mode); err != nil {
+		if _, err := buildplan.NormalizeChunkMode(*req.Mode); err != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 		}
 	}
 	var normEffort string
 	if strings.TrimSpace(req.Effort) != "" {
 		var effErr error
-		normEffort, effErr = NormalizeChunkEffort(req.Effort)
+		normEffort, effErr = buildplan.NormalizeChunkEffort(req.Effort)
 		if effErr != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
 		}
@@ -160,9 +160,9 @@ func applyChunkUpdates(chunk *model.VanadisChunk, req UpdateChunkRequest, normEf
 	}
 	effectiveRepo := chunk.Repo
 	if strings.TrimSpace(req.Repo) != "" {
-		effectiveRepo = NormalizeRepo(req.Repo)
+		effectiveRepo = buildplan.NormalizeRepo(req.Repo)
 	}
-	normMode, modeErr := NormalizeChunkMode(effectiveMode)
+	normMode, modeErr := buildplan.NormalizeChunkMode(effectiveMode)
 	if modeErr != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidBuildInput, modeErr)
 	}
@@ -246,7 +246,7 @@ func (s *Store) UpdateChunk(ctx context.Context, buildID, chunkRef string, req U
 		return nil, applyErr
 	}
 
-	normalizedDeps, err := dag.ValidateUpdateChunkDAG(existingChunks, targetIdx, updatedCandidate)
+	normalizedDeps, err := buildplan.ValidateUpdateChunkDAG(existingChunks, targetIdx, updatedCandidate)
 	if err != nil {
 		return nil, err
 	}
@@ -272,13 +272,13 @@ func validateAppendChunksInputs(buildID string, inputs []CreateChunkInput) error
 		if strings.TrimSpace(inp.Title) == "" || strings.TrimSpace(inp.Instructions) == "" {
 			return fmt.Errorf("%w: chunk[%d] title and instructions cannot be empty", ErrInvalidBuildInput, i)
 		}
-		if id := strings.TrimSpace(inp.ID); id != "" && !IsValidVanadisChunkID(id) {
+		if id := strings.TrimSpace(inp.ID); id != "" && !buildplan.IsValidVanadisChunkID(id) {
 			return fmt.Errorf("%w: chunk[%d] invalid id %q", ErrInvalidBuildInput, i, id)
 		}
-		if err := ValidateChunkModeAndRepo(i, inp.Mode, inp.Repo, inp.TargetFiles, inp.TargetSymbols); err != nil {
+		if err := buildplan.ValidateChunkModeAndRepo(i, inp.Mode, inp.Repo, inp.TargetFiles, inp.TargetSymbols); err != nil {
 			return fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 		}
-		if _, err := NormalizeChunkEffort(inp.Effort); err != nil {
+		if _, err := buildplan.NormalizeChunkEffort(inp.Effort); err != nil {
 			return fmt.Errorf("%w: chunk[%d] %w", ErrInvalidBuildInput, i, err)
 		}
 	}
@@ -296,15 +296,15 @@ func buildAppendedChunks(buildID string, existingIDs map[string]bool, startIndex
 			return nil, fmt.Errorf("%w: duplicate chunk id %q in build %s", ErrBuildConflict, cid, buildID)
 		}
 		existingIDs[cid] = true
-		cMode, err := NormalizeChunkMode(inp.Mode)
+		cMode, err := buildplan.NormalizeChunkMode(inp.Mode)
 		if err != nil {
 			return nil, err
 		}
-		cEffort, err := NormalizeChunkEffort(inp.Effort)
+		cEffort, err := buildplan.NormalizeChunkEffort(inp.Effort)
 		if err != nil {
 			return nil, err
 		}
-		cRepo := NormalizeRepo(inp.Repo)
+		cRepo := buildplan.NormalizeRepo(inp.Repo)
 		if cMode == chunkModeAction {
 			cRepo = ""
 		}
@@ -380,7 +380,7 @@ func (s *Store) AppendChunks(ctx context.Context, buildID string, inputs []Creat
 		return nil, err
 	}
 
-	validatedNew, err := dag.ValidateAppendChunksDAG(existingChunks, newChunks)
+	validatedNew, err := buildplan.ValidateAppendChunksDAG(existingChunks, newChunks)
 	if err != nil {
 		return nil, err
 	}
@@ -437,9 +437,9 @@ func (s *Store) RemoveChunk(ctx context.Context, buildID, chunkRef string) (*mod
 	remaining = append(remaining, existingChunks[:targetIdx]...)
 	remaining = append(remaining, existingChunks[targetIdx+1:]...)
 
-	dag.RelinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
+	buildplan.RelinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
 
-	validatedRemaining, err := dag.NormalizeAndValidateBuildDAG(remaining)
+	validatedRemaining, err := buildplan.NormalizeAndValidateBuildDAG(remaining)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: removing chunk causes invalid DAG: %w", ErrBuildConflict, err)
 	}

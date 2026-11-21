@@ -6,7 +6,6 @@ import (
 	"errors"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,45 +15,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
-
-func TestValidateChunkModeAndRepo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		mode          string
-		repo          string
-		targetFiles   []string
-		targetSymbols []string
-		wantErr       bool
-		wantSubstr    string
-	}{
-		{name: "invalid mode", mode: "invalid", repo: "aerial", wantErr: true, wantSubstr: "invalid chunk mode"},
-		{name: "pr mode empty repo", mode: "pr", repo: "", wantErr: true, wantSubstr: "repo is required"},
-		{name: "pr mode valid", mode: "pr", repo: "aerial", wantErr: false},
-		{name: "action mode with repo", mode: "action", repo: "aerial", wantErr: true, wantSubstr: "action chunk must have empty repo"},
-		{name: "action mode with target files", mode: "action", repo: "", targetFiles: []string{"a.go"}, wantErr: true, wantSubstr: "action chunk must not specify target_files"},
-		{name: "action mode with target symbols", mode: "action", repo: "", targetSymbols: []string{"Sym"}, wantErr: true, wantSubstr: "action chunk must not specify target_symbols"},
-		{name: "action mode valid", mode: "action", repo: "", wantErr: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := ValidateChunkModeAndRepo(0, tc.mode, tc.repo, tc.targetFiles, tc.targetSymbols)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
 
 func TestRepoMatchCandidates(t *testing.T) {
 	t.Parallel()
@@ -81,15 +41,6 @@ func TestRepoMatchCandidates(t *testing.T) {
 func TestPostgresVanadisStore_ParsingHelpers(t *testing.T) {
 	t.Parallel()
 
-	if eff, effErr := NormalizeChunkEffort("low"); effErr != nil || eff != "low" {
-		t.Errorf("NormalizeChunkEffort(low) = (%q, %v)", eff, effErr)
-	}
-	if eff, effErr := NormalizeChunkEffort("high"); effErr != nil || eff != "medium" {
-		t.Errorf("NormalizeChunkEffort(high) = (%q, %v)", eff, effErr)
-	}
-	if _, effErr := NormalizeChunkEffort("invalid"); effErr == nil {
-		t.Error("expected error for invalid effort")
-	}
 	if eff := CapChunkEffort("invalid"); eff != "medium" {
 		t.Errorf("CapChunkEffort(invalid) = %q, want medium", eff)
 	}
@@ -128,89 +79,6 @@ func TestNonNilSlice(t *testing.T) {
 	}
 	if got := NonNilSlice([]string{"a"}); !slices.Equal(got, []string{"a"}) {
 		t.Errorf("NonNilSlice([a]) = %v, want [a]", got)
-	}
-}
-
-func TestNormalizeRepo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		repo string
-		want string
-	}{
-		{name: "empty", repo: "", want: ""},
-		{name: "trims", repo: "  aerial  ", want: "aerial"},
-		{name: "keeps owner", repo: "azylman/aerial", want: "azylman/aerial"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := NormalizeRepo(tc.repo); got != tc.want {
-				t.Errorf("NormalizeRepo(%q) = %q, want %q", tc.repo, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeChunkMode(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		raw     string
-		want    string
-		wantErr bool
-	}{
-		{name: "empty defaults to pr", raw: "", want: "pr"},
-		{name: "pr", raw: "pr", want: "pr"},
-		{name: "pr case insensitive", raw: "PR", want: "pr"},
-		{name: "pr trims", raw: "  pr  ", want: "pr"},
-		{name: "action", raw: "action", want: "action"},
-		{name: "action case insensitive", raw: "ACTION", want: "action"},
-		{name: "invalid", raw: "nope", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := NormalizeChunkMode(tc.raw)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("NormalizeChunkMode(%q) expected error, got nil", tc.raw)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("NormalizeChunkMode(%q) unexpected error: %v", tc.raw, err)
-			}
-			if got != tc.want {
-				t.Errorf("NormalizeChunkMode(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIsValidVanadisChunkID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		id    string
-		valid bool
-	}{
-		{name: "simple", id: "abc", valid: true},
-		{name: "complex", id: "Abc-123_XZ", valid: true},
-		{name: "empty", id: "", valid: false},
-		{name: "blank", id: "   ", valid: false},
-		{name: "too long", id: strings.Repeat("a", 121), valid: false},
-		{name: "max length", id: strings.Repeat("a", 120), valid: true},
-		{name: "slash", id: "a/b", valid: false},
-		{name: "space", id: "a b", valid: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsValidVanadisChunkID(tc.id); got != tc.valid {
-				t.Errorf("IsValidVanadisChunkID(%q) = %v, want %v", tc.id, got, tc.valid)
-			}
-		})
 	}
 }
 
