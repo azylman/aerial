@@ -93,10 +93,10 @@ const (
 	testDMDigest = "80f00e04fa3df572"
 )
 
-// effectPR seeds an open PR on head h1 owned by miorine with a thread target.
+// effectPR seeds an open PR on head h1 owned by agent-alpha with a thread target.
 func effectPR() *PRState {
 	st := svcRow("h1", "", RegistryStatusOpen, TerminalNone)
-	st.Agent = "miorine"
+	st.Agent = "agent-alpha"
 	st.TargetID = testTarget
 	return st
 }
@@ -130,12 +130,12 @@ func TestPlanEriEffects(t *testing.T) {
 		{
 			name: "DM keyed on event head and check for the stored owner", state: effectPR(),
 			ev:   PREvent{HeadSHA: " h2 ", CheckName: "Lint", EriEffects: []EriEffect{{Kind: " eri_direct_message ", ChannelID: " " + testChannel + " ", Content: " hello "}}},
-			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h2", 0, "Lint"), Agent: "miorine"}},
+			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h2", 0, "Lint"), Agent: "agent-alpha"}},
 		},
 		{
 			name: "empty event head falls back to stored head", state: effectPR(),
 			ev:   PREvent{EriEffects: []EriEffect{dmEffect()}},
-			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h1", 0, ""), Agent: "miorine"}},
+			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h1", 0, ""), Agent: "agent-alpha"}},
 		},
 		{
 			name: "prompt without channel lands in the stored target", state: effectPR(),
@@ -143,7 +143,7 @@ func TestPlanEriEffects(t *testing.T) {
 			want: []PlannedEriEffect{{
 				Effect: EriEffect{Kind: EffectEriPrompt, ChannelID: testTarget, Content: "wake"},
 				Key:    EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Kind: EffectEriPrompt, JobName: "eri"},
-				Agent:  "miorine",
+				Agent:  "agent-alpha",
 			}},
 		},
 		{name: "prompt with no channel and no target is dropped", state: untargeted, ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: EffectEriPrompt, Content: "wake"}}}},
@@ -153,7 +153,7 @@ func TestPlanEriEffects(t *testing.T) {
 			want: []PlannedEriEffect{{
 				Effect: EriEffect{Kind: EffectEriBackground, Content: "fix", Effort: "medium", SkipIfActive: true},
 				Key:    EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Kind: EffectEriBackground},
-				Agent:  "miorine",
+				Agent:  "agent-alpha",
 			}},
 		},
 		{name: "unknown kind is dropped", state: effectPR(), ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: "discord_alert", ChannelID: testChannel, Content: "x"}}}},
@@ -161,7 +161,7 @@ func TestPlanEriEffects(t *testing.T) {
 		{
 			name: "same-key duplicates collapse to the first", state: effectPR(),
 			ev:   PREvent{HeadSHA: "h1", EriEffects: []EriEffect{dmEffect(), {Kind: EffectEriDirectMessage, ChannelID: testChannel, Content: "again"}}},
-			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h1", 0, ""), Agent: "miorine"}},
+			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h1", 0, ""), Agent: "agent-alpha"}},
 		},
 		{name: "already fired key is skipped", state: dispatched, ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{dmEffect()}}},
 		{
@@ -294,16 +294,16 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 	}{
 		{
 			name: "restate owner delivers to the stored owner", state: effectPR(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{},
-			wantCalls: []eriCall{{agent: "miorine", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantDispatched: true,
+			wantCalls: []eriCall{{agent: "agent-alpha", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantDispatched: true,
 		},
 		{
 			name: "failed delivery schedules a retry", state: effectPR(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{err: errFakeEri},
-			wantCalls: []eriCall{{agent: "miorine", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantSends: retrySend,
+			wantCalls: []eriCall{{agent: "agent-alpha", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantSends: retrySend,
 		},
 		{name: "unconfigured effector schedules a retry", state: effectPR(), owner: EffectsOwnerRestate, wantRun: true, wantSends: retrySend},
 		{
 			name: "legacy owner records the intended effect", state: effectPR(), owner: EffectsOwnerLegacy, eri: &fakeEriEffector{}, wantRun: true, wantDispatched: true,
-			wantIntended: []IntendedEffect{{Kind: EffectEriDirectMessage, Agent: "miorine", EffectKey: testDMKey, MatchKey: testDMMatch, Digest: testDMDigest}},
+			wantIntended: []IntendedEffect{{Kind: EffectEriDirectMessage, Agent: "agent-alpha", EffectKey: testDMKey, MatchKey: testDMMatch, Digest: testDMDigest}},
 		},
 		{name: "fired key never re-fires", state: dispatched(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{}, wantDispatched: true},
 	}
@@ -446,23 +446,23 @@ func TestSessionEriEffectorDeliverEri(t *testing.T) {
 	}{
 		{
 			name: "prompt enqueues the owner thread turn", eff: EriEffect{Kind: EffectEriPrompt, ChannelID: testTarget, Content: "wake"},
-			wantCalls: []sessionCall{{method: "prompt", agent: "miorine", channel: testTarget, content: "wake", key: idem}},
+			wantCalls: []sessionCall{{method: "prompt", agent: "agent-alpha", channel: testTarget, content: "wake", key: idem}},
 		},
 		{
 			name: "background dispatches on the owner session", eff: EriEffect{Kind: EffectEriBackground, ChannelID: testTarget, Content: "fix", Effort: "medium", SkipIfActive: true},
-			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "miorine", Source: "prstate", TargetID: testTarget, Prompt: "fix", Effort: "medium", SkipIfActive: true}}},
+			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", TargetID: testTarget, Prompt: "fix", Effort: "medium", SkipIfActive: true}}},
 		},
 		{
 			name: "busy skip-if-active dispatch counts as delivered", clientErr: ericlient.ErrDispatchActive, eff: EriEffect{Kind: EffectEriBackground, Content: "fix", SkipIfActive: true},
-			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "miorine", Source: "prstate", Prompt: "fix", SkipIfActive: true}}},
+			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix", SkipIfActive: true}}},
 		},
 		{
 			name: "dispatch failure surfaces", clientErr: errFakeEri, eff: EriEffect{Kind: EffectEriBackground, Content: "fix"}, wantErr: true,
-			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "miorine", Source: "prstate", Prompt: "fix"}}},
+			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix"}}},
 		},
 		{
 			name: "direct message uses the owner sender", eff: dmEffect(),
-			wantCalls: []sessionCall{{method: "message", agent: "miorine", channel: testChannel, content: "hello"}},
+			wantCalls: []sessionCall{{method: "message", agent: "agent-alpha", channel: testChannel, content: "hello"}},
 		},
 		{name: "unknown kind fails", eff: EriEffect{Kind: "discord_alert", Content: "x"}, wantErr: true},
 		{name: "missing client fails", nilClient: true, eff: dmEffect(), wantErr: true},
@@ -475,7 +475,7 @@ func TestSessionEriEffectorDeliverEri(t *testing.T) {
 			if tc.nilClient {
 				effector = NewSessionEriEffector(nil)
 			}
-			err := effector.DeliverEri(context.Background(), "miorine", key, tc.eff)
+			err := effector.DeliverEri(context.Background(), "agent-alpha", key, tc.eff)
 			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			require.Equal(t, tc.wantCalls, client.calls)
 		})
