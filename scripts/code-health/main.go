@@ -37,22 +37,6 @@ const (
 
 var splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
 
-// bannedTestFilenameSuffixes rejects catch-all test filenames that accumulate
-// unrelated coverage-slop cases outside their domain scope. Fold such files
-// into canonical domain-scoped test tables. Extend this list when a new
-// catch-all pattern appears; renaming a file to dodge a listed suffix
-// defeats the ratchet.
-var bannedTestFilenameSuffixes = []string{"_extra_test.go", "_more_test.go", "_coverage_gaps_test.go", "_additional_test.go"}
-
-func isCatchAllTestFilename(rel string) bool {
-	for _, suffix := range bannedTestFilenameSuffixes {
-		if strings.HasSuffix(rel, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
 // FileMetrics records ratcheted file-level watermarks.
 type FileMetrics struct {
 	Lines int `json:"lines,omitempty"`
@@ -103,9 +87,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rootDir := fsFlags.String("root", ".", "Repository root directory")
 	baselinePath := fsFlags.String("baseline", ".code-health-baseline.json", "Baseline JSON file path")
 	updateMode := fsFlags.Bool("update", false, "Write updated baseline JSON for current outliers")
+	fixMode := fsFlags.Bool("fix", false, "Auto-sort contiguous server route and handler runs in place")
+	configPath := fsFlags.String("config", "", "Optional JSON file with repo-specific thresholds, banned test patterns and skipped dirs")
 	if err := fsFlags.Parse(args); err != nil {
 		return 2
 	}
+
+	r, err := loadRules(*configPath)
+	if err != nil {
+		writef(stderr, "code-health: load config: %v\n", err)
+		return 1
+	}
+	r.checkOrdering = r.checkOrdering || *fixMode
 
 	absRoot := filepath.Clean(*rootDir)
 	explicit := fsFlags.Args()
@@ -114,22 +107,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		writef(stderr, "code-health: collect targets: %v\n", err)
 		return 1
 	}
+	targets = r.withoutSkipped(targets)
 
 	testTargets, err := collectTestTargets(absRoot, explicit)
 	if err != nil {
 		writef(stderr, "code-health: collect test targets: %v\n", err)
 		return 1
 	}
+	testTargets = r.withoutSkipped(testTargets)
 
 	if *updateMode {
-		return runUpdate(absRoot, *baselinePath, targets, testTargets, stdout, stderr)
+		return runUpdate(absRoot, *baselinePath, targets, r, stdout, stderr)
 	}
 
-	return runCheck(absRoot, *baselinePath, targets, testTargets, stdout, stderr)
+	return runCheck(absRoot, *baselinePath, targets, testTargets, r, *fixMode, stdout, stderr)
 }
 
-func runUpdate(absRoot, baselinePath string, targets, testTargets []string, stdout, stderr io.Writer) int {
-	base, err := buildBaseline(absRoot, targets, testTargets)
+func runUpdate(absRoot, baselinePath string, targets []string, r rules, stdout, stderr io.Writer) int {
+	base, err := buildBaseline(absRoot, targets, r)
 	if err != nil {
 		writef(stderr, "code-health: analyze: %v\n", err)
 		return 1
@@ -150,13 +145,13 @@ func runUpdate(absRoot, baselinePath string, targets, testTargets []string, stdo
 	return 0
 }
 
-func runCheck(absRoot, baselinePath string, targets, testTargets []string, stdout, stderr io.Writer) int {
+func runCheck(absRoot, baselinePath string, targets, testTargets []string, r rules, fix bool, stdout, stderr io.Writer) int {
 	base, err := loadBaseline(baselinePath)
 	if err != nil {
 		writef(stderr, "code-health: load baseline: %v\n", err)
 		return 1
 	}
-	violations, err := checkTargets(absRoot, targets, testTargets, base)
+	violations, err := checkTargets(absRoot, targets, testTargets, base, r, fix)
 	if err != nil {
 		writef(stderr, "code-health: check: %v\n", err)
 		return 1
@@ -279,7 +274,7 @@ func loadBaseline(path string) (Baseline, error) {
 	return b, err
 }
 
-func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
+func buildBaseline(absRoot string, targets []string, r rules) (Baseline, error) {
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
@@ -292,11 +287,11 @@ func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
 		if fa.skipped {
 			continue
 		}
-		if fa.metrics.Lines > maxFileLines {
+		if fa.metrics.Lines > r.maxFileLines {
 			b.Files[rel] = fa.metrics
 		}
 		for fnName, m := range fa.funcs {
-			if entry, ok := outlierFuncMetrics(m); ok {
+			if entry, ok := outlierFuncMetrics(m, r.maxDepth); ok {
 				b.Functions[rel+"::"+fnName] = entry
 			}
 		}
@@ -304,20 +299,28 @@ func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
 	return b, nil
 }
 
-func outlierFuncMetrics(m FuncMetrics) (FuncMetrics, bool) {
+func outlierFuncMetrics(m FuncMetrics, depthCeiling int) (FuncMetrics, bool) {
 	var entry FuncMetrics
-	if m.Depth > maxDepth {
+	if m.Depth > depthCeiling {
 		entry.Depth = m.Depth
 	}
 	return entry, entry.Depth > 0
 }
 
-func checkTargets(absRoot string, targets, testTargets []string, base Baseline) ([]string, error) {
+func checkTargets(absRoot string, targets, testTargets []string, base Baseline, r rules, fix bool) ([]string, error) {
 	var violations []string
 	var allFuncSigs []funcCloneSig
 	var allStructSigs []structCloneSig
 	for _, rel := range targets {
-		fa, err := analyzeFile(filepath.Join(absRoot, rel), rel)
+		fullPath := filepath.Join(absRoot, rel)
+		if r.checkOrdering {
+			orderViolations, err := checkOrFixFileOrdering(fullPath, rel, fix)
+			if err != nil {
+				return nil, err
+			}
+			violations = append(violations, orderViolations...)
+		}
+		fa, err := analyzeFile(fullPath, rel)
 		if err != nil {
 			return nil, err
 		}
@@ -327,11 +330,11 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 		for _, nv := range fa.nolintViolations {
 			violations = append(violations, fmt.Sprintf("%s: %s", rel, nv))
 		}
-		fileLimit := max(maxFileLines, base.Files[rel].Lines)
+		fileLimit := max(r.maxFileLines, base.Files[rel].Lines)
 		if fa.metrics.Lines > fileLimit {
-			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fa.metrics.Lines, fileLimit, maxFileLines))
+			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fa.metrics.Lines, fileLimit, r.maxFileLines))
 		}
-		violations = append(violations, checkFuncMetrics(rel, fa.funcs, base.Functions)...)
+		violations = append(violations, checkFuncMetrics(rel, fa.funcs, base.Functions, r.maxDepth)...)
 		allFuncSigs = append(allFuncSigs, fa.funcSigs...)
 		allStructSigs = append(allStructSigs, fa.structSigs...)
 	}
@@ -340,7 +343,7 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	violations = append(violations, checkStructCloneViolations(allStructSigs)...)
 
 	for _, rel := range testTargets {
-		_, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
+		_, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel, r)
 		if err != nil {
 			return nil, err
 		}
@@ -464,7 +467,7 @@ func jaccardSimilarity(a, b map[string]struct{}) float64 {
 	return float64(intersection) / float64(union)
 }
 
-func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string]FuncMetrics) []string {
+func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string]FuncMetrics, depthCeiling int) []string {
 	names := make([]string, 0, len(fns))
 	for k := range fns {
 		names = append(names, k)
@@ -474,8 +477,8 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 	for _, fnName := range names {
 		m := fns[fnName]
 		bm := baseFns[rel+"::"+fnName]
-		if depthLimit := max(maxDepth, bm.Depth); m.Depth > depthLimit {
-			violations = append(violations, fmt.Sprintf("%s (%s): nesting depth %d exceeds limit %d (ceiling %d)", rel, fnName, m.Depth, depthLimit, maxDepth))
+		if depthLimit := max(depthCeiling, bm.Depth); m.Depth > depthLimit {
+			violations = append(violations, fmt.Sprintf("%s (%s): nesting depth %d exceeds limit %d (ceiling %d)", rel, fnName, m.Depth, depthLimit, depthCeiling))
 		}
 	}
 	return violations
@@ -781,7 +784,7 @@ func checkNolintComment(raw string) string {
 	return ""
 }
 
-func analyzeTestFile(fullPath, rel string) (FileMetrics, []string, error) {
+func analyzeTestFile(fullPath, rel string, r rules) (FileMetrics, []string, error) {
 	src, err := os.ReadFile(fullPath)
 	if err != nil {
 		return FileMetrics{}, nil, err
@@ -797,7 +800,7 @@ func analyzeTestFile(fullPath, rel string) (FileMetrics, []string, error) {
 	}
 
 	var violations []string
-	if isCatchAllTestFilename(rel) {
+	if r.isCatchAllTestFilename(rel) {
 		violations = append(violations, rel+": test filename uses banned catch-all suffix; fold cases into the canonical domain-scoped Test* table or name after specific behavior")
 	}
 	for _, nv := range findBannedNolints(f, fset) {
@@ -816,14 +819,14 @@ func analyzeTestFile(fullPath, rel string) (FileMetrics, []string, error) {
 	}
 
 	ast.Inspect(f, func(n ast.Node) bool {
-		return inspectTestNode(n, fset, rel, &violations)
+		return inspectTestNode(n, fset, rel, r, &violations)
 	})
 
 	return FileMetrics{Lines: countLines(src)}, violations, nil
 }
 
-func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, violations *[]string) bool {
-	if sel, ok := n.(*ast.SelectorExpr); ok {
+func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, r rules, violations *[]string) bool {
+	if sel, ok := n.(*ast.SelectorExpr); ok && r.testRuleEnabled(ruleHTTPDefaultClient) {
 		if isSelectorNamed(sel.X, "http", "DefaultClient") && sel.Sel.Name == "CloseIdleConnections" {
 			return false
 		}
@@ -832,31 +835,31 @@ func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, violations *[]
 			*violations = append(*violations, fmt.Sprintf("%s:%d: unguarded http.DefaultClient in tests is prohibited; use httptest.Server.Client() or an http.Client with a mock Transport", rel, line))
 		}
 	}
-	if lit, ok := n.(*ast.CompositeLit); ok {
+	if lit, ok := n.(*ast.CompositeLit); ok && r.testRuleEnabled(ruleHTTPClientLiteral) {
 		if reason := checkHTTPClientLit(lit); reason != "" {
 			line := fset.Position(lit.Pos()).Line
 			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
 		}
 	}
 	if call, ok := n.(*ast.CallExpr); ok {
-		if reason := checkBannedTestCall(call); reason != "" {
+		if rule, reason := checkBannedTestCall(call); reason != "" && r.testRuleEnabled(rule) {
 			line := fset.Position(call.Pos()).Line
 			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
 		}
 	}
 	if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
-		checkTestStructFields(st, fset, rel, violations)
+		checkTestStructFields(st, fset, rel, r, violations)
 	}
 	return true
 }
 
-func checkTestStructFields(st *ast.StructType, fset *token.FileSet, rel string, violations *[]string) {
+func checkTestStructFields(st *ast.StructType, fset *token.FileSet, rel string, r rules, violations *[]string) {
 	for _, field := range st.Fields.List {
 		if _, isFunc := field.Type.(*ast.FuncType); !isFunc {
 			continue
 		}
 		for _, ident := range field.Names {
-			if isBannedClosureFieldName(ident.Name) {
+			if r.isBannedClosureFieldName(ident.Name) {
 				line := fset.Position(ident.Pos()).Line
 				*violations = append(*violations, fmt.Sprintf("%s:%d: test struct field %q uses a banned closure func type; use declarative expectation fields instead", rel, line, ident.Name))
 			}
@@ -903,17 +906,19 @@ func isDisallowedTransportExpr(expr ast.Expr) bool {
 	return false
 }
 
-func checkBannedTestCall(call *ast.CallExpr) string {
+// checkBannedTestCall returns the violated rule ID and its message, or two
+// empty strings.
+func checkBannedTestCall(call *ast.CallExpr) (string, string) {
 	if isSelectorNamed(call.Fun, "time", "Sleep") {
-		return "time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides"
+		return ruleTimeSleep, "time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides"
 	}
 	if isSelectorNamed(call.Fun, "syscall", "Kill") {
-		return "raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions"
+		return ruleSyscallKill, "raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions"
 	}
 	if reason := checkReservedPortCall(call); reason != "" {
-		return reason
+		return ruleReservedPort, reason
 	}
-	return ""
+	return "", ""
 }
 
 func checkReservedPortCall(call *ast.CallExpr) string {
@@ -1000,15 +1005,6 @@ func isLoopbackHost(host string) bool {
 func isReservedDaemonPort(port string) bool {
 	switch port {
 	case "8080", "8088", "4020", "8081", "8082", "8083", "8090", "8070", "9070":
-		return true
-	default:
-		return false
-	}
-}
-
-func isBannedClosureFieldName(name string) bool {
-	switch name {
-	case "run", "check", "extraCheck", "setup", "validate", "validator", "verify", "lookup":
 		return true
 	default:
 		return false

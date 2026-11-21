@@ -169,11 +169,13 @@ type testRunCase struct {
 	name              string
 	files             map[string]string
 	baselineJSON      string
+	configJSON        string
 	readOnlyBase      bool
 	customArgs        []string
 	targetArgs        []string
 	relTargets        []string
 	wantBaselineFiles map[string]int
+	wantFileContains  map[string]string
 	wantCode          int
 	wantOut           string
 	wantErr           string
@@ -194,10 +196,12 @@ func testRunCases() []testRunCase {
 	base := testRunBaseCases()
 	clones := testRunCloneCases()
 	targets := testRunTargetCases()
-	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets))
+	configs := testRunConfigCases()
+	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets)+len(configs))
 	all = append(all, base...)
 	all = append(all, clones...)
 	all = append(all, targets...)
+	all = append(all, configs...)
 	return all
 }
 
@@ -525,6 +529,9 @@ func runTestRunCase(t *testing.T, tc testRunCase) {
 	setupTestFiles(t, dir, tc.files)
 	basePath := setupBaseline(t, dir, tc.readOnlyBase, tc.baselineJSON)
 	args := buildTestArgs(dir, basePath, tc)
+	if tc.configJSON != "" {
+		args = append([]string{"-config", setupConfig(t, dir, tc.configJSON)}, args...)
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := run(args, &stdout, &stderr)
@@ -538,6 +545,7 @@ func runTestRunCase(t *testing.T, tc testRunCase) {
 		t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
 	}
 	verifyBaselineFiles(t, basePath, tc.wantBaselineFiles)
+	verifyFileContains(t, dir, tc.wantFileContains)
 }
 
 func setupTestFiles(t *testing.T, dir string, files map[string]string) {
@@ -661,7 +669,7 @@ func runAnalyzeTestFileCase(t *testing.T, tc analyzeTestCase) {
 		rel = "does_not_exist_test.go"
 	}
 
-	fm, violations, err := analyzeTestFile(filePath, rel)
+	fm, violations, err := analyzeTestFile(filePath, rel, defaultRules())
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("analyzeTestFile() error = %v, wantErr = %v", err, tc.wantErr)
 	}
