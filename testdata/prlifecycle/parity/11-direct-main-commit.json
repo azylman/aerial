@@ -1,0 +1,72 @@
+{
+  "name": "11-direct-main-commit",
+  "description": "A push to main that resolves to no PR still runs the repo-level auto-update cascade and git-push dispatch once each.",
+  "github_routes": {
+    "GET /repos/azylman/aerial/pulls": "[]",
+    "GET /repos/azylman/aerial/commits/c111/pulls": "[]"
+  },
+  "synapse": [
+    {
+      "kind": "github",
+      "event": "push",
+      "payload": {
+        "ref": "refs/heads/main",
+        "after": "c111",
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "head_commit": {
+          "id": "c111",
+          "message": "chore: bump deps"
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "RepoObject",
+      "handler": "HandleMainPush",
+      "event": {
+        "main_sha": "c111",
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleAutoUpdate",
+      "event": {
+        "main_sha": "c111",
+        "auto_update": {
+          "authors": [
+            "azylman"
+          ],
+          "default_owner": true
+        },
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleGitPush",
+      "event": {
+        "main_sha": "c111",
+        "ref": "refs/heads/main",
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "github_auto_update",
+      "key": "azylman/aerial#0@c111:github_auto_update"
+    },
+    {
+      "kind": "flux_git_push",
+      "key": "azylman/aerial#0@c111:flux_git_push"
+    }
+  ],
+  "rows": []
+}

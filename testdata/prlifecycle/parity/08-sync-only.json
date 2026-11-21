@@ -1,0 +1,142 @@
+{
+  "name": "08-sync-only",
+  "description": "A sync_success alert with no expected jobs for a repo with no image build (aerial-config) publishes deploy_success on the git-sync job once after the merge and leaves the row merged.",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial-config",
+        "pr_number": 108,
+        "branch": "feat/sync",
+        "head_sha": "h108",
+        "target_id": "100000000000000001",
+        "title": "Sync PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 108,
+        "repository": {
+          "full_name": "azylman/aerial-config"
+        },
+        "pull_request": {
+          "number": 108,
+          "title": "Sync PR",
+          "state": "closed",
+          "merged": true,
+          "head": {
+            "ref": "feat/sync",
+            "sha": "h108"
+          },
+          "base": {
+            "ref": "main"
+          },
+          "merge_commit_sha": "m108"
+        }
+      }
+    },
+    {
+      "kind": "deploy",
+      "deploy": {
+        "event": "sync_success",
+        "repo": "azylman/aerial-config",
+        "commit_sha": "m108",
+        "pr_number": 108,
+        "target_id": "100000000000000001",
+        "status": "success"
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial-config",
+        "pr_number": 108,
+        "branch": "feat/sync",
+        "head_sha": "h108",
+        "target_id": "100000000000000001",
+        "title": "Sync PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        },
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "pr_number": 108,
+        "head_sha": "h108",
+        "merge_sha": "m108",
+        "branch": "feat/sync",
+        "facts": [
+          {
+            "event": "merged",
+            "repo": "azylman/aerial-config",
+            "pr_number": 108,
+            "head_sha": "h108",
+            "merge_sha": "m108"
+          }
+        ],
+        "repo": "azylman/aerial-config",
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleDeploySuccess",
+      "event": {
+        "pr_number": 108,
+        "merge_sha": "m108",
+        "job_name": "git-sync",
+        "facts": [
+          {
+            "event": "deploy_success",
+            "repo": "azylman/aerial-config",
+            "pr_number": 108,
+            "merge_sha": "m108",
+            "job_name": "git-sync"
+          }
+        ],
+        "repo": "azylman/aerial-config",
+        "effects_owner": "restate"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_merged",
+      "key": "azylman/aerial-config#108@h108:pr_fact_merged"
+    },
+    {
+      "kind": "pr_fact_deploy_success",
+      "key": "azylman/aerial-config#108@m108:pr_fact_deploy_success:job=git-sync"
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial-config",
+      "pr_number": 108,
+      "branch": "feat/sync",
+      "head_sha": "h108",
+      "merge_sha": "m108",
+      "target_id": "100000000000000001",
+      "status": "merged",
+      "title": "Sync PR",
+      "metadata": {
+        "agent": "aerial",
+        "bot_id": "aerial"
+      }
+    }
+  ]
+}

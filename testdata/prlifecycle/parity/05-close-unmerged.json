@@ -1,0 +1,104 @@
+{
+  "name": "05-close-unmerged",
+  "description": "pull_request.closed without merge closes the row and publishes closed_unmerged once.",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 105,
+        "branch": "feat/close",
+        "head_sha": "h105",
+        "target_id": "100000000000000001",
+        "title": "Close PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 105,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 105,
+          "title": "Close PR",
+          "state": "closed",
+          "merged": false,
+          "head": {
+            "ref": "feat/close",
+            "sha": "h105"
+          },
+          "base": {
+            "ref": "main"
+          }
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 105,
+        "branch": "feat/close",
+        "head_sha": "h105",
+        "target_id": "100000000000000001",
+        "title": "Close PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        },
+        "effects_owner": "restate"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleClosed",
+      "event": {
+        "pr_number": 105,
+        "head_sha": "h105",
+        "branch": "feat/close",
+        "facts": [
+          {
+            "event": "closed_unmerged",
+            "repo": "azylman/aerial",
+            "pr_number": 105,
+            "head_sha": "h105"
+          }
+        ],
+        "repo": "azylman/aerial",
+        "effects_owner": "restate"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_closed_unmerged",
+      "key": "azylman/aerial#105@h105:pr_fact_closed_unmerged"
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 105,
+      "branch": "feat/close",
+      "head_sha": "h105",
+      "merge_sha": "",
+      "target_id": "100000000000000001",
+      "status": "closed",
+      "title": "Close PR",
+      "metadata": {
+        "agent": "aerial",
+        "bot_id": "aerial"
+      }
+    }
+  ]
+}
