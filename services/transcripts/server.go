@@ -11,6 +11,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 const (
@@ -21,9 +22,10 @@ const (
 
 // Server exposes the transcripts read API: search, steps, stats, watermarks.
 type Server struct {
-	store *Store
-	auth  *k8sauth.Authenticator
-	mux   *http.ServeMux
+	store   *Store
+	auth    *k8sauth.Authenticator
+	mux     *http.ServeMux
+	handler http.Handler
 }
 
 // NewServer wires the read API with constructor injection.
@@ -54,15 +56,13 @@ func NewServer(store *Store, auth ...*k8sauth.Authenticator) *Server {
 	s.mux.HandleFunc("/api/transcripts/stats", s.handleStats)
 
 	s.mux.HandleFunc("/transcripts/threads/", s.handleThreadTrajectory)
+	s.handler = s.auth.Middleware(k8sauth.DefaultExemptPaths...)(s.mux)
 	return s
 }
 
 // Handler serves the read API routes.
 func (s *Server) Handler() http.Handler {
-	if s.auth != nil && s.auth.Enabled() {
-		return s.auth.Middleware("/health", "/healthz", "/debug/coverage/flush")(s.mux)
-	}
-	return s.mux
+	return s.handler
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, requestedAgent string) (effectiveAgent string, ok bool) {
@@ -82,19 +82,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, requestedAgen
 		}
 	}
 	if err != nil {
-		if validation, okErr := errors.AsType[*k8sauth.ValidationError](err); okErr {
-			writeError(w, http.StatusBadRequest, validation.Error())
-			return "", false
-		}
-		if forbidden, okErr := errors.AsType[*k8sauth.ForbiddenError](err); okErr {
-			writeError(w, http.StatusForbidden, forbidden.Error())
-			return "", false
-		}
-		if unauth, okErr := errors.AsType[*k8sauth.UnauthorizedError](err); okErr {
-			writeError(w, http.StatusUnauthorized, unauth.Error())
-			return "", false
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		k8sauth.WriteError(w, err)
 		return "", false
 	}
 	return resolved, true
@@ -138,7 +126,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	requestedStack := resolveFirstNonEmpty(q.Get("agent"), q.Get("stack"))
+	requestedStack := strutil.FirstNonEmpty(q.Get("agent"), q.Get("stack"))
 	stack, ok := s.authorize(w, r, requestedStack)
 	if !ok {
 		return
@@ -147,7 +135,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
 	}
-	queryText := resolveFirstNonEmpty(q.Get("q"), q.Get("query"))
+	queryText := strutil.FirstNonEmpty(q.Get("q"), q.Get("query"))
 	mode := strings.ToLower(strings.TrimSpace(q.Get("mode")))
 	if mode == "" {
 		mode = searchModeAuto
@@ -252,7 +240,7 @@ func (s *Server) handleStepWindow(w http.ResponseWriter, r *http.Request, stack 
 
 func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	requestedStack := resolveFirstNonEmpty(q.Get("agent"), q.Get("stack"))
+	requestedStack := strutil.FirstNonEmpty(q.Get("agent"), q.Get("stack"))
 	stack, ok := s.authorize(w, r, requestedStack)
 	if !ok {
 		return
@@ -277,7 +265,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	requestedStack := resolveFirstNonEmpty(r.URL.Query().Get("agent"), r.URL.Query().Get("stack"))
+	requestedStack := strutil.FirstNonEmpty(r.URL.Query().Get("agent"), r.URL.Query().Get("stack"))
 	stack, ok := s.authorize(w, r, requestedStack)
 	if !ok {
 		return
@@ -312,7 +300,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWatermarks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	requestedStack := resolveFirstNonEmpty(q.Get("agent"), q.Get("stack"))
+	requestedStack := strutil.FirstNonEmpty(q.Get("agent"), q.Get("stack"))
 	stack, ok := s.authorize(w, r, requestedStack)
 	if !ok {
 		return
@@ -321,7 +309,7 @@ func (s *Server) handleWatermarks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "store is nil")
 		return
 	}
-	sessionID := resolveFirstNonEmpty(q.Get("session_id"), q.Get("session"))
+	sessionID := strutil.FirstNonEmpty(q.Get("session_id"), q.Get("session"))
 	if sessionID != "" {
 		step, err := s.store.GetWatermark(r.Context(), stack, sessionID)
 		if err != nil {
@@ -350,7 +338,7 @@ func (s *Server) handleWatermarks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleThreadTrajectory(w http.ResponseWriter, r *http.Request) {
-	requestedStack := resolveFirstNonEmpty(r.URL.Query().Get("agent"), r.URL.Query().Get("stack"))
+	requestedStack := strutil.FirstNonEmpty(r.URL.Query().Get("agent"), r.URL.Query().Get("stack"))
 	stack, ok := s.authorize(w, r, requestedStack)
 	if !ok {
 		return

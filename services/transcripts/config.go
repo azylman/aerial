@@ -9,6 +9,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -38,15 +39,6 @@ func ResolveConfigPath(fallbackPath string) string {
 		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
 	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "config.yaml")
-}
-
-func resolveFirstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
@@ -94,23 +86,23 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		stack = DefaultStack
 	}
 	auth := ycfg.Auth
-	if strings.EqualFold(os.Getenv("K8S_AUTH_ENABLED"), "true") {
-		auth.Enabled = true
+	if err := k8sauth.ApplyEnvOverride(&auth, os.Getenv); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
-	databaseURL := resolveFirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(os.Getenv, "aerial"), ycfg.DatabaseURL)
+	databaseURL := strutil.FirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(os.Getenv, "aerial"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
+	natsURL := strutil.FirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
 	summarizer := ycfg.Summarizer.withDefaults()
 	if strings.TrimSpace(summarizer.EriLLMURL) == "" {
 		summarizer.EriLLMURL = strings.TrimSpace(ycfg.EriLLMURL)
 	}
 	if strings.TrimSpace(summarizer.SensesURL) == "" {
-		summarizer.SensesURL = resolveFirstNonEmpty(ycfg.Embedder.BaseURL, ycfg.Ollama.BaseURL)
+		summarizer.SensesURL = strutil.FirstNonEmpty(ycfg.Embedder.BaseURL, ycfg.Ollama.BaseURL)
 	}
 	if strings.TrimSpace(summarizer.SensesModel) == "" {
-		summarizer.SensesModel = resolveFirstNonEmpty(ycfg.Embedder.Model, ycfg.Ollama.Model)
+		summarizer.SensesModel = strutil.FirstNonEmpty(ycfg.Embedder.Model, ycfg.Ollama.Model)
 	}
 	return &Config{
 		Port:        port,
