@@ -542,7 +542,7 @@ func TestShadowRolloutProgressGuards(t *testing.T) {
 			defer srv.Close()
 			r := newTestRouter(Config{RestateURL: srv.URL}, srv.Client(), &mockPRRegistry{resolveHeadSHA: shadowTestHeadSHA()}, nil)
 			r.SetRestateShadow(newShadowRestateReporter(Config{RestateURL: srv.URL}, srv.Client()))
-			r.shadowRolloutProgress(context.Background(), "aerial", tc.prNumber, shadowTestHeadSHA(), shadowTestMergeSHA(), "api")
+			r.shadowRolloutProgress(context.Background(), restateclient.PREvent{Repo: "aerial", PRNumber: tc.prNumber, HeadSHA: shadowTestHeadSHA(), MergeSHA: shadowTestMergeSHA(), JobName: "api"})
 			if got := shot.count(); got != tc.wantCalls {
 				t.Errorf("captured shadow calls = %d, want %d", got, tc.wantCalls)
 			}

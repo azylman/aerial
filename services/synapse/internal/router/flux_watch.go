@@ -290,7 +290,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		return s.completeKustomizationRequest(ctx, pr, name)
 	}
 	if jobsUpdated {
-		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, readyJobs, nil)); err != nil {
 			slog.WarnContext(ctx, "[synapse] [flux-watch] failed to route rollout progress", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
 		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -383,7 +383,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 	if !transitioned {
 		// Journal before the legacy publish: a journal failure leaves no
 		// rollout_updated behind, so the watcher tick retries cleanly.
-		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
 			return err
 		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -417,7 +417,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber); err != nil {
 		return err
 	}
-	if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+	if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
 		return err
 	}
 	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -468,7 +468,7 @@ func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Con
 		return err
 	}
 	if decision.ShouldPublish {
-		if err := s.routeRolloutProgress(ctx, pr.Repo, pr.PRNumber, pr.HeadSHA, pr.MergeSHA, name); err != nil {
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
 			return err
 		}
 		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -568,6 +568,15 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 	for _, ref := range refs {
 		names = append(names, ref.Name)
 	}
+	requests := newKustomizationRequests(refs, time.Now().UTC())
+	// Journal before recording: a journal failure leaves nothing recorded,
+	// so the retry re-journals and records. The event carries the deploying
+	// jobs and the exact requests so PRObject records the same row.
+	if jErr := s.routePREvent(ctx, "HandleKustomizationRequested", restateclient.PREvent{
+		Repo: repo, PRNumber: prNum, Jobs: names, KustomizationRequests: requests,
+	}); jErr != nil {
+		return false, jErr
+	}
 	tID, err := s.registry.TransitionDeploying(ctx, repo, prNum, names)
 	if err != nil {
 		return false, fmt.Errorf("transition pr %s#%d deploying: %w", repo, prNum, err)
@@ -589,7 +598,6 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 			return false, err
 		}
 	}
-	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)
 	}

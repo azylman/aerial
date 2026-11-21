@@ -38,6 +38,7 @@ func TestContractWireFormat(t *testing.T) {
 		{name: "pr event wire keys", got: wireKeys(t, PREvent{}), want: `branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
 		{name: "repo event wire keys", got: wireKeys(t, RepoEvent{}), want: `generation,head_sha,main_sha,pr_number,repo`},
 		{name: "stamped pr event wire keys", got: wireKeys(t, PREvent{EffectsOwner: EffectsOwnerLegacy}), want: `branch,build_id,check_name,effects_owner,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
+		{name: "registry payload wire keys", got: wireKeys(t, PREvent{TargetID: "t", CheckState: "passed", Jobs: []string{"a"}, DeployedJobs: []string{"a"}, JobState: "running", KustomizationRequests: map[string]KustomizationRequest{"k": {}}, BeforeSHA: "b", DeployedKustomizations: []string{"k"}, Banner: "b", Acknowledged: true, BuildMetadata: &BuildMetadata{}}), want: `acknowledged,banner,before_sha,branch,build_id,build_metadata,check_name,check_state,deployed_jobs,deployed_kustomizations,event,gate_generation,head_sha,job_name,job_state,jobs,kustomization_requests,merge_sha,pr_number,reopen_epoch,repo,target_id,title,unmanaged`},
 		{name: "stamped repo event wire keys", got: wireKeys(t, RepoEvent{EffectsOwner: EffectsOwnerRestate}), want: `effects_owner,generation,head_sha,main_sha,pr_number,repo`},
 	}
 	for _, tc := range tests {

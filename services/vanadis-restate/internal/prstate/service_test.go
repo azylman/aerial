@@ -139,7 +139,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
+			wantPRHandlers:  "GetBuildLifecycle,HandleBuildMetadata,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeployFailed,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Register",
 			wantRepoHandler: "HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRunBySHA,ResolvePRBySHA",
 		},
 	}
@@ -592,7 +592,7 @@ func TestPRObjectService_DeployDispatched(t *testing.T) {
 func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 	t.Parallel()
 	terminalState := NewPRState("aerial", 101)
-	terminalState.MarkTerminal(TerminalMerged)
+	terminalState.MarkTerminal(TerminalClosed)
 
 	tests := []struct {
 		name         string
@@ -609,7 +609,7 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 		{name: "fresh publish records and persists", repo: "aerial", pr: 101, evHead: "abc123", wantRecorded: true, wantSet: true},
 		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
 		{name: "zero pr drops before kv", repo: "aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "terminal absorbs without persisting", repo: "aerial", pr: 101, existing: terminalState, evHead: "abc123", wantSet: false},
+		{name: "closed terminal absorbs without persisting", repo: "aerial", pr: 101, existing: terminalState, evHead: "abc123", wantSet: false},
 		{name: "state load error surfaces", repo: "aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
 	}
 	for _, tc := range tests {
@@ -754,7 +754,20 @@ func TestPRObjectService_IndexSends(t *testing.T) {
 	kustMc, kustRec := newStateMock(t, known())
 	deployMc, deployRec := newStateMock(t, known())
 	dedupMc, dedupRec := newStateMock(t, deduped)
+	merged := func() *PRState {
+		st := known()
+		st.Terminal = TerminalMerged
+		st.MergeSHA = "m1"
+		st.Branch = "feat-a"
+		return st
+	}
+	mergedKustMc, mergedKustRec := newStateMock(t, merged())
+	mergedDeployMc, mergedDeployRec := newStateMock(t, merged())
+	closedAgain := known()
+	closedAgain.Terminal = TerminalClosed
+	closedKustMc, closedKustRec := newStateMock(t, closedAgain)
 	svc := NewPRObjectService()
+	_, mergedDeployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(mergedDeployMc), PREvent{Repo: "aerial", PRNumber: 101, JobName: "eri", MergeSHA: "m1"})
 	_, deployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(deployMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri", MergeSHA: "m1"})
 	_, dedupErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(dedupMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri"})
 	tests := []struct {
@@ -772,6 +785,9 @@ func TestPRObjectService_IndexSends(t *testing.T) {
 		{name: "kustomization request indexes deploying", got: svc.HandleKustomizationRequested(restate.WithMockContext(kustMc), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "abc123"}), sends: kustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "abc123", Generation: 1, Lifecycle: IndexDeploying})}},
 		{name: "recorded deploy success indexes deployed", got: deployErr, sends: deployRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexDeployed})}},
 		{name: "deduped deploy success sends nothing", got: dedupErr, sends: dedupRec.sends},
+		{name: "merged kustomization request indexes deploying with stored merge sha", got: svc.HandleKustomizationRequested(restate.WithMockContext(mergedKustMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Jobs: []string{"eri"}}), sends: mergedKustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", MergeSHA: "m1", Generation: 1, Lifecycle: IndexDeploying})}},
+		{name: "merged recorded deploy success indexes deployed", got: mergedDeployErr, sends: mergedDeployRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexDeployed})}},
+		{name: "closed kustomization request sends nothing", got: svc.HandleKustomizationRequested(restate.WithMockContext(closedKustMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}), sends: closedKustRec.sends},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -91,12 +91,15 @@ func IsOwnedMetadataKey(key string) bool {
 // ProjectionStatus derives the registry status column purely from committed
 // Restate state. Every failure signal is scoped to the current head SHA:
 // stale markers recorded for a superseded SHA never project failure onto a
-// head that never failed. Terminal states win; conflict beats ci_failed;
-// deploy and sync lifecycle states belong to later chunks and are never
-// invented here.
+// head that never failed. Post-merge registry statuses recorded by the
+// deploy-phase transitions (synced, deploying, deployed, deploy_failed) win;
+// then terminal states; conflict beats ci_failed.
 func ProjectionStatus(s *PRState) string {
 	if s == nil {
 		return ProjectionStatusOpen
+	}
+	if statusIn(s.Status, RegistryStatusSynced, RegistryStatusDeploying, RegistryStatusDeployed, RegistryStatusDeployFailed) {
+		return s.Status
 	}
 	switch s.Terminal {
 	case TerminalMerged:

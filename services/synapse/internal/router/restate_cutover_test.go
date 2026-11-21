@@ -308,7 +308,7 @@ func TestRouteRolloutProgress(t *testing.T) {
 				url = srv.URL
 			}
 			srv := NewRouterServer(fixedConfig(Config{RestateAuthoritative: tc.authoritative, RestateURL: url}), nil)
-			err := srv.routeRolloutProgress(context.Background(), "azylman/aerial", tc.prNumber, shadowTestHeadSHA(), shadowTestMergeSHA(), "api")
+			err := srv.routeRolloutProgress(context.Background(), restateclient.PREvent{Repo: "azylman/aerial", PRNumber: tc.prNumber, HeadSHA: shadowTestHeadSHA(), MergeSHA: shadowTestMergeSHA(), JobName: "api"})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("routeRolloutProgress() error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -579,7 +579,7 @@ func TestAuthoritativeKustomizationJournalsBeforeRecord(t *testing.T) {
 	disp := &mockOutboundDispatcher{}
 	srv := newTestRouter(cfg, nil, reg, disp, &mockEventBus{})
 	refs := []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}
-	if err := srv.recordAndReconcileKustomizations(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", refs, true, false); err == nil {
+	if err := srv.recordAndReconcileKustomizations(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", []string{"eri"}, refs, true, false); err == nil {
 		t.Fatal("first recordAndReconcileKustomizations() err = nil, want journal failure")
 	}
 	if got := len(reg.kustomizationRequestCalls); got != 0 {
@@ -588,7 +588,7 @@ func TestAuthoritativeKustomizationJournalsBeforeRecord(t *testing.T) {
 	if got := len(disp.ReconcileCalls()); got != 0 {
 		t.Fatalf("reconciles after failed journal = %d, want 0", got)
 	}
-	if err := srv.recordAndReconcileKustomizations(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", refs, true, false); err != nil {
+	if err := srv.recordAndReconcileKustomizations(context.Background(), "azylman/aerial", 42, "main", "headsha", "100000000000000002", []string{"eri"}, refs, true, false); err != nil {
 		t.Fatalf("second recordAndReconcileKustomizations() err = %v, want success", err)
 	}
 	if got := len(reg.kustomizationRequestCalls); got != 1 {

@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -301,16 +303,74 @@ func (s *RouterServer) shadowDeployDispatched(ctx context.Context, repo, jobName
 	})
 }
 
-// shadowRolloutProgress mirrors kustomization progress observations in shadow
-// mode. Deploy failures have no frozen PRObject handler, so only progress
-// and dispatch observations are mirrored; failures stay legacy-only.
-func (s *RouterServer) shadowRolloutProgress(ctx context.Context, repo string, prNumber int, headSHA, mergeSHA, jobName string) {
-	if prNumber <= 0 {
+// shadowRolloutProgress mirrors rollout observations (with their ready jobs
+// and completed Kustomizations) in shadow mode.
+func (s *RouterServer) shadowRolloutProgress(ctx context.Context, ev restateclient.PREvent) {
+	if ev.PRNumber <= 0 {
 		return
 	}
-	s.shadowPREvent(ctx, "HandleRolloutProgress", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
-	})
+	s.shadowPREvent(ctx, "HandleRolloutProgress", ev)
+}
+
+// shadowRegisterPR runs PRObject.Register beside the legacy registry write.
+// The legacy response stays authoritative while effects are legacy: a
+// Restate failure or a target mismatch is only logged and counted, never
+// returned. The owner fence mirrors authorizeExistingPROwner: with k8s auth
+// on, the caller was authorized for the agent it registered under, so
+// PRObject must hold that same owner (or none).
+func (s *RouterServer) shadowRegisterPR(ctx context.Context, req PRRegisterRequest, legacyTargetID string) {
+	r := s.restateShadow()
+	if !r.Enabled() || req.PRNumber <= 0 {
+		return
+	}
+	rr := restateclient.RegisterRequest{
+		Repo: req.Repo, PRNumber: req.PRNumber, Branch: req.Branch, HeadSHA: req.HeadSHA,
+		TargetID: req.TargetID, Title: req.Title, Agent: req.Agent, BotID: req.BotID,
+	}
+	rr.Metadata = registerMetadataStrings(req.Metadata)
+	rr.FallbackTargetID = model.NormalizeDiscordTargetID(s.currentConfig().SystemChannelID)
+	if s.k8sAuthEnabled() {
+		rr.EnforceOwner = true
+		rr.ExpectedOwner = req.Agent
+	}
+	resp, err := r.client.Register(ctx, rr)
+	if err != nil {
+		r.sendErrors.Add(1)
+		metrics.RecordRestateShadowSend("Register", "error")
+		slog.WarnContext(ctx, "[synapse] [restate-shadow] register failed closed",
+			"repo", req.Repo, "pr", req.PRNumber, "error", err)
+		return
+	}
+	r.sends.Add(1)
+	metrics.RecordRestateShadowSend("Register", "sent")
+	if resp.TargetID != legacyTargetID {
+		r.divergences.Add(1)
+		metrics.RecordRestateShadowDivergence("register_target_mismatch")
+		slog.WarnContext(ctx, "[synapse] [restate-shadow] register target diverged from legacy",
+			"repo", req.Repo, "pr", req.PRNumber, "legacy_target_id", legacyTargetID, "restate_target_id", resp.TargetID)
+	}
+}
+
+// registerMetadataStrings forwards the string-valued keys of the raw
+// register metadata JSON opaquely; malformed JSON, blank and non-string
+// values are dropped. Nil when nothing remains.
+func registerMetadataStrings(raw string) map[string]string {
+	var meta map[string]any
+	if json.Unmarshal([]byte(raw), &meta) != nil {
+		return nil
+	}
+	var out map[string]string
+	for key, value := range meta {
+		v, ok := value.(string)
+		if !ok || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[key] = strings.TrimSpace(v)
+	}
+	return out
 }
 
 // checkOutcomeHandler maps a check/workflow conclusion to its frozen PRObject

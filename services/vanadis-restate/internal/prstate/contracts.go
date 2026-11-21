@@ -245,6 +245,35 @@ type PREvent struct {
 	// Kustomization names the Flux Kustomization a forwarded
 	// kustomization status observed; empty for every other event.
 	Kustomization string `json:"kustomization,omitempty"`
+
+	// Registry row payload. Each field is omitted when empty, so events
+	// that carry no registry data keep the frozen wire key set.
+	//
+	// BeforeSHA is the head a synchronize moved away from; the head only
+	// advances when it matches the stored head (compare-and-set).
+	BeforeSHA string `json:"before_sha,omitempty"`
+	// TargetID is the Discord target synapse resolved for the PR.
+	TargetID string `json:"target_id,omitempty"`
+	// CheckState is the ci_checks value HandleCheckStatus records
+	// (passed/pending).
+	CheckState string `json:"check_state,omitempty"`
+	// Jobs are the deploy jobs a kustomization request starts.
+	Jobs []string `json:"jobs,omitempty"`
+	// DeployedJobs are jobs a rollout observation found ready.
+	DeployedJobs []string `json:"deployed_jobs,omitempty"`
+	// JobState is the job_states value recorded for JobName.
+	JobState string `json:"job_state,omitempty"`
+	// KustomizationRequests replaces the PR's recorded reconcile requests.
+	KustomizationRequests map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
+	// DeployedKustomizations are Kustomizations a rollout observation
+	// found complete.
+	DeployedKustomizations []string `json:"deployed_kustomizations,omitempty"`
+	// Banner is the failure banner a deploy failure records.
+	Banner string `json:"banner,omitempty"`
+	// Acknowledged marks a deploy-failed event as the publish ack.
+	Acknowledged bool `json:"acknowledged,omitempty"`
+	// BuildMetadata is one build-metadata snapshot for the PR revision.
+	BuildMetadata *BuildMetadata `json:"build_metadata,omitempty"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
@@ -271,6 +300,10 @@ const (
 	PRHandlerMerged              = "HandleMerged"
 	PRHandlerRolloutProgress     = "HandleRolloutProgress"
 	PRHandlerMainAdvanced        = "HandleMainAdvanced"
+	PRHandlerDeployFailed        = "HandleDeployFailed"
+	PRHandlerBuildMetadata       = "HandleBuildMetadata"
+	PRHandlerSynchronized        = "HandleSynchronized"
+	PRHandlerCheckStatus         = "HandleCheckStatus"
 )
 
 // RepoObject handler names PRObject and RepoObject itself target with
@@ -417,6 +450,10 @@ type PRObject interface {
 	HandleDeploySuccessPublished(ctx context.Context, ev PREvent) (DeployPublishedOutcome, error)
 	HandleKustomizationRequested(ctx context.Context, ev PREvent) error
 	HandleMainAdvanced(ctx context.Context, ev PREvent) error
+	HandleDeployFailed(ctx context.Context, ev PREvent) error
+	HandleBuildMetadata(ctx context.Context, ev PREvent) error
+	HandleSynchronized(ctx context.Context, ev PREvent) error
+	HandleCheckStatus(ctx context.Context, ev PREvent) error
 }
 
 // RepoObject is the frozen repo handler surface: main-push index,
@@ -473,7 +510,11 @@ func (PRObjectStub) HandleKustomizationRequested(context.Context, PREvent) error
 	return nil
 }
 
-func (PRObjectStub) HandleMainAdvanced(context.Context, PREvent) error { return nil }
+func (PRObjectStub) HandleMainAdvanced(context.Context, PREvent) error  { return nil }
+func (PRObjectStub) HandleDeployFailed(context.Context, PREvent) error  { return nil }
+func (PRObjectStub) HandleBuildMetadata(context.Context, PREvent) error { return nil }
+func (PRObjectStub) HandleSynchronized(context.Context, PREvent) error  { return nil }
+func (PRObjectStub) HandleCheckStatus(context.Context, PREvent) error   { return nil }
 
 // RepoObjectStub is the empty registered handler stub for RepoObject.
 type RepoObjectStub struct{}

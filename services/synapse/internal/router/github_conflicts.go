@@ -328,6 +328,14 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		return s.handlePRClosedAction(ctx, res, pr.Merged)
 	case ghActionSynchronize:
 		shadowWasConflict := s.shadowPreSyncConflict(ctx, res.Repo, res.PRNumber)
+		// Journal before the legacy sync: a journal failure leaves the
+		// registry untouched, so the redelivery retries both.
+		if err := s.routePREvent(ctx, "HandleSynchronized", restateclient.PREvent{
+			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, BeforeSHA: res.BeforeSHA,
+			Branch: res.Branch, Title: pr.Title,
+		}); err != nil {
+			return err
+		}
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return err

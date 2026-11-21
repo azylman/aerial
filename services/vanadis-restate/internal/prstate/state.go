@@ -47,6 +47,30 @@ type PRState struct {
 	DispatchedEffects    map[string]bool
 	DeployPRDispatched   bool
 	DeploySHAJob         map[string]bool
+
+	// Registry row: everything a pr_registry row holds, so PRObject can
+	// become its single writer. See registry_state.go for the transitions.
+	Registered             bool
+	Branch                 string
+	MergeSHA               string
+	TargetID               string
+	Title                  string
+	Status                 string
+	BotID                  string
+	Jobs                   []string
+	StartedJobs            []string
+	DeployedJobs           []string
+	JobStates              map[string]string
+	KustomizationRequests  map[string]KustomizationRequest
+	DeployedKustomizations []string
+	DeployFailedPublished  bool
+	DeploySuccessPending   bool
+	BuildMetadata          *BuildMetadata
+	Banner                 string
+	CIChecks               map[string]string
+	CIFailCount            int
+	VanadisChunkID         string
+	WidgetState            string
 }
 
 // NewPRState returns an empty PR state for repo#prNumber.
@@ -654,8 +678,35 @@ func (s *PRState) Reopen() {
 	s.ReopenEpoch++
 }
 
-// ApplyEvent computes the pure disposition for one inbound event: stale SHAs
-// drop, same-epoch terminal states absorb, and a newer reopen epoch applies.
+// ApplyDeployEvent computes the disposition for one deploy-phase event
+// (kustomization requested/status, rollout progress, deploy dispatched,
+// success, or failure, build metadata). Deploys happen after merge, so a
+// same-epoch merged PR still applies them as long as every carried SHA is
+// the PR head or merge SHA (or the merge SHA is not known yet); a mismatch
+// drops stale. Closed-unmerged PRs stay fully absorbing, and every other
+// state falls through to ApplyEvent.
+func (s *PRState) ApplyDeployEvent(ev PREvent) EventDisposition {
+	if s == nil {
+		return DispositionDropStale
+	}
+	if s.Terminal != TerminalMerged || ev.ReopenEpoch > s.ReopenEpoch {
+		return s.ApplyEvent(ev)
+	}
+	for _, ref := range []string{ev.HeadSHA, ev.MergeSHA} {
+		clean := strings.TrimSpace(ref)
+		if clean == "" || IsZeroSHA(clean) || strings.TrimSpace(s.MergeSHA) == "" {
+			continue
+		}
+		if !strings.EqualFold(clean, s.HeadSHA) && !strings.EqualFold(clean, s.MergeSHA) {
+			return DispositionDropStale
+		}
+	}
+	return DispositionApply
+}
+
+// ApplyEvent computes the pure disposition for one inbound PR-lifecycle
+// event: stale SHAs drop, same-epoch terminal states absorb, and a newer
+// reopen epoch applies. Deploy-phase events use ApplyDeployEvent instead.
 func (s *PRState) ApplyEvent(ev PREvent) EventDisposition {
 	if s == nil {
 		return DispositionDropStale

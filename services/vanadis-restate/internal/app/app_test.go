@@ -283,7 +283,7 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 17)
+			require.Len(t, byName["PRObject"], 23)
 			require.True(t, byName["PRObject"]["HandleCheckFailed"])
 			require.True(t, byName["PRObject"]["HandleDeploySuccessPublished"])
 			require.True(t, byName["PRObject"]["HandleConflictDetected"])
@@ -291,6 +291,12 @@ func TestBindRestateServices(t *testing.T) {
 			require.True(t, byName["PRObject"]["HandleCIRecovery"])
 			require.Equal(t, "VIRTUAL_OBJECT", types["PRObject"])
 			require.True(t, byName["PRObject"]["HandleMainAdvanced"])
+			require.True(t, byName["PRObject"]["Register"])
+			require.True(t, byName["PRObject"]["GetBuildLifecycle"])
+			require.True(t, byName["PRObject"]["HandleSynchronized"])
+			require.True(t, byName["PRObject"]["HandleCheckStatus"])
+			require.True(t, byName["PRObject"]["HandleDeployFailed"])
+			require.True(t, byName["PRObject"]["HandleBuildMetadata"])
 			require.Len(t, byName["RepoObject"], 11)
 			require.True(t, byName["RepoObject"]["ResolvePRBySHA"])
 			require.True(t, byName["RepoObject"]["HandlePRIndex"])

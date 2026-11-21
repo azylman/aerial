@@ -58,6 +58,10 @@ var prHandlers = map[string]bool{
 	"HandleDeployDispatched":       true,
 	"HandleDeploySuccessPublished": true,
 	"HandleKustomizationRequested": true,
+	"HandleDeployFailed":           true,
+	"HandleBuildMetadata":          true,
+	"HandleSynchronized":           true,
+	"HandleCheckStatus":            true,
 }
 
 // Frozen RepoObject handler surface from chunk-01. SendRepoEvent rejects
@@ -88,6 +92,59 @@ type PREvent struct {
 	BuildID        string `json:"build_id"`
 	Agent          string `json:"agent"`
 	EffectsOwner   string `json:"effects_owner"`
+
+	// Registry row payload: omitted when empty so events without registry
+	// data keep the frozen wire key set. Tags mirror the prstate contract.
+	BeforeSHA              string                                `json:"before_sha,omitempty"`
+	TargetID               string                                `json:"target_id,omitempty"`
+	CheckState             string                                `json:"check_state,omitempty"`
+	Jobs                   []string                              `json:"jobs,omitempty"`
+	DeployedJobs           []string                              `json:"deployed_jobs,omitempty"`
+	JobState               string                                `json:"job_state,omitempty"`
+	KustomizationRequests  map[string]model.KustomizationRequest `json:"kustomization_requests,omitempty"`
+	DeployedKustomizations []string                              `json:"deployed_kustomizations,omitempty"`
+	Banner                 string                                `json:"banner,omitempty"`
+	Acknowledged           bool                                  `json:"acknowledged,omitempty"`
+	BuildMetadata          *model.BuildMetadata                  `json:"build_metadata,omitempty"`
+}
+
+// RegisterRequest is the PRObject.Register payload: the normalized register
+// request plus the existing-owner fence and the headless target fallback.
+// JSON tags mirror the prstate RegisterRequest contract exactly.
+type RegisterRequest struct {
+	Repo     string `json:"repo"`
+	PRNumber int    `json:"pr_number"`
+	Branch   string `json:"branch"`
+	HeadSHA  string `json:"head_sha"`
+	TargetID string `json:"target_id"`
+	Title    string `json:"title,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	BotID    string `json:"bot_id,omitempty"`
+	// Metadata carries the string-valued register metadata keys opaquely;
+	// PRObject decides which keys it records.
+	Metadata         map[string]string `json:"metadata,omitempty"`
+	FallbackTargetID string            `json:"fallback_target_id,omitempty"`
+	EnforceOwner     bool              `json:"enforce_owner,omitempty"`
+	ExpectedOwner    string            `json:"expected_owner,omitempty"`
+}
+
+// RegisterResponse is the PRObject.Register result.
+type RegisterResponse struct {
+	TargetID string `json:"target_id"`
+	Agent    string `json:"agent"`
+	Status   string `json:"status"`
+}
+
+// BuildLifecycle is the PRObject.GetBuildLifecycle result: the registry
+// lifecycle fence plus the revision-fenced build metadata snapshot.
+type BuildLifecycle struct {
+	Found            bool                 `json:"found"`
+	Status           string               `json:"status"`
+	HeadSHA          string               `json:"head_sha"`
+	MergeSHA         string               `json:"merge_sha"`
+	Started          bool                 `json:"started"`
+	HasBuildMetadata bool                 `json:"has_build_metadata"`
+	BuildMetadata    *model.BuildMetadata `json:"build_metadata,omitempty"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
@@ -344,14 +401,88 @@ func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, 
 	return nil
 }
 
+// Register invokes PRObject.Register (request-response, exclusive) and
+// returns the resolved target ID. Owner mismatches (409) and invalid
+// requests (400) come back as terminal StatusErrors.
+func (c *Client) Register(ctx context.Context, req RegisterRequest) (RegisterResponse, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return RegisterResponse{}, errors.New("restate is not configured")
+	}
+	req.Repo = model.NormalizeRepo(req.Repo)
+	if req.Repo == "" || req.PRNumber <= 0 {
+		return RegisterResponse{}, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	}
+	var out RegisterResponse
+	if err := c.call(ctx, PRObjectKey(req.Repo, req.PRNumber), "Register", req, &out); err != nil {
+		return RegisterResponse{}, err
+	}
+	return out, nil
+}
+
+// GetBuildLifecycle invokes the shared, read-only PRObject.GetBuildLifecycle
+// query. A PR Restate has never seen yields the zero lifecycle.
+func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber int) (BuildLifecycle, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return BuildLifecycle{}, errors.New("restate is not configured")
+	}
+	repo = model.NormalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return BuildLifecycle{}, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	}
+	var out BuildLifecycle
+	if err := c.call(ctx, PRObjectKey(repo, prNumber), "GetBuildLifecycle", struct{}{}, &out); err != nil {
+		return BuildLifecycle{}, err
+	}
+	return out, nil
+}
+
+// call is one request-response PRObject invocation without an
+// Idempotency-Key: the result reflects current state and must not be cached.
+func (c *Client) call(ctx context.Context, key, handler string, payload, out any) error {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal restate payload: %w", err)
+	}
+	body, err := c.post(ctx, c.ingressURL(c.prService, key, handler), bodyBytes, "")
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode restate response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) send(ctx context.Context, service, key, handler string, payload any) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal restate payload: %w", err)
 	}
-	idKey := SendIdempotencyKey(EventIdentityFromContext(ctx), handler, bodyBytes)
+	keyBytes, err := json.Marshal(idempotencyPayload(payload))
+	if err != nil {
+		return fmt.Errorf("marshal restate idempotency payload: %w", err)
+	}
+	idKey := SendIdempotencyKey(EventIdentityFromContext(ctx), handler, keyBytes)
 	_, err = c.post(ctx, c.ingressURL(service, key, handler)+"/send", bodyBytes, idKey)
 	return err
+}
+
+// idempotencyPayload strips wall-clock noise from a payload before it is
+// digested into the Idempotency-Key: kustomization requested_at stamps are
+// minted per attempt, so a retried event must still dedup at the ingress
+// (the first accepted request wins). Every other payload digests as sent.
+func idempotencyPayload(payload any) any {
+	ev, ok := payload.(PREvent)
+	if !ok || len(ev.KustomizationRequests) == 0 {
+		return payload
+	}
+	stripped := make(map[string]model.KustomizationRequest, len(ev.KustomizationRequests))
+	for name, req := range ev.KustomizationRequests {
+		req.RequestedAt = ""
+		stripped[name] = req
+	}
+	ev.KustomizationRequests = stripped
+	return ev
 }
 
 func (c *Client) ingressURL(service, key, handler string) string {

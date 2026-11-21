@@ -224,6 +224,7 @@ type GitHubPingPayload struct {
 type GitHubPullRequestPayload struct {
 	Action      string            `json:"action"`
 	Number      int               `json:"number"`
+	Before      string            `json:"before,omitempty"`
 	PullRequest GitHubPullRequest `json:"pull_request"`
 	Repository  struct {
 		FullName string `json:"full_name"`
@@ -293,6 +294,8 @@ type ResolvedGitHubEvent struct {
 	Conclusion       string `json:"conclusion,omitempty"`
 	Sender           string `json:"sender,omitempty"`
 	ResolutionSource string `json:"resolution_source,omitempty"`
+	// BeforeSHA is the head a pull_request synchronize moved away from.
+	BeforeSHA string `json:"before_sha,omitempty"`
 }
 
 type GitHubCommitPRItem struct {
@@ -465,6 +468,7 @@ func populatePullRequestEvent(p *GitHubPullRequestPayload, res *ResolvedGitHubEv
 	}
 	res.Branch = p.PullRequest.Head.Ref
 	res.HeadSHA = p.PullRequest.Head.SHA
+	res.BeforeSHA = p.Before
 	res.Merged = p.PullRequest.Merged
 	// GitHub pull_request webhooks set merge_commit_sha for test merges even on unmerged PRs; only set MergeSHA when merged.
 	if p.PullRequest.Merged {
@@ -554,6 +558,14 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 	checkState := classifyCheckState(res.Status, res.Conclusion)
 	if checkState == "" || checkState == statusFailed {
 		return
+	}
+	// Journal the check status into PRObject before the legacy write; the
+	// legacy registry stays authoritative, so a journal failure only logs.
+	if err := s.routePREvent(ctx, "HandleCheckStatus", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
+		CheckName: res.CheckName, CheckState: checkState,
+	}); err != nil {
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] failed to route check status", "repo", res.Repo, "pr", res.PRNumber, "check", res.CheckName, "error", err)
 	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
 	if err != nil {
