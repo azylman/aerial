@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -19,6 +20,7 @@ const (
 // RecordKustomizationRequests replaces the PR's kustomization_requests wholesale and clears
 // deployed_kustomizations so completion is tracked only against the latest reconcile requests.
 func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]model.KustomizationRequest) error {
+	metrics.RecordRegistryCall("RecordKustomizationRequests")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(requests) == 0 {
 		return nil
@@ -44,6 +46,7 @@ func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, re
 // MarkJobsDeployed atomically unions ready job names into deployed_jobs for a deploying or
 // deploy_failed PR, filtering candidate jobs to those eligible in started_jobs/jobs.
 func (r *PostgresPRRegistry) MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	metrics.RecordRegistryCall("MarkJobsDeployed")
 	repo = model.NormalizeRepo(repo)
 	jobs = model.DedupeTrimmedStrings(jobs)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(jobs) == 0 {
@@ -101,6 +104,7 @@ func (r *PostgresPRRegistry) MarkJobsDeployed(ctx context.Context, repo string, 
 // is present. The row lock taken by FOR UPDATE serializes concurrent callers on the latest row version,
 // so exactly one caller observes the transition and gets true.
 func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (bool, error) {
+	metrics.RecordRegistryCall("MarkKustomizationsDeployed")
 	repo = model.NormalizeRepo(repo)
 	names = model.DedupeTrimmedStrings(names)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(names) == 0 {
@@ -155,6 +159,7 @@ func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, rep
 
 // HasKustomizationRequests reports whether the PR's completion is tracked by the Kustomization watcher.
 func (r *PostgresPRRegistry) HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error) {
+	metrics.RecordRegistryCall("HasKustomizationRequests")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return false, nil
@@ -170,6 +175,7 @@ func (r *PostgresPRRegistry) HasKustomizationRequests(ctx context.Context, repo 
 // RetryPRReadiness retries the original gate, never creates a new deployment generation.
 // Repeated requests while deploying retain partial progress and original request identities.
 func (r *PostgresPRRegistry) RetryPRReadiness(ctx context.Context, repo, merge string, number int) (map[string]model.KustomizationRequest, error) {
+	metrics.RecordRegistryCall("RetryPRReadiness")
 	repo = model.NormalizeRepo(repo)
 	merge = strings.TrimSpace(merge)
 	if r == nil || r.pool == nil || repo == "" || merge == "" || number <= 0 {

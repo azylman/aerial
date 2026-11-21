@@ -347,6 +347,7 @@ const (
 	PRHandlerCheckRerunRequested = "HandleCheckRerunRequested"
 	PRHandlerCollaboratorAlert   = "HandleCollaboratorAlert"
 	PRHandlerMerged              = "HandleMerged"
+	PRHandlerOpened              = "HandleOpened"
 	PRHandlerRolloutProgress     = "HandleRolloutProgress"
 	PRHandlerMainAdvanced        = "HandleMainAdvanced"
 	PRHandlerDeployFailed        = "HandleDeployFailed"
@@ -500,6 +501,7 @@ type PRObject interface {
 	HandleMerged(ctx context.Context, ev PREvent) error
 	HandleClosed(ctx context.Context, ev PREvent) error
 	HandleReopened(ctx context.Context, ev PREvent) error
+	HandleOpened(ctx context.Context, ev PREvent) error
 	HandleReadinessRetry(ctx context.Context, ev PREvent) error
 	HandleRolloutProgress(ctx context.Context, ev PREvent) error
 	HandleDeployDispatched(ctx context.Context, ev PREvent) (DeployDispatchDecision, error)
@@ -552,6 +554,7 @@ func (PRObjectStub) HandleConflictResolved(context.Context, PREvent) error { ret
 func (PRObjectStub) HandleMerged(context.Context, PREvent) error           { return nil }
 func (PRObjectStub) HandleClosed(context.Context, PREvent) error           { return nil }
 func (PRObjectStub) HandleReopened(context.Context, PREvent) error         { return nil }
+func (PRObjectStub) HandleOpened(context.Context, PREvent) error           { return nil }
 func (PRObjectStub) HandleReadinessRetry(context.Context, PREvent) error   { return nil }
 func (PRObjectStub) HandleRolloutProgress(context.Context, PREvent) error  { return nil }
 func (PRObjectStub) HandleDeployDispatched(context.Context, PREvent) (DeployDispatchDecision, error) {

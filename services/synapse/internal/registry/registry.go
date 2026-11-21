@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -89,36 +90,43 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 }
 
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
+	metrics.RecordRegistryCall("UpdatePRMerged")
 	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
 }
 
 func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (string, error) {
+	metrics.RecordRegistryCall("UpdatePRClosedUnmerged")
 	query := `UPDATE pr_registry SET status = 'closed', metadata = COALESCE(metadata, '{}'::jsonb) - 'banner', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr closed unmerged", query)
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
+	metrics.RecordRegistryCall("UpdatePRSync")
 	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', metadata = CASE WHEN head_sha IS DISTINCT FROM $3 THEN CASE WHEN COALESCE((metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata') - 'ci_fail_count' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata' END ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict') OR COALESCE(metadata, '{}'::jsonb) ? 'banner') RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
 }
 
 func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
+	metrics.RecordRegistryCall("BackfillPushMergeSHA")
 	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "backfill push merge_sha", query, strings.TrimSpace(mergeSHA))
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	metrics.RecordRegistryCall("AtomicTransitionCIFailed")
 	query := `UPDATE pr_registry SET status = 'ci_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition ci_failed", query)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	metrics.RecordRegistryCall("AtomicTransitionConflict")
 	query := `UPDATE pr_registry SET status = 'conflict', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('conflict', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition conflict", query)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	metrics.RecordRegistryCall("AtomicTransitionDeployFailed")
 	query := `
 		UPDATE pr_registry
 		SET status = 'deploy_failed',
@@ -137,6 +145,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, r
 }
 
 func (r *PostgresPRRegistry) RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error) {
+	metrics.RecordRegistryCall("RecordPRCheckStatus")
 	repo = model.NormalizeRepo(repo)
 	headSHA = strings.TrimSpace(headSHA)
 	checkName = strings.TrimSpace(checkName)
@@ -171,6 +180,7 @@ func (r *PostgresPRRegistry) RecordPRCheckStatus(ctx context.Context, repo strin
 }
 
 func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req model.PRRegisterRequest) (string, error) {
+	metrics.RecordRegistryCall("RegisterPR")
 	if r == nil || r.pool == nil {
 		return "", errors.New("pr registry uninitialized")
 	}
@@ -215,6 +225,7 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req model.PRRegiste
 }
 
 func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error) {
+	metrics.RecordRegistryCall("EnsurePRRegistered")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", nil
@@ -233,6 +244,7 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
+	metrics.RecordRegistryCall("AtomicTransitionCIFailedByHeadSHA")
 	repo = model.NormalizeRepo(repo)
 	headSHA = strings.TrimSpace(headSHA)
 	if repo == "" || headSHA == "" || model.IsZeroSHA(headSHA) {
@@ -253,6 +265,7 @@ func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Conte
 }
 
 func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha string) (int, string, string, error) {
+	metrics.RecordRegistryCall("ResolvePRBySHA")
 	repo = model.NormalizeRepo(repo)
 	sha = strings.TrimSpace(sha)
 	if repo == "" || sha == "" || model.IsZeroSHA(sha) {
@@ -273,6 +286,7 @@ func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sh
 }
 
 func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
+	metrics.RecordRegistryCall("ResolvePRByNumber")
 	repo = model.NormalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
 		return "", "", "", "", nil
@@ -291,6 +305,7 @@ func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string,
 }
 
 func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (string, error) {
+	metrics.RecordRegistryCall("TransitionDeploying")
 	cleanJobs := model.DedupeTrimmedStrings(jobs)
 	if len(cleanJobs) == 0 {
 		return "", nil
@@ -311,6 +326,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 }
 
 func (r *PostgresPRRegistry) RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	metrics.RecordRegistryCall("RecordExpectedJobs")
 	repo = model.NormalizeRepo(repo)
 	cleanJobs := model.DedupeTrimmedStrings(jobs)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
@@ -334,6 +350,7 @@ func (r *PostgresPRRegistry) RecordExpectedJobs(ctx context.Context, repo string
 }
 
 func (r *PostgresPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error) {
+	metrics.RecordRegistryCall("HasExpectedDeployJobs")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return false, nil
@@ -356,6 +373,7 @@ func (r *PostgresPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo str
 }
 
 func (r *PostgresPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState string) (string, int, bool, error) {
+	metrics.RecordRegistryCall("RecordPRJobState")
 	jobName = strings.TrimSpace(jobName)
 	jobState = strings.TrimSpace(jobState)
 	if r == nil || r.pool == nil || jobName == "" || jobState == "" {
@@ -397,6 +415,7 @@ func (r *PostgresPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobS
 }
 
 func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]model.DeployingPR, error) {
+	metrics.RecordRegistryCall("ListDeployingPRs")
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -432,6 +451,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]model.Depl
 }
 
 func (r *PostgresPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error {
+	metrics.RecordRegistryCall("AppendPRJobs")
 	repo = model.NormalizeRepo(repo)
 	cleanJobs := model.DedupeTrimmedStrings(jobs)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(cleanJobs) == 0 {
@@ -463,6 +483,7 @@ func (r *PostgresPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNu
 }
 
 func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
+	metrics.RecordRegistryCall("UpdatePRStatus")
 	repo = model.NormalizeRepo(repo)
 	status = strings.TrimSpace(status)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || status == "" {
@@ -497,6 +518,7 @@ func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, pr
 }
 
 func (r *PostgresPRRegistry) AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error {
+	metrics.RecordRegistryCall("AcknowledgeDeployFailedPublished")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return nil
@@ -518,6 +540,7 @@ func (r *PostgresPRRegistry) AcknowledgeDeployFailedPublished(ctx context.Contex
 // RecordPRBuildMetadata atomically fences snapshots by PR revision and workflow
 // order. This additive API deliberately does not update PR lifecycle status.
 func (r *PostgresPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata model.BuildMetadata) (bool, error) {
+	metrics.RecordRegistryCall("RecordPRBuildMetadata")
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return false, err
@@ -566,6 +589,7 @@ func (r *PostgresPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo str
 
 // LoadPRBuildMetadata revalidates identity even after head-change invalidation.
 func (r *PostgresPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (model.BuildMetadata, bool, error) {
+	metrics.RecordRegistryCall("LoadPRBuildMetadata")
 	var m model.BuildMetadata
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
@@ -589,6 +613,7 @@ func (r *PostgresPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo strin
 // LoadPRBuildLifecycle returns the PR's status, revisions and whether any
 // deployment job has started. A missing PR yields a zero lifecycle.
 func (r *PostgresPRRegistry) LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error) {
+	metrics.RecordRegistryCall("LoadPRBuildLifecycle")
 	var state model.PRBuildLifecycle
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
@@ -603,6 +628,7 @@ func (r *PostgresPRRegistry) LoadPRBuildLifecycle(ctx context.Context, repo stri
 
 // LoadRawPRMetadata returns the unmarshaled raw metadata jsonb for a PR and whether the row exists.
 func (r *PostgresPRRegistry) LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, bool, error) {
+	metrics.RecordRegistryCall("LoadRawPRMetadata")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return map[string]any{}, false, nil
@@ -627,6 +653,7 @@ func (r *PostgresPRRegistry) LoadRawPRMetadata(ctx context.Context, repo string,
 
 // IsPRDeployed reports whether the PR status is deployed (case-insensitive).
 func (r *PostgresPRRegistry) IsPRDeployed(ctx context.Context, repo string, prNumber int) (bool, error) {
+	metrics.RecordRegistryCall("IsPRDeployed")
 	repo = model.NormalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return false, nil

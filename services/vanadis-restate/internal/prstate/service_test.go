@@ -140,7 +140,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect",
+			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect",
 			wantRepoHandler: "HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRunBySHA,ResolvePRBySHA",
 		},
 	}
@@ -962,6 +962,34 @@ func TestRepoObjectService_ResolvePRBySHA(t *testing.T) {
 			if rec != nil && rec.setCalled {
 				t.Fatal("shared resolve persisted state")
 			}
+		})
+	}
+}
+
+// TestPRObjectService_HandleOpened pins that opened claims the PR-body
+// owner (an authoritative ownership source) instead of acting as a hint.
+func TestPRObjectService_HandleOpened(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		existing  *PRState
+		agent     string
+		wantAgent string
+		wantBotID string
+	}{
+		{name: "opened claims the body owner", agent: "bot-b", wantAgent: "bot-b", wantBotID: "bot-b"},
+		{name: "body owner overrides a hinted owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "bot-a"}, agent: "bot-b", wantAgent: "bot-b", wantBotID: "bot-b"},
+		{name: "no body owner keeps the stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "bot-a"}, wantAgent: "bot-a"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := newStateMock(t, tc.existing)
+			err := NewPRObjectService().HandleOpened(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Agent: tc.agent})
+			require.NoError(t, err)
+			require.NotNil(t, rec.saved)
+			require.Equal(t, tc.wantAgent, rec.saved.Agent)
+			require.Equal(t, tc.wantBotID, rec.saved.BotID)
 		})
 	}
 }

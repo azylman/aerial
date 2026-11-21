@@ -157,6 +157,7 @@ func TestPRStateStubHandlersNoop(t *testing.T) {
 		{name: "merged", got: PRObjectStub{}.HandleMerged(ctx, ev)},
 		{name: "closed", got: PRObjectStub{}.HandleClosed(ctx, ev)},
 		{name: "reopened", got: PRObjectStub{}.HandleReopened(ctx, ev)},
+		{name: "opened", got: PRObjectStub{}.HandleOpened(ctx, ev)},
 		{name: "readiness retry", got: PRObjectStub{}.HandleReadinessRetry(ctx, ev)},
 		{name: "rollout progress", got: PRObjectStub{}.HandleRolloutProgress(ctx, ev)},
 		{name: "deploy dispatched", got: stubDeployDispatchedErr(ctx, ev)},
