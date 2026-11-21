@@ -7,11 +7,13 @@ package prstate
 // Restate-owned state, including the RecordFailedCheckRunDetailed
 // triple-return with SHA-change reset, transactional rollback, the
 // ClearFailedCISHA seven-way fan-out (updated-for-main survives, exactly like
-// the tracker), BOTH deploy-dedup keys, and durable ResolvePRBySHA replacing
-// commitSHAPRs with ORDER BY updated_at DESC LIMIT 1 ambiguity ordering.
+// the tracker), BOTH deploy-dedup keys, and the RepoObject durable SHA index
+// replacing commitSHAPRs with newest-writer-wins ambiguity ordering (the
+// ORDER BY updated_at DESC LIMIT 1 semantics of the registry lookup).
 
 import (
 	"slices"
+	"sort"
 	"strings"
 )
 
@@ -673,10 +675,14 @@ func (s *PRState) ApplyEvent(ev PREvent) EventDisposition {
 	return DispositionApply
 }
 
-// RepoState is the Restate-owned per-repo state: ONLY the bounded main-push
-// index, dispatched-SHA tombstones scoped by generation, and the journaled
-// index of PR keys touched (rebuild enumerates it; snapshot restore is the
-// fallback). All heavy per-PR work stays in PRState.
+// RepoState is the Restate-owned per-repo state: the bounded main-push
+// index, dispatched-SHA tombstones scoped by generation, the journaled index
+// of PR keys touched (rebuild enumerates it; snapshot restore is the
+// fallback), and the routing index RepoObject keeps for itself: the
+// SHA->PR map, per-PR open/closed/deploying status, and SHA-only events held
+// until their SHA is indexed. PRObject feeds the routing index with one-way
+// sends; RepoObject never reads or writes PR state. All heavy per-PR work
+// stays in PRState.
 type RepoState struct {
 	Repo          string
 	MainPushIndex []string
@@ -684,6 +690,16 @@ type RepoState struct {
 	TouchedPRKeys []string
 	touchedSet    map[string]bool
 	Tombstones    map[string]uint64
+	// SHAIndex maps a lower-cased head or merge SHA to the PR that most
+	// recently claimed it.
+	SHAIndex map[string]SHAIndexEntry
+	// PRs is the per-PR routing status keyed by PR number.
+	PRs map[int]*RepoPRStatus
+	// Held are SHA-only events whose SHA was not indexed yet, oldest first.
+	Held []HeldSHAEvent
+	// Seq is the monotonic write counter ordering index entries, closes,
+	// and held event IDs. It replaces wall-clock updated_at ordering.
+	Seq uint64
 }
 
 // NewRepoState returns an empty repo state.
@@ -715,9 +731,10 @@ func (s *RepoState) RecordMainPushSHA(sha string) bool {
 }
 
 // TouchPRKey records a PR key in the journaled rebuild index (idempotent).
-func (s *RepoState) TouchPRKey(prKey string) {
+// Returns true when the key is newly recorded.
+func (s *RepoState) TouchPRKey(prKey string) bool {
 	if s == nil || strings.TrimSpace(prKey) == "" {
-		return
+		return false
 	}
 	if s.touchedSet == nil {
 		// Rebuild after a JSON/Restate restore, which preserves
@@ -728,10 +745,11 @@ func (s *RepoState) TouchPRKey(prKey string) {
 		}
 	}
 	if s.touchedSet[prKey] {
-		return
+		return false
 	}
 	s.touchedSet[prKey] = true
 	s.TouchedPRKeys = append(s.TouchedPRKeys, prKey)
+	return true
 }
 
 // PRKeys returns the journaled index of PR keys touched.
@@ -775,42 +793,316 @@ func (s *RepoState) EvictTombstonesBelowGeneration(minGen uint64) {
 	}
 }
 
-// SHAEntry is one durable SHA lookup row. UpdatedAt orders ambiguous
-// duplicate rows newest-first, mirroring the projection query.
-type SHAEntry struct {
-	Repo      string
-	SHA       string
-	PRNumber  int
-	Branch    string
-	UpdatedAt int64
+// Routing index bounds. Open PRs keep their most recent SHAs; closed PRs
+// keep their SHAs only until MaxClosedPRsIndexed newer closes evict them, so
+// a squash-merge push or late check run still resolves shortly after close
+// without the index growing forever.
+const (
+	MaxSHAsPerPR        = 20
+	MaxClosedPRsIndexed = 100
+	MaxHeldSHAEvents    = 64
+)
+
+// SHAIndexEntry is one durable SHA lookup row. Seq orders ambiguous claims:
+// the newest claim wins, mirroring ORDER BY updated_at DESC LIMIT 1.
+type SHAIndexEntry struct {
+	PRNumber int
+	Branch   string
+	Seq      uint64
 }
 
-// ResolvePRBySHA resolves a commit SHA to its PR, replacing the deleted
-// commitSHAPRs map with a durable lookup. Ambiguous duplicates resolve by
-// ORDER BY updated_at DESC LIMIT 1: the newest row wins.
-func ResolvePRBySHA(entries []SHAEntry, repo, sha string) (int, string, bool) {
-	normRepo := strings.ToLower(NormalizeRepo(repo))
-	normSHA := strings.ToLower(strings.TrimSpace(sha))
-	if normRepo == "" || normSHA == "" || IsZeroSHA(normSHA) {
-		return 0, "", false
+// RepoPRStatus is the routing status RepoObject keeps per PR. Epoch mirrors
+// the PRObject reopen epoch: a close absorbs same-epoch updates and only a
+// newer epoch reopens. Deploying replaces the registry ListDeployingPRs
+// scan for kustomization status fan-out.
+type RepoPRStatus struct {
+	Branch           string
+	Epoch            uint64
+	Closed           bool
+	ClosedSeq        uint64
+	Deploying        bool
+	DeploySHA        string
+	DeployGeneration uint64
+}
+
+// HeldSHAEvent is one SHA-only event waiting for its SHA to be indexed.
+type HeldSHAEvent struct {
+	ID    uint64
+	Kind  string
+	Event SHAEvent
+}
+
+func normalizeIndexSHA(sha string) string {
+	clean := strings.ToLower(strings.TrimSpace(sha))
+	if clean == "" || IsZeroSHA(clean) {
+		return ""
 	}
-	best := -1
-	for i, e := range entries {
-		if strings.ToLower(NormalizeRepo(e.Repo)) != normRepo {
+	return clean
+}
+
+func (s *RepoState) nextSeq() uint64 {
+	s.Seq++
+	return s.Seq
+}
+
+func (s *RepoState) ensureIndex() {
+	if s.SHAIndex == nil {
+		s.SHAIndex = make(map[string]SHAIndexEntry)
+	}
+	if s.PRs == nil {
+		s.PRs = make(map[int]*RepoPRStatus)
+	}
+}
+
+// ApplyPRIndex applies one PRObject index update: it records the PR status
+// transition and maps the carried head and merge SHAs to the PR. Updates
+// from an older reopen epoch are ignored entirely. It returns whether state
+// changed and the newly indexed SHAs that have held events to replay.
+func (s *RepoState) ApplyPRIndex(ev PRIndexEvent) (bool, []string) {
+	if s == nil || s.Repo == "" || ev.PRNumber <= 0 {
+		return false, nil
+	}
+	s.ensureIndex()
+	changed := s.TouchPRKey(PRObjectKey(s.Repo, ev.PRNumber))
+	status := s.PRs[ev.PRNumber]
+	if status == nil {
+		status = &RepoPRStatus{Epoch: ev.ReopenEpoch}
+		s.PRs[ev.PRNumber] = status
+		changed = true
+	}
+	if ev.ReopenEpoch < status.Epoch {
+		return changed, nil
+	}
+	if ev.ReopenEpoch > status.Epoch {
+		status.Epoch = ev.ReopenEpoch
+		status.Closed = false
+		status.ClosedSeq = 0
+		changed = true
+	}
+	if branch := strings.TrimSpace(ev.Branch); branch != "" && branch != status.Branch {
+		status.Branch = branch
+		changed = true
+	}
+	if s.applyIndexLifecycle(status, ev) {
+		changed = true
+	}
+	var replay []string
+	for _, sha := range []string{ev.HeadSHA, ev.MergeSHA} {
+		clean := normalizeIndexSHA(sha)
+		if clean == "" {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(e.SHA)) != normSHA {
+		if cur, ok := s.SHAIndex[clean]; ok && cur.PRNumber == ev.PRNumber && cur.Branch == status.Branch {
 			continue
 		}
-		if e.PRNumber <= 0 {
-			continue
-		}
-		if best == -1 || e.UpdatedAt >= entries[best].UpdatedAt {
-			best = i
+		s.SHAIndex[clean] = SHAIndexEntry{PRNumber: ev.PRNumber, Branch: status.Branch, Seq: s.nextSeq()}
+		changed = true
+		if s.hasHeld(clean) && !slices.Contains(replay, clean) {
+			replay = append(replay, clean)
 		}
 	}
-	if best == -1 {
-		return 0, "", false
+	s.evictPRSHAs(ev.PRNumber)
+	s.evictClosedPRs()
+	return changed, replay
+}
+
+// applyIndexLifecycle applies the lifecycle op of one index update to the
+// PR status. Merged PRs leave the open set but stay deploy candidates;
+// closed (unmerged) PRs also leave the deploying set.
+func (s *RepoState) applyIndexLifecycle(status *RepoPRStatus, ev PRIndexEvent) bool {
+	switch ev.Lifecycle {
+	case IndexMerged, IndexClosed:
+		changed := false
+		if !status.Closed {
+			status.Closed = true
+			status.ClosedSeq = s.nextSeq()
+			changed = true
+		}
+		if ev.Lifecycle == IndexClosed && status.Deploying {
+			status.Deploying = false
+			status.DeploySHA = ""
+			changed = true
+		}
+		return changed
+	case IndexDeploying:
+		sha := normalizeIndexSHA(ev.MergeSHA)
+		if sha == "" {
+			sha = normalizeIndexSHA(ev.HeadSHA)
+		}
+		if status.Deploying && status.DeploySHA == sha && status.DeployGeneration == ev.Generation {
+			return false
+		}
+		status.Deploying = true
+		status.DeploySHA = sha
+		status.DeployGeneration = ev.Generation
+		return true
+	case IndexDeployed:
+		if !status.Deploying || ev.Generation < status.DeployGeneration {
+			return false
+		}
+		status.Deploying = false
+		status.DeploySHA = ""
+		return true
+	default:
+		return false
 	}
-	return entries[best].PRNumber, entries[best].Branch, true
+}
+
+// evictPRSHAs keeps at most MaxSHAsPerPR index entries for one PR, dropping
+// the oldest claims first.
+func (s *RepoState) evictPRSHAs(prNumber int) {
+	type claim struct {
+		sha string
+		seq uint64
+	}
+	var claims []claim
+	for sha, e := range s.SHAIndex {
+		if e.PRNumber == prNumber {
+			claims = append(claims, claim{sha: sha, seq: e.Seq})
+		}
+	}
+	if len(claims) <= MaxSHAsPerPR {
+		return
+	}
+	sort.Slice(claims, func(i, j int) bool { return claims[i].seq < claims[j].seq })
+	for _, c := range claims[:len(claims)-MaxSHAsPerPR] {
+		delete(s.SHAIndex, c.sha)
+	}
+}
+
+// evictClosedPRs bounds retention for closed PRs: beyond MaxClosedPRsIndexed
+// the oldest closes lose their status and SHA entries. PRs still deploying
+// are never evicted, so kustomization fan-out cannot lose a rollout.
+func (s *RepoState) evictClosedPRs() {
+	type closed struct {
+		pr  int
+		seq uint64
+	}
+	var all []closed
+	for pr, st := range s.PRs {
+		if st != nil && st.Closed && !st.Deploying {
+			all = append(all, closed{pr: pr, seq: st.ClosedSeq})
+		}
+	}
+	if len(all) <= MaxClosedPRsIndexed {
+		return
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].seq < all[j].seq })
+	for _, c := range all[:len(all)-MaxClosedPRsIndexed] {
+		delete(s.PRs, c.pr)
+		for sha, e := range s.SHAIndex {
+			if e.PRNumber == c.pr {
+				delete(s.SHAIndex, sha)
+			}
+		}
+	}
+}
+
+// ResolveSHA resolves a commit SHA to the PR that most recently claimed it.
+func (s *RepoState) ResolveSHA(sha string) (SHAIndexEntry, bool) {
+	clean := normalizeIndexSHA(sha)
+	if s == nil || clean == "" || s.SHAIndex == nil {
+		return SHAIndexEntry{}, false
+	}
+	e, ok := s.SHAIndex[clean]
+	if !ok || e.PRNumber <= 0 {
+		return SHAIndexEntry{}, false
+	}
+	return e, true
+}
+
+// OpenPRNumbers returns the PRs whose current epoch is not closed, ascending.
+func (s *RepoState) OpenPRNumbers() []int {
+	if s == nil {
+		return nil
+	}
+	var out []int
+	for pr, st := range s.PRs {
+		if st != nil && !st.Closed {
+			out = append(out, pr)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// DeployingPRNumbers returns the PRs awaiting rollout completion, ascending.
+func (s *RepoState) DeployingPRNumbers() []int {
+	if s == nil {
+		return nil
+	}
+	var out []int
+	for pr, st := range s.PRs {
+		if st != nil && st.Deploying {
+			out = append(out, pr)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// PRStatus returns the routing status for one PR.
+func (s *RepoState) PRStatus(prNumber int) (RepoPRStatus, bool) {
+	if s == nil || s.PRs == nil || s.PRs[prNumber] == nil {
+		return RepoPRStatus{}, false
+	}
+	return *s.PRs[prNumber], true
+}
+
+// HoldSHAEvent holds one SHA-only event until its SHA is indexed. Beyond
+// MaxHeldSHAEvents the oldest held event is evicted and returned so the
+// caller can log the drop.
+func (s *RepoState) HoldSHAEvent(kind string, ev SHAEvent) (HeldSHAEvent, []HeldSHAEvent) {
+	if s == nil {
+		return HeldSHAEvent{}, nil
+	}
+	ev.SHA = normalizeIndexSHA(ev.SHA)
+	held := HeldSHAEvent{ID: s.nextSeq(), Kind: kind, Event: ev}
+	s.Held = append(s.Held, held)
+	var evicted []HeldSHAEvent
+	if over := len(s.Held) - MaxHeldSHAEvents; over > 0 {
+		evicted = append(evicted, s.Held[:over]...)
+		s.Held = append([]HeldSHAEvent(nil), s.Held[over:]...)
+	}
+	return held, evicted
+}
+
+func (s *RepoState) hasHeld(sha string) bool {
+	return slices.ContainsFunc(s.Held, func(h HeldSHAEvent) bool { return h.Event.SHA == sha })
+}
+
+// TakeHeld removes and returns the held events for one SHA, oldest first.
+func (s *RepoState) TakeHeld(sha string) []HeldSHAEvent {
+	clean := normalizeIndexSHA(sha)
+	if s == nil || clean == "" {
+		return nil
+	}
+	var taken, kept []HeldSHAEvent
+	for _, h := range s.Held {
+		if h.Event.SHA == clean {
+			taken = append(taken, h)
+		} else {
+			kept = append(kept, h)
+		}
+	}
+	if len(taken) == 0 {
+		return nil
+	}
+	s.Held = kept
+	return taken
+}
+
+// ExpireHeld drops one held event by ID. Returns the dropped event and
+// true when it was still held; a replayed or evicted ID reports false.
+func (s *RepoState) ExpireHeld(id uint64) (HeldSHAEvent, bool) {
+	if s == nil {
+		return HeldSHAEvent{}, false
+	}
+	for i, h := range s.Held {
+		if h.ID == id {
+			s.Held = append(s.Held[:i:i], s.Held[i+1:]...)
+			return h, true
+		}
+	}
+	return HeldSHAEvent{}, false
 }

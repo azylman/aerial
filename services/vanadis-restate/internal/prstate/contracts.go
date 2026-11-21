@@ -1,11 +1,15 @@
 // Package prstate freezes the Restate Virtual Object contracts for synapse PR
 // lifecycle state: PRObject (key repo#prNumber) is the only writer/authority
-// for per-PR state, RepoObject (key repo) holds only the bounded main-push
-// index, dispatched-SHA tombstones, and fan-out sends.
+// for per-PR state, RepoObject (key repo) holds only repo-level state: the
+// bounded main-push index, dispatched-SHA tombstones, the SHA->PR routing
+// index with open/deploying sets that PRObject feeds, held SHA-only events,
+// and fan-out sends. The two objects talk only through one-way sends.
 //
 // Authority invariants frozen here:
-//   - Postgres pr_registry is a read-only projection + SHA lookup index.
-//     Routing may use it; authority may not.
+//   - Postgres pr_registry is a read-only projection; authority never reads
+//     it. SHA->PR routing uses the RepoObject durable index, never the table.
+//   - PRObject and RepoObject exchange only one-way sends, never
+//     request-response between exclusive handlers.
 //   - Every external effect runs as a journaled step keyed by EffectKey;
 //     replays return the recorded result, never re-fire.
 //   - Cross-object sends carry head or merge SHA; handlers drop stale events.
@@ -27,6 +31,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -237,6 +242,9 @@ type PREvent struct {
 	Unmanaged      bool         `json:"unmanaged"`
 	BuildID        string       `json:"build_id"`
 	EffectsOwner   EffectsOwner `json:"effects_owner,omitempty"`
+	// Kustomization names the Flux Kustomization a forwarded
+	// kustomization status observed; empty for every other event.
+	Kustomization string `json:"kustomization,omitempty"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
@@ -250,6 +258,117 @@ type RepoEvent struct {
 	PRNumber     int          `json:"pr_number"`
 	HeadSHA      string       `json:"head_sha"`
 	EffectsOwner EffectsOwner `json:"effects_owner,omitempty"`
+	// Kustomization names the Flux Kustomization a status event observed.
+	Kustomization string `json:"kustomization,omitempty"`
+}
+
+// PRObject handler names RepoObject targets with one-way sends.
+const (
+	PRHandlerCheckFailed         = "HandleCheckFailed"
+	PRHandlerCheckPassed         = "HandleCheckPassed"
+	PRHandlerCheckRerunRequested = "HandleCheckRerunRequested"
+	PRHandlerCollaboratorAlert   = "HandleCollaboratorAlert"
+	PRHandlerMerged              = "HandleMerged"
+	PRHandlerRolloutProgress     = "HandleRolloutProgress"
+	PRHandlerMainAdvanced        = "HandleMainAdvanced"
+)
+
+// RepoObject handler names PRObject and RepoObject itself target with
+// one-way (optionally delayed) sends.
+const (
+	RepoHandlerPRIndex    = "HandlePRIndex"
+	RepoHandlerHeldReplay = "HandleHeldReplay"
+	RepoHandlerHeldExpiry = "HandleHeldExpiry"
+)
+
+// SHA-only event kinds RepoObject routes through its SHA index.
+const (
+	SHAKindCheckRun    = "check_run"
+	SHAKindWorkflowRun = "workflow_run"
+	SHAKindPush        = "push"
+	SHAKindImageReady  = "image_ready"
+)
+
+// shaRouteHandlers is the per-kind allowlist of PRObject handlers a SHA-only
+// event may target. Only state-mutating handlers that are safe as one-way
+// sends appear; verdict handlers need request-response and never route.
+var shaRouteHandlers = map[string]map[string]bool{
+	SHAKindCheckRun:    {PRHandlerCheckFailed: true, PRHandlerCheckPassed: true, PRHandlerCheckRerunRequested: true, PRHandlerCollaboratorAlert: true},
+	SHAKindWorkflowRun: {PRHandlerCheckFailed: true, PRHandlerCheckPassed: true, PRHandlerCheckRerunRequested: true, PRHandlerCollaboratorAlert: true},
+	SHAKindPush:        {PRHandlerMerged: true, PRHandlerRolloutProgress: true},
+	SHAKindImageReady:  {PRHandlerRolloutProgress: true},
+}
+
+// IsSHARouteAllowed reports whether a SHA-only event of kind may target the
+// PRObject handler.
+func IsSHARouteAllowed(kind, handler string) bool {
+	return shaRouteHandlers[kind][handler]
+}
+
+// Held SHA-only event timing. A miss is held until its SHA is indexed (a
+// squash-merge push often lands before pull_request.closed carries the
+// merge SHA) and expires after HeldSHAEventMaxAge via a delayed self-send.
+// Indexing a held SHA schedules the replay as its own invocation after
+// HeldReplayDelay. Both delays are data for Restate delayed sends, never
+// slept on.
+const (
+	HeldSHAEventMaxAge = 30 * time.Minute
+	HeldReplayDelay    = time.Second
+)
+
+// SHAEvent is the RepoObject payload for an event that carries only a
+// commit SHA. RepoObject resolves the SHA to a PR and forwards Event to the
+// PRObject Handler with the PR number (and branch, when Event has none)
+// filled in. Event keeps the synapse effects_owner stamp untouched.
+type SHAEvent struct {
+	Repo    string  `json:"repo"`
+	SHA     string  `json:"sha"`
+	Handler string  `json:"handler"`
+	Event   PREvent `json:"event"`
+}
+
+// PR index lifecycle ops carried by PRIndexEvent.
+const (
+	IndexActive    = "active"
+	IndexMerged    = "merged"
+	IndexClosed    = "closed"
+	IndexDeploying = "deploying"
+	IndexDeployed  = "deployed"
+)
+
+// PRIndexEvent is the one-way update PRObject sends RepoObject after a state
+// commit that changes what RepoObject routes on: head or merge SHA, reopen
+// epoch, terminal state, or deploy status.
+type PRIndexEvent struct {
+	Repo        string `json:"repo"`
+	PRNumber    int    `json:"pr_number"`
+	Branch      string `json:"branch,omitempty"`
+	HeadSHA     string `json:"head_sha,omitempty"`
+	MergeSHA    string `json:"merge_sha,omitempty"`
+	ReopenEpoch uint64 `json:"reopen_epoch"`
+	Generation  uint64 `json:"generation"`
+	Lifecycle   string `json:"lifecycle"`
+}
+
+// HeldReplayRequest is the delayed RepoObject self-send that replays held
+// events once their SHA is indexed.
+type HeldReplayRequest struct {
+	SHA string `json:"sha"`
+}
+
+// HeldExpiryRequest is the delayed RepoObject self-send that drops one held
+// event if it is still waiting.
+type HeldExpiryRequest struct {
+	ID uint64 `json:"id"`
+}
+
+// SHARouteOutcome reports what RepoObject did with one SHA-only event.
+type SHARouteOutcome struct {
+	Forwarded bool
+	PRNumber  int
+	Held      bool
+	HeldID    uint64
+	Evicted   []HeldSHAEvent
 }
 
 // UnmarshalJSON decodes the wire payload and normalizes EffectsOwner, so
@@ -297,14 +416,20 @@ type PRObject interface {
 	HandleDeployDispatched(ctx context.Context, ev PREvent) (DeployDispatchDecision, error)
 	HandleDeploySuccessPublished(ctx context.Context, ev PREvent) (DeployPublishedOutcome, error)
 	HandleKustomizationRequested(ctx context.Context, ev PREvent) error
+	HandleMainAdvanced(ctx context.Context, ev PREvent) error
 }
 
 // RepoObject is the frozen repo handler surface: main-push index,
-// dispatched-SHA tombstones, fan-out sends, and durable SHA resolution.
+// dispatched-SHA tombstones, fan-out sends, the PRObject-fed routing index,
+// SHA-only event routing with held replays, and durable SHA resolution.
 type RepoObject interface {
 	HandleMainPush(ctx context.Context, ev RepoEvent) error
 	HandleFanout(ctx context.Context, ev RepoEvent) error
 	HandleKustomizationStatus(ctx context.Context, ev RepoEvent) error
+	HandlePRIndex(ctx context.Context, ev PRIndexEvent) error
+	RouteBySHA(ctx context.Context, kind string, ev SHAEvent) (SHARouteOutcome, error)
+	ReplayHeld(ctx context.Context, repo, sha string) error
+	ExpireHeld(ctx context.Context, repo string, id uint64) (bool, error)
 	ResolvePRBySHA(ctx context.Context, repo, sha string) (int, string, bool)
 }
 
@@ -348,6 +473,8 @@ func (PRObjectStub) HandleKustomizationRequested(context.Context, PREvent) error
 	return nil
 }
 
+func (PRObjectStub) HandleMainAdvanced(context.Context, PREvent) error { return nil }
+
 // RepoObjectStub is the empty registered handler stub for RepoObject.
 type RepoObjectStub struct{}
 
@@ -357,6 +484,15 @@ var _ RepoObject = RepoObjectStub{}
 func (RepoObjectStub) HandleMainPush(context.Context, RepoEvent) error            { return nil }
 func (RepoObjectStub) HandleFanout(context.Context, RepoEvent) error              { return nil }
 func (RepoObjectStub) HandleKustomizationStatus(context.Context, RepoEvent) error { return nil }
+func (RepoObjectStub) HandlePRIndex(context.Context, PRIndexEvent) error          { return nil }
+func (RepoObjectStub) RouteBySHA(context.Context, string, SHAEvent) (SHARouteOutcome, error) {
+	return SHARouteOutcome{}, nil
+}
+func (RepoObjectStub) ReplayHeld(context.Context, string, string) error { return nil }
+func (RepoObjectStub) ExpireHeld(context.Context, string, uint64) (bool, error) {
+	return false, nil
+}
+
 func (RepoObjectStub) ResolvePRBySHA(context.Context, string, string) (int, string, bool) {
 	return 0, "", false
 }

@@ -985,37 +985,6 @@ func TestRepoStateMiscSlots(t *testing.T) {
 	}
 }
 
-func TestRepoStateResolvePRBySHA(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		entries []SHAEntry
-		repo    string
-		sha     string
-		wantPR  int
-		wantBr  string
-		wantOK  bool
-	}{
-		{name: "resolves exact sha", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 101, Branch: "feat/x", UpdatedAt: 1}}, repo: "aerial", sha: "abc123", wantPR: 101, wantBr: "feat/x", wantOK: true},
-		{name: "latest updated_at wins ambiguity", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 101, Branch: "feat/old", UpdatedAt: 1}, {Repo: "azylman/aerial", SHA: "abc123", PRNumber: 102, Branch: "feat/new", UpdatedAt: 2}}, repo: "aerial", sha: "abc123", wantPR: 102, wantBr: "feat/new", wantOK: true},
-		{name: "case insensitive sha", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 101, Branch: "feat/x", UpdatedAt: 1}}, repo: "aerial", sha: "ABC123", wantPR: 101, wantBr: "feat/x", wantOK: true},
-		{name: "unknown sha misses", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 101, Branch: "feat/x", UpdatedAt: 1}}, repo: "aerial", sha: "zzz999", wantPR: 0, wantBr: "", wantOK: false},
-		{name: "zero pr number misses", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 0, Branch: "feat/x", UpdatedAt: 1}}, repo: "aerial", sha: "abc123", wantPR: 0, wantBr: "", wantOK: false},
-		{name: "empty index misses", entries: nil, repo: "aerial", sha: "abc123", wantPR: 0, wantBr: "", wantOK: false},
-		{name: "zero sha misses", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 101, Branch: "feat/x", UpdatedAt: 1}}, repo: "aerial", sha: "0000000", wantPR: 0, wantBr: "", wantOK: false},
-		{name: "other repo misses", entries: []SHAEntry{{Repo: "azylman/aerial", SHA: "abc123", PRNumber: 101, Branch: "feat/x", UpdatedAt: 1}}, repo: "mirrormere", sha: "abc123", wantPR: 0, wantBr: "", wantOK: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			pr, br, ok := ResolvePRBySHA(tc.entries, tc.repo, tc.sha)
-			if pr != tc.wantPR || br != tc.wantBr || ok != tc.wantOK {
-				t.Fatalf("ResolvePRBySHA = (%d,%q,%v), want (%d,%q,%v)", pr, br, ok, tc.wantPR, tc.wantBr, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestPRState_ClaimOwner(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -291,15 +291,19 @@ func TestBindRestateServices(t *testing.T) {
 			for _, want := range []string{tc.wantBuild, tc.wantRouter, tc.wantPR, tc.wantRepo} {
 				require.Contains(t, byName, want)
 			}
-			require.Len(t, byName[tc.wantPR], 16)
+			require.Len(t, byName[tc.wantPR], 17)
 			require.True(t, byName[tc.wantPR]["HandleCheckFailed"])
 			require.True(t, byName[tc.wantPR]["HandleDeploySuccessPublished"])
 			require.True(t, byName[tc.wantPR]["HandleConflictDetected"])
 			require.True(t, byName[tc.wantPR]["HandleConflictPublished"])
 			require.True(t, byName[tc.wantPR]["HandleCIRecovery"])
 			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantPR])
-			require.Len(t, byName[tc.wantRepo], 4)
+			require.True(t, byName[tc.wantPR]["HandleMainAdvanced"])
+			require.Len(t, byName[tc.wantRepo], 11)
 			require.True(t, byName[tc.wantRepo]["ResolvePRBySHA"])
+			require.True(t, byName[tc.wantRepo]["HandlePRIndex"])
+			require.True(t, byName[tc.wantRepo]["HandleHeldReplay"])
+			require.True(t, byName[tc.wantRepo]["HandleCheckRunBySHA"])
 			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantRepo])
 		})
 	}

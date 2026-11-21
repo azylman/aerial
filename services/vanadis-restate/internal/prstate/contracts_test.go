@@ -127,6 +127,16 @@ func stubCIRecoveryErr(ctx context.Context, ev PREvent) error {
 	return err
 }
 
+func stubRouteBySHAErr(ctx context.Context) error {
+	_, err := RepoObjectStub{}.RouteBySHA(ctx, SHAKindCheckRun, SHAEvent{})
+	return err
+}
+
+func stubExpireHeldErr(ctx context.Context) error {
+	_, err := RepoObjectStub{}.ExpireHeld(ctx, "aerial", 1)
+	return err
+}
+
 func TestPRStateStubHandlersNoop(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -155,6 +165,11 @@ func TestPRStateStubHandlersNoop(t *testing.T) {
 		{name: "repo main push", got: RepoObjectStub{}.HandleMainPush(ctx, rev)},
 		{name: "repo fanout", got: RepoObjectStub{}.HandleFanout(ctx, rev)},
 		{name: "repo kustomization status", got: RepoObjectStub{}.HandleKustomizationStatus(ctx, rev)},
+		{name: "main advanced", got: PRObjectStub{}.HandleMainAdvanced(ctx, ev)},
+		{name: "repo pr index", got: RepoObjectStub{}.HandlePRIndex(ctx, PRIndexEvent{})},
+		{name: "repo held replay", got: RepoObjectStub{}.ReplayHeld(ctx, "aerial", "abc123")},
+		{name: "repo route by sha", got: stubRouteBySHAErr(ctx)},
+		{name: "repo held expiry", got: stubExpireHeldErr(ctx)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
