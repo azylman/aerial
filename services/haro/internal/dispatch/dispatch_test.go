@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -400,27 +402,28 @@ func TestPostBrainJSON_RequestErrors(t *testing.T) {
 	}
 }
 
-func TestPostRestateJSON_RequestErrors(t *testing.T) {
+func TestRestateRequestError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name            string
-		dispatcher      *HTTPPromptDispatcher
-		endpoint        string
-		req             any
-		wantErrContains string
+		name    string
+		err     error
+		wantErr string
 	}{
-		{name: "nil dispatcher", dispatcher: nil, endpoint: "http://restate:8080", req: map[string]any{"p": 1}, wantErrContains: "dispatcher is nil"},
-		{name: "invalid json payload", dispatcher: &HTTPPromptDispatcher{}, endpoint: "http://restate:8080", req: make(chan int), wantErrContains: "failed to marshal"},
-		{name: "request build fails", dispatcher: &HTTPPromptDispatcher{}, endpoint: "http://127.0.0.1:1\nbad", req: map[string]any{"p": 1}, wantErrContains: "failed to create http request"},
-		{name: "network do fails", dispatcher: &HTTPPromptDispatcher{httpClient: &http.Client{Transport: failBodyRoundTripper{}}}, endpoint: "http://restate:8080", req: map[string]any{"p": 1}, wantErrContains: "failed to read response body"},
+		{name: "http error with message", err: &restateingress.HTTPError{Status: 409, Message: "conflict", Body: `{"message":"conflict"}`}, wantErr: "restate dispatch error (409): conflict"},
+		{name: "http error without message", err: &restateingress.HTTPError{Status: 502, Body: "bad gateway"}, wantErr: "restate dispatch returned HTTP 502: bad gateway"},
+		{name: "url parse error", err: &url.Error{Op: "parse", URL: "http://bad host", Err: errors.New("invalid character in host name")}, wantErr: `failed to create http request: parse "http://bad host": invalid character in host name`},
+		{name: "transport error", err: &url.Error{Op: "Post", URL: "http://restate:8080", Err: errors.New("connection refused")}, wantErr: `dispatch failed: Post "http://restate:8080": connection refused`},
+		{name: "read error", err: errors.New("simulated read failure"), wantErr: "failed to read response body: simulated read failure"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := tc.dispatcher.postRestateJSON(context.Background(), tc.endpoint, "idemp-key", "restate op", tc.req)
-			if err == nil {
-				t.Fatal("postRestateJSON() expected error, got nil")
+			t.Parallel()
+			got := restateRequestError("dispatch", tc.err)
+			if got.Error() != tc.wantErr {
+				t.Errorf("restateRequestError() = %q, want %q", got.Error(), tc.wantErr)
 			}
-			if !strings.Contains(err.Error(), tc.wantErrContains) {
-				t.Errorf("postRestateJSON() err = %v, want containing %q", err, tc.wantErrContains)
+			if !errors.Is(got, tc.err) && !strings.HasPrefix(tc.wantErr, "restate ") {
+				t.Errorf("restateRequestError() does not wrap %v", tc.err)
 			}
 		})
 	}

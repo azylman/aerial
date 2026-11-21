@@ -17,48 +17,21 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
-const (
-	defaultAgentName = "aerial"
-	statusAccepted   = "accepted"
-)
-
-func isSafeAgentChar(c rune) bool {
-	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
-}
-
-// NormalizeAgentName trims and lowercases an agent name, ensuring it contains only safe identifier characters.
-func NormalizeAgentName(agent string) string {
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" {
-		return ""
-	}
-	for _, c := range clean {
-		if !isSafeAgentChar(c) {
-			return defaultAgentName
-		}
-	}
-	return clean
-}
+const statusAccepted = "accepted"
 
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
-func ThreadSessionServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == defaultAgentName {
-		return "ThreadSession"
-	}
-	return "ThreadSession-" + name
+func ThreadSessionServiceName(name string) string {
+	return agent.ScopedServiceName("ThreadSession", name)
 }
 
 // DispatchSessionServiceName returns the Restate service name for DispatchSession Virtual Objects.
-func DispatchSessionServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == defaultAgentName {
-		return "DispatchSession"
-	}
-	return "DispatchSession-" + name
+func DispatchSessionServiceName(name string) string {
+	return agent.ScopedServiceName("DispatchSession", name)
 }
 
 type PromptDispatchRequest struct {
@@ -124,7 +97,7 @@ func NewHTTPPromptDispatcher(brainURL string, restateOpts ...string) *HTTPPrompt
 		agentName = strings.TrimSpace(restateOpts[1])
 	}
 	if agentName == "" {
-		agentName = defaultAgentName
+		agentName = agent.Default
 	}
 	return &HTTPPromptDispatcher{
 		brainURL:   trimmed,
@@ -214,63 +187,21 @@ func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatch
 	return dispatchResp, nil
 }
 
-func parseRestateHTTPError(opLabel string, statusCode int, respBody []byte) error {
-	var errResp struct {
-		Message string `json:"message"`
-		Error   string `json:"error"`
-	}
-	if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil {
-		if msg := strings.TrimSpace(errResp.Message); msg != "" {
-			return fmt.Errorf("restate %s error (%d): %s", opLabel, statusCode, msg)
+// restateRequestError keeps haro's historical error text for failed Restate ingress posts.
+func restateRequestError(opLabel string, err error) error {
+	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		if httpErr.Message != "" {
+			return fmt.Errorf("restate %s error (%d): %s", opLabel, httpErr.Status, httpErr.Message)
 		}
-		if errStr := strings.TrimSpace(errResp.Error); errStr != "" {
-			return fmt.Errorf("restate %s error (%d): %s", opLabel, statusCode, errStr)
+		return fmt.Errorf("restate %s returned HTTP %d: %s", opLabel, httpErr.Status, httpErr.Body)
+	}
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+		if urlErr.Op == "parse" {
+			return fmt.Errorf("failed to create http request: %w", err)
 		}
+		return fmt.Errorf("%s failed: %w", opLabel, err)
 	}
-	return fmt.Errorf("restate %s returned HTTP %d: %s", opLabel, statusCode, string(respBody))
-}
-
-func (d *HTTPPromptDispatcher) postRestateJSON(ctx context.Context, endpoint, idempotencyKey, opLabel string, req any) ([]byte, error) {
-	if d == nil {
-		return nil, fmt.Errorf("dispatcher is nil")
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal %s request: %w", opLabel, err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create http request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if key := strings.TrimSpace(idempotencyKey); key != "" {
-		httpReq.Header.Set("Idempotency-Key", key)
-	}
-
-	client := d.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("%s failed: %w", opLabel, err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseRestateHTTPError(opLabel, resp.StatusCode, respBody)
-	}
-
-	return respBody, nil
+	return fmt.Errorf("failed to read response body: %w", err)
 }
 
 type restateEnvelopeFields struct {
@@ -317,14 +248,14 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 		msgID = uuid.New().String()
 	}
 
-	agent := req.Agent
-	if strings.TrimSpace(agent) == "" {
-		agent = d.agentName
+	agentName := req.Agent
+	if strings.TrimSpace(agentName) == "" {
+		agentName = d.agentName
 	}
-	if strings.TrimSpace(agent) == "" {
-		agent = defaultAgentName
+	if strings.TrimSpace(agentName) == "" {
+		agentName = agent.Default
 	}
-	svc := ThreadSessionServiceName(agent)
+	svc := ThreadSessionServiceName(agentName)
 	endpoint := d.restateURL + "/" + svc + "/" + url.PathEscape(channelID) + "/Enqueue"
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
 
@@ -332,9 +263,9 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 	payload.ChannelID = channelID
 	payload.MessageID = msgID
 
-	respBytes, err := d.postRestateJSON(ctx, endpoint, idempotencyKey, "prompt dispatch", payload)
+	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, idempotencyKey, payload, 0)
 	if err != nil {
-		return PromptDispatchResponse{}, err
+		return PromptDispatchResponse{}, restateRequestError("prompt dispatch", err)
 	}
 
 	fields, err := parseRestateEnvelope(respBytes)
@@ -374,19 +305,19 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req Dispatch
 		sessionKey = "dispatch-" + dispatchID
 	}
 
-	agent := req.Agent
-	if strings.TrimSpace(agent) == "" {
-		agent = d.agentName
+	agentName := req.Agent
+	if strings.TrimSpace(agentName) == "" {
+		agentName = d.agentName
 	}
-	if strings.TrimSpace(agent) == "" {
-		agent = defaultAgentName
+	if strings.TrimSpace(agentName) == "" {
+		agentName = agent.Default
 	}
-	svc := DispatchSessionServiceName(agent)
+	svc := DispatchSessionServiceName(agentName)
 	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", d.restateURL, svc, url.PathEscape(sessionKey))
 
 	raw := map[string]any{
 		"id":             dispatchID,
-		"agent":          agent,
+		"agent":          agentName,
 		"source":         req.Source,
 		"session_id":     req.SessionID,
 		"target_id":      req.TargetID,
@@ -395,9 +326,9 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req Dispatch
 		"skip_if_active": req.SkipIfActive,
 	}
 
-	respBytes, err := d.postRestateJSON(ctx, endpoint, dispatchID, "dispatch", raw)
+	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, dispatchID, raw, 0)
 	if err != nil {
-		return DispatchResponse{}, err
+		return DispatchResponse{}, restateRequestError("dispatch", err)
 	}
 
 	fields, err := parseRestateEnvelope(respBytes)
