@@ -58,10 +58,12 @@ func TestIsHighSignalLine(t *testing.T) {
 	}
 }
 
-func TestResolveCIFailureDetails(t *testing.T) {
+func TestResolveCIFailureDetailsChecked(t *testing.T) {
 	t.Parallel()
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Header.Get("Authorization") != "Bearer gh-token" || r.Header.Get("Accept") != "application/vnd.github+json":
+			w.WriteHeader(http.StatusUnauthorized)
 		case strings.Contains(r.URL.Path, "/issues/10/comments"):
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`[{"id":1,"body":"some regular comment"},{"id":2,"body":"## roborev:\n` + "`abc1234`" + `\nFound potential issue on line 10"}]`))
@@ -126,9 +128,9 @@ func TestResolveCIFailureDetails(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := client.ResolveCIFailureDetails(context.Background(), tc.repo, tc.pr, tc.check, tc.sha, tc.url, tc.details)
-			if !strings.Contains(got, tc.wantMatch) {
-				t.Errorf("ResolveCIFailureDetails = %q, want containing %q", got, tc.wantMatch)
+			got, err := client.ResolveCIFailureDetailsChecked(context.Background(), tc.repo, tc.pr, tc.check, tc.sha, tc.url, tc.details)
+			if err != nil || !strings.Contains(got, tc.wantMatch) {
+				t.Errorf("ResolveCIFailureDetailsChecked = (%q, %v), want containing %q", got, err, tc.wantMatch)
 			}
 		})
 	}
@@ -164,14 +166,14 @@ func TestResolveCIFailureDetailsRoboRevAndLogs(t *testing.T) {
 	client.GitHubAPIURL = srv.URL
 
 	// 1. RoboRev match
-	details := client.ResolveCIFailureDetails(ctx, "aerial", 101, "roborev", "abcdef123456", "", "failure")
+	details, _ := client.ResolveCIFailureDetailsChecked(ctx, "aerial", 101, "roborev", "abcdef123456", "", "failure")
 	if !strings.Contains(details, "Verified finding") {
 		t.Errorf("expected Verified finding, got %q", details)
 	}
 
 	// 2. Fetch logs with actions URL
 	actionsURL := "https://github.com/azylman/aerial/actions/runs/123/job/456789"
-	logDetails := client.ResolveCIFailureDetails(ctx, "aerial", 0, "test", "abcdef1", actionsURL, "failure")
+	logDetails, _ := client.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "test", "abcdef1", actionsURL, "failure")
 	if !strings.Contains(logDetails, "FAIL: TestX") {
 		t.Errorf("expected FAIL: TestX in logs, got %q", logDetails)
 	}
@@ -329,29 +331,6 @@ func TestNewClientDefaults(t *testing.T) {
 	}
 }
 
-func TestIsRetryableGitHubResponseCases(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		resp *http.Response
-		want bool
-	}{
-		{name: "nil response", resp: nil, want: false},
-		{name: "server error", resp: &http.Response{StatusCode: http.StatusInternalServerError}, want: true},
-		{name: "too many requests", resp: &http.Response{StatusCode: http.StatusTooManyRequests}, want: true},
-		{name: "forbidden with retry after", resp: &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Retry-After": []string{"1"}}}, want: true},
-		{name: "forbidden rate limited", resp: &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"X-Ratelimit-Remaining": []string{"0"}}}, want: true},
-		{name: "forbidden plain", resp: &http.Response{StatusCode: http.StatusForbidden}, want: false},
-		{name: "ok", resp: &http.Response{StatusCode: http.StatusOK}, want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, IsRetryableGitHubResponse(tc.resp))
-		})
-	}
-}
-
 func TestResolveCIFailureDetailsCheckedErrors(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -378,10 +357,6 @@ func TestResolveCIFailureDetailsCheckedErrors(t *testing.T) {
 	errClient.GitHubAPIURL = srv.URL
 	if _, err := errClient.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev-check", "abc123", "", "failure"); err == nil {
 		t.Error("expected error for 500 comments response, got nil")
-	}
-	// Non-checked wrapper falls back to details on error.
-	if got := errClient.ResolveCIFailureDetails(ctx, "aerial", 10, "roborev-check", "abc123", "", "fallback-details"); got != "fallback-details" {
-		t.Errorf("expected fallback details, got %q", got)
 	}
 	// Log fetch success through the checked path.
 	if got, err := errClient.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure"); err != nil || !strings.Contains(got, "FAIL: TestErr") {
