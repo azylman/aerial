@@ -68,6 +68,18 @@ type BuildObjectState struct {
 	Build            VanadisBuild    `json:"build"`
 	Chunks           []VanadisChunk  `json:"chunks"`
 	Launched         map[string]bool `json:"launched,omitempty"`
+	// DispatchDeferrals tracks launches eri keeps answering skipped_active,
+	// keyed by launch key. Only the journaled reconcile step output writes it.
+	DispatchDeferrals map[string]DispatchDeferral `json:"dispatch_deferrals,omitempty"`
+	// DeferralReconcileSeq identifies the one pending delayed Reconcile that
+	// retries deferred launches; zero means none is pending.
+	DeferralReconcileSeq int `json:"deferral_reconcile_seq,omitempty"`
+}
+
+// DispatchDeferral records continuous skipped_active deferral of one launch.
+type DispatchDeferral struct {
+	FirstDeferredAt time.Time `json:"first_deferred_at"`
+	Count           int       `json:"count"`
 }
 
 // FailChunkRequest carries the chunk and reason for failing a chunk.

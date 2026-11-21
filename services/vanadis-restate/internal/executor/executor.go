@@ -116,7 +116,7 @@ func (e *Executor) FormatChunkPrompt(build model.VanadisBuild, chunks []model.Va
 	return prompt.FormatChunkPromptWithShareRoot(build, chunks, activeIdx, root)
 }
 
-// ExecuteLaunchChunk reserves the chunk in PostgreSQL and dispatches it directly to Eri via POST /dispatch.
+// ExecuteLaunchChunk dispatches the chunk directly to Eri and reserves it in PostgreSQL once Eri accepts.
 // It explicitly DOES NOT publish to aerial.jobs.vanadis.chunk.
 func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, activeIdx int, notice string) error {
 	if e == nil || e.EriClient == nil {
@@ -126,17 +126,6 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 		return fmt.Errorf("chunk index %d out of bounds", activeIdx)
 	}
 	chunk := chunks[activeIdx]
-
-	var reserveErr error
-	if st != nil {
-		reserveErr = st.ReserveChunkForLaunch(ctx, chunk.ID)
-	}
-	if reserveErr != nil && chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
-		return fmt.Errorf("reserve action generation: %w", reserveErr)
-	}
-	if reserveErr != nil && !errors.Is(reserveErr, store.ErrChunkNotFound) {
-		slog.WarnContext(ctx, "[vanadis-restate] failed reserving chunk for launch", "chunk_id", chunk.ID, "error", reserveErr)
-	}
 
 	chunkPrompt, err := e.FormatChunkPrompt(build, chunks, activeIdx)
 	if err != nil {
@@ -160,7 +149,22 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 		SkipIfActive:   true,
 	}
 
-	return e.EriClient.DispatchAccepted(ctx, req)
+	// Reserve only after eri accepts: a deferred (skipped_active) or failed
+	// launch leaves the chunk in its pre-launch status.
+	if err := e.EriClient.DispatchAccepted(ctx, req); err != nil {
+		return err
+	}
+	var reserveErr error
+	if st != nil {
+		reserveErr = st.ReserveChunkForLaunch(ctx, chunk.ID)
+	}
+	if reserveErr != nil && chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
+		return fmt.Errorf("reserve action generation: %w", reserveErr)
+	}
+	if reserveErr != nil && !errors.Is(reserveErr, store.ErrChunkNotFound) {
+		slog.WarnContext(ctx, "[vanadis-restate] failed reserving chunk for launch", "chunk_id", chunk.ID, "error", reserveErr)
+	}
+	return nil
 }
 
 func IsGateAggregatorCheck(checkName string) bool {
