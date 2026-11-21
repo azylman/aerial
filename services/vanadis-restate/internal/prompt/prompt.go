@@ -72,6 +72,36 @@ The original chunk instructions follow.
 %s`, chunkID, chunkID, chunkID, chunkID, chunkPrompt)
 }
 
+// actionVerdictContract states how an action chunk finishes. Both the launch
+// prompt and every automatic resume carry it so a chunk launched under an older
+// prompt learns complete_chunk on its first resume.
+func actionVerdictContract(chunkID, dispatchID string, maxResumes int) string {
+	return fmt.Sprintf(`=== Action Chunk Verdict Contract ===
+- This chunk completes ONLY when you call complete_chunk(chunk_id=%q, dispatch_id=%q, summary="<PASS evidence>"). Ending a turn without it never completes the chunk: Vanadis resumes it automatically (up to %d times) and then fails it as RESUMABLE.
+- Turns stop at about 1h. Wait at most 45 min per turn on anything (deploys, rollouts, backfills). If work remains, write a checkpoint (what is done, what is next) to /tmp/vanadis-%s/checkpoint.md, summarize it in your final message and end the turn; the next automatic resume continues from that checkpoint.
+- A repair PR (/share/aerial/scripts/aerial-pr.sh submit "$SCRATCH_DIR" "<commit_msg>" --vanadis-chunk %s) is a step, not the verdict: after it deploys, re-verify live and then call complete_chunk.
+- For blockers outside this chunk's control, call fail_chunk(chunk_id=%q, dispatch_id=%q, reason="RESUMABLE: <blocker>"). Fix forward on test, lint or CI failures instead.
+`, chunkID, dispatchID, maxResumes, chunkID, chunkID, chunkID, dispatchID)
+}
+
+// FormatActionResumePrompt builds the self-contained prompt for automatic
+// resume k of an action chunk whose previous turn ended without a verdict. It
+// re-includes the full chunk prompt because sessions rotate.
+func FormatActionResumePrompt(chunk model.VanadisChunk, chunkPrompt string, k, maxResumes int) string {
+	chunkID := strings.TrimSpace(chunk.ID)
+	chunk.ID = chunkID
+	dispatchID := store.ActionResumeDispatchID(chunk, k)
+	return fmt.Sprintf(`[VANADIS AUTOMATIC RESUME %d/%d]
+Your previous turn for action chunk %s ended without calling complete_chunk. Dispatch ID for this turn: %s (use it, not the one in the original prompt, for complete_chunk and fail_chunk).
+
+Continue from your checkpoint (/tmp/vanadis-%s/checkpoint.md and your previous final message, if present); do not restart work that is already done and verified.
+
+%s
+The original chunk instructions follow.
+
+%s`, k, maxResumes, chunkID, dispatchID, chunkID, actionVerdictContract(chunkID, dispatchID, maxResumes), chunkPrompt)
+}
+
 // FormatConflictPrompt formats the conflict prompt when merge conflict is detected.
 func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
 	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
@@ -352,6 +382,13 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 		sb.WriteString("\n")
 	}
 
+	if isActionChunk {
+		sb.WriteString(actionVerdictContract(active.ID, model.ActionDispatchID(active), store.MaxActionResumes))
+		fmt.Fprintf(&sb, "\n=== Mandatory Execution Contract ===\n"+
+			"1. Execute chunk instructions directly in this turn.\n"+
+			"2. Finish only with complete_chunk(chunk_id=%q, dispatch_id=%q, summary=\"<PASS evidence>\").\n", active.ID, model.ActionDispatchID(active))
+		return sb.String(), nil
+	}
 	fmt.Fprintf(&sb, "=== Mandatory Execution Contract ===\n"+
 		"1. Execute chunk instructions directly in this turn.\n"+
 		"2. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`.\n", active.ID)

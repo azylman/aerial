@@ -173,6 +173,7 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 		{name: "missing retry identity", chunkID: "c1", dispatchID: "", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: false, NextChunkIndex: 1, BuildStatus: "running"}},
 		{name: "stale retry identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: false, NextChunkIndex: 1, BuildStatus: "running"}},
 		{name: "matching retry identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running"}},
+		{name: "matching resume identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-1-resume-3", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running"}},
 		{name: "mismatched first identity", chunkID: "c1", dispatchID: "wrong", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 0), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: false, NextChunkIndex: 1, BuildStatus: "running"}},
 		{name: "remaining count failure", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: errRow(errors.New("count unavailable"))}, wantErr: true},
 		{name: "completion commit failure", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(1), commitErr: errors.New("commit unavailable")}, wantErr: true},
@@ -247,6 +248,122 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 			}
 			if tc.wantFailed && (b.Status != "failed" || c.Status != "failed") {
 				t.Errorf("FailChunk statuses = build %q chunk %q, want failed/failed", b.Status, c.Status)
+			}
+		})
+	}
+}
+
+func TestActionResumeIndex(t *testing.T) {
+	t.Parallel()
+	gen1 := model.VanadisChunk{ID: "c1", StallNudges: 1}
+	tests := []struct {
+		name       string
+		chunk      model.VanadisChunk
+		dispatchID string
+		wantK      int
+		wantOK     bool
+	}{
+		{"launch id is resume zero", gen1, "vanadis-c1-turn-1", 0, true},
+		{"first resume", gen1, "vanadis-c1-turn-1-resume-1", 1, true},
+		{"last resume", gen1, "vanadis-c1-turn-1-resume-12", 12, true},
+		{"resume past cap rejected", gen1, "vanadis-c1-turn-1-resume-13", 0, false},
+		{"resume zero rejected", gen1, "vanadis-c1-turn-1-resume-0", 0, false},
+		{"padded ordinal rejected", gen1, "vanadis-c1-turn-1-resume-01", 0, false},
+		{"non numeric ordinal rejected", gen1, "vanadis-c1-turn-1-resume-x", 0, false},
+		{"older generation launch rejected", gen1, "vanadis-c1-turn-0", 0, false},
+		{"older generation resume rejected", gen1, "vanadis-c1-turn-0-resume-3", 0, false},
+		{"other chunk rejected", gen1, "vanadis-c2-turn-1-resume-1", 0, false},
+		{"no-pr resume rejected", gen1, "vanadis-c1-nopr-resume-1", 0, false},
+		{"empty id rejected", gen1, "", 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			k, ok := ActionResumeIndex(tc.chunk, tc.dispatchID)
+			if k != tc.wantK || ok != tc.wantOK {
+				t.Errorf("ActionResumeIndex(%q) = (%d, %v), want (%d, %v)", tc.dispatchID, k, ok, tc.wantK, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestActionResumeDispatchID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		chunk model.VanadisChunk
+		k     int
+		want  string
+	}{
+		{"first generation first resume", model.VanadisChunk{ID: "c1"}, 1, "vanadis-c1-turn-0-resume-1"},
+		{"retried generation last resume", model.VanadisChunk{ID: "c1", StallNudges: 2}, 12, "vanadis-c1-turn-2-resume-12"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ActionResumeDispatchID(tc.chunk, tc.k); got != tc.want {
+				t.Errorf("ActionResumeDispatchID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestActionCompletionAllowed(t *testing.T) {
+	t.Parallel()
+	running := model.VanadisChunk{ID: "c1", Mode: "action", Status: "running", StallNudges: 1}
+	tests := []struct {
+		name        string
+		chunk       model.VanadisChunk
+		buildStatus string
+		dispatchID  string
+		want        bool
+	}{
+		{"launch id accepted", running, "running", "vanadis-c1-turn-1", true},
+		{"current resume id accepted", running, "running", "vanadis-c1-turn-1-resume-5", true},
+		{"stale generation resume rejected", running, "running", "vanadis-c1-turn-0-resume-5", false},
+		{"resume past cap rejected", running, "running", "vanadis-c1-turn-1-resume-13", false},
+		{"empty id rejected after retry", running, "running", "", false},
+		{"empty id accepted on first generation", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running"}, "running", "", true},
+		{"pr chunk rejected", model.VanadisChunk{ID: "c1", Mode: "pr", Status: "running", StallNudges: 1}, "running", "vanadis-c1-turn-1", false},
+		{"attached pr rejected", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", false},
+		{"failed build rejected", running, "failed", "vanadis-c1-turn-1-resume-1", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ActionCompletionAllowed(tc.chunk, tc.buildStatus, tc.dispatchID); got != tc.want {
+				t.Errorf("ActionCompletionAllowed = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestActionFailureAllowed(t *testing.T) {
+	t.Parallel()
+	running := model.VanadisChunk{ID: "c1", Mode: "action", Status: "running", StallNudges: 1}
+	repair := model.VanadisChunk{ID: "c1", Mode: "action", Status: "pr_opened", PRNumber: 7, StallNudges: 1}
+	tests := []struct {
+		name        string
+		chunk       model.VanadisChunk
+		buildStatus string
+		dispatchID  string
+		want        bool
+	}{
+		{"running launch id accepted", running, "running", "vanadis-c1-turn-1", true},
+		{"running last resume accepted", running, "running", "vanadis-c1-turn-1-resume-12", true},
+		{"running stale resume rejected", running, "running", "vanadis-c1-turn-0-resume-12", false},
+		{"repair launch id accepted", repair, "running", "vanadis-c1-turn-1", true},
+		{"repair resume id accepted", repair, "running", "vanadis-c1-turn-1-resume-12", true},
+		{"repair ci remediation accepted", repair, "running", "vanadis-c1-cifail-abc-1", true},
+		{"repair stale resume rejected", repair, "running", "vanadis-c1-turn-0-resume-1", false},
+		{"deploying repair rejected", model.VanadisChunk{ID: "c1", Mode: "action", Status: "deploying", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", false},
+		{"repair on failed build rejected", repair, "failed", "vanadis-c1-turn-1-resume-1", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ActionFailureAllowed(tc.chunk, tc.buildStatus, tc.dispatchID); got != tc.want {
+				t.Errorf("ActionFailureAllowed = %v, want %v", got, tc.want)
 			}
 		})
 	}
