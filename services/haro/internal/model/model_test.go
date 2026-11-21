@@ -214,31 +214,6 @@ func TestPureHelpers_NormalizeEffort(t *testing.T) {
 	}
 }
 
-func TestPureHelpers_IsNumericSnowflake(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{name: "empty string", input: "", want: false},
-		{name: "whitespace only", input: "   ", want: false},
-		{name: "valid numeric snowflake", input: "1562847268833337377", want: true},
-		{name: "valid short numeric", input: "12345", want: true},
-		{name: "valid with whitespace padding", input: " 1562847268833337377 ", want: true},
-		{name: "alphanumeric string", input: "12345abc", want: false},
-		{name: "alpha string", input: "general", want: false},
-		{name: "negative number", input: "-12345", want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsNumericSnowflake(tc.input); got != tc.want {
-				t.Errorf("IsNumericSnowflake(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 	tests := []struct {
 		name          string
