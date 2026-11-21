@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -149,7 +150,7 @@ type TranscriptsIndexedEvent struct {
 
 // EffectiveAgent returns the active agent identifier, falling back to Stack or "aerial".
 func (e TranscriptsIndexedEvent) EffectiveAgent() string {
-	return firstNonEmpty(e.Agent, e.Stack, defaultAgent)
+	return strutil.FirstNonEmpty(e.Agent, e.Stack, defaultAgent)
 }
 
 // TurnCompletedEvent represents an agent conversation turn completion on aerial.turn.completed.
@@ -175,7 +176,7 @@ type CovenExtractJobArgs struct {
 
 // EffectiveAgent returns the active agent identifier, falling back to Stack or "aerial".
 func (a CovenExtractJobArgs) EffectiveAgent() string {
-	return firstNonEmpty(a.Agent, a.Stack, defaultAgent)
+	return strutil.FirstNonEmpty(a.Agent, a.Stack, defaultAgent)
 }
 
 // WidgetSyncJobArgs contains arguments for coalesced widget sync jobs.
@@ -259,15 +260,6 @@ func sanitizeToken(token string) string {
 		return unknownSubjectToken
 	}
 	return res
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // SubjectTranscriptsSteps returns the step-batch subject for a session's transcript.
@@ -713,7 +705,7 @@ func (b *JetStreamBus) EnsureCoreStreams(ctx context.Context) error {
 	}
 
 	for _, cfg := range configs {
-		if err := b.ensureStream(cfg); err != nil {
+		if err := b.EnsureStream(cfg); err != nil {
 			return fmt.Errorf("ensure stream %s: %w", cfg.Name, err)
 		}
 	}
@@ -754,7 +746,10 @@ func maxStreamBytes(desired, existing int64) int64 {
 	return desired
 }
 
-func (b *JetStreamBus) ensureStream(cfg *nats.StreamConfig) error {
+// EnsureStream creates the stream when it does not exist, or updates it with
+// mergeStreamLimits so a rollout never shrinks retention limits an earlier
+// release set.
+func (b *JetStreamBus) EnsureStream(cfg *nats.StreamConfig) error {
 	info, err := b.js.StreamInfo(cfg.Name)
 	if err == nil && info != nil {
 		_, err = b.js.UpdateStream(mergeStreamLimits(cfg, &info.Config))
