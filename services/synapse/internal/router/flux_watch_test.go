@@ -1273,7 +1273,7 @@ func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
 				TargetID: tc.targetID,
 				Metadata: tc.meta,
 			}
-			err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-core")
+			err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-core", nil)
 			assertExpectedErrorSubstring(t, err, tc.wantErrSub)
 			if tc.wantMarkCalls != 0 || strings.Contains(tc.name, "skips mark call") {
 				if got := len(reg.markKustomizationsCalls); got != tc.wantMarkCalls {

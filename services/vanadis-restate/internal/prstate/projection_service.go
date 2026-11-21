@@ -53,20 +53,24 @@ var (
 	})
 	projectionSupersededTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "prstate_projection_superseded_total",
-		Help: "Legacy pr_registry rows skipped by the shadow compare because head/merge SHA or status moved past the snapshot.",
+		Help: "Legacy pr_registry rows skipped by the shadow compare because head/merge SHA or status moved past the snapshot, or the row or PRObject state moved before a divergence was confirmed.",
 	})
 	projectionUntrackedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "prstate_projection_untracked_total",
 		Help: "Shadow compares of untracked PRs (no target thread) for which synapse also kept no pr_registry row.",
 	})
+	projectionRecheckedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "prstate_projection_rechecked_total",
+		Help: "First-pass shadow-compare divergences sent to a delayed confirming re-read before they count.",
+	})
 	projectionDivergenceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "prstate_projection_divergence_total",
-		Help: "Fields where the legacy pr_registry row diverged from the PRObject snapshot (field=row when the row is missing).",
+		Help: "Fields where the legacy pr_registry row diverged from the PRObject snapshot and the divergence persisted across a confirming re-read (field=row when the row is missing).",
 	}, []string{"field"})
 )
 
 func init() {
-	for _, c := range []prometheus.Collector{projectionWritesTotal, projectionComparedTotal, projectionSupersededTotal, projectionUntrackedTotal, projectionDivergenceTotal} {
+	for _, c := range []prometheus.Collector{projectionWritesTotal, projectionComparedTotal, projectionSupersededTotal, projectionUntrackedTotal, projectionRecheckedTotal, projectionDivergenceTotal} {
 		registerCollector(c)
 	}
 }
@@ -153,23 +157,45 @@ func (s *PRObjectService) Project(ctx restate.ObjectContext, _ ProjectRequest) e
 
 // CompareProjection is the shared, read-only shadow compare for legacy
 // events: it reads the row synapse wrote and records the verdict in metrics
-// and a [prstate-shadow] log line. Read failures are logged and dropped;
-// the compare is evidence, never authority.
-func (s *PRObjectService) CompareProjection(ctx restate.ObjectSharedContext, snap ProjectionSnapshot) error {
+// and a [prstate-shadow] log line. A first-pass divergence is not counted:
+// it schedules one delayed confirming re-read, which counts it only if the
+// row and the object's projected state both stood still (see
+// ResolveShadowCompare). Read failures are logged and dropped; the compare
+// is evidence, never authority. The handler is shared, so the delay never
+// holds the object lock.
+func (s *PRObjectService) CompareProjection(ctx restate.ObjectSharedContext, req ShadowCompareRequest) error {
+	snap := req.ProjectionSnapshot
 	if s.reader == nil || NormalizeRepo(snap.Repo) == "" || snap.PRNumber <= 0 {
 		return nil
 	}
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (ProjectionComparison, error) {
+	current := snap
+	if req.Confirm != nil {
+		st, err := restate.Get[*PRState](ctx, s.stateKey)
+		if err != nil {
+			return err
+		}
+		current = BuildProjection(st)
+	}
+	verdict, err := restate.Run(ctx, func(rc restate.RunContext) (ShadowVerdict, error) {
 		row, found, err := s.reader.LoadRegistryRow(rc, snap.Repo, snap.PRNumber)
 		if err != nil {
-			return ProjectionComparison{}, err
+			return ShadowVerdict{}, err
 		}
-		cmp := CompareProjection(snap, row, found)
-		recordComparison(rc, snap, cmp)
-		return cmp, nil
+		v := ResolveShadowCompare(req, row, found, current)
+		if v.Recheck != nil {
+			projectionRecheckedTotal.Inc()
+			return v, nil
+		}
+		recordComparison(rc, snap, v.Comparison)
+		return v, nil
 	}, restate.WithName("compare-projection"), restate.WithMaxRetryAttempts(projectionRunAttempts))
 	if err != nil {
 		slog.WarnContext(ctx, "[prstate-shadow] projection compare could not read the registry row", "pr", PRObjectKey(snap.Repo, snap.PRNumber), "error", err)
+		return nil
+	}
+	if verdict.Recheck != nil {
+		restate.ObjectSend(ctx, PRObjectServiceName, PRObjectKey(snap.Repo, snap.PRNumber), PRHandlerCompareProjection).
+			Send(ShadowCompareRequest{ProjectionSnapshot: snap, Confirm: verdict.Recheck}, restate.WithDelay(s.shadowDelay))
 	}
 	return nil
 }

@@ -270,7 +270,7 @@ func TestCompleteKustomizationRequestAuthoritative(t *testing.T) {
 			disp := &mockOutboundDispatcher{}
 			srv := newTestRouter(cfg, nil, reg, disp, bus)
 			pr := DeployingPR{Repo: "azylman/aerial", PRNumber: 42, HeadSHA: "sha123", MergeSHA: "sha-merge", TargetID: lifecycleTargetID}
-			if err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-core"); (err != nil) != tc.wantErr {
+			if err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-core", nil); (err != nil) != tc.wantErr {
 				t.Fatalf("completeKustomizationRequest() error = %v, wantErr %v", err, tc.wantErr)
 			}
 			if got := countDeploySuccess(bus); got != tc.wantPublishes {

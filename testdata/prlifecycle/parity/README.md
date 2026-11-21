@@ -46,3 +46,12 @@ Both tests assert the same `effects` multiset and the same final `rows`.
   `deploy_failed` fact.
 - Deploy-phase events carry the main branch, which never replaces the PR
   branch on the row.
+
+## Shadow goldens (`../shadow/`)
+
+`shadow/*.json` pin the wire synapse sends with `effects_owner=legacy`
+while it still performs the effect and writes the row itself. The synapse
+router test drives the legacy path and asserts the captured `shadow`
+sends; the prstate test replays `setup` (restate-owned) plus those `shadow`
+sends through PRObject and asserts `want_state`, which matches the row the
+legacy registry writes.

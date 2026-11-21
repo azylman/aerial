@@ -588,3 +588,96 @@ func TestCompareProjection(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveShadowCompare pins the two-pass shadow verdict. A first-pass
+// divergence never counts by itself; the confirming re-read counts it only
+// when the row and PRObject's projected state both stood still, so a read
+// that landed between the two writers' updates for a CI check or build
+// metadata event is superseded while a genuine at-rest difference (here a
+// deployed_jobs set PRObject never recorded) is still counted. Missing rows
+// for tracked PRs count on either pass.
+func TestResolveShadowCompare(t *testing.T) {
+	t.Parallel()
+	snap := ProjectionSnapshot{
+		Repo: "azylman/aerial", PRNumber: 2302, Agent: "miorine", Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "deployed",
+		Metadata: ProjectionMetadata{Agent: "miorine", CIChecks: map[string]string{"roborev": "passed"}, DeployedKustomizations: []string{"aerial-core"}},
+	}
+	atRest := RegistryRow{
+		Repo: "azylman/aerial", PRNumber: 2302, Agent: "aerial", Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "deployed",
+		Metadata: ProjectionMetadata{Agent: "miorine", CIChecks: map[string]string{"roborev": "passed"}, DeployedKustomizations: []string{"aerial-core"}},
+	}
+	ciAhead := atRest
+	ciAhead.Metadata.CIChecks = map[string]string{"roborev": "passed", "Promote Images to :latest": "pending"}
+	jobsAtRest := atRest
+	jobsAtRest.Metadata.DeployedJobs = []string{"prospera"}
+	headMoved := atRest
+	headMoved.HeadSHA = "h2"
+	stateMoved := snap
+	stateMoved.Metadata.CIChecks = map[string]string{"roborev": "passed", "Promote Images to :latest": "pending"}
+	untracked := snap
+	untracked.TargetID = ""
+	first := ShadowCompareRequest{ProjectionSnapshot: snap}
+	confirmCI := ShadowCompareRequest{ProjectionSnapshot: snap, Confirm: &ShadowConfirm{RowDigest: RegistryRowDigest(ciAhead), Fields: []string{"metadata.ci_checks"}}}
+	confirmJobs := ShadowCompareRequest{ProjectionSnapshot: snap, Confirm: &ShadowConfirm{RowDigest: RegistryRowDigest(jobsAtRest), Fields: []string{"metadata.deployed_jobs"}}}
+	tests := []struct {
+		name    string
+		req     ShadowCompareRequest
+		row     RegistryRow
+		found   bool
+		current ProjectionSnapshot
+		want    ShadowVerdict
+	}{
+		{name: "first pass clean records compared", req: first, row: atRest, found: true, current: snap, want: ShadowVerdict{}},
+		{name: "first pass divergence asks for a re-read", req: first, row: ciAhead, found: true, current: snap, want: ShadowVerdict{Recheck: &ShadowConfirm{RowDigest: RegistryRowDigest(ciAhead), Fields: []string{"metadata.ci_checks"}}}},
+		{name: "first pass missing tracked row counts at once", req: first, row: RegistryRow{}, found: false, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Missing: true}}},
+		{name: "first pass untracked pr without row", req: ShadowCompareRequest{ProjectionSnapshot: untracked}, row: RegistryRow{}, found: false, current: untracked, want: ShadowVerdict{Comparison: ProjectionComparison{Untracked: true}}},
+		{name: "first pass head moved is superseded", req: first, row: headMoved, found: true, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Superseded: true}}},
+		{name: "confirm after row caught up is superseded", req: confirmCI, row: atRest, found: true, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Superseded: true}}},
+		{name: "confirm after state moved is superseded", req: confirmCI, row: ciAhead, found: true, current: stateMoved, want: ShadowVerdict{Comparison: ProjectionComparison{Superseded: true}}},
+		{name: "confirm with row and state at rest counts the ci divergence", req: confirmCI, row: ciAhead, found: true, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Divergent: []string{"metadata.ci_checks"}}}},
+		{name: "confirm counts an at-rest deployed_jobs difference", req: confirmJobs, row: jobsAtRest, found: true, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Divergent: []string{"metadata.deployed_jobs"}}}},
+		{name: "confirm with tracked row gone counts missing", req: confirmJobs, row: RegistryRow{}, found: false, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Missing: true}}},
+		{name: "confirm after head moved is superseded", req: confirmJobs, row: headMoved, found: true, current: snap, want: ShadowVerdict{Comparison: ProjectionComparison{Superseded: true}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ResolveShadowCompare(tc.req, tc.row, tc.found, tc.current); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ResolveShadowCompare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRegistryRowDigest pins that the digest ignores cosmetic differences
+// (whitespace, set order, empty collections) and changes with any column or
+// metadata value.
+func TestRegistryRowDigest(t *testing.T) {
+	t.Parallel()
+	base := RegistryRow{Repo: "azylman/aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1", Status: "open", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}}}
+	cosmetic := base
+	cosmetic.Branch = " feat "
+	cosmetic.Metadata = ProjectionMetadata{Jobs: []string{"coven", "eri"}, CIChecks: map[string]string{}}
+	status := base
+	status.Status = "merged"
+	ci := base
+	ci.Metadata = ProjectionMetadata{Jobs: []string{"eri", "coven"}, CIChecks: map[string]string{"ci": "passed"}}
+	tests := []struct {
+		name      string
+		other     RegistryRow
+		wantEqual bool
+	}{
+		{name: "same row", other: base, wantEqual: true},
+		{name: "cosmetic differences", other: cosmetic, wantEqual: true},
+		{name: "status differs", other: status, wantEqual: false},
+		{name: "metadata differs", other: ci, wantEqual: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RegistryRowDigest(base) == RegistryRowDigest(tc.other); got != tc.wantEqual {
+				t.Fatalf("digest equal = %v, want %v", got, tc.wantEqual)
+			}
+		})
+	}
+}
