@@ -293,24 +293,6 @@ func (s *SQLTranscriptStore) UpsertSessionSummary(ctx context.Context, summary S
 	return nil
 }
 
-// SetSessionEngine stamps the engine on an existing local-stack session without touching its sync state.
-func (s *SQLTranscriptStore) SetSessionEngine(ctx context.Context, sessionID, engine string) (err error) {
-	defer recordTranscriptQuery("set_session_engine", time.Now(), &err)
-	if err := s.checkWriter(); err != nil {
-		return err
-	}
-	sessionID, engine = strings.TrimSpace(sessionID), strings.TrimSpace(engine)
-	if sessionID == "" || engine == "" {
-		return fmt.Errorf("session ID and engine cannot be empty")
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := s.db.ExecContext(queryCtx, `UPDATE session_summaries SET engine = $1 WHERE agent = $2 AND session_id = $3`, engine, s.stack, sessionID); err != nil {
-		return fmt.Errorf("set session engine failed: %w", err)
-	}
-	return nil
-}
-
 func (s *SQLTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) (err error) {
 	defer recordTranscriptQuery("batch_insert_transcript_steps", time.Now(), &err)
 	if err := s.checkWriter(); err != nil {

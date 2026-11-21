@@ -30,7 +30,7 @@ func assertRunCLICase(t *testing.T, tt runCLICase) {
 	var stdout bytes.Buffer
 	stdinBuf := strings.NewReader(tt.input)
 
-	code := RunCLI(tt.args, stdinBuf, &stdout)
+	code := RunCLI(tt.args, stdinBuf, &stdout, emptyEnv)
 	if code != tt.wantCode {
 		t.Errorf("expected exit code %d, got: %d", tt.wantCode, code)
 	}
@@ -239,6 +239,9 @@ func runCLIExtraTestCases() []runCLICase {
 	}
 }
 
+// emptyEnv stands in for os.Getenv so RunCLI never reads ERI_HOOK_ENDPOINT from the real environment.
+func emptyEnv(string) string { return "" }
+
 func TestRunCLI(t *testing.T) {
 	tests := runCLITestCases()
 	for _, tt := range tests {
@@ -248,17 +251,17 @@ func TestRunCLI(t *testing.T) {
 	}
 
 	t.Run("failing writer covered", func(t *testing.T) {
-		code := RunCLI([]string{"hook-guard"}, strings.NewReader(`{malformed`), &errWriter{})
+		code := RunCLI([]string{"hook-guard"}, strings.NewReader(`{malformed`), &errWriter{}, emptyEnv)
 		if code != 0 && code != 1 {
 			t.Errorf("unexpected code %d", code)
 		}
-		if c := RunCLI([]string{"hook-guard", "pre-invocation"}, strings.NewReader(`{malformed`), &errWriter{}); c != 0 && c != 1 {
+		if c := RunCLI([]string{"hook-guard", "pre-invocation"}, strings.NewReader(`{malformed`), &errWriter{}, emptyEnv); c != 0 && c != 1 {
 			t.Errorf("unexpected code %d", c)
 		}
 	})
 
 	t.Run("help flag with errWriter", func(t *testing.T) {
-		code := RunCLI([]string{"hook-guard", "--help"}, nil, &errWriter{})
+		code := RunCLI([]string{"hook-guard", "--help"}, nil, &errWriter{}, emptyEnv)
 		if code != 1 {
 			t.Errorf("expected 1 on help write failure, got: %d", code)
 		}

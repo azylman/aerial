@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,28 +19,14 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
-var activeVoiceBus atomic.Pointer[pubsub.Bus]
-
 const (
 	sseEventReply          = "reply"
 	sseFieldConversationID = "conversation_id"
 )
 
-// SetVoiceEventBus sets the global event bus used for streaming voice turns.
-func SetVoiceEventBus(bus pubsub.Bus) {
-	if bus == nil {
-		activeVoiceBus.Store(nil)
-		return
-	}
-	activeVoiceBus.Store(&bus)
-}
-
 func resolveVoiceEventBus(pool *queue.WorkerPool) pubsub.Bus {
-	if pool != nil && pool.EventBus() != nil {
+	if pool != nil {
 		return pool.EventBus()
-	}
-	if b := activeVoiceBus.Load(); b != nil {
-		return *b
 	}
 	return nil
 }

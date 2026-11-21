@@ -10,19 +10,18 @@ import (
 )
 
 type museSessionLifecycleCase struct {
-	name            string
-	isNilMgr        bool
-	sessionID       string
-	location        string
-	content         string
-	zeroByte        bool
-	age             time.Duration
-	wantExists      bool
-	wantPaths       int
-	wantSize        int64
-	wantSteps       int
-	wantTurns       int
-	wantNonZeroTime bool
+	name       string
+	isNilMgr   bool
+	sessionID  string
+	location   string
+	content    string
+	zeroByte   bool
+	age        time.Duration
+	wantExists bool
+	wantPaths  int
+	wantSize   int64
+	wantSteps  int
+	wantTurns  int
 }
 
 func resolveMuseWriteDir(location, homeDir, dataDir, sessionID string) (string, string) {
@@ -86,26 +85,6 @@ func assertMuseSessionMetrics(t *testing.T, mgr *Manager, tc museSessionLifecycl
 	if tt := mgr.CountTranscriptTurns(tc.sessionID); tt != tc.wantTurns {
 		t.Errorf("[%s] turns got=%d want=%d", tc.name, tt, tc.wantTurns)
 	}
-
-	root := ""
-	if tc.name == "custom roots override in GetSessionLastActivity" {
-		root = filepath.Join(dataDir, "muse", "sessions")
-	}
-	lastAct, err := evaluateMuseLastActivity(mgr, tc.sessionID, root)
-	if err != nil {
-		t.Fatalf("[%s] lastActivity err: %v", tc.name, err)
-	}
-	hasTime := !lastAct.IsZero()
-	if hasTime != tc.wantNonZeroTime {
-		t.Errorf("[%s] nonZeroTime got=%v want=%v", tc.name, hasTime, tc.wantNonZeroTime)
-	}
-}
-
-func evaluateMuseLastActivity(mgr *Manager, sessionID, customRoot string) (time.Time, error) {
-	if customRoot != "" {
-		return mgr.GetSessionLastActivity(sessionID, customRoot)
-	}
-	return mgr.GetSessionLastActivity(sessionID)
 }
 
 func runMuseSessionLifecycleCase(t *testing.T, tc museSessionLifecycleCase, t0 time.Time) {
@@ -148,12 +127,11 @@ func TestMuseSessionLifecycle(t *testing.T) {
 				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Initial prompt"}}}`,
 				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Done"}}}`,
 			}, "\n") + "\n",
-			age:             10 * time.Minute,
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       1,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			age:        10 * time.Minute,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  1,
 		},
 		{
 			name:      "data runtime discord session.jsonl direct",
@@ -165,11 +143,10 @@ func TestMuseSessionLifecycle(t *testing.T) {
 				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1"}]}}}`,
 				`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"ok"}]}}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       3,
-			wantTurns:       1,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  3,
+			wantTurns:  1,
 		},
 		{
 			name:      "home muse session.jsonl",
@@ -179,11 +156,10 @@ func TestMuseSessionLifecycle(t *testing.T) {
 				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient message"}}}`,
 				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"model output"}}}`,
 			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       1,
-			wantTurns:       0,
-			wantNonZeroTime: true,
+			wantExists: true,
+			wantPaths:  1,
+			wantSteps:  1,
+			wantTurns:  0,
 		},
 		{
 			name:       "zero byte muse session",
@@ -192,19 +168,6 @@ func TestMuseSessionLifecycle(t *testing.T) {
 			zeroByte:   true,
 			wantExists: false,
 			wantPaths:  1,
-		},
-		{
-			name:      "custom roots override in GetSessionLastActivity",
-			sessionID: "sess-muse-custom-root",
-			location:  "direct_muse",
-			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Custom root test"}}}`,
-			}, "\n") + "\n",
-			wantExists:      true,
-			wantPaths:       1,
-			wantSteps:       0,
-			wantTurns:       1,
-			wantNonZeroTime: true,
 		},
 	}
 

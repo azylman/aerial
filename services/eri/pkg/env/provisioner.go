@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
@@ -607,158 +604,5 @@ func (*Provisioner) writeAtomic(targetPath, content string) error {
 func ignore(err error) {
 	if err != nil {
 		return
-	}
-}
-
-func writeFmtf(w io.Writer, format string, args ...any) {
-	if _, err := fmt.Fprintf(w, format, args...); err != nil {
-		return
-	}
-}
-
-func writeBytes(w io.Writer, b []byte) {
-	if _, err := w.Write(b); err != nil {
-		return
-	}
-}
-
-// SourceFingerprint returns a deterministic SHA-256 hex digest of all source trees and credential files
-// consumed by Provisioner.Sync. Returns "" when p == nil || p.homeDir == "".
-func (p *Provisioner) SourceFingerprint() string {
-	if p == nil || p.homeDir == "" {
-		return ""
-	}
-
-	p.mu.Lock()
-	oauthPath := p.oauthTokenSourcePath
-	codexPath := p.codexAuthSourcePath
-	musePath := p.museAuthSourcePath
-	aerialRules := p.aerialRulesDir
-	configRules := p.configRulesDir
-	hooks := p.hooksDir
-	superpowers := p.superpowersDir
-	skillDirs := p.sourceSkillDirs()
-	p.mu.Unlock()
-
-	aerialRules = resolveDir(aerialRules, DefaultAerialRulesPaths)
-	configRules = resolveDir(configRules, DefaultConfigRulesPaths)
-	hooks = resolveDir(hooks, DefaultHooksSearchPaths)
-
-	h := sha256.New()
-
-	// (a) Credential source files (oauthPath, codexPath, musePath): write slot label, path, and raw file bytes if readable.
-	for _, cred := range []struct {
-		label string
-		path  string
-	}{
-		{"oauth", oauthPath},
-		{"codex", codexPath},
-		{"muse", musePath},
-	} {
-		writeFmtf(h, "cred:%s:%s:", cred.label, cred.path)
-		if cred.path != "" {
-			if data, err := os.ReadFile(cred.path); err == nil {
-				writeBytes(h, data)
-			}
-		}
-		writeBytes(h, []byte("\n"))
-	}
-
-	// (b) Directory trees for rules, hooks, and skills in deterministic order:
-	// resolved aerialRules, resolved configRules, resolved hooks, superpowers, and each directory in skillDirs.
-	hashProvisionerDir(h, "aerial-rules", aerialRules)
-	hashProvisionerDir(h, "config-rules", configRules)
-	hashProvisionerDir(h, "hooks", hooks)
-	hashProvisionerDir(h, "superpowers", superpowers)
-	for i, dir := range skillDirs {
-		hashProvisionerDir(h, fmt.Sprintf("skills:%d:%s", i, dir), dir)
-	}
-
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-type provisionerFileEntry struct {
-	relPath string
-	sha     [32]byte
-}
-
-func walkProvisionerDir(root string) []provisionerFileEntry {
-	var entries []provisionerFileEntry
-	visited := make(map[string]bool)
-
-	var walk func(dir string, relPrefix string, depth int)
-	walk = func(dir string, relPrefix string, depth int) {
-		if depth > 4 {
-			return
-		}
-		realDir, err := filepath.EvalSymlinks(dir)
-		if err == nil {
-			if visited[realDir] {
-				return
-			}
-			visited[realDir] = true
-		}
-
-		dirEntries, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
-
-		for _, de := range dirEntries {
-			name := de.Name()
-			entryPath := filepath.Join(dir, name)
-			entryRel := filepath.Join(relPrefix, name)
-
-			info, statErr := os.Stat(entryPath)
-			if statErr != nil {
-				continue
-			}
-
-			if info.IsDir() {
-				if depth < 4 {
-					walk(entryPath, entryRel, depth+1)
-				}
-			} else if info.Mode().IsRegular() {
-				content, readErr := os.ReadFile(entryPath)
-				if readErr == nil {
-					entries = append(entries, provisionerFileEntry{
-						relPath: filepath.ToSlash(entryRel),
-						sha:     sha256.Sum256(content),
-					})
-				}
-			}
-		}
-	}
-
-	walk(root, "", 0)
-	return entries
-}
-
-// hashProvisionerDir traverses root up to depth 4 (resolving directory symlinks via os.Stat up to depth 4
-// and skipping broken symlinks), sorts discovered relative file paths lexically, and writes label, relative path,
-// and file content SHA-256 digest into h. Missing directories are recorded as empty without error.
-func hashProvisionerDir(h io.Writer, label, root string) {
-	if root == "" {
-		writeFmtf(h, "%s:empty\n", label)
-		return
-	}
-	rootInfo, err := os.Stat(root)
-	if err != nil || !rootInfo.IsDir() {
-		writeFmtf(h, "%s:empty\n", label)
-		return
-	}
-
-	entries := walkProvisionerDir(root)
-	if len(entries) == 0 {
-		writeFmtf(h, "%s:empty\n", label)
-		return
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].relPath < entries[j].relPath
-	})
-
-	for _, e := range entries {
-		writeFmtf(h, "%s:%s:%x\n", label, e.relPath, e.sha)
 	}
 }

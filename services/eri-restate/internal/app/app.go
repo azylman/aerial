@@ -375,22 +375,6 @@ type appOptions struct {
 	llmFn          runner.LLMFunc
 	httpClient     *http.Client
 	appConfig      *config.Config
-	discordSession *discordgo.Session
-	eventBus       pubsub.Bus
-}
-
-// WithDiscordSession sets an explicit Discord session for testing or dependency injection.
-func WithDiscordSession(s *discordgo.Session) AppOption {
-	return func(o *appOptions) {
-		o.discordSession = s
-	}
-}
-
-// WithEventBus sets an explicit pubsub.Bus for testing or dependency injection.
-func WithEventBus(bus pubsub.Bus) AppOption {
-	return func(o *appOptions) {
-		o.eventBus = bus
-	}
 }
 
 func createReloadFunc(ctx context.Context, appCfg *config.Config, provisioner *env.Provisioner, ephemeralPool *runner.InterchangeablePool, workerPool *queue.WorkerPool) func(string) {
@@ -431,10 +415,6 @@ func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome
 	case config.EngineMuse:
 		startUsagePollerFn(ctx, 10*time.Minute, metrics.DefaultMuseUsageRunner(cur.MuseBin, ephemeralHome, envVars, false), metrics.RecordMuseUsageJSON)
 	}
-}
-
-func defaultReloadLogger(source string) {
-	log.Printf("[eri-restate] Config reload triggered via %s", source)
 }
 
 var (
@@ -547,19 +527,13 @@ func initializeAgentPools(cur *config.ConfigData, cfg Config, sessionMgr *sessio
 	}
 }
 
-func wireOutboundIntegrations(ctx context.Context, cur *config.ConfigData, workerPool *queue.WorkerPool, appOpts appOptions) func() {
-	if appOpts.discordSession != nil {
-		workerPool.SetDiscordSession(appOpts.discordSession)
-	} else if token := strings.TrimSpace(cur.DiscordToken); token != "" {
+func wireOutboundIntegrations(ctx context.Context, cur *config.ConfigData, workerPool *queue.WorkerPool) func() {
+	if token := strings.TrimSpace(cur.DiscordToken); token != "" {
 		if dg, err := discordgo.New("Bot " + token); err == nil {
 			workerPool.SetDiscordSession(dg)
 		}
 	}
 
-	if appOpts.eventBus != nil {
-		workerPool.SetEventBus(appOpts.eventBus)
-		return nil
-	}
 	if natsURL := strings.TrimSpace(cur.NATSURL); natsURL != "" {
 		bus, err := pubsub.NewJetStreamBus(ctx, natsURL)
 		if err != nil {
@@ -665,7 +639,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
 	})
 
-	if closeBus := wireOutboundIntegrations(ctx, cur, workerPool, appOpts); closeBus != nil {
+	if closeBus := wireOutboundIntegrations(ctx, cur, workerPool); closeBus != nil {
 		defer closeBus()
 	}
 

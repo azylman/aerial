@@ -367,6 +367,8 @@ func TestSessionLifecycle(t *testing.T) {
 }
 
 func TestTaskHelpers(t *testing.T) {
+	// The store resolves its agent from AGENT_NAME; clear it so the default agent applies.
+	t.Setenv("AGENT_NAME", "")
 	// Table-driven CleanTaskSummary
 	summaryTests := []struct {
 		name     string
@@ -475,6 +477,8 @@ func runTaskFilterCase(ctx context.Context, t *testing.T, store Store, tc taskFi
 }
 
 func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
+	// The store resolves its agent from AGENT_NAME; clear it so the default agent applies.
+	t.Setenv("AGENT_NAME", "")
 	database, err := initTestSQLite(filepath.Join(t.TempDir(), "aerial_tasks_test.db"))
 	if err != nil {
 		t.Fatalf("initTestSQLite failed: %v", err)

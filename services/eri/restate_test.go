@@ -341,12 +341,6 @@ func runThreadSessionOperationCase(t *testing.T, tc threadSessionOpCase) {
 		if err == nil {
 			assert.Equal(t, tc.wantStatus, resp.Status)
 		}
-	case "cancel_immediate":
-		resp, e := client.CancelThreadImmediate(context.Background(), tc.threadID, queue.CancelThreadControlRequest{ThreadID: tc.threadID, Reason: tc.cancelReq.Reason})
-		err = e
-		if err == nil {
-			assert.Equal(t, tc.wantStatus, resp.Status)
-		}
 	case "rotate":
 		resp, e := client.RotateThreadSession(context.Background(), tc.threadID, tc.rotateReq)
 		err = e
@@ -410,16 +404,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 			statusCode:  http.StatusOK,
 			wantStatus:  "ok",
 			wantPathSub: "/ThreadSession/th-103/CancelTurn",
-		},
-		{
-			name:        "cancel thread immediate returns ok",
-			op:          "cancel_immediate",
-			threadID:    "th-103-imm",
-			cancelReq:   queue.CancelTurnRequest{Reason: "cancelled"},
-			serverResp:  `{"status":"ok","cancelled_count":1,"cancelled_active_turn":true}`,
-			statusCode:  http.StatusOK,
-			wantStatus:  "ok",
-			wantPathSub: "/SessionManager/CancelThread",
 		},
 		{
 			name:        "rotate session returns new session id",
@@ -505,7 +489,6 @@ type dispatchOpCase struct {
 	statusCode     int
 	transportError bool
 	wantStatus     string
-	wantActive     bool
 	wantErrorSub   string
 	wantPathSub    string
 }
@@ -539,18 +522,6 @@ func runDispatchOperationCase(t *testing.T, tc dispatchOpCase) {
 	switch tc.op {
 	case "enqueue":
 		resp, e := client.EnqueueDispatch(context.Background(), tc.sessionKey, tc.dispatchReq)
-		err = e
-		if err == nil {
-			assert.Equal(t, tc.wantStatus, resp.Status)
-		}
-	case "dispatch_accepted":
-		err = client.DispatchAccepted(context.Background(), tc.dispatchReq)
-		if tc.wantActive {
-			assert.ErrorIs(t, err, queue.ErrDispatchActive)
-			return
-		}
-	case "cancel":
-		resp, e := client.CancelDispatch(context.Background(), tc.sessionKey, tc.cancelReq)
 		err = e
 		if err == nil {
 			assert.Equal(t, tc.wantStatus, resp.Status)
@@ -593,64 +564,6 @@ func TestRestateIngressClient_DispatchOperations(t *testing.T) {
 			wantPathSub: "/DispatchSession/disp-201/Enqueue",
 		},
 		{
-			name:        "dispatch accepted helper matches accepted",
-			op:          "dispatch_accepted",
-			sessionKey:  "disp-202",
-			dispatchReq: queue.BrainDispatchRequest{ID: "d-202", Source: "vanadis", SessionID: "disp-202"},
-			serverResp:  `{"status":"accepted","dispatch_id":"d-202"}`,
-			statusCode:  http.StatusOK,
-			wantPathSub: "/DispatchSession/disp-202/Enqueue",
-		},
-		{
-			name:        "dispatch accepted helper matches already_exists",
-			op:          "dispatch_accepted",
-			sessionKey:  "disp-203",
-			dispatchReq: queue.BrainDispatchRequest{ID: "d-203", Source: "vanadis", SessionID: "disp-203"},
-			serverResp:  `{"status":"already_exists","dispatch_id":"d-203"}`,
-			statusCode:  http.StatusOK,
-			wantPathSub: "/DispatchSession/disp-203/Enqueue",
-		},
-		{
-			name:        "dispatch accepted translates skipped_active to ErrDispatchActive",
-			op:          "dispatch_accepted",
-			sessionKey:  "disp-204",
-			dispatchReq: queue.BrainDispatchRequest{ID: "d-204", Source: "vanadis", SessionID: "disp-204", SkipIfActive: true},
-			serverResp:  `{"status":"skipped_active"}`,
-			statusCode:  http.StatusOK,
-			wantActive:  true,
-			wantPathSub: "/DispatchSession/disp-204/Enqueue",
-		},
-		{
-			name:         "dispatch accepted ID mismatch returns error",
-			op:           "dispatch_accepted",
-			sessionKey:   "disp-205",
-			dispatchReq:  queue.BrainDispatchRequest{ID: "d-205", Source: "vanadis", SessionID: "disp-205"},
-			serverResp:   `{"status":"accepted","dispatch_id":"d-other"}`,
-			statusCode:   http.StatusOK,
-			wantErrorSub: "dispatch ID mismatch",
-			wantPathSub:  "/DispatchSession/disp-205/Enqueue",
-		},
-		{
-			name:         "dispatch accepted unknown status returns error",
-			op:           "dispatch_accepted",
-			sessionKey:   "disp-206",
-			dispatchReq:  queue.BrainDispatchRequest{ID: "d-206", Source: "vanadis", SessionID: "disp-206"},
-			serverResp:   `{"status":"rejected","dispatch_id":"d-206"}`,
-			statusCode:   http.StatusOK,
-			wantErrorSub: "dispatch rejected with status: rejected",
-			wantPathSub:  "/DispatchSession/disp-206/Enqueue",
-		},
-		{
-			name:        "cancel dispatch returns ok",
-			op:          "cancel",
-			sessionKey:  "vanadis-chunk-207",
-			cancelReq:   queue.CancelDispatchRequest{ChunkID: "chunk-207"},
-			serverResp:  `{"status":"ok","cancelled_count":1}`,
-			statusCode:  http.StatusOK,
-			wantStatus:  "ok",
-			wantPathSub: "/DispatchSession/vanadis-chunk-207/Cancel",
-		},
-		{
 			name:        "cancel dispatch immediate returns ok",
 			op:          "cancel_immediate",
 			sessionKey:  "vanadis-chunk-imm",
@@ -661,14 +574,8 @@ func TestRestateIngressClient_DispatchOperations(t *testing.T) {
 			wantPathSub: "/SessionManager/CancelDispatch",
 		},
 		{
-			name:         "dispatch accepted requires id or session or chunk",
-			op:           "dispatch_accepted",
-			dispatchReq:  queue.BrainDispatchRequest{Source: "vanadis", Prompt: "missing all identifiers"},
-			wantErrorSub: "dispatch id, session id, or chunk id is required",
-		},
-		{
-			name:           "dispatch accepted returns error on transport failure",
-			op:             "dispatch_accepted",
+			name:           "enqueue dispatch returns error on transport failure",
+			op:             "enqueue",
 			sessionKey:     "disp-fail",
 			dispatchReq:    queue.BrainDispatchRequest{ID: "d-fail", Source: "vanadis", SessionID: "disp-fail"},
 			transportError: true,
@@ -788,9 +695,8 @@ func runWithMockRestate(statusCode int, serverResp string, fn func()) {
 	defer ts.Close()
 
 	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-	orig := ActiveRestateIngressClient()
-	SetActiveRestateIngressClient(client)
-	defer SetActiveRestateIngressClient(orig)
+	orig := activeRestateIngressClient.Swap(client)
+	defer activeRestateIngressClient.Store(orig)
 
 	fn()
 }
@@ -1077,8 +983,6 @@ func TestHandleVoiceAsk_RestateCutover(t *testing.T) {
 
 func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
 	bus := newSyncVoiceBus()
-	SetVoiceEventBus(bus)
-	defer SetVoiceEventBus(nil)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req queue.VoiceSessionRequest
@@ -1093,11 +997,10 @@ func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
 	defer ts.Close()
 
 	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-	orig := ActiveRestateIngressClient()
-	SetActiveRestateIngressClient(client)
-	defer SetActiveRestateIngressClient(orig)
+	orig := activeRestateIngressClient.Swap(client)
+	defer activeRestateIngressClient.Store(orig)
 
-	handler := handleVoiceAsk(nil)
+	handler := handleVoiceAsk(queue.New(newTestConfig(), queue.WorkerPoolConfig{EventBus: bus}))
 	req := httptest.NewRequest(http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-sse"}`))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
@@ -1120,9 +1023,8 @@ func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
 	defer ts.Close()
 
 	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-	orig := ActiveRestateIngressClient()
-	SetActiveRestateIngressClient(client)
-	defer SetActiveRestateIngressClient(orig)
+	orig := activeRestateIngressClient.Swap(client)
+	defer activeRestateIngressClient.Store(orig)
 
 	t.Setenv("ERI_RESTATE_URL", ts.URL)
 
@@ -1135,46 +1037,18 @@ func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "remote llm result")
 }
 
-func TestRestateIngressClient_Controls(t *testing.T) {
-	tests := []struct {
-		name           string
-		cancelThreadID string
-		serverResp     string
-		wantSubstr     string
-	}{
-		{
-			name:           "cancel thread immediate success",
-			cancelThreadID: "t-123",
-			serverResp:     `{"status":"ok","cancelled_count":2}`,
-			wantSubstr:     "ok",
-		},
-		{
-			name:       "cancel dispatch immediate success",
-			serverResp: `{"status":"ok","cancelled_count":1}`,
-			wantSubstr: "ok",
-		},
-	}
+func TestRestateIngressClient_CancelDispatchImmediate(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/SessionManager/CancelDispatch", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok","cancelled_count":1}`))
+	}))
+	defer ts.Close()
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(tc.serverResp))
-			}))
-			defer ts.Close()
-
-			c := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-			if tc.cancelThreadID != "" {
-				resp, err := c.CancelThreadImmediate(context.Background(), tc.cancelThreadID, queue.CancelThreadControlRequest{})
-				assert.NoError(t, err)
-				assert.Equal(t, tc.wantSubstr, resp.Status)
-			} else {
-				resp, err := c.CancelDispatchImmediate(context.Background(), queue.CancelDispatchControlRequest{BuildID: "b-1"})
-				assert.NoError(t, err)
-				assert.Equal(t, tc.wantSubstr, resp.Status)
-			}
-		})
-	}
+	c := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+	resp, err := c.CancelDispatchImmediate(context.Background(), queue.CancelDispatchControlRequest{BuildID: "b-1"})
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", resp.Status)
 }
 
 func TestHandleVoiceAskSSE_RestateNoBusWithPool(t *testing.T) {
@@ -1210,11 +1084,8 @@ func TestHandleVoiceAskSSE_RestateNoBusWithPool(t *testing.T) {
 			defer ts.Close()
 
 			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-			origClient := ActiveRestateIngressClient()
-			SetActiveRestateIngressClient(client)
-			defer SetActiveRestateIngressClient(origClient)
-
-			SetVoiceEventBus(nil)
+			origClient := activeRestateIngressClient.Swap(client)
+			defer activeRestateIngressClient.Store(origClient)
 
 			cfg := newTestConfig()
 			mockPool := queue.New(cfg, queue.WorkerPoolConfig{})
@@ -1304,8 +1175,6 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			bus := newSyncVoiceBus()
-			SetVoiceEventBus(bus)
-			defer SetVoiceEventBus(nil)
 
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tc.publishErr {
@@ -1325,7 +1194,7 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 			orig := activeRestateIngressClient.Swap(client)
 			defer activeRestateIngressClient.Store(orig)
 
-			handler := handleVoiceAsk(nil)
+			handler := handleVoiceAsk(queue.New(newTestConfig(), queue.WorkerPoolConfig{EventBus: bus}))
 			req := httptest.NewRequest(http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-err"}`))
 			req.Header.Set("Accept", "text/event-stream")
 			rec := httptest.NewRecorder()

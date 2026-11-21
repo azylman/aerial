@@ -60,7 +60,7 @@ func TestStore_MultiAgentIsolation_Messages(t *testing.T) {
 	database := setupTestDB(t)
 	t.Cleanup(func() { _ = database.Close() })
 
-	storeAlpha := NewStore(database).WithAgent("agent-alpha")
+	storeAlpha := NewSQLStore(database).WithAgent("agent-alpha")
 	storeBeta := NewSQLStore(database).WithAgent("agent-beta")
 	ctx := context.Background()
 

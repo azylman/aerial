@@ -690,19 +690,6 @@ func (p *WorkerPool) Start() {
 	p.wg.Go(p.runTranscriptPublishWorker)
 }
 
-// HoldUntilLeader gates worker spawning on EnqueueBurst and EnqueueDispatch
-// until ReleaseLeaderHold is called after acquiring the leader lock.
-//
-// TODO(c09f-purge-dead-eri-job-fallbacks): Deprecated; leader locks are superseded by Restate durable execution in services/eri-restate.
-func (p *WorkerPool) HoldUntilLeader() {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	p.leaderHold = true
-	p.mu.Unlock()
-}
-
 // ReleaseLeaderHold clears the canary leader hold and returns true if the pool was held.
 func (p *WorkerPool) ReleaseLeaderHold() bool {
 	if p == nil {

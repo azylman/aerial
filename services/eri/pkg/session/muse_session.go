@@ -120,22 +120,6 @@ func (m *Manager) MuseSessionExistsOnDisk(sessionID string) bool {
 	return false
 }
 
-func isMuseSessionDir(root string) bool {
-	base := filepath.Base(root)
-	return base == "sessions" || strings.Contains(root, "muse")
-}
-
-func checkMuseSubdirsActivity(root, cleanID string, current time.Time) time.Time {
-	if !isMuseSessionDir(root) {
-		return current
-	}
-	seen := make(map[string]bool)
-	for _, p := range scanMuseBaseForSession(root, cleanID, seen) {
-		current = checkFileMtime(p, current)
-	}
-	return current
-}
-
 const (
 	musePayloadTypeSession = "runtime.session"
 	musePayloadKindRun     = "run"

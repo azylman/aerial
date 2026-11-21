@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -134,11 +133,6 @@ type RestateIngressClient struct {
 
 var activeRestateIngressClient atomic.Pointer[RestateIngressClient]
 
-// SetActiveRestateIngressClient sets the global active RestateIngressClient instance.
-func SetActiveRestateIngressClient(c *RestateIngressClient) {
-	activeRestateIngressClient.Store(c)
-}
-
 // ActiveRestateIngressClient returns the global active RestateIngressClient instance, or nil.
 func ActiveRestateIngressClient() *RestateIngressClient {
 	return activeRestateIngressClient.Load()
@@ -246,61 +240,13 @@ func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey s
 	return resp, err
 }
 
-const (
-	statusSkippedActive = "skipped_active"
-	statusAccepted      = "accepted"
-)
-
-// DispatchAccepted enqueues a dispatch and requires acceptance, translating skipped_active into queue.ErrDispatchActive.
-func (c *RestateIngressClient) DispatchAccepted(ctx context.Context, req queue.BrainDispatchRequest) error {
-	if strings.TrimSpace(req.ID) == "" && strings.TrimSpace(req.SessionID) == "" && strings.TrimSpace(req.VanadisChunkID) == "" {
-		return errors.New("dispatch id, session id, or chunk id is required")
-	}
-	sessionKey := queue.ResolveDispatchSessionKey(req)
-	idKey := strings.TrimSpace(req.ID)
-	if idKey == "" {
-		idKey = sessionKey
-	}
-	resp, err := c.EnqueueDispatch(ctx, sessionKey, req, idKey)
-	if err != nil {
-		return err
-	}
-	if resp.Status == statusSkippedActive {
-		return queue.ErrDispatchActive
-	}
-	if req.ID != "" && resp.DispatchID != req.ID {
-		return fmt.Errorf("dispatch ID mismatch: expected %s, got %s", req.ID, resp.DispatchID)
-	}
-	if resp.Status != statusAccepted && resp.Status != "already_exists" {
-		return fmt.Errorf("dispatch rejected with status: %s", resp.Status)
-	}
-	return nil
-}
-
-// CancelDispatch cancels dispatches matching sessionKey/chunkID via Restate Ingress.
-func (c *RestateIngressClient) CancelDispatch(ctx context.Context, sessionKey string, req queue.CancelDispatchRequest) (queue.CancelDispatchResponse, error) {
-	var resp queue.CancelDispatchResponse
-	svcName := queue.DispatchSessionServiceName(c.agentName)
-	err := c.postJSON(ctx, svcName, sessionKey, "Cancel", req, &resp)
-	return resp, err
-}
+const statusSkippedActive = "skipped_active"
 
 // AskVoice executes a synchronous voice turn via Restate Ingress.
 func (c *RestateIngressClient) AskVoice(ctx context.Context, deviceKey string, req queue.VoiceSessionRequest) (queue.VoiceSessionResult, error) {
 	var resp queue.VoiceSessionResult
 	svcName := queue.VoiceSessionServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, deviceKey, "Ask", req, &resp)
-	return resp, err
-}
-
-// CancelThreadImmediate delivers cancellation to the unkeyed SessionManager service to preempt running turns without key queuing.
-func (c *RestateIngressClient) CancelThreadImmediate(ctx context.Context, threadID string, req queue.CancelThreadControlRequest) (queue.CancelTurnResponse, error) {
-	var resp queue.CancelTurnResponse
-	if req.ThreadID == "" {
-		req.ThreadID = threadID
-	}
-	svcName := queue.SessionManagerServiceName(c.agentName)
-	err := c.postJSON(ctx, svcName, "", "CancelThread", req, &resp)
 	return resp, err
 }
 
@@ -402,37 +348,4 @@ func handleInteractionViaRestate(ctx context.Context, client *RestateIngressClie
 		// Ignored.
 	}
 	return false, nil
-}
-
-// darkLaunchRestateAnchor preserves dark-launched Restate actors and ingress client from deadcode analysis
-// within the services/eri module while their runtime server registration lives in services/eri-restate.
-var _ = []any{
-	restate.Reflect(queue.NewThreadSessionObject(nil, "")),
-	restate.Reflect(queue.NewDispatchSessionObject(nil, "")),
-	restate.Reflect(queue.NewVoiceSessionObject(nil, "")),
-	restate.Reflect(queue.NewSessionManagerService(nil, "")),
-	NewRemoteQuotaProvider,
-	(*RemoteQuotaProvider).LatestQuotaGroups,
-	(*RemoteQuotaProvider).ProviderFunc,
-	NewRemoteEphemeralLLMFunc,
-	NewRestateIngressClient,
-	SetActiveRestateIngressClient,
-	ActiveRestateIngressClient,
-	resolveRestateClient,
-	(*RestateIngressClient).postJSON,
-	(*RestateIngressClient).EnqueueThread,
-	(*RestateIngressClient).CancelThreadTurn,
-	(*RestateIngressClient).CancelThreadImmediate,
-	(*RestateIngressClient).RotateThreadSession,
-	(*RestateIngressClient).EnqueueDispatch,
-	(*RestateIngressClient).DispatchAccepted,
-	(*RestateIngressClient).CancelDispatch,
-	(*RestateIngressClient).CancelDispatchImmediate,
-	(*RestateIngressClient).AskVoice,
-	handlePromptViaRestate,
-	handleDispatchViaRestate,
-	handleCancelDispatchViaRestate,
-	handleInteractionViaRestate,
-	SetVoiceEventBus,
-	WithRestateIngressClient,
 }
