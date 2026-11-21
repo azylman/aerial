@@ -254,7 +254,7 @@ func (s *PRState) ApplyRegister(req RegisterRequest, targetID string) {
 	}
 	s.Registered = true
 	s.Branch = strings.TrimSpace(req.Branch)
-	s.HeadSHA = head
+	s.SetHead(head)
 	s.TargetID = targetID
 	if title := strings.TrimSpace(req.Title); title != "" {
 		s.Title = title
@@ -312,9 +312,12 @@ func (s *PRState) ApplyRegistrySync(prevHead, head string) bool {
 }
 
 // SynchronizeDisposition is the compare-and-set guard for a synchronize:
-// same-epoch terminal states absorb, and the head advances only from the
-// stored head (BeforeSHA match), an unknown stored head, or a redelivery of
-// the same new head. Anything else is a late synchronize and drops stale.
+// same-epoch terminal states absorb and an empty or zero head drops. The
+// head applies from the stored head (BeforeSHA match), an unknown stored
+// head, or a redelivery of the same new head. A head this PR already moved
+// past (PriorHeads) is a late redelivery and drops stale. Any other
+// mismatch means PRObject missed a synchronize; it recovers last-write-wins
+// like the legacy row instead of wedging the head until merge.
 func (s *PRState) SynchronizeDisposition(ev PREvent) EventDisposition {
 	if s == nil {
 		return DispositionDropStale
@@ -330,7 +333,10 @@ func (s *PRState) SynchronizeDisposition(ev PREvent) EventDisposition {
 	if stored == "" || strings.EqualFold(stored, head) || strings.EqualFold(stored, strings.TrimSpace(ev.BeforeSHA)) {
 		return DispositionApply
 	}
-	return DispositionDropStale
+	if s.HasPriorHead(head) {
+		return DispositionDropStale
+	}
+	return DispositionRecoverStale
 }
 
 // ApplyRegistryMerged mirrors UpdatePRMerged/BackfillPushMergeSHA: status

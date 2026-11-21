@@ -240,6 +240,10 @@ const (
 	DispositionDropStale EventDisposition = "drop_stale"
 	// DispositionAbsorbTerminal absorbs the event into an absorbing terminal state.
 	DispositionAbsorbTerminal EventDisposition = "absorb_terminal"
+	// DispositionRecoverStale applies a synchronize whose stored head matches
+	// neither its head nor its before SHA: PRObject missed an earlier
+	// synchronize, so the head moves last-write-wins like the legacy row.
+	DispositionRecoverStale EventDisposition = "recover_stale"
 )
 
 // EffectsOwner says who performs an event's side effects. Synapse stamps
