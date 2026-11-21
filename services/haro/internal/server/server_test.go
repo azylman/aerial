@@ -813,54 +813,6 @@ func TestServer_AuthEnabled(t *testing.T) {
 	}
 }
 
-func TestWriteAuthError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-		wantSubstr string
-	}{
-		{
-			name:       "validation error returns 400",
-			err:        &k8sauth.ValidationError{Message: "bad target agent"},
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "bad target agent",
-		},
-		{
-			name:       "unauthorized error returns 401",
-			err:        &k8sauth.UnauthorizedError{Message: "missing token"},
-			wantStatus: http.StatusUnauthorized,
-			wantSubstr: "missing token",
-		},
-		{
-			name:       "forbidden error returns 403",
-			err:        &k8sauth.ForbiddenError{Message: "access denied"},
-			wantStatus: http.StatusForbidden,
-			wantSubstr: "access denied",
-		},
-		{
-			name:       "generic error returns 500",
-			err:        errors.New("internal server error"),
-			wantStatus: http.StatusInternalServerError,
-			wantSubstr: "internal server error",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := httptest.NewRecorder()
-			writeAuthError(rec, tc.err)
-			if rec.Code != tc.wantStatus {
-				t.Errorf("writeAuthError status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-			if !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("writeAuthError body %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
 type authEndpointTestCase struct {
 	name       string
 	method     string

@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 )
@@ -199,7 +200,7 @@ type dispatchTestCase struct {
 	serverStatus    int
 	serverResponse  string
 	closeServer     bool
-	req             DispatchRequest
+	req             eriwire.BrainDispatchRequest
 	wantErr         bool
 	wantErrContains string
 	wantStatus      string
@@ -250,19 +251,19 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 		{
 			name:            "nil dispatcher returns error",
 			nilDispatcher:   true,
-			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
 			wantErr:         true,
 			wantErrContains: "dispatcher is nil",
 		},
 		{
 			name:            "empty source returns error",
-			req:             DispatchRequest{Source: "  ", Prompt: "test"},
+			req:             eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"},
 			wantErr:         true,
 			wantErrContains: "source cannot be empty",
 		},
 		{
 			name:            "empty prompt returns error",
-			req:             DispatchRequest{Source: "heartbeat", Prompt: "  "},
+			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "  "},
 			wantErr:         true,
 			wantErrContains: "prompt cannot be empty",
 		},
@@ -270,7 +271,7 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			name:            "server returns error json 400",
 			serverStatus:    http.StatusBadRequest,
 			serverResponse:  `{"error":"invalid dispatch"}`,
-			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
 			wantErr:         true,
 			wantErrContains: "invalid dispatch",
 		},
@@ -278,14 +279,14 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			name:            "server returns non-json error 500",
 			serverStatus:    http.StatusInternalServerError,
 			serverResponse:  `Internal Server Error`,
-			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
 			wantErr:         true,
 			wantErrContains: "returned HTTP 500",
 		},
 		{
 			name:            "closed server network error",
 			closeServer:     true,
-			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
 			wantErr:         true,
 			wantErrContains: "dispatch failed",
 		},
@@ -293,7 +294,7 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			name:           "success accepted 202",
 			serverStatus:   http.StatusAccepted,
 			serverResponse: `{"status":"accepted","dispatch_id":"disp-1"}`,
-			req:            DispatchRequest{Source: "heartbeat", SessionID: "hb-1", TargetID: "123456789", Prompt: "echo test", Effort: "low", SkipIfActive: true},
+			req:            eriwire.BrainDispatchRequest{Source: "heartbeat", SessionID: "hb-1", TargetID: "123456789", Prompt: "echo test", Effort: "low", SkipIfActive: true},
 			wantStatus:     "accepted",
 			wantDispatchID: "disp-1",
 		},
@@ -301,7 +302,7 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			name:           "success ok 200",
 			serverStatus:   http.StatusOK,
 			serverResponse: `{"status":"ok","dispatch_id":"disp-2"}`,
-			req:            DispatchRequest{Source: "heartbeat", Prompt: "echo test 2"},
+			req:            eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "echo test 2"},
 			wantStatus:     "ok",
 			wantDispatchID: "disp-2",
 		},
@@ -527,9 +528,9 @@ func runTraceFireCase(t *testing.T, tc traceFireTestCase) {
 		ctx = parentCtx
 	}
 	var dispatchSC trace.SpanContext
-	_, err := TraceFire(ctx, tc.scheduleType, tc.scheduleID, func(ctx context.Context) (DispatchResponse, error) {
+	_, err := TraceFire(ctx, tc.scheduleType, tc.scheduleID, func(ctx context.Context) (eriwire.DispatchEnqueueResponse, error) {
 		dispatchSC = trace.SpanContextFromContext(ctx)
-		return DispatchResponse{}, tc.dispatchErr
+		return eriwire.DispatchEnqueueResponse{}, tc.dispatchErr
 	})
 	if !errors.Is(err, tc.dispatchErr) {
 		t.Fatalf("TraceFire err = %v, want %v", err, tc.dispatchErr)
@@ -763,7 +764,7 @@ type restateDispatchTestCase struct {
 	serverStatus    int
 	serverResponse  string
 	agent           string
-	reqDispatch     DispatchRequest
+	reqDispatch     eriwire.BrainDispatchRequest
 	wantPath        string
 	wantIdempotency string
 	wantErr         bool
@@ -823,7 +824,7 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			serverStatus:   http.StatusOK,
 			serverResponse: `{"status":"accepted","dispatch_id":"disp-1"}`,
 			agent:          "aerial",
-			reqDispatch: DispatchRequest{
+			reqDispatch: eriwire.BrainDispatchRequest{
 				ID:        "disp-1",
 				Source:    "heartbeat",
 				SessionID: "sess-custom",
@@ -839,7 +840,7 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			serverStatus:   http.StatusOK,
 			serverResponse: ``,
 			agent:          "agent-alpha",
-			reqDispatch: DispatchRequest{
+			reqDispatch: eriwire.BrainDispatchRequest{
 				ID:     "disp-2",
 				Source: "vanadis",
 				Prompt: "build chunk",
@@ -854,7 +855,7 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			serverStatus:   http.StatusOK,
 			serverResponse: `{"status":"accepted","dispatch_id":"disp-3"}`,
 			agent:          "aerial",
-			reqDispatch: DispatchRequest{
+			reqDispatch: eriwire.BrainDispatchRequest{
 				ID:     "disp-3",
 				Source: "heartbeat",
 				Prompt: "build chunk override",
@@ -870,7 +871,7 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			serverStatus:   http.StatusOK,
 			serverResponse: `{"status":"accepted"}`,
 			agent:          "aerial",
-			reqDispatch: DispatchRequest{
+			reqDispatch: eriwire.BrainDispatchRequest{
 				Source: "heartbeat",
 				Prompt: "auto id dispatch",
 			},
@@ -881,7 +882,7 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			serverStatus:   http.StatusConflict,
 			serverResponse: `{"message":"active turn running"}`,
 			agent:          "aerial",
-			reqDispatch: DispatchRequest{
+			reqDispatch: eriwire.BrainDispatchRequest{
 				ID:     "disp-conflict",
 				Source: "heartbeat",
 				Prompt: "conflict test",
@@ -896,7 +897,7 @@ func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
 			serverStatus:   http.StatusOK,
 			serverResponse: `not-json`,
 			agent:          "aerial",
-			reqDispatch: DispatchRequest{
+			reqDispatch: eriwire.BrainDispatchRequest{
 				ID:     "disp-bad-json",
 				Source: "heartbeat",
 				Prompt: "bad json",
