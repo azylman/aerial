@@ -1,125 +1,30 @@
 package ericlient
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 )
 
-const defaultAgentName = "aerial"
-
-func isSafeAgentChar(c rune) bool {
-	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
-}
-
-// NormalizeAgentName trims and lowercases an agent name, ensuring it contains only safe identifier characters.
-func NormalizeAgentName(agent string) string {
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" {
-		return ""
-	}
-	for _, c := range clean {
-		if !isSafeAgentChar(c) {
-			return defaultAgentName
-		}
-	}
-	return clean
-}
-
-// SessionManagerServiceName returns the Restate service name for SessionManager Virtual Objects.
-func SessionManagerServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == defaultAgentName {
-		return "SessionManager"
-	}
-	return "SessionManager-" + name
-}
-
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
-func ThreadSessionServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == defaultAgentName {
-		return "ThreadSession"
-	}
-	return "ThreadSession-" + name
+func ThreadSessionServiceName(name string) string {
+	return agent.ScopedServiceName("ThreadSession", name)
 }
 
 // DispatchSessionServiceName returns the Restate service name for DispatchSession Virtual Objects.
-func DispatchSessionServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == defaultAgentName {
-		return "DispatchSession"
-	}
-	return "DispatchSession-" + name
-}
-
-// VoiceSessionServiceName returns the Restate service name for VoiceSession Virtual Objects.
-func VoiceSessionServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == defaultAgentName {
-		return "VoiceSession"
-	}
-	return "VoiceSession-" + name
-}
-
-// ReconcileRestateServiceTimeouts PATCHes the Restate admin API for ThreadSession, DispatchSession,
-// and VoiceSession so long turns never hit Restate's 1m default inactivity timeout.
-// It attempts to patch all services even if one fails, aggregating any errors.
-func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL, agent string, httpClient *http.Client) error {
-	trimmedAdmin := strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	if trimmedAdmin == "" {
-		return errors.New("admin url cannot be empty")
-	}
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
-	}
-
-	services := []string{
-		SessionManagerServiceName(agent),
-		ThreadSessionServiceName(agent),
-		DispatchSessionServiceName(agent),
-		VoiceSessionServiceName(agent),
-	}
-
-	patchBody := []byte(`{"inactivity_timeout":"1h","abort_timeout":"1h"}`)
-	var errs []error
-	for _, svc := range services {
-		reqURL := fmt.Sprintf("%s/services/%s", trimmedAdmin, url.PathEscape(svc))
-		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(patchBody))
-		if err != nil {
-			errs = append(errs, fmt.Errorf("create timeout patch request for %s: %w", svc, err))
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("patch timeout for service %s: %w", svc, err))
-			continue
-		}
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			errs = append(errs, fmt.Errorf("read timeout patch response for %s: %w", svc, readErr))
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			errs = append(errs, fmt.Errorf("patch timeout for %s returned HTTP %d: %s", svc, resp.StatusCode, string(respBody)))
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
+func DispatchSessionServiceName(name string) string {
+	return agent.ScopedServiceName("DispatchSession", name)
 }
 
 // StatusWidgetDeliverer abstracts status widget delivery to decouple from concrete discord sender.
@@ -152,9 +57,9 @@ func NewRestateEriClient(restateURL, eriURL, agentName string, httpClient *http.
 	}
 	trimmedRestate := strings.TrimRight(strings.TrimSpace(restateURL), "/")
 	trimmedEri := strings.TrimRight(strings.TrimSpace(eriURL), "/")
-	agent := NormalizeAgentName(agentName)
-	if agent == "" {
-		agent = defaultAgentName
+	agentName = agent.Normalize(agentName)
+	if agentName == "" {
+		agentName = agent.Default
 	}
 
 	var fallback *HTTPEriClient
@@ -172,7 +77,7 @@ func NewRestateEriClient(restateURL, eriURL, agentName string, httpClient *http.
 	return &RestateEriClient{
 		restateURL:      trimmedRestate,
 		eriURL:          trimmedEri,
-		agentName:       agent,
+		agentName:       agentName,
 		hasDiscordAuth:  hasDiscord,
 		httpClient:      httpClient,
 		httpFallback:    fallback,
@@ -198,62 +103,23 @@ func (c *RestateEriClient) SetWidgetDeliverer(wd StatusWidgetDeliverer) {
 	}
 }
 
-func parseRestateHTTPError(opLabel string, statusCode int, respBody []byte) error {
-	var errResp struct {
-		Message string `json:"message"`
-		Error   string `json:"error"`
-	}
-	if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil {
-		if msg := strings.TrimSpace(errResp.Message); msg != "" {
-			return fmt.Errorf("restate %s error (%d): %s", opLabel, statusCode, msg)
-		}
-		if errStr := strings.TrimSpace(errResp.Error); errStr != "" {
-			return fmt.Errorf("restate %s error (%d): %s", opLabel, statusCode, errStr)
-		}
-	}
-	return fmt.Errorf("restate %s returned HTTP %d: %s", opLabel, statusCode, string(respBody))
-}
-
+// postRestateJSON posts req to a Restate ingress endpoint, keeping
+// ericlient's "restate <op> ..." error text.
 func (c *RestateEriClient) postRestateJSON(ctx context.Context, endpoint, idempotencyKey, opLabel string, req any) ([]byte, error) {
 	if c == nil {
 		return nil, errors.New("restate eri client is nil")
 	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal %s request: %w", opLabel, err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create http request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if key := strings.TrimSpace(idempotencyKey); key != "" {
-		httpReq.Header.Set("Idempotency-Key", key)
-	}
-
-	client := c.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
+	respBody, err := restateingress.Post(ctx, c.httpClient, endpoint, idempotencyKey, req, 64<<10)
+	var httpErr *restateingress.HTTPError
+	switch {
+	case errors.As(err, &httpErr):
+		if httpErr.Message != "" {
+			return nil, fmt.Errorf("restate %s error (%d): %s", opLabel, httpErr.Status, httpErr.Message)
+		}
+		return nil, fmt.Errorf("restate %s returned HTTP %d: %s", opLabel, httpErr.Status, httpErr.Body)
+	case err != nil:
 		return nil, fmt.Errorf("%s failed: %w", opLabel, err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseRestateHTTPError(opLabel, resp.StatusCode, respBody)
-	}
-
 	return respBody, nil
 }
 
@@ -275,37 +141,23 @@ func parseDispatchResponse(respBytes []byte) (restateDispatchResult, error) {
 	return result, nil
 }
 
-func resolveSessionKey(req BrainDispatchRequest) string {
-	sessionKey := strings.TrimSpace(req.SessionID)
-	if sessionKey == "" {
-		chunkID := strings.TrimSpace(req.VanadisChunkID)
-		if chunkID != "" {
-			sessionKey = "vanadis-" + chunkID
-		} else {
-			dispatchID := strings.TrimSpace(req.ID)
-			sessionKey = "dispatch-" + dispatchID
-		}
-	}
-	return sessionKey
-}
-
 // effectiveAgent resolves the first non-empty explicit value, else AgentFromContext(ctx), else c.agentName, else defaultAgentName.
 func (c *RestateEriClient) effectiveAgent(ctx context.Context, explicit ...string) string {
 	for _, exp := range explicit {
 		clean := strings.TrimSpace(exp)
 		if clean != "" {
-			return NormalizeAgentName(clean)
+			return agent.Normalize(clean)
 		}
 	}
 	if ctx != nil {
 		if fromCtx := AgentFromContext(ctx); fromCtx != "" {
-			return NormalizeAgentName(fromCtx)
+			return agent.Normalize(fromCtx)
 		}
 	}
 	if c != nil && c.agentName != "" {
-		return NormalizeAgentName(c.agentName)
+		return agent.Normalize(c.agentName)
 	}
-	return defaultAgentName
+	return agent.Default
 }
 
 type dispatchAttemptKey struct{}
@@ -340,7 +192,7 @@ func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req Brain
 	dispatchAgent := c.effectiveAgent(ctx, req.Agent)
 	req.Agent = dispatchAgent
 	dispatchID := strings.TrimSpace(req.ID)
-	sessionKey := resolveSessionKey(req)
+	sessionKey := eriwire.ResolveDispatchSessionKey(req)
 	svc := DispatchSessionServiceName(dispatchAgent)
 	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, svc, url.PathEscape(sessionKey))
 
@@ -366,11 +218,11 @@ func (c *RestateEriClient) Dispatch(ctx context.Context, req BrainDispatchReques
 	if err != nil {
 		return err
 	}
-	if res.Status == statusSkippedActive {
+	if res.Status == eriwire.StatusSkippedActive {
 		return ErrDispatchActive
 	}
 	switch res.Status {
-	case "", statusOK, statusAccepted, statusAlreadyExists:
+	case "", statusOK, eriwire.StatusAccepted, eriwire.StatusAlreadyExists:
 		return nil
 	default:
 		return fmt.Errorf("restate rejected dispatch %q (status %q)", req.ID, res.Status)
@@ -392,7 +244,7 @@ func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req BrainDispat
 	if err != nil {
 		return err
 	}
-	if res.Status == statusSkippedActive {
+	if res.Status == eriwire.StatusSkippedActive {
 		return ErrDispatchActive
 	}
 	effectiveID := res.DispatchID
@@ -400,7 +252,7 @@ func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req BrainDispat
 		effectiveID = res.MessageID
 	}
 	if req.ID != "" && effectiveID == req.ID {
-		if res.Status == statusAccepted || res.Status == statusAlreadyExists || res.Status == statusOK {
+		if res.Status == eriwire.StatusAccepted || res.Status == eriwire.StatusAlreadyExists || res.Status == statusOK {
 			return nil
 		}
 	}
@@ -448,8 +300,8 @@ func (c *RestateEriClient) Prompt(ctx context.Context, threadID, prompt string) 
 
 // enqueueThreadPrompt enqueues one prompt turn on agent's ThreadSession
 // Virtual Object keyed by the thread.
-func (c *RestateEriClient) enqueueThreadPrompt(ctx context.Context, agent, threadID, prompt, msgID, idempotencyKey string) error {
-	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, ThreadSessionServiceName(agent), url.PathEscape(threadID))
+func (c *RestateEriClient) enqueueThreadPrompt(ctx context.Context, agentName, threadID, prompt, msgID, idempotencyKey string) error {
+	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, ThreadSessionServiceName(agentName), url.PathEscape(threadID))
 	reqBody := struct {
 		ChannelID string `json:"channel_id"`
 		Prompt    string `json:"prompt"`
@@ -471,7 +323,7 @@ var errRestateNotConfigured = errors.New("restate url not configured")
 // Restate ingress, keyed by the caller's deterministic idempotency key (the
 // message ID derives from it too, so a resend is one turn). It never falls
 // back to eri HTTP.
-func (c *RestateEriClient) PromptAgent(ctx context.Context, agent, threadID, prompt, idempotencyKey string) error {
+func (c *RestateEriClient) PromptAgent(ctx context.Context, agentName, threadID, prompt, idempotencyKey string) error {
 	if c == nil {
 		return errors.New("restate eri client is nil")
 	}
@@ -485,7 +337,7 @@ func (c *RestateEriClient) PromptAgent(ctx context.Context, agent, threadID, pro
 	if cleanKey == "" {
 		return errors.New("prompt idempotency key is required")
 	}
-	return c.enqueueThreadPrompt(ctx, c.resolveAgent(agent), cleanThreadID, cleanPrompt, deterministicPromptMessageID(cleanThreadID, cleanKey), cleanKey)
+	return c.enqueueThreadPrompt(ctx, c.resolveAgent(agentName), cleanThreadID, cleanPrompt, deterministicPromptMessageID(cleanThreadID, cleanKey), cleanKey)
 }
 
 // DispatchRestate enqueues a background dispatch on req.Agent's
@@ -504,7 +356,7 @@ func (c *RestateEriClient) DispatchRestate(ctx context.Context, req BrainDispatc
 // MessageAgent delivers a plain direct message through agent's Discord
 // sender. It requires direct Discord auth and an agent-routing deliverer and
 // never falls back to eri HTTP.
-func (c *RestateEriClient) MessageAgent(ctx context.Context, agent, channelID, content string) error {
+func (c *RestateEriClient) MessageAgent(ctx context.Context, agentName, channelID, content string) error {
 	if c == nil {
 		return errors.New("restate eri client is nil")
 	}
@@ -520,17 +372,17 @@ func (c *RestateEriClient) MessageAgent(ctx context.Context, agent, channelID, c
 	if !hasDiscordAuth || !ok || mda == nil {
 		return errors.New("no agent direct message deliverer configured")
 	}
-	return mda.DeliverDirectMessageWithAgent(ctx, c.resolveAgent(agent), cleanChannelID, cleanContent)
+	return mda.DeliverDirectMessageWithAgent(ctx, c.resolveAgent(agentName), cleanChannelID, cleanContent)
 }
 
 // agentMessageDeliverer is the agent-routing direct message surface.
 type agentMessageDeliverer interface {
-	DeliverDirectMessageWithAgent(ctx context.Context, agent, channelID, content string) error
+	DeliverDirectMessageWithAgent(ctx context.Context, agentName, channelID, content string) error
 }
 
 // resolveAgent normalizes agent, falling back to the client's own agent.
-func (c *RestateEriClient) resolveAgent(agent string) string {
-	if clean := NormalizeAgentName(agent); clean != "" {
+func (c *RestateEriClient) resolveAgent(name string) string {
+	if clean := agent.Normalize(name); clean != "" {
 		return clean
 	}
 	return c.agentName
