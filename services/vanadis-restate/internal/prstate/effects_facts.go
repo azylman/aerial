@@ -9,22 +9,17 @@ package prstate
 // their decision first, then run the facts; the deploy-failure deadline
 // commits deploy_failed, then runs the fact captured with the attempt.
 //
-// For every fact whose generation-scoped EffectKey has not fired:
-//
-//   - effects_owner=restate: the fact takes the stored target and the
-//     rollout state rendered from committed PRState (BuildPRRolloutState)
-//     when it carries none, then one journaled restate.Run publishes it on
-//     aerial.pr.<event> with a deterministic Nats-Msg-Id derived from the
-//     EffectKey, so JetStream deduplicates a resend. The BuildRouter route
-//     rides the same publish: vanadis-nats forwards aerial.pr.> to
-//     BuildRouter.RoutePREvent keyed by that Nats-Msg-Id, so the route is
-//     deduplicated end to end and a second direct route would double-deliver.
-//     The Run fails fast (one attempt) so the exclusive PR lock is never held
-//     across backoff; a failure schedules a delayed RetryFactEffect.
-//   - effects_owner=legacy: synapse published it. PRObject commits the key,
-//     records an IntendedEffect, bumps prstate_intended_effects_total{kind},
-//     and logs [prstate-shadow] with the match key synapse logs as
-//     [synapse-effect].
+// For every fact whose generation-scoped EffectKey has not fired, the fact
+// takes the stored target and the rollout state rendered from committed
+// PRState (BuildPRRolloutState) when it carries none, then one journaled
+// restate.Run publishes it on aerial.pr.<event> with a deterministic
+// Nats-Msg-Id derived from the EffectKey, so JetStream deduplicates a
+// resend. The BuildRouter route rides the same publish: vanadis-nats
+// forwards aerial.pr.> to BuildRouter.RoutePREvent keyed by that
+// Nats-Msg-Id, so the route is deduplicated end to end and a second direct
+// route would double-deliver. The Run fails fast (one attempt) so the
+// exclusive PR lock is never held across backoff; a failure schedules a
+// delayed RetryFactEffect.
 
 import (
 	"context"
@@ -148,55 +143,31 @@ func PlanFacts(st *PRState, facts []pubsub.PRLifecycleEvent) []PlannedFact {
 	return out
 }
 
-// FactDigest fingerprints the rendered fact so gates can tell a matching
-// key with a different body apart. OccurredAt is excluded: synapse stamps it
-// per delivery.
-func FactDigest(f pubsub.PRLifecycleEvent) string {
-	return digestStrings(f.Event, f.Branch, f.HeadSHA, f.MergeSHA, f.TargetID, f.Status, f.CheckName, f.JobName, f.Details)
-}
-
-// runFacts publishes or records every planned fact and persists the
-// committed effect keys. owner is the event's effects owner.
-func (s *PRObjectService) runFacts(ctx restate.ObjectContext, st *PRState, owner EffectsOwner, facts []pubsub.PRLifecycleEvent) {
+// runFacts publishes every planned fact and persists the committed effect
+// keys. A fact whose journaled publish failed schedules a delayed retry and
+// stays uncommitted.
+func (s *PRObjectService) runFacts(ctx restate.ObjectContext, st *PRState, facts []pubsub.PRLifecycleEvent) {
 	planned := PlanFacts(st, facts)
 	if len(planned) == 0 {
 		return
 	}
 	for _, p := range planned {
-		if ParseEffectsOwner(string(owner)) == EffectsOwnerRestate {
-			// Restate-owned synapse renders facts without the registry, so
-			// a published fact with no target takes the stored one, and one
-			// with no rollout state takes the state rendered from st, which
-			// the handler committed before running its facts. The key and
-			// the legacy digest never include either.
-			if strings.TrimSpace(p.Fact.TargetID) == "" {
-				p.Fact.TargetID = st.TargetID
-			}
-			p.Fact = withRolloutState(st, p.Fact)
-			if !s.publishFact(ctx, p) {
-				s.scheduleFactRetry(ctx, FactEffectRetry{Fact: p.Fact, Generation: p.Key.GateGeneration})
-				continue
-			}
-		} else {
-			intended := IntendedEffect{Kind: p.Key.Kind, Agent: p.Agent, EffectKey: p.Key.String(), MatchKey: p.Key.MatchKey(), Digest: FactDigest(p.Fact)}
-			recordIntendedEffect(ctx, intended)
-			st.RecordIntendedEffect(intended)
+		// Synapse renders facts without the registry, so a published fact
+		// with no target takes the stored one, and one with no rollout
+		// state takes the state rendered from st, which the handler
+		// committed before running its facts. The key never includes
+		// either.
+		if strings.TrimSpace(p.Fact.TargetID) == "" {
+			p.Fact.TargetID = st.TargetID
+		}
+		p.Fact = withRolloutState(st, p.Fact)
+		if !s.publishFact(ctx, p) {
+			s.scheduleFactRetry(ctx, FactEffectRetry{Fact: p.Fact, Generation: p.Key.GateGeneration})
+			continue
 		}
 		st.MarkEffectDispatched(p.Key)
 	}
 	restate.Set(ctx, s.stateKey, st)
-}
-
-// recordIntendedEffect journals the intended-effect metric and log once.
-func recordIntendedEffect(ctx restate.ObjectContext, e IntendedEffect) {
-	pr := restate.Key(ctx)
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		intendedEffectsTotal.WithLabelValues(e.Kind).Inc()
-		slog.InfoContext(rc, "[prstate-shadow] intended effect recorded (synapse owns effects)",
-			"pr", pr, "kind", e.Kind, "agent", e.Agent, "effect_key", e.EffectKey,
-			"match_key", e.MatchKey, "digest", e.Digest)
-		return restate.Void{}, nil
-	}, restate.WithName("record-intended-"+e.Kind))
 }
 
 // factPlanned binds one fact to the configured publisher. The JetStream
