@@ -197,41 +197,19 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 // already-completed chunks re-derived for retry recovery. Skewed or
 // concurrent transitions surface as skipped writes inside the store sweep;
 // other errors return after processing partial progress so the journaled
-// step retries the remainder. Per affected non-terminal foreign build it
-// publishes a completed event per swept chunk, re-syncs the build widget
-// from the store, and applies the existing build-completion transition.
+// step retries the remainder. It publishes a completed event per swept
+// chunk, then queues one Reconcile per affected build for that build's own
+// runner: this object never evaluates another build's terminal status or
+// widget with its own lock, token or eri session.
 func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, deploying model.VanadisChunk) error {
 	swept, recovered, err := b.store.SweepEarlierDeploymentsAcrossBuilds(ctx, deploying)
-	byBuild := make(map[string][]string)
-	var buildOrder []string
 	for _, sw := range append(swept, recovered...) {
-		if _, ok := byBuild[sw.BuildID]; !ok {
-			buildOrder = append(buildOrder, sw.BuildID)
-		}
-		byBuild[sw.BuildID] = append(byBuild[sw.BuildID], sw.ChunkID)
-	}
-	for _, buildID := range buildOrder {
-		build, foreignChunks, getErr := b.store.GetBuild(ctx, buildID)
-		if getErr != nil {
-			return getErr
-		}
-		if build == nil || build.Status == statusCancelled || build.Status == statusCompleted {
-			continue
-		}
 		if b.executor != nil {
-			for _, sweptID := range byBuild[buildID] {
-				if pubErr := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{sweptID}, ""); pubErr != nil {
-					slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
-				}
+			if pubErr := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{sw.ChunkID}, ""); pubErr != nil {
+				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
 			}
 		}
-		if build.Status == statusFailed {
-			b.refreshFailedPRWidget(ctx, buildID)
-			continue
-		}
-		if _, evalErr := b.evaluateBuildTerminalStatus(ctx, build, foreignChunks); evalErr != nil {
-			return evalErr
-		}
+		recordCrossBuildReconcile(ctx, store.BuildRoute{BuildID: sw.BuildID, RunnerAgent: sw.RunnerAgent})
 	}
 	return err
 }
@@ -312,17 +290,21 @@ func (b *BuildObject) locateOrAttachPRChunk(ctx context.Context, buildID string,
 	return b.flow().LocateOrAttachPRChunk(ctx, buildID, ev)
 }
 
-func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+// dispatchPREvent applies one PR event and returns the other builds a
+// deploy_success sweep changed, for reconciliation by their own runners.
+func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) ([]store.BuildRoute, error) {
 	if event == "deploy_success" {
-		return b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
+		ctx, crossBuild := withCrossBuildReconciles(rc)
+		err := b.applyMutation(ctx, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
+		return crossBuild.list(), err
 	}
-	return b.handlePREventType(rc, buildID, chunkID, event, ev)
+	return nil, b.handlePREventType(rc, buildID, chunkID, event, ev)
 }
 
-func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (bool, error) {
+func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (prEventOutcome, error) {
 	chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
 	if cErr != nil || chunkID == "" {
-		return false, cErr
+		return prEventOutcome{}, cErr
 	}
 	rolloutStatus := ""
 	event := strings.ToLower(strings.TrimSpace(ev.Event))
@@ -330,28 +312,34 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 		valid, status, e := b.recordDeploymentStart(rc, buildID, chunkID, ev)
 		rolloutStatus = status
 		if e != nil || !valid {
-			return false, e
+			return prEventOutcome{}, e
 		}
 	}
 
-	eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
+	reconcileTargets, eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
 	if eventErr != nil {
 		if errors.Is(eventErr, errPRTransitionSkipped) {
-			return false, nil
+			return prEventOutcome{}, nil
 		}
-		return false, eventErr
+		return prEventOutcome{}, eventErr
 	}
 	b.refreshFailedPRWidget(rc, buildID)
 	if event != "deploy_success" && ev.RolloutState != nil {
 		if rErr := b.store.RecordPRRolloutState(rc, chunkID, rolloutStatus, ev.RolloutState); rErr != nil {
 			if event == prEventDeployStarted {
-				return false, rErr
+				return prEventOutcome{}, rErr
 			}
 			slog.WarnContext(rc, "[vanadis-restate] record rollout state warning", "error", rErr)
 		}
 		b.refreshFailedPRWidget(rc, buildID)
 	}
-	return true, nil
+	return prEventOutcome{Applied: true, ReconcileTargets: reconcileTargets}, nil
+}
+
+// prEventOutcome is the journaled result of applying one PR lifecycle event.
+type prEventOutcome struct {
+	Applied          bool               `json:"applied"`
+	ReconcileTargets []store.BuildRoute `json:"reconcile_targets,omitempty"`
 }
 
 // OnPREvent receives PR lifecycle events for this build.
@@ -359,14 +347,18 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	if b.store == nil {
 		return nil
 	}
+	if err := b.guardRunner(ctx, labelOnPREvent); err != nil {
+		return err
+	}
 	buildID := restate.Key(ctx)
-	_, err := RunJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (bool, error) {
+	outcome, err := RunJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (prEventOutcome, error) {
 		return b.recordDeploymentPREvent(rc, buildID, ev)
 	})
 	if err != nil {
 		return err
 	}
 	rt := b.getRuntime(ctx)
+	sendCrossBuildReconciles(rt, outcome.ReconcileTargets)
 	if strings.EqualFold(strings.TrimSpace(ev.Event), prEventDeployStarted) {
 		if err := b.armDeploymentStart(rt, buildID, ev); err != nil {
 			return err
@@ -383,6 +375,9 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
 	if b.store == nil {
 		return nil
+	}
+	if err := b.guardRunner(ctx, labelOnDispatchOutcome); err != nil {
+		return err
 	}
 	applied, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", func(rc restate.RunContext) (bool, error) {
 		chunkID := strings.TrimSpace(ev.VanadisChunkID)

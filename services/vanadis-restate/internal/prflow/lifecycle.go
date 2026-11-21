@@ -453,6 +453,11 @@ func (f *Flow) LocateOrAttachPRChunk(ctx context.Context, buildID string, ev pub
 		return "", err
 	}
 	if lookup != nil && lookup.Matched {
+		// A PR chunk owned by another build is that build's runner's work:
+		// never act on it from this build's object.
+		if owner := strings.TrimSpace(lookup.BuildID); owner != "" && owner != strings.TrimSpace(buildID) {
+			return "", nil
+		}
 		return lookup.ChunkID, nil
 	}
 	return f.ResolveOrAttachPRChunk(ctx, buildID, ev)

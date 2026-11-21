@@ -31,7 +31,7 @@ const (
 )
 
 // BuildColumns is the canonical build-row select list.
-const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
+const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at, COALESCE(NULLIF(runner_agent, ''), 'aerial')`
 
 // PgxQueryExecer abstracts the pgx query surface used by the store.
 type PgxQueryExecer interface {
@@ -173,9 +173,9 @@ type VanadisStore interface {
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
-	LookupPRChunk(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, err error)
-	LookupChunkBuildID(ctx context.Context, chunkID string) (buildID string, err error)
-	LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (buildID, chunkID string, err error)
+	LookupPRChunk(ctx context.Context, repo string, prNumber int) (route BuildRoute, chunkID string, err error)
+	LookupChunkBuildID(ctx context.Context, chunkID string) (route BuildRoute, err error)
+	LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (route BuildRoute, chunkID string, err error)
 	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)
 	CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error)
 	FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*model.VanadisBuild, *model.VanadisChunk, bool, error)
@@ -271,11 +271,30 @@ func ScanBuild(s rowScanner) (model.VanadisBuild, error) {
 		return model.VanadisBuild{}, errors.New("row scanner is nil")
 	}
 	var b model.VanadisBuild
-	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
+	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt, &b.RunnerAgent)
 	if err == nil && strings.TrimSpace(b.Agent) == "" {
 		b.Agent = defaultAgent
 	}
+	if err == nil {
+		b.RunnerAgent = NormalizeRunnerAgent(b.RunnerAgent)
+	}
 	return b, err
+}
+
+// NormalizeRunnerAgent canonicalizes a runner agent name: trimmed and
+// lowercased, with empty meaning the default agent.
+func NormalizeRunnerAgent(agent string) string {
+	if name := model.NormalizeAgentName(agent); name != "" {
+		return name
+	}
+	return defaultAgent
+}
+
+// BuildRoute is the Restate routing key for one build: its ID and the agent
+// whose vanadis-restate runner executes it.
+type BuildRoute struct {
+	BuildID     string `json:"build_id"`
+	RunnerAgent string `json:"runner_agent"`
 }
 
 // ApplyRawChunkCIChecks folds raw CI check JSON into derived chunk fields.
@@ -304,33 +323,9 @@ func ApplyRawChunkCIChecks(c *model.VanadisChunk, rawCIChecks []byte) {
 func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 	chunks := make([]model.VanadisChunk, 0)
 	for rows.Next() {
-		var c model.VanadisChunk
-		var startedAt, completedAt sql.NullTime
-		var rawCIChecks, rawRolloutState []byte
-		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
-			&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
-			&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
-			&rawRolloutState, &c.Banner, &c.MergeAwakeableID, &c.DeployAwakeableID,
-			&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
-		}
-		if startedAt.Valid {
-			c.StartedAt = startedAt.Time
-		}
-		if completedAt.Valid {
-			c.CompletedAt = completedAt.Time
-		}
-		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = NonNilSlice(c.TargetFiles), NonNilSlice(c.TargetSymbols), NonNilSlice(c.AcceptanceCriteria)
-		c.DependsOn = NonNilSlice(c.DependsOn)
-		c.Effort = CapChunkEffort(c.Effort)
-		ApplyRawChunkCIChecks(&c, rawCIChecks)
-		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
-			var rs pubsub.PRRolloutState
-			if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
-				c.RolloutState = &rs
-			}
+		c, err := scanChunkRow(rows)
+		if err != nil {
+			return nil, err
 		}
 		chunks = append(chunks, c)
 	}
@@ -338,4 +333,40 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 		return nil, fmt.Errorf("error iterating vanadis chunks: %w", err)
 	}
 	return chunks, nil
+}
+
+// scanChunkRow scans one canonical chunk row followed by optional trailing
+// columns (for joins that select extra build fields after the chunk).
+func scanChunkRow(row rowScanner, extra ...any) (model.VanadisChunk, error) {
+	var c model.VanadisChunk
+	var startedAt, completedAt sql.NullTime
+	var rawCIChecks, rawRolloutState []byte
+	dest := make([]any, 0, 25+len(extra))
+	dest = append(dest,
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
+		&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
+		&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
+		&rawRolloutState, &c.Banner, &c.MergeAwakeableID, &c.DeployAwakeableID,
+		&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err := row.Scan(append(dest, extra...)...); err != nil {
+		return model.VanadisChunk{}, fmt.Errorf("failed to scan vanadis chunk: %w", err)
+	}
+	if startedAt.Valid {
+		c.StartedAt = startedAt.Time
+	}
+	if completedAt.Valid {
+		c.CompletedAt = completedAt.Time
+	}
+	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = NonNilSlice(c.TargetFiles), NonNilSlice(c.TargetSymbols), NonNilSlice(c.AcceptanceCriteria)
+	c.DependsOn = NonNilSlice(c.DependsOn)
+	c.Effort = CapChunkEffort(c.Effort)
+	ApplyRawChunkCIChecks(&c, rawCIChecks)
+	if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
+		var rs pubsub.PRRolloutState
+		if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
+			c.RolloutState = &rs
+		}
+	}
+	return c, nil
 }

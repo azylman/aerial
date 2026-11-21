@@ -741,7 +741,7 @@ func TestDeploymentStartEvent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, MergeSHA: "sha", Status: statusMerged}}}}
-			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, MergeSHA: "sha", RolloutState: tc.rollout})
+			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, MergeSHA: "sha", RolloutState: tc.rollout})
 			require.Equal(t, tc.writeErr != nil, err != nil)
 			require.Equal(t, tc.wantLifecycle, st.lifecycleStatus)
 			if tc.writeErr == nil {
@@ -788,7 +788,7 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 			b := &BuildObject{store: st}
 			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
 			rc := mockRunContext{Context: context.Background()}
-			_, err := b.recordDeploymentPREvent(rc, "b", ev)
+			_, err := b.recordDeploymentPREvent(rc, "b1", ev)
 			require.NoError(t, err)
 			require.NoError(t, b.armDeploymentStart(rt, "b", ev))
 			require.Equal(t, now.Add(15*time.Minute), rt.attempts["c1"].Deadline)
@@ -1287,22 +1287,19 @@ type crossBuildSweepSpyStore struct {
 	foreignChunks   []model.VanadisChunk
 	crossSwept      []store.SweptChunk
 	crossErr        bool
-	foreignErr      bool
-	updateErr       bool
 	crossCalled     bool
 	crossRecovered  []store.SweptChunk
 	crossDeployJobs []string
 	ownCompleted    []string
 	statusUpdates   []string
+	foreignReads    []string
 }
 
 func (s *crossBuildSweepSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	if buildID == "b1" {
 		return s.ownBuild, s.ownChunks, nil
 	}
-	if s.foreignErr {
-		return nil, nil, errors.New("build read unavailable")
-	}
+	s.foreignReads = append(s.foreignReads, buildID)
 	for i := range s.foreignBuilds {
 		if s.foreignBuilds[i].ID != buildID {
 			continue
@@ -1364,9 +1361,6 @@ func (*crossBuildSweepSpyStore) UpdateBuildStatusMessageID(context.Context, stri
 }
 
 func (s *crossBuildSweepSpyStore) UpdateBuildStatus(_ context.Context, buildID, status string) error {
-	if s.updateErr {
-		return errors.New("build status unavailable")
-	}
 	s.statusUpdates = append(s.statusUpdates, buildID+"="+status)
 	for i := range s.foreignBuilds {
 		if s.foreignBuilds[i].ID == buildID {
@@ -1383,27 +1377,35 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 		return []model.VanadisChunk{{ID: "deploying", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: statusDeploying, PRNumber: 7, CompletedAt: mergeLater, RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}}}
 	}
 	tests := []struct {
-		name                                                                                string
-		buildStatus                                                                         string
-		foreignChunks                                                                       []model.VanadisChunk
-		crossSwept                                                                          []store.SweptChunk
-		crossErr, foreignErr, publishErr, updateErr, withExecutor, wantErr, wantCrossCalled bool
-		wantOwnCompleted                                                                    []string
-		wantStatusUpdates                                                                   []string
-		wantEvents                                                                          []string
+		name                                                         string
+		buildStatus                                                  string
+		foreignChunks                                                []model.VanadisChunk
+		crossSwept                                                   []store.SweptChunk
+		crossErr, publishErr, withExecutor, wantErr, wantCrossCalled bool
+		wantOwnCompleted                                             []string
+		wantReconciles                                               []store.BuildRoute
+		wantEvents                                                   []string
 	}{
 		{
-			name: "foreign earlier merged completes and its build completes", buildStatus: statusRunning,
+			name: "foreign earlier merged completes and its runner reconciles the build", buildStatus: statusRunning,
 			foreignChunks:   crossBuildForeignChunks(),
-			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantStatusUpdates: []string{"b2=completed"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 		{
-			name: "foreign deploying and synced complete while build stays running", buildStatus: statusRunning,
+			name: "foreign build on sibling runner is reconciled by that runner", buildStatus: statusRunning,
+			foreignChunks:   crossBuildForeignChunks(),
+			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}},
+			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}},
+		},
+		{
+			name: "foreign deploying and synced complete with one reconcile", buildStatus: statusRunning,
 			foreignChunks:   crossBuildRunningChunks(),
 			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}},
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 		{
 			name: "no foreign sweep touches nothing", buildStatus: statusRunning,
@@ -1425,32 +1427,20 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantStatusUpdates: []string{"b2=completed"}, wantEvents: []string{"deploying", "f1"},
-		},
-		{
-			name: "foreign build read error aborts", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, foreignErr: true,
-			wantErr: true, wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}, wantEvents: []string{"deploying", "f1"},
 		},
 		{
 			name: "publish error warns without aborting", buildStatus: statusRunning,
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, publishErr: true, withExecutor: true,
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantStatusUpdates: []string{"b2=completed"},
-		},
-		{
-			name: "foreign build status error aborts", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, updateErr: true,
-			wantErr: true, wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spy := &crossBuildSweepSpyStore{ownBuild: &model.VanadisBuild{ID: "b1", Status: tc.buildStatus}, ownChunks: newOwnChunks(), foreignBuilds: []model.VanadisBuild{{ID: "b2", Status: statusRunning}}, foreignChunks: tc.foreignChunks, crossSwept: tc.crossSwept, crossErr: tc.crossErr, foreignErr: tc.foreignErr, updateErr: tc.updateErr}
+			spy := &crossBuildSweepSpyStore{ownBuild: &model.VanadisBuild{ID: "b1", Status: tc.buildStatus}, ownChunks: newOwnChunks(), foreignBuilds: []model.VanadisBuild{{ID: "b2", Status: statusRunning}}, foreignChunks: tc.foreignChunks, crossSwept: tc.crossSwept, crossErr: tc.crossErr}
 			bus := &recordingChunkBus{}
 			var busPub pubsub.Bus = bus
 			if tc.publishErr {
@@ -1461,7 +1451,8 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 				exec = executor.NewExecutor("", &mockEriClient{}, busPub, "token", nil)
 			}
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
-			err := bo.completePRDeploymentMutation(context.Background(), "b1", &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying"})
+			ctx, crossBuild := withCrossBuildReconciles(context.Background())
+			err := bo.completePRDeploymentMutation(ctx, "b1", &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying"})
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -1469,7 +1460,9 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 			}
 			assert.Equal(t, tc.wantCrossCalled, spy.crossCalled)
 			assert.Equal(t, tc.wantOwnCompleted, spy.ownCompleted)
-			assert.Equal(t, tc.wantStatusUpdates, spy.statusUpdates)
+			assert.Equal(t, tc.wantReconciles, crossBuild.list())
+			assert.Empty(t, spy.statusUpdates, "other builds must never be evaluated by this runner")
+			assert.Empty(t, spy.foreignReads, "other builds must never be read for local evaluation")
 			for _, id := range tc.wantEvents {
 				assert.True(t, bus.sweptEvent(id), "expected vanadis_chunk completed event for %q, got %+v", id, bus.events)
 			}

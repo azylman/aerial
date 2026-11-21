@@ -33,6 +33,7 @@ var ErrPRTransitionSkipped = errors.New("pr lifecycle transition not applied")
 type chunkPRMatch struct {
 	chunkID      string
 	buildID      string
+	runnerAgent  string
 	chunkIdx     int
 	effort       string
 	hasRemaining bool
@@ -58,77 +59,90 @@ func (s *Store) GetChunkByPR(ctx context.Context, repo string, prNumber int) (*V
 	}, nil
 }
 
-func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (string, string, error) {
-	lookup, err := s.GetChunkByPR(ctx, repo, prNumber)
+// LookupPRChunk resolves the build route and chunk that own a repo PR.
+func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (BuildRoute, string, error) {
+	if s == nil || s.db == nil {
+		return BuildRoute{}, "", errors.New("database connection is nil")
+	}
+	candidates := RepoMatchCandidates(repo)
+	if len(candidates) == 0 || prNumber <= 0 {
+		return BuildRoute{}, "", ErrChunkNotFound
+	}
+	match, found, err := s.findChunkPRMatch(ctx, candidates, prNumber)
 	if err != nil {
-		return "", "", err
+		return BuildRoute{}, "", err
 	}
-	if lookup == nil || !lookup.Matched {
-		return "", "", ErrChunkNotFound
+	if !found {
+		return BuildRoute{}, "", ErrChunkNotFound
 	}
-	return lookup.BuildID, lookup.ChunkID, nil
+	return BuildRoute{BuildID: match.buildID, RunnerAgent: NormalizeRunnerAgent(match.runnerAgent)}, match.chunkID, nil
 }
 
-func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (string, error) {
+// LookupChunkBuildID resolves the build route that owns a chunk.
+func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (BuildRoute, error) {
 	if s == nil || s.db == nil {
-		return "", errors.New("database connection is nil")
+		return BuildRoute{}, errors.New("database connection is nil")
 	}
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
-		return "", errors.New("chunk id cannot be empty")
+		return BuildRoute{}, errors.New("chunk id cannot be empty")
 	}
-	var buildID string
-	err := s.db.QueryRow(ctx, `SELECT build_id FROM vanadis_chunks WHERE id = $1;`, chunkID).Scan(&buildID)
+	var route BuildRoute
+	err := s.db.QueryRow(ctx, `SELECT c.build_id, COALESCE(NULLIF(b.runner_agent, ''), 'aerial') FROM vanadis_chunks c JOIN vanadis_builds b ON b.id = c.build_id WHERE c.id = $1;`, chunkID).Scan(&route.BuildID, &route.RunnerAgent)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrChunkNotFound
+			return BuildRoute{}, ErrChunkNotFound
 		}
-		return "", fmt.Errorf("lookup chunk build id: %w", err)
+		return BuildRoute{}, fmt.Errorf("lookup chunk build id: %w", err)
 	}
-	return buildID, nil
+	route.RunnerAgent = NormalizeRunnerAgent(route.RunnerAgent)
+	return route, nil
 }
 
-func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (string, string, error) {
+// LookupUnattachedChunkByThreadAndRepo resolves the single running unattached
+// PR chunk for a thread and repo, with its build route.
+func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (BuildRoute, string, error) {
 	if s == nil || s.db == nil {
-		return "", "", errors.New("database connection is nil")
+		return BuildRoute{}, "", errors.New("database connection is nil")
 	}
 	threadID = model.NormalizeDiscordThreadID(threadID)
 	candidates := RepoMatchCandidates(repo)
 	if threadID == "" || len(candidates) == 0 {
-		return "", "", ErrChunkNotFound
+		return BuildRoute{}, "", ErrChunkNotFound
 	}
-	const query = `SELECT c.build_id, c.id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE b.thread_id = $1 AND b.status != 'cancelled' AND c.mode = 'pr' AND c.repo = ANY($2) AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') AND c.started_at IS NOT NULL ORDER BY c.chunk_index ASC LIMIT 2;`
+	const query = `SELECT c.build_id, c.id, COALESCE(NULLIF(b.runner_agent, ''), 'aerial') FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE b.thread_id = $1 AND b.status != 'cancelled' AND c.mode = 'pr' AND c.repo = ANY($2) AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') AND c.started_at IS NOT NULL ORDER BY c.chunk_index ASC LIMIT 2;`
 	rows, err := s.db.Query(ctx, query, threadID, candidates)
 	if err != nil {
-		return "", "", fmt.Errorf("lookup unattached chunk by thread %s and repo %s: %w", threadID, repo, err)
+		return BuildRoute{}, "", fmt.Errorf("lookup unattached chunk by thread %s and repo %s: %w", threadID, repo, err)
 	}
 	defer rows.Close()
 
 	type chunkMatch struct {
 		buildID string
 		chunkID string
+		runner  string
 	}
 	var matches []chunkMatch
 	for rows.Next() {
 		var m chunkMatch
-		if err := rows.Scan(&m.buildID, &m.chunkID); err != nil {
-			return "", "", fmt.Errorf("scan unattached chunk: %w", err)
+		if err := rows.Scan(&m.buildID, &m.chunkID, &m.runner); err != nil {
+			return BuildRoute{}, "", fmt.Errorf("scan unattached chunk: %w", err)
 		}
 		matches = append(matches, m)
 	}
 	if err := rows.Err(); err != nil {
-		return "", "", fmt.Errorf("iterate unattached chunks: %w", err)
+		return BuildRoute{}, "", fmt.Errorf("iterate unattached chunks: %w", err)
 	}
 	if len(matches) == 1 {
-		return matches[0].buildID, matches[0].chunkID, nil
+		return BuildRoute{BuildID: matches[0].buildID, RunnerAgent: NormalizeRunnerAgent(matches[0].runner)}, matches[0].chunkID, nil
 	}
-	return "", "", ErrChunkNotFound
+	return BuildRoute{}, "", ErrChunkNotFound
 }
 
 func (s *Store) findChunkPRMatch(ctx context.Context, candidates []string, prNumber int) (chunkPRMatch, bool, error) {
-	const query = `SELECT c.id, c.build_id, c.chunk_index, COALESCE(NULLIF(c.effort, ''), 'medium'), EXISTS (SELECT 1 FROM vanadis_chunks c2 WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index) FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled' ORDER BY c.updated_at DESC LIMIT 1;`
+	const query = `SELECT c.id, c.build_id, c.chunk_index, COALESCE(NULLIF(c.effort, ''), 'medium'), EXISTS (SELECT 1 FROM vanadis_chunks c2 WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index), COALESCE(NULLIF(b.runner_agent, ''), 'aerial') FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled' ORDER BY c.updated_at DESC LIMIT 1;`
 	var m chunkPRMatch
-	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&m.chunkID, &m.buildID, &m.chunkIdx, &m.effort, &m.hasRemaining)
+	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&m.chunkID, &m.buildID, &m.chunkIdx, &m.effort, &m.hasRemaining, &m.runnerAgent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return chunkPRMatch{}, false, nil
 	}

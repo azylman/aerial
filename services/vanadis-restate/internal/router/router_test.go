@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -64,12 +65,12 @@ func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req st
 	return &model.VanadisBuild{ID: id, Title: req.Title}, nil
 }
 
-func (s *metadataMutationStore) LookupChunkBuildID(context.Context, string) (string, error) {
-	return "", s.err
+func (s *metadataMutationStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
+	return store.BuildRoute{}, s.err
 }
 
-func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (string, string, error) {
-	return "", "", s.err
+func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (store.BuildRoute, string, error) {
+	return store.BuildRoute{}, "", s.err
 }
 
 func observeJournalCallback(t *testing.T, mc *mocks.MockContext, want error, code restate.Code) {
@@ -146,7 +147,6 @@ func TestBuildRouterService_ReflectionAndInterface(t *testing.T) {
 	r := NewBuildRouterService(nil)
 	assert.Equal(t, "BuildRouter", r.ServiceName())
 	assert.Equal(t, "BuildRouter", (*BuildRouterService)(nil).ServiceName())
-	assert.Equal(t, "Build", (*BuildRouterService)(nil).buildServiceName())
 
 	require.NotPanics(t, func() {
 		def := restate.Reflect(r)
@@ -167,33 +167,48 @@ func TestRestateBuildObjectInvoker(t *testing.T) {
 	inv := restateBuildObjectInvoker{ctx: restate.WithMockContext(mc)}
 
 	ctx := context.Background()
-	_ = inv.RoutePREvent(ctx, "b1", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1})
-	_ = inv.RouteDispatchOutcome(ctx, "b1", pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"})
-	_, _ = inv.RouteAttachPR(ctx, "b1", store.AttachChunkPRRequest{PRNumber: 1})
-	_, _ = inv.RouteFailChunk(ctx, "b1", model.FailChunkRequest{ChunkID: "c1"})
+	_ = inv.RoutePREvent(ctx, "", "b1", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1})
+	_ = inv.RouteDispatchOutcome(ctx, "", "b1", pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"})
+	_, _ = inv.RouteAttachPR(ctx, "", "b1", store.AttachChunkPRRequest{PRNumber: 1})
+	_, _ = inv.RouteFailChunk(ctx, "", "b1", model.FailChunkRequest{ChunkID: "c1"})
+	_ = inv.RouteReconcile(ctx, "", "b1", build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync})
 }
 
 func TestBuildRouterService_InvokerWiring(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		agent     string
-		wantBuild string
+		name        string
+		routerAgent string
+		runner      string
+		wantService string
 	}{
-		{name: "empty wires legacy invoker", agent: "", wantBuild: "Build"},
-		{name: "aerial wires legacy invoker", agent: "aerial", wantBuild: "Build"},
-		{name: "suletta wires scoped invoker", agent: "suletta", wantBuild: "Build-suletta"},
-		{name: "miorine wires scoped invoker", agent: "miorine", wantBuild: "Build-miorine"},
-		{name: "mixed case wires normalized invoker", agent: "Suletta", wantBuild: "Build-suletta"},
+		{name: "empty runner targets legacy Build", routerAgent: "", runner: "", wantService: "Build"},
+		{name: "default runner targets legacy Build", routerAgent: "", runner: "aerial", wantService: "Build"},
+		{name: "sibling runner targets scoped Build", routerAgent: "", runner: "agent-alpha", wantService: "Build-agent-alpha"},
+		{name: "mixed case runner normalized", routerAgent: "", runner: " Agent-Alpha ", wantService: "Build-agent-alpha"},
+		{name: "router agent never overrides runner", routerAgent: "agent-beta", runner: "aerial", wantService: "Build"},
+		{name: "scoped router targets other runner", routerAgent: "agent-beta", runner: "agent-alpha", wantService: "Build-agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := NewBuildRouterServiceWithAgent(nil, tc.agent)
-			assert.Equal(t, tc.wantBuild, r.buildServiceName())
-			inv, ok := r.getInvoker(makeRouterMockContext(t)).(restateBuildObjectInvoker)
+			mc := mocks.NewMockContext(t)
+			mClient := mocks.NewMockClient(t)
+			mInv := mocks.NewMockInvocation(t)
+			for _, handler := range []string{"OnPREvent", "OnDispatchOutcome", "AttachPR", "FailChunk", "Reconcile"} {
+				mc.EXPECT().Object(tc.wantService, "b1", handler).Return(mClient).Once()
+			}
+			mClient.EXPECT().Send(mock.Anything).Return(mInv).Times(3)
+			mClient.EXPECT().Request(mock.Anything, mock.Anything).Return(nil).Times(2)
+			r := NewBuildRouterServiceWithAgent(nil, tc.routerAgent)
+			inv, ok := r.getInvoker(restate.WithMockContext(mc)).(restateBuildObjectInvoker)
 			require.True(t, ok)
-			assert.Equal(t, tc.wantBuild, inv.serviceName())
+			ctx := context.Background()
+			require.NoError(t, inv.RoutePREvent(ctx, tc.runner, "b1", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1}))
+			require.NoError(t, inv.RouteDispatchOutcome(ctx, tc.runner, "b1", pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"}))
+			_, _ = inv.RouteAttachPR(ctx, tc.runner, "b1", store.AttachChunkPRRequest{PRNumber: 1})
+			_, _ = inv.RouteFailChunk(ctx, tc.runner, "b1", model.FailChunkRequest{ChunkID: "c1"})
+			require.NoError(t, inv.RouteReconcile(ctx, tc.runner, "b1", build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync}))
 		})
 	}
 }
@@ -343,14 +358,14 @@ func fillBuildDest(b model.VanadisBuild, dest []any) error {
 	if len(dest) == 7 {
 		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
 	}
-	if len(dest) != 12 {
-		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
+	if len(dest) != 13 {
+		return fmt.Errorf("scan build: %d destinations, want 13", len(dest))
 	}
 	agent := b.Agent
 	if agent == "" {
 		agent = "aerial"
 	}
-	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
+	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt, b.RunnerAgent)
 }
 
 func (r *mockRow) Scan(dest ...any) error {
@@ -432,12 +447,12 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
-	case 2:
+	case 3:
 		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
 			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
 		}
 		return nil
-	case 12:
+	case 13:
 		return r.scan12(dest)
 	case 10:
 		return r.scan10(dest)
@@ -560,42 +575,50 @@ type mockInvoker struct {
 	attachPRFn        func(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error)
 	failChunkFn       func(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error)
 
-	lastPRBuildID       string
-	lastDispatchBuildID string
-	lastAttachBuildID   string
-	lastFailBuildID     string
+	lastPRBuildID        string
+	lastDispatchBuildID  string
+	lastAttachBuildID    string
+	lastFailBuildID      string
+	lastReconcileBuildID string
+	lastRunner           string
+	lastReconcileReason  string
 }
 
-func (m *mockInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
-	m.lastPRBuildID = buildID
+func (m *mockInvoker) RoutePREvent(ctx context.Context, runner, buildID string, ev pubsub.PRLifecycleEvent) error {
+	m.lastPRBuildID, m.lastRunner = buildID, runner
 	if m.prEventFn != nil {
 		return m.prEventFn(ctx, buildID, ev)
 	}
 	return nil
 }
 
-func (m *mockInvoker) RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error {
-	m.lastDispatchBuildID = buildID
+func (m *mockInvoker) RouteDispatchOutcome(ctx context.Context, runner, buildID string, ev pubsub.DispatchOutcomeEvent) error {
+	m.lastDispatchBuildID, m.lastRunner = buildID, runner
 	if m.dispatchOutcomeFn != nil {
 		return m.dispatchOutcomeFn(ctx, buildID, ev)
 	}
 	return nil
 }
 
-func (m *mockInvoker) RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
-	m.lastAttachBuildID = buildID
+func (m *mockInvoker) RouteAttachPR(ctx context.Context, runner, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
+	m.lastAttachBuildID, m.lastRunner = buildID, runner
 	if m.attachPRFn != nil {
 		return m.attachPRFn(ctx, buildID, req)
 	}
 	return model.AttachChunkPRResponse{BuildID: buildID, ChunkID: "c1", Status: "attached"}, nil
 }
 
-func (m *mockInvoker) RouteFailChunk(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
-	m.lastFailBuildID = buildID
+func (m *mockInvoker) RouteFailChunk(ctx context.Context, runner, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
+	m.lastFailBuildID, m.lastRunner = buildID, runner
 	if m.failChunkFn != nil {
 		return m.failChunkFn(ctx, buildID, req)
 	}
 	return model.FailChunkResponse{BuildID: buildID, ChunkID: req.ChunkID, Failed: true}, nil
+}
+
+func (m *mockInvoker) RouteReconcile(_ context.Context, runner, buildID string, req build.ReconcileBuildRequest) error {
+	m.lastReconcileBuildID, m.lastRunner, m.lastReconcileReason = buildID, runner, req.Reason
+	return nil
 }
 
 type routerMockRunContext struct {
@@ -610,9 +633,10 @@ func runRouterMockRunContext(fn func(restate.RunContext) (any, error), output an
 	if err != nil {
 		return restate.TerminalErrorf("%v", err)
 	}
-	if strPtr, ok := output.(*string); ok && res != nil {
-		if s, sOk := res.(string); sOk {
-			*strPtr = s
+	if output != nil && res != nil {
+		outVal, resVal := reflect.ValueOf(output), reflect.ValueOf(res)
+		if outVal.Kind() == reflect.Pointer && !outVal.IsNil() && outVal.Elem().Type() == resVal.Type() {
+			outVal.Elem().Set(resVal)
 		}
 	}
 	return nil
@@ -638,6 +662,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 		ev          pubsub.PRLifecycleEvent
 		db          dbScript
 		wantBuildID string
+		wantRunner  string
 		wantErr     bool
 	}{
 		{
@@ -655,7 +680,9 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			ev:          pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"},
 			db:          dbScript{row: valuesRow("c1", "b-matched", 0, "medium", false)},
 			wantBuildID: "b-matched",
+			wantRunner:  "aerial",
 		},
+		{name: "primary lookup routes to sibling runner", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"}, db: dbScript{row: valuesRow("c1", "b-alpha", 0, "medium", false, "agent-alpha")}, wantBuildID: "b-alpha", wantRunner: "agent-alpha"},
 		{
 			name: "branch-based fallback resolution",
 			ev: pubsub.PRLifecycleEvent{
@@ -666,9 +693,10 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				routes: []sqlRoute{{match: "SELECT build_id FROM vanadis_chunks WHERE id = $1", row: valuesRow("b-branch")}},
+				routes: []sqlRoute{{match: "FROM vanadis_chunks c JOIN vanadis_builds b ON b.id = c.build_id WHERE c.id = $1", row: valuesRow("b-branch", "agent-alpha")}},
 			},
 			wantBuildID: "b-branch",
+			wantRunner:  "agent-alpha",
 		},
 		{
 			name: "thread and repo fallback resolution",
@@ -684,6 +712,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 				chunks: []model.VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
 			},
 			wantBuildID: "b-thread",
+			wantRunner:  "aerial",
 		},
 		{
 			name: "dependabot guard exclusion",
@@ -737,7 +766,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				routes: []sqlRoute{{match: "SELECT build_id FROM vanadis_chunks WHERE id = $1", row: errRow(errors.New("lookup err"))}},
+				routes: []sqlRoute{{match: "FROM vanadis_chunks c JOIN vanadis_builds b ON b.id = c.build_id WHERE c.id = $1", row: errRow(errors.New("lookup err"))}},
 			},
 			wantErr: true,
 		},
@@ -770,6 +799,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tc.wantBuildID, inv.lastPRBuildID)
+				assert.Equal(t, tc.wantRunner, inv.lastRunner)
 			}
 		})
 	}
@@ -944,16 +974,133 @@ func TestBuildRouterServiceName_Derivation(t *testing.T) {
 		{name: "empty defaults to legacy", agent: "", wantRouter: "BuildRouter"},
 		{name: "aerial defaults to legacy", agent: "aerial", wantRouter: "BuildRouter"},
 		{name: "aerial case insensitive", agent: "Aerial", wantRouter: "BuildRouter"},
-		{name: "suletta scoped", agent: "suletta", wantRouter: "BuildRouter-suletta"},
-		{name: "miorine scoped", agent: "miorine", wantRouter: "BuildRouter-miorine"},
-		{name: "whitespace trimmed", agent: "  suletta  ", wantRouter: "BuildRouter-suletta"},
-		{name: "mixed case scoped normalized", agent: "Suletta", wantRouter: "BuildRouter-suletta"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta"},
+		{name: "whitespace trimmed", agent: "  agent-alpha  ", wantRouter: "BuildRouter-agent-alpha"},
+		{name: "mixed case scoped normalized", agent: "Agent-Alpha", wantRouter: "BuildRouter-agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.wantRouter, model.BuildRouterServiceName(tc.agent))
 			assert.Equal(t, tc.wantRouter, NewBuildRouterServiceWithAgent(nil, tc.agent).ServiceName())
+		})
+	}
+}
+
+func TestBuildRouterService_RouteDispatchOutcomeRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		row         pgx.Row
+		wantBuildID string
+		wantRunner  string
+	}{
+		{name: "default runner", row: valuesRow("b1", "aerial"), wantBuildID: "b1", wantRunner: "aerial"},
+		{name: "sibling runner", row: valuesRow("b2", "agent-alpha"), wantBuildID: "b2", wantRunner: "agent-alpha"},
+		{name: "unknown chunk not routed", row: errRow(pgx.ErrNoRows)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inv := &mockInvoker{}
+			st, _ := dbScript{row: tc.row}.open()
+			router := NewBuildRouterService(st, func(restate.Context) BuildObjectInvoker { return inv })
+			require.NoError(t, router.RouteDispatchOutcome(makeRouterMockContext(t), pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"}))
+			assert.Equal(t, tc.wantBuildID, inv.lastDispatchBuildID)
+			assert.Equal(t, tc.wantRunner, inv.lastRunner)
+		})
+	}
+}
+
+func TestBuildRouterService_RouteFailChunkRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		row        pgx.Row
+		wantRunner string
+	}{
+		{name: "default runner", row: valuesRow("b1", "aerial"), wantRunner: "aerial"},
+		{name: "sibling runner", row: valuesRow("b1", "agent-alpha"), wantRunner: "agent-alpha"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inv := &mockInvoker{}
+			st, _ := dbScript{row: tc.row}.open()
+			router := NewBuildRouterService(st, func(restate.Context) BuildObjectInvoker { return inv })
+			_, err := router.RouteFailChunk(makeRouterMockContext(t), model.FailChunkRequest{ChunkID: "c1", Reason: "boom"})
+			require.NoError(t, err)
+			assert.Equal(t, "b1", inv.lastFailBuildID)
+			assert.Equal(t, tc.wantRunner, inv.lastRunner)
+		})
+	}
+}
+
+func TestBuildRouterService_RouteAttachPRRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		routerAgent string
+		row         pgx.Row
+		req         store.AttachChunkPRRequest
+		wantBuildID string
+		wantRunner  string
+	}{
+		{name: "existing chunk on sibling runner", row: valuesRow("b1", "agent-alpha"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7}, wantBuildID: "b1", wantRunner: "agent-alpha"},
+		{name: "existing pr on default runner", routerAgent: "agent-beta", row: valuesRow("c1", "b2", 0, "medium", false, "aerial"), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2", wantRunner: "aerial"},
+		{name: "new build stays on default router", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "aerial"},
+		{name: "new build stays on scoped router", routerAgent: "agent-beta", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inv := &mockInvoker{}
+			st, _ := dbScript{row: tc.row}.open()
+			router := NewBuildRouterServiceWithAgent(st, tc.routerAgent, func(restate.Context) BuildObjectInvoker { return inv })
+			res, err := router.RouteAttachPR(makeRouterMockContext(t), tc.req)
+			require.NoError(t, err)
+			assert.NotEmpty(t, res.BuildID)
+			if tc.wantBuildID != "" {
+				assert.Equal(t, tc.wantBuildID, inv.lastAttachBuildID)
+			}
+			assert.Equal(t, tc.wantRunner, inv.lastRunner)
+		})
+	}
+}
+
+func TestBuildRouterService_RouteBuildReconcile(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		buildID     string
+		db          dbScript
+		wantErr     bool
+		wantBuildID string
+		wantRunner  string
+		wantReason  string
+	}{
+		{name: "empty build id rejected", buildID: " ", wantErr: true},
+		{name: "default runner", buildID: "b1", db: dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", RunnerAgent: "aerial"}}}, wantBuildID: "b1", wantRunner: "aerial", wantReason: "widget_sync"},
+		{name: "sibling runner", buildID: "b2", db: dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b2", RunnerAgent: "agent-alpha"}}}, wantBuildID: "b2", wantRunner: "agent-alpha", wantReason: "widget_sync"},
+		{name: "unknown build dropped", buildID: "b3", db: dbScript{buildRow: errRow(pgx.ErrNoRows)}},
+		{name: "storage error propagates", buildID: "b4", db: dbScript{buildRow: errRow(errors.New("db down"))}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inv := &mockInvoker{}
+			st, _ := tc.db.open()
+			router := NewBuildRouterService(st, func(restate.Context) BuildObjectInvoker { return inv })
+			err := router.RouteBuildReconcile(makeRouterMockContext(t), tc.buildID)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantBuildID, inv.lastReconcileBuildID)
+			assert.Equal(t, tc.wantRunner, inv.lastRunner)
+			assert.Equal(t, tc.wantReason, inv.lastReconcileReason)
 		})
 	}
 }
