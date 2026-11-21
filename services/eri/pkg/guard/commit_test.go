@@ -19,7 +19,7 @@ const (
 )
 
 func TestCustomPatterns(t *testing.T) {
-	// Not t.Parallel() because it exercises t.Setenv
+	// Not t.Parallel(): sibling tests reset the global sanitizer registry.
 	payloadTests := []struct {
 		name     string
 		input    string
@@ -71,7 +71,7 @@ func TestCustomPatterns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(geminiConfig, "commit-guard.json"), []byte(`[{"pattern": "cg_pat_\\d+"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rulesCG := LoadCustomPatterns(tmpHome)
+	rulesCG := LoadCustomPatterns(tmpHome, mapEnv(nil))
 	if len(rulesCG) != 1 {
 		t.Fatalf("expected 1 rule from commit-guard.json, got %d", len(rulesCG))
 	}
@@ -85,21 +85,21 @@ func TestCustomPatterns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(geminiConfig2, "guard.json"), []byte(`[{"pattern": "g_pat_\\d+"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rulesG := LoadCustomPatterns(tmpHome2)
+	rulesG := LoadCustomPatterns(tmpHome2, mapEnv(nil))
 	if len(rulesG) != 1 {
 		t.Fatalf("expected 1 rule from guard.json, got %d", len(rulesG))
 	}
 
-	// Empty homeDir fallback
-	_ = LoadCustomPatterns("")
-
-	// GetActivePatterns with environment variable
-	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `env_pat_\d+`)
-	activeWithEnv := GetActivePatterns()
-	if len(activeWithEnv) <= len(BuiltinPatterns) {
-		t.Fatalf("expected GetActivePatterns with env to be augmented, got %d", len(activeWithEnv))
+	// Empty homeDir falls back to the injected HOME
+	if rulesHome := LoadCustomPatterns("", mapEnv(map[string]string{"HOME": tmpHome2})); len(rulesHome) != 1 {
+		t.Fatalf("expected 1 rule from HOME fallback, got %d", len(rulesHome))
 	}
-	os.Unsetenv("AERIAL_COMMIT_GUARD_PATTERNS")
+
+	// GetActivePatterns with injected pattern variable
+	activeWithEnv := GetActivePatterns(mapEnv(map[string]string{"AERIAL_COMMIT_GUARD_PATTERNS": `env_pat_\d+`}))
+	if len(activeWithEnv) != len(BuiltinPatterns)+1 {
+		t.Fatalf("expected GetActivePatterns with env to add 1 rule, got %d", len(activeWithEnv))
+	}
 }
 
 func TestScanTextForSecrets(t *testing.T) {
@@ -128,7 +128,7 @@ func TestScanTextForSecrets(t *testing.T) {
 				sanitizer.RegisterSensitiveTokens(tc.secret)
 			}
 
-			v := ScanTextForSecrets(tc.text, "test-label", GetActivePatterns())
+			v := ScanTextForSecrets(tc.text, "test-label", GetActivePatterns(mapEnv(nil)))
 			if len(v) != tc.wantCount {
 				t.Fatalf("ScanTextForSecrets(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
 			}
@@ -177,7 +177,7 @@ func TestCheckOutboundSecrets(t *testing.T) {
 			}
 			args := ToolArgs{CommandLine: tc.cmd, Arguments: []byte(tc.arguments), ServerName: tc.server}
 			args.AdoptClaudeMCPCall(tc.tool, []byte(tc.arguments))
-			dec := CheckOutboundSecrets(tc.tool, args)
+			dec := CheckOutboundSecrets(tc.tool, args, mapEnv(nil))
 			if tc.wantDeny && dec.Decision != DecisionDeny {
 				t.Fatalf("expected deny, got %v", dec)
 			}

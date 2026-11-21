@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -127,9 +126,10 @@ func (c *livePgxConn) Close(ctx context.Context) {
 	}
 }
 
-// DefaultSQLDescriber returns a PostgreSQL describer backed by DATABASE_URL, or nil if unconfigured.
-func DefaultSQLDescriber() SQLDescriber {
-	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+// DefaultSQLDescriber returns a PostgreSQL describer backed by DATABASE_URL resolved through getenv,
+// or nil if unconfigured. It connects lazily, on the first described query.
+func DefaultSQLDescriber(getenv func(string) string) SQLDescriber {
+	dsn := strings.TrimSpace(getenv("DATABASE_URL"))
 	if dsn == "" || dsn == ":memory:" || strings.HasPrefix(dsn, "sqlite") {
 		return nil
 	}
