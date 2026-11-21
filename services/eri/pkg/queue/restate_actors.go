@@ -676,10 +676,9 @@ func (d *DispatchSessionObject) ServiceName() string {
 }
 
 func (d *DispatchSessionObject) shouldSkipActive(ctx restate.ObjectSharedContext, sessionKey, dispID string) (bool, error) {
-	activeInvID, _ := restate.Get[string](ctx, "active_invocation_id")
-	if activeInvID != "" {
-		return true, nil
-	}
+	// The marker read stays journaled for replay compatibility, but only the store decides:
+	// a marker left by a cancelled RunTurn must not skip the next Enqueue.
+	_, _ = restate.Get[string](ctx, "active_invocation_id")
 	if d.pool == nil || d.pool.cfg.Store == nil {
 		return false, nil
 	}
@@ -860,6 +859,7 @@ func (d *DispatchSessionObject) RunTurn(ctx restate.ObjectContext, req BrainDisp
 		}, restate.WithName("execute-dispatch"))
 
 		if runErr != nil {
+			restate.Clear(ctx, "active_invocation_id")
 			return DispatchTurnResult{Status: "error", DispatchesExecuted: executedCount}, runErr
 		}
 		if step.ClaimedCount == 0 {
