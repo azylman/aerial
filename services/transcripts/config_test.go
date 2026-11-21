@@ -255,6 +255,7 @@ func TestLoadConfigFileAuth(t *testing.T) {
 		path        string
 		k8sAuthEnv  string
 		wantEnabled bool
+		wantErr     bool
 	}{
 		{
 			name:        "auth disabled by default",
@@ -274,6 +275,24 @@ func TestLoadConfigFileAuth(t *testing.T) {
 			k8sAuthEnv:  "",
 			wantEnabled: true,
 		},
+		{
+			name:        "env 1 enables via ParseBool",
+			path:        defaultAuthPath,
+			k8sAuthEnv:  "1",
+			wantEnabled: true,
+		},
+		{
+			name:        "env false disables yaml true",
+			path:        enabledAuthPath,
+			k8sAuthEnv:  "false",
+			wantEnabled: false,
+		},
+		{
+			name:       "invalid env value fails config load",
+			path:       defaultAuthPath,
+			k8sAuthEnv: "maybe",
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -289,8 +308,11 @@ func TestLoadConfigFileAuth(t *testing.T) {
 			t.Setenv("K8S_AUTH_ENABLED", tc.k8sAuthEnv)
 
 			cfg, err := LoadConfigFile(tc.path, "")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() err = %v, wantErr %v", err, tc.wantErr)
+			}
 			if err != nil {
-				t.Fatalf("LoadConfigFile() err = %v", err)
+				return
 			}
 			if cfg.Auth.Enabled != tc.wantEnabled {
 				t.Errorf("Auth.Enabled = %v, want %v", cfg.Auth.Enabled, tc.wantEnabled)

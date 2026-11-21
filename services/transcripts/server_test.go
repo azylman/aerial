@@ -346,6 +346,8 @@ func TestServerAuth_RBAC(t *testing.T) {
 		{"health exempt without auth", "/health", "", false, http.StatusOK},
 		{"healthz exempt without auth", "/healthz", "", false, http.StatusOK},
 		{"debug coverage flush exempt without auth", "/debug/coverage/flush", "", false, http.StatusOK},
+		{"readyz exempt reaches mux 404", "/readyz", "", false, http.StatusNotFound},
+		{"metrics exempt reaches mux 404", "/metrics", "", false, http.StatusNotFound},
 		{"search missing auth 401", "/search?q=content", "", false, http.StatusUnauthorized},
 		{"steps missing auth 401", "/steps?session=sess-a", "", false, http.StatusUnauthorized},
 		{"stats missing auth 401", "/stats", "", false, http.StatusUnauthorized},
