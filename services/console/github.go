@@ -597,13 +597,3 @@ func (p *GitHubPoller) GetSnapshot() ([]GitHubRun, map[int64][]GitHubJob) {
 	}
 	return runs, jobs
 }
-
-func mergeClusterDeploymentsWithHangar(
-	rawContainers []DockerContainerJSON,
-	runs []GitHubRun,
-	jobs map[int64][]GitHubJob,
-	gitSync GitSyncStatusResponse,
-	currentCommit string,
-) []DeploymentStatus {
-	return MergeClusterDeploymentsWithHangar(runs, jobs, gitSync, rawContainers, currentCommit, time.Time{})
-}

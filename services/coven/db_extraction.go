@@ -6,51 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/pgvector/pgvector-go"
 )
-
-type eriTranscriptSearchResult struct {
-	Steps []eriTranscriptStepItem `json:"steps"`
-}
-
-type eriTranscriptStepItem struct {
-	StepType string `json:"step_type"`
-	ToolName string `json:"tool_name"`
-	Content  string `json:"content"`
-}
-
-func (s *SQLStore) fetchBrainJSON(ctx context.Context, endpointURL, label string, dst any) error {
-	if s.getBrainURL() == "" {
-		return fmt.Errorf("brain API URL not configured")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, http.NoBody)
-	if err != nil {
-		return fmt.Errorf("failed to create %s request: %w", label, err)
-	}
-	if s.brainToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.brainToken)
-	}
-	resp, err := s.getHTTPClient().Do(req)
-	if err != nil {
-		return fmt.Errorf("%s request failed: %w", label, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s request returned status %d", label, resp.StatusCode)
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-		return fmt.Errorf("failed to decode %s response: %w", label, err)
-	}
-	return nil
-}
 
 // GetConversationFactWatermark retrieves the last extracted row ID and timestamp for a thread or sentinel key.
 func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID string, agent ...string) (int64, *time.Time, error) {
@@ -289,35 +250,7 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 	return summary, priorTurns, nil
 }
 
-var (
-	reRetrievedMemoryBlock = regexp.MustCompile(`(?is)<\s*\\?retrieved_memory\s*>(.*?)<\s*[\\/]+retrieved_memory\s*>`)
-	reFactLine             = regexp.MustCompile(`(?m)^\s*(-\s*\[id:\d+\].*)$`)
-	reSkillPath            = regexp.MustCompile(`/skills/(?:(?:common|discord|voice|ephemeral)/)?([a-z0-9-]+)/SKILL\.md`)
-	reSkillYAML            = regexp.MustCompile(`(?m)(?:1:\s*)?---\s*(?:\n|\s+)(?:2:\s*)?name:\s*([a-z0-9-]+)`)
-	reSkillLoaded          = regexp.MustCompile(`\[SKILL_LOADED:\s*([a-z0-9-]+)\]`)
-)
-
-// ExtractLoadedSkillName extracts a skill name from trajectory step content or tool parameters.
-func ExtractLoadedSkillName(stepType, toolName, content string) string {
-	cleanType := strings.ToUpper(strings.TrimSpace(stepType))
-	cleanTool := strings.ToLower(strings.TrimSpace(toolName))
-
-	normalized := strings.ReplaceAll(content, "\\", "/")
-	if cleanType == "PLANNER_RESPONSE" || cleanTool == "read_file" || strings.Contains(normalized, "/skills/") {
-		if m := reSkillPath.FindStringSubmatch(normalized); len(m) > 1 {
-			return strings.TrimSpace(m[1])
-		}
-	}
-	if cleanType == "GENERIC" || cleanType == "TOOL" || cleanType == "RUN_COMMAND" || strings.Contains(content, "---") {
-		if m := reSkillYAML.FindStringSubmatch(content); len(m) > 1 {
-			return strings.TrimSpace(m[1])
-		}
-		if m := reSkillPath.FindStringSubmatch(normalized); len(m) > 1 {
-			return strings.TrimSpace(m[1])
-		}
-	}
-	return ""
-}
+var reSkillLoaded = regexp.MustCompile(`\[SKILL_LOADED:\s*([a-z0-9-]+)\]`)
 
 // ExtractLoadedSkillsFromCalls extracts deduplicated loaded skill names from tool calls.
 func ExtractLoadedSkillsFromCalls(toolCalls []string) []string {
@@ -339,141 +272,6 @@ func ExtractLoadedSkillsFromCalls(toolCalls []string) []string {
 	return skills
 }
 
-func truncateSingleLine(s string, maxLen int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if maxLen > 0 && len(s) > maxLen {
-		return s[:maxLen]
-	}
-	return s
-}
-
-func extractRetrievedMemoryFacts(content string) []string {
-	var facts []string
-	seen := make(map[string]struct{})
-	for _, block := range reRetrievedMemoryBlock.FindAllStringSubmatch(content, -1) {
-		if len(block) <= 1 {
-			continue
-		}
-		for _, lineMatch := range reFactLine.FindAllStringSubmatch(block[1], -1) {
-			if len(lineMatch) <= 1 {
-				continue
-			}
-			line := strings.TrimSpace(lineMatch[1])
-			if line == "" {
-				continue
-			}
-			if _, exists := seen[line]; !exists {
-				seen[line] = struct{}{}
-				facts = append(facts, line)
-			}
-		}
-	}
-	return facts
-}
-
-func extractTrajectorySignals(stepType, toolName, content string) ([]string, string) {
-	switch stepType {
-	case "USER_INPUT":
-		return extractRetrievedMemoryFacts(content), ""
-	case "PLANNER_RESPONSE":
-		trimmedTool := strings.TrimSpace(toolName)
-		if trimmedTool != "" {
-			skillName := ExtractLoadedSkillName(stepType, toolName, content)
-			callStr := fmt.Sprintf("%s(%s)", trimmedTool, truncateSingleLine(content, 200))
-			if skillName != "" {
-				return nil, fmt.Sprintf("%s [SKILL_LOADED: %s]", callStr, skillName)
-			}
-			return nil, callStr
-		}
-	case "GENERIC", "TOOL", "RUN_COMMAND":
-		skillName := ExtractLoadedSkillName(stepType, toolName, content)
-		if skillName != "" {
-			return nil, fmt.Sprintf("[SKILL_LOADED: %s]", skillName)
-		}
-		trimmedTool := strings.TrimSpace(toolName)
-		if trimmedTool == "" {
-			trimmedTool = strings.ToLower(stepType)
-		}
-		return nil, fmt.Sprintf("-> OUTPUT(%s): %s", trimmedTool, truncateSingleLine(content, 200))
-	}
-	return nil, ""
-}
-
-func parseTrajectorySteps(steps []eriTranscriptStepItem) ([]string, []string) {
-	var retrievedFacts []string
-	var toolCalls []string
-	seenFacts := make(map[string]struct{})
-	for _, step := range steps {
-		content := step.Content
-		r := []rune(content)
-		if len(r) > 500 {
-			content = string(r[:500])
-		}
-		rf, tc := extractTrajectorySignals(step.StepType, step.ToolName, content)
-		for _, f := range rf {
-			if _, exists := seenFacts[f]; !exists {
-				seenFacts[f] = struct{}{}
-				retrievedFacts = append(retrievedFacts, f)
-			}
-		}
-		if tc != "" {
-			toolCalls = append(toolCalls, tc)
-		}
-	}
-	return retrievedFacts, toolCalls
-}
-
-func (s *SQLStore) fetchTranscriptSteps(ctx context.Context, sessionCSV, sinceRFC string) ([]eriTranscriptStepItem, error) {
-	searchEndpoint := fmt.Sprintf("%s/transcripts/search?mode=steps&session=%s&since=%s&limit=50",
-		s.getBrainURL(), url.QueryEscape(sessionCSV), url.QueryEscape(sinceRFC))
-
-	var searchRes eriTranscriptSearchResult
-	if err := s.fetchBrainJSON(ctx, searchEndpoint, "transcript search", &searchRes); err != nil {
-		return nil, err
-	}
-	return searchRes.Steps, nil
-}
-
-func (s *SQLStore) findThreadSessionIDs(ctx context.Context, targetAgent, threadID string) ([]string, error) {
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	var sessionParts []string
-	rows, qErr := s.db.QueryContext(queryCtx,
-		`SELECT conversation_id FROM messages WHERE agent = $1 AND thread_id = $2 AND conversation_id != '' GROUP BY conversation_id ORDER BY MAX(row_id) DESC LIMIT 3`,
-		targetAgent, threadID)
-	if qErr != nil {
-		return nil, fmt.Errorf("failed to query messages for trajectory context: %w", qErr)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid string
-		if scanErr := rows.Scan(&cid); scanErr == nil && cid != "" {
-			sessionParts = append(sessionParts, cid)
-		}
-	}
-	if rowsErr := rows.Err(); rowsErr != nil {
-		return nil, fmt.Errorf("failed reading conversation_id rows: %w", rowsErr)
-	}
-	if len(sessionParts) > 0 {
-		return sessionParts, nil
-	}
-
-	var sessID, prevSessID string
-	if sessErr := s.db.QueryRowContext(queryCtx,
-		`SELECT conversation_id, previous_conversation_id FROM sessions WHERE agent = $1 AND (session_id = $2 OR session_id = 'discord-' || $2) LIMIT 1`,
-		targetAgent, threadID).Scan(&sessID, &prevSessID); sessErr != nil && !errors.Is(sessErr, sql.ErrNoRows) {
-		return nil, fmt.Errorf("failed to query session for trajectory context: %w", sessErr)
-	}
-	if sessID != "" {
-		sessionParts = append(sessionParts, sessID)
-	}
-	if prevSessID != "" && prevSessID != sessID {
-		sessionParts = append(sessionParts, prevSessID)
-	}
-	return sessionParts, nil
-}
-
 // GetThreadTrajectoryContext queries the trajectory context (retrieved facts and tool calls) for an active thread.
 func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string, agent ...string) ([]string, []string, error) {
 	if checkDBErr := s.checkDB(); checkDBErr != nil {
@@ -487,38 +285,14 @@ func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID stri
 		targetAgent = strings.TrimSpace(agent[0])
 	}
 
-	if s.indexerClient != nil {
-		tc, tcErr := s.indexerClient.GetTrajectoryContext(ctx, targetAgent, threadID)
-		if tcErr != nil {
-			return nil, nil, tcErr
-		}
-		return tc.RetrievedFacts, tc.ToolCalls, nil
-	}
-
-	_, factExtractedAt, watermarkErr := s.GetConversationFactWatermark(ctx, threadID, targetAgent)
-	if watermarkErr != nil {
-		return nil, nil, watermarkErr
-	}
-	sinceTime := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-	if factExtractedAt != nil && !factExtractedAt.IsZero() {
-		sinceTime = factExtractedAt.UTC()
-	}
-
-	sessionParts, sessErr := s.findThreadSessionIDs(ctx, targetAgent, threadID)
-	if sessErr != nil {
-		return nil, nil, sessErr
-	}
-	if len(sessionParts) == 0 {
+	if s.indexerClient == nil {
 		return nil, nil, nil
 	}
-
-	steps, fetchErr := s.fetchTranscriptSteps(ctx, strings.Join(sessionParts, ","), sinceTime.Format(time.RFC3339))
-	if fetchErr != nil {
-		return nil, nil, fetchErr
+	tc, tcErr := s.indexerClient.GetTrajectoryContext(ctx, targetAgent, threadID)
+	if tcErr != nil {
+		return nil, nil, tcErr
 	}
-
-	facts, tools := parseTrajectorySteps(steps)
-	return facts, tools, nil
+	return tc.RetrievedFacts, tc.ToolCalls, nil
 }
 
 // InsertProceduralCandidate persists a staged procedural candidate into the procedural_candidates table.

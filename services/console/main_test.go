@@ -23,7 +23,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/tracing"
 )
 
 func TestStatusHandler(t *testing.T) {
@@ -31,12 +30,6 @@ func TestStatusHandler(t *testing.T) {
 	defer mockServer.Close()
 
 	tests := append(statusHandlerPrimaryCases(), statusHandlerSecondaryCases()...)
-
-	origDockerDefault := dockerSocketClient
-	defer func() { dockerSocketClient = origDockerDefault }()
-	dockerSocketClient = &http.Client{Transport: &roundTripperFunc{fn: func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("hermetic test: docker socket disabled")
-	}}}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,30 +99,14 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 					{ID: "b-1", Agent: "agent-gamma"},
 				},
 			})
-		case strings.HasPrefix(r.URL.Path, "/hangar/synced/status"):
-			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-				Status:        "synced",
-				MaxLagSeconds: 0,
-				LastSyncTime:  time.Now().UTC(),
-				Repos: map[string]RepoStatus{
-					"/share/aerial": {DiskCommit: "abcdef123456"},
-				},
-			})
-		case strings.HasPrefix(r.URL.Path, "/hangar/swapping/status"):
-			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-				Status: "synced",
-				Reconciliation: &ReconciliationStatus{
-					Active:         true,
-					State:          "swapping",
-					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					TargetServices: []string{"aerial-dashboard"},
-					StartedAt:      time.Now().UTC().Add(-10 * time.Second),
-				},
-			})
 		case strings.HasPrefix(r.URL.Path, "/k8s/ok/apis/apps/v1/namespaces/default/deployments"):
 			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":1}}]}`))
 		case strings.HasPrefix(r.URL.Path, "/k8s/ok/api/v1/namespaces/default/pods"):
 			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain-pod","labels":{"app.kubernetes.io/name":"k8s-brain"}},"status":{"phase":"Running","containerStatuses":[{"name":"k8s-brain","ready":true,"state":{}}]}}]}`))
+		case strings.HasPrefix(r.URL.Path, "/k8s/degraded/apis/apps/v1/namespaces/default/deployments"):
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":0}}]}`))
+		case strings.HasPrefix(r.URL.Path, "/k8s/degraded/api/v1/namespaces/default/pods"):
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain-pod","labels":{"app.kubernetes.io/name":"k8s-brain"}},"status":{"phase":"Running","containerStatuses":[{"name":"k8s-brain","ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}`))
 		case strings.HasPrefix(r.URL.Path, "/k8s/error500"):
 			http.Error(w, "k8s server error", http.StatusInternalServerError)
 		default:
@@ -141,7 +118,7 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 func statusHandlerPrimaryCases() []statusTestCase {
 	return []statusTestCase{
 		{
-			name:              "Basic_DockerFallback",
+			name:              "Basic_NoClusterStateFallback",
 			wantCode:          http.StatusOK,
 			wantMinServices:   1,
 			wantOngoingDeploy: "idle",
@@ -211,14 +188,13 @@ func statusHandlerPrimaryCases() []statusTestCase {
 		},
 		{
 			name:          "EnrichedFields",
-			gitSyncMode:   "synced",
 			yamlContent:   "console:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.zylman.com\"\n",
 			wantCode:      http.StatusOK,
 			wantQuickLink: "HOME",
 		},
 		{
 			name:              "DegradedClusterStatus",
-			dockerJSON:        `[{"Names":["/aerial-brain"],"State":"running","Status":"Up 10m (unhealthy)","Created":1775240000}]`,
+			k8sMode:           "degraded",
 			wantCode:          http.StatusOK,
 			wantClusterStatus: "degraded",
 		},
@@ -228,9 +204,7 @@ func statusHandlerPrimaryCases() []statusTestCase {
 func statusHandlerSecondaryCases() []statusTestCase {
 	return []statusTestCase{
 		{
-			name:        "ConcurrentPipelines",
-			gitSyncMode: "swapping",
-			dockerJSON:  "[]",
+			name: "PollerRunBuilding",
 			pollerRuns: []GitHubRun{
 				{
 					ID:        999,
@@ -245,8 +219,8 @@ func statusHandlerSecondaryCases() []statusTestCase {
 			},
 			yamlContent:       "console: {}\n",
 			wantCode:          http.StatusOK,
-			wantDeploys:       2,
-			wantOngoingDeploy: "swapping",
+			wantDeploys:       1,
+			wantOngoingDeploy: "building",
 			wantIsDeploying:   true,
 		},
 		{
@@ -257,7 +231,6 @@ func statusHandlerSecondaryCases() []statusTestCase {
 		{
 			name:          "SetupConsoleMux_StatusWiring",
 			useMux:        true,
-			gitSyncMode:   "synced",
 			yamlContent:   "console:\n  quick_launch_links:\n    - name: \"TESTLINK\"\n      url: \"https://test.zylman.com\"\n",
 			wantCode:      http.StatusOK,
 			wantQuickLink: "TESTLINK",
@@ -276,7 +249,7 @@ func statusHandlerSecondaryCases() []statusTestCase {
 			wantServiceName: "k8s-brain",
 		},
 		{
-			name:            "K8s_Error_Fallback_To_Docker",
+			name:            "K8s_Error_FallbackServices",
 			k8sMode:         "error500",
 			wantCode:        http.StatusOK,
 			wantMinServices: 1,
@@ -290,13 +263,11 @@ type statusTestCase struct {
 	target               string
 	useMux               bool
 	brainMode            string
-	gitSyncMode          string
 	k8sMode              string
 	haroMode             string
 	vanadisMode          string
 	discoveryAgents      []string
 	emptyCommit          bool
-	dockerJSON           string
 	pollerRuns           []GitHubRun
 	pollerJobs           map[int64][]GitHubJob
 	yamlContent          string
@@ -313,7 +284,7 @@ type statusTestCase struct {
 	wantTaskID           string
 }
 
-func resolveStatusTestURLs(tc statusTestCase, mockServerURL string) (brainURL, gitSyncURL, kubeAPIServer, haroURL, vanadisURL string) {
+func resolveStatusTestURLs(tc statusTestCase, mockServerURL string) (brainURL, kubeAPIServer, haroURL, vanadisURL string) {
 	switch tc.brainMode {
 	case "ok":
 		brainURL = mockServerURL + "/brain/ok"
@@ -328,39 +299,19 @@ func resolveStatusTestURLs(tc statusTestCase, mockServerURL string) (brainURL, g
 	if tc.vanadisMode == "ok" {
 		vanadisURL = mockServerURL + "/vanadis/ok"
 	}
-	switch tc.gitSyncMode {
-	case "synced":
-		gitSyncURL = mockServerURL + "/hangar/synced"
-	case "swapping":
-		gitSyncURL = mockServerURL + "/hangar/swapping"
-	}
 	switch tc.k8sMode {
 	case "ok":
 		kubeAPIServer = mockServerURL + "/k8s/ok"
+	case "degraded":
+		kubeAPIServer = mockServerURL + "/k8s/degraded"
 	case "error500":
 		kubeAPIServer = mockServerURL + "/k8s/error500"
 	}
-	return brainURL, gitSyncURL, kubeAPIServer, haroURL, vanadisURL
+	return brainURL, kubeAPIServer, haroURL, vanadisURL
 }
 
 func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string) {
 	t.Helper()
-	if tc.dockerJSON != "" {
-		origDocker := dockerSocketClient
-		defer func() { dockerSocketClient = origDocker }()
-		dockerSocketClient = &http.Client{
-			Transport: &roundTripperFunc{
-				fn: func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader(tc.dockerJSON)),
-						Header:     make(http.Header),
-					}, nil
-				},
-			},
-		}
-	}
-
 	if tc.pollerRuns != nil {
 		oldPoller := globalGHPoller
 		defer func() { globalGHPoller = oldPoller }()
@@ -379,7 +330,7 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 		}
 	}
 
-	brainURL, gitSyncURL, kubeAPIServer, haroURL, vanadisURL := resolveStatusTestURLs(tc, mockServerURL)
+	brainURL, kubeAPIServer, haroURL, vanadisURL := resolveStatusTestURLs(tc, mockServerURL)
 
 	discoveredAgentsCache.reset()
 	if len(tc.discoveryAgents) > 0 {
@@ -399,7 +350,6 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 		cfg := ConsoleConfig{
 			Port:          "8080",
 			BrainURL:      brainURL,
-			GitSyncURL:    gitSyncURL,
 			ConfigPath:    cfgFile,
 			GitCommit:     commitArg,
 			KubeAPIServer: kubeAPIServer,
@@ -408,7 +358,7 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 		}
 		h = SetupConsoleMux(cfg, nil)
 	} else {
-		h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer, haroURL, vanadisURL)
+		h = statusHandler(brainURL, cfgFile, commitArg, kubeAPIServer, haroURL, vanadisURL)
 	}
 
 	method := tc.method
@@ -522,9 +472,6 @@ func assertStatusDeployments(t *testing.T, tc statusTestCase, resp ClusterRespon
 		for _, d := range resp.Deployments {
 			stages[d.Commit] = d.Stage
 		}
-		if stages["aaaaaaa"] != "swapping" {
-			t.Errorf("expected commit aaaaaaa swapping, got %q", stages["aaaaaaa"])
-		}
 		if stages["bbbbbbb"] != "building" {
 			t.Errorf("expected commit bbbbbbb building, got %q", stages["bbbbbbb"])
 		}
@@ -564,9 +511,6 @@ func assertStatusServices(t *testing.T, tc statusTestCase, resp ClusterResponse)
 		if !found {
 			t.Errorf("expected quick link %q in %+v", tc.wantQuickLink, resp.QuickLaunchLinks)
 		}
-		if resp.GitSync.Status != "synced" {
-			t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
-		}
 	}
 }
 
@@ -603,116 +547,6 @@ func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
 	}
 	if strings.Contains(string(dataNil), `"commit_time"`) {
 		t.Errorf("expected JSON to omit commit_time when nil, got: %s", string(dataNil))
-	}
-}
-
-func TestFetchGitSyncStatus(t *testing.T) {
-	var gotTraceparent string
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/status":
-			gotTraceparent = r.Header.Get("Traceparent")
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
-				Status:        "lagging",
-				MaxLagSeconds: 42,
-				LastSyncTime:  time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC),
-				Repos: map[string]RepoStatus{
-					"/share/aerial": {
-						Repo:           "/share/aerial",
-						DiskCommit:     "commit1",
-						RemoteCommit:   "commit2",
-						TimeLagSeconds: 42,
-						SyncStatus:     "lagging",
-					},
-				},
-			})
-		case "/error500/status":
-			w.WriteHeader(http.StatusInternalServerError)
-		case "/badjson/status":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{not-json`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer mockServer.Close()
-
-	tests := []struct {
-		name            string
-		url             string
-		wantStatus      string
-		wantMaxLag      int64
-		wantRepoCommit  string
-		wantErr         string
-		wantErrNonEmpty bool
-		// traceparent is the caller's context; wantUpstreamTrace the trace id gitsync must see.
-		traceparent       string
-		wantUpstreamTrace string
-	}{
-		{
-			name:       "empty_URL_returns_fallback",
-			url:        "",
-			wantStatus: "synced",
-		},
-		{
-			name:            "invalid_URL_returns_error",
-			url:             "http://[::1]:namedport",
-			wantErrNonEmpty: true,
-		},
-		{
-			name:           "successful_upstream_response",
-			url:            mockServer.URL,
-			wantStatus:     "lagging",
-			wantMaxLag:     42,
-			wantRepoCommit: "commit1",
-		},
-		{
-			name:       "upstream_500_error_returns_fallback",
-			url:        mockServer.URL + "/error500",
-			wantStatus: "synced",
-			wantErr:    "HTTP 500",
-		},
-		{
-			name:            "invalid_JSON_returns_fallback",
-			url:             mockServer.URL + "/badjson",
-			wantStatus:      "synced",
-			wantErrNonEmpty: true,
-		},
-		{
-			name:              "propagates_caller_trace_to_gitsync",
-			url:               mockServer.URL,
-			wantStatus:        "lagging",
-			traceparent:       "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-			wantUpstreamTrace: "4bf92f3577b34da6a3ce929d0e0e4736",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotTraceparent = ""
-			resp := fetchGitSyncStatus(tracing.ContextWithTraceparent(context.Background(), tc.traceparent), tc.url)
-			if tc.wantUpstreamTrace != "" {
-				assertTraceparentTrace(t, gotTraceparent, tc.wantUpstreamTrace)
-			}
-			if tc.wantStatus != "" && resp.Status != tc.wantStatus {
-				t.Errorf("expected status %q, got %q", tc.wantStatus, resp.Status)
-			}
-			if tc.wantMaxLag != 0 && resp.MaxLagSeconds != tc.wantMaxLag {
-				t.Errorf("expected max lag %d, got %d", tc.wantMaxLag, resp.MaxLagSeconds)
-			}
-			if tc.wantRepoCommit != "" {
-				if len(resp.Repos) != 1 || resp.Repos["/share/aerial"].DiskCommit != tc.wantRepoCommit {
-					t.Errorf("unexpected repo status: %+v", resp.Repos)
-				}
-			}
-			if tc.wantErr != "" && resp.Error != tc.wantErr {
-				t.Errorf("expected error %q, got %q", tc.wantErr, resp.Error)
-			}
-			if tc.wantErrNonEmpty && resp.Error == "" {
-				t.Errorf("expected non-empty error")
-			}
-		})
 	}
 }
 
@@ -902,133 +736,6 @@ func TestConsoleServerLifecycle(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("RunConsoleServer did not shut down in time")
-	}
-}
-
-func TestFetchDockerClusterState_Extended(t *testing.T) {
-	origClient := dockerSocketClient
-	defer func() { dockerSocketClient = origClient }()
-
-	sampleContainers := []DockerContainerJSON{
-		{
-			Names:   []string{"/aerial-brain"},
-			State:   "running",
-			Status:  "Up 2 hours (healthy)",
-			Created: time.Now().UTC().Add(-2 * time.Hour).Unix(),
-			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "brain",
-			},
-		},
-		{
-			Names:   []string{"/aerial-scheduler"},
-			State:   "running",
-			Status:  "Up 10 minutes (unhealthy)",
-			Created: time.Now().UTC().Add(-10 * time.Minute).Unix(),
-		},
-		{
-			Names:   []string{"/aerial-proxy"},
-			State:   "running",
-			Status:  "Up 5 minutes (health: starting)",
-			Created: time.Now().UTC().Add(time.Hour).Unix(),
-		},
-		{
-			Names:   []string{"/aerial-db"},
-			State:   "exited",
-			Status:  "Exited (1)",
-			Created: time.Now().UTC().Add(-time.Hour).Unix(),
-		},
-		{
-			Names:   []string{"/haro-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
-			State:   "running",
-			Status:  "Up 30 minutes (healthy)",
-			Created: time.Now().UTC().Add(-30 * time.Minute).Unix(),
-			Labels: map[string]string{
-				"aerial.service":               "haro",
-				"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
-			},
-		},
-		{
-			Names:   []string{"/victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294"},
-			State:   "running",
-			Status:  "Up 15 minutes (healthy)",
-			Created: time.Now().UTC().Add(-15 * time.Minute).Unix(),
-			Labels: map[string]string{
-				"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294",
-			},
-		},
-		{
-			Names:   []string{"/hassio_supervisor"},
-			State:   "running",
-			Status:  "Up 10 hours",
-			Created: time.Now().UTC().Add(-10 * time.Hour).Unix(),
-		},
-	}
-	sampleContainersJSON, _ := json.Marshal(sampleContainers)
-
-	tests := []struct {
-		name         string
-		statusCode   int
-		body         string
-		rtErr        error
-		wantServices int
-		wantErr      bool
-	}{
-		{
-			name:         "Success_MixedContainers",
-			statusCode:   http.StatusOK,
-			body:         string(sampleContainersJSON),
-			wantServices: 5,
-		},
-		{
-			name:       "HTTP500_Error",
-			statusCode: http.StatusInternalServerError,
-			body:       "server err",
-			wantErr:    true,
-		},
-		{
-			name:       "BadJSON_Error",
-			statusCode: http.StatusOK,
-			body:       "{invalid json",
-			wantErr:    true,
-		},
-		{
-			name:    "ClientFailure_Error",
-			rtErr:   errors.New("socket closed"),
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dockerSocketClient = &http.Client{
-				Transport: &roundTripperFunc{
-					fn: func(req *http.Request) (*http.Response, error) {
-						if tc.rtErr != nil {
-							return nil, tc.rtErr
-						}
-						return &http.Response{
-							StatusCode: tc.statusCode,
-							Body:       io.NopCloser(strings.NewReader(tc.body)),
-							Header:     make(http.Header),
-						}, nil
-					},
-				},
-			}
-			services, _, err := fetchDockerClusterState(context.Background())
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("fetchDockerClusterState failed: %v", err)
-			}
-			if len(services) != tc.wantServices {
-				t.Errorf("expected %d services, got %d", tc.wantServices, len(services))
-			}
-		})
 	}
 }
 

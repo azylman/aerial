@@ -25,10 +25,10 @@ const rows: Row[] = [
   },
   {
     name: 'changed scalar keeps unchanged siblings',
-    prev: '{"system_time":"t1","services":[{"name":"eri","status":"up"}],"git_sync":{"status":"synced"}}',
-    next: '{"system_time":"t2","services":[{"name":"eri","status":"up"}],"git_sync":{"status":"synced"}}',
+    prev: '{"system_time":"t1","services":[{"name":"eri","status":"up"}],"meta":{"status":"ok"}}',
+    next: '{"system_time":"t2","services":[{"name":"eri","status":"up"}],"meta":{"status":"ok"}}',
     wantRootReused: false,
-    reusedFromPrev: [['services', 'services'], ['git_sync', 'git_sync']],
+    reusedFromPrev: [['services', 'services'], ['meta', 'meta']],
     freshPaths: [],
   },
   {

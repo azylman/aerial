@@ -424,60 +424,9 @@ func FormatUptimeString(sec int) string {
 	return fmt.Sprintf("%dh", sec/3600)
 }
 
-func extractServiceNameFromCompose(labels map[string]string) (string, bool, bool) {
-	proj, hasProj := labels["com.docker.compose.project"]
-	if hasProj {
-		if proj == "aerial" {
-			if svc := labels["com.docker.compose.service"]; svc != "" {
-				return svc, true, true
-			}
-		}
-		// Foreign Compose project (e.g. homeassistant) -> reject
-		return "", false, true
-	}
-	return "", false, false
-}
-
-func extractServiceNameFromLabels(labels map[string]string) (string, bool) {
-	if svc, ok, handled := extractServiceNameFromCompose(labels); handled {
-		return svc, ok
-	}
-	if svc := labels["aerial.service"]; svc != "" {
-		return svc, true
-	}
-	if svc := labels["com.docker.compose.service"]; svc != "" {
-		return svc, true
-	}
-	return "", false
-}
-
-func extractServiceNameFromNames(names []string) (string, bool) {
-	if len(names) == 0 {
-		return "", false
-	}
-	name := strings.TrimPrefix(names[0], "/")
-	if after, ok := strings.CutPrefix(name, "aerial-"); ok {
-		svc := after
-		if svc != "" {
-			return svc, true
-		}
-	}
-	return "", false
-}
-
-// ExtractAerialServiceName extracts the canonical Aerial service name and returns whether
-// the container belongs to the Aerial stack (Docker Compose managed).
-func ExtractAerialServiceName(c DockerContainerJSON) (string, bool) {
-	if c.Labels != nil {
-		if svc, ok := extractServiceNameFromLabels(c.Labels); ok {
-			return svc, true
-		}
-		if _, hasProj := c.Labels["com.docker.compose.project"]; hasProj {
-			return "", false
-		}
-	}
-
-	return extractServiceNameFromNames(c.Names)
+// containerServiceName returns the Aerial service a container was synthesized for.
+func containerServiceName(c DockerContainerJSON) string {
+	return c.Labels["aerial.service"]
 }
 
 // containsWordToken returns true if token matches any discrete word token in s
@@ -606,8 +555,8 @@ func BuildContainerChips(rawContainers []DockerContainerJSON, now time.Time) []M
 	seen := make(map[string]bool)
 
 	for _, c := range rawContainers {
-		svcName, isAerial := ExtractAerialServiceName(c)
-		if !isAerial || svcName == "" || seen[svcName] {
+		svcName := containerServiceName(c)
+		if svcName == "" || seen[svcName] {
 			continue
 		}
 		seen[svcName] = true
@@ -622,80 +571,6 @@ func BuildContainerChips(rawContainers []DockerContainerJSON, now time.Time) []M
 			Type:       chipTypeContainer,
 		})
 	}
-	return chips
-}
-
-// BuildTargetContainerChips constructs Permet HUD service chips scoped to targeted services.
-// If targets is empty, it falls back to BuildContainerChips.
-// It iterates over targets as canonical keys to ensure missing or pending containers are visibly represented.
-func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []string, startedAt time.Time, now time.Time) []MatrixJobChip {
-	if len(targets) == 0 {
-		return BuildContainerChips(rawContainers, now)
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-
-	containerByService := make(map[string]DockerContainerJSON)
-	for _, c := range rawContainers {
-		svcName, isAerial := ExtractAerialServiceName(c)
-		if isAerial && svcName != "" {
-			if existing, ok := containerByService[svcName]; !ok || c.Created > existing.Created {
-				containerByService[svcName] = c
-			}
-		}
-	}
-
-	chips := make([]MatrixJobChip, 0, len(targets))
-	seen := make(map[string]bool)
-
-	for _, target := range targets {
-		svc := strings.TrimSpace(target)
-		if svc == "" || seen[svc] {
-			continue
-		}
-		seen[svc] = true
-
-		c, found := containerByService[svc]
-		if !found {
-			chips = append(chips, MatrixJobChip{
-				Name:       svc,
-				Status:     statusActive,
-				Conclusion: "",
-				Duration:   statusPending,
-				Type:       chipTypeContainer,
-			})
-			continue
-		}
-
-		createdAt := time.Unix(c.Created, 0).UTC()
-		isRecentlyRecreated := true
-		if !startedAt.IsZero() && createdAt.Before(startedAt.Add(-30*time.Second)) {
-			isRecentlyRecreated = false
-		}
-
-		if !isRecentlyRecreated {
-			chips = append(chips, MatrixJobChip{
-				Name:       svc,
-				Status:     statusActive,
-				Conclusion: "",
-				Duration:   statusPending,
-				Type:       chipTypeContainer,
-			})
-			continue
-		}
-
-		status, conclusion, durStr := containerChipStatusAndDuration(c, now)
-
-		chips = append(chips, MatrixJobChip{
-			Name:       svc,
-			Status:     status,
-			Conclusion: conclusion,
-			Duration:   durStr,
-			Type:       chipTypeContainer,
-		})
-	}
-
 	return chips
 }
 
@@ -796,23 +671,6 @@ func IsDeployOngoing(target any) bool {
 		return false
 	}
 	return false
-}
-
-// ExtractSingleContainerCommit extracts the raw commit SHA from container labels.
-func ExtractSingleContainerCommit(c DockerContainerJSON) string {
-	if c.Labels == nil {
-		return ""
-	}
-	if rev, ok := c.Labels["org.opencontainers.image.revision"]; ok && rev != "" {
-		return rev
-	}
-	if rev, ok := c.Labels["aerial.commit_sha"]; ok && rev != "" {
-		return rev
-	}
-	if rev, ok := c.Labels["vcs-ref"]; ok && rev != "" {
-		return rev
-	}
-	return ""
 }
 
 // NormalizeAgent cleans an agent identifier to a lowercase DNS slug ([a-z0-9-]).

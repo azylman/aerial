@@ -132,7 +132,7 @@ func mergeClusterBatch5Cases() []mergeClusterTestCase {
 		// 72. Jobs missing after a console restart: healthy group on the SHA is live regardless of uptime
 		{name: "K8sRollout_JobsMissingHealthyGroup_Live", runs: mkRuns(run), containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "healthy", 900), console, grafana}, currentCommit: "0000000", wantList: []wantDep{{Stage: "live", Progress: 100}}},
 
-		// 73. No container on the SHA after 5 min waits in awaiting_pull, never the Hangar timeout
+		// 73. No container on the SHA after 5 min waits in awaiting_pull
 		{name: "K8sRollout_NotRolledAfter5Min_AwaitingPull", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synOld, "healthy", 7200)}, currentCommit: "0000000", wantList: []wantDep{{Stage: "awaiting_pull", StepStatusMap: map[int]string{2: "active"}}}},
 
 		// 74. Jobs missing and nothing on the SHA also waits in awaiting_pull
@@ -146,9 +146,6 @@ func mergeClusterBatch5Cases() []mergeClusterTestCase {
 
 		// 77. Containers already on a newer main run's SHA count as rolled for the older card
 		{name: "K8sRollout_NewerRunSHACountsAsRolled_BothLive", runs: mkRuns(run, nextRun), jobs: bothJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNext, "healthy", 60)}, currentCommit: "0000000", wantList: []wantDep{{Commit: "abcdef0", Stage: "live"}, {Commit: "de22ef4", Stage: "live"}}},
-
-		// 78. Docker mode without Hangar reconciliation never fires the 120s timeout
-		{name: "NoReconciliationNoHangarTimeout", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(2003, "", "notimeout123", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{2003: {mkJob(0, 2003, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull"}}},
 	}
 }
 

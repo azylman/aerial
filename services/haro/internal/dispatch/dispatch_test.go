@@ -333,17 +333,6 @@ func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
 		if d.agentName != "agent-alpha" {
 			t.Errorf("agentName = %q, want agent-alpha", d.agentName)
 		}
-
-		d.SetRestateConfig("http://restate2:8080/", "")
-		if d.restateURL != "http://restate2:8080" {
-			t.Errorf("restateURL = %q, want http://restate2:8080", d.restateURL)
-		}
-		if d.agentName != "aerial" {
-			t.Errorf("agentName = %q, want aerial", d.agentName)
-		}
-
-		var nilD *HTTPPromptDispatcher
-		nilD.SetRestateConfig("x", "y") // must not panic
 	})
 }
 

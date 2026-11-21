@@ -152,7 +152,6 @@ type ConsoleConfig struct {
 	GHRepos       []string
 	GHToken       string
 	GitCommit     string
-	GitSyncURL    string
 	ConfigPath    string
 	APIBaseURL    string
 	KubeAPIServer string

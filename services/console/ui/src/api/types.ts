@@ -76,40 +76,6 @@ export interface QuickLaunchLink {
   readonly is_custom?: boolean;
 }
 
-export interface RepoStatus {
-  readonly repo: string;
-  readonly github_repo?: string;
-  readonly disk_commit: string;
-  readonly disk_commit_time?: IsoTimestamp;
-  readonly remote_commit: string;
-  readonly remote_commit_time?: IsoTimestamp;
-  readonly time_lag_seconds: number;
-  readonly sync_status: 'synced' | 'lagging' | 'error' | (string & {});
-  readonly last_sync_time: IsoTimestamp;
-  readonly error?: string;
-}
-
-export interface ReconciliationStatus {
-  readonly active: boolean;
-  readonly state: string;
-  readonly stage: string;
-  readonly trigger?: string;
-  readonly target_services?: readonly string[];
-  readonly commit_sha?: string;
-  readonly started_at: IsoTimestamp;
-  readonly completed_at: IsoTimestamp;
-  readonly error?: string;
-}
-
-export interface GitSyncStatusResponse {
-  readonly status: 'synced' | 'lagging' | 'error' | (string & {});
-  readonly max_lag_seconds: number;
-  readonly last_sync_time: IsoTimestamp;
-  readonly repos?: Readonly<Record<string, RepoStatus>>;
-  readonly reconciliation?: ReconciliationStatus;
-  readonly error?: string;
-}
-
 export interface ClusterResponse {
   readonly system_time: IsoTimestamp;
   readonly cluster_status: string;
@@ -118,13 +84,10 @@ export interface ClusterResponse {
   readonly services: readonly ServiceStatus[];
   readonly deployments: readonly DeploymentStatus[];
   readonly quick_launch_links: readonly QuickLaunchLink[] | null;
-  readonly git_sync: GitSyncStatusResponse;
   readonly ongoing_deploy: string;
   readonly is_deploying: boolean;
   readonly configured_agents?: readonly string[];
 }
-
-export type StatusResponse = ClusterResponse;
 
 // ---- /api/facts (handlers.go: FactsAPIResponse) ----
 

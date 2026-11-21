@@ -97,9 +97,6 @@ func TestMain(m *testing.M) {
 		if brainHTTPClient != nil {
 			brainHTTPClient.CloseIdleConnections()
 		}
-		if dockerSocketClient != nil {
-			dockerSocketClient.CloseIdleConnections()
-		}
 		if k8sHTTPClient != nil {
 			k8sHTTPClient.CloseIdleConnections()
 		}

@@ -4,12 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite"
 )
 
@@ -32,7 +29,6 @@ type queryMockDBTX struct {
 	watermarkSQL  string
 	summarySQL    string
 	joinSQL       string
-	messagesSQL   string
 }
 
 func (q queryMockDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -86,9 +82,6 @@ func (q queryMockDBTX) QueryContext(ctx context.Context, query string, args ...a
 	if q.queryErr != nil {
 		return nil, q.queryErr
 	}
-	if q.messagesSQL != "" && strings.Contains(query, "messages") {
-		return q.dbMem.QueryContext(ctx, q.messagesSQL)
-	}
 	if q.rowsSQL != "" {
 		return q.dbMem.QueryContext(ctx, q.rowsSQL)
 	}
@@ -108,218 +101,51 @@ func setupTestDBMem(t *testing.T) *sql.DB {
 	return db
 }
 
-type sqlStoreSetterTestCase struct {
-	name         string
-	initialURL   string
-	setURL       string
-	setToken     string
-	setStack     string
-	wantBrainURL string
-	wantToken    string
-	wantStack    string
-}
-
-func runNilStoreFallbackCase(t *testing.T, tc sqlStoreSetterTestCase) {
-	t.Helper()
-	var store *SQLStore
-	if got := store.getBrainURL(); got != tc.wantBrainURL {
-		t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
-	}
-	if got := store.Stack(); got != tc.wantStack {
-		t.Errorf("Stack() = %q, want %q", got, tc.wantStack)
-	}
-	if _, err := store.Conn(context.Background()); err == nil {
-		t.Errorf("Conn() expected error for nil store")
-	}
-}
-
-func runSQLStoreSetterCase(t *testing.T, tc sqlStoreSetterTestCase, dbMem *sql.DB) {
-	t.Helper()
-	if tc.name == "NilStoreFallback" {
-		runNilStoreFallbackCase(t, tc)
-		return
-	}
-
-	store := NewSQLStoreWithBrainURL(dbMem, tc.initialURL, nil)
-	if tc.setURL != "" {
-		store.SetBrainURL(tc.setURL)
-	}
-	if tc.setToken != "" {
-		store.SetBrainToken(tc.setToken)
-	}
-	if tc.setStack != "" {
-		store.SetStack(tc.setStack)
-	}
-	if store.DB() != dbMem {
-		t.Errorf("DB() = %v, want %v", store.DB(), dbMem)
-	}
-	ic := NewIndexerClient("http://transcripts", "test", nil)
-	store.SetIndexerClient(ic)
-	if store.IndexerClient() != ic {
-		t.Errorf("IndexerClient() = %v, want %v", store.IndexerClient(), ic)
-	}
-	if got := store.getBrainURL(); got != tc.wantBrainURL {
-		t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
-	}
-	if store.brainToken != tc.wantToken {
-		t.Errorf("brainToken = %q, want %q", store.brainToken, tc.wantToken)
-	}
-	if got := store.Stack(); got != tc.wantStack {
-		t.Errorf("Stack() = %q, want %q", got, tc.wantStack)
-	}
-}
-
 func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 
-	tests := []sqlStoreSetterTestCase{
-		{
-			name:         "DefaultURL",
-			initialURL:   "",
-			wantBrainURL: "",
-			wantStack:    DefaultStack,
-		},
-		{
-			name:         "CustomURL",
-			initialURL:   "http://my-eri:5000/",
-			setToken:     "test-token",
-			setStack:     "agent-alpha",
-			wantBrainURL: "http://my-eri:5000",
-			wantToken:    "test-token",
-			wantStack:    "agent-alpha",
-		},
-		{
-			name:         "SetterWithWhitespace",
-			initialURL:   "http://old-eri:5000",
-			setURL:       " http://new-eri:6000/ ",
-			setToken:     "  padded-token  ",
-			setStack:     "  agent-beta  ",
-			wantBrainURL: "http://new-eri:6000",
-			wantToken:    "padded-token",
-			wantStack:    "agent-beta",
-		},
-		{
-			name:         "SetterEmptyResetsToEmpty",
-			initialURL:   "http://custom:1234",
-			setURL:       "   ",
-			setStack:     "   ",
-			wantBrainURL: "",
-			wantStack:    DefaultStack,
-		},
-		{
-			name:         "NilStoreFallback",
-			initialURL:   "",
-			wantBrainURL: "",
-			wantStack:    DefaultStack,
-		},
+	tests := []struct {
+		name      string
+		nilStore  bool
+		setStack  string
+		wantStack string
+	}{
+		{name: "DefaultStack", wantStack: DefaultStack},
+		{name: "CustomStack", setStack: "agent-alpha", wantStack: "agent-alpha"},
+		{name: "StackWithWhitespace", setStack: "  agent-beta  ", wantStack: "agent-beta"},
+		{name: "WhitespaceStackResetsToDefault", setStack: "   ", wantStack: DefaultStack},
+		{name: "NilStoreFallback", nilStore: true, setStack: "agent-alpha", wantStack: DefaultStack},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSQLStoreSetterCase(t, tc, dbMem)
+			store := NewSQLStore(dbMem)
+			wantDB := DBTX(dbMem)
+			if tc.nilStore {
+				store = nil
+				wantDB = nil
+			}
+			store.SetStack(tc.setStack)
+			ic := NewIndexerClient("http://transcripts", "test", nil)
+			store.SetIndexerClient(ic)
+			if got := store.effectiveStack(); got != tc.wantStack {
+				t.Errorf("effectiveStack() = %q, want %q", got, tc.wantStack)
+			}
+			if got := store.DB(); got != wantDB {
+				t.Errorf("DB() = %v, want %v", got, wantDB)
+			}
+			if !tc.nilStore && store.indexerClient != ic {
+				t.Errorf("indexerClient = %v, want %v", store.indexerClient, ic)
+			}
+			if _, err := store.Conn(context.Background()); tc.nilStore && err == nil {
+				t.Errorf("Conn() expected error for nil store")
+			}
 		})
 	}
 
 	mockStore := NewSQLStore(queryMockDBTX{dbMem: dbMem})
 	if c, err := mockStore.Conn(context.Background()); !errors.Is(err, errNoPinnedConn) || c != nil {
 		t.Errorf("mockStore.Conn() = (%v, %v), want (nil, errNoPinnedConn)", c, err)
-	}
-}
-
-func TestSQLStore_FetchBrainJSON(t *testing.T) {
-	t.Parallel()
-	// A sampled remote parent with a hand-written trace ID: the eri request must carry it.
-	parent := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID:    trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
-		SpanID:     trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
-		TraceFlags: trace.FlagsSampled,
-		Remote:     true,
-	})
-	ctx := trace.ContextWithRemoteSpanContext(context.Background(), parent)
-
-	tests := []struct {
-		name                  string
-		token                 string
-		emptyURL              bool
-		serverCode            int
-		serverBody            string
-		wantErr               bool
-		wantVal               string
-		wantTraceparentPrefix string
-	}{
-		{
-			name:     "UnconfiguredBrainURLFailsFast",
-			emptyURL: true,
-			wantErr:  true,
-		},
-		{
-			name:                  "SuccessWithToken",
-			token:                 "secret-token",
-			serverCode:            http.StatusOK,
-			serverBody:            `{"val":"hello"}`,
-			wantErr:               false,
-			wantVal:               "hello",
-			wantTraceparentPrefix: "00-4bf92f3577b34da6a3ce929d0e0e4736-",
-		},
-		{
-			name:                  "NonOKStatus",
-			serverCode:            http.StatusNotFound,
-			serverBody:            `not found`,
-			wantErr:               true,
-			wantTraceparentPrefix: "00-4bf92f3577b34da6a3ce929d0e0e4736-",
-		},
-		{
-			name:                  "InvalidJSON",
-			serverCode:            http.StatusOK,
-			serverBody:            `{bad json}`,
-			wantErr:               true,
-			wantTraceparentPrefix: "00-4bf92f3577b34da6a3ce929d0e0e4736-",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var gotAuthHeader, gotTraceparent string
-			var srvCalls int
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				srvCalls++
-				gotAuthHeader = r.Header.Get("Authorization")
-				gotTraceparent = r.Header.Get("Traceparent")
-				w.WriteHeader(tc.serverCode)
-				_, _ = w.Write([]byte(tc.serverBody))
-			}))
-			defer srv.Close()
-
-			brainURL := srv.URL
-			if tc.emptyURL {
-				brainURL = ""
-			}
-
-			store := NewSQLStoreWithBrainURL(nil, brainURL, srv.Client())
-			store.SetBrainToken(tc.token)
-			var dst struct {
-				Val string `json:"val"`
-			}
-			err := store.fetchBrainJSON(ctx, srv.URL+"/test", "test", &dst)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("fetchBrainJSON() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.emptyURL && srvCalls != 0 {
-				t.Errorf("server calls = %d, want 0 on unconfigured brain URL", srvCalls)
-			}
-			if !strings.HasPrefix(gotTraceparent, tc.wantTraceparentPrefix) || (tc.wantTraceparentPrefix == "") != (gotTraceparent == "") {
-				t.Errorf("traceparent = %q, want prefix %q", gotTraceparent, tc.wantTraceparentPrefix)
-			}
-			if !tc.wantErr {
-				if dst.Val != tc.wantVal {
-					t.Errorf("dst.Val = %q, want %q", dst.Val, tc.wantVal)
-				}
-				if tc.token != "" && gotAuthHeader != "Bearer "+tc.token {
-					t.Errorf("got auth = %q, want Bearer %s", gotAuthHeader, tc.token)
-				}
-			}
-		})
 	}
 }
 
@@ -1232,70 +1058,5 @@ func runFindNearestScoredFactsCase(t *testing.T, tc sqlStoreFindNearestScoredFac
 	}
 	if tc.wantMinScore > 0 && len(scored) > 0 && scored[0].Score < tc.wantMinScore {
 		t.Errorf("scored[0].Score = %f, want >= %f", scored[0].Score, tc.wantMinScore)
-	}
-}
-
-func TestSQLStore_GetThreadTrajectoryContext_IndexerClient(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-
-	tests := []struct {
-		name         string
-		statusCode   int
-		body         string
-		threadID     string
-		wantErr      bool
-		wantFactsLen int
-		wantToolsLen int
-	}{
-		{
-			name:         "EmptyThreadIDReturnsNil",
-			threadID:     "   ",
-			wantErr:      false,
-			wantFactsLen: 0,
-			wantToolsLen: 0,
-		},
-		{
-			name:         "Success",
-			threadID:     "th-traj-1",
-			statusCode:   http.StatusOK,
-			body:         `{"retrieved_facts": ["- [id:1] Matcha"], "tool_calls": ["search(tea)"]}`,
-			wantErr:      false,
-			wantFactsLen: 1,
-			wantToolsLen: 1,
-		},
-		{
-			name:       "ServerError",
-			threadID:   "th-traj-2",
-			statusCode: http.StatusInternalServerError,
-			wantErr:    true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.statusCode)
-				if tc.body != "" {
-					_, _ = w.Write([]byte(tc.body))
-				}
-			}))
-			defer srv.Close()
-
-			store := NewSQLStoreWithBrainURL(dbMem, "http://eri:8080", srv.Client())
-			ic := NewIndexerClient(srv.URL, "aerial", srv.Client())
-			store.SetIndexerClient(ic)
-
-			facts, tools, err := store.GetThreadTrajectoryContext(ctx, tc.threadID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(facts) != tc.wantFactsLen {
-				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantFactsLen)
-			}
-			if len(tools) != tc.wantToolsLen {
-				t.Errorf("len(tools) = %d, want %d", len(tools), tc.wantToolsLen)
-			}
-		})
 	}
 }
