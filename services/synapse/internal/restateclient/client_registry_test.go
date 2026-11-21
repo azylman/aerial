@@ -148,6 +148,47 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 	}
 }
 
+func TestClientRetryReadiness(t *testing.T) {
+	t.Parallel()
+	const wantBody = `{"merge_sha":"m1","effects_owner":"restate","enforce_owner":true,"expected_owner":"aerial"}`
+	req := RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate, EnforceOwner: true, ExpectedOwner: "aerial"}
+	tests := []struct {
+		name         string
+		unconfigured bool
+		repo         string
+		pr           int
+		status       int
+		body         string
+		wantErrSub   string
+		wantCalls    int
+		wantStatus   int
+		wantRequests int
+	}{
+		{name: "accepted decision round-trips", repo: "aerial", pr: 7, status: 200, body: `{"status":202,"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t1"}},"effect_key":"k"}`, wantCalls: 1, wantStatus: 202, wantRequests: 1},
+		{name: "conflict decision round-trips", repo: "aerial", pr: 7, status: 200, body: `{"status":409}`, wantCalls: 1, wantStatus: 409},
+		{name: "owner fence surfaces as a terminal error", repo: "aerial", pr: 7, status: 409, body: "owner", wantErrSub: "status 409", wantCalls: 1},
+		{name: "zero pr rejected without request", repo: "aerial", wantErrSub: "required"},
+		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", pr: 7, wantErrSub: "not configured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []registryCall
+			var mu sync.Mutex
+			baseURL := ""
+			if !tc.unconfigured {
+				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
+			}
+			got, err := NewClient(baseURL, "", "", nil).RetryReadiness(t.Context(), tc.repo, tc.pr, req)
+			assertErrSub(t, "RetryReadiness", err, tc.wantErrSub)
+			if got.Status != tc.wantStatus || len(got.Requests) != tc.wantRequests {
+				t.Fatalf("RetryReadiness() = %+v, want status %d with %d requests", got, tc.wantStatus, tc.wantRequests)
+			}
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/azylman%2Faerial%237/RetryReadiness", wantBody)
+		})
+	}
+}
+
 func TestIdempotencyPayload(t *testing.T) {
 	t.Parallel()
 	req := func(ns, at string) map[string]model.KustomizationRequest {

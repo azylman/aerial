@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // RepoObject logic: main-push SHA recording, the PRObject-fed SHA routing
@@ -153,6 +156,7 @@ type RepoHandlers struct {
 	prs     PRSender
 	self    RepoSelfScheduler
 	github  GitHubEffector
+	kube    KubeEffector
 }
 
 // Compile-time freeze: the handlers satisfy the full RepoObject surface.
@@ -488,12 +492,31 @@ type RepoEffectOutcome struct {
 	Key      EffectKey
 	Deduped  bool
 	Intended *IntendedEffect
-	Skipped  bool
-	Executed bool
-	Retry    bool
-	Err      *GitHubError
+	// MoreIntended are further intended effects one legacy trigger records
+	// (an untracked promotion's reconcile).
+	MoreIntended []IntendedEffect
+	Skipped      bool
+	Executed     bool
+	Retry        bool
+	Err          *GitHubError
+	// Kube is the failure of a Flux or image effect.
+	Kube     *KubeError
 	Updates  []BranchUpdate
 	Forwards int
+	// Promoted are the workloads an image promotion promoted.
+	Promoted []string
+}
+
+// errText renders the outcome's failure, or "".
+func (o RepoEffectOutcome) errText() string {
+	switch {
+	case o.Err != nil:
+		return o.Err.Error()
+	case o.Kube != nil:
+		return o.Kube.Error()
+	default:
+		return ""
+	}
 }
 
 // repoEffectTrigger returns the SHA a repo effect is keyed on: the head SHA
@@ -706,4 +729,264 @@ func (h *RepoHandlers) HandleWorkflowRerun(ctx context.Context, ev RepoEvent) (R
 	st.MarkRepoEffect(out.Key)
 	h.store.SaveRepo(st)
 	return out, nil
+}
+
+// errKubeUnconfigured is the retryable failure a restate-owned Flux or image
+// effect reports when no Kubernetes client is wired.
+var errKubeUnconfigured = &KubeError{Message: "prstate: no kube client configured"}
+
+// WithKube injects the Kubernetes/Flux boundary and returns h.
+func (h *RepoHandlers) WithKube(k KubeEffector) *RepoHandlers {
+	h.kube = k
+	return h
+}
+
+// finishKubeEffect settles one single-call Flux effect: a retryable failure
+// leaves the key uncommitted for the binding's delayed retry; success or a
+// terminal failure commits it.
+func (h *RepoHandlers) finishKubeEffect(st *RepoState, out RepoEffectOutcome, kerr *KubeError) RepoEffectOutcome {
+	if kerr != nil {
+		out.Kube = kerr
+		if kerr.Retryable() {
+			out.Retry = true
+			return out
+		}
+	} else {
+		out.Executed = true
+	}
+	st.MarkRepoEffect(out.Key)
+	h.store.SaveRepo(st)
+	return out
+}
+
+// HandleGitPush forwards one main push to the Flux receiver once per
+// trigger key (repo, PR or 0, pushed SHA), mirroring synapse
+// dispatchGitPush. It is repo-level, so a direct commit to main with no PR
+// still dispatches. Legacy-owned pushes only record the intended effect.
+func (h *RepoHandlers) HandleGitPush(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
+	ref := strings.TrimSpace(ev.Ref)
+	if !strings.HasPrefix(ref, "refs/heads/main") {
+		return RepoEffectOutcome{}, fmt.Errorf("%w: git push dispatch requires a main ref, got %q", ErrInvalidRepoEvent, ref)
+	}
+	st, out, done, err := h.beginRepoEffect(EffectFluxGitPush, digestStrings(EffectFluxGitPush, ref, strings.TrimSpace(ev.TargetID)), ev)
+	if done || err != nil {
+		return out, err
+	}
+	if h.kube == nil {
+		out.Retry, out.Kube = true, errKubeUnconfigured
+		return out, nil
+	}
+	kerr := h.kube.DispatchGitPush(ctx, GitPushRequest{
+		Repo: st.Repo, Ref: ref, Commit: repoEffectTrigger(ev), TargetID: strings.TrimSpace(ev.TargetID), PRNumber: ev.PRNumber,
+	})
+	return h.finishKubeEffect(st, out, kerr), nil
+}
+
+// ImagePromotionDigest fingerprints the images one promotion writes.
+func ImagePromotionDigest(images []string) string {
+	return digestStrings(append([]string{EffectImagePromote}, cleanStrings(images)...)...)
+}
+
+// KustomizationRequestsDigest fingerprints one reconcile request set.
+func KustomizationRequestsDigest(requests map[string]KustomizationRequest) string {
+	names := sortedRequestNames(requests)
+	parts := make([]string, 0, 1+3*len(names))
+	parts = append(parts, EffectFluxReconcile)
+	for _, name := range names {
+		parts = append(parts, name, requests[name].Namespace, requests[name].RequestedAt)
+	}
+	return digestStrings(parts...)
+}
+
+// sortedRequestNames returns the non-empty request names in order.
+func sortedRequestNames(requests map[string]KustomizationRequest) []string {
+	names := make([]string, 0, len(requests))
+	for name := range requests {
+		if strings.TrimSpace(name) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HandleImagePromotion promotes the event's images to its commit SHA
+// (ConfigMap/aerial-image-tags plus the Flux receiver), mirroring synapse
+// dispatchWorkflowRunImages phases c-e. Promotion is repo-level, so a direct
+// commit to main promotes with no PR. Once every image is promoted the
+// rollout starts in the same invocation, after the tags are written so one
+// reconcile renders all of them: a PR rollout forwards
+// HandleKustomizationRequested to PRObject (which records the requests
+// before patching them), and an untracked rollout (no PR) reconciles here
+// under its own key. Legacy-owned triggers only record the intended
+// promotion (and untracked reconcile); synapse journals the PR rollout
+// itself. A retryable failure leaves the failed key uncommitted for the
+// binding's delayed retry; a failed restate-owned PR promotion also reports
+// HandleDeployAttemptFailed so the PR's deploy-failure deadline arms.
+func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
+	repo := NormalizeRepo(ev.Repo)
+	commit := usableHeadSHA(ev.HeadSHA)
+	images := cleanStrings(ev.Images)
+	if repo == "" || commit == "" || len(images) == 0 {
+		return RepoEffectOutcome{}, fmt.Errorf("%w: repo, head sha and images are required for image promotion", ErrInvalidRepoEvent)
+	}
+	st, err := h.loadOrNew(repo)
+	if err != nil {
+		return RepoEffectOutcome{}, err
+	}
+	out := RepoEffectOutcome{Key: RepoEffectKey(EffectImagePromote, ev)}
+	var reconcileKey EffectKey
+	if ev.PRNumber <= 0 && len(sortedRequestNames(ev.KustomizationRequests)) > 0 {
+		reconcileKey = RepoEffectKey(EffectFluxReconcile, ev)
+	}
+	promoteDone := st.WasRepoEffect(out.Key)
+	reconcileDone := reconcileKey.Kind == "" || st.WasRepoEffect(reconcileKey)
+	if promoteDone && reconcileDone {
+		out.Deduped = true
+		return out, nil
+	}
+	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
+		h.recordPromotionIntent(st, &out, promoteDone, reconcileKey, reconcileDone, images, ev.KustomizationRequests)
+		return out, nil
+	}
+	if h.kube == nil {
+		out.Retry, out.Kube = true, errKubeUnconfigured
+		ferr := h.reportPromotionFailure(ctx, ev, out.Kube, &out)
+		return out, ferr
+	}
+	if !promoteDone {
+		if failed, ferr := h.promoteImages(ctx, st, ev, images, reconcileKey, &out); failed {
+			return out, ferr
+		}
+	}
+	if reconcileKey.Kind != "" && !reconcileDone {
+		kerr := reconcileRequests(ctx, h.kube, ev.KustomizationRequests)
+		if kerr != nil {
+			out.Kube = kerr
+			if kerr.Retryable() {
+				out.Retry = true
+				return out, nil
+			}
+		}
+		st.MarkRepoEffect(reconcileKey)
+		h.store.SaveRepo(st)
+	}
+	return out, nil
+}
+
+// recordPromotionIntent commits the legacy promotion (and untracked
+// reconcile) keys and records them as intended.
+func (h *RepoHandlers) recordPromotionIntent(st *RepoState, out *RepoEffectOutcome, promoteDone bool, reconcileKey EffectKey, reconcileDone bool, images []string, requests map[string]KustomizationRequest) {
+	var intents []IntendedEffect
+	if !promoteDone {
+		intents = append(intents, IntendedEffect{Kind: EffectImagePromote, EffectKey: out.Key.String(), MatchKey: out.Key.MatchKey(), Digest: ImagePromotionDigest(images)})
+		st.MarkRepoEffect(out.Key)
+	}
+	if !reconcileDone {
+		intents = append(intents, IntendedEffect{Kind: EffectFluxReconcile, EffectKey: reconcileKey.String(), MatchKey: reconcileKey.MatchKey(), Digest: KustomizationRequestsDigest(requests)})
+		st.MarkRepoEffect(reconcileKey)
+	}
+	for _, e := range intents {
+		st.RecordIntendedEffect(e)
+	}
+	h.store.SaveRepo(st)
+	out.Intended = &intents[0]
+	out.MoreIntended = intents[1:]
+}
+
+// promoteImages promotes every image (one failure never skips the rest,
+// like synapse's concurrent promotion) and reports whether the promotion
+// failed. Success commits the promotion key and starts a PR rollout; a
+// terminal failure commits the promotion and any reconcile key, since no
+// retry can succeed and synapse never reconciles after a failed promotion.
+func (h *RepoHandlers) promoteImages(ctx context.Context, st *RepoState, ev RepoEvent, images []string, reconcileKey EffectKey, out *RepoEffectOutcome) (bool, error) {
+	var first *KubeError
+	retry := false
+	for _, img := range images {
+		workload, kerr := h.kube.PromoteImageTag(ctx, ImagePromotionRequest{
+			Image: img, Repo: st.Repo, CommitSHA: usableHeadSHA(ev.HeadSHA), PRNumber: ev.PRNumber, TargetID: strings.TrimSpace(ev.TargetID),
+		})
+		if kerr != nil {
+			if first == nil {
+				first = kerr
+			}
+			retry = retry || kerr.Retryable()
+			continue
+		}
+		if workload != "" {
+			out.Promoted = append(out.Promoted, workload)
+		}
+	}
+	if first != nil {
+		out.Kube = first
+		out.Retry = retry
+		if !retry {
+			st.MarkRepoEffect(out.Key)
+			if reconcileKey.Kind != "" {
+				st.MarkRepoEffect(reconcileKey)
+			}
+			h.store.SaveRepo(st)
+		}
+		return true, h.reportPromotionFailure(ctx, ev, first, out)
+	}
+	out.Executed = true
+	st.MarkRepoEffect(out.Key)
+	h.store.SaveRepo(st)
+	if ev.PRNumber > 0 && len(sortedRequestNames(ev.KustomizationRequests)) > 0 {
+		return false, h.forward(ctx, PRHandlerKustomizationRequested, promotedRolloutEvent(st.Repo, ev), out)
+	}
+	return false, nil
+}
+
+// promotedRolloutEvent is the restate-owned PR rollout a promotion starts:
+// the deploying jobs, the exact reconcile requests, and the deploy_started
+// fact synapse rendered.
+func promotedRolloutEvent(repo string, ev RepoEvent) PREvent {
+	return PREvent{
+		Event: "kustomization_requested", Repo: repo, PRNumber: ev.PRNumber, HeadSHA: usableHeadSHA(ev.HeadSHA),
+		Branch: strings.TrimSpace(ev.Branch), TargetID: strings.TrimSpace(ev.TargetID), Jobs: cleanStrings(ev.Jobs),
+		KustomizationRequests: ev.KustomizationRequests, Facts: ev.Facts, EffectsOwner: EffectsOwnerRestate,
+	}
+}
+
+// reportPromotionFailure reports one failed restate-owned PR promotion to
+// PRObject, whose bounded deploy-failure deadline decides deploy_failed
+// (synapse handleDeployAttemptFailure). Promotions without a PR report
+// nothing.
+func (h *RepoHandlers) reportPromotionFailure(ctx context.Context, ev RepoEvent, kerr *KubeError, out *RepoEffectOutcome) error {
+	if ev.PRNumber <= 0 || kerr == nil {
+		return nil
+	}
+	msg := kerr.Error()
+	failed := make([]pubsub.PRLifecycleEvent, 0, len(ev.DeployFailedFacts))
+	for _, f := range ev.DeployFailedFacts {
+		f.Details = msg
+		failed = append(failed, f)
+	}
+	head := usableHeadSHA(ev.HeadSHA)
+	return h.forward(ctx, PRHandlerDeployAttemptFailed, PREvent{
+		Event: "deploy_attempt_failed", Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: head, MergeSHA: head,
+		Branch: strings.TrimSpace(ev.Branch), Banner: msg, Facts: failed, EffectsOwner: EffectsOwnerRestate,
+	}, out)
+}
+
+// reconcileRequests patches every request in name order; one failure never
+// skips the rest. It returns the first failure, made retryable when any
+// failure was.
+func reconcileRequests(ctx context.Context, kube KubeEffector, requests map[string]KustomizationRequest) *KubeError {
+	var first *KubeError
+	retry := false
+	for _, name := range sortedRequestNames(requests) {
+		req := requests[name]
+		if kerr := kube.ReconcileKustomization(ctx, req.Namespace, name, req.RequestedAt); kerr != nil {
+			if first == nil {
+				first = &KubeError{Status: kerr.Status, Message: kerr.Message}
+			}
+			retry = retry || kerr.Retryable()
+		}
+	}
+	if first != nil && retry && !first.Retryable() {
+		first.Status = 0
+	}
+	return first
 }

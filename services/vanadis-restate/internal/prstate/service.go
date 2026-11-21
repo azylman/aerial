@@ -20,7 +20,8 @@ package prstate
 // handlers (HandleConflict, HandleDeploySuccess, HandleCIRecovered) decide,
 // commit, then execute in one exclusive invocation. GitHub effects
 // (auto-update cascade, update-branch, conflict checks, workflow reruns)
-// run in service_github.go; Flux and image effects land in a later chunk.
+// run in service_github.go; Flux and image effects (git-push dispatch,
+// image promotion, reconcile requests, readiness retry) in service_flux.go.
 //
 // The only cross-object traffic is one-way sends: PRObject sends RepoObject
 // a HandlePRIndex update after each commit that changes a routed field, and
@@ -79,6 +80,9 @@ type PRObjectService struct {
 	deployFailureDeadline time.Duration
 
 	github GitHubEffector
+
+	kube                KubeEffector
+	reconcileRetryDelay time.Duration
 }
 
 // NewPRObjectService builds the single PRObject service. Without
@@ -87,6 +91,7 @@ func NewPRObjectService() *PRObjectService {
 	return &PRObjectService{
 		stateKey: prObjectStateKey, shadowDelay: DefaultShadowCompareDelay, retryDelay: DefaultProjectionRetry,
 		eriRetryDelay: DefaultEriEffectRetryDelay, factRetryDelay: DefaultFactRetryDelay, deployFailureDeadline: DefaultDeployFailureDeadline,
+		reconcileRetryDelay: DefaultRepoEffectRetryDelay,
 	}
 }
 
@@ -459,14 +464,6 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 	})
 }
 
-// HandleReadinessRetry applies one readiness retry dark. Retry never mints
-// a generation and never clears effect keys, per the frozen contract.
-func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
-		st.RetryPRReadiness()
-	})
-}
-
 // HandleRolloutProgress applies one rollout-progress event. It is a
 // deploy-phase event, so merged PRs apply it: ready jobs union into
 // deployed_jobs, completed Kustomizations into deployed_kustomizations
@@ -606,21 +603,6 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 	return out, nil
 }
 
-// HandleKustomizationRequested starts a new gate generation for one
-// kustomization request. It is a deploy-phase event, so merged PRs apply
-// it: carried jobs move the PR to deploying (TransitionDeploying) and the
-// carried requests replace the recorded set (RecordKustomizationRequests),
-// in the registry's order. The generation bump sends RepoObject a deploying
-// index update so kustomization status fans out to this PR.
-func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
-		st.DisarmDeployFailure()
-		st.TransitionDeploying(ev.Jobs)
-		st.RecordKustomizationRequestSet(ev.KustomizationRequests)
-		st.RecordKustomizationRequests()
-	})
-}
-
 // Register is the request-response PR register: it fences the existing
 // owner (authorizeExistingPROwner), resolves the headless target (request
 // snowflake, stored target, system-channel fallback), applies the
@@ -698,6 +680,7 @@ func (s *PRObjectService) HandleMainAdvanced(ctx restate.ObjectContext, ev PREve
 type RepoObjectService struct {
 	stateKey   string
 	github     GitHubEffector
+	kube       KubeEffector
 	retryDelay time.Duration
 }
 
@@ -714,7 +697,7 @@ func (*RepoObjectService) ServiceName() string {
 
 func (s *RepoObjectService) handlers(ctx restate.ObjectContext) *RepoHandlers {
 	return NewRepoHandlers(restateRepoStore{ctx: ctx, key: s.stateKey}, nil, restatePRSender{ctx: ctx}, restateSelfScheduler{ctx: ctx}).
-		WithGitHub(journaled(ctx, s.github))
+		WithGitHub(journaled(ctx, s.github)).WithKube(journaledKubeFor(ctx, s.kube))
 }
 
 // terminalOnInvalid converts malformed-input errors to terminal errors so

@@ -52,6 +52,12 @@ type Config struct {
 	AgentName         string
 	// ConfigPath is the agent config.yaml read for widget channel policy (shared CONFIG_PATH convention).
 	ConfigPath string
+	// KubeAPIServer is the in-cluster API server restate-owned Flux and
+	// image effects write to; empty outside a cluster.
+	KubeAPIServer string
+	// FluxReceiverURL is the tokenized Flux receiver webhook (a secret);
+	// empty disables receiver forwards exactly like synapse.
+	FluxReceiverURL string
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -97,6 +103,8 @@ func LoadConfigFromEnv() Config {
 		ShareRoot:         shareRoot,
 		AgentName:         agentName,
 		ConfigPath:        configPath,
+		KubeAPIServer:     prstate.InClusterAPIServer(os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")),
+		FluxReceiverURL:   strings.TrimSpace(os.Getenv("FLUX_RECEIVER_URL")),
 	}
 }
 
@@ -116,30 +124,43 @@ func LoadConfigFromEnv() Config {
 // facts publishes restate-owned aerial.pr.> lifecycle facts; nil leaves them
 // unconfigured. gh is the GitHub client restate-owned GitHub effects
 // (auto-update, update-branch, conflict checks, workflow reruns) call; nil
-// leaves them unconfigured.
-func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient) *server.Restate {
+// leaves them unconfigured. kube is the Kubernetes/Flux client restate-owned
+// Flux and image effects (git-push dispatch, image promotion, reconcile
+// requests) call; nil leaves them unconfigured.
+func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) *server.Restate {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))
 	if ownsPRState(agent) {
-		pr := prstate.NewPRObjectService()
-		if projection != nil {
-			pr = pr.WithProjection(projection, projection)
-		}
-		if eri != nil {
-			pr = pr.WithEriEffector(eri)
-		}
-		if facts != nil {
-			pr = pr.WithFactPublisher(facts)
-		}
-		repo := prstate.NewRepoObjectService()
-		if gh != nil {
-			pr = pr.WithGitHub(gh)
-			repo = repo.WithGitHub(gh)
-		}
+		pr, repo := newPRStateServices(projection, eri, facts, gh, kube)
 		prstate.RegisterPRStateServices(srv, pr, repo)
 	}
 	return srv
+}
+
+// newPRStateServices wires the PRObject and RepoObject services with every
+// configured boundary; a nil boundary stays unconfigured.
+func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*prstate.PRObjectService, *prstate.RepoObjectService) {
+	pr := prstate.NewPRObjectService()
+	repo := prstate.NewRepoObjectService()
+	if projection != nil {
+		pr = pr.WithProjection(projection, projection)
+	}
+	if eri != nil {
+		pr = pr.WithEriEffector(eri)
+	}
+	if facts != nil {
+		pr = pr.WithFactPublisher(facts)
+	}
+	if gh != nil {
+		pr = pr.WithGitHub(gh)
+		repo = repo.WithGitHub(gh)
+	}
+	if kube != nil {
+		pr = pr.WithKube(kube)
+		repo = repo.WithKube(kube)
+	}
+	return pr, repo
 }
 
 // ownsPRState reports whether agent is the default agent that owns prstate.
@@ -220,7 +241,8 @@ func RunApp(ctx context.Context, cfg Config) error {
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
 	restateServer := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()), prstate.NewSessionEriEffector(eriClient), prstate.NewBusFactPublisher(bus),
-		prstate.NewGitHubClient(tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}), "", cfg.GitHubToken))
+		prstate.NewGitHubClient(tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}), "", cfg.GitHubToken),
+		prstate.NewKubeClient(tracing.ExternalClient(&http.Client{Timeout: 15 * time.Second}), cfg.KubeAPIServer, prstate.DefaultKubeTokenPath, prstate.DefaultKubeCAPath, cfg.FluxReceiverURL))
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)

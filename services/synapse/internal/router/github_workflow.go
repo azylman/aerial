@@ -148,6 +148,19 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		}
 	}
 
+	var requests map[string]kustomizationRequest
+	if len(refs) > 0 {
+		requests = newKustomizationRequests(refs, time.Now().UTC())
+	}
+	effectPR := 0
+	if trackPR {
+		effectPR = prNum
+	}
+	s.journalImagePromotion(ctx, restateclient.RepoEvent{
+		Repo: repo, HeadSHA: headSHA, PRNumber: effectPR, Branch: headBranch, TargetID: targetID,
+		Images: images, Jobs: workloads, KustomizationRequests: requests,
+	})
+
 	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
 	if err := s.promoteWorkflowRunImages(ctx, images, ImageReadyEventRequest{Repo: repo, CommitSHA: headSHA, PRNumber: prNum, TargetID: targetID}); err != nil {
 		if trackPR {
@@ -155,6 +168,8 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		}
 		return err
 	}
+	recordLegacyEffect(ctx, restateclient.EffectImagePromote,
+		restateclient.EffectMatchKey(repo, effectPR, headSHA, restateclient.EffectImagePromote, "", ""), normalizeRepo(repo), effectPR)
 	if len(refs) == 0 {
 		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
@@ -162,7 +177,17 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	// Phases d+e: durably record every reconcile request before patching any of them, so a watch event can
 	// never observe a request that is not yet recorded. A crash or failure between record and patch is
 	// repaired by the watcher re-patching the recorded value. Sync the widget after recording (rollout lines).
-	return s.recordAndReconcileKustomizations(ctx, repo, prNum, headBranch, headSHA, targetID, workloads, refs, trackPR, finalAttempt)
+	return s.recordAndReconcileRequests(ctx, repo, prNum, headBranch, headSHA, targetID, workloads, refs, requests, trackPR, finalAttempt)
+}
+
+// journalImagePromotion journals one legacy image promotion to
+// RepoObject.HandleImagePromotion, which records the promotion (and, for an
+// untracked rollout, the reconcile) as intended; synapse promotes and
+// reconciles below exactly as before, so a journal failure is only logged.
+func (s *RouterServer) journalImagePromotion(ctx context.Context, ev restateclient.RepoEvent) {
+	if err := s.routeRepoEvent(ctx, "HandleImagePromotion", ev); err != nil {
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] image promotion journal failed; legacy promotion continues", "repo", ev.Repo, "sha", ev.HeadSHA, "error", err)
+	}
 }
 
 // hasUnrecordedKustomizationRequests is projection-safe: pure workflow
@@ -179,8 +204,10 @@ func (s *RouterServer) handleFinalAttemptDeployFailure(ctx context.Context, repo
 	}
 }
 
-func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, jobs []string, refs []fluxKustomizationRef, trackPR, finalAttempt bool) error {
-	requests := newKustomizationRequests(refs, time.Now().UTC())
+// recordAndReconcileRequests records requests (journal, then registry) and
+// patches every ref, logging the reconcile as [synapse-effect] under the
+// match key PRObject (tracked PR) or RepoObject (untracked) records.
+func (s *RouterServer) recordAndReconcileRequests(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, jobs []string, refs []fluxKustomizationRef, requests map[string]kustomizationRequest, trackPR, finalAttempt bool) error {
 	// Journal before recording or reconciling: a journal failure leaves
 	// nothing recorded, so redelivery re-journals (idempotent) and retries
 	// the record/reconcile instead of repeating an unjournaled effect. The
@@ -207,6 +234,12 @@ func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, rep
 		}
 		return err
 	}
+	effectPR := 0
+	if trackPR {
+		effectPR = prNum
+	}
+	recordLegacyEffect(ctx, restateclient.EffectFluxReconcile,
+		restateclient.EffectMatchKey(repo, effectPR, headSHA, restateclient.EffectFluxReconcile, "", ""), normalizeRepo(repo), effectPR)
 	return nil
 }
 

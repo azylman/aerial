@@ -107,6 +107,21 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) || (!s.cfgSrc.Current().DefaultOwner && targetID == "") {
 		return nil
 	}
+	// Journal the dispatch to RepoObject.HandleGitPush first: a
+	// restate-owned push is dispatched there (a send failure retries the
+	// job); a legacy push is dispatched here as today, logs
+	// [synapse-effect], and RepoObject records it as intended.
+	if err := s.routeRepoEvent(ctx, "HandleGitPush", restateclient.RepoEvent{
+		Repo: repo, MainSHA: commit, PRNumber: prNum, Ref: ref, TargetID: targetID,
+	}); err != nil {
+		if restateOwnsEffects(ctx) {
+			return err
+		}
+		slog.WarnContext(ctx, "[synapse] [restate-cutover] git push journal failed; legacy dispatch continues", "repo", repo, "error", err)
+	}
+	if restateOwnsEffects(ctx) {
+		return nil
+	}
 	if err := s.dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
 		Repo:     repo,
 		Ref:      ref,
@@ -117,6 +132,8 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching git_push", "repo", repo, "error", err)
 		return fmt.Errorf("dispatch git_push: %w", err)
 	}
+	recordLegacyEffect(ctx, restateclient.EffectFluxGitPush,
+		restateclient.EffectMatchKey(repo, prNum, commit, restateclient.EffectFluxGitPush, "", ""), normalizeRepo(repo), prNum)
 	return nil
 }
 

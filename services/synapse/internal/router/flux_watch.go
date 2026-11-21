@@ -621,7 +621,14 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)
 	}
 	slog.InfoContext(ctx, "[synapse] [deploy] deferring completion to the kustomization watcher", "repo", repo, "pr", prNum, "kustomizations", strings.Join(names, ", "))
-	return true, s.reconcileImageKustomizations(ctx, refs, requests)
+	if err := s.reconcileImageKustomizations(ctx, refs, requests); err != nil {
+		return true, err
+	}
+	// The journaled request carried no head SHA, so PRObject keys the
+	// reconcile on an empty SHA; the [synapse-effect] key matches it.
+	recordLegacyEffect(ctx, restateclient.EffectFluxReconcile,
+		restateclient.EffectMatchKey(repo, prNum, "", restateclient.EffectFluxReconcile, "", ""), normalizeRepo(repo), prNum)
+	return true, nil
 }
 
 // newKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.

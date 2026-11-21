@@ -461,6 +461,17 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	}); err != nil {
 		return nil, err
 	}
+	// Git-push dispatch is repo-level: RepoObject forwards the push to the
+	// Flux receiver whether or not a PR resolved, so a direct commit to main
+	// still deploys. Like the legacy dispatch, only the default owner
+	// dispatches without a known PR target; synapse no longer reads targets.
+	if s.cfgSrc.Current().DefaultOwner {
+		if err := s.sendOwnedRepo(ctx, "HandleGitPush", restateclient.RepoEvent{
+			Repo: res.Repo, MainSHA: res.HeadSHA, PRNumber: res.PRNumber, Ref: p.Ref,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	return res, nil
 }
 

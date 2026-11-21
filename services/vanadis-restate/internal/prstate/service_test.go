@@ -140,8 +140,8 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect",
-			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRerun,HandleWorkflowRunBySHA,ResolvePRBySHA",
+			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
+			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRerun,HandleWorkflowRunBySHA,ResolvePRBySHA",
 		},
 	}
 	for _, tc := range tests {
@@ -209,7 +209,7 @@ func TestPRObjectService_DarkHandlers(t *testing.T) {
 		{name: "merged applies", got: NewPRObjectService().HandleMerged(restate.WithMockContext(prMc06), ev), rec: prRec06, wantSet: true, wantTerminal: TerminalMerged},
 		{name: "closed applies", got: NewPRObjectService().HandleClosed(restate.WithMockContext(prMc07), ev), rec: prRec07, wantSet: true, wantTerminal: TerminalClosed},
 		{name: "reopened applies", got: NewPRObjectService().HandleReopened(restate.WithMockContext(prMc08), ev), rec: prRec08, wantSet: true},
-		{name: "readiness retry applies", got: NewPRObjectService().HandleReadinessRetry(restate.WithMockContext(prMc09), ev), rec: prRec09, wantSet: true},
+		{name: "readiness retry without a merge sha persists nothing", got: NewPRObjectService().HandleReadinessRetry(restate.WithMockContext(prMc09), ev), rec: prRec09},
 		{name: "rollout progress applies", got: NewPRObjectService().HandleRolloutProgress(restate.WithMockContext(prMc10), ev), rec: prRec10, wantSet: true},
 		{name: "kustomization requested applies", got: NewPRObjectService().HandleKustomizationRequested(restate.WithMockContext(prMc11), ev), rec: prRec11, wantSet: true, wantGen: 1},
 	}

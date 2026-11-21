@@ -17,6 +17,8 @@ package prstate
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -399,4 +401,53 @@ func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext,
 	restate.Set(ctx, s.stateKey, st)
 	s.afterCommit(ctx, st, EffectsOwnerRestate)
 	return nil
+}
+
+// RetryReadinessGate mirrors registry RetryPRReadiness: a merged rollout
+// whose merge SHA matches, whose status is deployed, deploy_failed, or
+// deploying, and that recorded reconcile requests returns to deploying with
+// its original requests. A PR that was not already deploying drops its
+// deployed kustomizations and jobs; a deploying PR keeps partial progress.
+// It never mints a generation and never clears effect keys; it numbers the
+// retry so the readiness reconcile re-fires under its own key. ok is false
+// (nothing changed) when no matching merged rollout gate exists.
+func (s *PRState) RetryReadinessGate(mergeSHA string) (map[string]KustomizationRequest, bool) {
+	merge := strings.TrimSpace(mergeSHA)
+	if s == nil || merge == "" || s.MergeSHA != merge || len(s.KustomizationRequests) == 0 ||
+		!statusIn(s.Status, RegistryStatusDeployed, RegistryStatusDeployFailed, RegistryStatusDeploying) {
+		return nil, false
+	}
+	if s.Status != RegistryStatusDeploying {
+		s.DeployedKustomizations = nil
+		s.DeployedJobs = nil
+	}
+	s.Status = RegistryStatusDeploying
+	s.ReadinessRetries++
+	out := make(map[string]KustomizationRequest, len(s.KustomizationRequests))
+	maps.Copy(out, s.KustomizationRequests)
+	return out, true
+}
+
+// ReadinessJobName scopes the readiness reconcile effect in match keys;
+// the journaled key appends the retry ordinal.
+const ReadinessJobName = "readiness"
+
+// ReadinessReconcileKey keys the reconcile one accepted readiness retry
+// requests: the merge SHA plus the retry ordinal, in the current
+// generation. The returned match key drops the ordinal, matching the
+// [synapse-effect] line synapse logs for its legacy readiness reconcile.
+func ReadinessReconcileKey(s *PRState, mergeSHA string) (EffectKey, string) {
+	if s == nil {
+		return EffectKey{}, ""
+	}
+	key := s.EffectKeyFor(EffectFluxReconcile, mergeSHA, fmt.Sprintf("%s-%d", ReadinessJobName, s.ReadinessRetries), "")
+	match := s.EffectKeyFor(EffectFluxReconcile, mergeSHA, ReadinessJobName, "").MatchKey()
+	return key, match
+}
+
+// RolloutReconcileKey keys the reconcile of a recorded rollout request set:
+// the head SHA the request event carried, in the generation the record
+// minted.
+func RolloutReconcileKey(s *PRState, headSHA string) EffectKey {
+	return s.EffectKeyFor(EffectFluxReconcile, usableHeadSHA(headSHA), "", "")
 }
