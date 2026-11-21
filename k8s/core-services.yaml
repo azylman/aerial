@@ -2633,6 +2633,27 @@ spec:
             - mountPath: /etc/nats
               name: nats-config
               readOnly: true
+        - name: metrics
+          image: natsio/prometheus-nats-exporter:0.20.3@sha256:4b8ddc1c86fec360b5cd3d5e1fbc6fb52bdafd5805bba3901cc52926538af255
+          args:
+            - "-p"
+            - "7777"
+            - "-varz"
+            - "-connz"
+            - "-healthz"
+            - "-accstatz"
+            - "-jsz=all"
+            - "http://localhost:8222"
+          ports:
+            - containerPort: 7777
+              name: metrics
+              protocol: TCP
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
       volumes:
         - name: jetstream-data
           persistentVolumeClaim:

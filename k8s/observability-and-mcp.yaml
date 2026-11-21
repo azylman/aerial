@@ -696,6 +696,39 @@ spec:
             severity: warning
           annotations:
             summary: VictoriaTraces has ingested no spans for 15 minutes
+    - name: nats_health
+      interval: 1m
+      rules:
+        - alert: NatsMetricsMissing
+          expr: absent(gnatsd_varz_mem{job="default/nats"})
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: NATS metrics have not been scraped for 10 minutes
+        - alert: NatsMemoryHigh
+          expr: max(container_memory_working_set_bytes{container="nats", pod=~"nats-.*"}) > 600 * 1024 * 1024
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: NATS memory has been above 600 MiB (of its 1 GiB limit) for 15 minutes
+        - alert: NatsStreamNearFull
+          expr: |
+            max by (account, stream_name) (jetstream_stream_total_bytes{job="default/nats"})
+              / max by (account, stream_name) (jetstream_stream_limit_bytes{job="default/nats"} > 0) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NATS stream {{ $labels.account }}/{{ $labels.stream_name }} is above 80% of its byte limit"
+        - alert: NatsHealthzFailing
+          expr: max(gnatsd_healthz_status{job="default/nats"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: NATS /healthz is failing
     - name: vanadis_restate_health
       interval: 30s
       rules:
@@ -881,6 +914,20 @@ spec:
     - port: http
       path: /metrics
       interval: 15s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: nats
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
