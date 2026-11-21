@@ -9,9 +9,7 @@ import (
 	"strings"
 	"time"
 
-	// pgx driver registration for the postgres:// connection strings handled by OpenDB.
-	_ "github.com/jackc/pgx/v5/stdlib"
-
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 )
 
@@ -73,20 +71,16 @@ func (s *PGStore) IsSQLite() bool {
 	return s.isSQLite
 }
 
-// OpenDB opens a database connection from a connection string.
-func OpenDB(databaseURL string) (*sql.DB, error) {
+// OpenDB opens a database connection from a connection string: sqlite://,
+// file: and :memory: URLs open SQLite, everything else goes through
+// pgutil.OpenSQL (postgres:// or postgresql:// only, pinged at open).
+func OpenDB(ctx context.Context, databaseURL string) (*sql.DB, error) {
 	trimmed := strings.TrimSpace(databaseURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("store: connection string cannot be empty")
-	}
 	if strings.HasPrefix(trimmed, "sqlite://") || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ":memory:") {
 		sqlitePath := strings.TrimPrefix(trimmed, "sqlite://")
 		return sql.Open("sqlite", sqlitePath)
 	}
-	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("store: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
-	}
-	return sql.Open("pgx", trimmed)
+	return pgutil.OpenSQL(ctx, trimmed, pgutil.SQLOptions{})
 }
 
 const selectCallFields = `call_id, provider_call_sid, direction, state, end_reason,

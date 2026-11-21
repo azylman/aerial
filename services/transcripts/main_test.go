@@ -13,30 +13,9 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
-
-func TestOpenDB(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		dsn     string
-		wantSub string
-	}{
-		{"empty dsn", "", "cannot be empty"},
-		{"blank dsn", "   ", "cannot be empty"},
-		{"unsupported scheme", "sqlite:///tmp/x.db", "unsupported database scheme"},
-		{"unreachable host fails ping", "postgres://127.0.0.1:1/db?sslmode=disable", "ping failed"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if _, err := openDB(context.Background(), tc.dsn); err == nil || !strings.Contains(err.Error(), tc.wantSub) {
-				t.Errorf("openDB() err = %v, want substring %q", err, tc.wantSub)
-			}
-		})
-	}
-}
 
 func TestLoadConfig(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://env:pass@host:5432/db")
@@ -132,7 +111,7 @@ func TestInitTranscriptsJetStream(t *testing.T) {
 func stubOpenDB(t *testing.T, db *sql.DB, err error) func() {
 	t.Helper()
 	old := openDBFn
-	openDBFn = func(context.Context, string) (*sql.DB, error) { return db, err }
+	openDBFn = func(context.Context, string, pgutil.SQLOptions) (*sql.DB, error) { return db, err }
 	return func() { openDBFn = old }
 }
 
