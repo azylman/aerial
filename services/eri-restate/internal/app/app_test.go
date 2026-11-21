@@ -1041,6 +1041,7 @@ func TestWireOutboundIntegrations(t *testing.T) {
 	}{
 		{name: "token and nats url", cur: &config.ConfigData{DiscordToken: "token-1", NATSURL: "nats://127.0.0.1:65530"}, wantSession: true},
 		{name: "no token and no nats url", cur: &config.ConfigData{}},
+		{name: "malformed nats url skips event bus", cur: &config.ConfigData{NATSURL: "nats://bad\x7fhost:4222"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1101,8 +1102,11 @@ func TestCreateReloadFunc(t *testing.T) {
 			tmpDir := t.TempDir()
 
 			var appCfg *config.Config
+			cfgPath := filepath.Join(tmpDir, "config.yaml")
+			loadConfig := func() (*config.Config, error) {
+				return config.LoadConfigFromLookup(func(string) string { return "" }, cfgPath)
+			}
 			if tc.withAppCfg {
-				cfgPath := filepath.Join(tmpDir, "config.yaml")
 				switch {
 				case tc.corruptConfig:
 					_ = os.WriteFile(cfgPath, []byte("invalid: yaml: ["), 0o644)
@@ -1113,8 +1117,6 @@ func TestCreateReloadFunc(t *testing.T) {
 					validYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
 					_ = os.WriteFile(cfgPath, []byte(validYAML), 0o644)
 				}
-				t.Setenv("CONFIG_PATH", cfgPath)
-
 				appCfg = config.NewFromData(&config.ConfigData{
 					DataDir:       tmpDir,
 					GeminiHomeDir: tmpDir,
@@ -1152,7 +1154,7 @@ func TestCreateReloadFunc(t *testing.T) {
 				})
 			}
 
-			fn := createReloadFunc(ctx, appCfg, prov, ephemPool, workerPool)
+			fn := createReloadFunc(ctx, appCfg, loadConfig, prov, ephemPool, workerPool)
 			require.NotNil(t, fn)
 			fn("test-source")
 
@@ -1186,5 +1188,26 @@ func TestStartDiscoveryTimeoutReconciler_ContextCanceledDuringRetry(t *testing.T
 	case <-trigger.Done():
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for trigger.Done()")
+	}
+}
+
+func TestFirstNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		vals []string
+		want string
+	}{
+		{name: "no values", vals: nil, want: ""},
+		{name: "all blank", vals: []string{"", "  ", "\t"}, want: ""},
+		{name: "first non-blank is trimmed", vals: []string{" ", "  alpha  ", "beta"}, want: "alpha"},
+		{name: "first value wins", vals: []string{"gamma", "delta"}, want: "gamma"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, FirstNonEmpty(tc.vals...))
+		})
 	}
 }

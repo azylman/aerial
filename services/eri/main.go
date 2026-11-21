@@ -24,6 +24,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
@@ -618,6 +619,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		TraceContent:           appOpts.traceContent,
 		ActiveTurns:            runner.NewActiveTurnRegistry(),
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
+		SATokenPath:            k8sauth.DefaultTokenPath,
 	})
 	detachEventBus := attachEriEventBus(ctx, pool)
 	defer detachEventBus()

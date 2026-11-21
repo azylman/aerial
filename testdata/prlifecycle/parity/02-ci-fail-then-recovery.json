@@ -208,6 +208,20 @@
       "key": "azylman/aerial#102@h102:github_auto_update:check=lint"
     }
   ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#102@h102:pr_fact_ci_failed:check=lint",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#102@h102:pr_fact_synchronize",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#102@h102:pr_fact_check_updated:check=lint",
+      "rollout_state": null
+    }
+  ],
   "rows": [
     {
       "repo": "azylman/aerial",

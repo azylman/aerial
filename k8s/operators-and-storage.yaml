@@ -719,6 +719,15 @@ spec:
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
+    - remoteRef:
+        key: GITHUB_APP_ID
+      secretKey: GITHUB_APP_ID
+    - remoteRef:
+        key: GITHUB_APP_INSTALLATION_ID
+      secretKey: GITHUB_APP_INSTALLATION_ID
+    - remoteRef:
+        key: GITHUB_APP_PRIVATE_KEY
+      secretKey: GITHUB_APP_PRIVATE_KEY
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -742,6 +751,15 @@ spec:
     - remoteRef:
         key: GITHUB_WEBHOOK_SECRET
       secretKey: GITHUB_WEBHOOK_SECRET
+    - remoteRef:
+        key: GITHUB_APP_ID
+      secretKey: GITHUB_APP_ID
+    - remoteRef:
+        key: GITHUB_APP_INSTALLATION_ID
+      secretKey: GITHUB_APP_INSTALLATION_ID
+    - remoteRef:
+        key: GITHUB_APP_PRIVATE_KEY
+      secretKey: GITHUB_APP_PRIVATE_KEY
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
