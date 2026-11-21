@@ -186,7 +186,7 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 func TestPRObjectService_Register(t *testing.T) {
 	t.Parallel()
 	owned := svcRow("h0", "", RegistryStatusCIFailed, TerminalNone)
-	owned.Agent, owned.TargetID = "miorine", snowB
+	owned.Agent, owned.TargetID = "agent-alpha", snowB
 	tests := []struct {
 		name       string
 		existing   *PRState
@@ -200,7 +200,7 @@ func TestPRObjectService_Register(t *testing.T) {
 		wantSends  int
 	}{
 		{name: "new pr registers and indexes", req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA, Agent: "aerial"}, wantResp: RegisterResponse{TargetID: snowA, Agent: "aerial", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
-		{name: "headless target resolves stored target", existing: owned, req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", EnforceOwner: true, ExpectedOwner: "miorine"}, wantResp: RegisterResponse{TargetID: snowB, Agent: "miorine", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
+		{name: "headless target resolves stored target", existing: owned, req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", EnforceOwner: true, ExpectedOwner: "agent-alpha"}, wantResp: RegisterResponse{TargetID: snowB, Agent: "agent-alpha", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
 		{name: "owner mismatch is a terminal 409", existing: owned, req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA, EnforceOwner: true, ExpectedOwner: "aerial"}, wantErr: true, wantCode: 409},
 		{name: "no target is a terminal 400", req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1"}, wantErr: true, wantCode: 400},
 		{name: "missing branch is a terminal 400", req: RegisterRequest{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", TargetID: snowA}, wantErr: true, wantCode: 400},

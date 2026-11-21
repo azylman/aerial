@@ -131,9 +131,9 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter"},
 		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter"},
 		{name: "whitespace aerial defaults to legacy", agent: "  Aerial  ", wantBuild: "Build", wantRouter: "BuildRouter"},
-		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta"},
-		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine"},
-		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
+		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

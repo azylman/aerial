@@ -501,10 +501,10 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 		{name: "empty defaults to legacy", agent: "", wantBuild: "Build"},
 		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build"},
 		{name: "aerial case insensitive", agent: "Aerial", wantBuild: "Build"},
-		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta"},
-		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine"},
-		{name: "whitespace trimmed", agent: "  suletta  ", wantBuild: "Build-suletta"},
-		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha"},
+		{name: "whitespace trimmed", agent: "  agent-beta  ", wantBuild: "Build-agent-beta"},
+		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantBuild: "Build-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
