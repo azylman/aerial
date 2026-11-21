@@ -22,14 +22,29 @@ import (
 
 // Reconcile reconciles the build state on Restate.
 func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (ReconcileBuildResult, error) {
-	_ = req
 	if b == nil || b.store == nil {
 		err := restate.TerminalErrorf("store not configured")
 		RecordReconcileError(labelReconcileBuild, err)
 		return ReconcileBuildResult{}, err
 	}
+	if err := b.guardRunner(ctx, labelReconcileBuild); err != nil {
+		return ReconcileBuildResult{}, err
+	}
 	rt := b.getRuntime(ctx)
-	return b.executeObjectTransition(rt, labelReconcileBuild, nil)
+	res, err := b.executeObjectTransition(rt, labelReconcileBuild, nil)
+	if err != nil || strings.TrimSpace(req.Reason) != ReconcileReasonWidgetSync || res.Status != statusFailed || b.executor == nil {
+		return res, err
+	}
+	// Failed builds return from reconciliation before its widget sync, so an
+	// explicit widget sync refreshes the failed card here.
+	buildID := strings.TrimSpace(rt.Key())
+	if _, wErr := RunJournaled(ctx, labelReconcileBuild, "widget-sync-failed-build", func(rc restate.RunContext) (bool, error) {
+		b.refreshFailedPRWidget(rc, buildID)
+		return true, nil
+	}); wErr != nil {
+		return res, wErr
+	}
+	return res, nil
 }
 
 // Mutate applies a mutation to the build and reconciles state.
@@ -37,6 +52,9 @@ func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest
 	if b == nil || b.store == nil {
 		err := restate.TerminalErrorf("store not configured")
 		RecordReconcileError(labelMutateBuild, err)
+		return ReconcileBuildResult{}, err
+	}
+	if err := b.guardRunner(ctx, labelMutateBuild); err != nil {
 		return ReconcileBuildResult{}, err
 	}
 	rt := b.getRuntime(ctx)
@@ -68,8 +86,12 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 		return reconcileStepOutput{}, err
 	}
 	notifiedInStep := false
-	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
+	stepOut, err := rt.RunReconcileStep(stepName, func(stepCtx context.Context) (reconcileStepOutput, error) {
+		ctx, crossBuild := withCrossBuildReconciles(stepCtx)
 		out, stepErr := b.executeAuthoritativeTransition(ctx, buildID, mutation, priorState, priorLaunched, terminalNotificationRecorded(priorState))
+		if stepErr == nil {
+			out.ReconcileTargets = crossBuild.list()
+		}
 		if stepErr != nil {
 			notifiedInStep = true
 			RecordReconcileError(stepName, stepErr)
@@ -116,6 +138,7 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 	if err != nil {
 		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
 	}
+	sendCrossBuildReconciles(rt, stepOut.ReconcileTargets)
 
 	if stepOut.BuildStatus == statusCompleted || stepOut.BuildStatus == statusCancelled || stepOut.BuildStatus == statusNotFound {
 		rt.ClearState()

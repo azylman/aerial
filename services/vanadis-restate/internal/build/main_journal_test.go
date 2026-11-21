@@ -125,12 +125,12 @@ func TestUpdateBuildConflictThenValid(t *testing.T) {
 	}
 }
 
-func (s *metadataMutationStore) LookupChunkBuildID(context.Context, string) (string, error) {
-	return "", s.err
+func (s *metadataMutationStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
+	return store.BuildRoute{}, s.err
 }
 
-func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (string, string, error) {
-	return "", "", s.err
+func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (store.BuildRoute, string, error) {
+	return store.BuildRoute{}, "", s.err
 }
 
 func TestCreateBuildJournalCallback(t *testing.T) {
@@ -381,4 +381,8 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 			assert.Equal(t, got1.CreatedAt, state2.Build.CreatedAt)
 		})
 	}
+}
+
+func (*metadataMutationStore) GetBuild(_ context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	return &model.VanadisBuild{ID: id}, nil, nil
 }

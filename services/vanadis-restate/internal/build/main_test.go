@@ -32,6 +32,14 @@ type fakeObjectRuntime struct {
 	stepsRun           []string
 	cleared            bool
 	reconcileScheduled bool
+	reconcilesSent     []sentReconcile
+}
+
+// sentReconcile records one cross-build Reconcile send.
+type sentReconcile struct {
+	Service string
+	BuildID string
+	Reason  string
 }
 
 func newFakeObjectRuntime(key string) *fakeObjectRuntime {
@@ -474,6 +482,14 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }
+
+func (*fakeObjectRuntime) RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error) {
+	return fn(context.Background())
+}
+
+func (f *fakeObjectRuntime) SendReconcile(service, buildID, reason string) {
+	f.reconcilesSent = append(f.reconcilesSent, sentReconcile{Service: service, BuildID: buildID, Reason: reason})
+}
 
 func TestBuildServiceName_Derivation(t *testing.T) {
 	t.Parallel()

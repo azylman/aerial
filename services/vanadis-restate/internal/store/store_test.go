@@ -242,12 +242,12 @@ func (r stubScanRow) Scan(dest ...any) error {
 func TestScanBuild(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	row := stubScanRow{vals: []any{"b1", "aerial", "thread-1", 2, "Title", "Objective", "ctx", "running", "msg-1", true, now, now}}
+	row := stubScanRow{vals: []any{"b1", "aerial", "thread-1", 2, "Title", "Objective", "ctx", "running", "msg-1", true, now, now, " Agent-Alpha "}}
 	got, err := ScanBuild(row)
 	if err != nil {
 		t.Fatalf("ScanBuild unexpected error: %v", err)
 	}
-	if got.ID != "b1" || got.Agent != "aerial" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet {
+	if got.ID != "b1" || got.Agent != "aerial" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet || got.RunnerAgent != "agent-alpha" {
 		t.Errorf("ScanBuild decoded %+v", got)
 	}
 	if _, err := ScanBuild(stubScanRow{err: errors.New("scan boom")}); err == nil {
@@ -620,7 +620,7 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 	}
 }
 
-func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidates []model.VanadisChunk, updates *int) *Store {
+func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidates []model.VanadisChunk, runners map[string]string, updates *int) *Store {
 	return New(mockDB{
 		execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
 			*updates++
@@ -636,7 +636,7 @@ func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidate
 			if queryErr {
 				return nil, errors.New("database unavailable")
 			}
-			return &mockRows{items: candidates}, nil
+			return &mockRows{items: candidates, runners: runners}, nil
 		},
 	})
 }
@@ -660,6 +660,7 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 		execErr       bool
 		execTag       string
 		failChunk     string
+		runners       map[string]string
 		want          []SweptChunk
 		wantRecovered []SweptChunk
 		wantErr       bool
@@ -669,7 +670,7 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			name: "sweeps eligible candidate and returns ids", deploying: newDeploying([]string{"eri"}),
 			candidates:  []model.VanadisChunk{newCandidate()},
 			execTag:     "UPDATE 1",
-			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
 			wantUpdates: 1,
 		},
 		{
@@ -705,8 +706,9 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 				xbuildChunk("r1", "b3", 1, "pr", "aerial", "completed", 5, mergeBase, nil, nil),
 			},
 			execTag:       "UPDATE 1",
-			want:          []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
-			wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3"}},
+			runners:       map[string]string{"b2": "Agent-Alpha", "b3": ""},
+			want:          []SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}},
+			wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3", RunnerAgent: "aerial"}},
 			wantUpdates:   1,
 		},
 		{
@@ -717,7 +719,7 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			},
 			execTag:     "UPDATE 1",
 			failChunk:   "f2",
-			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
 			wantErr:     true,
 			wantUpdates: 2,
 		},
@@ -730,7 +732,7 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			if tc.nilDB {
 				st = &Store{}
 			} else {
-				st = sweepMockStore(tc.queryErr, tc.execErr, tc.execTag, tc.failChunk, tc.candidates, &updates)
+				st = sweepMockStore(tc.queryErr, tc.execErr, tc.execTag, tc.failChunk, tc.candidates, tc.runners, &updates)
 			}
 			got, recovered, err := st.SweepEarlierDeploymentsAcrossBuilds(context.Background(), tc.deploying)
 			if (err != nil) != tc.wantErr {

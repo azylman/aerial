@@ -177,14 +177,14 @@ func fillBuildDest(b model.VanadisBuild, dest []any) error {
 	if len(dest) == 7 {
 		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
 	}
-	if len(dest) != 12 {
-		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
+	if len(dest) != 13 {
+		return fmt.Errorf("scan build: %d destinations, want 13", len(dest))
 	}
 	agent := b.Agent
 	if agent == "" {
 		agent = "aerial"
 	}
-	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
+	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt, b.RunnerAgent)
 }
 
 func (r *mockRow) Scan(dest ...any) error {
@@ -207,6 +207,7 @@ type mockRows struct {
 	builds           []model.VanadisBuild
 	idx              int
 	scanErr, rowsErr error
+	runners          map[string]string
 }
 
 func (*mockRows) Close()       {}
@@ -266,12 +267,12 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
-	case 2:
+	case 2, 3:
 		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
 			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
 		}
 		return nil
-	case 12:
+	case 13:
 		return r.scan12(dest)
 	case 10:
 		return r.scan10(dest)
@@ -279,6 +280,14 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scan18(dest)
 	case 25:
 		return r.scan25(dest)
+	case 26:
+		if err := r.scan25(dest); err != nil {
+			return err
+		}
+		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
+			return scanValues(dest[25:], r.runners[r.items[r.idx-1].BuildID])
+		}
+		return nil
 	default:
 		return nil
 	}
@@ -378,6 +387,7 @@ func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
 		{name: "identical committed replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: c1}},
 		{name: "evolved committed replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "Obj 1", Status: "running", StatusMessageID: "widget"}}, chunks: c1}},
 		{name: "different objective replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "different"}}, chunks: c1}, wantErrIs: ErrBuildConflict},
+		{name: "different runner replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "Obj 1", RunnerAgent: "agent-alpha"}}, chunks: c1}, wantErrIs: ErrBuildConflict},
 		{name: "partial replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: nil}, wantErrIs: ErrBuildConflict},
 		{name: "different chunk replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Repo: "aerial", Title: "changed", DependsOn: []string{}}}}, wantErrIs: ErrBuildConflict},
 		{name: "chunk id conflict", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "vanadis_chunks_pkey", Detail: "private"})}, wantErrIs: ErrBuildConflict},

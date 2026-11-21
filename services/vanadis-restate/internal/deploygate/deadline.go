@@ -80,6 +80,9 @@ type StepOutput struct {
 	LaunchedMap    map[string]bool               `json:"launched_map,omitempty"`
 	Error          string                        `json:"error,omitempty"`
 	State          *model.BuildObjectState       `json:"state,omitempty"`
+	// ReconcileTargets mirrors the build step payload; deployment gate steps
+	// never touch other builds, so it stays empty here.
+	ReconcileTargets []store.BuildRoute `json:"reconcile_targets,omitempty"`
 }
 
 // Runtime is the Restate deployment state surface Gate operates on.

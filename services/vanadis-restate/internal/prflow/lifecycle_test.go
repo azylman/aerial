@@ -1169,3 +1169,26 @@ func TestFlow_IsEligibleUnattachedChunk(t *testing.T) {
 		})
 	}
 }
+
+func TestFlow_LocateOrAttachPRChunkOwnership(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		lookup    store.VanadisChunkPRLookup
+		wantChunk string
+	}{
+		{name: "own build chunk", lookup: store.VanadisChunkPRLookup{ChunkID: "c1", BuildID: "b1", Matched: true}, wantChunk: "c1"},
+		{name: "blank owner keeps chunk", lookup: store.VanadisChunkPRLookup{ChunkID: "c1", Matched: true}, wantChunk: "c1"},
+		{name: "foreign build chunk is never acted on", lookup: store.VanadisChunkPRLookup{ChunkID: "c9", BuildID: "b2", Matched: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lookup := tc.lookup
+			f := NewFlow(&checkStatusSpyStore{lookup: &lookup}, nil)
+			got, err := f.LocateOrAttachPRChunk(context.Background(), "b1", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantChunk, got)
+		})
+	}
+}
