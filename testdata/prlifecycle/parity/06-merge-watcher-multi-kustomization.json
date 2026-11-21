@@ -284,6 +284,58 @@
       "key": "azylman/aerial#106@h106:pr_fact_deploy_success:job=core"
     }
   ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#106@h106:pr_fact_merged",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#106@m106:pr_fact_deploy_started",
+      "rollout_state": {
+        "expected_jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ]
+      }
+    },
+    {
+      "key": "azylman/aerial#106@h106:pr_fact_rollout_updated:job=apps",
+      "rollout_state": {
+        "expected_jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ],
+        "deployed_jobs": [
+          "apps"
+        ]
+      }
+    },
+    {
+      "key": "azylman/aerial#106@h106:pr_fact_deploy_success:job=core",
+      "rollout_state": {
+        "expected_jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ],
+        "deployed_jobs": [
+          "apps",
+          "core"
+        ]
+      }
+    }
+  ],
   "rows": [
     {
       "repo": "azylman/aerial",

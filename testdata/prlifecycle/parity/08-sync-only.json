@@ -123,6 +123,16 @@
       "key": "azylman/aerial-config#108@m108:pr_fact_deploy_success:job=git-sync"
     }
   ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial-config#108@h108:pr_fact_merged",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial-config#108@m108:pr_fact_deploy_success:job=git-sync",
+      "rollout_state": null
+    }
+  ],
   "rows": [
     {
       "repo": "azylman/aerial-config",

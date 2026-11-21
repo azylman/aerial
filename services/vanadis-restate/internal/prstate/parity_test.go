@@ -49,6 +49,13 @@ type parityEffect struct {
 	Key  string `json:"key"`
 }
 
+// parityFactState is the rollout state one published fact carried, keyed
+// by the fact's generation-free match key.
+type parityFactState struct {
+	Key          string                 `json:"key"`
+	RolloutState *pubsub.PRRolloutState `json:"rollout_state"`
+}
+
 // parityRow is the pr_registry row a lifecycle ends on.
 type parityRow struct {
 	Repo     string             `json:"repo"`
@@ -64,10 +71,11 @@ type parityRow struct {
 
 // parityScenario is one golden file; synapse-only fields are ignored here.
 type parityScenario struct {
-	Name    string             `json:"name"`
-	Restate []parityInvocation `json:"restate"`
-	Effects []parityEffect     `json:"effects"`
-	Rows    []parityRow        `json:"rows"`
+	Name              string             `json:"name"`
+	Restate           []parityInvocation `json:"restate"`
+	Effects           []parityEffect     `json:"effects"`
+	FactRolloutStates []parityFactState  `json:"fact_rollout_states"`
+	Rows              []parityRow        `json:"rows"`
 }
 
 func loadParityScenarios(t *testing.T) []parityScenario {
@@ -136,6 +144,7 @@ type paritySim struct {
 	current  simCall
 	seen     map[string]bool
 	effects  []parityEffect
+	facts    []parityFactState
 	rows     map[string]ProjectionSnapshot
 }
 
@@ -302,6 +311,7 @@ func (s *paritySim) PublishFact(_ context.Context, _ string, f pubsub.PRLifecycl
 	}
 	key := EffectKey{Repo: f.Repo, PRNumber: f.PRNumber, HeadSHA: head, Kind: FactEffectKind(f.Event), JobName: f.JobName, CheckName: f.CheckName}
 	s.record(key.Kind, key.MatchKey())
+	s.facts = append(s.facts, parityFactState{Key: key.MatchKey(), RolloutState: f.RolloutState})
 	return nil
 }
 
@@ -383,7 +393,8 @@ func rowOf(snap ProjectionSnapshot) parityRow {
 
 // TestRestateOwnershipParity replays every golden lifecycle with
 // effects_owner=restate and asserts PRObject/RepoObject perform exactly the
-// legacy effect multiset and write exactly the legacy final rows.
+// legacy effect multiset, publish facts with the legacy rollout states and
+// write exactly the legacy final rows.
 func TestRestateOwnershipParity(t *testing.T) {
 	t.Parallel()
 	tests := loadParityScenarios(t)
@@ -409,6 +420,7 @@ func TestRestateOwnershipParity(t *testing.T) {
 				sim.send(inv)
 			}
 			require.Equal(t, sortedEffects(tc.Effects), sortedEffects(sim.effects))
+			require.ElementsMatch(t, tc.FactRolloutStates, sim.facts, "published fact rollout states")
 			wantRows := make(map[string]parityRow, len(tc.Rows))
 			for _, r := range tc.Rows {
 				wantRows[PRObjectKey(r.Repo, r.PRNumber)] = r

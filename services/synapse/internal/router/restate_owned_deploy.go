@@ -106,7 +106,8 @@ func rolloutFromView(v restateclient.DeployView) (trackedRollout, bool) {
 }
 
 // ownedRolloutFact renders one watcher lifecycle fact for a tracked PR.
-// Rollout state is a registry read-model render, so it stays empty.
+// It carries no rollout state: PRObject renders it from the state the
+// handler just committed (ready jobs, deployed jobs) when it publishes.
 func ownedRolloutFact(pr DeployingPR, name, event, status string) pubsub.PRLifecycleEvent {
 	return pubsub.PRLifecycleEvent{
 		Event: event, Repo: pr.Repo, PRNumber: pr.PRNumber, HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA,
@@ -156,7 +157,8 @@ func (s *RouterServer) sendOwnedReconcileLost(ctx context.Context, prs []Deployi
 
 // ownedDeployFact renders the lifecycle fact for one deploy alert outcome
 // without the registry: success events without a job name default to
-// git-sync, and Quiet comes from the branch PRObject recorded.
+// git-sync, Quiet comes from the branch PRObject recorded, and PRObject
+// renders the rollout state from its committed state when it publishes.
 func ownedDeployFact(evt DeployEvent, eventName, status, branch string) pubsub.PRLifecycleEvent {
 	jobName := evt.JobName
 	if (eventName == eventDeploySuccess || eventName == eventSyncSuccess) && jobName == "" {

@@ -2,8 +2,8 @@ package prstate
 
 // aerial.pr.> lifecycle facts executed by PRObject.
 //
-// Synapse renders each fact from stateless inputs (target, rollout-state
-// snapshot, quiet flag, details) and attaches it to the PREvent it already
+// Synapse renders each fact from stateless inputs (target, quiet flag,
+// details) and attaches it to the PREvent it already
 // routes (PREvent.Facts). PRObject decides whether it fires: verdict
 // handlers (HandleConflict, HandleDeploySuccess, HandleCIRecovered) commit
 // their decision first, then run the facts; the deploy-failure deadline
@@ -11,7 +11,9 @@ package prstate
 //
 // For every fact whose generation-scoped EffectKey has not fired:
 //
-//   - effects_owner=restate: one journaled restate.Run publishes the fact on
+//   - effects_owner=restate: the fact takes the stored target and the
+//     rollout state rendered from committed PRState (BuildPRRolloutState)
+//     when it carries none, then one journaled restate.Run publishes it on
 //     aerial.pr.<event> with a deterministic Nats-Msg-Id derived from the
 //     EffectKey, so JetStream deduplicates a resend. The BuildRouter route
 //     rides the same publish: vanadis-nats forwards aerial.pr.> to
@@ -163,11 +165,14 @@ func (s *PRObjectService) runFacts(ctx restate.ObjectContext, st *PRState, owner
 	for _, p := range planned {
 		if ParseEffectsOwner(string(owner)) == EffectsOwnerRestate {
 			// Restate-owned synapse renders facts without the registry, so
-			// a published fact with no target takes the stored one. The key
-			// and the legacy digest never include it.
+			// a published fact with no target takes the stored one, and one
+			// with no rollout state takes the state rendered from st, which
+			// the handler committed before running its facts. The key and
+			// the legacy digest never include either.
 			if strings.TrimSpace(p.Fact.TargetID) == "" {
 				p.Fact.TargetID = st.TargetID
 			}
+			p.Fact = withRolloutState(st, p.Fact)
 			if !s.publishFact(ctx, p) {
 				s.scheduleFactRetry(ctx, FactEffectRetry{Fact: p.Fact, Generation: p.Key.GateGeneration})
 				continue
@@ -246,6 +251,8 @@ func (s *PRObjectService) RetryFactEffect(ctx restate.ObjectContext, req FactEff
 		return err
 	}
 	f, ok := normalizeFact(st, req.Fact)
+	// A retry journaled before facts carried rollout state renders it now.
+	f = withRolloutState(st, f)
 	p := s.factPlanned(PlannedFact{Fact: f, Key: FactEffectKey(st, f), Agent: st.OwnerAgent()})
 	return s.retryPlanned(ctx, st, p, ok, func() { s.scheduleFactRetry(ctx, req) })
 }

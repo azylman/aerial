@@ -154,6 +154,7 @@ type WorkerPool struct {
 	cancel              context.CancelFunc
 	stopped, leaderHold bool
 	quotaLockedUntil    atomic.Int64
+	vanadisURLWarned    atomic.Bool // set once the unconfigured-vanadis_url skip has been logged
 	scopeLocks          sync.Map
 	webhookDispatcher   WebhookDispatcher
 	summaryGroup        singleflight.Group
