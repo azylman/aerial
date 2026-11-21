@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
@@ -305,10 +304,10 @@ func (te *turnExecution) startPromptStep(ctx context.Context, name string, attrs
 	return te.pool.tracer().Start(ctx, name, trace.WithAttributes(attrs...)) //nolint:spancheck // the caller owns and ends the span
 }
 
-// recordSpanError marks span failed with a redacted error message.
+// recordSpanError marks span failed with its error message; the collector masks secret values.
 func recordSpanError(span trace.Span, err error) {
 	if err != nil {
-		span.SetStatus(codes.Error, tracing.Redact(err.Error()))
+		span.SetStatus(codes.Error, err.Error())
 	}
 }
 

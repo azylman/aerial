@@ -183,7 +183,7 @@ func otelLogProxyFilteringCases() []otelLogProxyTestCase {
 			wantRecordCount: 0,
 		},
 		{
-			name: "kept event redacts secrets and drops sensitive keys",
+			name: "kept event passes values through and drops sensitive keys",
 			requestJSON: `{
 				"resourceLogs": [{
 					"resource": {
@@ -194,7 +194,7 @@ func otelLogProxyFilteringCases() []otelLogProxyTestCase {
 						"logRecords": [{
 							"severityNumber": 9,
 							"severityText": "INFO",
-							"body": {"stringValue": "Connecting with ghp_1234567890abcdefghijklmnopqrstuvwxyz"},
+							"body": {"stringValue": "Connecting with dummy-value"},
 							"attributes": [
 								{"key": "event.name", "value": {"stringValue": "claude_code.api_request"}},
 								{"key": "prompt", "value": {"stringValue": "secret-prompt"}},
@@ -210,7 +210,7 @@ func otelLogProxyFilteringCases() []otelLogProxyTestCase {
 								{"key": "http.status_code", "value": {"intValue": 200}},
 								{"key": "duration_ms", "value": {"doubleValue": 123.45}},
 								{"key": "success", "value": {"boolValue": true}},
-								{"key": "auth_header", "value": {"stringValue": "Bearer ghp_1234567890abcdefghijklmnopqrstuvwxyz"}}
+								{"key": "auth_header", "value": {"stringValue": "plain-dummy-header"}}
 							]
 						}]
 					}]
@@ -223,7 +223,7 @@ func otelLogProxyFilteringCases() []otelLogProxyTestCase {
 			wantStatus:      http.StatusOK,
 			wantRecordCount: 1,
 			wantLevel:       slog.LevelInfo,
-			wantMsgContains: "[REDACTED]",
+			wantMsgContains: "Connecting with dummy-value",
 			wantAttrs: map[string]any{
 				"source":           "agent_otel",
 				"engine":           "claude",
@@ -234,7 +234,7 @@ func otelLogProxyFilteringCases() []otelLogProxyTestCase {
 				"http.status_code": int64(200),
 				"duration_ms":      123.45,
 				"success":          true,
-				"auth_header":      "Bearer [REDACTED]",
+				"auth_header":      "plain-dummy-header",
 			},
 			omittedAttrs: []string{
 				"prompt", "prompt_text", "response", "system_prompt", "tool_parameters",

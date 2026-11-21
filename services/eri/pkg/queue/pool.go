@@ -23,7 +23,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -45,10 +44,6 @@ const (
 	YieldTrapResumePrompt       = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
 	InterruptedByOperatorReason = "interrupted by operator via slash command"
 )
-
-func sanitizeErrorText(errStr string) string {
-	return sanitizer.SanitizeLog(errStr)
-}
 
 // testPoolHook is an optional hook injected by tests to wrap custom test runners without compiling test adapters into production.
 var testPoolHook func(cfg WorkerPoolConfig) runner.AgentPool
@@ -562,8 +557,7 @@ func (p *WorkerPool) makeDebouncedAlertHandler(mu *sync.Mutex, lastAlert *time.T
 			return
 		}
 		sysChan := p.systemChannel()
-		sanitizedAlert := sanitizeErrorText(buildMsg())
-		if err := p.cfg.SystemAlertFunc(sess, sysChan, title, sanitizedAlert); err != nil {
+		if err := p.cfg.SystemAlertFunc(sess, sysChan, title, buildMsg()); err != nil {
 			log.Printf("[WorkerPool] Warning: failed to send %s alert to system channel %q: %v", title, sysChan, err)
 		}
 	}()

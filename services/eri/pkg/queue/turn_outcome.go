@@ -416,7 +416,7 @@ func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Dura
 	}
 	te.logf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
 	te.stopIndicators()
-	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
+	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, errDetail)
 	metrics.RecordRunnerError("capacity_exhausted", currentModel)
 	metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
 	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
@@ -463,7 +463,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	te.stopIndicators()
 	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
 	te.deliverQuotaNotice(pauseMsg, "quota pause notice")
-	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
+	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, errDetail)
 	te.failBurstWithStatus(outcomeFailed, reason, currentModel)
 	return false
 }
@@ -568,12 +568,11 @@ func (te *turnExecution) stopIndicators() {
 }
 
 func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) {
-	sanitizedErr := sanitizeErrorText(errText)
 	te.turnStatus = turnStatus
-	te.turnError = sanitizedErr
+	te.turnError = errText
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	te.finalized.Store(true)
-	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, outcomeFailed, sanitizedErr, model, true, false)
+	te.finalizeBurstMessages(te.burst, db.StatusFailed, errText, outcomeFailed, errText, model, true, false)
 }
 
 func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
@@ -597,7 +596,7 @@ func (te *turnExecution) cancelBurstOnShutdown(_ string, failScheduleRun bool) {
 // touching persisted message or dispatch state.
 func (te *turnExecution) markTurnCancelled(reason string) {
 	te.turnStatus = "cancelled"
-	te.turnError = sanitizeErrorText(reason)
+	te.turnError = reason
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 }
 
@@ -605,7 +604,7 @@ func buildFailureNotice(cfg WorkerPoolConfig, agyBin, apiKey, errDetail, stderr,
 	if isRateLimitError(errDetail, stderr) {
 		return notifier.ModelUnavailableMessage()
 	}
-	snippet := sanitizeErrorText(errDetail)
+	snippet := errDetail
 	if len([]rune(snippet)) > 300 {
 		snippet = string([]rune(snippet)[:300])
 	}

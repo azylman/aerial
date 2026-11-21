@@ -33,8 +33,6 @@ type wantSpan struct {
 	attrs  []attribute.KeyValue
 }
 
-const leakedPAT = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-
 type tracingTurnSinkCase struct {
 	name     string
 	events   []sinkEvent
@@ -232,15 +230,17 @@ func TestTracingTurnSink(t *testing.T) {
 			},
 		},
 		{
-			name: "error status is redacted",
+			name: "error status passes through",
 			events: []sinkEvent{
 				{start: true, call: ToolCall{ID: "toolu_x", Name: "Bash"}},
-				{call: ToolCall{ID: "toolu_x", Name: "Bash"}, status: "failed: token " + leakedPAT},
+				{call: ToolCall{ID: "toolu_x", Name: "Bash"}, status: "failed: exit 1"},
 			},
-			turnErr:  errors.New("push failed: https://x-access-token:" + leakedPAT + "@github.com/o/r"),
-			want:     []wantSpan{{name: "execute_tool Bash", parent: "turn", code: codes.Error}, {name: "chat", parent: "turn", code: codes.Error}},
-			innerOK:  2,
-			noLeakOf: leakedPAT,
+			turnErr: errors.New("push failed: remote rejected"),
+			want: []wantSpan{
+				{name: "execute_tool Bash", parent: "turn", code: codes.Error, desc: "failed: exit 1", attrs: []attribute.KeyValue{AttrToolStatus.String("failed: exit 1")}},
+				{name: "chat", parent: "turn", code: codes.Error, desc: "push failed: remote rejected"},
+			},
+			innerOK: 2,
 		},
 	}
 	for _, tc := range tests {

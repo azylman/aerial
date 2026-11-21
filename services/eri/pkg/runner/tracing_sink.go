@@ -115,7 +115,7 @@ func newClaimTimer(d time.Duration) (<-chan time.Time, func() bool) {
 // (carrying usage) and one execute_tool span per tool call, nested under a child
 // invoke_agent span when the call runs inside a subagent. Every callback is forwarded to
 // the inner sink unchanged. Span attributes carry only tool names, call IDs, MCP server
-// names and redacted statuses: tool arguments are never recorded, and prompt/response text
+// names and statuses: tool arguments are never recorded, and prompt/response text
 // only on invoke_agent spans when tracing's capture_content is on (see ContentAttributes).
 type TracingTurnSink struct {
 	inner    TurnSink
@@ -293,7 +293,7 @@ func (s *TracingTurnSink) OnError(err error) {
 	msg := ""
 	var usage *AgyUsage
 	if err != nil {
-		msg = tracing.Redact(err.Error())
+		msg = err.Error()
 	}
 	if u, ok := UsageFromError(err); ok {
 		usage = &u
@@ -352,14 +352,14 @@ func (s *TracingTurnSink) endToolSpan(call ToolCall, mcpServer, status string) {
 
 func finishToolSpan(ts *openToolSpan, status string) {
 	if status != "" {
-		ts.span.SetAttributes(AttrToolStatus.String(tracing.Redact(status)))
+		ts.span.SetAttributes(AttrToolStatus.String(status))
 	}
 	if status != "" && status != "ok" {
-		ts.span.SetStatus(codes.Error, tracing.Redact(status))
+		ts.span.SetStatus(codes.Error, status)
 	}
 	if ts.agent != nil {
 		if status != "" && status != "ok" {
-			ts.agent.SetStatus(codes.Error, tracing.Redact(status))
+			ts.agent.SetStatus(codes.Error, status)
 		}
 		ts.agent.End()
 	}
@@ -441,7 +441,7 @@ func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage *AgyUsage
 	chat.End()
 }
 
-// ContentAttributes renders a run's prompt and response as the redacted, size-capped
+// ContentAttributes renders a run's prompt and response as the size-capped
 // gen_ai.input.messages and gen_ai.output.messages attributes. Callers add them to an
 // invoke_agent span only when tracing's capture_content is on.
 func ContentAttributes(prompt, response string) []attribute.KeyValue {

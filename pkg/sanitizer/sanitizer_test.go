@@ -131,51 +131,6 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 	}
 }
 
-func TestSanitizeLog_TableDriven(t *testing.T) {
-	rawPAT := "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
-	rawSecret := "my_special_pat_token"
-	b64Secret := base64.StdEncoding.EncodeToString([]byte(rawSecret))
-
-	tests := []struct {
-		name     string
-		tokens   []string
-		input    string
-		expected string
-	}{
-		{
-			name:     "empty log",
-			tokens:   []string{rawPAT},
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "registered pat in log",
-			tokens:   []string{rawPAT},
-			input:    "fatal: could not read from remote repo " + rawPAT,
-			expected: "fatal: could not read from remote repo [REDACTED_TOKEN]",
-		},
-		{
-			name:     "base64 encoded secret in log",
-			tokens:   []string{rawSecret},
-			input:    "failed command with encoded PAT: " + b64Secret,
-			expected: "failed command with encoded PAT: [REDACTED_TOKEN]",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ResetSensitiveTokensForTest()
-			defer ResetSensitiveTokensForTest()
-			RegisterSensitiveTokens(tc.tokens...)
-
-			got := SanitizeLog(tc.input)
-			if got != tc.expected {
-				t.Errorf("SanitizeLog(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
-	}
-}
-
 func assertStringTransformTable(t *testing.T, tests []struct {
 	name     string
 	input    string

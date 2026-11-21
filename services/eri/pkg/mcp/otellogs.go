@@ -15,7 +15,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
@@ -62,7 +61,7 @@ type OTelLogProxyConfig struct {
 }
 
 // OTelLogProxy receives OTLP HTTP/JSON log records from agent subprocesses (Claude Code, Codex)
-// and emits structured, redacted, trace-correlated slog events.
+// and emits structured, trace-correlated slog events.
 type OTelLogProxy struct {
 	turns  ActiveTurns
 	stack  string
@@ -388,7 +387,7 @@ func extractScalarAttrs(recordAttrs []otlpKeyValue) []slog.Attr {
 		switch valType {
 		case "string":
 			if s, ok := val.(string); ok {
-				attrs = append(attrs, slog.String(attr.Key, tracing.Redact(s)))
+				attrs = append(attrs, slog.String(attr.Key, s))
 			}
 		case typeInt:
 			if n, ok := val.(int64); ok {
@@ -418,7 +417,7 @@ func extractRecordMessage(lr *otlpLogRecord, normEventName string) string {
 	if msg == "" {
 		msg = "agent log"
 	}
-	return tracing.Redact(msg)
+	return msg
 }
 
 func (*OTelLogProxy) resolveSessionAndTarget(resolvedTurn runner.ActiveTurn, r *http.Request, lr *otlpLogRecord, resAttrs []otlpKeyValue) (string, string) {
