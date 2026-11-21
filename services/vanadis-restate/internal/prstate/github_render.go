@@ -143,8 +143,9 @@ func isDependabotBranch(branch string) bool {
 }
 
 // prFact renders one lifecycle fact for st, matching synapse conflictFact
-// and the stale closed_unmerged publish. RolloutState is left nil: it is a
-// read-model render the projection consumer rebuilds.
+// and the stale closed_unmerged publish. RolloutState is left nil here;
+// runFacts renders it from committed PRState before a restate-owned
+// publish (BuildPRRolloutState).
 func prFact(st *PRState, event, branch, headSHA string, at time.Time) pubsub.PRLifecycleEvent {
 	if strings.TrimSpace(branch) == "" {
 		branch = st.Branch
