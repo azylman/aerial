@@ -117,7 +117,7 @@ channels:
 		{
 			name: "discord message", handler: handleInternalDiscordMessage, path: "/internal/discord/message", traceparent: inbound,
 			rowID: "123456789012345679", want: inbound,
-			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345679","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
+			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345679","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
 		},
 	}
 	for _, tc := range tests {

@@ -272,7 +272,7 @@ func TestExtractCommandName(t *testing.T) {
 		{"python3 main.py", "python3"},
 		{"/usr/local/bin/git push", "git"},
 		{"./scripts/verify.sh --staged", "verify.sh"},
-		{`C:\Users\Alex\tools\kubectl.exe get pods`, "kubectl.exe"},
+		{`C:\Users\Alice\tools\kubectl.exe get pods`, "kubectl.exe"},
 		{`C:\\tools\\app.exe`, "app.exe"},
 		{"FOO=bar git diff", "git"},
 		{`TOKEN="secret with spaces" ./deploy.sh`, "deploy.sh"},
