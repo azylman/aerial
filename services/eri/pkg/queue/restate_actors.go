@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -24,45 +25,24 @@ const (
 	statusCompleted = "completed"
 )
 
-// NormalizeAgentName trims and lowercases an agent / stack bot identifier.
-func NormalizeAgentName(agent string) string {
-	return strings.ToLower(strings.TrimSpace(agent))
-}
-
 // ThreadSessionServiceName returns the Restate service name for ThreadSession.
-func ThreadSessionServiceName(agent string) string {
-	norm := NormalizeAgentName(agent)
-	if norm == "" || norm == defaultStackName {
-		return "ThreadSession"
-	}
-	return "ThreadSession-" + norm
+func ThreadSessionServiceName(name string) string {
+	return agent.ScopedServiceName("ThreadSession", name)
 }
 
 // DispatchSessionServiceName returns the Restate service name for DispatchSession.
-func DispatchSessionServiceName(agent string) string {
-	norm := NormalizeAgentName(agent)
-	if norm == "" || norm == defaultStackName {
-		return "DispatchSession"
-	}
-	return "DispatchSession-" + norm
+func DispatchSessionServiceName(name string) string {
+	return agent.ScopedServiceName("DispatchSession", name)
 }
 
 // VoiceSessionServiceName returns the Restate service name for VoiceSession.
-func VoiceSessionServiceName(agent string) string {
-	norm := NormalizeAgentName(agent)
-	if norm == "" || norm == defaultStackName {
-		return "VoiceSession"
-	}
-	return "VoiceSession-" + norm
+func VoiceSessionServiceName(name string) string {
+	return agent.ScopedServiceName("VoiceSession", name)
 }
 
 // SessionManagerServiceName returns the Restate service name for SessionManager.
-func SessionManagerServiceName(agent string) string {
-	norm := NormalizeAgentName(agent)
-	if norm == "" || norm == defaultStackName {
-		return "SessionManager"
-	}
-	return "SessionManager-" + norm
+func SessionManagerServiceName(name string) string {
+	return agent.ScopedServiceName("SessionManager", name)
 }
 
 // CancelThreadControlRequest defines the request to cancel a thread from the unkeyed session manager.
@@ -200,7 +180,9 @@ func (t *ThreadSessionObject) ServiceName() string {
 	return ThreadSessionServiceName(t.agentName)
 }
 
-func resolveActorPromptEffort(model, effort string) string {
+// ResolvePromptEffort returns effort when set, else the effort implied by the
+// model name (medium models run at medium effort, flash models at low).
+func ResolvePromptEffort(model, effort string) string {
 	if effort != "" {
 		return effort
 	}
@@ -309,7 +291,7 @@ func (t *ThreadSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Threa
 			effThreadID = channelID
 
 			msgID := strings.TrimSpace(req.MessageID)
-			effort := resolveActorPromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort))
+			effort := ResolvePromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort))
 			msg = db.Message{
 				ID:         msgID,
 				ThreadID:   effThreadID,

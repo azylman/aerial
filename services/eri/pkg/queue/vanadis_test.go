@@ -374,6 +374,7 @@ func TestBuildServiceName(t *testing.T) {
 		{name: "trimmed upper agent-alpha", agent: "  AGENT-ALPHA  ", wantBuild: "Build-agent-alpha"},
 		{name: "agent-beta stack agent", agent: "agent-beta", wantBuild: "Build-agent-beta"},
 		{name: "custom agent identifier", agent: "custom-worker", wantBuild: "Build-custom-worker"},
+		{name: "unsafe characters route to Build", agent: "Foo Bar", wantBuild: "Build"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

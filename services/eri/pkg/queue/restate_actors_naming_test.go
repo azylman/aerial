@@ -14,68 +14,30 @@ func TestServiceNaming(t *testing.T) {
 	tests := []struct {
 		name          string
 		agent         string
-		wantNormalize string
 		wantThreadSvc string
 		wantDispSvc   string
 		wantVoiceSvc  string
+		wantMgrSvc    string
 	}{
-		{
-			name:          "empty agent defaults to aerial canonical names",
-			agent:         "",
-			wantNormalize: "",
-			wantThreadSvc: "ThreadSession",
-			wantDispSvc:   "DispatchSession",
-			wantVoiceSvc:  "VoiceSession",
-		},
-		{
-			name:          "aerial bot id defaults to aerial canonical names",
-			agent:         "aerial",
-			wantNormalize: "aerial",
-			wantThreadSvc: "ThreadSession",
-			wantDispSvc:   "DispatchSession",
-			wantVoiceSvc:  "VoiceSession",
-		},
-		{
-			name:          "aerial bot id with spaces and caps",
-			agent:         "  AERIAL  ",
-			wantNormalize: "aerial",
-			wantThreadSvc: "ThreadSession",
-			wantDispSvc:   "DispatchSession",
-			wantVoiceSvc:  "VoiceSession",
-		},
-		{
-			name:          "agent-alpha persona namespaced",
-			agent:         "agent-alpha",
-			wantNormalize: "agent-alpha",
-			wantThreadSvc: "ThreadSession-agent-alpha",
-			wantDispSvc:   "DispatchSession-agent-alpha",
-			wantVoiceSvc:  "VoiceSession-agent-alpha",
-		},
-		{
-			name:          "agent-beta persona namespaced with whitespace",
-			agent:         " Agent-Beta ",
-			wantNormalize: "agent-beta",
-			wantThreadSvc: "ThreadSession-agent-beta",
-			wantDispSvc:   "DispatchSession-agent-beta",
-			wantVoiceSvc:  "VoiceSession-agent-beta",
-		},
+		{name: "empty agent uses canonical names", agent: "", wantThreadSvc: "ThreadSession", wantDispSvc: "DispatchSession", wantVoiceSvc: "VoiceSession", wantMgrSvc: "SessionManager"},
+		{name: "aerial uses canonical names", agent: "aerial", wantThreadSvc: "ThreadSession", wantDispSvc: "DispatchSession", wantVoiceSvc: "VoiceSession", wantMgrSvc: "SessionManager"},
+		{name: "aerial with spaces and caps", agent: "  AERIAL  ", wantThreadSvc: "ThreadSession", wantDispSvc: "DispatchSession", wantVoiceSvc: "VoiceSession", wantMgrSvc: "SessionManager"},
+		{name: "agent-alpha namespaced", agent: "agent-alpha", wantThreadSvc: "ThreadSession-agent-alpha", wantDispSvc: "DispatchSession-agent-alpha", wantVoiceSvc: "VoiceSession-agent-alpha", wantMgrSvc: "SessionManager-agent-alpha"},
+		{name: "agent-beta namespaced with whitespace", agent: " Agent-Beta ", wantThreadSvc: "ThreadSession-agent-beta", wantDispSvc: "DispatchSession-agent-beta", wantVoiceSvc: "VoiceSession-agent-beta", wantMgrSvc: "SessionManager-agent-beta"},
+		{name: "unsafe characters route to canonical names", agent: "Foo Bar", wantThreadSvc: "ThreadSession", wantDispSvc: "DispatchSession", wantVoiceSvc: "VoiceSession", wantMgrSvc: "SessionManager"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.wantNormalize, NormalizeAgentName(tc.agent))
 			assert.Equal(t, tc.wantThreadSvc, ThreadSessionServiceName(tc.agent))
 			assert.Equal(t, tc.wantDispSvc, DispatchSessionServiceName(tc.agent))
 			assert.Equal(t, tc.wantVoiceSvc, VoiceSessionServiceName(tc.agent))
+			assert.Equal(t, tc.wantMgrSvc, SessionManagerServiceName(tc.agent))
 
-			thObj := NewThreadSessionObject(nil, tc.agent)
-			dispObj := NewDispatchSessionObject(nil, tc.agent)
-			voiceObj := NewVoiceSessionObject(nil, tc.agent)
-
-			assert.Equal(t, tc.wantThreadSvc, thObj.ServiceName())
-			assert.Equal(t, tc.wantDispSvc, dispObj.ServiceName())
-			assert.Equal(t, tc.wantVoiceSvc, voiceObj.ServiceName())
+			assert.Equal(t, tc.wantThreadSvc, NewThreadSessionObject(nil, tc.agent).ServiceName())
+			assert.Equal(t, tc.wantDispSvc, NewDispatchSessionObject(nil, tc.agent).ServiceName())
+			assert.Equal(t, tc.wantVoiceSvc, NewVoiceSessionObject(nil, tc.agent).ServiceName())
 		})
 	}
 
@@ -84,7 +46,7 @@ func TestServiceNaming(t *testing.T) {
 	assert.Equal(t, "VoiceSession", (*VoiceSessionObject)(nil).ServiceName())
 }
 
-func TestResolveActorPromptEffort(t *testing.T) {
+func TestResolvePromptEffort(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -102,7 +64,7 @@ func TestResolveActorPromptEffort(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := resolveActorPromptEffort(tc.model, tc.effort)
+			got := ResolvePromptEffort(tc.model, tc.effort)
 			assert.Equal(t, tc.want, got)
 		})
 	}
