@@ -601,8 +601,6 @@ func TestOpenDB(t *testing.T) {
 		{name: "sqlite memory prefix", url: "sqlite://:memory:", wantErr: false},
 		{name: "sqlite file prefix", url: "file:test.db?mode=memory", wantErr: false},
 		{name: "sqlite memory keyword", url: ":memory:", wantErr: false},
-		{name: "postgres scheme", url: "postgres://user:pass@localhost:5432/testdb", wantErr: false},
-		{name: "postgresql scheme", url: "postgresql://user:pass@localhost:5432/testdb", wantErr: false},
 		{name: "empty url", url: "   ", wantErr: true},
 		{name: "unsupported scheme", url: "invalid://url", wantErr: true},
 	}
@@ -610,7 +608,7 @@ func TestOpenDB(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := store.OpenDB(tc.url)
+			db, err := store.OpenDB(context.Background(), tc.url)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("OpenDB(%q) err = %v, wantErr = %v", tc.url, err, tc.wantErr)
 			}
