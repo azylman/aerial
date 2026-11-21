@@ -1268,6 +1268,7 @@ data:
           - context: scope
             statements:
               - 'replace_all_patterns(scope.attributes, "value", "${file:/redact/pattern}", "[REDACTED]")'
+              - 'replace_pattern(scope.name, "${file:/redact/pattern}", "[REDACTED]")'
           - context: span
             statements:
               - 'replace_all_patterns(span.attributes, "value", "${file:/redact/pattern}", "[REDACTED]")'
