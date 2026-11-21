@@ -729,6 +729,7 @@ func TestPRState_SynchronizeDisposition(t *testing.T) {
 		name     string
 		nilState bool
 		stored   string
+		prior    []string
 		terminal TerminalState
 		ev       PREvent
 		want     EventDisposition
@@ -736,9 +737,13 @@ func TestPRState_SynchronizeDisposition(t *testing.T) {
 		{name: "before matches stored head", stored: "h1", ev: PREvent{HeadSHA: "h2", BeforeSHA: "H1"}, want: DispositionApply},
 		{name: "unknown stored head applies", ev: PREvent{HeadSHA: "h2"}, want: DispositionApply},
 		{name: "redelivered new head applies", stored: "h2", ev: PREvent{HeadSHA: "h2", BeforeSHA: "h1"}, want: DispositionApply},
-		{name: "late synchronize drops", stored: "h3", ev: PREvent{HeadSHA: "h2", BeforeSHA: "h1"}, want: DispositionDropStale},
+		{name: "missed synchronize recovers stale head", stored: "c00b710c", prior: []string{"aaaa1111"}, ev: PREvent{HeadSHA: "701c341c", BeforeSHA: "79e9dfc2"}, want: DispositionRecoverStale},
+		{name: "mismatch with empty ring recovers", stored: "h3", ev: PREvent{HeadSHA: "h4", BeforeSHA: "h1"}, want: DispositionRecoverStale},
+		{name: "late redelivery of a prior head drops", stored: "h3", prior: []string{"h1", "h2"}, ev: PREvent{HeadSHA: "H2", BeforeSHA: "h1"}, want: DispositionDropStale},
 		{name: "missing head drops", stored: "h1", ev: PREvent{BeforeSHA: "h1"}, want: DispositionDropStale},
+		{name: "zero head drops", stored: "h1", ev: PREvent{HeadSHA: "0000000000000000000000000000000000000000", BeforeSHA: "h1"}, want: DispositionDropStale},
 		{name: "closed absorbs", stored: "h1", terminal: TerminalClosed, ev: PREvent{HeadSHA: "h2", BeforeSHA: "h1"}, want: DispositionAbsorbTerminal},
+		{name: "merged absorbs a mismatched head", stored: "h1", terminal: TerminalMerged, ev: PREvent{HeadSHA: "h9", BeforeSHA: "h8"}, want: DispositionAbsorbTerminal},
 		{name: "nil state drops", nilState: true, ev: PREvent{HeadSHA: "h2"}, want: DispositionDropStale},
 	}
 	for _, tc := range tests {
@@ -747,9 +752,67 @@ func TestPRState_SynchronizeDisposition(t *testing.T) {
 			var s *PRState
 			if !tc.nilState {
 				s = rowState(tc.stored, "", "")
+				s.PriorHeads = tc.prior
 				s.Terminal = tc.terminal
 			}
 			require.Equal(t, tc.want, s.SynchronizeDisposition(tc.ev))
+		})
+	}
+}
+
+func TestPRState_SetHead(t *testing.T) {
+	t.Parallel()
+	full := []string{"p01", "p02", "p03", "p04", "p05", "p06", "p07", "p08", "p09", "p10", "p11", "p12", "p13", "p14", "p15", "p16", "p17", "p18", "p19", "p20"}
+	tests := []struct {
+		name      string
+		stored    string
+		prior     []string
+		head      string
+		wantHead  string
+		wantPrior []string
+	}{
+		{name: "first head records no prior", head: " h1 ", wantHead: "h1"},
+		{name: "advance appends the left head", stored: "h1", head: "h2", wantHead: "h2", wantPrior: []string{"h1"}},
+		{name: "same head keeps the ring", stored: "h2", prior: []string{"h1"}, head: "H2", wantHead: "H2", wantPrior: []string{"h1"}},
+		{name: "return to a prior head leaves the ring", stored: "h2", prior: []string{"h1"}, head: "h1", wantHead: "h1", wantPrior: []string{"h2"}},
+		{name: "full ring drops the oldest", stored: "p21", prior: full, head: "h22", wantHead: "h22", wantPrior: append(append([]string(nil), full[1:]...), "p21")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := rowState(tc.stored, "", "")
+			s.PriorHeads = append([]string(nil), tc.prior...)
+			s.SetHead(tc.head)
+			require.Equal(t, tc.wantHead, s.HeadSHA)
+			require.Equal(t, tc.wantPrior, s.PriorHeads)
+			require.LessOrEqual(t, len(s.PriorHeads), 20)
+		})
+	}
+}
+
+func TestPRState_HasPriorHead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilState bool
+		prior    []string
+		head     string
+		want     bool
+	}{
+		{name: "case-insensitive hit", prior: []string{"abc1"}, head: " ABC1 ", want: true},
+		{name: "miss", prior: []string{"abc1"}, head: "abc2"},
+		{name: "empty head never matches", prior: []string{""}, head: " "},
+		{name: "nil state", nilState: true, head: "abc1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s *PRState
+			if !tc.nilState {
+				s = rowState("h", "", "")
+				s.PriorHeads = tc.prior
+			}
+			require.Equal(t, tc.want, s.HasPriorHead(tc.head))
 		})
 	}
 }

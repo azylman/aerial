@@ -314,7 +314,7 @@ func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition 
 func applyEventRow(st *PRState, ev PREvent) {
 	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) && st.Terminal != TerminalMerged &&
 		(st.HeadSHA == "" || !IsMergeOnlyRef(head, ev.MergeSHA)) {
-		st.HeadSHA = head
+		st.SetHead(head)
 	}
 	st.ApplyIdentity(prBranch(ev.Branch), ev.Title)
 	if tid := strings.TrimSpace(ev.TargetID); st.TargetID == "" && IsValidDiscordSnowflake(tid) {
@@ -668,9 +668,21 @@ func withoutFactEvent(facts []pubsub.PRLifecycleEvent, event string) []pubsub.PR
 	return out
 }
 
+// synchronizeRecoveredTotal counts synchronizes that recovered a stale
+// stored head (DispositionRecoverStale).
+var synchronizeRecoveredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "prstate_synchronize_recovered_total",
+	Help: "Synchronizes PRObject applied although its stored head matched neither the event head nor its before SHA (a missed synchronize), moving the head last-write-wins.",
+})
+
+func init() {
+	registerCollector(synchronizeRecoveredTotal)
+}
+
 // HandleSynchronized advances the PR head on a synchronize under the
-// BeforeSHA compare-and-set guard and applies the UpdatePRSync row
-// transition. The new head is indexed for RepoObject SHA routing.
+// BeforeSHA compare-and-set guard (recovering a stale stored head, see
+// SynchronizeDisposition) and applies the UpdatePRSync row transition. The
+// new head is indexed for RepoObject SHA routing.
 func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREvent) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
@@ -679,12 +691,18 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	if err != nil {
 		return err
 	}
-	if st.SynchronizeDisposition(ev) != DispositionApply {
+	disp := st.SynchronizeDisposition(ev)
+	if disp != DispositionApply && disp != DispositionRecoverStale {
 		return nil
 	}
 	before := snapshotIndexView(st)
 	prevHead := st.HeadSHA
-	st.HeadSHA = strings.TrimSpace(ev.HeadSHA)
+	if disp == DispositionRecoverStale {
+		synchronizeRecoveredTotal.Inc()
+		slog.WarnContext(ctx, "[prstate] synchronize recovered stale head", "pr", PRObjectKey(st.Repo, st.PRNumber),
+			"stored", prevHead, "before", strings.TrimSpace(ev.BeforeSHA), "head", strings.TrimSpace(ev.HeadSHA))
+	}
+	st.SetHead(ev.HeadSHA)
 	st.ApplyRegistrySync(prevHead, st.HeadSHA)
 	st.DisarmDeployFailure()
 	st.ApplyIdentity(ev.Branch, ev.Title)

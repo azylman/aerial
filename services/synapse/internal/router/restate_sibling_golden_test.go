@@ -1,12 +1,15 @@
 package router
 
-// Sibling-bot golden, synapse side: testdata/prlifecycle/shadow/
+// Synchronize goldens, synapse side: testdata/prlifecycle/shadow/
 // sibling-bot-synchronize.json pins that one synapse serving every
 // configured bot processes a sibling-owned PR's synchronize on the legacy
 // path (row head written, synchronize fact, one legacy-owned
 // HandleSynchronized carrying the stored owner) and still drops a bot
-// outside cfg.Bots. The prstate module's TestShadowSiblingBotSynchronizeGolden
-// replays the PRObject side of the same file.
+// outside cfg.Bots. stale-head-synchronize.json pins the same legacy wire
+// for a synchronize whose before SHA PRObject never saw, a late redelivery
+// and a normal advance: legacy stays last-write-wins with one fact per
+// webhook. The prstate module's TestShadowSiblingBotSynchronizeGolden and
+// TestShadowStaleHeadSynchronizeGolden replay the PRObject side.
 
 import (
 	"bytes"
@@ -63,51 +66,75 @@ func siblingGoldenPayload(t *testing.T, tc siblingGoldenCase) []byte {
 	return raw
 }
 
+// syncGoldenFile is one synchronize golden file, synapse view.
+type syncGoldenFile struct {
+	Bots  []string            `json:"bots"`
+	Cases []siblingGoldenCase `json:"cases"`
+}
+
+// syncGoldenRow is one synchronize golden case with its file's bots.
+type syncGoldenRow struct {
+	golden siblingGoldenCase
+	bots   []string
+}
+
+// loadSyncGoldens flattens every case of the named synchronize goldens
+// into one table, names prefixed by file.
+func loadSyncGoldens(t *testing.T, files ...string) []syncGoldenRow {
+	t.Helper()
+	rows := make([]syncGoldenRow, 0, len(files))
+	for _, f := range files {
+		raw, err := os.ReadFile(shadowGoldenDir + f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var g syncGoldenFile
+		if err := json.Unmarshal(raw, &g); err != nil {
+			t.Fatal(err)
+		}
+		if len(g.Cases) == 0 {
+			t.Fatalf("no cases in %s", f)
+		}
+		for _, c := range g.Cases {
+			c.Name = f + "/" + c.Name
+			rows = append(rows, syncGoldenRow{golden: c, bots: g.Bots})
+		}
+	}
+	return rows
+}
+
 // TestShadowSiblingBotSynchronizeGolden pins the legacy side of a
-// synchronize for a configured sibling bot and for a bot outside cfg.Bots.
+// synchronize for a configured sibling bot, a bot outside cfg.Bots, and a
+// stale, late or normal before SHA.
 func TestShadowSiblingBotSynchronizeGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(shadowGoldenDir + "sibling-bot-synchronize.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var g struct {
-		Bots  []string            `json:"bots"`
-		Cases []siblingGoldenCase `json:"cases"`
-	}
-	if err := json.Unmarshal(raw, &g); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.Cases) == 0 {
-		t.Fatal("no sibling golden cases")
-	}
-	tests := g.Cases
+	tests := loadSyncGoldens(t, "sibling-bot-synchronize.json", "stale-head-synchronize.json")
 	for _, tc := range tests {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.golden.Name, func(t *testing.T) {
 			t.Parallel()
 			shot, srv := newShadowCapture()
 			defer srv.Close()
 			cfg := Config{RestateURL: srv.URL, BotID: "aerial", Bots: map[string]BotConfig{}}
-			for _, b := range g.Bots {
+			for _, b := range tc.bots {
 				cfg.Bots[b] = BotConfig{}
 			}
 			reg := &mockPRRegistry{
-				resolveTargetID: tc.PR.TargetID,
-				rawMetadata:     map[string]any{"agent": tc.BodyBot, "bot_id": tc.BodyBot},
+				resolveTargetID: tc.golden.PR.TargetID,
+				rawMetadata:     map[string]any{"agent": tc.golden.BodyBot, "bot_id": tc.golden.BodyBot},
 			}
 			bus := &mockEventBus{}
 			r := newTestRouter(cfg, srv.Client(), reg, &mockOutboundDispatcher{}, bus)
 			r.SetRestateShadow(newShadowRestateReporter(cfg, srv.Client()))
-			if _, err := r.processGitHubPullRequestEvent(context.Background(), "del-"+tc.Name, siblingGoldenPayload(t, tc), &ResolvedGitHubEvent{}); err != nil {
+			if _, err := r.processGitHubPullRequestEvent(context.Background(), "del-"+tc.golden.Name, siblingGoldenPayload(t, tc.golden), &ResolvedGitHubEvent{}); err != nil {
 				t.Fatalf("processGitHubPullRequestEvent err = %v", err)
 			}
-			if got := prCallHeads(reg.syncCalls); !reflect.DeepEqual(got, tc.Legacy.SyncHeads) {
-				t.Errorf("UpdatePRSync heads = %v, want %v", got, tc.Legacy.SyncHeads)
+			if got := prCallHeads(reg.syncCalls); !reflect.DeepEqual(got, tc.golden.Legacy.SyncHeads) {
+				t.Errorf("UpdatePRSync heads = %v, want %v", got, tc.golden.Legacy.SyncHeads)
 			}
-			if got := publishedFactNames(bus); !reflect.DeepEqual(got, tc.Legacy.Facts) {
-				t.Errorf("published facts = %v, want %v", got, tc.Legacy.Facts)
+			if got := publishedFactNames(bus); !reflect.DeepEqual(got, tc.golden.Legacy.Facts) {
+				t.Errorf("published facts = %v, want %v", got, tc.golden.Legacy.Facts)
 			}
-			assertShadowWire(t, journaledShadowSends(t, shot), tc.Shadow)
+			assertShadowWire(t, journaledShadowSends(t, shot), tc.golden.Shadow)
 		})
 	}
 }

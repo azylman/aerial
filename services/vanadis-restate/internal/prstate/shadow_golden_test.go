@@ -254,3 +254,106 @@ func TestShadowSiblingBotSynchronizeGolden(t *testing.T) {
 		})
 	}
 }
+
+// staleHeadWant is the hand-derived outcome of one stale-head case: the
+// PRObject state after the legacy-owned shadow sends, the RepoObject lookup
+// of that head, the PR status once the check_run on it routes, and the
+// effects the restate-owned replay performs.
+type staleHeadWant struct {
+	Owner            string         `json:"owner"`
+	HeadSHA          string         `json:"head_sha"`
+	PriorHeads       []string       `json:"prior_heads"`
+	Status           string         `json:"status"`
+	Superseded       bool           `json:"superseded"`
+	Divergent        []string       `json:"divergent"`
+	ResolvedPR       int            `json:"resolved_pr"`
+	StatusAfterCheck string         `json:"status_after_check"`
+	RestateEffects   []parityEffect `json:"restate_effects"`
+}
+
+// staleHeadCase replays setup plus the legacy-owned shadow sends (then an
+// optional SHA-only check_run), and separately setup plus the restate-owned
+// stream; synapse-only fields are ignored.
+type staleHeadCase struct {
+	Name     string             `json:"name"`
+	Setup    []parityInvocation `json:"setup"`
+	Shadow   []parityInvocation `json:"shadow"`
+	Restate  []parityInvocation `json:"restate"`
+	CheckRun *parityInvocation  `json:"check_run"`
+	Want     staleHeadWant      `json:"want"`
+	Row      RegistryRow        `json:"row"`
+}
+
+// newStaleHeadSim is the parity sim plus the RepoObject SHA routing
+// handlers, so an unindexed check_run is held and expires instead of
+// routing.
+func newStaleHeadSim(t *testing.T) *paritySim {
+	t.Helper()
+	sim := newParitySim(t)
+	repo := NewRepoObjectService()
+	sim.handlers["RepoObject/HandleCheckRunBySHA"] = bindErr(repo.HandleCheckRunBySHA)
+	sim.handlers["RepoObject/"+RepoHandlerHeldReplay] = bindErr(repo.HandleHeldReplay)
+	sim.handlers["RepoObject/"+RepoHandlerHeldExpiry] = bindErr(repo.HandleHeldExpiry)
+	return sim
+}
+
+// simPRState decodes the committed PRObject state for inv's key.
+func simPRState(t *testing.T, sim *paritySim, inv parityInvocation) PRState {
+	t.Helper()
+	raw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, inv)+"/"+prObjectStateKey]
+	require.True(t, ok, "PRObject state committed")
+	st, err := decodeInput[PRState](raw)
+	require.NoError(t, err)
+	return st
+}
+
+// TestShadowStaleHeadSynchronizeGolden pins that a synchronize whose before
+// SHA PRObject never saw recovers the stale head (state, projection, SHA
+// index, check routing and the restate-owned synchronize fact), while a
+// late redelivery of a prior head still drops stale and the normal
+// before==stored synchronize is unchanged.
+func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/stale-head-synchronize.json")
+	require.NoError(t, err)
+	var g struct {
+		Cases []staleHeadCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newStaleHeadSim(t)
+			for _, inv := range append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...) {
+				sim.send(inv)
+			}
+			st := simPRState(t, sim, tc.Setup[0])
+			cmp := CompareProjection(BuildProjection(&st), tc.Row, true)
+			got := staleHeadWant{Owner: st.OwnerAgent(), HeadSHA: st.HeadSHA, PriorHeads: st.PriorHeads, Status: st.RegistryStatus(), Superseded: cmp.Superseded, Divergent: cmp.Divergent}
+			repoRaw, ok := sim.kv[RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			require.True(t, ok, "RepoObject index committed")
+			repoSt, err := decodeInput[RepoState](repoRaw)
+			require.NoError(t, err)
+			if entry, found := repoSt.ResolveSHA(st.HeadSHA); found {
+				got.ResolvedPR = entry.PRNumber
+			}
+			if tc.CheckRun != nil {
+				sim.send(*tc.CheckRun)
+				after := simPRState(t, sim, tc.Setup[0])
+				got.StatusAfterCheck = after.RegistryStatus()
+			}
+			owned := newStaleHeadSim(t)
+			for _, inv := range tc.Setup {
+				owned.send(inv)
+			}
+			owned.effects = nil
+			for _, inv := range tc.Restate {
+				owned.send(inv)
+			}
+			got.RestateEffects = owned.effects
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}
