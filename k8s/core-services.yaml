@@ -1962,11 +1962,6 @@ spec:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
                   optional: true
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: password
-                  name: postgres-aerial-role
           envFrom:
             - secretRef:
                 name: synapse-secret

@@ -86,38 +86,3 @@ func TestAerialPRMetadata_Methods(t *testing.T) {
 		})
 	}
 }
-
-func TestIsDependabotAppCheck_Normalization(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		appSlug string
-		wantApp bool
-	}{
-		{
-			name:    "case folding dependabot",
-			appSlug: "Dependabot",
-			wantApp: true,
-		},
-		{
-			name:    "whitespace trimmed dependabot",
-			appSlug: "  dependabot  ",
-			wantApp: true,
-		},
-		{
-			name:    "unrelated app",
-			appSlug: "github-actions",
-			wantApp: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsDependabotAppCheck(tc.appSlug); got != tc.wantApp {
-				t.Errorf("IsDependabotAppCheck(%q) = %v, want %v", tc.appSlug, got, tc.wantApp)
-			}
-		})
-	}
-}

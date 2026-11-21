@@ -153,12 +153,10 @@ func TestSendPREvent(t *testing.T) {
 		wantRequests   int
 		wantIdemPrefix string
 	}{
-		{name: "owned check failed routes to PRObject", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`, `"effects_owner":"legacy"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:"},
+		{name: "owned check failed routes to PRObject", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:"},
 		{name: "idempotency key propagated when set", handler: "HandleCheckFailed", event: PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, identity: "gh:delivery-1", serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:gh:delivery-1:"},
 		{name: "bare repo normalizes with owner prefix", handler: "HandleCheckPassed", event: PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed/send", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckPassed:"},
 		{name: "owned merged carries merge sha", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
-		{name: "restate stamp is preserved", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, MergeSHA: "merge999", EffectsOwner: "Restate"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"effects_owner":"restate"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
-		{name: "unknown stamp normalizes to legacy", handler: "HandleMerged", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, MergeSHA: "merge999", EffectsOwner: "both"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"effects_owner":"legacy"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
 		{name: "empty repo sends nothing", handler: "HandleClosed", event: PREvent{Event: "closed", Repo: "", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
 		{name: "bad pr number sends nothing", handler: "HandleClosed", event: PREvent{Event: "closed", Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "pr_number is required", wantRequests: 0},
@@ -201,10 +199,10 @@ func TestSendRepoEvent(t *testing.T) {
 		wantRequests   int
 		wantIdemPrefix string
 	}{
-		{name: "main push routes to RepoObject", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send", wantBodySubs: []string{`"main_sha":"abc123"`, `"effects_owner":"legacy"`}, wantRequests: 1, wantIdemPrefix: "HandleMainPush:"},
+		{name: "main push routes to RepoObject", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleMainPush:"},
 		{name: "idempotency key propagated when set", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, identity: "gh:delivery-2", serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleMainPush/send", wantBodySubs: []string{`"main_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleMainPush:gh:delivery-2:"},
 		{name: "unconfigured endpoint sends nothing", baseURL: "unconfigured", handler: "HandleMainPush", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
-		{name: "fanout carries pr and head sha", handler: "HandleFanout", event: RepoEvent{Repo: "azylman/mirrormere", PRNumber: 7, HeadSHA: "def456", EffectsOwner: "restate"}, serverStatus: 202, wantPath: "/RepoObject/azylman%2Fmirrormere/HandleFanout/send", wantBodySubs: []string{`"pr_number":7`, `"head_sha":"def456"`, `"effects_owner":"restate"`}, wantRequests: 1, wantIdemPrefix: "HandleFanout:"},
+		{name: "fanout carries pr and head sha", handler: "HandleFanout", event: RepoEvent{Repo: "azylman/mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/RepoObject/azylman%2Fmirrormere/HandleFanout/send", wantBodySubs: []string{`"pr_number":7`, `"head_sha":"def456"`}, wantRequests: 1, wantIdemPrefix: "HandleFanout:"},
 		{name: "kustomization status routes to RepoObject", handler: "HandleKustomizationStatus", event: RepoEvent{Repo: "aerial", Generation: 3, PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantPath: "/RepoObject/azylman%2Faerial/HandleKustomizationStatus/send", wantBodySubs: []string{`"generation":3`}, wantRequests: 1, wantIdemPrefix: "HandleKustomizationStatus:"},
 		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "unknown repo handler", wantRequests: 0},
 		{name: "pr handler rejected for repo event", handler: "HandleCheckFailed", event: RepoEvent{Repo: "aerial", MainSHA: "abc123"}, serverStatus: 200, wantErr: "unknown repo handler", wantRequests: 0},
@@ -270,13 +268,13 @@ func TestPayloadJSONShape(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `agent,branch,build_id,check_name,effects_owner,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
-		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `agent,effects_owner,generation,head_sha,main_sha,pr_number,repo`},
-		{name: "registry payload keys match prstate contract", got: marshalKeys(t, PREvent{BeforeSHA: "b", TargetID: "t", CheckState: "passed", Jobs: []string{"a"}, DeployedJobs: []string{"a"}, JobState: "running", KustomizationRequests: map[string]model.KustomizationRequest{"k": {}}, DeployedKustomizations: []string{"k"}, Banner: "b", Acknowledged: true, BuildMetadata: &model.BuildMetadata{}}), want: `acknowledged,agent,banner,before_sha,branch,build_id,build_metadata,check_name,check_state,deployed_jobs,deployed_kustomizations,effects_owner,event,gate_generation,head_sha,job_name,job_state,jobs,kustomization_requests,merge_sha,pr_number,reopen_epoch,repo,target_id,title,unmanaged`},
-		{name: "github repo payload keys match prstate contract", got: marshalKeys(t, RepoEvent{CheckName: "c", RunID: 1, AutoUpdate: &AutoUpdatePolicy{}}), want: `agent,auto_update,check_name,effects_owner,generation,head_sha,main_sha,pr_number,repo,run_id`},
-		{name: "register request keys match prstate contract", got: marshalKeys(t, RegisterRequest{Title: "t", Agent: "a", BotID: "a", Metadata: map[string]string{"k": "v"}, FallbackTargetID: "f", EnforceOwner: true, ExpectedOwner: "a", EffectsOwner: "restate"}), want: `agent,bot_id,branch,effects_owner,enforce_owner,expected_owner,fallback_target_id,head_sha,metadata,pr_number,repo,target_id,title`},
+		{name: "pr event keys match frozen contract", got: marshalKeys(t, PREvent{}), want: `agent,branch,build_id,check_name,event,gate_generation,head_sha,job_name,merge_sha,pr_number,reopen_epoch,repo,title,unmanaged`},
+		{name: "repo event keys match frozen contract", got: marshalKeys(t, RepoEvent{}), want: `agent,generation,head_sha,main_sha,pr_number,repo`},
+		{name: "registry payload keys match prstate contract", got: marshalKeys(t, PREvent{BeforeSHA: "b", TargetID: "t", CheckState: "passed", Jobs: []string{"a"}, DeployedJobs: []string{"a"}, JobState: "running", KustomizationRequests: map[string]model.KustomizationRequest{"k": {}}, DeployedKustomizations: []string{"k"}, Banner: "b", Acknowledged: true, BuildMetadata: &model.BuildMetadata{}}), want: `acknowledged,agent,banner,before_sha,branch,build_id,build_metadata,check_name,check_state,deployed_jobs,deployed_kustomizations,event,gate_generation,head_sha,job_name,job_state,jobs,kustomization_requests,merge_sha,pr_number,reopen_epoch,repo,target_id,title,unmanaged`},
+		{name: "github repo payload keys match prstate contract", got: marshalKeys(t, RepoEvent{CheckName: "c", RunID: 1, AutoUpdate: &AutoUpdatePolicy{}}), want: `agent,auto_update,check_name,generation,head_sha,main_sha,pr_number,repo,run_id`},
+		{name: "register request keys match prstate contract", got: marshalKeys(t, RegisterRequest{Title: "t", Agent: "a", BotID: "a", Metadata: map[string]string{"k": "v"}, FallbackTargetID: "f", EnforceOwner: true, ExpectedOwner: "a"}), want: `agent,bot_id,branch,enforce_owner,expected_owner,fallback_target_id,head_sha,metadata,pr_number,repo,target_id,title`},
 		{name: "sha event keys match prstate contract", got: marshalKeys(t, SHAEvent{}), want: `event,handler,repo,sha`},
-		{name: "deploy path payload keys match prstate contract", got: marshalKeys(t, PREvent{ExpectedJobs: []string{"a"}, ObservedReconcileAt: "t"}), want: `agent,branch,build_id,check_name,effects_owner,event,expected_jobs,gate_generation,head_sha,job_name,merge_sha,observed_reconcile_at,pr_number,reopen_epoch,repo,title,unmanaged`},
+		{name: "deploy path payload keys match prstate contract", got: marshalKeys(t, PREvent{ExpectedJobs: []string{"a"}, ObservedReconcileAt: "t"}), want: `agent,branch,build_id,check_name,event,expected_jobs,gate_generation,head_sha,job_name,merge_sha,observed_reconcile_at,pr_number,reopen_epoch,repo,title,unmanaged`},
 		{name: "build lifecycle keys carry the owner", got: marshalKeys(t, BuildLifecycle{Agent: "a"}), want: `agent,found,has_build_metadata,head_sha,merge_sha,started,status`},
 	}
 	for _, tc := range tests {
@@ -346,28 +344,6 @@ func TestSendIdempotencyKey(t *testing.T) {
 			t.Parallel()
 			if got := SendIdempotencyKey(tc.identity, tc.handler, []byte(tc.payload)); got != tc.want {
 				t.Errorf("SendIdempotencyKey() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeEffectsOwner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		owner string
-		want  string
-	}{
-		{name: "missing stamp is legacy", owner: "", want: "legacy"},
-		{name: "legacy stays legacy", owner: "legacy", want: "legacy"},
-		{name: "restate with padding and case", owner: " ReState ", want: "restate"},
-		{name: "unknown stamp is legacy", owner: "both", want: "legacy"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := NormalizeEffectsOwner(tc.owner); got != tc.want {
-				t.Errorf("NormalizeEffectsOwner(%q) = %q, want %q", tc.owner, got, tc.want)
 			}
 		})
 	}

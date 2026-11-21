@@ -8,14 +8,12 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
-	"github.com/azylman/aerial/services/synapse/internal/registry"
 )
 
 type (
 	ConfigSource                 = config.ConfigSource
 	Config                       = config.Config
 	CollaboratorCIAlertRule      = config.CollaboratorCIAlertRule
-	PRRegistryUpdater            = model.PRRegistryUpdater
 	OutboundDispatcher           = model.OutboundDispatcher
 	ConsumerStatsQuerier         = metrics.ConsumerStatsQuerier
 	consumerStatsQuerier         = metrics.ConsumerStatsQuerier
@@ -44,7 +42,6 @@ type (
 	FluxInvolvedObject           = model.FluxInvolvedObject
 	EventWebhookRequest          = alerts.EventWebhookRequest
 	VMAlertNotification          = alerts.VMAlertNotification
-	PostgresPRRegistry           = registry.PostgresPRRegistry
 	WorkloadRollout              = model.WorkloadRollout
 	ConfigMapChange              = model.ConfigMapChange
 	FluxKustomizationRef         = model.FluxKustomizationRef
@@ -96,13 +93,10 @@ const (
 
 var (
 	prRolloutStatus                 = flux.PRRolloutStatus
-	NewPostgresPRRegistry           = registry.NewPostgresPRRegistry
 	LoadConfig                      = config.LoadConfig
 	LoadConfigStrict                = config.LoadConfigStrict
 	LoadConfigFromEnv               = config.LoadConfigFromEnv
 	RestartRequired                 = config.RestartRequired
-	extractStringSliceFromMetadata  = model.ExtractStringSliceFromMetadata
-	extractJobsFromMetadata         = model.ExtractJobsFromMetadata
 	dedupeTrimmedStrings            = model.DedupeTrimmedStrings
 	firstNonEmpty                   = model.FirstNonEmpty
 	randomNonce                     = model.RandomNonce
@@ -124,7 +118,6 @@ var (
 	normalizeRepo                   = model.NormalizeRepo
 	cleanRevisionSHA                = flux.CleanRevisionSHA
 	isBuildMetadataCheck            = model.IsBuildMetadataCheck
-	parseStoredBuildMetadata        = model.ParseStoredBuildMetadata
 	ParseBuildMetadata              = model.ParseBuildMetadata
 	ParseStoredBuildMetadata        = model.ParseStoredBuildMetadata
 	ResolveImageTag                 = kube.ResolveImageTag

@@ -11,8 +11,6 @@ var synapseConfigKeysToClear = []string{
 	"PORT", "KUBE_API_SERVER",
 	"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
 	"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
-	"DATABASE_URL", "POSTGRES_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
-	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
 	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
 	"FLUX_RECEIVER_URL", "HARO_URL", "HANGAR_URL", "NATS_URL",
 	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
@@ -29,7 +27,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantGHTok           string
 		wantGHURL           string
 		wantGHWebhookSecret string
-		wantPGURL           string
 		wantFluxURL         string
 		wantBrainURL        string
 		wantEriURL          string
@@ -43,14 +40,12 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			env:       map[string]string{"PORT": "9999"},
 			wantPort:  "9999",
 			wantGHURL: "https://api.github.com",
-			wantPGURL: "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
 		},
 		{
 			name:         "default fallback loading with empty envs",
 			env:          map[string]string{},
 			wantPort:     "4020",
 			wantGHURL:    "https://api.github.com",
-			wantPGURL:    "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
 			wantEmptyURL: true,
 		},
 		{
@@ -65,23 +60,15 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantKubeServer: "https://192.0.2.1:443",
 		},
 		{
-			name:      "github and postgres primary envs",
-			env:       map[string]string{"GITHUB_PAT": "pat123", "GITHUB_API_URL": "https://api.github.test/", "DATABASE_URL": "postgres://custom:pass@db:5432/customdb"},
+			name:      "github primary envs",
+			env:       map[string]string{"GITHUB_PAT": "pat123", "GITHUB_API_URL": "https://api.github.test/"},
 			wantGHTok: "pat123",
 			wantGHURL: "https://api.github.test",
-			wantPGURL: "postgres://custom:pass@db:5432/customdb",
 		},
 		{
 			name:                "github webhook secret primary env",
 			env:                 map[string]string{"GITHUB_WEBHOOK_SECRET": "secret-webhook-key"},
 			wantGHWebhookSecret: "secret-webhook-key",
-		},
-		{
-			name: "decomposed postgres envs",
-			env: map[string]string{
-				"POSTGRES_HOST": "custom-pg.aerial", "POSTGRES_PORT": "5432", "POSTGRES_USER": "aerial", "POSTGRES_PASSWORD": "custom_pass", "POSTGRES_DB": "aerial",
-			},
-			wantPGURL: "postgres://aerial:custom_pass@custom-pg.aerial:5432/aerial?sslmode=disable",
 		},
 		{
 			name:        "system channel id primary env",
@@ -115,8 +102,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"PORT", "KUBE_API_SERVER",
 		"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
 		"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
-		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
-		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
 		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "HARO_URL", "NATS_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
@@ -137,7 +122,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
 				{cfg.GitHubWebhookSecret, tc.wantGHWebhookSecret, "GitHubWebhookSecret"},
-				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
 				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantEriURL, "EriURL"},
@@ -173,13 +157,23 @@ type loadConfigCase struct {
 	wantGHCredential       string
 }
 
+// withRestateURL prefixes a non-empty YAML fixture with the restate_url every
+// valid synapse config carries, so cases exercise their own keys rather than
+// the required-setting check (TestLoadConfigStrict_RestateURLRequired).
+func withRestateURL(yaml string) string {
+	if yaml == "" {
+		return ""
+	}
+	return "restate_url: \"http://restate.test:8080\"\n" + yaml
+}
+
 func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	var targetPath string
 	if !tc.useEmptyPath {
 		targetPath = filepath.Join(tmpDir, "local.yaml")
-		if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0o644); err != nil {
+		if err := os.WriteFile(targetPath, []byte(withRestateURL(tc.localYAML)), 0o644); err != nil {
 			t.Fatalf("failed to write local config: %v", err)
 		}
 	}
@@ -202,7 +196,7 @@ func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
 		SynapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
 	case tc.fallbackYAML != "":
 		fbPath := filepath.Join(tmpDir, "fallback.yaml")
-		if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
+		if err := os.WriteFile(fbPath, []byte(withRestateURL(tc.fallbackYAML)), 0o644); err != nil {
 			t.Fatalf("failed to write fallback config: %v", err)
 		}
 		SynapseFallbackConfigPath = fbPath
@@ -341,10 +335,11 @@ eri_url: "http://brain.custom:8088"
 			wantPort:     "4088",
 		},
 		{
-			name:            "zero-byte local config with missing fallback uses defaults",
+			name:            "zero-byte local config with missing fallback uses defaults, strict load requires restate_url",
 			localYAML:       "",
 			missingFallback: true,
 			wantPort:        "4020",
+			wantStrictErr:   true,
 		},
 		{
 			name:         "empty config path with valid fallback",
@@ -495,7 +490,6 @@ func TestRestartRequired(t *testing.T) {
 	t.Parallel()
 	base := Config{
 		Port:                "4020",
-		PostgresURL:         "postgres://a@db/aerial",
 		DiscordToken:        "tok",
 		BotID:               "aerial",
 		BrainURL:            "http://eri:8080",
@@ -520,7 +514,6 @@ func TestRestartRequired(t *testing.T) {
 		{name: "default owner changes live", next: withField(base, Config{DefaultOwner: true}), want: false},
 		{name: "collaborator alerts change live", next: withField(base, Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/aerial", ChannelID: "111", Authors: map[string]string{"dev": "<@1>"}}}}), want: false},
 		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
-		{name: "postgres url requires restart", next: withField(base, Config{PostgresURL: "postgres://b@db/aerial"}), want: true},
 		{name: "discord token requires restart", next: withField(base, Config{DiscordToken: "tok2"}), want: true},
 		{name: "bot id requires restart", next: withField(base, Config{BotID: "agent-gamma"}), want: true},
 		{name: "eri url requires restart", next: withField(base, Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), want: true},
@@ -774,7 +767,7 @@ func TestDefaultOwnerAgent(t *testing.T) {
 func TestLoadConfigFromEnvStrict(t *testing.T) {
 	tmpDir := t.TempDir()
 	validYAML := filepath.Join(tmpDir, "valid.yaml")
-	if err := os.WriteFile(validYAML, []byte("port: \"5050\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(validYAML, []byte("port: \"5050\"\nrestate_url: \"http://restate.test:8080\"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

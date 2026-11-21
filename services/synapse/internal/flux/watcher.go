@@ -428,23 +428,6 @@ func (t TrackedRollout) HasPending() bool {
 	return false
 }
 
-// RecordedKustomizationRequests decodes the PR's kustomization_requests metadata, if any.
-func RecordedKustomizationRequests(meta map[string]any) map[string]model.KustomizationRequest {
-	raw, ok := meta[kustomizationRequestsKey].(map[string]any)
-	if !ok {
-		return nil
-	}
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var requests map[string]model.KustomizationRequest
-	if err := json.Unmarshal(encoded, &requests); err != nil {
-		return nil
-	}
-	return requests
-}
-
 // IsDeploySuccessPending reports whether the deploy_success_pending flag is true in metadata.
 func IsDeploySuccessPending(meta map[string]any) bool {
 	if meta == nil {

@@ -71,23 +71,23 @@ const (
 	maxDeliverDiscordInteraction uint64 = 1
 )
 
-// Restate-owned retry budget: once prstate owns an event's effects, a
-// Restate outage must not lose it. 45 deliveries on a backoff capped at one
+// Restate send retry budget: prstate owns every event's effects, so a
+// Restate outage must not lose one. 45 deliveries on a backoff capped at one
 // minute span about 40 minutes (1+2+4+8+16+32 s, then 39 x 60 s), outlasting
-// a 30-minute outage. Legacy jobs keep the short budget above, so legacy
-// retries and the final-attempt deploy_failed timing never change.
+// a 30-minute outage. Jobs failing for any other reason keep the short
+// budget above.
 const (
-	maxDeliverRestateOwned  uint64 = 45
-	maxRestateOwnedBackoff         = time.Minute
-	restateOwnedJobDropKind        = "restate_terminal"
+	maxDeliverRestate         uint64 = 45
+	maxRestateBackoff                = time.Minute
+	restateTerminalDropReason        = "restate_terminal"
 )
 
-func restateOwnedBackoffDelay(numDelivered uint64) time.Duration {
+func restateBackoffDelay(numDelivered uint64) time.Duration {
 	if numDelivered <= 1 {
 		return 1 * time.Second
 	}
 	shift := min(numDelivered-1, 6)
-	return min(time.Duration(1<<shift)*time.Second, maxRestateOwnedBackoff)
+	return min(time.Duration(1<<shift)*time.Second, maxRestateBackoff)
 }
 
 func nakBackoffDelay(numDelivered uint64) time.Duration {
@@ -112,6 +112,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	var args T
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error unmarshaling job", "job", jobName, "error", err)
+		RecordJobDropped(queueDefault, jobName+"_webhook", "malformed")
 		if termErr := msg.Term(); termErr != nil {
 			slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
 		}
@@ -120,19 +121,20 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	if err := process(args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error processing job", "job", jobName, "error", err)
 		delay := nakBackoffDelay(msg.NumDelivered())
-		switch restateOwned, terminal := restateOwnedSendFailure(err); {
+		switch restateFailed, terminal := restateSendFailure(err); {
 		case terminal:
-			RecordJobDropped(queueDefault, jobName+"_webhook", restateOwnedJobDropKind)
+			RecordJobDropped(queueDefault, jobName+"_webhook", restateTerminalDropReason)
 			slog.ErrorContext(ctx, "[synapse] [jetstream] dropping job after terminal restate rejection", "job", jobName, "error", err)
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
 			}
 			return nil
-		case restateOwned:
-			maxDeliver = maxDeliverRestateOwned
-			delay = restateOwnedBackoffDelay(msg.NumDelivered())
+		case restateFailed:
+			maxDeliver = maxDeliverRestate
+			delay = restateBackoffDelay(msg.NumDelivered())
 		}
 		if termJobIfExhausted(ctx, msg, maxDeliver, jobName) {
+			RecordJobDropped(queueDefault, jobName+"_webhook", "max_retries_exhausted")
 			return nil
 		}
 		if nakErr := msg.NakWithDelay(delay); nakErr != nil {
@@ -143,38 +145,11 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	return nil
 }
 
-type finalAttemptKey struct{}
-
-func withFinalAttempt(ctx context.Context, isFinal bool) context.Context {
-	return context.WithValue(ctx, finalAttemptKey{}, isFinal)
-}
-
-func isFinalAttemptFromContext(ctx context.Context) bool {
-	v, ok := ctx.Value(finalAttemptKey{}).(bool)
-	return ok && v
-}
-
-// githubJobFinalAttempt reports whether this delivery is the legacy final
-// attempt. Restate-owned jobs never mark it: their final-attempt
-// deploy_failed decision belongs to prstate, and their longer restate retry
-// budget must not move when legacy deploy_failed fires.
-func githubJobFinalAttempt(owner string, numDelivered uint64) bool {
-	return restateclient.NormalizeEffectsOwner(owner) == restateclient.EffectsOwnerLegacy && numDelivered >= maxDeliverGitHubWebhook
-}
-
-// jobContext binds one job's publish-time effect-owner stamp and its event
-// identity (the source of every Restate send's Idempotency-Key) into ctx.
-func jobContext(ctx context.Context, owner, identity string) context.Context {
-	return restateclient.WithEventIdentity(withEffectsOwner(ctx, owner), identity)
-}
-
-// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream,
-// marking final delivery attempts so terminal image promotion failures transition PRs to deploy_failed.
+// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream.
 func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
 	return handleJetStreamJob(ctx, msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
-		isFinal := githubJobFinalAttempt(args.EffectsOwner, msg.NumDelivered())
-		jobCtx := withFinalAttempt(jobContext(ctx, args.EffectsOwner, eventIdentity("github", args.Delivery)), isFinal)
-		slog.InfoContext(ctx, "[synapse] [jetstream] processing github job", "event", args.Event, "delivery", args.Delivery, "final", isFinal)
+		jobCtx := restateclient.WithEventIdentity(ctx, eventIdentity("github", args.Delivery))
+		slog.InfoContext(ctx, "[synapse] [jetstream] processing github job", "event", args.Event, "delivery", args.Delivery)
 		_, err := s.ProcessGitHubEvent(jobCtx, args.Event, args.Delivery, args.Body)
 		return err
 	})
@@ -184,7 +159,7 @@ func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) 
 func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) error {
 	return handleJetStreamJob(ctx, msg, maxDeliverDeployWebhook, "deploy", func(args DeployWebhookArgs) error {
 		slog.InfoContext(ctx, "[synapse] [jetstream] processing deploy job", "event", args.Event.Event, "job_name", args.Event.JobName)
-		_, err := s.ProcessDeployEvent(jobContext(ctx, args.EffectsOwner, eventIdentity("deploy", args.IdempotencyKey)), args.Event)
+		_, err := s.ProcessDeployEvent(restateclient.WithEventIdentity(ctx, eventIdentity("deploy", args.IdempotencyKey)), args.Event)
 		return err
 	})
 }

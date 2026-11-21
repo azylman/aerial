@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -10,7 +11,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -37,8 +37,6 @@ type Config struct {
 	RestateURL           string
 	RestatePRService     string
 	RestateRepoService   string
-	RestateAuthoritative bool
-	PostgresURL          string
 	FluxReceiverURL      string
 	BrainURL             string
 	EriURL               string
@@ -68,18 +66,12 @@ type RouterYAMLConfig struct {
 	FluxReceiverURL      string                `yaml:"flux_receiver_url"`
 	EriURL               string                `yaml:"eri_url"`
 	NATSURL              string                `yaml:"nats_url"`
-	RestateURL           string                `yaml:"restate_url"`
-	RestatePRService     string                `yaml:"restate_pr_service"`
-	RestateRepoService   string                `yaml:"restate_repo_service"`
-	// RestateAuthoritative flips github/deploy consumer ownership to the
-	// Restate PRObject/RepoObject journal. Rollback is a YAML rebind
-	// (restate_authoritative: false) with no code revert and no restart:
-	// the flag is read live per request, so it is deliberately absent from
-	// RestartRequired. The rebind rollback window is one deploy soak
-	// (about 48h); it stays valid only until the first Restate-committed
-	// external effect, after which rollback is forward-fix only because
-	// the journal owns effects legacy state cannot replay.
-	RestateAuthoritative bool                      `yaml:"restate_authoritative"`
+	// RestateURL is the Restate ingress synapse sends every PR lifecycle
+	// event to. Required: a config without it fails validation, and a hot
+	// reload without it keeps the last known good config.
+	RestateURL           string                    `yaml:"restate_url"`
+	RestatePRService     string                    `yaml:"restate_pr_service"`
+	RestateRepoService   string                    `yaml:"restate_repo_service"`
 	SystemChannelID      string                    `yaml:"system_channel_id"`
 	SystemChannel        string                    `yaml:"system_channel"`
 	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
@@ -159,7 +151,23 @@ func LoadConfigStrict(configPath string) (Config, error) {
 	if v, ok := NormalizeGitHubCredential(fileCfg.GitHubCredential); !ok {
 		return Config{}, fmt.Errorf("github_credential %q is not app or pat", v)
 	}
-	return buildConfig(fileCfg), nil
+	cfg := buildConfig(fileCfg)
+	if err := ValidateRequired(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// ErrRestateURLRequired rejects a config without restate_url: synapse sends
+// every PR lifecycle event to Restate and has no other path.
+var ErrRestateURLRequired = errors.New("restate_url is required")
+
+// ValidateRequired reports the first required setting cfg is missing.
+func ValidateRequired(cfg *Config) error {
+	if cfg == nil || strings.TrimSpace(cfg.RestateURL) == "" {
+		return ErrRestateURLRequired
+	}
+	return nil
 }
 
 // LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
@@ -217,17 +225,14 @@ func botsEqual(a, b map[string]BotConfig) bool {
 }
 
 // RestartRequired reports whether moving from old to next changes a
-// field that is bound once at startup (listener, database pool, Discord
-// gateway session, outbound dispatcher and registry clients) and therefore
-// can only take effect through a graceful process restart.
-// RestateAuthoritative is deliberately excluded: the consumer cutover and
-// its YAML-rebind rollback take effect on the next request without restart.
+// field that is bound once at startup (listener, Discord gateway session,
+// outbound dispatcher and Restate ingress) and therefore can only take
+// effect through a graceful process restart.
 func RestartRequired(old, next *Config) bool {
 	if old == nil || next == nil {
 		return true
 	}
 	return old.Port != next.Port ||
-		old.PostgresURL != next.PostgresURL ||
 		old.DiscordToken != next.DiscordToken ||
 		old.BotID != next.BotID ||
 		old.BrainURL != next.BrainURL ||
@@ -488,18 +493,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
 	}
 
-	// Delegate local fallback DSN synthesis to httpkit.BuildPostgresDSN so config.go
-	// embeds zero plaintext default password literals (enforced by commit-safety-guard).
-	pgURL := model.FirstNonEmpty(
-		httpkit.BuildPostgresDSN(os.Getenv, defaultAgentName),
-		httpkit.BuildPostgresDSN(func(k string) string {
-			if k == "POSTGRES_HOST" {
-				return "127.0.0.1"
-			}
-			return ""
-		}, defaultAgentName),
-	)
-
 	kubeServer := os.Getenv("KUBE_API_SERVER")
 	if kubeServer == "" {
 		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
@@ -536,7 +529,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		GitHubAPIURL:         strings.TrimRight(model.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		GitHubCredential:     ghCredential,
 		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		PostgresURL:          pgURL,
 		FluxReceiverURL:      strings.TrimRight(model.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
 		BrainURL:             eriURL,
 		EriURL:               eriURL,
@@ -544,7 +536,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
 		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
 		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
-		RestateAuthoritative: fileCfg.RestateAuthoritative,
 		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:         discordToken,
 		AutoUpdatePRAuthors:  autoUpdateAuthors,

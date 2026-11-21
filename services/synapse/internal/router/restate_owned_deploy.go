@@ -12,16 +12,16 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
-// Restate-owned deploy path: the deploy-side twin of restate_owned_github.go.
-// For an event stamped effects_owner=restate (a JetStream deploy or
-// workflow_run job, or one watcher call) synapse stays a Postgres-free edge:
-// it observes the cluster and GitHub statelessly (Kustomization status,
+// Deploy path: the deploy-side twin of restate_owned_github.go. For a
+// JetStream deploy or workflow_run job, or one watcher call, synapse stays a
+// Postgres-free edge: it observes the cluster and GitHub statelessly
+// (Kustomization status,
 // workload rollout state, image tags a workflow built, commit history),
 // reads PR state only from Restate (PRObject.GetDeployView,
 // GetBuildLifecycle, RepoObject.ListRollouts and ResolvePRBySHA), and sends
 // one-way observations. PRObject/RepoObject apply the transitions, publish
 // the facts, run the Flux/image/GitHub effects and write the pr_registry
-// projection. Nothing here calls the registry.
+// projection.
 //
 //   - Kustomization watcher: the deploying set comes from the Restate
 //     rollout index, each rollout's recorded requests from its deploy view.
@@ -36,7 +36,7 @@ import (
 //     started/expected jobs go to HandleDeployObserved; success, sync and
 //     failure outcomes go to HandleDeploySuccess / HandleDeployObserved /
 //     HandleDeployFailed with their facts. PR-less alerts keep the
-//     stateless system-alert path, which never touches the registry.
+//     stateless system-alert path, which never touches Restate.
 //   - Main-branch workflow runs: attempt-1 failures rerun failed jobs via
 //     RepoObject.HandleWorkflowRerun; later failures report deploy_failed
 //     to the PR (by number or through the RepoObject SHA route); successful
@@ -44,19 +44,9 @@ import (
 //     starts the PR rollout and resolves a SHA-only commit to its PR from
 //     the durable index.
 
-// ownedRestateClient returns the configured Restate client for a
-// restate-owned read, or an error when none is configured.
-func (s *RouterServer) ownedRestateClient() (*restateclient.Client, error) {
-	r := s.restateShadow()
-	if !r.Enabled() {
-		return nil, errors.New("restate-owned deploy read with no restate_url configured")
-	}
-	return r.client, nil
-}
-
 // ownedDeployView reads PRObject's deploy read model for one PR.
 func (s *RouterServer) ownedDeployView(ctx context.Context, repo string, prNumber int) (restateclient.DeployView, error) {
-	c, err := s.ownedRestateClient()
+	c, err := s.restateClient()
 	if err != nil {
 		return restateclient.DeployView{}, err
 	}
@@ -71,7 +61,7 @@ func (s *RouterServer) ownedDeployView(ctx context.Context, repo string, prNumbe
 // Restate rollout index, with its recorded requests from the PR's deploy
 // view. A view that no longer shows a deploying rollout is skipped.
 func (s *RouterServer) ownedTrackedRollouts(ctx context.Context) ([]trackedRollout, error) {
-	c, err := s.ownedRestateClient()
+	c, err := s.restateClient()
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +145,8 @@ func (s *RouterServer) sendOwnedReconcileLost(ctx context.Context, prs []Deployi
 	return errors.Join(errs...)
 }
 
-// ownedDeployFact renders the lifecycle fact for one deploy alert outcome
-// without the registry: success events without a job name default to
+// ownedDeployFact renders the lifecycle fact for one deploy alert outcome:
+// success events without a job name default to
 // git-sync, Quiet comes from the branch PRObject recorded, and PRObject
 // renders the rollout state from its committed state when it publishes.
 func ownedDeployFact(evt DeployEvent, eventName, status, branch string) pubsub.PRLifecycleEvent {
@@ -179,7 +169,7 @@ func (s *RouterServer) sendOwnedDeployFailed(ctx context.Context, evt DeployEven
 	})
 }
 
-// ownedDeferPRToWatcher is the restate-owned deferPRToWatcher: when repo is
+// ownedDeferPRToWatcher hands a PR's completion to the watcher: when repo is
 // the GitRepository source of a watched Kustomization, it sends the
 // rollout (deploying jobs, fresh reconcile requests, the deploy_started
 // fact) to PRObject.HandleKustomizationRequested, which records the
@@ -187,8 +177,7 @@ func (s *RouterServer) sendOwnedDeployFailed(ctx context.Context, evt DeployEven
 //
 // A PR the deploy view does not find (never seen, or untracked: an
 // upstream Flux source commit resolved to a PR nobody registered) is
-// handled like legacy deferPRToWatcher with no registry row: the
-// Kustomizations are patched once and nothing is tracked, so no rollout
+// handled without tracking: the Kustomizations are patched once and nothing is tracked, so no rollout
 // starts that could never complete.
 func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, prNum int, view restateclient.DeployView) (bool, error) {
 	if s.dispatcher == nil || prNum <= 0 {
@@ -225,9 +214,8 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 	return true, nil
 }
 
-// resolveOwnedSHAPR resolves a commit to its PR without the registry: the
-// RepoObject durable SHA index first (the registry SHA lookup's
-// replacement), then the stateless GitHub commits-API lookup. A GitHub
+// resolveOwnedSHAPR resolves a commit to its PR: the RepoObject durable SHA
+// index first, then the stateless GitHub commits-API lookup. A GitHub
 // answer that proves a merge PRObject missed (lost closed and main-push
 // webhooks) is sent to PRObject before the caller forwards its event.
 func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) (int, string) {
@@ -235,13 +223,13 @@ func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) 
 	if normalizeRepo(repo) == "" || sha == "" || isZeroSHA(sha) {
 		return 0, ""
 	}
-	if c, err := s.ownedRestateClient(); err == nil {
+	if c, err := s.restateClient(); err == nil {
 		resp, rErr := c.ResolvePRBySHA(ctx, repo, sha)
 		if rErr == nil && resp.Found && resp.PRNumber > 0 {
 			return resp.PRNumber, resp.Branch
 		}
 		if rErr != nil {
-			slog.WarnContext(ctx, "[synapse] [restate-cutover] RepoObject SHA lookup failed; trying GitHub", "repo", repo, "sha", sha, "error", rErr)
+			slog.WarnContext(ctx, "[synapse] [restate] RepoObject SHA lookup failed; trying GitHub", "repo", repo, "sha", sha, "error", rErr)
 		}
 	}
 	pr, err := s.resolveCommitPR(ctx, repo, sha)
@@ -253,7 +241,7 @@ func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) 
 	return pr.Number, pr.Branch
 }
 
-// processOwnedDeployEvent is the restate-owned twin of ProcessDeployEvent.
+// processOwnedDeployEvent normalizes one deploy alert and sends its PR outcome to PRObject.
 func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
 	if evt.PRNumber == 0 && evt.CommitSHA != "" {
 		evt.PRNumber, _ = s.resolveOwnedSHAPR(ctx, evt.Repo, evt.CommitSHA)
@@ -262,7 +250,7 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 	if evt.PRNumber > 0 {
 		v, err := s.ownedDeployView(ctx, evt.Repo, evt.PRNumber)
 		if err != nil {
-			return &evt, restateOwnedFailure(ctx, "GetDeployView", err)
+			return &evt, restateFailure(ctx, "GetDeployView", err)
 		}
 		view = v
 		evt.TargetID = firstNonEmpty(evt.TargetID, view.TargetID)
@@ -270,14 +258,14 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 	if evt.TargetID == "" && (evt.Event == eventDeployFailed || evt.Event == eventDeployRollback || evt.Event == eventSyncFailed) {
 		evt.TargetID = strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
 	}
-	slog.InfoContext(ctx, "[synapse] [restate-cutover] restate-owned deploy event", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber, "commit", evt.CommitSHA, "status", evt.Status)
+	slog.InfoContext(ctx, "[synapse] [restate] deploy event", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber, "commit", evt.CommitSHA, "status", evt.Status)
 
 	s.evaluateFluxEventTriggers(ctx, evt)
 
 	if evt.PRNumber <= 0 {
 		// PR-less alerts have no PRObject key: the stateless system-alert
-		// path publishes and prompts without touching the registry.
-		return s.publishUnownedDeployEvent(ctx, evt, false)
+		// path publishes and prompts without touching Restate.
+		return s.publishUnownedDeployEvent(ctx, evt)
 	}
 	waiting := evt.SourceKind == kindKustomization && s.ownedWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber, view)
 	if handled, err := s.ownedDeferDeployEventToWatcher(ctx, evt, view, waiting); handled || err != nil {
@@ -295,8 +283,7 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 	return &evt, s.publishOwnedDeployEvent(ctx, evt, view.Branch, expected, syncHasExpected, waiting)
 }
 
-// ownedSyncExpected is the restate-owned recordDeploySyncExpectedJobs plus
-// deferSyncToWatcher for a sync_success: it records the announced jobs on
+// ownedSyncExpected handles a sync_success: it records the announced jobs on
 // PRObject, reports whether the PR expects deploy jobs, and otherwise
 // hands completion to the watcher when the repo sources a Kustomization.
 // Other events expect nothing and never defer.
@@ -317,8 +304,8 @@ func (s *RouterServer) ownedSyncExpected(ctx context.Context, evt DeployEvent, v
 	return false, deferred, err
 }
 
-// ownedDeferDeployEventToWatcher is the restate-owned
-// deferOwnedDeployEventToWatcher: a watcher-owned alert publishes nothing
+// ownedDeferDeployEventToWatcher defers watcher-owned alerts: a watcher-owned
+// alert publishes nothing
 // itself. Already-tracked alerts defer silently; untracked started/success
 // alerts start the rollout through ownedDeferPRToWatcher unless the image
 // build is still pending.
@@ -343,8 +330,8 @@ func (s *RouterServer) ownedDeferDeployEventToWatcher(ctx context.Context, evt D
 	return s.ownedDeferPRToWatcher(ctx, evt.Repo, evt.PRNumber, view)
 }
 
-// ownedDeployEventWatcherOwnership mirrors deployEventWatcherOwnership with
-// the tracked flag read from PRObject instead of the registry.
+// ownedDeployEventWatcherOwnership reports whether the Kustomization watcher
+// owns a deploy alert, with the tracked flag read from PRObject.
 func (s *RouterServer) ownedDeployEventWatcherOwnership(ctx context.Context, evt DeployEvent, tracked bool) (bool, error) {
 	isFluxKind := evt.SourceKind == kindKustomization || evt.SourceKind == kindHelmRelease
 	if !isFluxKind && evt.Event != eventDeploySuccess {
@@ -366,13 +353,13 @@ func (s *RouterServer) ownedDeployEventWatcherOwnership(ctx context.Context, evt
 // ownedWaitingForImageBuild mirrors isWaitingForImageBuild from Restate
 // state: an open/merged PR whose image build has not started, that records
 // no reconcile requests, and whose final build metadata is missing or still
-// selects images. A failed lifecycle read waits, like the legacy path.
+// selects images. A failed lifecycle read waits.
 func (s *RouterServer) ownedWaitingForImageBuild(ctx context.Context, repo string, prNumber int, view restateclient.DeployView) bool {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 || metadataWorkflowPath(repo) == "" {
 		return false
 	}
-	c, err := s.ownedRestateClient()
+	c, err := s.restateClient()
 	if err != nil {
 		return true
 	}
@@ -455,8 +442,8 @@ func (s *RouterServer) resolveOwnedMainPR(ctx context.Context, res *ResolvedGitH
 
 // processOwnedMainWorkflowRun handles one main-branch workflow run: the
 // attempt-1 failed-job rerun, a later failure's deploy_failed, or a
-// successful build's image promotion. Like the legacy path only the default
-// owner acts on main-branch runs; synapse reads no PR owner.
+// successful build's image promotion. Only the default owner acts on
+// main-branch runs; synapse reads no PR owner.
 func (s *RouterServer) processOwnedMainWorkflowRun(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent, prBranch string) error {
 	if !s.cfgSrc.Current().DefaultOwner || p.Action != ghStatusCompleted {
 		return nil
@@ -497,7 +484,7 @@ func (s *RouterServer) sendOwnedMainRerun(ctx context.Context, p GitHubWorkflowR
 }
 
 // ownedImageDeployFailedFact renders the deploy_failed fact for a failed
-// image build or promotion without the registry.
+// image build or promotion.
 func ownedImageDeployFailedFact(repo string, prNum int, branch, sha, details string) pubsub.PRLifecycleEvent {
 	return pubsub.PRLifecycleEvent{
 		Event: eventDeployFailed, Repo: repo, PRNumber: prNum, Branch: branch, HeadSHA: sha, MergeSHA: sha,
@@ -505,8 +492,7 @@ func ownedImageDeployFailedFact(repo string, prNum int, branch, sha, details str
 	}
 }
 
-// dispatchOwnedWorkflowRunImages is the restate-owned
-// dispatchWorkflowRunImages: it resolves the images the run built (a
+// dispatchOwnedWorkflowRunImages resolves the images the run built (a
 // stateless GitHub read through the Restate-backed buildmeta store) and
 // promotes them through promoteOwnedImages.
 func (s *RouterServer) dispatchOwnedWorkflowRunImages(ctx context.Context, run workflowRunEvent, res *ResolvedGitHubEvent, prBranch string) error {
@@ -520,7 +506,9 @@ func (s *RouterServer) dispatchOwnedWorkflowRunImages(ctx context.Context, run w
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", run.ID, "attempt", run.Attempt, "repo", repo, "error", err)
 		if prNum > 0 {
 			fact := ownedImageDeployFailedFact(repo, prNum, prBranch, headSHA, err.Error())
-			if rErr := s.routeDeployAttemptFailed(ctx, repo, prNum, headSHA, headSHA, fact); rErr != nil {
+			if rErr := s.sendOwnedPR(ctx, "HandleDeployAttemptFailed", restateclient.PREvent{
+				Repo: repo, PRNumber: prNum, HeadSHA: headSHA, MergeSHA: headSHA, Banner: fact.Details, Facts: facts(fact),
+			}); rErr != nil {
 				return rErr
 			}
 		}
@@ -565,8 +553,7 @@ func (s *RouterServer) promoteOwnedImages(ctx context.Context, repo string, prNu
 	return nil
 }
 
-// ownedCompleteNoDeploy is the restate-owned completeNoDeployWorkflowRun: a
-// PR that expects no deploy jobs defers to the watcher when its repo
+// ownedCompleteNoDeploy completes a build with no deploy jobs: a PR that expects no deploy jobs defers to the watcher when its repo
 // sources a watched Kustomization and otherwise completes with the
 // git-merge deploy_success, which PRObject dedupes and publishes.
 func (s *RouterServer) ownedCompleteNoDeploy(ctx context.Context, repo, headSHA string, prNum int, branch string) error {
@@ -575,7 +562,7 @@ func (s *RouterServer) ownedCompleteNoDeploy(ctx context.Context, repo, headSHA 
 	}
 	view, err := s.ownedDeployView(ctx, repo, prNum)
 	if err != nil {
-		return restateOwnedFailure(ctx, "GetDeployView", err)
+		return restateFailure(ctx, "GetDeployView", err)
 	}
 	if view.HasExpectedDeployJobs {
 		return nil

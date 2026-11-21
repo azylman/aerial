@@ -183,7 +183,7 @@ func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := newTraceparentServer(t, 0, `{"status":"ok"}`)
-			router := newTestRouter(Config{}, nil, nil, NewDefaultOutboundDispatcher(srv.URL, srv.Client()))
+			router := newTestRouter(Config{}, nil, NewDefaultOutboundDispatcher(srv.URL, srv.Client()))
 			body := fmt.Sprintf(`{"interaction_id":"inter-traced","interaction":{"id":"inter-traced","type":2,"data":{"id":"cmd-1","name":"ask"}},"traceparent":%q}`, tc.bodyTraceparent)
 			msg := &synapseMemoryMsg{
 				data:    []byte(body),

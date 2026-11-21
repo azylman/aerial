@@ -43,7 +43,7 @@ func (r PRRegisterRequest) OwningAgent() string {
 	return r.BotID
 }
 
-// PRBuildLifecycle is the registry lifecycle fence image-build consumers read
+// PRBuildLifecycle is the PRObject lifecycle fence image-build consumers read
 // without inspecting transport metadata.
 type PRBuildLifecycle struct {
 	Status   string
@@ -56,47 +56,6 @@ type PRBuildLifecycle struct {
 type KustomizationRequest struct {
 	Namespace   string `json:"namespace"`
 	RequestedAt string `json:"requested_at"`
-}
-
-// PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
-type PRRegistryUpdater interface {
-	LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (PRBuildLifecycle, error)
-	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata BuildMetadata) (bool, error)
-	LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (BuildMetadata, bool, error)
-	RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error)
-	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
-	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (targetID string, err error)
-	UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (targetID string, err error)
-	AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
-	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
-	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
-	ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (targetID string, branch, headSHA, mergeSHA string, err error)
-	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
-	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
-	RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error)
-	// EnsurePRRegistered self-heals a missing row. agent, when set, seeds
-	// metadata.agent/bot_id on insert only; an existing row keeps its owner.
-	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, agent string) (string, error)
-	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
-	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
-	RecordPRJobState(ctx context.Context, jobName, jobState string) (repo string, prNumber int, updated bool, err error)
-	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
-	RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]KustomizationRequest) error
-	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
-	MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
-	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
-	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
-	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error
-	LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, bool, error)
-	IsPRDeployed(ctx context.Context, repo string, prNumber int) (bool, error)
-}
-
-// ReadinessRetryStore defines the interface for retrying PR readiness rollout gates.
-type ReadinessRetryStore interface {
-	RetryPRReadiness(ctx context.Context, repo, merge string, number int) (map[string]KustomizationRequest, error)
 }
 
 // DeployEvent represents a deployment or sync lifecycle event.
@@ -278,22 +237,16 @@ type StoppedChildObservation struct {
 }
 
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
-// EffectsOwner is stamped once at publish time (legacy or restate) so every
-// branch handling the job agrees on who performs its side effects even if
-// config hot-reloads mid-job; a missing stamp means legacy.
 type GitHubWebhookArgs struct {
-	Event        string `json:"event"`
-	Delivery     string `json:"delivery"`
-	Body         []byte `json:"body"`
-	EffectsOwner string `json:"effects_owner,omitempty"`
+	Event    string `json:"event"`
+	Delivery string `json:"delivery"`
+	Body     []byte `json:"body"`
 }
 
 // DeployWebhookArgs contains payload data for durable background processing of deployment webhooks.
-// EffectsOwner is stamped once at publish time; a missing stamp means legacy.
 type DeployWebhookArgs struct {
 	IdempotencyKey string      `json:"idempotency_key,omitempty"`
 	Event          DeployEvent `json:"event"`
-	EffectsOwner   string      `json:"effects_owner,omitempty"`
 }
 
 // DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.

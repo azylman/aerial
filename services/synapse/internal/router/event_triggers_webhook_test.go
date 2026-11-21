@@ -348,11 +348,10 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			recBus := &recordingBus{}
-			mockReg := &mockPRRegistry{}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
+			ingress := &ownedIngress{sendCode: http.StatusAccepted, callCode: http.StatusOK, callBody: `{"found":false}`}
+			srv := NewRouterServer(fixedConfig(Config{RestateURL: ingress.serve(t)}), nil)
 			srv.SetEventBus(recBus)
-			srv.SetRegistry(mockReg)
 			srv.SetDispatcher(mockDisp)
 
 			ctx := context.Background()
@@ -389,13 +388,10 @@ func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
 	t.Parallel()
 
 	recBus := &recordingBus{}
-	mockReg := &mockPRRegistry{
-		err: errors.New("database connection lost"),
-	}
 	mockDisp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	ingress := &ownedIngress{sendCode: http.StatusServiceUnavailable}
+	srv := NewRouterServer(fixedConfig(Config{RestateURL: ingress.serve(t)}), nil)
 	srv.SetEventBus(recBus)
-	srv.SetRegistry(mockReg)
 	srv.SetDispatcher(mockDisp)
 
 	ctx := context.Background()

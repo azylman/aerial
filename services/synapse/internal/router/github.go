@@ -16,7 +16,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 const (
@@ -58,24 +57,6 @@ func (s *RouterServer) publishPRLifecycleEvent(ctx context.Context, ev pubsub.PR
 	return nil
 }
 
-func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNum int) *pubsub.PRRolloutState {
-	if s == nil || s.registry == nil || prNum <= 0 || strings.TrimSpace(repo) == "" {
-		return nil
-	}
-	meta, exists, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
-	if err != nil || !exists || len(meta) == 0 {
-		return nil
-	}
-	// Only the identity-validated snapshot for the PR's current revision renders.
-	// Projection-safe: read-model render for rollout state display, never an
-	// effect decision.
-	delete(meta, "build_metadata")
-	if m, found, err := s.registry.LoadPRBuildMetadata(ctx, repo, prNum); err == nil && found {
-		meta["build_metadata"] = m
-	}
-	return buildPRRolloutState(meta)
-}
-
 func (s *RouterServer) ghClient() *github.Client {
 	if s == nil {
 		return nil
@@ -92,50 +73,12 @@ func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string
 	return github.NewRequest(ctx, s.cfgSrc.Current().GitHubAPIURL, "", method, path, body)
 }
 
-func isGitHubNotFound(err error) bool {
-	return github.IsNotFound(err)
-}
-
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
 	req, err := s.newGitHubRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("create github api request: %w", err)
 	}
 	return github.GetJSON(ctx, s.githubClient, req, maxBytes, out)
-}
-
-func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, targetID string, prNum int) error {
-	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) || (!s.cfgSrc.Current().DefaultOwner && targetID == "") {
-		return nil
-	}
-	// Journal the dispatch to RepoObject.HandleGitPush first: a
-	// restate-owned push is dispatched there (a send failure retries the
-	// job); a legacy push is dispatched here as today, logs
-	// [synapse-effect], and RepoObject records it as intended.
-	if err := s.routeRepoEvent(ctx, "HandleGitPush", restateclient.RepoEvent{
-		Repo: repo, MainSHA: commit, PRNumber: prNum, Ref: ref, TargetID: targetID,
-	}); err != nil {
-		if restateOwnsEffects(ctx) {
-			return err
-		}
-		slog.WarnContext(ctx, "[synapse] [restate-cutover] git push journal failed; legacy dispatch continues", "repo", repo, "error", err)
-	}
-	if restateOwnsEffects(ctx) {
-		return nil
-	}
-	if err := s.dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
-		Repo:     repo,
-		Ref:      ref,
-		Commit:   commit,
-		TargetID: targetID,
-		PRNumber: prNum,
-	}); err != nil {
-		slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching git_push", "repo", repo, "error", err)
-		return fmt.Errorf("dispatch git_push: %w", err)
-	}
-	recordLegacyEffect(ctx, restateclient.EffectFluxGitPush,
-		restateclient.EffectMatchKey(repo, prNum, commit, restateclient.EffectFluxGitPush, "", ""), normalizeRepo(repo), prNum)
-	return nil
 }
 
 // GitHub Webhook Payloads and Resolution Types
@@ -193,39 +136,6 @@ func isForeignBotPR(meta AerialPRMetadata, cfgBotID string) bool {
 	metaBotID := strings.TrimSpace(meta.OwningAgent())
 	cfgBotID = strings.TrimSpace(cfgBotID)
 	return metaBotID != "" && cfgBotID != "" && !strings.EqualFold(metaBotID, cfgBotID)
-}
-
-func (s *RouterServer) isPROwnedLocally(ctx context.Context, repo string, prNum int) bool {
-	if s == nil || s.registry == nil || prNum <= 0 {
-		return false
-	}
-	targetID, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(targetID) != "" || strings.TrimSpace(branch) != ""
-}
-
-func (s *RouterServer) resolveOwningAgent(ctx context.Context, repo string, prNum int, prBody string) string {
-	defaultOwner := defaultOwnerAgent
-	if s != nil && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
-		defaultOwner = s.cfgSrc.Current().DefaultOwnerAgent()
-	}
-	if prBody != "" {
-		if agent := ParseAerialPRMetadata(prBody).OwningAgent(); agent != "" {
-			return agent
-		}
-	}
-	if s == nil || s.registry == nil || prNum <= 0 || repo == "" {
-		return defaultOwner
-	}
-	meta, _, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
-	if err != nil || len(meta) == 0 {
-		return defaultOwner
-	}
-	owner := extractExistingAgent(meta, "")
-	s.shadowCompareOwnerLookup(ctx, repo, prNum, owner)
-	return firstNonEmpty(owner, defaultOwner)
 }
 
 type GitHubPingPayload struct {
@@ -374,7 +284,7 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
 		return
 	}
-	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body, EffectsOwner: s.acceptEffectsOwner()}); err != nil {
+	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
 		slog.ErrorContext(r.Context(), "[synapse] [github] failed to publish job to jetstream", "error", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 		return
@@ -384,85 +294,6 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		fieldEvent:  event,
 		"delivery":  delivery,
 	})
-}
-
-func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEvent, prs []GitHubCheckRunPR, payloadSource string) {
-	if len(prs) > 0 {
-		res.PRNumber = prs[0].Number
-		if res.Branch == "" {
-			res.Branch = prs[0].Head.Ref
-		}
-		res.ResolutionSource = payloadSource
-		if s.registry != nil && res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			if _, _, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err == nil && targetID != "" {
-				res.TargetID = targetID
-			}
-		}
-		return
-	}
-	if res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
-		return
-	}
-	if s.registry != nil {
-		if prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err != nil {
-			slog.WarnContext(ctx, "[synapse] [registry] failed resolving PR by SHA locally", "event", res.Event, "head_sha", res.HeadSHA, "error", err)
-		} else if prNum > 0 {
-			s.shadowCompareSHALookup(ctx, res.Repo, res.HeadSHA, prNum)
-			res.PRNumber = prNum
-			if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
-				res.Branch = firstNonEmpty(branch, res.Branch)
-			}
-			res.TargetID = targetID
-			res.ResolutionSource = "local_pr_registry"
-			return
-		}
-	}
-	if prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA); err != nil {
-		slog.WarnContext(ctx, "[synapse] [github] failed resolving PR for commit", "event", res.Event, "head_sha", res.HeadSHA, "error", err)
-	} else {
-		res.PRNumber = prNum
-		if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
-			res.Branch = firstNonEmpty(branch, res.Branch)
-		}
-		res.ResolutionSource = "commit_sha_lookup"
-	}
-}
-
-func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
-	if s.isStaleOrIgnoredCIFailure(ctx, res) {
-		return nil
-	}
-	if handled, err := s.handleMergeOrPromotionFailure(ctx, res, details); handled {
-		return err
-	}
-	emitAdditional, wasActive, _ := s.recordNonGateCheckFailureDetailed(res)
-	var (
-		updated bool
-		err     error
-	)
-	if res.PRNumber > 0 {
-		updated, err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL, emitAdditional, wasActive)
-	} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-		updated, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
-	}
-	if err != nil {
-		return err
-	}
-	if !updated && res.TargetID == "" {
-		if notifyErr := s.notifyCollaboratorCIFailure(ctx, res, checkURL); notifyErr != nil {
-			return notifyErr
-		}
-	}
-	// The registry atomic transition is the once-per-failure gate for the
-	// legacy open-PR conflict cascade the deleted failed-CISHA mark used to
-	// own. A restate-owned failure triggers on every delivery instead:
-	// RepoObject dedupes the trigger per PR head, and a retried job (whose
-	// transition already committed, so updated is false) must re-send a
-	// HandleAutoUpdate whose first send failed.
-	if updated || (restateOwnsEffects(ctx) && res.PRNumber > 0) {
-		return logAutoUpdateError(ctx, res.Repo, "ci_failure", s.autoUpdateOpenPRs(ctx, res.Repo, res.PRNumber, res.HeadSHA, "", ""))
-	}
-	return nil
 }
 
 func (*RouterServer) processGitHubPingEvent(delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
@@ -519,283 +350,6 @@ func (s *RouterServer) isForeignBotEvent(meta AerialPRMetadata) bool {
 	return isForeignBotPR(meta, cfg.BotID)
 }
 
-func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
-	var p GitHubPullRequestPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
-	}
-	populatePullRequestEvent(&p, res)
-	slog.InfoContext(ctx, "[synapse] [github] [pull_request] event", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "branch", res.Branch, "merged", p.PullRequest.Merged, "sender", res.Sender, "delivery", delivery)
-
-	if s.isForeignBotEvent(ParseAerialPRMetadata(p.PullRequest.GetBody())) {
-		return res, nil
-	}
-
-	s.handleDependabotPROpen(ctx, res, p)
-
-	if s.registry != nil && res.PRNumber > 0 {
-		if err := s.handlePullRequestRegistryAction(ctx, res, p.PullRequest); err != nil {
-			return nil, err
-		}
-	}
-	if res.Action == ghActionReopened && res.PRNumber > 0 && strings.TrimSpace(res.HeadSHA) != "" {
-		if err := s.routePREvent(ctx, "HandleReopened", restateclient.PREvent{
-			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
-			Branch: res.Branch, Title: p.PullRequest.Title,
-		}); err != nil {
-			return nil, err
-		}
-	}
-	if res.Action == ghActionOpened && res.PRNumber > 0 {
-		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        ghActionOpened,
-			Repo:         res.Repo,
-			PRNumber:     res.PRNumber,
-			Branch:       res.Branch,
-			HeadSHA:      res.HeadSHA,
-			Title:        p.PullRequest.Title,
-			TargetID:     res.TargetID,
-			Status:       prOpen,
-			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-			Quiet:        isDependabotBranch(res.Branch),
-			OccurredAt:   time.Now().UTC(),
-		}); err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
-
-func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGitHubEvent) {
-	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || (isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName)) {
-		return
-	}
-	if isDependabotBranch(res.Branch) {
-		return
-	}
-	checkState := classifyCheckState(res.Status, res.Conclusion)
-	if checkState == "" || checkState == statusFailed {
-		return
-	}
-	// Journal the check status into PRObject before the legacy write; the
-	// legacy registry stays authoritative, so a journal failure only logs.
-	if err := s.routePREvent(ctx, "HandleCheckStatus", restateclient.PREvent{
-		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
-		CheckName: res.CheckName, CheckState: checkState,
-	}); err != nil {
-		slog.WarnContext(ctx, "[synapse] [restate-cutover] failed to route check status", "repo", res.Repo, "pr", res.PRNumber, "check", res.CheckName, "error", err)
-	}
-	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
-	if err != nil {
-		slog.WarnContext(ctx, "[synapse] [registry] error recording check status", "repo", res.Repo, "pr", res.PRNumber, "check", res.CheckName, "error", err)
-		return
-	}
-	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "check_updated",
-		Repo:         res.Repo,
-		PRNumber:     res.PRNumber,
-		Branch:       res.Branch,
-		HeadSHA:      res.HeadSHA,
-		TargetID:     res.TargetID,
-		Status:       prOpen,
-		CheckName:    res.CheckName,
-		CheckState:   checkState,
-		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-		Quiet:        isDependabotBranch(res.Branch),
-		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
-		slog.WarnContext(ctx, "[synapse] [pr_lifecycle] failed publishing lifecycle event", "error", err)
-	}
-	_ = updated
-}
-
-func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
-	var p GitHubCheckRunPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		return nil, fmt.Errorf("unmarshal check_run payload: %w", err)
-	}
-	res.Repo = p.Repository.FullName
-	res.Action = p.Action
-	res.CheckName = p.CheckRun.Name
-	res.HeadSHA = p.CheckRun.HeadSHA
-	res.Status = p.CheckRun.Status
-	res.Conclusion = p.CheckRun.Conclusion
-	if isBuildMetadataCheck(res.CheckName) {
-		if err := s.handleBuildMetadataCheck(ctx, p, res); err != nil {
-			return nil, err
-		}
-		return res, nil
-	}
-	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
-	slog.InfoContext(ctx, "[synapse] [github] [check_run] event", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", delivery)
-
-	recovered := false
-	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
-		if err := s.recoverCheckRun(ctx, res); err != nil {
-			return nil, err
-		}
-		recovered = true
-	}
-
-	s.recordCheckRunStatus(ctx, res)
-
-	details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
-	if lines := github.ExtractLogErrorLines(details, 10); len(lines) > 0 {
-		details = strings.Join(lines, "\n")
-	}
-	details = github.SanitizeDetailsForPrompt(details, 2000)
-	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
-	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
-		return nil, err
-	}
-	if err := s.reportCheckRunGateSuccess(ctx, p, res, recovered); err != nil {
-		return nil, err
-	}
-	return res, nil
-}
-
-// recoverCheckRun reopens a CI-failed PR on a recovering check success: it
-// syncs the registry row, then journals the merged HandleCIRecovered verdict
-// with the recovery synchronize fact before the legacy publish. Legacy-owned
-// recoveries commit the recovery in PRObject and record the fact as
-// intended; restate-owned ones make PRObject decide and publish.
-func (s *RouterServer) recoverCheckRun(ctx context.Context, res *ResolvedGitHubEvent) error {
-	targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
-	if err != nil {
-		return err
-	}
-	res.TargetID = firstNonEmpty(res.TargetID, targetID)
-	s.populateMissingBranch(ctx, res)
-	fact := pubsub.PRLifecycleEvent{
-		Event:        ghActionSynchronize,
-		Repo:         res.Repo,
-		PRNumber:     res.PRNumber,
-		Branch:       res.Branch,
-		HeadSHA:      res.HeadSHA,
-		TargetID:     res.TargetID,
-		Status:       prOpen,
-		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-		Quiet:        isDependabotBranch(res.Branch),
-		OccurredAt:   time.Now().UTC(),
-	}
-	if err := s.routeCIRecovered(ctx, res, fact); err != nil {
-		return err
-	}
-	if restateOwnsEffects(ctx) {
-		return nil
-	}
-	if err := s.publishLegacyFact(ctx, fact); err != nil {
-		slog.WarnContext(ctx, "[synapse] [pr_lifecycle] failed publishing recovery synchronize event", "repo", res.Repo, "pr", res.PRNumber, "error", err)
-	}
-	return nil
-}
-
-// reportCheckRunGateSuccess re-checks open-PR conflicts when a gate check
-// (or a recovered success) lands, then journals the check outcome to the
-// Restate journal in authoritative mode or the shadow mirror otherwise.
-func (s *RouterServer) reportCheckRunGateSuccess(ctx context.Context, p GitHubCheckRunPayload, res *ResolvedGitHubEvent, recovered bool) error {
-	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && (isGateAggregatorCheck(res.CheckName) || isRoboRevCheck(res.CheckName) || recovered) && res.PRNumber > 0 {
-		if err := logAutoUpdateError(ctx, res.Repo, "gate_success", s.autoUpdateOpenPRs(ctx, res.Repo, res.PRNumber, res.HeadSHA, "", res.CheckName)); err != nil {
-			return err
-		}
-	}
-	return s.routeCheckOutcome(ctx, res)
-}
-
-func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPushPayload) error {
-	s.resolveEventPR(ctx, res, nil, "")
-	if res.PRNumber == 0 && p.HeadCommit != nil {
-		if prNum := extractPRNumberFromCommitMessage(p.HeadCommit.Message); prNum > 0 {
-			res.PRNumber = prNum
-			res.ResolutionSource = "commit_message"
-		}
-	}
-	if res.PRNumber > 0 {
-		res.MergeSHA = res.HeadSHA
-	}
-	slog.InfoContext(ctx, "[synapse] [github] [push] event", "repo", res.Repo, "ref", p.Ref, "head_sha", res.HeadSHA, "resolved_pr", res.PRNumber, "branch", res.Branch, "source", res.ResolutionSource, "target_id", res.TargetID, "delivery", res.Delivery)
-
-	if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
-		targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
-		if err != nil {
-			return err
-		}
-		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		// Journal before the legacy publish: a journal failure leaves no
-		// merged event behind, so the redelivery retries the journal.
-		if err := s.routePREvent(ctx, "HandleMerged", restateclient.PREvent{
-			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
-			MergeSHA: res.MergeSHA, Branch: res.Branch,
-		}); err != nil {
-			return err
-		}
-		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        prMerged,
-			Repo:         res.Repo,
-			PRNumber:     res.PRNumber,
-			Branch:       res.Branch,
-			HeadSHA:      res.HeadSHA,
-			MergeSHA:     res.MergeSHA,
-			TargetID:     res.TargetID,
-			Status:       prMerged,
-			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-			Quiet:        isDependabotBranch(res.Branch),
-			OccurredAt:   time.Now().UTC(),
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
-	var p GitHubPushPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		return nil, fmt.Errorf("unmarshal push payload: %w", err)
-	}
-	res.Repo = p.Repository.FullName
-	res.Branch = p.Ref
-
-	if p.Deleted || isZeroSHA(p.After) {
-		res.ResolutionSource = "branch_deleted"
-		return res, nil
-	}
-	if !strings.HasPrefix(p.Ref, "refs/heads/") {
-		res.ResolutionSource = "non_branch_ref"
-		return res, nil
-	}
-	res.HeadSHA = p.After
-	if p.HeadCommit != nil && p.HeadCommit.ID != "" {
-		res.HeadSHA = p.HeadCommit.ID
-	}
-	if !strings.HasPrefix(p.Ref, "refs/heads/main") {
-		res.ResolutionSource = "non_main_branch"
-		return res, nil
-	}
-
-	// Journal before every legacy side effect on the push path
-	// (backfill, conflict checks, git_push dispatch): a journal failure
-	// leaves nothing behind, so the redelivery retries the journal instead
-	// of re-emitting the dispatch or duplicating downstream work.
-	if err := s.routeRepoEvent(ctx, "HandleMainPush", restateclient.RepoEvent{
-		Repo: res.Repo, MainSHA: res.HeadSHA,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := s.resolveAndBackfillPushPR(ctx, res, p); err != nil {
-		return nil, err
-	}
-
-	if err := logAutoUpdateError(ctx, res.Repo, "main_push", s.autoUpdateOpenPRs(ctx, res.Repo, 0, "", res.HeadSHA, "")); err != nil {
-		return nil, err
-	}
-	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
-		return nil, err
-	}
-	return res, nil
-}
-
 func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery string, body []byte) (res *ResolvedGitHubEvent, err error) {
 	if s.onProcessed != nil {
 		defer s.onProcessed(event, delivery)
@@ -808,25 +362,6 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 	}()
 
-	// Restate-owned jobs take the Postgres-free path: normalize and send,
-	// with zero registry calls and zero lifecycle effects.
-	if restateOwnsEffects(ctx) {
-		return s.processRestateOwnedGitHubEvent(ctx, event, delivery, body, res)
-	}
-	switch event {
-	case "ping":
-		return s.processGitHubPingEvent(delivery, body, res)
-	case ghEventPullRequest:
-		return s.processGitHubPullRequestEvent(ctx, delivery, body, res)
-	case ghEventCheckRun:
-		return s.processGitHubCheckRunEvent(ctx, delivery, body, res)
-	case ghEventWorkflowRun:
-		return s.processGitHubWorkflowRunEvent(ctx, delivery, body, res)
-	case "push":
-		return s.processGitHubPushEvent(ctx, body, res)
-	default:
-		slog.InfoContext(ctx, "[synapse] [github] [unhandled] event", "event", event, "delivery", delivery, "payload_size_bytes", len(body))
-		res.ResolutionSource = "unhandled_event"
-		return res, nil
-	}
+	// Normalize and send to Restate; synapse performs no lifecycle effect.
+	return s.processRestateOwnedGitHubEvent(ctx, event, delivery, body, res)
 }

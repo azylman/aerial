@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,19 +11,17 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/github"
-	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
-// Restate-owned GitHub path: for a webhook job stamped effects_owner=restate
-// synapse is a Postgres-free edge. It verifies (upstream), parses and
+// GitHub path: for every webhook job synapse is a Postgres-free edge. It
+// verifies (upstream), parses and
 // normalizes the payload, renders the stateless facts and collaborator DMs
 // each event carries, and sends one-way events to Restate: events with a PR
 // number go to PRObject (key repo#pr), SHA-only events go to the RepoObject
-// SHA handlers, which resolve the PR from their own durable index. It makes
-// zero pr_registry calls, asks Restate for no verdicts, and performs no
-// lifecycle effect: PRObject/RepoObject decide, commit, publish facts, wake
+// SHA handlers, which resolve the PR from their own durable index. It asks
+// Restate for no verdicts and performs no lifecycle effect: PRObject/RepoObject decide, commit, publish facts, wake
 // agents, run GitHub/Flux effects and write the pr_registry projection.
 //
 // Stateless reads stay here: the "(#N)" commit-message parse, the GitHub
@@ -41,66 +38,7 @@ import (
 // job reruns, deploy failures) is deploy-path work: processOwnedWorkflowRun
 // hands it to processOwnedMainWorkflowRun in restate_owned_deploy.go.
 
-// ownedSend runs one restate-owned send through the configured client and
-// classifies failures for the job retry policy: nothing else performs a
-// restate-owned event's effects, so a lost send must retry.
-func (s *RouterServer) ownedSend(ctx context.Context, handler string, send func(*restateclient.Client) error) error {
-	r := s.restateShadow()
-	if !r.Enabled() {
-		return restateOwnedFailure(ctx, handler, errors.New("restate-owned event with no restate_url configured"))
-	}
-	if err := send(r.client); err != nil {
-		r.sendErrors.Add(1)
-		return restateOwnedFailure(ctx, handler, err)
-	}
-	r.sends.Add(1)
-	metrics.RecordRestateShadowSend(handler, "authoritative_sent")
-	return nil
-}
-
-// sendOwnedPR sends one restate-owned PRObject event. The agent stays
-// whatever the caller knows (empty when unknown); synapse never looks the
-// owner up. PR-less events have no PRObject key and send nothing.
-func (s *RouterServer) sendOwnedPR(ctx context.Context, handler string, ev restateclient.PREvent) error {
-	if ev.PRNumber <= 0 || normalizeRepo(ev.Repo) == "" {
-		return nil
-	}
-	ev.EffectsOwner = restateclient.EffectsOwnerRestate
-	return s.ownedSend(ctx, handler, func(c *restateclient.Client) error {
-		return c.SendPREvent(ctx, handler, ev)
-	})
-}
-
-// sendOwnedRepo sends one restate-owned RepoObject event.
-func (s *RouterServer) sendOwnedRepo(ctx context.Context, handler string, ev restateclient.RepoEvent) error {
-	if normalizeRepo(ev.Repo) == "" {
-		return nil
-	}
-	ev.EffectsOwner = restateclient.EffectsOwnerRestate
-	return s.ownedSend(ctx, handler, func(c *restateclient.Client) error {
-		return c.SendRepoEvent(ctx, handler, ev)
-	})
-}
-
-// sendOwnedPROrSHA sends ev to PRObject when it carries a PR number and
-// otherwise wraps it for the RepoObject SHA handler keyed on sha. Events
-// with neither a PR nor a usable SHA send nothing.
-func (s *RouterServer) sendOwnedPROrSHA(ctx context.Context, shaHandler, prHandler, sha string, ev restateclient.PREvent) error {
-	if ev.PRNumber > 0 {
-		return s.sendOwnedPR(ctx, prHandler, ev)
-	}
-	sha = strings.TrimSpace(sha)
-	if sha == "" || isZeroSHA(sha) || normalizeRepo(ev.Repo) == "" {
-		return nil
-	}
-	ev.EffectsOwner = restateclient.EffectsOwnerRestate
-	return s.ownedSend(ctx, shaHandler, func(c *restateclient.Client) error {
-		return c.SendSHAEvent(ctx, shaHandler, restateclient.SHAEvent{Repo: ev.Repo, SHA: sha, Handler: prHandler, Event: ev})
-	})
-}
-
-// processRestateOwnedGitHubEvent is the restate-owned twin of the event
-// switch in ProcessGitHubEvent.
+// processRestateOwnedGitHubEvent dispatches one webhook job by event type.
 func (s *RouterServer) processRestateOwnedGitHubEvent(ctx context.Context, event, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	switch event {
 	case "ping":
@@ -120,8 +58,7 @@ func (s *RouterServer) processRestateOwnedGitHubEvent(ctx context.Context, event
 	}
 }
 
-// ownedFact renders one stateless aerial.pr.> fact for a restate-owned
-// event. It carries no rollout state: synapse holds no PR state, and
+// ownedFact renders one stateless aerial.pr.> fact for an event. It carries no rollout state: synapse holds no PR state, and
 // PRObject pins the PR identity, fills a missing target and renders the
 // rollout state from its committed state when it publishes the fact.
 func ownedFact(res *ResolvedGitHubEvent, event, status string) pubsub.PRLifecycleEvent {
@@ -140,32 +77,31 @@ func ownedFact(res *ResolvedGitHubEvent, event, status string) pubsub.PRLifecycl
 }
 
 // processOwnedPullRequest normalizes one pull_request webhook into its
-// PRObject event and the fact the legacy pipeline would have published.
+// PRObject event and the fact PRObject publishes for it.
 func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	var p GitHubPullRequestPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
 	}
 	populatePullRequestEvent(&p, res)
-	slog.InfoContext(ctx, "[synapse] [restate-cutover] restate-owned pull_request", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "delivery", delivery)
+	slog.InfoContext(ctx, "[synapse] [restate] pull_request", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "delivery", delivery)
 	meta := ParseAerialPRMetadata(p.PullRequest.GetBody())
 	if s.isForeignBotEvent(meta) || res.PRNumber <= 0 {
 		return res, nil
 	}
-	// Self-registration first, from legacy's exact rule (stored target
-	// wins in PRObject, see ownedHeadlessTarget): it alone fills the target
-	// and the opened/merged title, so every action fills them exactly where
-	// legacy's EnsurePRRegistered does, unmerged closes included (none).
+	// Self-registration first (the stored target wins in PRObject): it
+	// alone fills the target and the opened/merged title, and an unmerged
+	// close registers nothing.
 	res.TargetID = ""
-	if reg, ok := s.pullRequestSelfRegistration(ctx, res, p, s.ownedHeadlessTarget); ok {
+	if reg, ok := s.pullRequestSelfRegistration(res, p); ok {
 		if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
 			return nil, err
 		}
 		res.TargetID = reg.TargetID
 	}
 	title := p.PullRequest.Title
-	// Reopened and synchronize carry the title like the legacy shadow
-	// sends do (PRObject fills it only when empty); every other action
+	// Reopened and synchronize carry the title (PRObject fills it only
+	// when empty); every other action
 	// leaves it to the self-registration.
 	ev := restateclient.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
@@ -288,7 +224,7 @@ func (s *RouterServer) processOwnedCheckRun(ctx context.Context, delivery string
 		return res, s.processOwnedBuildMetadataCheck(ctx, p, res)
 	}
 	resolveOwnedPayloadPR(res, p.CheckRun.PullRequests, "check_run_payload")
-	slog.InfoContext(ctx, "[synapse] [restate-cutover] restate-owned check_run", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "status", res.Status, "conclusion", res.Conclusion, "delivery", delivery)
+	slog.InfoContext(ctx, "[synapse] [restate] check_run", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "status", res.Status, "conclusion", res.Conclusion, "delivery", delivery)
 	details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
 	if lines := github.ExtractLogErrorLines(details, 10); len(lines) > 0 {
 		details = strings.Join(lines, "\n")
@@ -321,7 +257,7 @@ func (s *RouterServer) processOwnedWorkflowRun(ctx context.Context, delivery str
 	if mainBranch {
 		prBranch = s.resolveOwnedMainPR(ctx, res)
 	}
-	slog.InfoContext(ctx, "[synapse] [restate-cutover] restate-owned workflow_run", "repo", res.Repo, "workflow", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "delivery", delivery)
+	slog.InfoContext(ctx, "[synapse] [restate] workflow_run", "repo", res.Repo, "workflow", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "delivery", delivery)
 	if err := s.refreshOwnedWorkflowRunBuildMetadata(ctx, p, res); err != nil {
 		logBuildMetadataWarning(ctx, "refreshing build metadata on workflow run", res.Repo, res.PRNumber, err)
 	}
@@ -343,8 +279,8 @@ func (s *RouterServer) processOwnedWorkflowRun(ctx context.Context, delivery str
 // recovery verdict with the recovery synchronize fact on success, the pass
 // itself, or the failure with the rendered ci_failed fact (plus the
 // collaborator DM for an untargeted collaborator PR). PRObject applies the
-// failure slots, stale-head guards and dedup the registry used to gate.
-// Gate aggregators never fail a PR, matching the legacy filter.
+// failure slots, stale-head guards and dedup. Gate aggregators never fail a
+// PR.
 func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedGitHubEvent, action, details, checkURL, shaHandler string) error {
 	if res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
 		return nil
@@ -363,9 +299,8 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 		if isGateAggregatorCheck(res.CheckName) {
 			return nil
 		}
-		// healDependabotPR's self-registration, ahead of the failure as in
-		// legacy's handleCIFailureByPRNumber.
-		if reg, ok := s.dependabotCIHealRegistration(ctx, res, s.ownedHeadlessTarget); ok {
+		// Dependabot self-registration goes ahead of the failure.
+		if reg, ok := s.dependabotCIHealRegistration(res); ok {
 			if err := s.routeSelfRegistration(ctx, res, reg); err != nil {
 				return err
 			}
@@ -416,8 +351,8 @@ func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGi
 	return nil
 }
 
-// ownedGateSuccessTrigger reports whether a check outcome is legacy's
-// stateless gate_success auto-update trigger: a completed, successful gate
+// ownedGateSuccessTrigger reports whether a check outcome is the stateless
+// gate_success auto-update trigger: a completed, successful gate
 // aggregator or RoboRev check_run on a known PR.
 func ownedGateSuccessTrigger(res *ResolvedGitHubEvent, action string) bool {
 	return res.Event == ghEventCheckRun && action == ghStatusCompleted && res.Conclusion == conclusionSuccess &&
@@ -435,8 +370,7 @@ func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prN
 }
 
 // sendOwnedCheckStatus records one pending or passed non-gate check_run on
-// a known, non-dependabot PR, matching where the legacy registry recorded
-// it (workflow runs never recorded ci_checks).
+// a known, non-dependabot PR (workflow runs record no ci_checks).
 func (s *RouterServer) sendOwnedCheckStatus(ctx context.Context, res *ResolvedGitHubEvent) error {
 	if res.Event != ghEventCheckRun || res.PRNumber <= 0 || isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName) || isDependabotBranch(res.Branch) {
 		return nil
@@ -455,8 +389,8 @@ func (s *RouterServer) sendOwnedCheckStatus(ctx context.Context, res *ResolvedGi
 	})
 }
 
-// ownedCIFailedFact renders the ci_failed fact exactly as the legacy
-// completion does, minus the registry rollout render.
+// ownedCIFailedFact renders the ci_failed fact; PRObject renders the
+// rollout state when it publishes.
 func (s *RouterServer) ownedCIFailedFact(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) pubsub.PRLifecycleEvent {
 	if strings.TrimSpace(details) == "" {
 		if isRoboRevCheck(res.CheckName) {
@@ -512,7 +446,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	}
 	s.resolveOwnedCommitPR(ctx, res)
 	res.MergeSHA = res.HeadSHA
-	slog.InfoContext(ctx, "[synapse] [restate-cutover] restate-owned push", "repo", res.Repo, "ref", p.Ref, "head_sha", res.HeadSHA, "resolved_pr", res.PRNumber, "source", res.ResolutionSource, "delivery", res.Delivery)
+	slog.InfoContext(ctx, "[synapse] [restate] push", "repo", res.Repo, "ref", p.Ref, "head_sha", res.HeadSHA, "resolved_pr", res.PRNumber, "source", res.ResolutionSource, "delivery", res.Delivery)
 	if err := s.sendOwnedPROrSHA(ctx, "HandlePushBySHA", "HandleMerged", res.HeadSHA, restateclient.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, MergeSHA: res.MergeSHA, Branch: res.Branch,
 		Facts: facts(ownedFact(res, prMerged, prMerged)),
@@ -525,8 +459,8 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	}
 	// Git-push dispatch is repo-level: RepoObject forwards the push to the
 	// Flux receiver whether or not a PR resolved, so a direct commit to main
-	// still deploys. Like the legacy dispatch, only the default owner
-	// dispatches without a known PR target; synapse no longer reads targets.
+	// still deploys. Only the default owner dispatches it; synapse reads no
+	// PR targets.
 	if s.cfgSrc.Current().DefaultOwner {
 		if err := s.sendOwnedRepo(ctx, "HandleGitPush", restateclient.RepoEvent{
 			Repo: res.Repo, MainSHA: res.HeadSHA, PRNumber: res.PRNumber, Ref: p.Ref,
@@ -537,10 +471,9 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	return res, nil
 }
 
-// restateBuildMetadataStore backs the buildmeta consumer for restate-owned
-// events: lifecycle and snapshot reads come from PRObject.GetBuildLifecycle
+// restateBuildMetadataStore backs the buildmeta consumer: lifecycle and snapshot reads come from PRObject.GetBuildLifecycle
 // and each recorded snapshot is sent as a HandleBuildMetadata event carrying
-// the optional fact. It never touches pr_registry.
+// the optional fact.
 type restateBuildMetadataStore struct {
 	srv  *RouterServer
 	fact *pubsub.PRLifecycleEvent
@@ -549,11 +482,11 @@ type restateBuildMetadataStore struct {
 var _ buildmeta.PRMetadataRegistry = restateBuildMetadataStore{}
 
 func (st restateBuildMetadataStore) lifecycle(ctx context.Context, repo string, prNumber int) (restateclient.BuildLifecycle, error) {
-	r := st.srv.restateShadow()
-	if !r.Enabled() {
-		return restateclient.BuildLifecycle{}, errors.New("restate-owned build metadata with no restate_url configured")
+	c, err := st.srv.restateClient()
+	if err != nil {
+		return restateclient.BuildLifecycle{}, err
 	}
-	return r.client.GetBuildLifecycle(ctx, repo, prNumber)
+	return c.GetBuildLifecycle(ctx, repo, prNumber)
 }
 
 func (st restateBuildMetadataStore) LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error) {
@@ -622,4 +555,21 @@ func (s *RouterServer) refreshOwnedWorkflowRunBuildMetadata(ctx context.Context,
 	consumer.SupersedeStaleBuildAttempt(ctx, repo, res.PRNumber, workflowRunEvent{ID: p.WorkflowRun.ID, Attempt: p.WorkflowRun.RunAttempt, HeadSHA: p.WorkflowRun.HeadSHA})
 	_, err := consumer.RefreshPRBuildMetadata(ctx, repo, res.PRNumber, p.WorkflowRun.HeadSHA)
 	return err
+}
+
+// checkOutcomeHandler maps a check/workflow conclusion to its PRObject
+// handler. Empty means no send: pending, cancelled, and neutral outcomes
+// carry no PRObject transition.
+func checkOutcomeHandler(res *ResolvedGitHubEvent) string {
+	if res == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(res.Conclusion)) {
+	case conclusionSuccess:
+		return "HandleCheckPassed"
+	case conclusionFailure, conclusionTimedOut:
+		return "HandleCheckFailed"
+	default:
+		return ""
+	}
 }

@@ -55,13 +55,10 @@ func TestCollaboratorConflictCarriesRenderedDM(t *testing.T) {
 	wantEffects := []restateclient.EriEffect{{Kind: "eri_direct_message", ChannelID: "111111111111111111", Content: wantMsg}}
 
 	tests := []struct {
-		name      string
-		owner     string
-		wantOwner string
-		wantDMs   int
+		name    string
+		wantDMs int
 	}{
-		{name: "legacy event sends the DM and carries it", owner: "legacy", wantOwner: "legacy", wantDMs: 1},
-		{name: "restate event carries the DM and skips the send", owner: "restate", wantOwner: "restate", wantDMs: 0},
+		{name: "event carries the DM and synapse skips the send", wantDMs: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,7 +67,6 @@ func TestCollaboratorConflictCarriesRenderedDM(t *testing.T) {
 			ts := httptest.NewServer(capture)
 			t.Cleanup(ts.Close)
 			cfg := lifecycleCfg()
-			cfg.RestateAuthoritative = true
 			cfg.RestateURL = ts.URL
 			cfg.CollaboratorCIAlerts = []CollaboratorCIAlertRule{{
 				Repo:      "azylman/aerial",
@@ -78,17 +74,13 @@ func TestCollaboratorConflictCarriesRenderedDM(t *testing.T) {
 				Authors:   map[string]string{"collab-user": "<@123456>"},
 			}}
 			disp := &mockOutboundDispatcher{}
-			srv := newLifecycleServer(cfg, &mockEventBus{}, nil, disp)
-			ctx := withEffectsOwner(context.Background(), tc.owner)
-			if err := srv.notifyCollaboratorConflict(ctx, "azylman/aerial", pr); err != nil {
+			srv := newLifecycleServer(cfg, &mockEventBus{}, disp)
+			if err := srv.notifyCollaboratorConflict(context.Background(), "azylman/aerial", pr); err != nil {
 				t.Fatalf("notifyCollaboratorConflict() err = %v", err)
 			}
 			events := capture.Events()
 			if len(events) != 1 {
 				t.Fatalf("routed events = %d, want 1", len(events))
-			}
-			if events[0].EffectsOwner != tc.wantOwner {
-				t.Errorf("effects_owner = %q, want %q", events[0].EffectsOwner, tc.wantOwner)
 			}
 			if !reflect.DeepEqual(events[0].EriEffects, wantEffects) {
 				t.Errorf("eri_effects = %+v, want %+v", events[0].EriEffects, wantEffects)

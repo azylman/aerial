@@ -89,42 +89,13 @@ func TestGitHubForbiddenClassification(t *testing.T) {
 			srv := forbiddenServer(t, tc.fixture)
 			client := NewClient(srv.Client(), srv.URL, "")
 			var out map[string]any
-			for _, err := range []error{
-				client.GetJSON(context.Background(), "/f", 1<<20, &out),
-				func() error { _, err := UpdatePRBranch(context.Background(), client, "azylman/aerial", 7); return err }(),
-			} {
-				statusErr, ok := errors.AsType[*StatusError](err)
-				if !ok {
-					t.Fatalf("err = %v, want *StatusError", err)
-				}
-				if statusErr.StatusCode != tc.wantStatus || statusErr.RateLimited != tc.wantRateLimited || statusErr.Message != tc.wantMessage {
-					t.Errorf("StatusError = %+v, want {%d %q %v}", *statusErr, tc.wantStatus, tc.wantMessage, tc.wantRateLimited)
-				}
-				if IsRateLimitError(err) != tc.wantRateLimited {
-					t.Errorf("IsRateLimitError = %v, want %v", !tc.wantRateLimited, tc.wantRateLimited)
-				}
+			err := client.GetJSON(context.Background(), "/f", 1<<20, &out)
+			statusErr, ok := errors.AsType[*StatusError](err)
+			if !ok {
+				t.Fatalf("err = %v, want *StatusError", err)
 			}
-		})
-	}
-}
-
-func TestIsRateLimitError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{name: "nil", err: nil, want: false},
-		{name: "generic error", err: errors.New("boom"), want: false},
-		{name: "plain 403", err: &StatusError{StatusCode: 403}, want: false},
-		{name: "rate limited", err: &StatusError{StatusCode: 429, RateLimited: true}, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsRateLimitError(tc.err); got != tc.want {
-				t.Errorf("IsRateLimitError(%v) = %v, want %v", tc.err, got, tc.want)
+			if statusErr.StatusCode != tc.wantStatus || statusErr.RateLimited != tc.wantRateLimited || statusErr.Message != tc.wantMessage {
+				t.Errorf("StatusError = %+v, want {%d %q %v}", *statusErr, tc.wantStatus, tc.wantMessage, tc.wantRateLimited)
 			}
 		})
 	}

@@ -2,7 +2,6 @@ package flux
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -111,41 +110,6 @@ func TestKustomizationRequestAction(t *testing.T) {
 			t.Parallel()
 			if got := KustomizationRequestAction(recorded, tc.obs); got != tc.want {
 				t.Errorf("KustomizationRequestAction() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRecordedKustomizationRequests(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		meta string
-		want map[string]model.KustomizationRequest
-	}{
-		{name: "decodes requests", meta: `{"kustomization_requests":{"agent-gamma-core":{"namespace":"apps","requested_at":"t1"}}}`, want: map[string]model.KustomizationRequest{"agent-gamma-core": {Namespace: "apps", RequestedAt: "t1"}}},
-		{name: "legacy started_jobs only", meta: `{"started_jobs":["aerial-synapse"]}`},
-		{name: "malformed requests list", meta: `{"kustomization_requests":["aerial-core"]}`},
-		{name: "malformed request entry", meta: `{"kustomization_requests":{"aerial-core":"t1"}}`},
-		{name: "nil metadata"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var meta map[string]any
-			if tc.meta != "" {
-				if err := json.Unmarshal([]byte(tc.meta), &meta); err != nil {
-					t.Fatalf("unmarshal meta: %v", err)
-				}
-			}
-			got := RecordedKustomizationRequests(meta)
-			if len(got) != len(tc.want) {
-				t.Fatalf("RecordedKustomizationRequests() = %v, want %v", got, tc.want)
-			}
-			for name, req := range tc.want {
-				if got[name] != req {
-					t.Errorf("request %s = %+v, want %+v", name, got[name], req)
-				}
 			}
 		})
 	}
