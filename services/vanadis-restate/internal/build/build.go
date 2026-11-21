@@ -12,8 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -480,11 +480,11 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		return model.VanadisBuild{}, ToTerminalErr(err)
 	}
 	chunks := planInputsToChunks(buildID, req.Chunks, now)
-	if verr := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); verr != nil {
+	if verr := buildplan.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); verr != nil {
 		RecordReconcileError(labelCreate, verr)
 		return model.VanadisBuild{}, ToTerminalErr(verr)
 	}
-	validatedChunks, err := dag.NormalizeAndValidateBuildDAG(chunks)
+	validatedChunks, err := buildplan.NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		RecordReconcileError(labelCreate, err)
 		return model.VanadisBuild{}, ToTerminalErr(err)

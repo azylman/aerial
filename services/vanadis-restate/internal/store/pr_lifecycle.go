@@ -25,6 +25,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
@@ -372,7 +373,7 @@ func deployCompletableMode(c model.VanadisChunk) bool {
 // sameDeployRepo matches repo spellings the chunk lookup already treats as
 // the same repository, including the owner-qualified variant.
 func sameDeployRepo(a, b string) bool {
-	a, b = NormalizeRepo(a), NormalizeRepo(b)
+	a, b = buildplan.NormalizeRepo(a), buildplan.NormalizeRepo(b)
 	if a == "" || b == "" {
 		return false
 	}
