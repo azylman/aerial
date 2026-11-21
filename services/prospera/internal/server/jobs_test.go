@@ -97,7 +97,7 @@ func setupMockReporterServer(t *testing.T) (*Server, *mockStoreForDelivery, *htt
 		audioData:   []byte("test-audio"),
 		contentType: "audio/wav",
 	}
-	server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: srv.URL, DefaultDiscordChannel: "prospera"}}, store, twilioMock, delivery.WithReporterHTTPClient(srv.Client()))
+	server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: srv.URL, DefaultDiscordChannel: "prospera"}}, store, twilioMock)
 	return server, store, srv
 }
 
@@ -706,7 +706,7 @@ func TestServer_Webhooks_FallbackToBackgroundGoroutine(t *testing.T) {
 		TwilioAuthToken:       cfg.TwilioAuthToken,
 		TwilioFromNumber:      cfg.TwilioFromNumber,
 		PublicWebhookBaseURL:  cfg.PublicWebhookBaseURL,
-	}}, store, twilioMock, delivery.WithReporterHTTPClient(srv.Client()))
+	}}, store, twilioMock)
 	server.SetEventBus(&failPublishBus{Bus: pubsub.NewMemoryBus()})
 
 	callID, vmCallID, smsID := triggerTwilioWebhooks(t, server, store, cfg, "fallback")

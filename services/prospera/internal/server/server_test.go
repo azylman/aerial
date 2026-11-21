@@ -64,7 +64,7 @@ func setupTestServer() (*Server, *mockStoreForDelivery, *config.Config) {
 		audioData:   []byte("test-audio"),
 		contentType: "audio/wav",
 	}
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr,
 		mediastream.WithSessionFactory(newProsperaMediaSession),
 	)
@@ -791,9 +791,9 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 func TestServer_TokenIssueFailures(t *testing.T) {
 	t.Parallel()
 	server, store, cfg := setupTestServer()
-	tokenMgrFail := twilio.NewStreamTokenManager(nil, twilio.WithEntropyReader(func([]byte) (int, error) {
+	tokenMgrFail := twilio.NewStreamTokenManager(nil, func([]byte) (int, error) {
 		return 0, errors.New("entropy failure")
-	}))
+	})
 	server.tokenMgr = tokenMgrFail
 	mux := server.Routes()
 
@@ -1180,12 +1180,14 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 			t.Parallel()
 			cfg := &config.Config{GeminiLiveModel: "gemini-3.8-live"}
 			store := newMockStoreForDelivery()
-			tokenMgr := twilio.NewStreamTokenManager(time.Now)
+			tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 			sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, tokenMgr,
-				mediastream.WithGeminiDialer(func(context.Context, string) (*websocket.Conn, error) {
-					return nil, errors.New("gemini unavailable")
+				mediastream.WithSessionFactory(func(sc mediastream.SessionConfig) mediastream.Session {
+					sc.GeminiDialer = func(context.Context, string) (*websocket.Conn, error) {
+						return nil, errors.New("gemini unavailable")
+					}
+					return newProsperaMediaSession(sc)
 				}),
-				mediastream.WithSessionFactory(newProsperaMediaSession),
 			)
 			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, delivery.NewReporter(staticConfig{cfg: cfg}, store, nil))
 			srv := httptest.NewServer(server.Routes())
