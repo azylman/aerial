@@ -453,11 +453,22 @@ const seedBuilds = (data: BuildsAPIResponse): void => act(() => useConsoleStore.
 const seedSchedules = (data: SchedulesAPIResponse): void => act(() => useConsoleStore.getState().setSchedules(data));
 
 describe('OverviewBuildsSection', () => {
-  it('renders idle empty state when no builds exist', () => {
+  it.each([
+    { name: 'before the first poll shows loading', data: null, error: null, wantText: 'LOADING BUILDS...', wantRows: 0, wantAlert: null },
+    { name: 'an empty healthy queue is idle', data: sampleBuilds({ builds: [], running_count: 0, queued_count: 0, total: 0 }), error: null, wantText: 'ALL BUILDS IDLE // NO QUEUED RUNS', wantRows: 0, wantAlert: null },
+    { name: 'a failed first poll is an error, never idle', data: null, error: 'Upstream vanadis error occurred', wantText: null, wantRows: 0, wantAlert: 'VANADIS UNREACHABLE // Upstream vanadis error occurred' },
+    { name: 'an in-band error payload is an error, never idle', data: sampleBuilds({ status: 'error', error: 'Upstream vanadis error occurred', builds: [], running_count: 0, queued_count: 0, total: 0 }), error: null, wantText: null, wantRows: 0, wantAlert: 'VANADIS UNREACHABLE // Upstream vanadis error occurred' },
+    { name: 'a failed poll over a snapshot keeps stale rows with a notice', data: sampleBuilds(), error: 'HTTP 401', wantText: null, wantRows: 3, wantAlert: 'VANADIS UNREACHABLE // SHOWING LAST SNAPSHOT // HTTP 401' },
+  ])('$name', ({ data, error, wantText, wantRows, wantAlert }) => {
+    act(() => {
+      if (data !== null) useConsoleStore.getState().setBuilds(data);
+      if (error !== null) useConsoleStore.getState().failBuilds(error);
+    });
     const { container } = render(<OverviewBuildsSection />);
-    expect(screen.getByText('ALL BUILDS IDLE // NO QUEUED RUNS')).toBeTruthy();
-    expect(container.querySelector('.section-badge')?.textContent).toBe('0 ACTIVE');
-    expect(container.querySelectorAll('.overview-build-row')).toHaveLength(0);
+    expect(screen.queryByText('ALL BUILDS IDLE // NO QUEUED RUNS') !== null).toBe(wantText === 'ALL BUILDS IDLE // NO QUEUED RUNS');
+    if (wantText !== null) expect(container.querySelector('.overview-bento-body')?.textContent).toContain(wantText);
+    expect(screen.queryByRole('alert')?.textContent?.replace(/\s+/g, ' ').trim() ?? null).toBe(wantAlert);
+    expect(container.querySelectorAll('.overview-build-row')).toHaveLength(wantRows);
   });
 
   it('renders populated build rows with active builds prioritized first, toggles inline DAG expansion on click, and navigates to builds tab', () => {
