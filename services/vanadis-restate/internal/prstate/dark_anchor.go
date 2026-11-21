@@ -28,17 +28,18 @@ func init() {
 		HandleRolloutEvent,
 		HandleDeployEvent,
 
-		// Repo handlers (chunk 06): constructors plus zero values root
-		// the handler method set, the in-memory store, and the no-op
-		// conflict/projector/fanout defaults.
-		NewRepoHandlers,
-		NewMemRepoStore,
-		RepoHandlers{},
-		MemRepoStore{},
+		// Per-PR conflict check: constructor plus zero values root the
+		// handler method set, the in-memory PR store, and the no-op
+		// conflict/rescheduler defaults. RepoHandlers is live through
+		// RepoObjectService; only its in-memory test store needs a root.
+		NewConflictHandlers,
+		NewMemPRStore,
+		ConflictHandlers{},
+		MemPRStore{},
 		noopConflictChecker{},
 		noopRescheduler{},
-		noopProjector{},
-		noopFanoutSender{},
+		NewMemRepoStore,
+		MemRepoStore{},
 
 		// Registry projection sends (chunk 02).
 		BuildProjection,

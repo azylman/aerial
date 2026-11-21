@@ -1,33 +1,42 @@
 package prstate
 
-// Dark Restate Virtual Object assembly for synapse PR lifecycle state.
+// Restate Virtual Object assembly for synapse PR lifecycle state.
 //
 // PRObject (key repo#prNumber) is the single ordered authority for per-PR
-// state; RepoObject (key repo) holds only the bounded main-push index,
-// dispatched-SHA tombstones, and fan-out sends. Postgres pr_registry stays a
-// read-only projection synced by a journaled send after the state commit and
-// is never consulted to decide a transition.
+// state; RepoObject (key repo) holds only repo-level state: the bounded
+// main-push index, dispatched-SHA tombstones, the SHA->PR routing index with
+// open and deploying sets, and SHA-only events held until indexed. Postgres
+// pr_registry stays a read-only projection synced by a journaled send after
+// the state commit and is never consulted to decide a transition.
 //
-// Chunk 07 is registration ONLY: the services below bind the frozen handler
-// surfaces beside BuildRouter so the Restate deployment discovers PRObject
-// and RepoObject, with all synapse consumers still on legacy trackers
-// (fully dark, zero caller cutover). Each handler loads Restate K/V state,
-// applies the pure disposition guard (stale-drop, terminal-absorbing), and
-// persists on apply. No external effects fire here (Discord alerts, GitHub
-// update-branch/rerun, image promotion, Flux forward), no cross-object sends
-// fire, and unmanaged collaborator PRs never signal the BuildRouter: effect
-// and routing wiring lands in later chunks through the journaled,
-// generation-scoped EffectKey boundaries frozen in contracts.go.
+// The services bind beside BuildRouter so the Restate deployment discovers
+// PRObject and RepoObject, with all synapse consumers still on the legacy
+// pipeline until the cutover chunks. Each PRObject handler loads Restate K/V
+// state, applies the pure disposition guard (stale-drop, terminal-absorbing),
+// and persists on apply. No external effects fire here (Discord alerts,
+// GitHub update-branch/rerun, image promotion, Flux forward), and unmanaged
+// collaborator PRs never signal the BuildRouter: effect and routing wiring
+// lands in later chunks through the journaled, generation-scoped EffectKey
+// boundaries frozen in contracts.go.
+//
+// The only cross-object traffic is one-way sends: PRObject sends RepoObject
+// a HandlePRIndex update after each commit that changes a routed field, and
+// RepoObject forwards resolved SHA-only events, main-advanced clears, and
+// kustomization statuses to PRObject. No exclusive handler ever waits on
+// another object, so the two can never deadlock.
 //
 // Handler signatures use restate.ObjectContext (exclusive mode), so these
 // services intentionally do not satisfy the context.Context-based PRObject
 // and RepoObject interfaces: those freeze the logic surface, this file binds
 // the Restate surface. ResolvePRBySHA takes a single request struct because
-// Restate handlers accept at most one input parameter; the durable SHA index
-// lookup wires to the projection in a later chunk and reports not-found dark.
+// Restate handlers accept at most one input parameter.
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"strings"
+	"time"
 
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
@@ -93,6 +102,7 @@ func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, m
 	if st.ApplyEvent(ev) != DispositionApply {
 		return nil
 	}
+	before := snapshotIndexView(st)
 	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) {
 		st.HeadSHA = head
 	}
@@ -100,7 +110,60 @@ func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, m
 		mutate(st)
 	}
 	restate.Set(ctx, s.stateKey, st)
+	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
+		sendPRIndex(ctx, st, ev, lifecycle)
+	}
 	return nil
+}
+
+// prIndexView is the slice of PRState RepoObject routes on.
+type prIndexView struct {
+	head     string
+	terminal TerminalState
+	epoch    uint64
+	gen      uint64
+}
+
+func snapshotIndexView(st *PRState) prIndexView {
+	return prIndexView{head: st.HeadSHA, terminal: st.Terminal, epoch: st.ReopenEpoch, gen: st.GateGeneration}
+}
+
+// indexLifecycle derives the index op for one committed transition, or ""
+// when nothing RepoObject routes on changed.
+func indexLifecycle(before, after prIndexView) string {
+	switch {
+	case after.terminal != before.terminal && after.terminal == TerminalClosed:
+		return IndexClosed
+	case after.terminal != before.terminal && after.terminal == TerminalMerged:
+		return IndexMerged
+	case after.gen > before.gen:
+		return IndexDeploying
+	case after.head != before.head || after.epoch != before.epoch:
+		return IndexActive
+	default:
+		return ""
+	}
+}
+
+// sendPRIndex sends RepoObject one one-way index update after the state
+// commit. Only merge and deploy ops carry the event merge SHA, so a merged
+// PR's squash commit resolves to it.
+func sendPRIndex(ctx restate.ObjectContext, st *PRState, ev PREvent, lifecycle string) {
+	idx := PRIndexEvent{
+		Repo:        st.Repo,
+		PRNumber:    st.PRNumber,
+		Branch:      strings.TrimSpace(ev.Branch),
+		HeadSHA:     st.HeadSHA,
+		ReopenEpoch: st.ReopenEpoch,
+		Generation:  st.GateGeneration,
+		Lifecycle:   lifecycle,
+	}
+	if lifecycle == IndexMerged || lifecycle == IndexDeploying || lifecycle == IndexDeployed {
+		if merge := strings.TrimSpace(ev.MergeSHA); merge != "" && !IsZeroSHA(merge) {
+			idx.MergeSHA = merge
+		}
+	}
+	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerPRIndex).Send(idx)
 }
 
 // applyPREvent loads the PR state, drops stale and same-epoch terminal
@@ -270,6 +333,9 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 	}
 	if out.Disposition == DispositionApply {
 		restate.Set(ctx, s.stateKey, st)
+		if !out.Deduped {
+			sendPRIndex(ctx, st, ev, IndexDeployed)
+		}
 	}
 	return out, nil
 }
@@ -281,13 +347,25 @@ func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext
 	})
 }
 
-// RepoObjectService is the dark RepoObject Virtual Object. Handlers persist
-// main-push and tombstone state to Restate K/V and fire nothing.
+// HandleMainAdvanced clears updated-for-main after RepoObject recorded a new
+// main push SHA, mirroring StateTracker.ClearUpdatedPRsForMainCommit. It is
+// the one-way target of RepoObject main-push fan-out.
+func (s *PRObjectService) HandleMainAdvanced(ctx restate.ObjectContext, ev PREvent) error {
+	return s.mutatePREvent(ctx, ev, func(st *PRState) {
+		st.ClearUpdatedForMain()
+	})
+}
+
+// RepoObjectService is the RepoObject Virtual Object. Each handler builds
+// RepoHandlers over this invocation's Restate K/V and Restate one-way sends,
+// so the logic in handlers_repo.go is the single implementation. RepoObject
+// touches only its own repo-keyed state and reaches PRObject only through
+// one-way sends. Malformed input fails terminally instead of retrying.
 type RepoObjectService struct {
 	stateKey string
 }
 
-// NewRepoObjectService builds the single dark RepoObject service.
+// NewRepoObjectService builds the single RepoObject service.
 func NewRepoObjectService() *RepoObjectService {
 	return &RepoObjectService{stateKey: repoObjectStateKey}
 }
@@ -298,62 +376,93 @@ func (*RepoObjectService) ServiceName() string {
 	return RepoObjectServiceName
 }
 
-// HandleMainPush records one main push SHA into the bounded index dark.
-// Pushes without a usable repo or SHA, and duplicate pushes, persist
-// nothing: invalid input never creates a state slot.
-func (s *RepoObjectService) HandleMainPush(ctx restate.ObjectContext, ev RepoEvent) error {
-	if NormalizeRepo(ev.Repo) == "" {
-		return nil
-	}
-	sha := strings.TrimSpace(ev.MainSHA)
-	if sha == "" || IsZeroSHA(sha) {
-		return nil
-	}
-	st, err := restate.Get[*RepoState](ctx, s.stateKey)
-	if err != nil {
-		return err
-	}
-	fresh := st == nil
-	if fresh {
-		st = NewRepoState(ev.Repo)
-	}
-	if !st.RecordMainPushSHA(ev.MainSHA) && !fresh {
-		return nil
-	}
-	restate.Set(ctx, s.stateKey, st)
-	return nil
+func (s *RepoObjectService) handlers(ctx restate.ObjectContext) *RepoHandlers {
+	return NewRepoHandlers(restateRepoStore{ctx: ctx, key: s.stateKey}, nil, restatePRSender{ctx: ctx}, restateSelfScheduler{ctx: ctx})
 }
 
-// HandleFanout is the dark main-push fan-out entrypoint. Per-PR fan-out
-// sends land in a later chunk; this assembly step registers the surface and
-// touches no state.
-func (s *RepoObjectService) HandleFanout(ctx restate.ObjectContext, ev RepoEvent) error { //nolint:revive // dark surface stub: receiver required by restate.Reflect; fanout sends wire in a later chunk.
-	return nil
+// terminalOnInvalid converts malformed-input errors to terminal errors so
+// Restate does not retry what no retry can fix.
+func terminalOnInvalid(err error) error {
+	if errors.Is(err, ErrInvalidRepoEvent) {
+		return restate.ToTerminalError(err, restate.WithErrorCode(400))
+	}
+	return err
+}
+
+// HandleMainPush records one main push SHA and fans a main-advanced send out
+// to every open PR. Duplicate pushes persist nothing.
+func (s *RepoObjectService) HandleMainPush(ctx restate.ObjectContext, ev RepoEvent) error {
+	return terminalOnInvalid(s.handlers(ctx).HandleMainPush(ctx, ev))
+}
+
+// HandleFanout re-delivers the latest main push to every open PR.
+func (s *RepoObjectService) HandleFanout(ctx restate.ObjectContext, ev RepoEvent) error {
+	return terminalOnInvalid(s.handlers(ctx).HandleFanout(ctx, ev))
 }
 
 // HandleKustomizationStatus records one dispatched-SHA tombstone scoped to
-// its gate generation dark, evicting tombstones below that generation.
-// Statuses without a usable repo or SHA persist nothing: invalid input never
-// creates a state slot.
+// its gate generation and forwards the status to every deploying PR.
 func (s *RepoObjectService) HandleKustomizationStatus(ctx restate.ObjectContext, ev RepoEvent) error {
-	repo := NormalizeRepo(ev.Repo)
-	if repo == "" {
-		return nil
-	}
-	st, err := restate.Get[*RepoState](ctx, s.stateKey)
+	return terminalOnInvalid(s.handlers(ctx).HandleKustomizationStatus(ctx, ev))
+}
+
+// HandlePRIndex applies one PRObject index update.
+func (s *RepoObjectService) HandlePRIndex(ctx restate.ObjectContext, ev PRIndexEvent) error {
+	return terminalOnInvalid(s.handlers(ctx).HandlePRIndex(ctx, ev))
+}
+
+// HandleCheckRunBySHA routes one check_run event by head SHA.
+func (s *RepoObjectService) HandleCheckRunBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
+	return s.routeBySHA(ctx, SHAKindCheckRun, ev)
+}
+
+// HandleWorkflowRunBySHA routes one workflow_run event by head SHA.
+func (s *RepoObjectService) HandleWorkflowRunBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
+	return s.routeBySHA(ctx, SHAKindWorkflowRun, ev)
+}
+
+// HandlePushBySHA routes one push event by commit SHA (for example a
+// squash-merge push that carries no PR number).
+func (s *RepoObjectService) HandlePushBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
+	return s.routeBySHA(ctx, SHAKindPush, ev)
+}
+
+// HandleImageReadyBySHA routes one image-ready event by commit SHA.
+func (s *RepoObjectService) HandleImageReadyBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
+	return s.routeBySHA(ctx, SHAKindImageReady, ev)
+}
+
+func (s *RepoObjectService) routeBySHA(ctx restate.ObjectContext, kind string, ev SHAEvent) error {
+	out, err := s.handlers(ctx).RouteBySHA(ctx, kind, ev)
 	if err != nil {
-		return err
+		return terminalOnInvalid(err)
 	}
-	if st == nil {
-		st = NewRepoState(repo)
+	if out.Held {
+		slog.InfoContext(ctx, "[prstate] RepoObject held SHA event until indexed", "repo", NormalizeRepo(ev.Repo), "sha", ev.SHA, "kind", kind, "handler", ev.Handler, "held_id", out.HeldID)
 	}
-	sha := strings.TrimSpace(ev.HeadSHA)
-	if sha == "" || IsZeroSHA(sha) {
-		return nil
+	for _, dropped := range out.Evicted {
+		slog.WarnContext(ctx, "[prstate] RepoObject evicted held SHA event at capacity", "repo", NormalizeRepo(ev.Repo), "sha", dropped.Event.SHA, "kind", dropped.Kind, "handler", dropped.Event.Handler, "held_id", dropped.ID)
 	}
-	st.RecordTombstone(sha, ev.Generation)
-	st.EvictTombstonesBelowGeneration(ev.Generation)
-	restate.Set(ctx, s.stateKey, st)
+	return nil
+}
+
+// HandleHeldReplay is the delayed self-send that replays held events once
+// their SHA is indexed.
+func (s *RepoObjectService) HandleHeldReplay(ctx restate.ObjectContext, req HeldReplayRequest) error {
+	return terminalOnInvalid(s.handlers(ctx).ReplayHeld(ctx, restate.Key(ctx), req.SHA))
+}
+
+// HandleHeldExpiry is the delayed self-send that drops one held event that
+// never resolved.
+func (s *RepoObjectService) HandleHeldExpiry(ctx restate.ObjectContext, req HeldExpiryRequest) error {
+	repo := restate.Key(ctx)
+	dropped, err := s.handlers(ctx).ExpireHeld(ctx, repo, req.ID)
+	if err != nil {
+		return terminalOnInvalid(err)
+	}
+	if dropped {
+		slog.WarnContext(ctx, "[prstate] RepoObject expired unresolved held SHA event", "repo", repo, "held_id", req.ID)
+	}
 	return nil
 }
 
@@ -371,11 +480,64 @@ type ResolveSHAResponse struct {
 	Found    bool   `json:"found"`
 }
 
-// ResolvePRBySHA resolves a commit SHA dark. The durable SHA index wires to
-// the read-only projection in a later chunk, so every lookup reports
-// not-found and touches no Restate K/V.
-func (s *RepoObjectService) ResolvePRBySHA(ctx restate.ObjectSharedContext, req ResolveSHARequest) (ResolveSHAResponse, error) { //nolint:revive // dark surface stub: receiver required by restate.Reflect; durable SHA index wires in a later chunk.
-	return ResolveSHAResponse{}, nil
+// ResolvePRBySHA resolves a commit SHA through the durable RepoObject index
+// (newest claim wins). It is a shared, read-only handler: it never takes the
+// exclusive lock and never writes.
+func (s *RepoObjectService) ResolvePRBySHA(ctx restate.ObjectSharedContext, req ResolveSHARequest) (ResolveSHAResponse, error) {
+	st, err := restate.Get[*RepoState](ctx, s.stateKey)
+	if err != nil {
+		return ResolveSHAResponse{}, err
+	}
+	entry, ok := st.ResolveSHA(req.SHA)
+	if !ok {
+		return ResolveSHAResponse{}, nil
+	}
+	return ResolveSHAResponse{PRNumber: entry.PRNumber, Branch: entry.Branch, Found: true}, nil
+}
+
+// restateRepoStore binds RepoStateStore to this invocation's Restate K/V.
+// The object key already scopes the slot, so the repo argument is unused.
+type restateRepoStore struct {
+	ctx restate.ObjectContext
+	key string
+}
+
+func (s restateRepoStore) LoadRepo(string) (*RepoState, error) {
+	st, err := restate.Get[*RepoState](s.ctx, s.key)
+	if err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (s restateRepoStore) SaveRepo(st *RepoState) {
+	restate.Set(s.ctx, s.key, st)
+}
+
+// restatePRSender binds PRSender to a journaled one-way ObjectSend.
+type restatePRSender struct {
+	ctx restate.ObjectContext
+}
+
+func (s restatePRSender) SendPR(_ context.Context, handler string, ev PREvent) error {
+	restate.ObjectSend(s.ctx, PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), handler).Send(ev)
+	return nil
+}
+
+// restateSelfScheduler binds RepoSelfScheduler to delayed one-way
+// ObjectSends back to this RepoObject.
+type restateSelfScheduler struct {
+	ctx restate.ObjectContext
+}
+
+func (s restateSelfScheduler) ScheduleHeldReplay(_ context.Context, repo, sha string, delay time.Duration) error {
+	restate.ObjectSend(s.ctx, RepoObjectServiceName, RepoObjectKey(repo), RepoHandlerHeldReplay).Send(HeldReplayRequest{SHA: sha}, restate.WithDelay(delay))
+	return nil
+}
+
+func (s restateSelfScheduler) ScheduleHeldExpiry(_ context.Context, repo string, id uint64, delay time.Duration) error {
+	restate.ObjectSend(s.ctx, RepoObjectServiceName, RepoObjectKey(repo), RepoHandlerHeldExpiry).Send(HeldExpiryRequest{ID: id}, restate.WithDelay(delay))
+	return nil
 }
 
 // RegisterPRStateServices binds the dark PRObject and RepoObject services

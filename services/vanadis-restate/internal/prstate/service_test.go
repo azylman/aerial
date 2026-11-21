@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
@@ -20,6 +21,58 @@ import (
 type stateCapture[T any] struct {
 	setCalled bool
 	saved     T
+	sends     *sendCapture
+}
+
+// sentCall is one Restate one-way send: target, handler, payload, and
+// whether it carried a delay option.
+type sentCall struct {
+	service string
+	key     string
+	method  string
+	input   any
+	delayed bool
+}
+
+// sendCapture records every restate.ObjectSend in call order. ObjectSend
+// resolves the client (Object) and sends on it immediately, so each Send
+// completes the most recent Object call.
+type sendCapture struct {
+	mu    sync.Mutex
+	calls []sentCall
+}
+
+func (c *sendCapture) record(args mock.Arguments) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, sentCall{service: args.String(0), key: args.String(1), method: args.String(2)})
+}
+
+func (c *sendCapture) complete(input any, delayed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	last := &c.calls[len(c.calls)-1]
+	last.input = input
+	last.delayed = delayed
+}
+
+func (c *sendCapture) snapshot() []sentCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]sentCall(nil), c.calls...)
+}
+
+// captureSends stubs restate.ObjectSend on mc. Every expectation is Maybe so
+// handlers that send nothing pass too; rows assert the exact send list.
+func captureSends(t *testing.T, mc *mocks.MockContext) *sendCapture {
+	t.Helper()
+	rec := &sendCapture{}
+	client := mocks.NewMockClient(t)
+	invocation := mocks.NewMockInvocation(t)
+	mc.On("Object", mock.Anything, mock.Anything, mock.Anything).Run(rec.record).Return(client).Maybe()
+	client.On("Send", mock.Anything).Run(func(args mock.Arguments) { rec.complete(args.Get(0), false) }).Return(invocation).Maybe()
+	client.On("Send", mock.Anything, mock.Anything).Run(func(args mock.Arguments) { rec.complete(args.Get(0), true) }).Return(invocation).Maybe()
+	return rec
 }
 
 // newStateMock stubs the Restate K/V surface for one dark handler call: Get
@@ -28,7 +81,8 @@ type stateCapture[T any] struct {
 func newStateMock[T any](t *testing.T, existing T) (*mocks.MockContext, *stateCapture[T]) {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
-	rec := &stateCapture[T]{}
+	rec := &stateCapture[T]{sends: captureSends(t, mc)}
+	mc.On("Key").Return("azylman/aerial").Maybe()
 	mc.On("Get", "state", mock.Anything).Run(func(args mock.Arguments) {
 		if pp, ok := args.Get(1).(*T); ok && pp != nil {
 			*pp = existing
@@ -66,8 +120,8 @@ func sortedHandlerNames(def restate.ServiceDefinition) string {
 }
 
 // TestRegisterPRStateServices pins dark registration: frozen service names
-// matching the synapse ingress invoker defaults, the exact 13-handler PR
-// surface and 4-handler repo surface, and nil-safe dark defaults.
+// matching the synapse ingress invoker defaults, the exact 17-handler PR
+// surface and 11-handler repo surface, and nil-safe dark defaults.
 func TestRegisterPRStateServices(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -85,8 +139,8 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
-			wantRepoHandler: "HandleFanout,HandleKustomizationStatus,HandleMainPush,ResolvePRBySHA",
+			wantPRHandlers:  "HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress",
+			wantRepoHandler: "HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRunBySHA,ResolvePRBySHA",
 		},
 	}
 	for _, tc := range tests {
@@ -637,82 +691,6 @@ func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 	}
 }
 
-// TestRepoObjectService_DarkHandlers pins the frozen repo handlers: main
-// pushes persist exactly once per new SHA, idempotent and invalid pushes
-// persist nothing, kustomization statuses scope tombstones by generation,
-// and K/V failures surface without persisting.
-func TestRepoObjectService_DarkHandlers(t *testing.T) {
-	t.Parallel()
-	dupState := NewRepoState("aerial")
-	dupState.RecordMainPushSHA("abc123")
-	pushMc, pushRec := newStateMock(t, (*RepoState)(nil))
-	dupMc, dupRec := newStateMock(t, dupState)
-	badPushMc := mocks.NewMockContext(t)
-	badRepoMc := mocks.NewMockContext(t)
-	pushErrMc := newStateErrorMock(t)
-	statusMc, statusRec := newStateMock(t, (*RepoState)(nil))
-	emptyMc, emptyRec := newStateMock(t, (*RepoState)(nil))
-	emptyRepoMc := mocks.NewMockContext(t)
-	statusErrMc := newStateErrorMock(t)
-	tests := []struct {
-		name        string
-		got         error
-		rec         *stateCapture[*RepoState]
-		wantSet     bool
-		wantErr     bool
-		wantLatest  string
-		wantTombSHA string
-		wantTombGen uint64
-	}{
-		{name: "main push persists", got: NewRepoObjectService().HandleMainPush(restate.WithMockContext(pushMc), RepoEvent{Repo: "aerial", MainSHA: "abc123"}), rec: pushRec, wantSet: true, wantLatest: "abc123"},
-		{name: "duplicate push persists nothing", got: NewRepoObjectService().HandleMainPush(restate.WithMockContext(dupMc), RepoEvent{Repo: "aerial", MainSHA: "abc123"}), rec: dupRec, wantSet: false},
-		{name: "empty sha push persists nothing", got: NewRepoObjectService().HandleMainPush(restate.WithMockContext(badPushMc), RepoEvent{Repo: "aerial"}), rec: &stateCapture[*RepoState]{}, wantSet: false},
-		{name: "empty repo push persists nothing", got: NewRepoObjectService().HandleMainPush(restate.WithMockContext(badRepoMc), RepoEvent{MainSHA: "abc123"}), rec: &stateCapture[*RepoState]{}, wantSet: false},
-		{name: "main push load error surfaces", got: NewRepoObjectService().HandleMainPush(restate.WithMockContext(pushErrMc), RepoEvent{Repo: "aerial", MainSHA: "abc123"}), rec: &stateCapture[*RepoState]{}, wantSet: false, wantErr: true},
-		{name: "kustomization status scopes tombstone", got: NewRepoObjectService().HandleKustomizationStatus(restate.WithMockContext(statusMc), RepoEvent{Repo: "aerial", HeadSHA: "abc123", Generation: 2}), rec: statusRec, wantSet: true, wantTombSHA: "abc123", wantTombGen: 2},
-		{name: "empty sha status persists nothing", got: NewRepoObjectService().HandleKustomizationStatus(restate.WithMockContext(emptyMc), RepoEvent{Repo: "aerial", Generation: 2}), rec: emptyRec, wantSet: false},
-		{name: "empty repo status persists nothing", got: NewRepoObjectService().HandleKustomizationStatus(restate.WithMockContext(emptyRepoMc), RepoEvent{HeadSHA: "abc123", Generation: 2}), rec: &stateCapture[*RepoState]{}, wantSet: false},
-		{name: "kustomization status load error surfaces", got: NewRepoObjectService().HandleKustomizationStatus(restate.WithMockContext(statusErrMc), RepoEvent{Repo: "aerial", HeadSHA: "abc123", Generation: 2}), rec: &stateCapture[*RepoState]{}, wantSet: false, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.wantErr && tc.got == nil {
-				t.Fatal("handler returned nil, want kv error")
-			}
-			if !tc.wantErr && tc.got != nil {
-				t.Fatalf("handler returned %v, want nil", tc.got)
-			}
-			if tc.rec.setCalled != tc.wantSet {
-				t.Fatalf("setCalled = %v, want %v", tc.rec.setCalled, tc.wantSet)
-			}
-			if !tc.wantSet {
-				return
-			}
-			require.NotNil(t, tc.rec.saved)
-			if tc.wantLatest != "" && tc.rec.saved.LatestMainSHA != tc.wantLatest {
-				t.Fatalf("latest = %q, want %q", tc.rec.saved.LatestMainSHA, tc.wantLatest)
-			}
-			if tc.wantTombSHA != "" && tc.rec.saved.Tombstones[tc.wantTombSHA] != tc.wantTombGen {
-				t.Fatalf("tombstone[%q] = %d, want %d", tc.wantTombSHA, tc.rec.saved.Tombstones[tc.wantTombSHA], tc.wantTombGen)
-			}
-		})
-	}
-}
-
-// TestRepoObjectService_FanoutAndResolve pins the dark fanout and SHA resolve stubs.
-func TestRepoObjectService_FanoutAndResolve(t *testing.T) {
-	t.Parallel()
-	mc := mocks.NewMockContext(t)
-	repoSvc := NewRepoObjectService()
-	err := repoSvc.HandleFanout(restate.WithMockContext(mc), RepoEvent{Repo: "aerial"})
-	require.NoError(t, err)
-
-	resp, rErr := repoSvc.ResolvePRBySHA(restate.WithMockContext(mc), ResolveSHARequest{Repo: "aerial", SHA: "abc123"})
-	require.NoError(t, rErr)
-	require.False(t, resp.Found)
-}
-
 // TestPRObjectService_OwnerPreserved proves lifecycle events never clobber a
 // stored owner: an event agent is only a hint that fills an empty slot.
 func TestPRObjectService_OwnerPreserved(t *testing.T) {
@@ -737,6 +715,236 @@ func TestPRObjectService_OwnerPreserved(t *testing.T) {
 			require.NoError(t, NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), ev))
 			require.True(t, rec.setCalled)
 			assert.Equal(t, tc.wantAgent, rec.saved.Agent)
+		})
+	}
+}
+
+func prIndexSend(idx PRIndexEvent) sentCall {
+	return sentCall{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: idx}
+}
+
+func prObjectSend(pr int, method string, ev PREvent) sentCall {
+	return sentCall{service: "PRObject", key: PRObjectKey("aerial", pr), method: method, input: ev}
+}
+
+func assertSends(t *testing.T, got, want []sentCall) {
+	t.Helper()
+	if len(got) == 0 && len(want) == 0 {
+		return
+	}
+	assert.Equal(t, want, got)
+}
+
+// TestPRObjectService_IndexSends pins the one-way HandlePRIndex updates
+// PRObject sends RepoObject after commits that change a routed field, and
+// that unchanged, stale, and deduped transitions send nothing.
+func TestPRObjectService_IndexSends(t *testing.T) {
+	t.Parallel()
+	known := func() *PRState { return &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"} }
+	closed := known()
+	closed.Terminal = TerminalClosed
+	deduped := known()
+	deduped.MarkEffectDispatched(deduped.EffectKeyFor(EffectDeployDispatch, "abc123", "eri", ""))
+	firstMc, firstRec := newStateMock[*PRState](t, nil)
+	sameMc, sameRec := newStateMock(t, known())
+	staleMc, staleRec := newStateMock(t, known())
+	mergedMc, mergedRec := newStateMock(t, known())
+	closedMc, closedRec := newStateMock(t, known())
+	reopenMc, reopenRec := newStateMock(t, closed)
+	kustMc, kustRec := newStateMock(t, known())
+	deployMc, deployRec := newStateMock(t, known())
+	dedupMc, dedupRec := newStateMock(t, deduped)
+	svc := NewPRObjectService()
+	_, deployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(deployMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri", MergeSHA: "m1"})
+	_, dedupErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(dedupMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri"})
+	tests := []struct {
+		name      string
+		got       error
+		sends     *sendCapture
+		wantSends []sentCall
+	}{
+		{name: "first head touch indexes active", got: svc.HandleCheckFailed(restate.WithMockContext(firstMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Branch: " feat-a ", CheckName: "ci"}), sends: firstRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", Lifecycle: IndexActive})}},
+		{name: "same head sends nothing", got: svc.HandleCheckPassed(restate.WithMockContext(sameMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}), sends: sameRec.sends},
+		{name: "stale head sends nothing", got: svc.HandleCheckFailed(restate.WithMockContext(staleMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "def456"}), sends: staleRec.sends},
+		{name: "merge indexes merge sha", got: svc.HandleMerged(restate.WithMockContext(mergedMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1"}), sends: mergedRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexMerged})}},
+		{name: "close indexes closed without merge sha", got: svc.HandleClosed(restate.WithMockContext(closedMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1"}), sends: closedRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Lifecycle: IndexClosed})}},
+		{name: "reopen indexes the new epoch", got: svc.HandleReopened(restate.WithMockContext(reopenMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: 1}), sends: reopenRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: 1, Lifecycle: IndexActive})}},
+		{name: "kustomization request indexes deploying", got: svc.HandleKustomizationRequested(restate.WithMockContext(kustMc), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "abc123"}), sends: kustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "abc123", Generation: 1, Lifecycle: IndexDeploying})}},
+		{name: "recorded deploy success indexes deployed", got: deployErr, sends: deployRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexDeployed})}},
+		{name: "deduped deploy success sends nothing", got: dedupErr, sends: dedupRec.sends},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.NoError(t, tc.got)
+			assertSends(t, tc.sends.snapshot(), tc.wantSends)
+		})
+	}
+}
+
+// TestPRObjectService_HandleMainAdvanced proves the RepoObject main-push
+// fan-out target clears updated-for-main and is absorbed by terminal PRs.
+func TestPRObjectService_HandleMainAdvanced(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		existing    *PRState
+		wantSet     bool
+		wantUpdated bool
+	}{
+		{name: "open pr clears updated for main", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", UpdatedForMain: true}, wantSet: true},
+		{name: "merged pr absorbs the clear", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", UpdatedForMain: true, Terminal: TerminalMerged}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := newStateMock(t, tc.existing)
+			require.NoError(t, NewPRObjectService().HandleMainAdvanced(restate.WithMockContext(mc), PREvent{Event: "main_advanced", Repo: "aerial", PRNumber: 101}))
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			if tc.wantSet {
+				assert.Equal(t, tc.wantUpdated, rec.saved.UpdatedForMain)
+			}
+			assertSends(t, rec.sends.snapshot(), nil)
+		})
+	}
+}
+
+// bareRepoMock stubs a RepoObject invocation that must reject its input
+// before touching Restate K/V or sending anything.
+func bareRepoMock(t *testing.T) (*mocks.MockContext, *stateCapture[*RepoState]) {
+	t.Helper()
+	mc := mocks.NewMockContext(t)
+	mc.On("Key").Return("azylman/aerial").Maybe()
+	return mc, &stateCapture[*RepoState]{}
+}
+
+// repoMock stubs one RepoObject invocation over a seeded RepoState.
+func repoMock(t *testing.T, seed repoSeed) (*mocks.MockContext, *stateCapture[*RepoState]) {
+	t.Helper()
+	var existing *RepoState
+	if !seed.empty() {
+		existing = loadRepoForTest(t, seedRepoStore(seed, false))
+	}
+	return newStateMock(t, existing)
+}
+
+// TestRepoObjectService_Handlers proves the Restate binding of every
+// exclusive RepoObject handler: Restate K/V round-trips, one-way sends to
+// PRObject, delayed self-sends, and terminal errors for malformed input.
+func TestRepoObjectService_Handlers(t *testing.T) {
+	t.Parallel()
+	openPR := []PRIndexEvent{idxActive(101, "abc123", "feat-a", 0)}
+	deploying := []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1"), idxDeploying(101, "m1", 2)}
+	held := repoSeed{held: []SHAEvent{heldCheck("m9")}}
+	svc := NewRepoObjectService()
+	pushMc, pushRec := repoMock(t, repoSeed{mains: []string{"main1"}, index: openPR})
+	dupMc, dupRec := repoMock(t, repoSeed{mains: []string{"main1"}})
+	badPushMc, badPushRec := bareRepoMock(t)
+	errPushMc := newStateErrorMock(t)
+	fanMc, fanRec := repoMock(t, repoSeed{mains: []string{"main1"}, index: openPR})
+	badFanMc, badFanRec := bareRepoMock(t)
+	kustMc, kustRec := repoMock(t, repoSeed{index: deploying})
+	badKustMc, badKustRec := bareRepoMock(t)
+	idxMc, idxRec := repoMock(t, held)
+	badIdxMc, badIdxRec := bareRepoMock(t)
+	hitMc, hitRec := repoMock(t, repoSeed{index: openPR})
+	missMc, missRec := repoMock(t, repoSeed{})
+	pushHitMc, pushHitRec := repoMock(t, repoSeed{index: deploying})
+	fullMc, fullRec := repoMock(t, repoSeed{held: heldFill(64)})
+	badRouteMc, badRouteRec := bareRepoMock(t)
+	errRouteMc := newStateErrorMock(t)
+	replayMc, replayRec := repoMock(t, repoSeed{held: []SHAEvent{heldCheck("abc123")}, index: openPR})
+	badReplayMc, badReplayRec := bareRepoMock(t)
+	expireMc, expireRec := repoMock(t, held)
+	staleExpireMc, staleExpireRec := repoMock(t, held)
+	errExpireMc := newStateErrorMock(t)
+	errExpireMc.On("Key").Return("azylman/aerial")
+	forwardedCheck := PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci", EffectsOwner: EffectsOwnerLegacy}
+	tests := []struct {
+		name         string
+		got          error
+		rec          *stateCapture[*RepoState]
+		wantErr      bool
+		wantTerminal bool
+		wantSet      bool
+		wantSends    []sentCall
+	}{
+		{name: "main push fans out to open prs", got: svc.HandleMainPush(restate.WithMockContext(pushMc), RepoEvent{Repo: "aerial", MainSHA: "main2"}), rec: pushRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101, EffectsOwner: EffectsOwnerLegacy})}},
+		{name: "duplicate main push persists nothing", got: svc.HandleMainPush(restate.WithMockContext(dupMc), RepoEvent{Repo: "aerial", MainSHA: "main1"}), rec: dupRec},
+		{name: "zero sha main push fails terminally", got: svc.HandleMainPush(restate.WithMockContext(badPushMc), RepoEvent{Repo: "aerial", MainSHA: "0000000"}), rec: badPushRec, wantErr: true, wantTerminal: true},
+		{name: "main push load error surfaces", got: svc.HandleMainPush(restate.WithMockContext(errPushMc), RepoEvent{Repo: "aerial", MainSHA: "main1"}), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
+		{name: "fanout resends main advanced", got: svc.HandleFanout(restate.WithMockContext(fanMc), RepoEvent{Repo: "aerial"}), rec: fanRec, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101, EffectsOwner: EffectsOwnerLegacy})}},
+		{name: "fanout without repo fails terminally", got: svc.HandleFanout(restate.WithMockContext(badFanMc), RepoEvent{}), rec: badFanRec, wantErr: true, wantTerminal: true},
+		{name: "kustomization status records tombstone and forwards", got: svc.HandleKustomizationStatus(restate.WithMockContext(kustMc), RepoEvent{Repo: "aerial", HeadSHA: "dep1", Generation: 2, Kustomization: "eri"}), rec: kustRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleRolloutProgress", PREvent{Event: "kustomization_status", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", GateGeneration: 2, EffectsOwner: EffectsOwnerLegacy, Kustomization: "eri"})}},
+		{name: "kustomization status without repo fails terminally", got: svc.HandleKustomizationStatus(restate.WithMockContext(badKustMc), RepoEvent{HeadSHA: "dep1"}), rec: badKustRec, wantErr: true, wantTerminal: true},
+		{name: "pr index of a held sha schedules delayed replay", got: svc.HandlePRIndex(restate.WithMockContext(idxMc), idxMerged(101, "h1", "m9")), rec: idxRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldReplay", input: HeldReplayRequest{SHA: "m9"}, delayed: true}}},
+		{name: "pr index without pr number fails terminally", got: svc.HandlePRIndex(restate.WithMockContext(badIdxMc), idxActive(0, "h1", "", 0)), rec: badIdxRec, wantErr: true, wantTerminal: true},
+		{name: "check run hit forwards to probject", got: svc.HandleCheckRunBySHA(restate.WithMockContext(hitMc), heldCheck("abc123")), rec: hitRec, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
+		{name: "workflow run miss holds with delayed expiry", got: svc.HandleWorkflowRunBySHA(restate.WithMockContext(missMc), heldCheck("abc123")), rec: missRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 1}, delayed: true}}},
+		{name: "push hit forwards merged", got: svc.HandlePushBySHA(restate.WithMockContext(pushHitMc), SHAEvent{Repo: "aerial", SHA: "m1", Handler: PRHandlerMerged, Event: PREvent{Event: "merged"}}), rec: pushHitRec, wantSends: []sentCall{prObjectSend(101, "HandleMerged", PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy})}},
+		{name: "image ready miss at capacity evicts and holds", got: svc.HandleImageReadyBySHA(restate.WithMockContext(fullMc), SHAEvent{Repo: "aerial", SHA: "m2", Handler: PRHandlerRolloutProgress}), rec: fullRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 65}, delayed: true}}},
+		{name: "unroutable handler fails terminally", got: svc.HandleImageReadyBySHA(restate.WithMockContext(badRouteMc), SHAEvent{Repo: "aerial", SHA: "m2", Handler: "HandleDeployDispatched"}), rec: badRouteRec, wantErr: true, wantTerminal: true},
+		{name: "route load error surfaces", got: svc.HandleCheckRunBySHA(restate.WithMockContext(errRouteMc), heldCheck("abc123")), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
+		{name: "held replay forwards resolved events", got: svc.HandleHeldReplay(restate.WithMockContext(replayMc), HeldReplayRequest{SHA: "abc123"}), rec: replayRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
+		{name: "held replay without sha fails terminally", got: svc.HandleHeldReplay(restate.WithMockContext(badReplayMc), HeldReplayRequest{}), rec: badReplayRec, wantErr: true, wantTerminal: true},
+		{name: "held expiry drops a waiting event", got: svc.HandleHeldExpiry(restate.WithMockContext(expireMc), HeldExpiryRequest{ID: 1}), rec: expireRec, wantSet: true},
+		{name: "held expiry of a replayed id persists nothing", got: svc.HandleHeldExpiry(restate.WithMockContext(staleExpireMc), HeldExpiryRequest{ID: 9}), rec: staleExpireRec},
+		{name: "held expiry load error surfaces", got: svc.HandleHeldExpiry(restate.WithMockContext(errExpireMc), HeldExpiryRequest{ID: 1}), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if (tc.got != nil) != tc.wantErr {
+				t.Fatalf("handler err = %v, wantErr %v", tc.got, tc.wantErr)
+			}
+			if restate.IsTerminalError(tc.got) != tc.wantTerminal {
+				t.Fatalf("terminal = %v, want %v (err %v)", restate.IsTerminalError(tc.got), tc.wantTerminal, tc.got)
+			}
+			if tc.rec.setCalled != tc.wantSet {
+				t.Fatalf("setCalled = %v, want %v", tc.rec.setCalled, tc.wantSet)
+			}
+			if tc.rec.sends != nil {
+				assertSends(t, tc.rec.sends.snapshot(), tc.wantSends)
+			}
+		})
+	}
+}
+
+// TestRepoObjectService_ResolvePRBySHA proves the shared read-only lookup
+// answers from the durable index and never writes.
+func TestRepoObjectService_ResolvePRBySHA(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		seed    repoSeed
+		kvErr   bool
+		sha     string
+		want    ResolveSHAResponse
+		wantErr bool
+	}{
+		{name: "hit resolves pr and branch", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "abc123", "feat-a", 0)}}, sha: "ABC123", want: ResolveSHAResponse{PRNumber: 101, Branch: "feat-a", Found: true}},
+		{name: "miss reports not found", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "abc123", "feat-a", 0)}}, sha: "zzz999"},
+		{name: "missing state reports not found", sha: "abc123"},
+		{name: "kv error surfaces", kvErr: true, sha: "abc123", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mc *mocks.MockContext
+			var rec *stateCapture[*RepoState]
+			if tc.kvErr {
+				mc = newStateErrorMock(t)
+			} else {
+				mc, rec = repoMock(t, tc.seed)
+			}
+			got, err := NewRepoObjectService().ResolvePRBySHA(restate.WithMockContext(mc), ResolveSHARequest{Repo: "aerial", SHA: tc.sha})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ResolvePRBySHA err = %v, wantErr %v", err, tc.wantErr)
+			}
+			assert.Equal(t, tc.want, got)
+			if rec != nil && rec.setCalled {
+				t.Fatal("shared resolve persisted state")
+			}
 		})
 	}
 }
