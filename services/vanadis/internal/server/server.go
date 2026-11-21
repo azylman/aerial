@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -137,8 +136,9 @@ type VanadisServer struct {
 	auth       *k8sauth.Authenticator
 }
 
-// NewVanadisServer constructs a new VanadisServer instance.
-func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client, auth ...*k8sauth.Authenticator) *VanadisServer {
+// NewVanadisServer constructs a new VanadisServer instance. restateCfg is
+// resolved once by app wiring (RunApp); the server never reads env itself.
+func NewVanadisServer(cfg Config, restateCfg RestateConfig, st VanadisStore, httpClient *http.Client, auth ...*k8sauth.Authenticator) *VanadisServer {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
@@ -151,7 +151,7 @@ func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client, auth
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
 	return &VanadisServer{
 		cfg:        cfg,
-		restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")),
+		restateCfg: restateCfg,
 		httpClient: tracing.Client(httpClient),
 		store:      st,
 		auth:       a,
