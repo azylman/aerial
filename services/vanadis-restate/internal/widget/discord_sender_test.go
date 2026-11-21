@@ -305,7 +305,7 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discord widget deliverer is nil")
 
-	d, nErr := NewDiscordWidgetDeliverer("")
+	d, nErr := NewDiscordWidgetDeliverer("", "")
 	require.NoError(t, nErr)
 	_, dErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
 	require.Error(t, dErr)
@@ -868,7 +868,7 @@ func TestDelivererWithNow(t *testing.T) {
 	t.Parallel()
 	fixedTime := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
 	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-clock"}}
-	d, err := NewDiscordWidgetDeliverer("")
+	d, err := NewDiscordWidgetDeliverer("", "")
 	require.NoError(t, err)
 	d.sender = mockSender
 	d.nowFn = func() time.Time { return fixedTime }
@@ -1108,36 +1108,39 @@ func TestFormatWidgetFooterTextTable(t *testing.T) {
 
 func TestNewDiscordWidgetDelivererTokens(t *testing.T) {
 	tests := []struct {
-		name       string
-		token      string
-		envToken   string
-		configPath string
-		hasSession bool
+		name           string
+		agent          string
+		token          string
+		envToken       string
+		configPath     string
+		wantOwner      string
+		wantConfigPath string
+		hasSession     bool
 	}{
-		{"token with Bot prefix", "Bot test-token", "", "", true},
-		{"token without Bot prefix", "test-token-raw", "", "/custom/path", true},
-		{"token from env", "", "env-token", "", true},
-		{"empty token", "", "", "", false},
+		{"token with Bot prefix", "", "Bot test-token", "", "", "aerial", DefaultWidgetConfigPath, true},
+		{"token without Bot prefix", "aerial", "test-token-raw", "", "/custom/path", "aerial", "/custom/path", true},
+		{"token from env", "", "", "env-token", "", "aerial", DefaultWidgetConfigPath, true},
+		{"empty token", "", "", "", "", "aerial", DefaultWidgetConfigPath, false},
+		{"sibling runner keys env token under own agent", " Agent-Alpha ", "", "env-token", "/share/agent-alpha/config.yaml", "agent-alpha", "/share/agent-alpha/config.yaml", true},
+		{"sibling runner keys explicit token under own agent", "agent-alpha", "alpha-token", "", "", "agent-alpha", DefaultWidgetConfigPath, true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envToken != "" {
-				t.Setenv("DISCORD_TOKEN", tc.envToken)
-			} else {
-				t.Setenv("DISCORD_TOKEN", "")
-			}
-			d, err := NewDiscordWidgetDeliverer(tc.token, tc.configPath)
+			t.Setenv("DISCORD_TOKEN", tc.envToken)
+			t.Setenv("DISCORD_BOT_TOKEN", "")
+			d, err := NewDiscordWidgetDeliverer(tc.agent, tc.token, tc.configPath)
 			require.NoError(t, err)
 			assert.NotNil(t, d)
-			if tc.hasSession {
-				assert.NotNil(t, d.session)
-			} else {
+			assert.Equal(t, tc.wantConfigPath, d.configPath)
+			if !tc.hasSession {
 				assert.Nil(t, d.session)
+				assert.NotContains(t, d.agentSenders, tc.wantOwner)
+				return
 			}
-			if tc.configPath != "" {
-				assert.Equal(t, tc.configPath, d.configPath)
-			}
+			require.NotNil(t, d.session)
+			assert.Same(t, d.session, d.agentSenders[tc.wantOwner])
+			assert.Same(t, d.session, d.senderForAgent(tc.wantOwner))
 		})
 	}
 }
@@ -1313,13 +1316,35 @@ func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
 }
 
 func TestDiscoverAgentTokens(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN_AGENT_ALPHA", "token-alpha")
-	t.Setenv("DISCORD_TOKEN", "token-aerial")
-	tokens := discoverAgentTokens()
-	if tokens["agent-alpha"] != "token-alpha" {
-		t.Errorf("expected token-alpha, got %q", tokens["agent-alpha"])
+	tests := []struct {
+		name       string
+		runner     string
+		plainToken string
+		alphaToken string
+		betaToken  string
+		want       map[string]string
+	}{
+		{"default runner keys plain token under aerial", "", "token-plain", "token-alpha", "", map[string]string{"aerial": "token-plain", "agent-alpha": "token-alpha"}},
+		{"explicit aerial runner keys plain token under aerial", "aerial", "token-plain", "", "", map[string]string{"aerial": "token-plain"}},
+		{"sibling runner keys plain token under itself", "agent-beta", "token-plain", "", "", map[string]string{"agent-beta": "token-plain"}},
+		{"sibling runner keeps explicit per-agent token", "agent-beta", "token-plain", "", "token-beta", map[string]string{"agent-beta": "token-beta"}},
+		{"sibling runner without plain token", "agent-alpha", "", "token-alpha", "", map[string]string{"agent-alpha": "token-alpha"}},
 	}
-	if tokens["aerial"] != "token-aerial" {
-		t.Errorf("expected token-aerial, got %q", tokens["aerial"])
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DISCORD_TOKEN", tc.plainToken)
+			t.Setenv("DISCORD_BOT_TOKEN", "")
+			t.Setenv("DISCORD_TOKEN_AGENT_ALPHA", tc.alphaToken)
+			t.Setenv("DISCORD_TOKEN_AGENT_BETA", tc.betaToken)
+			got := discoverAgentTokens(tc.runner)
+			for agent, tok := range tc.want {
+				assert.Equal(t, tok, got[agent], agent)
+			}
+			for _, agent := range []string{"aerial", "agent-alpha", "agent-beta"} {
+				if _, ok := tc.want[agent]; !ok {
+					assert.NotContains(t, got, agent)
+				}
+			}
+		})
 	}
 }
