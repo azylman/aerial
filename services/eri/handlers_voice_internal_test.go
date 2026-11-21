@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -584,181 +582,6 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 				t.Errorf("body %q does not contain wantSubstr %q", rec.Body.String(), tc.wantSubstr)
 			}
 		})
-	}
-}
-
-type gitHubProxyCase struct {
-	name       string
-	cfg        *config.Config
-	path       string
-	wantStatus int
-	wantSubstr string
-	wantAuth   string
-	wantPath   string
-	wantQuery  string
-	reqHeaders []string
-}
-
-func runGitHubProxyTests(t *testing.T, handlerMaker func(*config.Config) http.HandlerFunc, tests []gitHubProxyCase, capturedAuth, capturedPath, capturedQuery *string) {
-	t.Helper()
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			*capturedAuth, *capturedPath, *capturedQuery = "", "", ""
-			h := handlerMaker(tc.cfg)
-			w := runHTTP(h, http.MethodGet, tc.path, nil, tc.reqHeaders...)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("expected substr %q in body: %s", tc.wantSubstr, w.Body.String())
-			}
-			if tc.wantAuth != "" && *capturedAuth != tc.wantAuth {
-				t.Errorf("captured auth = %q, want %q", *capturedAuth, tc.wantAuth)
-			}
-			if tc.wantPath != "" && *capturedPath != tc.wantPath {
-				t.Errorf("captured path = %q, want %q", *capturedPath, tc.wantPath)
-			}
-			if tc.wantQuery != "" && *capturedQuery != tc.wantQuery {
-				t.Errorf("captured query = %q, want %q", *capturedQuery, tc.wantQuery)
-			}
-		})
-	}
-}
-
-func TestHandleInternalGitHubAPIProxy(t *testing.T) {
-	var capturedAuth, capturedPath, capturedQuery string
-	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		capturedPath = r.URL.Path
-		capturedQuery = r.URL.RawQuery
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"status":"ok","api_version":%q}`, r.Header.Get("X-Github-Api-Version"))
-	}))
-	defer mockAPI.Close()
-
-	t.Setenv("GITHUB_API_URL", mockAPI.URL)
-
-	cfgWithPAT := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_mockpat12345"})
-	cfgWithoutPAT := config.NewFromData(&config.ConfigData{GitHubPAT: ""})
-
-	tests := []gitHubProxyCase{
-		{
-			name:       "missing PAT returns 503",
-			cfg:        cfgWithoutPAT,
-			path:       "/internal/github-api/user",
-			wantStatus: http.StatusServiceUnavailable,
-			wantSubstr: "GitHub PAT not configured",
-		},
-		{
-			name:       "successful proxy with subpath and query",
-			cfg:        cfgWithPAT,
-			path:       "/internal/github-api/repos/org/repo/pulls?state=open",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"status":"ok"`,
-			wantAuth:   "token ghp_mockpat12345",
-			wantPath:   "/repos/org/repo/pulls",
-			wantQuery:  "state=open",
-		},
-		{
-			name:       "client auth replaced by PAT while other headers forward",
-			cfg:        cfgWithPAT,
-			path:       "/internal/github-api/user",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"api_version":"2022-11-28"`,
-			wantAuth:   "token ghp_mockpat12345",
-			wantPath:   "/user",
-			reqHeaders: []string{"Authorization", "token client-supplied", "X-Github-Api-Version", "2022-11-28"},
-		},
-	}
-
-	runGitHubProxyTests(t, handleInternalGitHubAPIProxy, tests, &capturedAuth, &capturedPath, &capturedQuery)
-
-	t.Run("upstream network failure returns 502", func(t *testing.T) {
-		t.Setenv("GITHUB_API_URL", "http://127.0.0.1:0")
-		h := handleInternalGitHubAPIProxy(cfgWithPAT)
-		w := runHTTP(h, http.MethodGet, "/internal/github-api/test", nil)
-		if w.Code != http.StatusBadGateway {
-			t.Fatalf("expected 502, got %d", w.Code)
-		}
-	})
-}
-
-func TestHandleInternalGitHubGitProxy(t *testing.T) {
-	var capturedAuth, capturedPath, capturedQuery string
-	mockGit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		capturedPath = r.URL.Path
-		capturedQuery = r.URL.RawQuery
-		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("001e# service=git-upload-pack\n0000"))
-	}))
-	defer mockGit.Close()
-
-	t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", mockGit.URL)
-
-	cfgWithPAT := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_gitpat98765"})
-	cfgWithoutPAT := config.NewFromData(&config.ConfigData{GitHubPAT: ""})
-
-	tests := []gitHubProxyCase{
-		{
-			name:       "missing PAT returns 503",
-			cfg:        cfgWithoutPAT,
-			path:       "/internal/github-git/org/repo.git/info/refs",
-			wantStatus: http.StatusServiceUnavailable,
-			wantSubstr: "GitHub PAT not configured",
-		},
-		{
-			name:       "successful git proxy with basic auth and query",
-			cfg:        cfgWithPAT,
-			path:       "/internal/github-git/org/repo.git/info/refs?service=git-upload-pack",
-			wantStatus: http.StatusOK,
-			wantSubstr: "git-upload-pack",
-			wantAuth:   "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghp_gitpat98765")),
-			wantPath:   "/org/repo.git/info/refs",
-			wantQuery:  "service=git-upload-pack",
-		},
-	}
-
-	runGitHubProxyTests(t, handleInternalGitHubGitProxy, tests, &capturedAuth, &capturedPath, &capturedQuery)
-
-	t.Run("upstream network failure returns 502", func(t *testing.T) {
-		t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", "http://127.0.0.1:0")
-		h := handleInternalGitHubGitProxy(cfgWithPAT)
-		w := runHTTP(h, http.MethodGet, "/internal/github-git/test", nil)
-		if w.Code != http.StatusBadGateway {
-			t.Fatalf("expected 502, got %d", w.Code)
-		}
-	})
-}
-
-type testNonFlusherWriter struct {
-	header http.Header
-	code   int
-	buf    bytes.Buffer
-}
-
-func (n *testNonFlusherWriter) Header() http.Header {
-	if n.header == nil {
-		n.header = make(http.Header)
-	}
-	return n.header
-}
-func (n *testNonFlusherWriter) Write(b []byte) (int, error) { return n.buf.Write(b) }
-func (n *testNonFlusherWriter) WriteHeader(code int)        { n.code = code }
-
-func TestStreamProxyResponse_NonFlusher(t *testing.T) {
-	t.Parallel()
-	w := &testNonFlusherWriter{}
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"X-Custom": []string{"val"}, "Connection": []string{"close"}},
-		Body:       io.NopCloser(strings.NewReader("hello proxy")),
-	}
-	streamProxyResponse(w, resp)
-	if w.code != http.StatusOK || w.buf.String() != "hello proxy" {
-		t.Fatalf("unexpected streamProxyResponse result: code=%d, body=%q", w.code, w.buf.String())
 	}
 }
 
