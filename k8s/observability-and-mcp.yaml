@@ -923,7 +923,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: nats
+      app.kubernetes.io/name: nats-exporter
   podMetricsEndpoints:
     - port: metrics
       path: /metrics
