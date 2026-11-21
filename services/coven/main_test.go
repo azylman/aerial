@@ -91,19 +91,20 @@ ollama:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DATABASE_URL", tc.envDB)
-			t.Setenv("POSTGRES_URL", "")
-			t.Setenv("POSTGRES_HOST", "")
-			t.Setenv("POSTGRES_PORT", "")
-			t.Setenv("POSTGRES_USER", "")
-			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
-			t.Setenv("POSTGRES_DB", "")
-			t.Setenv("ERI_URL", tc.envEriURL)
-			t.Setenv("ERI_LLM_URL", tc.envEriLLMURL)
-			t.Setenv("PR_REGISTER_URL", tc.envPRRegURL)
-			t.Setenv("SYNAPSE_PR_REGISTER_URL", tc.envSynapseURL)
+			env := map[string]string{}
+			env["DATABASE_URL"] = tc.envDB
+			env["POSTGRES_URL"] = ""
+			env["POSTGRES_HOST"] = ""
+			env["POSTGRES_PORT"] = ""
+			env["POSTGRES_USER"] = ""
+			env["POSTGRES_PASSWORD"] = tc.envPassword
+			env["POSTGRES_DB"] = ""
+			env["ERI_URL"] = tc.envEriURL
+			env["ERI_LLM_URL"] = tc.envEriLLMURL
+			env["PR_REGISTER_URL"] = tc.envPRRegURL
+			env["SYNAPSE_PR_REGISTER_URL"] = tc.envSynapseURL
 
-			cfg, err := LoadConfig(tc.path)
+			cfg, err := LoadConfig(tc.path, mapEnv(env))
 			if err != nil {
 				t.Fatalf("LoadConfig() error = %v", err)
 			}
