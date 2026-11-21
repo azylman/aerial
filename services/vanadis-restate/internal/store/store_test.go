@@ -38,47 +38,22 @@ func TestRepoMatchCandidates(t *testing.T) {
 	}
 }
 
-func TestPostgresVanadisStore_ParsingHelpers(t *testing.T) {
-	t.Parallel()
-
-	if eff := CapChunkEffort("invalid"); eff != "medium" {
-		t.Errorf("CapChunkEffort(invalid) = %q, want medium", eff)
-	}
-	if eff := CapChunkEffort("low"); eff != "low" {
-		t.Errorf("CapChunkEffort(low) = %q, want low", eff)
-	}
-}
-
-func TestFirstNonEmpty(t *testing.T) {
+func TestCapChunkEffort(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		vals []string
-		want string
+		name, effort, want string
 	}{
-		{name: "empty", vals: nil, want: ""},
-		{name: "blank only", vals: []string{"", "   "}, want: ""},
-		{name: "first wins", vals: []string{"a", "b"}, want: "a"},
-		{name: "skips blanks", vals: []string{"", "  ", "a", "b"}, want: "a"},
-		{name: "trims result", vals: []string{"  a  "}, want: "a"},
+		{name: "invalid clamps to medium", effort: "invalid", want: "medium"},
+		{name: "empty clamps to medium", effort: "", want: "medium"},
+		{name: "valid kept", effort: "low", want: "low"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := FirstNonEmpty(tc.vals...); got != tc.want {
-				t.Errorf("FirstNonEmpty(%q) = %q, want %q", tc.vals, got, tc.want)
+			if got := CapChunkEffort(tc.effort); got != tc.want {
+				t.Errorf("CapChunkEffort(%q) = %q, want %q", tc.effort, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestNonNilSlice(t *testing.T) {
-	t.Parallel()
-	if got := NonNilSlice[string](nil); got == nil || len(got) != 0 {
-		t.Errorf("NonNilSlice(nil) = %#v, want empty non-nil slice", got)
-	}
-	if got := NonNilSlice([]string{"a"}); !slices.Equal(got, []string{"a"}) {
-		t.Errorf("NonNilSlice([a]) = %v, want [a]", got)
 	}
 }
 

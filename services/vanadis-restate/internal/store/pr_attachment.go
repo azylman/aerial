@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -166,7 +167,7 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 	}
 	buildID := buildplan.GenerateBuildID()
 	chunkID := buildID + "-chunk-1"
-	title := FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, model.CleanRepoName(repo)))
+	title := strutil.FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, model.CleanRepoName(repo)))
 	threadID := model.NormalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
 	build := model.VanadisBuild{

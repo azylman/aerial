@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // Status vocabulary mirrored from the executor frozen copies; values stay byte-identical.
@@ -35,8 +35,8 @@ const (
 
 // BuildSyncWidgetRequest formats the Discord tracker widget request for a build.
 func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChunk, deployUIURL ...string) ericlient.StatusWidgetRequest {
-	widgetStatus := store.FirstNonEmpty(NormalizeWidgetStatus(build.Status), statusRunning)
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	widgetStatus := strutil.FirstNonEmpty(NormalizeWidgetStatus(build.Status), statusRunning)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	ordered := orderWidgetChunks(chunks)
 	wChunks := make([]ericlient.StatusWidgetChunk, len(ordered))
 	for i, c := range ordered {
@@ -52,7 +52,7 @@ func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChun
 		MessageID: build.StatusMessageID,
 		ID:        build.ID,
 		Tier:      build.Tier,
-		Title:     store.FirstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
+		Title:     strutil.FirstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    build.Objective,
 		SkipSink:  build.Quiet,
@@ -173,11 +173,11 @@ func orderWidgetChunks(chunks []model.VanadisChunk) []model.VanadisChunk {
 
 // BuildStatusWidgetChunk formats a single chunk for the Discord tracker widget.
 func BuildStatusWidgetChunk(c model.VanadisChunk, deployUIURL ...string) ericlient.StatusWidgetChunk {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	// Action chunks have no repository; only PR chunks fall back to the default repo.
 	chunkRepo := ""
 	if c.Mode != chunkModeAction {
-		chunkRepo = store.FirstNonEmpty(c.Repo, "aerial")
+		chunkRepo = strutil.FirstNonEmpty(c.Repo, "aerial")
 	}
 	chunkStatus := NormalizeWidgetStatus(c.Status)
 	activeStep := FormatChunkActiveStep(c, baseURL)
@@ -331,7 +331,7 @@ func formatDeployTargetLabel(name, kind, deployUIURL string) string {
 }
 
 func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool, deployUIURL ...string) string {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	label := formatDeployTargetLabel(job, "job", baseURL)
 	jKey := strings.ToLower(strings.TrimSpace(job))
 	switch {
@@ -350,7 +350,7 @@ func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSe
 
 // FormatPerJobRolloutStatus renders per-job rollout lines for a deploying chunk.
 func FormatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool, deployUIURL ...string) string {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	deployedSet := make(map[string]bool, len(deployedJobs))
 	for _, j := range deployedJobs {
 		deployedSet[strings.ToLower(strings.TrimSpace(j))] = true
@@ -373,7 +373,7 @@ func FormatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses 
 	if cleanStatus != statusDeploying {
 		return "", false
 	}
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	names := make([]string, 0, len(kustomizationStatuses))
 	for name := range kustomizationStatuses {
 		names = append(names, name)
@@ -416,7 +416,7 @@ func formatRecoverableFailureStep(cleanStatus, banner string) (string, bool) {
 
 // FormatChunkActiveStep formats the step string for a chunk in a widget.
 func FormatChunkActiveStep(chunk model.VanadisChunk, deployUIURL ...string) string {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	if step, ok := formatRecoverableFailureStep(cleanStatus, chunk.Banner); ok {
 		return step
