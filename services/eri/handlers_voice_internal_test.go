@@ -467,62 +467,98 @@ func (b *syncVoiceBus) Publish(ctx context.Context, subject, _ string, data any)
 	return nil
 }
 
-func TestStreamRestateVoiceEvents_BufferedEventOrder(t *testing.T) {
-	bus := newSyncVoiceBus()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req queue.VoiceSessionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		topic := "voice.stream." + req.TurnID
-		for i, ev := range []queue.VoiceStreamEvent{
-			{Event: "status", Status: "buffered-wait"},
-			{Event: "sentence", Text: "Token chunk 1"},
-			{Event: "reply", Reply: "Full response.", ConversationID: "conv-buff-1"},
-		} {
-			_ = bus.Publish(r.Context(), topic, fmt.Sprintf("step-%d", i), ev)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(queue.VoiceSessionResult{
-			Reply:          "Full response.",
-			ConversationID: "conv-buff-1",
-			DeviceKey:      "kiosk-1",
+func TestStreamRestateVoiceEvents(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		events        []queue.VoiceStreamEvent
+		status        int
+		wantStatuses  []string
+		wantSentences []string
+		wantSSE       []string
+	}{
+		{
+			name: "buffered events emit reply once",
+			events: []queue.VoiceStreamEvent{
+				{Event: "status", Status: "buffered-wait"},
+				{Event: "sentence", Text: "Token chunk 1"},
+				{Event: "reply", Reply: "Full response.", ConversationID: "conv-buff-1"},
+			},
+			status:        http.StatusOK,
+			wantStatuses:  []string{"buffered-wait"},
+			wantSentences: []string{"Token chunk 1"},
+			wantSSE:       []string{"reply", "done"},
+		},
+		{
+			name:    "reply from ask result when no stream events",
+			status:  http.StatusOK,
+			wantSSE: []string{"reply", "done"},
+		},
+		{
+			name:    "ask error when no stream events",
+			status:  http.StatusInternalServerError,
+			wantSSE: []string{"error", "done"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bus := newSyncVoiceBus()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req queue.VoiceSessionRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				topic := "voice.stream." + req.TurnID
+				for i, ev := range tc.events {
+					_ = bus.Publish(r.Context(), topic, fmt.Sprintf("step-%d", i), ev)
+				}
+				if tc.status != http.StatusOK {
+					http.Error(w, "boom", tc.status)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(queue.VoiceSessionResult{
+					Reply:          "Full response.",
+					ConversationID: "conv-buff-1",
+					DeviceKey:      "kiosk-1",
+				})
+			}))
+			defer ts.Close()
+
+			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+
+			var statuses, sentences, sseEvents []string
+			onStatus := func(s string) { statuses = append(statuses, s) }
+			onSentence := func(s string) { sentences = append(sentences, s) }
+			emitSSE := func(event string, payload any) { sseEvents = append(sseEvents, event) }
+
+			req := VoiceAskRequest{Prompt: "test buffered voice", NodeID: "kiosk-1"}
+			streamRestateVoiceEvents(context.Background(), nil, client, bus, req, "kiosk-1", onStatus, onSentence, emitSSE)
+
+			if strings.Join(statuses, ",") != strings.Join(tc.wantStatuses, ",") {
+				t.Fatalf("statuses = %+v, want %+v", statuses, tc.wantStatuses)
+			}
+			if strings.Join(sentences, ",") != strings.Join(tc.wantSentences, ",") {
+				t.Fatalf("sentences = %+v, want %+v", sentences, tc.wantSentences)
+			}
+			if strings.Join(sseEvents, ",") != strings.Join(tc.wantSSE, ",") {
+				t.Fatalf("sseEvents = %+v, want %+v", sseEvents, tc.wantSSE)
+			}
 		})
-	}))
-	defer ts.Close()
+	}
+}
 
-	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+func TestResolveVoiceEventBus_NilPool(t *testing.T) {
+	t.Parallel()
 
-	var statuses []string
-	var sentences []string
-	var sseEvents []string
-
-	onStatus := func(s string) {
-		statuses = append(statuses, s)
-	}
-	onSentence := func(s string) {
-		sentences = append(sentences, s)
-	}
-	emitSSE := func(event string, payload any) {
-		sseEvents = append(sseEvents, event)
-	}
-
-	req := VoiceAskRequest{
-		Prompt: "test buffered voice",
-		NodeID: "kiosk-1",
-	}
-	streamRestateVoiceEvents(context.Background(), nil, client, bus, req, "kiosk-1", onStatus, onSentence, emitSSE)
-
-	if len(statuses) != 1 || statuses[0] != "buffered-wait" {
-		t.Fatalf("unexpected statuses: %+v", statuses)
-	}
-	if len(sentences) != 1 || sentences[0] != "Token chunk 1" {
-		t.Fatalf("unexpected sentences: %+v", sentences)
-	}
-	if len(sseEvents) != 2 || sseEvents[0] != "reply" || sseEvents[1] != "done" {
-		t.Fatalf("unexpected sseEvents: %+v", sseEvents)
+	if bus := resolveVoiceEventBus(nil); bus != nil {
+		t.Fatalf("resolveVoiceEventBus(nil) = %v, want nil", bus)
 	}
 }
 
