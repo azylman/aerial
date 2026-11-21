@@ -13,191 +13,28 @@ func TestServiceNaming(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		agent          string
-		wantNorm       string
-		wantSessionMgr string
-		wantThread     string
-		wantDisp       string
-		wantVoice      string
+		name       string
+		agent      string
+		wantThread string
+		wantDisp   string
 	}{
-		{
-			name:           "empty defaults to aerial",
-			agent:          "",
-			wantNorm:       "",
-			wantSessionMgr: "SessionManager",
-			wantThread:     "ThreadSession",
-			wantDisp:       "DispatchSession",
-			wantVoice:      "VoiceSession",
-		},
-		{
-			name:           "aerial explicit",
-			agent:          "aerial",
-			wantNorm:       "aerial",
-			wantSessionMgr: "SessionManager",
-			wantThread:     "ThreadSession",
-			wantDisp:       "DispatchSession",
-			wantVoice:      "VoiceSession",
-		},
-		{
-			name:           "agent-alpha lowercase",
-			agent:          "agent-alpha",
-			wantNorm:       "agent-alpha",
-			wantSessionMgr: "SessionManager-agent-alpha",
-			wantThread:     "ThreadSession-agent-alpha",
-			wantDisp:       "DispatchSession-agent-alpha",
-			wantVoice:      "VoiceSession-agent-alpha",
-		},
-		{
-			name:           "agent-beta uppercase trimmed",
-			agent:          "  agent-beta  ",
-			wantNorm:       "agent-beta",
-			wantSessionMgr: "SessionManager-agent-beta",
-			wantThread:     "ThreadSession-agent-beta",
-			wantDisp:       "DispatchSession-agent-beta",
-			wantVoice:      "VoiceSession-agent-beta",
-		},
-		{
-			name:           "unsafe characters fallback",
-			agent:          "bad/agent@name!",
-			wantNorm:       "aerial",
-			wantSessionMgr: "SessionManager",
-			wantThread:     "ThreadSession",
-			wantDisp:       "DispatchSession",
-			wantVoice:      "VoiceSession",
-		},
-		{
-			name:           "safe hyphens and underscores",
-			agent:          "bot-1_test",
-			wantNorm:       "bot-1_test",
-			wantSessionMgr: "SessionManager-bot-1_test",
-			wantThread:     "ThreadSession-bot-1_test",
-			wantDisp:       "DispatchSession-bot-1_test",
-			wantVoice:      "VoiceSession-bot-1_test",
-		},
+		{name: "empty defaults to aerial", agent: "", wantThread: "ThreadSession", wantDisp: "DispatchSession"},
+		{name: "aerial explicit", agent: "aerial", wantThread: "ThreadSession", wantDisp: "DispatchSession"},
+		{name: "agent-alpha lowercase", agent: "agent-alpha", wantThread: "ThreadSession-agent-alpha", wantDisp: "DispatchSession-agent-alpha"},
+		{name: "agent-beta uppercase trimmed", agent: "  Agent-Beta  ", wantThread: "ThreadSession-agent-beta", wantDisp: "DispatchSession-agent-beta"},
+		{name: "unsafe characters fallback", agent: "bad/agent@name!", wantThread: "ThreadSession", wantDisp: "DispatchSession"},
+		{name: "safe hyphens and underscores", agent: "bot-1_test", wantThread: "ThreadSession-bot-1_test", wantDisp: "DispatchSession-bot-1_test"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := NormalizeAgentName(tc.agent); got != tc.wantNorm {
-				t.Errorf("NormalizeAgentName(%q) = %q, want %q", tc.agent, got, tc.wantNorm)
-			}
-			if got := SessionManagerServiceName(tc.agent); got != tc.wantSessionMgr {
-				t.Errorf("SessionManagerServiceName(%q) = %q, want %q", tc.agent, got, tc.wantSessionMgr)
-			}
 			if got := ThreadSessionServiceName(tc.agent); got != tc.wantThread {
 				t.Errorf("ThreadSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantThread)
 			}
 			if got := DispatchSessionServiceName(tc.agent); got != tc.wantDisp {
 				t.Errorf("DispatchSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantDisp)
 			}
-			if got := VoiceSessionServiceName(tc.agent); got != tc.wantVoice {
-				t.Errorf("VoiceSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantVoice)
-			}
-		})
-	}
-}
-
-type reconcileTestCase struct {
-	name       string
-	adminURL   string
-	status     int
-	body       string
-	wantErr    bool
-	errContain string
-}
-
-func runReconcileTest(t *testing.T, tc reconcileTestCase) {
-	t.Helper()
-	adminURL := tc.adminURL
-	if tc.adminURL == "placeholder" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPatch {
-				t.Errorf("expected PATCH, got %s", r.Method)
-			}
-			if r.Header.Get("Content-Type") != "application/json" {
-				t.Errorf("expected application/json, got %s", r.Header.Get("Content-Type"))
-			}
-			w.WriteHeader(tc.status)
-			_, _ = w.Write([]byte(tc.body))
-		}))
-		defer srv.Close()
-		adminURL = srv.URL
-	}
-	if tc.adminURL == "partial-placeholder" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.Contains(r.URL.Path, "VoiceSession") {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"status":"ok"}`))
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`fail`))
-		}))
-		defer srv.Close()
-		adminURL = srv.URL
-	}
-
-	err := ReconcileRestateServiceTimeouts(context.Background(), adminURL, "aerial", nil)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-			t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestReconcileRestateServiceTimeouts(t *testing.T) {
-	t.Parallel()
-
-	tests := []reconcileTestCase{
-		{
-			name:     "success patch all services",
-			adminURL: "placeholder",
-			status:   http.StatusOK,
-			body:     `{"status":"ok"}`,
-		},
-		{
-			name:       "empty admin url",
-			adminURL:   "",
-			wantErr:    true,
-			errContain: "admin url cannot be empty",
-		},
-		{
-			name:       "server returns 500 error",
-			adminURL:   "placeholder",
-			status:     http.StatusInternalServerError,
-			body:       `internal error`,
-			wantErr:    true,
-			errContain: "returned HTTP 500",
-		},
-		{
-			name:       "server partial 500 aggregates errors",
-			adminURL:   "partial-placeholder",
-			status:     http.StatusInternalServerError,
-			body:       `internal error`,
-			wantErr:    true,
-			errContain: "ThreadSession",
-		},
-		{
-			name:       "invalid admin url",
-			adminURL:   "http://127.0.0.1:0\nbad",
-			wantErr:    true,
-			errContain: "create timeout patch request",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runReconcileTest(t, tc)
 		})
 	}
 }
@@ -936,20 +773,6 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	if err := gatewayErrClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil || !strings.Contains(err.Error(), "raw text gateway error") {
 		t.Errorf("expected raw text error, got %v", err)
 	}
-
-	// Coverage for resolveSessionKey fallback branches
-	key1 := resolveSessionKey(BrainDispatchRequest{SessionID: "sess-1"})
-	if key1 != "sess-1" {
-		t.Errorf("key1 = %q, want sess-1", key1)
-	}
-	key2 := resolveSessionKey(BrainDispatchRequest{VanadisChunkID: "chunk-2"})
-	if key2 != "vanadis-chunk-2" {
-		t.Errorf("key2 = %q, want vanadis-chunk-2", key2)
-	}
-	key3 := resolveSessionKey(BrainDispatchRequest{ID: "disp-3"})
-	if key3 != "dispatch-disp-3" {
-		t.Errorf("key3 = %q, want dispatch-disp-3", key3)
-	}
 }
 
 func TestAgentContextAndEffectiveResolution(t *testing.T) {
@@ -964,7 +787,7 @@ func TestAgentContextAndEffectiveResolution(t *testing.T) {
 	}{
 		{
 			name:      "all empty falls back to default agent",
-			wantAgent: defaultAgentName,
+			wantAgent: "aerial",
 		},
 		{
 			name:        "client agent used when context and explicit empty",

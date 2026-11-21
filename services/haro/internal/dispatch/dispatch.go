@@ -18,11 +18,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 )
-
-const statusAccepted = "accepted"
 
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
 func ThreadSessionServiceName(name string) string {
@@ -54,27 +53,9 @@ type PromptDispatchResponse struct {
 	MessageID string `json:"message_id,omitempty"`
 }
 
-type DispatchRequest struct {
-	ID           string `json:"id,omitempty"`
-	Agent        string `json:"agent,omitempty"`
-	Source       string `json:"source"`
-	SessionID    string `json:"session_id,omitempty"`
-	TargetID     string `json:"target_id,omitempty"`
-	Prompt       string `json:"prompt"`
-	Effort       string `json:"effort,omitempty"`
-	SkipIfActive bool   `json:"skip_if_active,omitempty"`
-}
-
-type DispatchResponse struct {
-	Status     string `json:"status"`
-	DispatchID string `json:"dispatch_id,omitempty"`
-	MessageID  string `json:"message_id,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-}
-
 type PromptDispatcher interface {
 	DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error)
-	Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error)
+	Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error)
 }
 
 type HTTPPromptDispatcher struct {
@@ -274,7 +255,7 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 	}
 
 	out := PromptDispatchResponse{
-		Status:    statusAccepted,
+		Status:    eriwire.StatusAccepted,
 		ChannelID: channelID,
 		MessageID: msgID,
 		SessionID: req.SessionID,
@@ -294,16 +275,15 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 	return out, nil
 }
 
-func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	dispatchID := strings.TrimSpace(req.ID)
 	if dispatchID == "" {
 		dispatchID = uuid.New().String()
 	}
 
-	sessionKey := strings.TrimSpace(req.SessionID)
-	if sessionKey == "" {
-		sessionKey = "dispatch-" + dispatchID
-	}
+	keyReq := req
+	keyReq.ID = dispatchID
+	sessionKey := eriwire.ResolveDispatchSessionKey(keyReq)
 
 	agentName := req.Agent
 	if strings.TrimSpace(agentName) == "" {
@@ -328,18 +308,17 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req Dispatch
 
 	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, dispatchID, raw, 0)
 	if err != nil {
-		return DispatchResponse{}, restateRequestError("dispatch", err)
+		return eriwire.DispatchEnqueueResponse{}, restateRequestError("dispatch", err)
 	}
 
 	fields, err := parseRestateEnvelope(respBytes)
 	if err != nil {
-		return DispatchResponse{}, fmt.Errorf("failed to parse dispatch restate response: %w", err)
+		return eriwire.DispatchEnqueueResponse{}, fmt.Errorf("failed to parse dispatch restate response: %w", err)
 	}
 
-	res := DispatchResponse{
-		Status:     statusAccepted,
+	res := eriwire.DispatchEnqueueResponse{
+		Status:     eriwire.StatusAccepted,
 		DispatchID: dispatchID,
-		MessageID:  dispatchID,
 		SessionID:  req.SessionID,
 	}
 	if fields.status != "" {
@@ -347,7 +326,6 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req Dispatch
 	}
 	if fields.messageID != "" {
 		res.DispatchID = fields.messageID
-		res.MessageID = fields.messageID
 	}
 	if fields.sessionID != "" {
 		res.SessionID = fields.sessionID
@@ -362,18 +340,18 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 	return postBrainJSON[PromptDispatchRequest, PromptDispatchResponse](ctx, d, "/prompt", "prompt dispatch", req)
 }
 
-func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	if d == nil {
-		return DispatchResponse{}, errors.New("dispatcher is nil")
+		return eriwire.DispatchEnqueueResponse{}, errors.New("dispatcher is nil")
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
-		return DispatchResponse{}, errors.New("dispatch prompt cannot be empty")
+		return eriwire.DispatchEnqueueResponse{}, errors.New("dispatch prompt cannot be empty")
 	}
 	if strings.TrimSpace(req.Source) == "" {
-		return DispatchResponse{}, errors.New("dispatch source cannot be empty")
+		return eriwire.DispatchEnqueueResponse{}, errors.New("dispatch source cannot be empty")
 	}
 	if strings.TrimSpace(d.restateURL) != "" {
 		return d.dispatchRestate(ctx, req)
 	}
-	return postBrainJSON[DispatchRequest, DispatchResponse](ctx, d, "/dispatch", "dispatch", req)
+	return postBrainJSON[eriwire.BrainDispatchRequest, eriwire.DispatchEnqueueResponse](ctx, d, "/dispatch", "dispatch", req)
 }

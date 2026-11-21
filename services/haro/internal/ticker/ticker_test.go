@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
@@ -33,8 +34,8 @@ type fakeDispatcher struct {
 	dispatched         []dispatch.PromptDispatchRequest
 	response           dispatch.PromptDispatchResponse
 	err                error
-	dispatchedRequests []dispatch.DispatchRequest
-	dispatchResponse   dispatch.DispatchResponse
+	dispatchedRequests []eriwire.BrainDispatchRequest
+	dispatchResponse   eriwire.DispatchEnqueueResponse
 	dispatchErr        error
 	onDispatch         func()
 }
@@ -47,7 +48,7 @@ func (m *fakeDispatcher) DispatchPrompt(_ context.Context, req dispatch.PromptDi
 	return m.response, m.err
 }
 
-func (m *fakeDispatcher) Dispatch(_ context.Context, req dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
+func (m *fakeDispatcher) Dispatch(_ context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	m.dispatchedRequests = append(m.dispatchedRequests, req)
 	if m.onDispatch != nil {
 		m.onDispatch()
@@ -128,10 +129,9 @@ func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) 
 			MessageID: tc.responseMessageID,
 		},
 		err: tc.dispatcherErr,
-		dispatchResponse: dispatch.DispatchResponse{
+		dispatchResponse: eriwire.DispatchEnqueueResponse{
 			Status:     tc.dispatcherStatus,
 			DispatchID: tc.responseMessageID,
-			MessageID:  tc.responseMessageID,
 		},
 		dispatchErr: tc.dispatcherErr,
 	}
@@ -552,7 +552,7 @@ func runEvaluateDueHeartbeatsCase(t *testing.T, tc evaluateDueHeartbeatsTestCase
 	mock := &fakeDispatcher{
 		response:         dispatch.PromptDispatchResponse{Status: dispStatus, MessageID: "msg-dispatched"},
 		err:              tc.dispatcherErr,
-		dispatchResponse: dispatch.DispatchResponse{Status: dispStatus, DispatchID: "msg-dispatched", MessageID: "msg-dispatched"},
+		dispatchResponse: eriwire.DispatchEnqueueResponse{Status: dispStatus, DispatchID: "msg-dispatched"},
 		dispatchErr:      tc.dispatcherErr,
 	}
 	ticker := NewTicker(db, mock, 30*time.Second)
@@ -1079,7 +1079,7 @@ func runEvaluateFaultCase(t *testing.T, tc evaluateFaultTestCase, now time.Time)
 
 	mock := &fakeDispatcher{
 		response:         dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-x"},
-		dispatchResponse: dispatch.DispatchResponse{Status: "ok", DispatchID: "msg-x", MessageID: "msg-x"},
+		dispatchResponse: eriwire.DispatchEnqueueResponse{Status: "ok", DispatchID: "msg-x"},
 	}
 	NewTicker(db, mock, 30*time.Second).EvaluateDueSchedules(ctx, now)
 
@@ -1231,7 +1231,7 @@ func TestTicker_EvaluateCancelledMidLoop(t *testing.T) {
 			defer cancel()
 			mock := &fakeDispatcher{
 				response:         dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-x"},
-				dispatchResponse: dispatch.DispatchResponse{Status: "ok", DispatchID: "msg-x", MessageID: "msg-x"},
+				dispatchResponse: eriwire.DispatchEnqueueResponse{Status: "ok", DispatchID: "msg-x"},
 			}
 			calls := 0
 			mock.onDispatch = func() {

@@ -110,7 +110,7 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 		t.Error("expected error creating schema on conflicting view database")
 	}
 
-	if _, err := store.NewDB(t.Context(), &config.Config{DatabaseURL: ":memory:"}); err == nil {
+	if _, err := store.OpenDB(t.Context(), &config.Config{DatabaseURL: ":memory:"}); err == nil {
 		t.Error("expected error for unsupported :memory: scheme")
 	}
 }
@@ -218,9 +218,6 @@ func runDBOpCase(t *testing.T, tc dbOpTestCase, c model.CronSchedule, s model.On
 
 func testDBStandaloneFunctions(ctx context.Context, t *testing.T, db, closedDB *sql.DB) {
 	t.Helper()
-	if model.FirstNonEmpty("", "   ") != "" {
-		t.Error("expected empty string from firstNonEmpty")
-	}
 	if claimed, err := store.ClaimEventTriggers(ctx, db, "", nil, ""); err != nil || len(claimed) != 0 {
 		t.Errorf("expected empty, nil for empty ClaimEventTriggers, got %v, %v", claimed, err)
 	}
@@ -250,8 +247,8 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	}
 	for _, tc := range cfgTests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := store.NewDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
-				t.Fatalf("NewDB(t.Context(), ) err=%v", err)
+			if _, err := store.OpenDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("OpenDB(t.Context(), ) err=%v", err)
 			}
 			if _, err := store.OpenDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
 				t.Fatalf("OpenDB(t.Context(), ) err=%v", err)

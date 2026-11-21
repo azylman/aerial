@@ -7,7 +7,6 @@ package model
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -167,16 +166,6 @@ func IsScheduleStale(scheduledAt, now time.Time, maxOverdue time.Duration) bool 
 // ShouldPruneRuns reports whether runs should be pruned given the last prune time, interval, and now.
 func ShouldPruneRuns(now, lastPrune time.Time, interval time.Duration) bool {
 	return interval > 0 && (lastPrune.IsZero() || now.Sub(lastPrune) >= interval)
-}
-
-// FirstNonEmpty returns the first non-blank string after trimming spaces.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // BuildHeartbeatPrompt wraps a raw heartbeat prompt with runtime instructions for the LLM.
@@ -613,19 +602,4 @@ func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
 		})
 	}
 	return oneShots
-}
-
-// RedactDSN returns a log-safe form of a database DSN: query string and fragment
-// are dropped, any userinfo password is masked, and unparseable or host-less
-// inputs (including libpq key=value DSNs) collapse to "[redacted]".
-func RedactDSN(dsn string) string {
-	u, err := url.Parse(strings.TrimSpace(dsn))
-	if err != nil || u.Host == "" {
-		return "[redacted]"
-	}
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	u.RawFragment = ""
-	return u.Redacted()
 }
