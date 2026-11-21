@@ -20,8 +20,8 @@ func TestDeriveThreadTitle_TableDriven(t *testing.T) {
 	}{
 		{"empty string", "", "Aerial Discussion"},
 		{"whitespace only", "   \n\n\t  ", "Aerial Discussion"},
-		{"pure user mention", "<@1542035925603713086>", "Aerial Discussion"},
-		{"pure nickname mention", "<@!1542035925603713086>", "Aerial Discussion"},
+		{"pure user mention", "<@1000000000000000001>", "Aerial Discussion"},
+		{"pure nickname mention", "<@!1000000000000000001>", "Aerial Discussion"},
 		{"pure role mention", "<@&9999999999>", "Aerial Discussion"},
 		{"pure channel mention", "<#8888888888>", "Aerial Discussion"},
 		{"pure custom emoji", "<:pepe:1234567>", "Aerial Discussion"},

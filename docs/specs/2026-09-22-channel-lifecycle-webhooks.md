@@ -40,8 +40,8 @@ Dispatched upon inbound message arrival at the Discord Gateway event funnel befo
   "thread_id": "1551972052884529154",
   "guild_id": "1464358485817954538",
   "author_id": "169260920550195200",
-  "author_username": "arcane103",
-  "author_global_name": "Arcane",
+  "author_username": "example-user",
+  "author_global_name": "Example User",
   "author_bot": false,
   "is_admin": true,
   "content": "Can you verify both files?",
@@ -88,7 +88,7 @@ Dispatched immediately before prompt execution and agent runner invocation. Allo
   "burst_messages": [
     {
       "id": "1551984807947538486",
-      "author": "arcane103",
+      "author": "example-user",
       "content": "Yes let's just do 2 and 4 first",
       "timestamp": "2026-09-22T15:53:32Z"
     }

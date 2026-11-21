@@ -153,7 +153,7 @@ func TestMuseSessionLifecycle(t *testing.T) {
 			sessionID: "sess-muse-home",
 			location:  "home_muse",
 			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient message"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alice]: ambient message"}}}`,
 				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"model output"}}}`,
 			}, "\n") + "\n",
 			wantExists: true,
@@ -329,7 +329,7 @@ func TestExtractMuseLinesForResponse(t *testing.T) {
 			name: "started ambient prompt does not stop backward scan",
 			lines: []string{
 				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Valid reply"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient ping"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alice]: ambient ping"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "Valid reply",
@@ -408,7 +408,7 @@ func TestMuseSessionLinePredicates(t *testing.T) {
 		{name: "non-run kind", raw: `{"payload_type":"runtime.session","payload":{"kind":"init"}}`},
 		{name: "unknown event kind", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"unknown"}}}`},
 		{name: "empty prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":""}}}`},
-		{name: "ambient prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient"}}}`},
+		{name: "ambient prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alice]: ambient"}}}`},
 		{name: "regular prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"Regular user question"}}}`, wantNonAmbient: true},
 		{name: "assistant message committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_message_committed"}}}`, wantStep: true},
 		{name: "assistant tool calls committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed"}}}`, wantStep: true},
