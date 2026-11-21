@@ -141,14 +141,14 @@ func resolvePositiveInt(env string, yamlVal int) int {
 	return yamlVal
 }
 
-// LoadConfig loads configuration from path using DATABASE_URL from the environment.
-func LoadConfig(path string) (*Config, error) {
-	return LoadConfigFile(path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
+// LoadConfig loads configuration from path using the database DSN built from getenv.
+func LoadConfig(path string, getenv func(string) string) (*Config, error) {
+	return LoadConfigFile(path, httpkit.BuildPostgresDSN(getenv, "aerial"), getenv)
 }
 
 // LoadConfigFile loads and strictly validates configuration from a YAML file and secrets.
 // Fails fast if the file is missing, malformed, or required fields are absent.
-func LoadConfigFile(path string, dbURL string) (*Config, error) {
+func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Config, error) {
 	cleanPath := strings.TrimSpace(path)
 	if cleanPath == "" {
 		return nil, fmt.Errorf("config: path cannot be empty")
@@ -191,18 +191,18 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if port == "" {
 		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-	eriURL := resolveFirstNonEmpty(os.Getenv("ERI_URL"), ycfg.EriURL)
+	eriURL := resolveFirstNonEmpty(getenv("ERI_URL"), ycfg.EriURL)
 	if eriURL == "" {
 		return nil, fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
-	eriLLMURL := resolveFirstNonEmpty(os.Getenv("ERI_LLM_URL"), ycfg.EriLLMURL)
+	eriLLMURL := resolveFirstNonEmpty(getenv("ERI_LLM_URL"), ycfg.EriLLMURL)
 	if eriLLMURL == "" {
 		return nil, fmt.Errorf("config: eri_llm_url is required in %s", cleanPath)
 	}
-	role := resolveFirstNonEmpty(os.Getenv("COVEN_ROLE"), ycfg.Role)
-	stack := resolveFirstNonEmpty(os.Getenv("COVEN_STACK"), os.Getenv("STACK"), ycfg.Stack)
+	role := resolveFirstNonEmpty(getenv("COVEN_ROLE"), ycfg.Role)
+	stack := resolveFirstNonEmpty(getenv("COVEN_STACK"), getenv("STACK"), ycfg.Stack)
 
-	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), os.Getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
+	prRegisterURL := resolveFirstNonEmpty(getenv("PR_REGISTER_URL"), getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
 	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
 	rulesDir := strings.TrimSpace(ycfg.RulesDir)
 	configRepoOwner := strings.TrimSpace(ycfg.ConfigRepoOwner)
@@ -223,25 +223,25 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: ollama.num_ctx must be positive in %s", cleanPath)
 	}
 
-	databaseURL := resolveFirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(os.Getenv, "aerial"), ycfg.DatabaseURL)
+	databaseURL := resolveFirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(getenv, "aerial"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
-	gitHubPAT := resolveFirstNonEmpty(os.Getenv("GITHUB_PAT"), ycfg.GitHubPAT)
-	systemChannelID := resolveFirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), ycfg.SystemChannelID)
+	gitHubPAT := resolveFirstNonEmpty(getenv("GITHUB_PAT"), ycfg.GitHubPAT)
+	systemChannelID := resolveFirstNonEmpty(getenv("SYSTEM_CHANNEL_ID"), ycfg.SystemChannelID)
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
 	}
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
-	transcriptsURL := resolveFirstNonEmpty(os.Getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL, ycfg.IndexerURL)
+	natsURL := resolveFirstNonEmpty(getenv("NATS_URL"), ycfg.NATSURL)
+	transcriptsURL := resolveFirstNonEmpty(getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL, ycfg.IndexerURL)
 	if transcriptsURL == "" && NormalizeStack(stack) == DefaultStack {
 		transcriptsURL = "http://transcripts.aerial"
 	}
-	llmEffort := resolveFirstNonEmpty(os.Getenv("LLM_EFFORT"), ycfg.LLMEffort)
+	llmEffort := resolveFirstNonEmpty(getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
 	authCfg := ycfg.Auth
-	if envVal := strings.TrimSpace(os.Getenv("K8S_AUTH_ENABLED")); envVal != "" {
+	if envVal := strings.TrimSpace(getenv("K8S_AUTH_ENABLED")); envVal != "" {
 		if enabled, err := strconv.ParseBool(envVal); err == nil {
 			authCfg.Enabled = enabled
 		}
@@ -264,8 +264,8 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		Role:                  strings.TrimSpace(role),
 		TranscriptsURL:        strings.TrimSpace(transcriptsURL),
 		LLMEffort:             strings.TrimSpace(llmEffort),
-		ExtractTimeoutSeconds: resolvePositiveInt(os.Getenv("EXTRACT_TIMEOUT_SECONDS"), ycfg.ExtractTimeout),
-		ExtractMaxSteps:       resolvePositiveInt(os.Getenv("EXTRACT_MAX_STEPS"), ycfg.ExtractMaxSteps),
+		ExtractTimeoutSeconds: resolvePositiveInt(getenv("EXTRACT_TIMEOUT_SECONDS"), ycfg.ExtractTimeout),
+		ExtractMaxSteps:       resolvePositiveInt(getenv("EXTRACT_MAX_STEPS"), ycfg.ExtractMaxSteps),
 		Ollama: OllamaConfig{
 			BaseURL:     ollamaBaseURL,
 			Model:       ollamaModel,

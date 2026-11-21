@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -49,13 +48,11 @@ func (c *Client) RouterPath(handler string) string {
 	return "/" + c.BuildRouterServiceName() + "/" + handler
 }
 
-// IngressURL returns the configured Restate ingress base URL with ENV fallback.
+// IngressURL returns the configured Restate ingress base URL, or "" when
+// none is configured. It never consults the process environment: app wiring
+// resolves env overrides once via config.LoadRestateConfig.
 func (c *Client) IngressURL() string {
-	base := strings.TrimRight(strings.TrimSpace(c.cfg.RestateIngressURL), "/")
-	if base == "" {
-		base = strings.TrimRight(strings.TrimSpace(os.Getenv("RESTATE_INGRESS_URL")), "/")
-	}
-	return base
+	return strings.TrimRight(strings.TrimSpace(c.cfg.RestateIngressURL), "/")
 }
 
 type restateErrorResponse struct {

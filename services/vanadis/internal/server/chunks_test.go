@@ -257,7 +257,7 @@ func TestVanadisServer_HandleChunkByID(t *testing.T) {
 			if !tc.nilStore {
 				store, _, _ = setupTestStoreWithBuild()
 			}
-			rec := serveChunkRequest(NewVanadisServer(Config{}, store, nil), tc.method, tc.path, "", false)
+			rec := serveChunkRequest(NewVanadisServer(Config{}, RestateConfig{}, store, nil), tc.method, tc.path, "", false)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
 			}
@@ -424,7 +424,7 @@ func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 			if !tc.nilStore {
 				store, _, _ = setupTestStoreWithBuild()
 			}
-			srv := NewVanadisServer(Config{}, store, restateSrv.Client())
+			srv := NewVanadisServer(Config{}, RestateConfig{}, store, restateSrv.Client())
 			if !tc.nilStore {
 				srv.restateCfg.RestateIngressURL = restateSrv.URL
 			}
@@ -518,7 +518,7 @@ func TestServer_MutationEndpoints(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store, _ := seedMemoryStore(tc.nilStore, tc.seedBuild, tc.seedChunks)
 
-			srv := NewVanadisServer(Config{}, store, restateSrv.Client())
+			srv := NewVanadisServer(Config{}, RestateConfig{}, store, restateSrv.Client())
 			if !tc.nilStore {
 				srv.restateCfg.RestateIngressURL = restateSrv.URL
 			}
@@ -545,7 +545,7 @@ func TestResolveAttachCallerAgent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewVanadisServer(Config{}, nil, nil)
+			srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 			got, err := srv.resolveAttachCallerAgent(context.Background(), tc.requested)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)

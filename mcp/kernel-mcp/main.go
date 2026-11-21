@@ -529,7 +529,7 @@ func runServer(ctx context.Context, cfg *Config) error {
 }
 
 func main() {
-	cfg, err := LoadConfig("")
+	cfg, err := LoadConfig(httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", "/local/config.yaml", "/share/aerial-config/config.yaml", "config.yaml"), os.Getenv)
 	if err != nil {
 		exitFn("[kernel-mcp] Configuration error: %v", err)
 		return

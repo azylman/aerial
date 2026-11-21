@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 var (
@@ -356,9 +354,10 @@ func parseURLHostPort(raw string) (string, string) {
 	return host, port
 }
 
-// LoadConfig loads configuration from path or defaults, applying env vars.
-// Treats missing or empty /local/config.yaml as valid defaults.
-func LoadConfig(path string) (*Config, error) {
+// LoadConfig loads configuration from path or defaults, applying env vars read
+// through getenv. An empty path yields defaults; callers resolve the path.
+// Treats missing or empty config files as valid defaults.
+func LoadConfig(path string, getenv func(string) string) (*Config, error) {
 	cfg := &Config{
 		Port:        "4018",
 		CDPHost:     "",
@@ -366,16 +365,11 @@ func LoadConfig(path string) (*Config, error) {
 		SettleDelay: 500 * time.Millisecond,
 	}
 
-	configPath := strings.TrimSpace(path)
-	if configPath == "" {
-		configPath = httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", "/local/config.yaml", "/share/aerial-config/config.yaml", "config.yaml")
-	}
-
-	if err := applyYAMLFile(cfg, configPath); err != nil {
+	if err := applyYAMLFile(cfg, strings.TrimSpace(path)); err != nil {
 		return nil, err
 	}
 
-	applyEnvOverrides(cfg)
+	applyEnvOverrides(cfg, getenv)
 	return cfg, nil
 }
 
@@ -418,9 +412,9 @@ func applyYAMLFile(cfg *Config, configPath string) error {
 	return nil
 }
 
-func applyEnvOverrides(cfg *Config) {
+func applyEnvOverrides(cfg *Config, getenv func(string) string) {
 	for _, envURL := range []string{"KERNEL_CDP_URL", "KERNEL_API_URL"} {
-		if val := strings.TrimSpace(os.Getenv(envURL)); val != "" {
+		if val := strings.TrimSpace(getenv(envURL)); val != "" {
 			h, p := parseURLHostPort(val)
 			if h != "" {
 				cfg.CDPHost = h
@@ -432,16 +426,16 @@ func applyEnvOverrides(cfg *Config) {
 		}
 	}
 
-	if val := strings.TrimSpace(os.Getenv("PORT")); val != "" {
+	if val := strings.TrimSpace(getenv("PORT")); val != "" {
 		cfg.Port = val
 	}
-	if val := strings.TrimSpace(os.Getenv("CDP_HOST")); val != "" {
+	if val := strings.TrimSpace(getenv("CDP_HOST")); val != "" {
 		cfg.CDPHost = val
 	}
-	if val := strings.TrimSpace(os.Getenv("CDP_PORT")); val != "" {
+	if val := strings.TrimSpace(getenv("CDP_PORT")); val != "" {
 		cfg.CDPPort = val
 	}
-	if val := strings.TrimSpace(os.Getenv("SETTLE_DELAY")); val != "" {
+	if val := strings.TrimSpace(getenv("SETTLE_DELAY")); val != "" {
 		if d, err := time.ParseDuration(val); err == nil {
 			cfg.SettleDelay = d
 		}
