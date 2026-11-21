@@ -38,7 +38,17 @@ const (
 	statusConflict = "conflict"
 )
 
+// CompletePRDeployment completes a PR chunk on deploy_success. Action chunks
+// never complete here: a repair PR's deploy goes through
+// MarkActionRepairDeployed and the chunk completes only on its verdict.
 func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
+	return s.execDeployTransition(ctx, chunkID, rolloutState, "complete pr deployment", `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND c.mode = 'pr' AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled';`)
+}
+
+// execDeployTransition runs one deploy_success chunk write. The query takes
+// the rollout evidence as $1, then args, then the chunk ID last; a write that
+// matches no row reports ErrPRTransitionSkipped.
+func (s *Store) execDeployTransition(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState, opLabel, query string, args ...any) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
 	}
@@ -54,14 +64,34 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 		}
 		evidence = data
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled';`, evidence, chunkID)
+	params := append(append([]any{evidence}, args...), chunkID)
+	tag, err := s.db.Exec(ctx, query, params...)
 	if err != nil {
-		return fmt.Errorf("complete pr deployment: %w", err)
+		return fmt.Errorf("%s: %w", opLabel, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrPRTransitionSkipped
 	}
 	return nil
+}
+
+// actionRepairStageStatuses are the PR stages an action chunk passes through
+// while a repair PR it submitted moves toward deployment.
+var actionRepairStageStatuses = []string{statusPROpened, statusCIFailed, statusConflict, statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed}
+
+// ActionRepairInFlight reports whether an action chunk has an attached repair
+// PR that has not deployed yet.
+func ActionRepairInFlight(c model.VanadisChunk) bool {
+	return c.Mode == chunkModeAction && c.PRNumber > 0 && slices.Contains(actionRepairStageStatuses, strings.ToLower(strings.TrimSpace(c.Status)))
+}
+
+// MarkActionRepairDeployed moves an action chunk whose repair PR deployed
+// back to running. The repair is a step inside the chunk, so the chunk keeps
+// its repo and pr_number, stores the rollout evidence, clears its banner and
+// waits for its complete_chunk verdict. Chunks outside a repair stage report
+// ErrPRTransitionSkipped.
+func (s *Store) MarkActionRepairDeployed(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
+	return s.execDeployTransition(ctx, chunkID, rolloutState, "mark action repair deployed", `UPDATE vanadis_chunks AS c SET status = 'running', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = NULL, updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $3 AND b.id = c.build_id AND c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0 AND c.status = ANY($2) AND b.status NOT IN ('cancelled', 'completed');`, actionRepairStageStatuses)
 }
 
 // SweptChunk identifies one cross-build swept chunk and the foreign build
@@ -329,8 +359,9 @@ func supersededByDeployment(candidate, deploying model.VanadisChunk) bool {
 	return sameDeployRepo(candidate.Repo, deploying.Repo) && deployCompletableMode(candidate) && sweepPreDeployStatus(candidate.Status) && sweepStampProvesInclusion(candidate, deploying)
 }
 
-// deployCompletableMode matches the CompletePRDeployment mode guard: plain
-// PR chunks and PR-attached action chunks.
+// deployCompletableMode reports which chunks a deploy sweep touches: plain PR
+// chunks, which complete, and PR-attached action chunks, whose repair is
+// marked deployed and which stay running until their verdict.
 func deployCompletableMode(c model.VanadisChunk) bool {
 	if c.Mode == "pr" {
 		return true

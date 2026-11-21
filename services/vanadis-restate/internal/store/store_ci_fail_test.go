@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 func buildRow(id, status string) pgx.Row {
@@ -187,6 +188,82 @@ func TestCompletePRDeployment(t *testing.T) {
 			} else {
 				assert.Nil(t, gotArgs[0])
 			}
+		})
+	}
+}
+
+func TestMarkActionRepairDeployed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, chunkID                string
+		nilDB, evidence, execFailure bool
+		rejected                     bool
+		wantErr, wantSkipped         bool
+	}{
+		{"nil database", "c1", true, false, false, false, true, false},
+		{"empty id", " ", false, false, false, false, true, false},
+		{"chunk outside repair stage skipped", "c1", false, false, false, true, true, true},
+		{"nil evidence", "c1", false, false, false, false, false, false},
+		{"supplied evidence", " c1 ", false, true, false, false, false, false},
+		{"persistence failure", "c1", false, true, true, false, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotArgs []any
+			st := New(mockDB{execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+				gotArgs = args
+				if tc.execFailure {
+					return pgconn.CommandTag{}, errors.New("database unavailable")
+				}
+				if tc.rejected {
+					return pgconn.NewCommandTag("UPDATE 0"), nil
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}})
+			if tc.nilDB {
+				st = &Store{}
+			}
+			var evidence *pubsub.PRRolloutState
+			if tc.evidence {
+				evidence = &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
+			}
+			err := st.MarkActionRepairDeployed(context.Background(), tc.chunkID, evidence)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
+			if tc.wantErr {
+				return
+			}
+			assert.Equal(t, "c1", gotArgs[2])
+			if tc.evidence {
+				data, ok := gotArgs[0].([]byte)
+				assert.True(t, ok)
+				assert.Contains(t, string(data), "service")
+			} else {
+				assert.Nil(t, gotArgs[0])
+			}
+		})
+	}
+}
+
+func TestActionRepairInFlight(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		chunk model.VanadisChunk
+		want  bool
+	}{
+		{"opened repair", model.VanadisChunk{Mode: "action", Status: "pr_opened", PRNumber: 7}, true},
+		{"deploying repair", model.VanadisChunk{Mode: "action", Status: "deploying", PRNumber: 7}, true},
+		{"failed ci repair", model.VanadisChunk{Mode: "action", Status: "ci_failed", PRNumber: 7}, true},
+		{"deployed repair back to running", model.VanadisChunk{Mode: "action", Status: "running", PRNumber: 7}, false},
+		{"plain running action", model.VanadisChunk{Mode: "action", Status: "running"}, false},
+		{"pr chunk deploying", model.VanadisChunk{Mode: "pr", Status: "deploying", PRNumber: 7}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, ActionRepairInFlight(tc.chunk))
 		})
 	}
 }
