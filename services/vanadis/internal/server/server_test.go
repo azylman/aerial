@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,14 +55,14 @@ func TestServerDelegateEdges(t *testing.T) {
 				case "nil-store":
 					srv = &VanadisServer{}
 				case "list-error":
-					srv = NewVanadisServer(Config{}, &memoryVanadisStore{listErr: errors.New("db down")}, nil)
+					srv = NewVanadisServer(Config{}, RestateConfig{}, &memoryVanadisStore{listErr: errors.New("db down")}, nil)
 				}
 				srv.collectBuildMetrics(context.Background())
 				if body := scrapeRootMetrics(t); !strings.Contains(body, tc.want) {
 					t.Errorf("metrics exposition missing %q\nbody:\n%s", tc.want, body)
 				}
 			case "restate-client":
-				srv := NewVanadisServer(Config{}, nil, nil)
+				srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 				srv.restateCfg = RestateConfig{AgentName: "agent-beta", RestateIngressURL: "http://restate.test"}
 				if got := srv.restateObjectPath("agent-alpha", "b1", "Create"); got != tc.want {
 					t.Errorf("restateObjectPath() = %q, want %q", got, tc.want)
@@ -86,7 +88,7 @@ func TestMetricsEndToEndSeededStore(t *testing.T) {
 	if err := memStore.CreateBuild(context.Background(), bDone, []VanadisChunk{mkChunk("c-e2e-4", "b-e2e-done", 0, "C4", "I4", "", "merged")}); err != nil {
 		t.Fatalf("seed completed build: %v", err)
 	}
-	srv := NewVanadisServer(Config{}, memStore, nil)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, memStore, nil)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if rec.Code != http.StatusOK {
@@ -114,7 +116,7 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	}
 	nilSrv.collectQueueMetrics(context.Background())
 
-	srv := NewVanadisServer(Config{}, nil, nil)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 	if srv.consumerStatsQuerier() != nil {
 		t.Errorf("expected nil when no stats or bus configured")
 	}
@@ -150,7 +152,7 @@ func TestInitQueueStats(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewVanadisServer(Config{}, nil, nil)
+			srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 			newBus := func(context.Context, string) (queueStatsBus, error) {
 				if tc.busErr != nil {
 					return nil, tc.busErr
@@ -362,7 +364,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	defer restateSrv.Close()
 
 	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{Port: "0"}, memStore, restateSrv.Client())
+	srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, memStore, restateSrv.Client())
 	srv.restateCfg.RestateIngressURL = restateSrv.URL
 	mux := srv.Routes()
 	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
@@ -381,7 +383,7 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	origPoolFn := newPgxPoolFn
 	defer func() { newPgxPoolFn = origPoolFn }()
 	ctx := context.Background()
-	srv := NewVanadisServer(Config{}, nil, nil)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 	if _, err := initPostgres(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
 		t.Fatal("expected parse error")
 	}
@@ -398,13 +400,13 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 		t.Fatalf("expected success from initPostgres, got err=%v", err)
 	}
 	cleanup(ctx)
-	if runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, nil) == nil || runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, nil) == nil {
+	if runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, RestateConfig{}, nil) == nil || runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, RestateConfig{}, nil) == nil {
 		t.Fatal("expected error on invalid runServer configs")
 	}
 	runCtx, runCancel := context.WithCancel(context.Background())
 	ready, done := make(chan string, 1), make(chan error, 1)
 	go func() {
-		done <- runServer(runCtx, Config{Port: "0", PostgresURL: cfg.ConnString()}, func(addr string) { ready <- addr })
+		done <- runServer(runCtx, Config{Port: "0", PostgresURL: cfg.ConnString()}, RestateConfig{}, func(addr string) { ready <- addr })
 	}()
 	select {
 	case addr := <-ready:
@@ -417,6 +419,16 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	runCancel()
 	if err := <-done; err != nil {
 		t.Fatalf("unexpected runServer exit error: %v", err)
+	}
+	// RunApp resolves Restate config from CONFIG_PATH plus env overrides; pin
+	// both to hermetic values so the test never reads real config or pod env.
+	restateYAML := filepath.Join(t.TempDir(), "vanadis.yaml")
+	if err := os.WriteFile(restateYAML, []byte("enabled: false\n"), 0o600); err != nil {
+		t.Fatalf("write restate config: %v", err)
+	}
+	t.Setenv("CONFIG_PATH", restateYAML)
+	for _, key := range []string{"RESTATE_INGRESS_URL", "VANADIS_RESTATE_ENABLED", "RESTATE_ENABLED", "AGENT_NAME"} {
+		t.Setenv(key, "")
 	}
 	appCtx, appCancel := context.WithCancel(context.Background())
 	appCancel()
@@ -445,7 +457,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	defer restateSrv.Close()
 
 	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{}, memStore, restateSrv.Client())
+	srv := NewVanadisServer(Config{}, RestateConfig{}, memStore, restateSrv.Client())
 	srv.restateCfg.RestateIngressURL = restateSrv.URL
 
 	// 1. handleCreateBuild success -> created
@@ -457,7 +469,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	}
 
 	// 2. handleCreateBuild enqueue failure -> failed
-	srvFailInsert := NewVanadisServer(Config{}, memStore, restateSrv.Client())
+	srvFailInsert := NewVanadisServer(Config{}, RestateConfig{}, memStore, restateSrv.Client())
 	srvFailInsert.restateCfg.RestateIngressURL = restateSrv.URL + "/fail"
 	recCreateFail := httptest.NewRecorder()
 	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
@@ -520,7 +532,7 @@ func TestCreateBuildTerminalResponses(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer upstream.Close()
-			s := NewVanadisServer(Config{}, newMemoryVanadisStore(), upstream.Client())
+			s := NewVanadisServer(Config{}, RestateConfig{}, newMemoryVanadisStore(), upstream.Client())
 			s.restateCfg.RestateIngressURL = upstream.URL
 			rec := httptest.NewRecorder()
 			s.handleCreateBuild(rec, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(`{"id":"example","thread_id":"123456789012345678","objective":"test","chunks":[{"repo":"aerial","title":"test","instructions":"test","depends_on":[]}]}`)))
@@ -660,7 +672,7 @@ func TestRoutes_ServerSpanPropagatesToRestate(t *testing.T) {
 // both the /mcp and /sse aliases after the L2 internal/mcp extraction.
 func TestMCPRouteWiring(t *testing.T) {
 	t.Parallel()
-	srv := NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil)
+	srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, newMemoryVanadisStore(), nil)
 	ts := httptest.NewServer(srv.Routes())
 	t.Cleanup(ts.Close)
 
@@ -712,7 +724,7 @@ func TestRetryActionRouteWiring(t *testing.T) {
 			if err := mem.CreateBuild(context.Background(), mkBuild("b1", "1555999", "Retry", "obj", "failed"), nil); err != nil {
 				t.Fatalf("seed retry build: %v", err)
 			}
-			srv := NewVanadisServer(Config{Port: "0"}, mem, nil)
+			srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, mem, nil)
 			srv.restateCfg = RestateConfig{}
 			ts := httptest.NewServer(srv.Routes())
 			t.Cleanup(ts.Close)
@@ -756,7 +768,7 @@ func TestMCPHandlerReceivers(t *testing.T) {
 			var mem *memoryVanadisStore
 			if !tc.nilServer {
 				mem = newMemoryVanadisStore()
-				srv = NewVanadisServer(Config{Port: "0"}, mem, nil)
+				srv = NewVanadisServer(Config{Port: "0"}, RestateConfig{}, mem, nil)
 				srv.restateCfg = RestateConfig{Enabled: tc.enabled, RestateIngressURL: "http://restate.invalid"}
 			}
 			h := srv.mcpHandler()
@@ -806,7 +818,7 @@ func TestWriteStoreErrMapping(t *testing.T) {
 			t.Parallel()
 			st := newMemoryVanadisStore()
 			st.getErr = tc.storeErr
-			srv := NewVanadisServer(Config{Port: "0"}, st, nil)
+			srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, st, nil)
 			ts := httptest.NewServer(srv.Routes())
 			t.Cleanup(ts.Close)
 			resp, err := ts.Client().Get(ts.URL + "/builds/b1")
@@ -834,7 +846,7 @@ func TestMCPHandlerLiveDependencies(t *testing.T) {
 	}))
 	t.Cleanup(ingress.Close)
 
-	srv := NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil)
+	srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, newMemoryVanadisStore(), nil)
 	srv.restateCfg = RestateConfig{}
 	ts := httptest.NewServer(srv.Routes())
 	t.Cleanup(ts.Close)

@@ -78,7 +78,6 @@ func mockRestateProxyServerHandler(w http.ResponseWriter, r *http.Request) {
 type callIngressCase struct {
 	name        string
 	serverURL   string
-	envURL      string
 	path        string
 	usePayload  bool
 	useOut      bool
@@ -89,9 +88,9 @@ type callIngressCase struct {
 }
 
 func TestCallIngress(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(mockRestateProxyServerHandler))
-	defer ts.Close()
-	t.Setenv("RESTATE_INGRESS_URL", "")
+	t.Cleanup(ts.Close)
 
 	tests := []callIngressCase{
 		{name: "missing ingress url", path: "/ok", wantErr: true, wantSubstr: "restate ingress URL not configured"},
@@ -106,7 +105,7 @@ func TestCallIngress(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("RESTATE_INGRESS_URL", tc.envURL)
+			t.Parallel()
 			runCallIngressCase(t, ts, tc)
 		})
 	}
@@ -350,6 +349,33 @@ func TestClientScopedNames(t *testing.T) {
 			}
 			if got := c.RouterPath("RouteFailChunk"); got != tc.wantRouterPath {
 				t.Errorf("RouterPath() = %q, want %q", got, tc.wantRouterPath)
+			}
+		})
+	}
+}
+
+type ingressURLCase struct {
+	name       string
+	configured string
+	want       string
+}
+
+// TestIngressURL pins that the client reports only its configured ingress and
+// never falls back to process env (RESTATE_INGRESS_URL), so tests cannot be
+// routed to a live Restate ingress.
+func TestIngressURL(t *testing.T) {
+	t.Parallel()
+	tests := []ingressURLCase{
+		{name: "empty config stays empty", configured: "", want: ""},
+		{name: "whitespace config stays empty", configured: "   ", want: ""},
+		{name: "configured url trimmed", configured: " http://restate.test:8080/ ", want: "http://restate.test:8080"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := NewClient(config.RestateConfig{RestateIngressURL: tc.configured}, nil).IngressURL()
+			if got != tc.want {
+				t.Fatalf("IngressURL() = %q, want %q", got, tc.want)
 			}
 		})
 	}
