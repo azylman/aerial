@@ -266,7 +266,9 @@ func TestMediaStreamSession_TestConnSends(t *testing.T) {
 	t.Cleanup(func() { _ = clientConn.Close() })
 
 	sessLive := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-testconn-live"})
-	sessLive.SetGeminiConnForTest(clientConn)
+	sessLive.mu.Lock()
+	sessLive.geminiConn = clientConn
+	sessLive.mu.Unlock()
 	if err := sessLive.Steer("say hello now", "say"); err != nil {
 		t.Fatalf("Steer() err = %v, want nil", err)
 	}

@@ -140,7 +140,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		calendarResp: "Dentist appointment at 2pm",
 		memoryResp:   "Home address: 123 Example St",
 	}
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 
 	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
@@ -454,7 +454,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 		GeminiVoiceName:     "Kore",
 	}
 
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
@@ -546,7 +546,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	t.Cleanup(geminiServer.Close)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 
 	consultClient := &mockConsultClient{
 		calendarErr: errors.New("calendar failed"),
@@ -667,7 +667,7 @@ func waitForClearEvent(ws *websocket.Conn) bool {
 func TestStreamTokenManager_NilTimeSource(t *testing.T) {
 	t.Parallel()
 
-	mgrNil := twilio.NewStreamTokenManager(nil)
+	mgrNil := twilio.NewStreamTokenManager(nil, nil)
 	tok, err := mgrNil.Issue("c1", 10*time.Second)
 	if err != nil {
 		t.Fatalf("Issue err: %v", err)
@@ -762,7 +762,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 	setupMediaWebSocketStoreCall(context.Background(), st, tc)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {

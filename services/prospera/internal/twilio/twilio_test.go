@@ -157,7 +157,7 @@ func TestStreamTokenManager(t *testing.T) {
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	mgr := NewStreamTokenManager(func() time.Time {
 		return now
-	})
+	}, nil)
 
 	tests := []struct {
 		name       string
@@ -199,7 +199,7 @@ func TestStreamTokenManager(t *testing.T) {
 			currentTime := now
 			mgrInstance := NewStreamTokenManager(func() time.Time {
 				return currentTime
-			})
+			}, nil)
 
 			token, err := mgrInstance.Issue(tc.callID, tc.ttl)
 			if err != nil {
@@ -1146,9 +1146,9 @@ func TestEscapeXML(t *testing.T) {
 
 func TestStreamTokenManager_EntropyError(t *testing.T) {
 	t.Parallel()
-	mgr := NewStreamTokenManager(nil, WithEntropyReader(func([]byte) (int, error) {
+	mgr := NewStreamTokenManager(nil, func([]byte) (int, error) {
 		return 0, errors.New("entropy error")
-	}))
+	})
 	if _, err := mgr.Issue("c1", time.Minute); err == nil {
 		t.Fatal("expected error on entropy failure")
 	}

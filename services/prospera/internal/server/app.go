@@ -27,22 +27,6 @@ var newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error)
 
 var transcriptBatchInterval = 5 * time.Second
 
-// testSeamKeepers holds address-taken references to functional-option helpers
-// exercised exclusively by hermetic tests. The deadcode CI gate builds its
-// call graph (RTA) from non-test code only, so without a production reference
-// these options read as unreachable; the slice keeps them rooted with zero
-// behavior change. Do not call these entries.
-var _ = []any{
-	delivery.WithReporterHTTPClient,
-	delivery.WithReporterGeminiBaseURL,
-	mediastream.WithPacerInterval,
-	mediastream.WithGeminiDialer,
-	(*mediastream.CallSessionManager).WaitForSession,
-	twilio.WithEntropyReader,
-	twilio.WithTwilioBaseURL,
-	twilio.WithTwilioHTTPClient,
-}
-
 // shutdownTimeout bounds graceful HTTP shutdown; drainTimeout bounds the
 // live-bridge drain window for calls that end naturally. Separate windows
 // (not one shared deadline) so a Shutdown consumed or failed by lingering
@@ -188,7 +172,7 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config]) erro
 		log.Printf("prospera: initial orphan reconciliation notice: %v", err)
 	}
 
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	consultClient := gemini.NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
 	sessionMgr := mediastream.NewCallSessionManager(cfgSrc, st, twilioClient, consultClient, tokenMgr,
 		mediastream.WithSessionFactory(newProsperaMediaSession))

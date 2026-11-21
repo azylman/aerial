@@ -55,29 +55,16 @@ type StreamTokenManager struct {
 	tokens map[string]streamTokenEntry
 }
 
-// StreamTokenOption configures a StreamTokenManager.
-type StreamTokenOption func(*StreamTokenManager)
-
-// WithEntropyReader overrides the crypto-random source used for token generation (tests).
-func WithEntropyReader(fn func([]byte) (int, error)) StreamTokenOption {
-	return func(m *StreamTokenManager) {
-		m.randFn = fn
-	}
-}
-
 // NewStreamTokenManager initializes a StreamTokenManager.
-func NewStreamTokenManager(nowFn func() time.Time, opts ...StreamTokenOption) *StreamTokenManager {
+func NewStreamTokenManager(nowFn func() time.Time, randFn func([]byte) (int, error)) *StreamTokenManager {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	m := &StreamTokenManager{
+	return &StreamTokenManager{
 		nowFn:  nowFn,
+		randFn: randFn,
 		tokens: make(map[string]streamTokenEntry),
 	}
-	for _, opt := range opts {
-		opt(m)
-	}
-	return m
 }
 
 // Issue generates a 32-byte crypto-random hex token bound to callID with a specified TTL.
