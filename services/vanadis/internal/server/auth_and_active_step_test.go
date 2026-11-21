@@ -125,7 +125,7 @@ func TestServer_AuthEnabledConfig(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("tok"), 0o600); err != nil {
 		t.Fatalf("failed to write token: %v", err)
 	}
-	srv := NewVanadisServer(Config{Auth: k8sauth.Config{Enabled: true, TokenPath: tokenFile}}, nil, nil)
+	srv := NewVanadisServer(Config{Auth: k8sauth.Config{Enabled: true, TokenPath: tokenFile}}, RestateConfig{}, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/builds", http.NoBody)
 	srv.Routes().ServeHTTP(rec, req)
@@ -160,7 +160,7 @@ func TestServer_AuthMiddleware_ExemptAndProtected(t *testing.T) {
 			t.Parallel()
 			auth := newTestAuthenticator(t, authRoundTripper(tc.authOk, tc.sarOk))
 			mem := newMemoryVanadisStore()
-			srv := NewVanadisServer(Config{}, mem, nil, auth)
+			srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 			mux := srv.Routes()
 
 			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
@@ -282,7 +282,7 @@ func TestServer_RBAC_Endpoints(t *testing.T) {
 			_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
 			_ = mem.CreateBuild(context.Background(), bEmpty, []VanadisChunk{cEmpty})
 
-			srv := NewVanadisServer(Config{}, mem, nil, auth)
+			srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 			srv.restateCfg = RestateConfig{RestateIngressURL: restateSrv.URL}
 			mux := srv.Routes()
 
@@ -369,7 +369,7 @@ func TestServer_ActiveStepEndpoints(t *testing.T) {
 			_ = mem.CreateBuild(context.Background(), bErr, []VanadisChunk{cErr})
 			_ = mem.CreateBuild(context.Background(), bEmptyActive, []VanadisChunk{cEmptyActive})
 
-			srv := NewVanadisServer(Config{}, mem, nil, auth)
+			srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 			srv.restateCfg = RestateConfig{
 				RestateIngressURL: restateSrv.URL,
 			}
@@ -396,7 +396,7 @@ func TestServer_ActiveStepEndpoints(t *testing.T) {
 
 func TestServer_NilStore_Endpoints(t *testing.T) {
 	t.Parallel()
-	srv := NewVanadisServer(Config{}, nil, nil)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 	mux := srv.Routes()
 
 	tests := []struct {
@@ -437,7 +437,7 @@ func TestServer_MissingCallerInContext(t *testing.T) {
 	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
 	_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
 
-	srv := NewVanadisServer(Config{}, mem, nil, auth)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 
 	err := srv.authorizeBuildUpdate(context.Background(), "aerial")
 	if err == nil {

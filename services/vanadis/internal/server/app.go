@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -187,8 +188,8 @@ func initQueueStats(ctx context.Context, server *VanadisServer, natsURL string, 
 	}
 }
 
-func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
-	server := NewVanadisServer(cfg, nil, nil)
+func runServer(ctx context.Context, cfg Config, restateCfg RestateConfig, onReady func(addr string)) error {
+	server := NewVanadisServer(cfg, restateCfg, nil, nil)
 	var cleanupDB func(context.Context)
 	if cfg.PostgresURL != "" {
 		cleanup, err := initPostgres(ctx, server, cfg.PostgresURL)
@@ -239,5 +240,9 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	return runErr
 }
 
-// RunApp runs the Vanadis orchestrator application until the context is canceled.
-func RunApp(ctx context.Context, cfg Config) error { return runServer(ctx, cfg, nil) }
+// RunApp runs the Vanadis orchestrator application until the context is
+// canceled. It is the only place that resolves Restate config from
+// CONFIG_PATH and its env overrides.
+func RunApp(ctx context.Context, cfg Config) error {
+	return runServer(ctx, cfg, LoadRestateConfig(os.Getenv("CONFIG_PATH")), nil)
+}
