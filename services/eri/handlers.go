@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
+	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -728,7 +729,7 @@ func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL, 
 	}
 	defer resp.Body.Close()
 
-	streamProxyResponse(w, resp)
+	githubproxy.StreamResponse(w, resp)
 }
 
 func handleTranscriptsSearch(indexerURL string, store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
@@ -1283,7 +1284,7 @@ func (rec *statusRecorder) Flush() {
 func normalizeRoute(path string) string {
 	switch {
 	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/metrics", path == "/internal/llm",
-		path == "/internal/discord/message", path == "/internal/discord/interaction", path == "/internal/guard/scan":
+		path == "/internal/discord/message", path == "/internal/discord/interaction":
 		return path
 	case path == "/health" || path == "/healthz":
 		return "/health"
@@ -1293,10 +1294,6 @@ func normalizeRoute(path string) string {
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
-	case path == "/internal/github-api" || strings.HasPrefix(path, "/internal/github-api/"):
-		return "/internal/github-api"
-	case path == "/internal/github-git" || strings.HasPrefix(path, "/internal/github-git/"):
-		return "/internal/github-git"
 	default:
 		return "unmatched"
 	}
@@ -1332,7 +1329,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
 	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))
 	mux.HandleFunc("/internal/discord/interaction", handleInternalDiscordInteraction(store, pool))
-	mux.HandleFunc("/internal/guard/scan", handleInternalGuardScan())
 
 	var cfg *config.Config
 	if pool != nil && pool.AppConfig() != nil {
@@ -1340,9 +1336,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	} else {
 		cfg = config.ActiveConfig()
 	}
-	mux.HandleFunc("/internal/github-api/", handleInternalGitHubAPIProxy(cfg))
-	mux.HandleFunc("/internal/github-git/", handleInternalGitHubGitProxy(cfg))
-
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	indexerURL := resolveTranscriptsIndexerURL(cfg, pool)

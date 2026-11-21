@@ -457,6 +457,46 @@ func (s *PRState) RecordExpectedJobs(jobs []string) bool {
 	return true
 }
 
+// Untracked reports whether st never saw any event that makes a PR exist
+// for the legacy registry: no register (Registered, TargetID), no Hydrate
+// (a pr_registry row always carries its head SHA), no opened (it carries
+// the head SHA, and PR-body bot metadata sets BotID), and no merge or close
+// (Terminal, MergeSHA). Such a state was built only from deploy-phase
+// events, for example an upstream Flux source commit resolved to a PR of a
+// repo nobody registers. The legacy registry has no row for it, so its
+// deploy transitions and request records are no-ops there; prstate must not
+// start a rollout for it either. A nil state is not untracked: there is
+// nothing to drop.
+func (s *PRState) Untracked() bool {
+	return s != nil && !s.Registered && s.Terminal == TerminalNone &&
+		strings.TrimSpace(s.HeadSHA) == "" && strings.TrimSpace(s.MergeSHA) == "" &&
+		strings.TrimSpace(s.TargetID) == "" && strings.TrimSpace(s.BotID) == ""
+}
+
+// HasDeployResidue reports whether st still holds rollout state: a status,
+// recorded or started jobs, reconcile requests, or rollout-index membership.
+func (s *PRState) HasDeployResidue() bool {
+	return s != nil && (s.Status != "" || len(s.Jobs) > 0 || len(s.StartedJobs) > 0 ||
+		len(s.KustomizationRequests) > 0 || s.RolloutIndexed || s.PendingDeployFailure != nil)
+}
+
+// ClearDeployResidue drops every rollout field of st, so an untracked state
+// created before the untracked-event guard stops reading as a rollout. It
+// keeps the generation and index sequences, so a later index update for the
+// PR still orders after the inactive one this clear sends.
+func (s *PRState) ClearDeployResidue() {
+	if s == nil {
+		return
+	}
+	s.Status = ""
+	s.Jobs, s.StartedJobs, s.DeployedJobs = nil, nil, nil
+	s.JobStates = nil
+	s.KustomizationRequests, s.DeployedKustomizations = nil, nil
+	s.DeploySuccessPending, s.DeployFailedPublished = false, false
+	s.PendingDeployFailure = nil
+	s.Banner = ""
+}
+
 // TransitionDeploying mirrors TransitionDeploying: when at least one
 // requested job is not yet deployed and the PR is not closed or in conflict,
 // the PR moves to deploying, jobs gain the undeployed requests, started_jobs

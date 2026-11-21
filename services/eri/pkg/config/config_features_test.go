@@ -210,14 +210,14 @@ func daemonClassifierCases() []daemonClassifierCase {
 	return []daemonClassifierCase{
 		{name: "daemon explicit", yaml: "channels: {default: {mode: threads}}\ndaemon_idle_timeout: 12h\nmax_concurrent_daemons: 25\nmax_background_task_duration: 90m\n", wantIdle: 12 * time.Hour},
 		{name: "daemon defaults", yaml: "channels: {default: {mode: threads}}\n", wantIdle: 24 * time.Hour},
-		{name: "classifier yaml", yaml: "channels: {default: {mode: threads}}\nclassifier_url: http://192.168.1.70:11434\nclassifier_model: qwen2.5:3b\nclassifier_protocol: systemone\n", wantProtocol: "systemone", wantClassURL: "http://192.168.1.70:11434"},
-		{name: "classifier sysone valid", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: systemone\nclassifier_url: http://192.168.1.70:8000/v1/systemone\n", wantProtocol: "systemone", wantClassURL: "http://192.168.1.70:8000/v1/systemone"},
-		{name: "classifier ollama with url", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: ollama\nclassifier_url: http://192.168.1.70:11434\n", wantProtocol: "ollama", wantClassURL: "http://192.168.1.70:11434"},
+		{name: "classifier yaml", yaml: "channels: {default: {mode: threads}}\nclassifier_url: http://systemone.test:11434\nclassifier_model: qwen2.5:3b\nclassifier_protocol: systemone\n", wantProtocol: "systemone", wantClassURL: "http://systemone.test:11434"},
+		{name: "classifier sysone valid", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: systemone\nclassifier_url: http://systemone.test:8000/v1/systemone\n", wantProtocol: "systemone", wantClassURL: "http://systemone.test:8000/v1/systemone"},
+		{name: "classifier ollama with url", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: ollama\nclassifier_url: http://systemone.test:11434\n", wantProtocol: "ollama", wantClassURL: "http://systemone.test:11434"},
 		{name: "classifier ollama no url", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: ollama\n", wantProtocol: "ollama"},
 		{name: "classifier sysone missing url", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: systemone\n", wantErr: true},
 		{name: "classifier invalid protocol", yaml: "channels: {default: {mode: threads}}\nclassifier_protocol: unsupported\n", wantErr: true},
 		{name: "classifier env", env: map[string]string{"CLASSIFIER_PROTOCOL": "SYSTEMONE"}, wantProtocol: "systemone"},
-		{name: "thread title yaml", yaml: "channels: {default: {mode: threads}}\nthread_title_url: http://192.168.1.70:11434\nthread_title_model: qwen2.5:3b\n", wantTitleURL: "http://192.168.1.70:11434"},
+		{name: "thread title yaml", yaml: "channels: {default: {mode: threads}}\nthread_title_url: http://systemone.test:11434\nthread_title_model: qwen2.5:3b\n", wantTitleURL: "http://systemone.test:11434"},
 		{name: "thread title env", env: map[string]string{"THREAD_TITLE_URL": "http://edge.lan:11434", "THREAD_TITLE_MODEL": "llama3.2:1b"}, wantTitleURL: "http://edge.lan:11434"},
 		{name: "example config", yaml: "model: gemini-2.5-flash\nsystem_channel: aerial-dev\nchannels: {default: {mode: threads}}\n", wantModel: "gemini-2.5-flash", wantChannel: "aerial-dev", wantIdle: 24 * time.Hour},
 	}

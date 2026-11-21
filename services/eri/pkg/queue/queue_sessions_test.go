@@ -63,7 +63,7 @@ func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
 	tests := []struct {
 		name, model, rawOutput, endpoint, wantParseSubstr, wantSysSubstr string
 	}{
-		{"TruncatedAndSanitizedOutput", "gemini-flash", strings.Repeat("x", 700) + "\n```json\n@everyone @here\n```", "http://192.168.1.70:8000/v1/systemone", "... (truncated)", "http://192.168.1.70:8000/v1/systemone"},
+		{"TruncatedAndSanitizedOutput", "gemini-flash", strings.Repeat("x", 700) + "\n```json\n@everyone @here\n```", "http://systemone.test:8000/v1/systemone", "... (truncated)", "http://systemone.test:8000/v1/systemone"},
 		{"ShortOutputAndMentions", "gemini-pro", "```json\n@everyone @here\n```", "http://127.0.0.1:8000/v1/systemone", "'''json", "http://127.0.0.1:8000/v1/systemone"},
 	}
 	for _, tc := range tests {

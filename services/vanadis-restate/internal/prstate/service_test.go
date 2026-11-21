@@ -140,7 +140,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
+			wantPRHandlers:  "CompareProjection,DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
 			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA",
 		},
 	}
@@ -190,8 +190,11 @@ func TestPRObjectService_DarkHandlers(t *testing.T) {
 	prMc07, prRec07 := newStateMock[*PRState](t, nil)
 	prMc08, prRec08 := newStateMock[*PRState](t, nil)
 	prMc09, prRec09 := newStateMock[*PRState](t, nil)
-	prMc10, prRec10 := newStateMock[*PRState](t, nil)
-	prMc11, prRec11 := newStateMock[*PRState](t, nil)
+	// Rollout events drop for an untracked PR, so their rows seed a PR
+	// opened on the event head (TestPRObjectService_UntrackedRollout pins
+	// the drop).
+	prMc10, prRec10 := newStateMock(t, svcRow("abc123", "", RegistryStatusOpen, TerminalNone))
+	prMc11, prRec11 := newStateMock(t, svcRow("abc123", "", RegistryStatusOpen, TerminalNone))
 	tests := []struct {
 		name         string
 		got          error
@@ -607,7 +610,8 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 		wantSet      bool
 		wantErr      bool
 	}{
-		{name: "fresh publish records and persists", repo: "aerial", pr: 101, evHead: "abc123", wantRecorded: true, wantSet: true},
+		{name: "fresh publish records and persists", repo: "aerial", pr: 101, existing: svcRow("abc123", "", RegistryStatusOpen, TerminalNone), evHead: "abc123", wantRecorded: true, wantSet: true},
+		{name: "untracked pr drops without persisting", repo: "aerial", pr: 101, evHead: "abc123", wantSet: false},
 		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
 		{name: "zero pr drops before kv", repo: "aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
 		{name: "closed terminal absorbs without persisting", repo: "aerial", pr: 101, existing: terminalState, evHead: "abc123", wantSet: false},
@@ -625,6 +629,7 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 				mc = newStateErrorMock(t)
 			default:
 				mc, rec = newStateMock(t, tc.existing)
+				stubRunKeepTerminal(mc)
 			}
 			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: tc.evHead, JobName: "deploy-job", Event: "deploy_success"}
 			got, err := NewPRObjectService().HandleDeploySuccessPublished(restate.WithMockContext(mc), ev)

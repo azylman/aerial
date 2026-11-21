@@ -13,11 +13,14 @@ REPO_NAME_EXPLICIT=0
 DEFAULT_BRANCH="main"
 
 GITHUB_API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+# eri-restate serves the PAT-injecting, secret-scanning GitHub proxy on its
+# loopback-only health mux in every agent pod.
+GITHUB_PROXY_BASE="http://127.0.0.1:4028"
 USE_LOOPBACK_GITHUB=0
 if [ -z "${GITHUB_PAT:-}" ]; then
-    if [ "${AERIAL_USE_LOOPBACK_GITHUB:-0}" = "1" ] || { [ "${REPO_TEST_MODE:-0}" != "1" ] && [ "$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 "${AERIAL_INTERNAL_ERI_URL:-http://127.0.0.1:8088}/healthz" 2>/dev/null || true)" = "200" ]; }; then
+    if [ "${AERIAL_USE_LOOPBACK_GITHUB:-0}" = "1" ] || { [ "${REPO_TEST_MODE:-0}" != "1" ] && [ "$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 "${GITHUB_PROXY_BASE}/healthz" 2>/dev/null || true)" = "200" ]; }; then
         USE_LOOPBACK_GITHUB=1
-        GITHUB_API_BASE="${AERIAL_INTERNAL_ERI_URL:-http://127.0.0.1:8088}/internal/github-api"
+        GITHUB_API_BASE="${GITHUB_PROXY_BASE}/internal/github-api"
     fi
 fi
 
@@ -232,7 +235,7 @@ init_scratch() {
 
     local default_repo_url="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
     if [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ]; then
-        default_repo_url="${AERIAL_INTERNAL_ERI_URL:-http://127.0.0.1:8088}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
+        default_repo_url="${GITHUB_PROXY_BASE}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
     fi
     REPO_URL="${AERIAL_REPO_URL_OVERRIDE:-$default_repo_url}"
 

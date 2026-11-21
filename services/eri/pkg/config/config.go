@@ -361,6 +361,30 @@ type ConfigData struct {
 	CovenURL                  string                   `yaml:"coven_url"                              json:"coven_url"`
 	NATSURL                   string                   `yaml:"nats_url"                               json:"nats_url"`
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
+	PushScan                  PushScanConfig           `yaml:"push_scan,omitempty"                    json:"push_scan,omitempty"`
+}
+
+// PushScanConfig tunes the GitHub egress proxy secret scan.
+type PushScanConfig struct {
+	// RegexAllowlist entries are "owner/repo:path/prefix/"; token and private-IP
+	// regex hits under a listed prefix are dropped. Registered secret values are
+	// never allowlisted.
+	RegexAllowlist []string `yaml:"regex_allowlist,omitempty" json:"regex_allowlist,omitempty"`
+}
+
+// PrefixesFor returns the allowlisted path prefixes for owner/repo, matching
+// owner and repo case-insensitively.
+func (p PushScanConfig) PrefixesFor(owner, repo string) []string {
+	want := strings.ToLower(owner + "/" + repo)
+	var out []string
+	for _, entry := range p.RegexAllowlist {
+		target, prefix, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+		if ok && prefix != "" && strings.ToLower(strings.TrimSpace(target)) == want {
+			out = append(out, prefix)
+		}
+	}
+	return out
 }
 
 func normalizePrewarmedTargets(targets []string) []string {
@@ -498,6 +522,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		CovenURL                  string                   `yaml:"coven_url"`
 		NATSURL                   string                   `yaml:"nats_url"`
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
+		PushScan                  PushScanConfig           `yaml:"push_scan"`
 	}
 
 	var raw rawConfigHelper
@@ -532,6 +557,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		IndexerURL:    strings.TrimRight(strings.TrimSpace(raw.Transcripts.IndexerURL), "/"),
 		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
 	}
+	c.PushScan = PushScanConfig{RegexAllowlist: cloneStringSlice(raw.PushScan.RegexAllowlist)}
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
@@ -660,6 +686,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	}
 	dst := *src
 	dst.AdminUsers = cloneStringSlice(src.AdminUsers)
+	dst.PushScan.RegexAllowlist = cloneStringSlice(src.PushScan.RegexAllowlist)
 	if src.Channels != nil {
 		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))
 		for k, v := range src.Channels {

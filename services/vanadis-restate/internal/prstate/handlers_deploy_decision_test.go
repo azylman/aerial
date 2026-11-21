@@ -247,7 +247,7 @@ func TestPRObjectService_DeployDecision(t *testing.T) {
 		{name: "decision resolves publish on fresh state", evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantPublish: true},
 		{name: "decision dedupes recorded publish without persisting", preset: true, stateHead: "aaa111", stateGen: 2, recordDispatch: true, recordPRSlot: true, recordSHASlot: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDeduped: true},
 		{name: "decision surfaces kv failure", failGet: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantErr: true},
-		{name: "ack records fresh publish", ack: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantRecorded: true, wantSet: true},
+		{name: "ack records fresh publish", ack: true, preset: true, stateHead: "aaa111", evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantRecorded: true, wantSet: true},
 		{name: "ack replays recorded publish", ack: true, preset: true, stateHead: "aaa111", stateGen: 2, recordDispatch: true, recordPRSlot: true, recordSHASlot: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantRecorded: true, wantDeduped: true, wantSet: true},
 		{name: "ack drops stale head without persisting", ack: true, preset: true, stateHead: "aaa111", stateGen: 2, evHead: "zzz999", evMerge: "mmm999", evJob: "flux-a"},
 		{name: "ack surfaces kv failure", ack: true, failGet: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantErr: true},

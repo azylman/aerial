@@ -13,16 +13,16 @@ All pods are running the deployed cutover image containing the decomposed subpac
 
 ## Endpoint Health & Telemetry Verification
 Probed `/healthz` and `/metrics` on all live instances:
-1. `synapse` (`http://10.42.0.254:4020`):
+1. `synapse` (`http://synapse:4020`):
    - Health: HTTP 200 OK (`{"service":"synapse","status":"ok","time":"2026-11-19T05:24:51Z"}`)
    - Gateway Latency: `synapse_discord_gateway_latency_seconds ~0.094s`
    - Queue Depth: `synapse_queue_depth` reporting 0 in-flight / 0 pending across default, discord_ingress, and discord_interaction
    - JetStream / River Job Ingestion: Active and healthy (`synapse_jobs_enqueued_total`)
-2. `synapse-agent-alpha` (`http://10.42.0.2:4020`):
+2. `synapse-agent-alpha` (`http://synapse-agent-alpha:4020`):
    - Health: HTTP 200 OK (`{"service":"synapse","status":"ok","time":"2026-11-19T05:24:51Z"}`)
    - Gateway Latency: Nominal (<0.10s)
    - Queue Depth: Nominal (0 pending / 0 in-flight)
-3. `synapse-agent-beta` (`http://10.42.0.3:4020`):
+3. `synapse-agent-beta` (`http://synapse-agent-beta:4020`):
    - Health: HTTP 200 OK (`{"service":"synapse","status":"ok","time":"2026-11-19T05:24:51Z"}`)
    - Gateway Latency: Nominal (<0.10s)
    - Queue Depth: Nominal (0 pending / 0 in-flight)

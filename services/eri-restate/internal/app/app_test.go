@@ -331,6 +331,7 @@ type healthEndpointCase struct {
 	llmError      error
 	withNilLLM    bool
 	withUsage     bool
+	remoteAddr    string
 	wantStatus    int
 	wantBodySub   string
 	wantHeaderKey string
@@ -365,6 +366,9 @@ func runHealthEndpointCase(t *testing.T, tc healthEndpointCase) {
 	req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 	if tc.body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if tc.remoteAddr != "" {
+		req.RemoteAddr = tc.remoteAddr
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -477,6 +481,38 @@ func TestSetupHealthMux(t *testing.T) {
 			body:        strings.Repeat("a", (1<<20)+1024),
 			wantStatus:  http.StatusRequestEntityTooLarge,
 			wantBodySub: "request body too large",
+		},
+		{
+			name:        "loopback GET /internal/github-api/ reaches proxy without PAT",
+			method:      http.MethodGet,
+			path:        "/internal/github-api/user",
+			remoteAddr:  "127.0.0.1:41000",
+			wantStatus:  http.StatusServiceUnavailable,
+			wantBodySub: "GitHub PAT not configured",
+		},
+		{
+			name:        "loopback POST /internal/github-git/ reaches proxy without PAT",
+			method:      http.MethodPost,
+			path:        "/internal/github-git/org/repo.git/git-receive-pack",
+			remoteAddr:  "127.0.0.1:41000",
+			wantStatus:  http.StatusServiceUnavailable,
+			wantBodySub: "GitHub PAT not configured",
+		},
+		{
+			name:        "pod-network GET /internal/github-api/ is forbidden",
+			method:      http.MethodGet,
+			path:        "/internal/github-api/user",
+			remoteAddr:  "192.0.2.20:41000",
+			wantStatus:  http.StatusForbidden,
+			wantBodySub: "forbidden",
+		},
+		{
+			name:        "pod-network POST /internal/github-git/ is forbidden",
+			method:      http.MethodPost,
+			path:        "/internal/github-git/org/repo.git/git-receive-pack",
+			remoteAddr:  "192.0.2.20:41000",
+			wantStatus:  http.StatusForbidden,
+			wantBodySub: "forbidden",
 		},
 	}
 

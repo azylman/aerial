@@ -42,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 
@@ -104,10 +105,18 @@ func (*PRObjectService) ServiceName() string {
 }
 
 func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, ev PREvent) (*PRState, error) {
+	st, _, err := s.loadPRState(ctx, ev)
+	return st, err
+}
+
+// loadPRState is loadOrCreatePRState that also reports whether the state
+// was stored (false when it was just created for this event).
+func (s *PRObjectService) loadPRState(ctx restate.ObjectSharedContext, ev PREvent) (*PRState, bool, error) {
 	st, err := restate.Get[*PRState](ctx, s.stateKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	stored := st != nil
 	if st == nil {
 		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
@@ -115,7 +124,101 @@ func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, e
 	// owner slot but never overwrites a stored owner. Register, Hydrate, and
 	// PR-body metadata on opened claim ownership via ClaimOwner instead.
 	st.ApplyAgentHint(ev.Agent)
-	return st, nil
+	return st, stored, nil
+}
+
+// untrackedEventsTotal counts rollout events dropped because the PR is
+// untracked (PRState.Untracked), by handler.
+var untrackedEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "prstate_untracked_events_total",
+	Help: "Rollout events PRObject dropped because the PR never saw register, Hydrate, opened or merge (legacy keeps no row for it), by handler.",
+}, []string{"handler"})
+
+func init() {
+	registerCollector(untrackedEventsTotal)
+}
+
+// dropUntrackedRollout drops one rollout event for an untracked PR, the way
+// the legacy registry's deploy transitions return no target and record
+// nothing when no row exists: it counts and logs the drop, persists nothing
+// for a state this event created, and sends no index update, fact or
+// reconcile. A stored untracked state with rollout residue (created before
+// this guard) is cleaned instead (cleanUntrackedResidue). Returns true when
+// the event must be dropped.
+func (s *PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PRState, stored bool, handler string) bool {
+	if !st.Untracked() {
+		return false
+	}
+	pr := PRObjectKey(st.Repo, st.PRNumber)
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+		untrackedEventsTotal.WithLabelValues(handler).Inc()
+		slog.InfoContext(rc, "[prstate] dropping rollout event for untracked PR (no register, Hydrate, opened or merge seen)",
+			"pr", pr, "handler", handler, "stored", stored)
+		return restate.Void{}, nil
+	}, restate.WithName("untracked-"+handler))
+	if stored {
+		s.cleanUntrackedResidue(ctx, st)
+	}
+	return true
+}
+
+// dropUntrackedEvent loads the PR state for a handler that loads it itself
+// later and applies dropUntrackedRollout. A malformed event is not dropped
+// here; the handler's own validation decides.
+func (s *PRObjectService) dropUntrackedEvent(ctx restate.ObjectContext, ev PREvent, handler string) (bool, error) {
+	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return false, nil
+	}
+	st, stored, err := s.loadPRState(ctx, ev)
+	if err != nil {
+		return false, err
+	}
+	return s.dropUntrackedRollout(ctx, st, stored, handler), nil
+}
+
+// cleanUntrackedResidue clears the rollout fields of a stored untracked
+// state and closes its index entries: the rollout index gets an inactive
+// update (syncRolloutIndex) and RepoObject a deployed update for the
+// indexed generation, so it leaves the deploying set. Idempotent: a state
+// with no residue changes nothing and sends nothing.
+func (s *PRObjectService) cleanUntrackedResidue(ctx restate.ObjectContext, st *PRState) bool {
+	if !st.Untracked() || !st.HasDeployResidue() {
+		return false
+	}
+	st.ClearDeployResidue()
+	restate.Set(ctx, s.stateKey, st)
+	s.syncRolloutIndex(ctx, st)
+	if st.GateGeneration > 0 {
+		restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerPRIndex).Send(PRIndexEvent{
+			Repo: st.Repo, PRNumber: st.PRNumber, ReopenEpoch: st.ReopenEpoch, Generation: st.GateGeneration, Lifecycle: IndexDeployed,
+		})
+	}
+	return true
+}
+
+// DropUntrackedRequest is the empty DropUntracked input; the object key
+// names the PR.
+type DropUntrackedRequest struct{}
+
+// DropUntrackedResponse reports whether DropUntracked cleaned anything.
+type DropUntrackedResponse struct {
+	Untracked bool `json:"untracked"`
+	Cleaned   bool `json:"cleaned"`
+}
+
+// DropUntracked is the idempotent operator cleanup for an untracked PR left
+// in rollout before the untracked-event guard: it clears the rollout fields
+// and closes the PR's rollout-index and RepoObject deploying entries. A
+// tracked or unknown PR is untouched.
+func (s *PRObjectService) DropUntracked(ctx restate.ObjectContext, _ DropUntrackedRequest) (DropUntrackedResponse, error) {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil || st == nil {
+		return DropUntrackedResponse{}, err
+	}
+	if !st.Untracked() {
+		return DropUntrackedResponse{}, nil
+	}
+	return DropUntrackedResponse{Untracked: true, Cleaned: s.cleanUntrackedResidue(ctx, st)}, nil
 }
 
 // eventPhase selects the disposition guard for one handler: PR-lifecycle
@@ -126,6 +229,10 @@ type eventPhase int
 const (
 	phaseLifecycle eventPhase = iota
 	phaseDeploy
+	// phaseRollout is a deploy-phase event that can start or advance a
+	// rollout (TransitionDeploying, reconcile requests, rollout progress,
+	// deploy failure). It is dropped for an untracked PR.
+	phaseRollout
 )
 
 func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
@@ -134,6 +241,14 @@ func (s *PRObjectService) mutatePREvent(ctx restate.ObjectContext, ev PREvent, m
 
 func (s *PRObjectService) mutateDeployEvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
 	return s.mutatePhase(ctx, ev, phaseDeploy, mutate)
+}
+
+func (s *PRObjectService) mutateRolloutEvent(ctx restate.ObjectContext, ev PREvent, handler string, mutate func(*PRState)) error {
+	return s.mutateRolloutPhaseEvent(ctx, ev, handler, func(st *PRState, _ *PREvent) {
+		if mutate != nil {
+			mutate(st)
+		}
+	})
 }
 
 func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, phase eventPhase, mutate func(*PRState)) error {
@@ -148,12 +263,25 @@ func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, pha
 // which of the carried facts still apply: mutate may trim ev.Facts before
 // they run.
 func (s *PRObjectService) mutatePhaseEvent(ctx restate.ObjectContext, ev PREvent, phase eventPhase, mutate func(*PRState, *PREvent)) error {
+	return s.mutateEvent(ctx, ev, phase, "", mutate)
+}
+
+// mutateRolloutPhaseEvent is mutatePhaseEvent for rollout events: an
+// untracked PR drops the event (dropUntrackedRollout) before any mutation.
+func (s *PRObjectService) mutateRolloutPhaseEvent(ctx restate.ObjectContext, ev PREvent, handler string, mutate func(*PRState, *PREvent)) error {
+	return s.mutateEvent(ctx, ev, phaseRollout, handler, mutate)
+}
+
+func (s *PRObjectService) mutateEvent(ctx restate.ObjectContext, ev PREvent, phase eventPhase, handler string, mutate func(*PRState, *PREvent)) error {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
-	st, err := s.loadOrCreatePRState(ctx, ev)
+	st, stored, err := s.loadPRState(ctx, ev)
 	if err != nil {
 		return err
+	}
+	if phase == phaseRollout && s.dropUntrackedRollout(ctx, st, stored, handler) {
+		return nil
 	}
 	if dispositionFor(st, ev, phase) != DispositionApply {
 		return nil
@@ -172,7 +300,7 @@ func (s *PRObjectService) mutatePhaseEvent(ctx restate.ObjectContext, ev PREvent
 }
 
 func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition {
-	if phase == phaseDeploy {
+	if phase == phaseDeploy || phase == phaseRollout {
 		return st.ApplyDeployEvent(ev)
 	}
 	return st.ApplyEvent(ev)
@@ -516,7 +644,7 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 // deploying: once the last Kustomization flips the PR to deployed, the
 // deploy_success verdict publishes instead, exactly like the legacy watcher.
 func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePhaseEvent(ctx, ev, phaseDeploy, func(st *PRState, ev *PREvent) {
+	return s.mutateRolloutPhaseEvent(ctx, ev, PRHandlerRolloutProgress, func(st *PRState, ev *PREvent) {
 		st.MarkJobsDeployed(ev.DeployedJobs)
 		st.MarkKustomizationsDeployed(ev.DeployedKustomizations)
 		st.RecordJobState(ev.JobName, ev.JobState)
@@ -573,7 +701,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 // or, when Acknowledged, the confirmed deploy_failed publish
 // (AcknowledgeDeployFailedPublished). Merged PRs apply it.
 func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+	return s.mutateRolloutEvent(ctx, ev, PRHandlerDeployFailed, func(st *PRState) {
 		st.DisarmDeployFailure()
 		if ev.Acknowledged {
 			st.AckDeployFailedPublished()
@@ -610,6 +738,9 @@ func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREven
 // deploy_success facts the event carries. Legacy-owned events commit the
 // same keys and skip only the publish.
 func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREvent) (DeployDispatchDecision, error) {
+	if dropped, err := s.dropUntrackedEvent(ctx, ev, PRHandlerDeploySuccess); dropped || err != nil {
+		return DeployDispatchDecision{}, err
+	}
 	return runVerdict(s, ctx, ev, ResolveDeployDispatchDecision,
 		func(d DeployDispatchDecision) bool { return d.ShouldPublish },
 		func(st *PRState) error {
@@ -661,9 +792,12 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return DeployPublishedOutcome{}, nil
 	}
-	st, err := s.loadOrCreatePRState(ctx, ev)
+	st, stored, err := s.loadPRState(ctx, ev)
 	if err != nil {
 		return DeployPublishedOutcome{}, err
+	}
+	if s.dropUntrackedRollout(ctx, st, stored, "HandleDeploySuccessPublished") {
+		return DeployPublishedOutcome{}, nil
 	}
 	out, err := s.commitDeploySuccess(ctx, st, ev)
 	if err != nil || out.Disposition != DispositionApply {

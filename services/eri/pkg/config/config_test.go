@@ -1430,3 +1430,31 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+func TestPushScanConfig_PrefixesFor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		yaml  string
+		owner string
+		repo  string
+		want  []string
+	}{
+		{name: "absent key defaults empty", yaml: "model: m\n", owner: "acme", repo: "widgets"},
+		{name: "matches repo case-insensitively", yaml: "push_scan:\n  regex_allowlist:\n    - \"Acme/Widgets:testdata/\"\n    - \"acme/widgets:/pkg/guard/\"\n    - \"acme/other:docs/\"\n", owner: "acme", repo: "widgets", want: []string{"testdata/", "pkg/guard/"}},
+		{name: "malformed and empty prefixes skipped", yaml: "push_scan:\n  regex_allowlist:\n    - \"acme/widgets\"\n    - \"acme/widgets:\"\n", owner: "acme", repo: "widgets"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cd ConfigData
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cd); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			cloned := cloneConfigData(&cd)
+			if got := cloned.PushScan.PrefixesFor(tc.owner, tc.repo); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("PrefixesFor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

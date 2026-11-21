@@ -753,3 +753,62 @@ func TestPRState_SynchronizeDisposition(t *testing.T) {
 		})
 	}
 }
+
+func TestPRState_Untracked(t *testing.T) {
+	t.Parallel()
+	fresh := func() *PRState { return NewPRState("kubernetes-sigs/gateway-api", 5433) }
+	with := func(f func(*PRState)) *PRState { s := fresh(); f(s); return s }
+	tests := []struct {
+		name string
+		st   *PRState
+		want bool
+	}{
+		{name: "nil state has nothing to drop"},
+		{name: "fresh state is untracked", st: fresh(), want: true},
+		{name: "agent hint alone stays untracked", st: with(func(s *PRState) { s.Agent = "aerial" }), want: true},
+		{name: "pre-guard deploying residue stays untracked", st: untrackedResidue(), want: true},
+		{name: "registered pr is tracked", st: with(func(s *PRState) { s.Registered = true })},
+		{name: "opened head is tracked", st: with(func(s *PRState) { s.HeadSHA = "h1" })},
+		{name: "shadow-built opened pr without register is tracked", st: with(func(s *PRState) { s.HeadSHA, s.BotID, s.Agent = "h2304", "miorine", "miorine" })},
+		{name: "merge sha is tracked", st: with(func(s *PRState) { s.MergeSHA = "m1" })},
+		{name: "target thread is tracked", st: with(func(s *PRState) { s.TargetID = "100000000000000001" })},
+		{name: "body bot id is tracked", st: with(func(s *PRState) { s.BotID = "suletta" })},
+		{name: "merged terminal is tracked", st: with(func(s *PRState) { s.Terminal = TerminalMerged })},
+		{name: "closed terminal is tracked", st: with(func(s *PRState) { s.Terminal = TerminalClosed })},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.st.Untracked(); got != tc.want {
+				t.Fatalf("Untracked() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPRState_HasDeployResidue(t *testing.T) {
+	t.Parallel()
+	with := func(f func(*PRState)) *PRState { s := NewPRState("aerial", 101); f(s); return s }
+	tests := []struct {
+		name string
+		st   *PRState
+		want bool
+	}{
+		{name: "nil state has none"},
+		{name: "fresh state has none", st: with(func(*PRState) {})},
+		{name: "status is residue", st: with(func(s *PRState) { s.Status = RegistryStatusDeploying }), want: true},
+		{name: "jobs are residue", st: with(func(s *PRState) { s.Jobs = []string{"eri"} }), want: true},
+		{name: "started jobs are residue", st: with(func(s *PRState) { s.StartedJobs = []string{"eri"} }), want: true},
+		{name: "requests are residue", st: with(func(s *PRState) { s.KustomizationRequests = map[string]KustomizationRequest{"core": {}} }), want: true},
+		{name: "index membership is residue", st: with(func(s *PRState) { s.RolloutIndexed = true }), want: true},
+		{name: "armed deploy failure is residue", st: with(func(s *PRState) { s.PendingDeployFailure = &PendingDeployFailure{} }), want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.st.HasDeployResidue(); got != tc.want {
+				t.Fatalf("HasDeployResidue() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
