@@ -1,6 +1,8 @@
 package httpkit
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -832,6 +834,108 @@ func TestSetupHealthMux(t *testing.T) {
 			}
 			if tc.wantCT != "" && rec.Header().Get("Content-Type") != tc.wantCT {
 				t.Errorf("SetupHealthMux %s %s Content-Type = %q, want %q", tc.method, tc.path, rec.Header().Get("Content-Type"), tc.wantCT)
+			}
+		})
+	}
+}
+
+// writeCoverageFile returns a coverage writer stub that drops name into the
+// flush directory (when name is set) and returns err.
+func writeCoverageFile(name string, err error) func(string) error {
+	return func(dir string) error {
+		if name != "" {
+			if wErr := os.WriteFile(filepath.Join(dir, name), []byte(name+"-bytes"), 0o600); wErr != nil {
+				return wErr
+			}
+		}
+		return err
+	}
+}
+
+// archiveEntries returns the entry names of a coverage tar archive, failing
+// when an entry's content or mode differs from what writeCoverageFile wrote.
+func archiveEntries(t *testing.T, r io.Reader) []string {
+	t.Helper()
+	var got []string
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return got
+		}
+		if err != nil {
+			t.Fatalf("read archive: %v", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read archive entry: %v", err)
+		}
+		if string(data) != hdr.Name+"-bytes" || hdr.Mode != 0o600 {
+			t.Errorf("entry %s = (%q, %o), want (%q, 600)", hdr.Name, data, hdr.Mode, hdr.Name+"-bytes")
+		}
+		got = append(got, hdr.Name)
+	}
+}
+
+func TestArchiveCoverage(t *testing.T) {
+	// Not t.Parallel(): the mkdir row overrides TMPDIR via t.Setenv.
+	tests := []struct {
+		name          string
+		invalidTmpDir bool
+		writeMeta     func(string) error
+		writeCounters func(string) error
+		wantErr       string
+		wantFiles     []string
+	}{
+		{
+			name:          "archives meta and counters files",
+			writeMeta:     writeCoverageFile("covmeta.1", nil),
+			writeCounters: writeCoverageFile("covcounters.1", nil),
+			wantFiles:     []string{"covcounters.1", "covmeta.1"},
+		},
+		{
+			name:      "nil writers produce empty archive",
+			wantFiles: nil,
+		},
+		{
+			name:          "meta error is tolerated",
+			writeMeta:     writeCoverageFile("covmeta.1", errors.New("meta failure")),
+			writeCounters: writeCoverageFile("covcounters.1", nil),
+			wantFiles:     []string{"covcounters.1", "covmeta.1"},
+		},
+		{
+			name:          "counters error is returned",
+			writeCounters: writeCoverageFile("", errors.New("counters write failed")),
+			wantErr:       "counters write failed",
+		},
+		{
+			name:          "mkdirtemp error is returned",
+			invalidTmpDir: true,
+			wantErr:       "no such file or directory",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.invalidTmpDir {
+				t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "nonexistent", "subdir"))
+			}
+
+			var buf bytes.Buffer
+			err := ArchiveCoverage(&buf, tc.writeMeta, tc.writeCounters)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ArchiveCoverage error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ArchiveCoverage unexpected error: %v", err)
+			}
+
+			got := archiveEntries(t, &buf)
+			if !reflect.DeepEqual(got, tc.wantFiles) {
+				t.Errorf("archive files = %v, want %v", got, tc.wantFiles)
 			}
 		})
 	}
