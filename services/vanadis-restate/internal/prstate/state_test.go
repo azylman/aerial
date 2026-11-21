@@ -994,11 +994,11 @@ func TestPRState_ClaimOwner(t *testing.T) {
 		want      bool
 		wantAgent string
 	}{
-		{name: "claims empty owner", state: &PRState{}, agent: "miorine", want: true, wantAgent: "miorine"},
-		{name: "overwrites stored owner", state: &PRState{Agent: "aerial"}, agent: " miorine ", want: true, wantAgent: "miorine"},
-		{name: "same owner is a no-op", state: &PRState{Agent: "miorine"}, agent: "miorine", want: false, wantAgent: "miorine"},
-		{name: "blank agent never clears owner", state: &PRState{Agent: "miorine"}, agent: "  ", want: false, wantAgent: "miorine"},
-		{name: "nil state is a no-op", state: nil, agent: "miorine", want: false, wantAgent: ""},
+		{name: "claims empty owner", state: &PRState{}, agent: "agent-alpha", want: true, wantAgent: "agent-alpha"},
+		{name: "overwrites stored owner", state: &PRState{Agent: "aerial"}, agent: " agent-alpha ", want: true, wantAgent: "agent-alpha"},
+		{name: "same owner is a no-op", state: &PRState{Agent: "agent-alpha"}, agent: "agent-alpha", want: false, wantAgent: "agent-alpha"},
+		{name: "blank agent never clears owner", state: &PRState{Agent: "agent-alpha"}, agent: "  ", want: false, wantAgent: "agent-alpha"},
+		{name: "nil state is a no-op", state: nil, agent: "agent-alpha", want: false, wantAgent: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1022,10 +1022,10 @@ func TestPRState_ApplyAgentHint(t *testing.T) {
 		want      bool
 		wantAgent string
 	}{
-		{name: "fills empty owner", state: &PRState{}, agent: "suletta", want: true, wantAgent: "suletta"},
-		{name: "never overwrites stored owner", state: &PRState{Agent: "miorine"}, agent: "aerial", want: false, wantAgent: "miorine"},
+		{name: "fills empty owner", state: &PRState{}, agent: "agent-beta", want: true, wantAgent: "agent-beta"},
+		{name: "never overwrites stored owner", state: &PRState{Agent: "agent-alpha"}, agent: "aerial", want: false, wantAgent: "agent-alpha"},
 		{name: "blank hint leaves owner empty", state: &PRState{}, agent: "", want: false, wantAgent: ""},
-		{name: "nil state is a no-op", state: nil, agent: "suletta", want: false, wantAgent: ""},
+		{name: "nil state is a no-op", state: nil, agent: "agent-beta", want: false, wantAgent: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1047,7 +1047,7 @@ func TestPRState_OwnerAgent(t *testing.T) {
 		state *PRState
 		want  string
 	}{
-		{name: "stored owner", state: &PRState{Agent: "miorine"}, want: "miorine"},
+		{name: "stored owner", state: &PRState{Agent: "agent-alpha"}, want: "agent-alpha"},
 		{name: "empty owner falls back to aerial", state: &PRState{}, want: "aerial"},
 		{name: "nil state falls back to aerial", state: nil, want: "aerial"},
 	}

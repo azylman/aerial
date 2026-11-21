@@ -20,7 +20,7 @@ func TestRestateObjectRuntime_ServiceName(t *testing.T) {
 		want         string
 	}{
 		{name: "empty defaults to legacy", buildService: "", want: "Build"},
-		{name: "custom service returned", buildService: "Build-suletta", want: "Build-suletta"},
+		{name: "custom service returned", buildService: "Build-agent-beta", want: "Build-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

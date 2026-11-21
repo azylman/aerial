@@ -701,10 +701,10 @@ func TestPRObjectService_OwnerPreserved(t *testing.T) {
 		evAgent   string
 		wantAgent string
 	}{
-		{name: "stored owner survives a different event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "miorine"}, evAgent: "aerial", wantAgent: "miorine"},
-		{name: "stored owner survives an empty event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "miorine"}, evAgent: "", wantAgent: "miorine"},
-		{name: "hint fills an empty stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7}, evAgent: " suletta ", wantAgent: "suletta"},
-		{name: "first touch adopts the hint", existing: nil, evAgent: "suletta", wantAgent: "suletta"},
+		{name: "stored owner survives a different event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "agent-alpha"}, evAgent: "aerial", wantAgent: "agent-alpha"},
+		{name: "stored owner survives an empty event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "agent-alpha"}, evAgent: "", wantAgent: "agent-alpha"},
+		{name: "hint fills an empty stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7}, evAgent: " agent-beta ", wantAgent: "agent-beta"},
+		{name: "first touch adopts the hint", existing: nil, evAgent: "agent-beta", wantAgent: "agent-beta"},
 		{name: "first touch without hint leaves owner unset", existing: nil, evAgent: "", wantAgent: ""},
 	}
 	for _, tc := range tests {

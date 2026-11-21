@@ -1071,9 +1071,9 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 	}{
 		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Reconcile/send", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
 		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Reconcile/send", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
-		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-suletta/RoutePREvent/send"},
-		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Reconcile/send", wantRouterPath: "/BuildRouter-miorine/RoutePREvent/send"},
-		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-suletta/RoutePREvent/send"},
+		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
+		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantObjectPath: "/Build-agent-alpha/b1/Reconcile/send", wantRouterPath: "/BuildRouter-agent-alpha/RoutePREvent/send"},
+		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
