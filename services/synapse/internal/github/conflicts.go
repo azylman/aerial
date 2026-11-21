@@ -181,25 +181,52 @@ func FetchOpenPullRequests(ctx context.Context, client *Client, repo string) ([]
 }
 
 type commitPRItem struct {
-	Number int               `json:"number"`
-	State  string            `json:"state"`
-	Head   model.GitHubPRRef `json:"head"`
+	Number         int               `json:"number"`
+	State          string            `json:"state"`
+	Head           model.GitHubPRRef `json:"head"`
+	MergedAt       string            `json:"merged_at"`
+	MergeCommitSHA string            `json:"merge_commit_sha"`
+}
+
+// CommitPR is the pull request a commit resolves to through the GitHub
+// commits API. Merged and MergeCommitSHA come from the same response:
+// GitHub fills merge_commit_sha with a test merge commit on open PRs, so
+// MergeCommitSHA is only the real merge commit when Merged is true.
+type CommitPR struct {
+	Number         int
+	Branch         string
+	HeadSHA        string
+	Merged         bool
+	MergeCommitSHA string
+}
+
+// MergedOn reports whether the PR merged with sha as its merge commit.
+func (p CommitPR) MergedOn(sha string) bool {
+	merge, sha := strings.TrimSpace(p.MergeCommitSHA), strings.TrimSpace(sha)
+	return p.Number > 0 && p.Merged && merge != "" && sha != "" && strings.EqualFold(merge, sha)
 }
 
 // ResolvePRFromCommitSHA discovers the pull request number and head branch ref associated with a commit SHA.
 // The in-memory commitSHAPRs index is deleted; durable ResolvePRBySHA in pr_registry is the lookup index.
 func ResolvePRFromCommitSHA(ctx context.Context, client *Client, repo, sha string) (int, string, error) {
+	pr, err := ResolveCommitPR(ctx, client, repo, sha)
+	return pr.Number, pr.Branch, err
+}
+
+// ResolveCommitPR is ResolvePRFromCommitSHA with the selected PR's head SHA
+// and merge state.
+func ResolveCommitPR(ctx context.Context, client *Client, repo, sha string) (CommitPR, error) {
 	repo = model.NormalizeRepo(repo)
 	if repo == "" || sha == "" || model.IsZeroSHA(sha) {
-		return 0, "", fmt.Errorf("invalid repo or sha for pr resolution")
+		return CommitPR{}, fmt.Errorf("invalid repo or sha for pr resolution")
 	}
 	if client == nil {
-		return 0, "", fmt.Errorf("github client required for resolving pr from commit")
+		return CommitPR{}, fmt.Errorf("github client required for resolving pr from commit")
 	}
 	var prs []commitPRItem
 	path := fmt.Sprintf("/repos/%s/commits/%s/pulls", repo, url.PathEscape(sha))
 	if err := client.GetJSON(ctx, path, 1<<20, &prs); err != nil {
-		return 0, "", err
+		return CommitPR{}, err
 	}
 	if len(prs) == 0 {
 		var openPRs []commitPRItem
@@ -212,7 +239,7 @@ func ResolvePRFromCommitSHA(ctx context.Context, client *Client, repo, sha strin
 		}
 	}
 	if len(prs) == 0 {
-		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
+		return CommitPR{}, fmt.Errorf("no pull requests associated with commit %s", sha)
 	}
 	selected := prs[0]
 	for _, item := range prs[1:] {
@@ -220,5 +247,11 @@ func ResolvePRFromCommitSHA(ctx context.Context, client *Client, repo, sha strin
 			selected = item
 		}
 	}
-	return selected.Number, selected.Head.Ref, nil
+	return CommitPR{
+		Number:         selected.Number,
+		Branch:         selected.Head.Ref,
+		HeadSHA:        strings.TrimSpace(selected.Head.SHA),
+		Merged:         strings.TrimSpace(selected.MergedAt) != "",
+		MergeCommitSHA: strings.TrimSpace(selected.MergeCommitSHA),
+	}, nil
 }

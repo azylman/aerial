@@ -151,6 +151,16 @@ var (
 		},
 		[]string{"kind"},
 	)
+	// RestateMergeRecoveredTotal counts merges synapse recovered for PRObject
+	// from a deploy-path commit lookup that fell back to GitHub, because the
+	// PR's closed and main-push webhooks never reached Restate.
+	RestateMergeRecoveredTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_restate_merge_recovered_total",
+			Help: "Total number of PR merges recovered into PRObject from a deploy-path GitHub commit lookup, by path.",
+		},
+		[]string{"path"},
+	)
 )
 
 var (
@@ -176,6 +186,7 @@ func init() {
 	registerCollector(LegacyEffectsTotal)
 	registerCollector(RegistryCallsTotal)
 	registerCollector(RestateLookupDivergenceTotal)
+	registerCollector(RestateMergeRecoveredTotal)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
@@ -279,6 +290,15 @@ func RecordRestateLookupDivergence(kind string) {
 		kind = unknownLabel
 	}
 	RestateLookupDivergenceTotal.WithLabelValues(kind).Inc()
+}
+
+// RecordRestateMergeRecovered increments the RestateMergeRecoveredTotal
+// counter for path.
+func RecordRestateMergeRecovered(path string) {
+	if path == "" {
+		path = unknownLabel
+	}
+	RestateMergeRecoveredTotal.WithLabelValues(path).Inc()
 }
 
 // SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.

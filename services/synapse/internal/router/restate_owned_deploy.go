@@ -225,7 +225,9 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 
 // resolveOwnedSHAPR resolves a commit to its PR without the registry: the
 // RepoObject durable SHA index first (the registry SHA lookup's
-// replacement), then the stateless GitHub commits-API lookup.
+// replacement), then the stateless GitHub commits-API lookup. A GitHub
+// answer that proves a merge PRObject missed (lost closed and main-push
+// webhooks) is sent to PRObject before the caller forwards its event.
 func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) (int, string) {
 	sha = strings.TrimSpace(sha)
 	if normalizeRepo(repo) == "" || sha == "" || isZeroSHA(sha) {
@@ -240,12 +242,13 @@ func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) 
 			slog.WarnContext(ctx, "[synapse] [restate-cutover] RepoObject SHA lookup failed; trying GitHub", "repo", repo, "sha", sha, "error", rErr)
 		}
 	}
-	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, repo, sha)
+	pr, err := s.resolveCommitPR(ctx, repo, sha)
 	if err != nil {
 		slog.WarnContext(ctx, "[synapse] [github] failed resolving PR for commit", "repo", repo, "sha", sha, "error", err)
 		return 0, ""
 	}
-	return prNum, branch
+	s.recoverLostMerge(ctx, mergeRecoveryPathOwnedDeploy, repo, sha, pr)
+	return pr.Number, pr.Branch
 }
 
 // processOwnedDeployEvent is the restate-owned twin of ProcessDeployEvent.

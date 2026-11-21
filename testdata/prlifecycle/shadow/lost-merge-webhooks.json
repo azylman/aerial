@@ -1,0 +1,651 @@
+{
+ "description": "When a PR's pull_request closed and main-push webhooks are lost (aerial#2327 merged as 353b1b05 during the 2026-11-21 08:34Z NATS outage), legacy synapse still self-heals: the deploy path ResolveSHA misses pr_registry, resolves the commit through the GitHub commits API and BackfillPushMergeSHA flips the row to merged on that commit. PRObject never heard about the merge, so under authority it stayed open forever (no deploy tracking, no deploy_success). Fix: when a deploy/rollout/main commit SHA resolves to a PR only through the GitHub fallback and GitHub reports that PR merged with merge commit == the SHA, synapse sends PRObject.HandleMerged (merge SHA = the commit, head = the PR head GitHub reports) before forwarding the deploy event, keyed merge-recovery:repo#pr@merge, unless PRObject already merged on that SHA or does not track the PR. A first merge applies on its merge SHA even when PRObject's head is stale (a missed synchronize) and adopts the GitHub head unless it is in PriorHeads. lookup is the synapse side: GitHub commits/pulls answer and PRObject GetDeployView; recovery_shadow/recovery_restate are the HandleMerged sends synapse makes for a legacy and a restate-owned event. prstate replays setup + recovery + deploy in both modes: merged -> deploying -> deployed, DeployedJobs equal the row, the projection agrees with the row, RepoObject resolves the merge SHA, ListRollouts is empty, and the legacy intended effects (the merge's flux_reconcile on the merge commit, which a normal merge runs too, and deploy_success) equal the restate-owned published ones. Contrast: the late real closed webhook and main push for the same merge afterwards change nothing and run no effects. Case 1: synchronize and CI success reached PRObject. Case 2: the synchronize was lost too, so PRObject's head is stale and the recovered merge adopts the GitHub head.",
+ "cases": [
+  {
+   "name": "lost closed and main push: deploy commit lookup recovers the merge",
+   "pr": {
+    "repo": "azylman/aerial",
+    "pr_number": 2327,
+    "branch": "feat/redaction-purge",
+    "head_sha": "c0de232700000000000000000000000000002327",
+    "merge_sha": "353b1b0500000000000000000000000000002327",
+    "target_id": "100000000000000003"
+   },
+   "lookup": {
+    "commit_sha": "353b1b0500000000000000000000000000002327",
+    "github": [
+     {
+      "number": 2327,
+      "state": "closed",
+      "head": {
+       "ref": "feat/redaction-purge",
+       "sha": "c0de232700000000000000000000000000002327"
+      },
+      "merged_at": "2026-11-21T08:38:21Z",
+      "merge_commit_sha": "353b1b0500000000000000000000000000002327"
+     }
+    ],
+    "view": {
+     "found": true,
+     "repo": "azylman/aerial",
+     "pr_number": 2327,
+     "status": "open",
+     "branch": "feat/redaction-purge",
+     "head_sha": "c0de232700000000000000000000000000002327",
+     "target_id": "100000000000000003",
+     "agent": "aerial"
+    }
+   },
+   "setup": [
+    {
+     "object": "PRObject",
+     "handler": "Register",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "branch": "feat/redaction-purge",
+      "head_sha": "7a1e232700000000000000000000000000002327",
+      "target_id": "100000000000000003",
+      "title": "Purge in-process redaction",
+      "agent": "aerial",
+      "bot_id": "aerial",
+      "metadata": {
+       "agent": "aerial",
+       "bot_id": "aerial"
+      },
+      "effects_owner": "restate"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleSynchronized",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "before_sha": "7a1e232700000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "title": "Purge in-process redaction",
+      "agent": "aerial",
+      "effects_owner": "legacy"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleCheckPassed",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "check_name": "ci",
+      "agent": "aerial",
+      "effects_owner": "legacy"
+     }
+    }
+   ],
+   "recovery_shadow": [
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "effects_owner": "legacy",
+      "agent": "aerial"
+     }
+    }
+   ],
+   "recovery_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "effects_owner": "restate"
+     }
+    }
+   ],
+   "deploy_shadow": [
+    {
+     "object": "PRObject",
+     "handler": "HandleKustomizationRequested",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "legacy",
+      "jobs": [
+       "eri"
+      ],
+      "kustomization_requests": {
+       "aerial-core": {
+        "namespace": "flux-system",
+        "requested_at": "2026-11-21T08:40:02Z"
+       }
+      }
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleRolloutProgress",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "legacy",
+      "deployed_jobs": [
+       "eri",
+       "aerial-core"
+      ],
+      "deployed_kustomizations": [
+       "aerial-core"
+      ]
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleDeploySuccess",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "legacy",
+      "facts": [
+       {
+        "event": "deploy_success",
+        "repo": "azylman/aerial",
+        "pr_number": 2327,
+        "head_sha": "c0de232700000000000000000000000000002327",
+        "merge_sha": "353b1b0500000000000000000000000000002327",
+        "target_id": "100000000000000003",
+        "status": "deployed",
+        "job_name": "aerial-core"
+       }
+      ]
+     }
+    }
+   ],
+   "deploy_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleKustomizationRequested",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "restate",
+      "jobs": [
+       "eri"
+      ],
+      "kustomization_requests": {
+       "aerial-core": {
+        "namespace": "flux-system",
+        "requested_at": "2026-11-21T08:40:02Z"
+       }
+      }
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleRolloutProgress",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "restate",
+      "deployed_jobs": [
+       "eri",
+       "aerial-core"
+      ],
+      "deployed_kustomizations": [
+       "aerial-core"
+      ]
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleDeploySuccess",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "restate",
+      "facts": [
+       {
+        "event": "deploy_success",
+        "repo": "azylman/aerial",
+        "pr_number": 2327,
+        "head_sha": "c0de232700000000000000000000000000002327",
+        "merge_sha": "353b1b0500000000000000000000000000002327",
+        "target_id": "100000000000000003",
+        "status": "deployed",
+        "job_name": "aerial-core"
+       }
+      ]
+     }
+    }
+   ],
+   "late": [
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "agent": "aerial",
+      "effects_owner": "legacy"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "353b1b0500000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "legacy"
+     }
+    }
+   ],
+   "want": {
+    "stages": [
+     "merged",
+     "deploying",
+     "deployed",
+     "deployed"
+    ],
+    "status": "deployed",
+    "head_sha": "c0de232700000000000000000000000000002327",
+    "merge_sha": "353b1b0500000000000000000000000000002327",
+    "prior_heads": [
+     "7a1e232700000000000000000000000000002327"
+    ],
+    "deployed_jobs": [
+     "eri"
+    ],
+    "deployed_kustomizations": [
+     "aerial-core"
+    ],
+    "resolved_merge_pr": 2327,
+    "effects": [
+     {
+      "kind": "flux_reconcile",
+      "key": "azylman/aerial#2327@353b1b0500000000000000000000000000002327:flux_reconcile"
+     },
+     {
+      "kind": "pr_fact_deploy_success",
+      "key": "azylman/aerial#2327@c0de232700000000000000000000000000002327:pr_fact_deploy_success:job=aerial-core"
+     }
+    ]
+   },
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 2327,
+    "agent": "aerial",
+    "branch": "feat/redaction-purge",
+    "head_sha": "c0de232700000000000000000000000000002327",
+    "merge_sha": "353b1b0500000000000000000000000000002327",
+    "target_id": "100000000000000003",
+    "status": "deployed",
+    "title": "Purge in-process redaction",
+    "metadata": {
+     "agent": "aerial",
+     "bot_id": "aerial",
+     "jobs": [
+      "eri"
+     ],
+     "deployed_jobs": [
+      "eri"
+     ],
+     "kustomization_requests": {
+      "aerial-core": {
+       "namespace": "flux-system",
+       "requested_at": "2026-11-21T08:40:02Z"
+      }
+     },
+     "deployed_kustomizations": [
+      "aerial-core"
+     ],
+     "started_jobs": [
+      "eri"
+     ]
+    }
+   }
+  },
+  {
+   "name": "lost synchronize, closed and main push: recovered merge adopts the GitHub head",
+   "pr": {
+    "repo": "azylman/aerial",
+    "pr_number": 2327,
+    "branch": "feat/redaction-purge",
+    "head_sha": "c0de232700000000000000000000000000002327",
+    "merge_sha": "353b1b0500000000000000000000000000002327",
+    "target_id": "100000000000000003"
+   },
+   "lookup": {
+    "commit_sha": "353b1b0500000000000000000000000000002327",
+    "github": [
+     {
+      "number": 2327,
+      "state": "closed",
+      "head": {
+       "ref": "feat/redaction-purge",
+       "sha": "c0de232700000000000000000000000000002327"
+      },
+      "merged_at": "2026-11-21T08:38:21Z",
+      "merge_commit_sha": "353b1b0500000000000000000000000000002327"
+     }
+    ],
+    "view": {
+     "found": true,
+     "repo": "azylman/aerial",
+     "pr_number": 2327,
+     "status": "open",
+     "branch": "feat/redaction-purge",
+     "head_sha": "7a1e232700000000000000000000000000002327",
+     "target_id": "100000000000000003",
+     "agent": "aerial"
+    }
+   },
+   "setup": [
+    {
+     "object": "PRObject",
+     "handler": "Register",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "branch": "feat/redaction-purge",
+      "head_sha": "7a1e232700000000000000000000000000002327",
+      "target_id": "100000000000000003",
+      "title": "Purge in-process redaction",
+      "agent": "aerial",
+      "bot_id": "aerial",
+      "metadata": {
+       "agent": "aerial",
+       "bot_id": "aerial"
+      },
+      "effects_owner": "restate"
+     }
+    }
+   ],
+   "recovery_shadow": [
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "effects_owner": "legacy",
+      "agent": "aerial"
+     }
+    }
+   ],
+   "recovery_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "effects_owner": "restate"
+     }
+    }
+   ],
+   "deploy_shadow": [
+    {
+     "object": "PRObject",
+     "handler": "HandleKustomizationRequested",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "legacy",
+      "jobs": [
+       "eri"
+      ],
+      "kustomization_requests": {
+       "aerial-core": {
+        "namespace": "flux-system",
+        "requested_at": "2026-11-21T08:40:02Z"
+       }
+      }
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleRolloutProgress",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "legacy",
+      "deployed_jobs": [
+       "eri",
+       "aerial-core"
+      ],
+      "deployed_kustomizations": [
+       "aerial-core"
+      ]
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleDeploySuccess",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "legacy",
+      "facts": [
+       {
+        "event": "deploy_success",
+        "repo": "azylman/aerial",
+        "pr_number": 2327,
+        "head_sha": "c0de232700000000000000000000000000002327",
+        "merge_sha": "353b1b0500000000000000000000000000002327",
+        "target_id": "100000000000000003",
+        "status": "deployed",
+        "job_name": "aerial-core"
+       }
+      ]
+     }
+    }
+   ],
+   "deploy_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleKustomizationRequested",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "restate",
+      "jobs": [
+       "eri"
+      ],
+      "kustomization_requests": {
+       "aerial-core": {
+        "namespace": "flux-system",
+        "requested_at": "2026-11-21T08:40:02Z"
+       }
+      }
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleRolloutProgress",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "restate",
+      "deployed_jobs": [
+       "eri",
+       "aerial-core"
+      ],
+      "deployed_kustomizations": [
+       "aerial-core"
+      ]
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleDeploySuccess",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "job_name": "aerial-core",
+      "effects_owner": "restate",
+      "facts": [
+       {
+        "event": "deploy_success",
+        "repo": "azylman/aerial",
+        "pr_number": 2327,
+        "head_sha": "c0de232700000000000000000000000000002327",
+        "merge_sha": "353b1b0500000000000000000000000000002327",
+        "target_id": "100000000000000003",
+        "status": "deployed",
+        "job_name": "aerial-core"
+       }
+      ]
+     }
+    }
+   ],
+   "late": [
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "c0de232700000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "feat/redaction-purge",
+      "agent": "aerial",
+      "effects_owner": "legacy"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2327,
+      "head_sha": "353b1b0500000000000000000000000000002327",
+      "merge_sha": "353b1b0500000000000000000000000000002327",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "legacy"
+     }
+    }
+   ],
+   "want": {
+    "stages": [
+     "merged",
+     "deploying",
+     "deployed",
+     "deployed"
+    ],
+    "status": "deployed",
+    "head_sha": "c0de232700000000000000000000000000002327",
+    "merge_sha": "353b1b0500000000000000000000000000002327",
+    "prior_heads": [
+     "7a1e232700000000000000000000000000002327"
+    ],
+    "deployed_jobs": [
+     "eri"
+    ],
+    "deployed_kustomizations": [
+     "aerial-core"
+    ],
+    "resolved_merge_pr": 2327,
+    "effects": [
+     {
+      "kind": "flux_reconcile",
+      "key": "azylman/aerial#2327@353b1b0500000000000000000000000000002327:flux_reconcile"
+     },
+     {
+      "kind": "pr_fact_deploy_success",
+      "key": "azylman/aerial#2327@c0de232700000000000000000000000000002327:pr_fact_deploy_success:job=aerial-core"
+     }
+    ]
+   },
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 2327,
+    "agent": "aerial",
+    "branch": "feat/redaction-purge",
+    "head_sha": "c0de232700000000000000000000000000002327",
+    "merge_sha": "353b1b0500000000000000000000000000002327",
+    "target_id": "100000000000000003",
+    "status": "deployed",
+    "title": "Purge in-process redaction",
+    "metadata": {
+     "agent": "aerial",
+     "bot_id": "aerial",
+     "jobs": [
+      "eri"
+     ],
+     "deployed_jobs": [
+      "eri"
+     ],
+     "kustomization_requests": {
+      "aerial-core": {
+       "namespace": "flux-system",
+       "requested_at": "2026-11-21T08:40:02Z"
+      }
+     },
+     "deployed_kustomizations": [
+      "aerial-core"
+     ],
+     "started_jobs": [
+      "eri"
+     ]
+    }
+   }
+  }
+ ]
+}
