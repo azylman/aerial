@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -41,6 +42,7 @@ type mockStoreForLaunch struct {
 	store.VanadisStore
 
 	reserveErr error
+	reserved   []string
 }
 
 type mockBusExecutor struct {
@@ -335,6 +337,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 }
 
 func (m *mockStoreForLaunch) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
+	m.reserved = append(m.reserved, chunkID)
 	return m.reserveErr
 }
 
@@ -422,23 +425,37 @@ func TestExecutorCILogDelegation(t *testing.T) {
 
 func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
 	t.Parallel()
+	unavailable := errors.New("unavailable")
 	tests := []struct {
-		name       string
-		reserveErr error
-		wantError  bool
+		name         string
+		nudges       int
+		dispatchErr  error
+		reserveErr   error
+		wantErr      error
+		wantReserved []string
 	}{
-		{"reserved", nil, false},
-		{"database unavailable", errors.New("unavailable"), true},
-		{"missing chunk", store.ErrChunkNotFound, true},
+		{name: "accepted then reserved", nudges: 1, wantReserved: []string{"c"}},
+		{name: "retry reservation unavailable after acceptance", nudges: 1, reserveErr: unavailable, wantErr: unavailable, wantReserved: []string{"c"}},
+		{name: "retry reservation missing chunk after acceptance", nudges: 1, reserveErr: store.ErrChunkNotFound, wantErr: store.ErrChunkNotFound, wantReserved: []string{"c"}},
+		{name: "initial reservation failure only warns", nudges: 0, reserveErr: unavailable, wantReserved: []string{"c"}},
+		{name: "deferred launch keeps pre-launch status", nudges: 0, dispatchErr: ErrDispatchActive, wantErr: ErrDispatchActive},
+		{name: "rejected launch keeps pre-launch status", nudges: 1, dispatchErr: unavailable, wantErr: unavailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			eri := &mockEriClient{}
+			dispatchErr := tc.dispatchErr
+			eri := &mockEriClient{dispatchFn: func(context.Context, BrainDispatchRequest) error { return dispatchErr }}
+			st := &mockStoreForLaunch{reserveErr: tc.reserveErr}
 			executor := NewExecutor(t.TempDir(), eri, nil, "", nil)
-			err := executor.ExecuteLaunchChunk(context.Background(), &mockStoreForLaunch{reserveErr: tc.reserveErr}, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", StallNudges: 1}}, 0, "")
-			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, !tc.wantError, eri.lastDispatch != nil)
+			err := executor.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", Status: "pending", StallNudges: tc.nudges}}, 0, "")
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+			require.NotNil(t, eri.lastDispatch)
+			assert.Equal(t, tc.wantReserved, st.reserved)
 		})
 	}
 }
