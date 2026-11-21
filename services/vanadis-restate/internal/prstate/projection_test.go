@@ -262,7 +262,7 @@ func (f *FakeProjectionStore) RecordedCount() int {
 // fullState is a PRState carrying every registry row field.
 func fullState() *PRState {
 	s := NewPRState("aerial", 101)
-	s.Agent, s.BotID = "suletta", "suletta"
+	s.Agent, s.BotID = "agent-beta", "agent-beta"
 	s.Branch, s.HeadSHA, s.MergeSHA, s.Title, s.TargetID = " feat/x ", "h1", "m1", "T", snowA
 	s.Status, s.Terminal, s.GateGeneration, s.ReopenEpoch = RegistryStatusDeploying, TerminalMerged, 2, 1
 	s.Jobs, s.StartedJobs = []string{"eri", " coven", "eri"}, []string{"eri"}
@@ -292,10 +292,10 @@ func TestBuildProjection(t *testing.T) {
 		{
 			name: "full row projects every column and key", state: fullState(),
 			want: ProjectionSnapshot{
-				Repo: "azylman/aerial", PRNumber: 101, Agent: "suletta", Branch: "feat/x", HeadSHA: "h1", MergeSHA: "m1", Title: "T", TargetID: snowA,
+				Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-beta", Branch: "feat/x", HeadSHA: "h1", MergeSHA: "m1", Title: "T", TargetID: snowA,
 				Status: "deploying", Generation: 2, MetaEpoch: 1,
 				Metadata: ProjectionMetadata{
-					Agent: "suletta", BotID: "suletta", Banner: "b", BuildMetadata: &BuildMetadata{Version: 1, Kind: "final", RunNumber: 7},
+					Agent: "agent-beta", BotID: "agent-beta", Banner: "b", BuildMetadata: &BuildMetadata{Version: 1, Kind: "final", RunNumber: 7},
 					CIFailCount: 2, DeploySuccessPending: true, DeployedKustomizations: []string{"core"},
 					JobStates: map[string]string{"eri": "verifying_health"}, Jobs: []string{"coven", "eri"},
 					KustomizationRequests: map[string]KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t0"}},
@@ -319,7 +319,7 @@ func TestBuildProjection(t *testing.T) {
 // readable prefix names agent, PR, head, generation, and epoch.
 func TestProjectionJournalKey(t *testing.T) {
 	t.Parallel()
-	base := ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "suletta", HeadSHA: "h1", Status: "open", Generation: 2, MetaEpoch: 1, Metadata: ProjectionMetadata{Jobs: []string{"a", "b"}}}
+	base := ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", HeadSHA: "h1", Status: "open", Generation: 2, MetaEpoch: 1, Metadata: ProjectionMetadata{Jobs: []string{"a", "b"}}}
 	reordered := base
 	reordered.Metadata = ProjectionMetadata{Jobs: []string{"b", "a", "a"}}
 	retitled := base
@@ -334,10 +334,10 @@ func TestProjectionJournalKey(t *testing.T) {
 		wantEqual  bool
 		wantPrefix string
 	}{
-		{name: "identical snapshots share a key", a: base, b: base, wantEqual: true, wantPrefix: "projection:suletta:azylman/aerial:101@h1:gen2:epoch1:"},
-		{name: "set order and duplicates never change the key", a: base, b: reordered, wantEqual: true, wantPrefix: "projection:suletta:azylman/aerial:101@h1:gen2:epoch1:"},
-		{name: "title change mints a new key", a: base, b: retitled, wantEqual: false, wantPrefix: "projection:suletta:azylman/aerial:101@h1:gen2:epoch1:"},
-		{name: "metadata change mints a new key", a: base, b: rechecked, wantEqual: false, wantPrefix: "projection:suletta:azylman/aerial:101@h1:gen2:epoch1:"},
+		{name: "identical snapshots share a key", a: base, b: base, wantEqual: true, wantPrefix: "projection:agent-beta:azylman/aerial:101@h1:gen2:epoch1:"},
+		{name: "set order and duplicates never change the key", a: base, b: reordered, wantEqual: true, wantPrefix: "projection:agent-beta:azylman/aerial:101@h1:gen2:epoch1:"},
+		{name: "title change mints a new key", a: base, b: retitled, wantEqual: false, wantPrefix: "projection:agent-beta:azylman/aerial:101@h1:gen2:epoch1:"},
+		{name: "metadata change mints a new key", a: base, b: rechecked, wantEqual: false, wantPrefix: "projection:agent-beta:azylman/aerial:101@h1:gen2:epoch1:"},
 		{name: "blank agent keys as default agent", a: blankAgent, b: blankAgent, wantEqual: true, wantPrefix: "projection:aerial:azylman/aerial:101@h1:gen2:epoch1:"},
 	}
 	for _, tc := range tests {
@@ -372,8 +372,8 @@ func TestProjectionUpsertQuery(t *testing.T) {
 	}{
 		{
 			name:     "full snapshot",
-			snap:     ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "suletta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
-			wantArgs: []any{"azylman/aerial", 101, "suletta", "feat", "h1", "m1", snowA, "T", "merged", `{"deploy_success_pending":true,"jobs":["coven","eri"]}`, ownedKeysLiteral},
+			snap:     ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
+			wantArgs: []any{"azylman/aerial", 101, "agent-beta", "feat", "h1", "m1", snowA, "T", "merged", `{"deploy_success_pending":true,"jobs":["coven","eri"]}`, ownedKeysLiteral},
 		},
 		{
 			name:     "blank agent and empty metadata",
@@ -506,9 +506,9 @@ func TestPgProjectionStoreLoadRegistryRow(t *testing.T) {
 		wantErr   string
 	}{
 		{
-			name: "row decodes typed metadata", row: fakeRow{vals: rowVals(`{"agent":"suletta","jobs":["eri"],"ci_fail_count":2,"deploy_success_pending":true,"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t0"}},"unknown":1}`)},
+			name: "row decodes typed metadata", row: fakeRow{vals: rowVals(`{"agent":"agent-beta","jobs":["eri"],"ci_fail_count":2,"deploy_success_pending":true,"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t0"}},"unknown":1}`)},
 			want: RegistryRow{Repo: "azylman/aerial", PRNumber: 101, Agent: "aerial", Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Status: "merged", Title: "T", Metadata: ProjectionMetadata{
-				Agent: "suletta", Jobs: []string{"eri"}, CIFailCount: 2, DeploySuccessPending: true,
+				Agent: "agent-beta", Jobs: []string{"eri"}, CIFailCount: 2, DeploySuccessPending: true,
 				KustomizationRequests: map[string]KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t0"}},
 			}},
 			wantFound: true,
@@ -543,12 +543,12 @@ func TestPgProjectionStoreLoadRegistryRow(t *testing.T) {
 func TestCompareProjection(t *testing.T) {
 	t.Parallel()
 	snap := ProjectionSnapshot{
-		Repo: "azylman/aerial", PRNumber: 101, Agent: "suletta", Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "deploying",
-		Metadata: ProjectionMetadata{Agent: "suletta", Jobs: []string{"coven", "eri"}, DeployFailedPublished: false},
+		Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-beta", Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "deploying",
+		Metadata: ProjectionMetadata{Agent: "agent-beta", Jobs: []string{"coven", "eri"}, DeployFailedPublished: false},
 	}
 	row := RegistryRow{
 		Repo: "azylman/aerial", PRNumber: 101, Agent: "aerial", Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "deploying",
-		Metadata: ProjectionMetadata{Agent: "suletta", Jobs: []string{"eri", "coven"}, CIChecks: map[string]string{}},
+		Metadata: ProjectionMetadata{Agent: "agent-beta", Jobs: []string{"eri", "coven"}, CIChecks: map[string]string{}},
 	}
 	diverged := row
 	diverged.Title = "Old"

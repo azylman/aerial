@@ -41,7 +41,7 @@ change shipped through Vanadis.
 - New console features or new views. (Layout and visual identity stay as they are.)
 - Changing any `/api/*` response shape or the Go backend logic beyond routing/prefix changes and
   serving the new bundle.
-- Showing Marida's stack in the console. The console keeps reading the Aerial-stack services it reads
+- Showing agent-gamma's stack in the console. The console keeps reading the Aerial-stack services it reads
   today.
 - Renaming Grafana "dashboards" or anything else that merely contains the word.
 - Rewriting historical docs under `docs/specs/` and `docs/superpowers/` that mention the dashboard.

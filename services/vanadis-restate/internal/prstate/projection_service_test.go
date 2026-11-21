@@ -242,12 +242,12 @@ func newKeyedStateMock(t *testing.T, key string, existing *PRState) (*mocks.Mock
 // deploying for a live rollout), idempotent replays, and K/V failures.
 func TestPRObjectServiceHydrate(t *testing.T) {
 	t.Parallel()
-	deployingRow := RegistryRow{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Status: RegistryStatusDeploying, Metadata: ProjectionMetadata{Agent: "suletta"}}
-	openRow := RegistryRow{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", Status: RegistryStatusOpen, Metadata: ProjectionMetadata{BotID: "miorine"}}
+	deployingRow := RegistryRow{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Status: RegistryStatusDeploying, Metadata: ProjectionMetadata{Agent: "agent-beta"}}
+	openRow := RegistryRow{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", Status: RegistryStatusOpen, Metadata: ProjectionMetadata{BotID: "agent-alpha"}}
 	hydratedOpen := NewPRState("aerial", 101)
-	hydratedOpen.Branch, hydratedOpen.HeadSHA, hydratedOpen.Status, hydratedOpen.Agent, hydratedOpen.BotID = "feat", "h1", RegistryStatusOpen, "miorine", "miorine"
+	hydratedOpen.Branch, hydratedOpen.HeadSHA, hydratedOpen.Status, hydratedOpen.Agent, hydratedOpen.BotID = "feat", "h1", RegistryStatusOpen, "agent-alpha", "agent-alpha"
 	mergeOnly := svcRow("h1", "", RegistryStatusMerged, TerminalMerged)
-	mergeOnly.Branch, mergeOnly.Agent = "feat", "suletta"
+	mergeOnly.Branch, mergeOnly.Agent = "feat", "agent-beta"
 	tests := []struct {
 		name      string
 		key       string
@@ -264,7 +264,7 @@ func TestPRObjectServiceHydrate(t *testing.T) {
 		{name: "row without pr is rejected", key: "azylman/aerial#101", row: RegistryRow{Repo: "aerial"}, wantErr: "prstate: hydrate row must name this object's repo and pr_number"},
 		{
 			name: "first touch deploying row indexes merged and deploying", key: "azylman/aerial#101", row: deployingRow, wantSet: true,
-			want: HydrateResponse{Changed: true, Agent: "suletta", Status: RegistryStatusDeploying},
+			want: HydrateResponse{Changed: true, Agent: "agent-beta", Status: RegistryStatusDeploying},
 			wantSends: []sentCall{
 				{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexMerged}},
 				{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexDeploying}},
@@ -272,12 +272,12 @@ func TestPRObjectServiceHydrate(t *testing.T) {
 		},
 		{
 			name: "first touch open row indexes active", key: "azylman/aerial#101", row: openRow, wantSet: true,
-			want:      HydrateResponse{Changed: true, Agent: "miorine", Status: RegistryStatusOpen},
+			want:      HydrateResponse{Changed: true, Agent: "agent-alpha", Status: RegistryStatusOpen},
 			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", Lifecycle: IndexActive}}},
 		},
 		{
 			name: "filling only the merge sha re-indexes merged", key: "azylman/aerial#101", state: mergeOnly, row: deployingRow, wantSet: true,
-			want:      HydrateResponse{Changed: true, Agent: "suletta", Status: RegistryStatusMerged},
+			want:      HydrateResponse{Changed: true, Agent: "agent-beta", Status: RegistryStatusMerged},
 			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexMerged}}},
 		},
 		{
@@ -285,7 +285,7 @@ func TestPRObjectServiceHydrate(t *testing.T) {
 			want:      HydrateResponse{Changed: true, Agent: "aerial", Status: RegistryStatusClosed},
 			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Lifecycle: IndexClosed}}},
 		},
-		{name: "replay is a no-op", key: "azylman/aerial#101", state: hydratedOpen, row: openRow, want: HydrateResponse{Agent: "miorine", Status: RegistryStatusOpen}},
+		{name: "replay is a no-op", key: "azylman/aerial#101", state: hydratedOpen, row: openRow, want: HydrateResponse{Agent: "agent-alpha", Status: RegistryStatusOpen}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

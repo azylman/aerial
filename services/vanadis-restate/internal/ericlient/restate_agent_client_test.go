@@ -60,19 +60,19 @@ func TestRestateEriClient_PromptAgent(t *testing.T) {
 		wantEriHits int
 	}{
 		{
-			name: "enqueues on the agent thread session", status: http.StatusOK, agent: "Miorine", thread: "T1", key: "prstate-abc",
-			wantCalls: []ingressCall{{path: "/ThreadSession-miorine/T1/Enqueue", key: "prstate-abc", body: map[string]any{"channel_id": "T1", "prompt": "wake", "message_id": "vanadis-prompt-6b2f417788dc68777681c92ce3796215"}}},
+			name: "enqueues on the agent thread session", status: http.StatusOK, agent: "Agent-Alpha", thread: "T1", key: "prstate-abc",
+			wantCalls: []ingressCall{{path: "/ThreadSession-agent-alpha/T1/Enqueue", key: "prstate-abc", body: map[string]any{"channel_id": "T1", "prompt": "wake", "message_id": "vanadis-prompt-6b2f417788dc68777681c92ce3796215"}}},
 		},
 		{
 			name: "empty agent uses the client agent", status: http.StatusOK, agent: "", thread: "T1", key: "prstate-abc",
 			wantCalls: []ingressCall{{path: "/ThreadSession/T1/Enqueue", key: "prstate-abc", body: map[string]any{"channel_id": "T1", "prompt": "wake", "message_id": "vanadis-prompt-6b2f417788dc68777681c92ce3796215"}}},
 		},
-		{name: "empty thread sends nothing", status: http.StatusOK, agent: "miorine", thread: " ", key: "prstate-abc"},
-		{name: "missing key fails", status: http.StatusOK, agent: "miorine", thread: "T1", key: " ", wantErr: true},
-		{name: "no restate url never falls back to eri", noRestate: true, status: http.StatusOK, agent: "miorine", thread: "T1", key: "prstate-abc", wantErr: true},
+		{name: "empty thread sends nothing", status: http.StatusOK, agent: "agent-alpha", thread: " ", key: "prstate-abc"},
+		{name: "missing key fails", status: http.StatusOK, agent: "agent-alpha", thread: "T1", key: " ", wantErr: true},
+		{name: "no restate url never falls back to eri", noRestate: true, status: http.StatusOK, agent: "agent-alpha", thread: "T1", key: "prstate-abc", wantErr: true},
 		{
-			name: "ingress failure surfaces", status: http.StatusInternalServerError, agent: "miorine", thread: "T1", key: "prstate-abc", wantErr: true,
-			wantCalls: []ingressCall{{path: "/ThreadSession-miorine/T1/Enqueue", key: "prstate-abc", body: map[string]any{"channel_id": "T1", "prompt": "wake", "message_id": "vanadis-prompt-6b2f417788dc68777681c92ce3796215"}}},
+			name: "ingress failure surfaces", status: http.StatusInternalServerError, agent: "agent-alpha", thread: "T1", key: "prstate-abc", wantErr: true,
+			wantCalls: []ingressCall{{path: "/ThreadSession-agent-alpha/T1/Enqueue", key: "prstate-abc", body: map[string]any{"channel_id": "T1", "prompt": "wake", "message_id": "vanadis-prompt-6b2f417788dc68777681c92ce3796215"}}},
 		},
 	}
 	for _, tc := range tests {
@@ -105,7 +105,7 @@ func TestRestateEriClient_PromptAgent(t *testing.T) {
 // to fall back to eri HTTP.
 func TestRestateEriClient_DispatchRestate(t *testing.T) {
 	t.Parallel()
-	req := BrainDispatchRequest{ID: "prstate-d1", Agent: "miorine", Source: "prstate", TargetID: "T1", Prompt: "fix"}
+	req := BrainDispatchRequest{ID: "prstate-d1", Agent: "agent-alpha", Source: "prstate", TargetID: "T1", Prompt: "fix"}
 	tests := []struct {
 		name      string
 		noRestate bool
@@ -113,8 +113,8 @@ func TestRestateEriClient_DispatchRestate(t *testing.T) {
 		wantErr   error
 		wantPaths []string
 	}{
-		{name: "enqueues on the agent dispatch session", body: `{"status":"accepted","dispatch_id":"prstate-d1"}`, wantPaths: []string{"/DispatchSession-miorine/dispatch-prstate-d1/Enqueue"}},
-		{name: "busy session maps to ErrDispatchActive", body: `{"status":"skipped_active"}`, wantErr: ErrDispatchActive, wantPaths: []string{"/DispatchSession-miorine/dispatch-prstate-d1/Enqueue"}},
+		{name: "enqueues on the agent dispatch session", body: `{"status":"accepted","dispatch_id":"prstate-d1"}`, wantPaths: []string{"/DispatchSession-agent-alpha/dispatch-prstate-d1/Enqueue"}},
+		{name: "busy session maps to ErrDispatchActive", body: `{"status":"skipped_active"}`, wantErr: ErrDispatchActive, wantPaths: []string{"/DispatchSession-agent-alpha/dispatch-prstate-d1/Enqueue"}},
 		{name: "no restate url never falls back to eri", noRestate: true, wantErr: errRestateNotConfigured},
 	}
 	for _, tc := range tests {
@@ -184,12 +184,12 @@ func TestRestateEriClient_MessageAgent(t *testing.T) {
 		wantAgent   string
 		wantChannel string
 	}{
-		{name: "sends through the agent sender", auth: true, agent: "Suletta", channel: " C1 ", wantSends: 1, wantAgent: "suletta", wantChannel: "C1"},
+		{name: "sends through the agent sender", auth: true, agent: "Agent-Beta", channel: " C1 ", wantSends: 1, wantAgent: "agent-beta", wantChannel: "C1"},
 		{name: "empty agent uses the client agent", auth: true, agent: "", channel: "C1", wantSends: 1, wantAgent: "aerial", wantChannel: "C1"},
-		{name: "empty channel sends nothing", auth: true, agent: "suletta", channel: " "},
-		{name: "missing discord auth fails", auth: false, agent: "suletta", channel: "C1", wantErr: true},
-		{name: "deliverer without agent routing fails", auth: true, plain: true, agent: "suletta", channel: "C1", wantErr: true},
-		{name: "delivery failure surfaces", auth: true, deliverErr: errors.New("discord down"), agent: "suletta", channel: "C1", wantErr: true, wantSends: 1, wantAgent: "suletta", wantChannel: "C1"},
+		{name: "empty channel sends nothing", auth: true, agent: "agent-beta", channel: " "},
+		{name: "missing discord auth fails", auth: false, agent: "agent-beta", channel: "C1", wantErr: true},
+		{name: "deliverer without agent routing fails", auth: true, plain: true, agent: "agent-beta", channel: "C1", wantErr: true},
+		{name: "delivery failure surfaces", auth: true, deliverErr: errors.New("discord down"), agent: "agent-beta", channel: "C1", wantErr: true, wantSends: 1, wantAgent: "agent-beta", wantChannel: "C1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

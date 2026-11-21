@@ -122,20 +122,20 @@ func TestPlanFacts(t *testing.T) {
 		{
 			name: "fact is pinned to the PR and keyed on its head", state: effectPR(),
 			facts: []pubsub.PRLifecycleEvent{{Event: " Conflict ", Repo: "other/repo", PRNumber: 9, HeadSHA: "h1", Status: "conflict", TargetID: testTarget}},
-			want:  []PlannedFact{{Fact: pinned(conflictFact()), Key: factKey("pr_fact_conflict", "h1", ""), Agent: "miorine"}},
+			want:  []PlannedFact{{Fact: pinned(conflictFact()), Key: factKey("pr_fact_conflict", "h1", ""), Agent: "agent-alpha"}},
 		},
 		{
 			name: "merge sha keys a headless fact", state: effectPR(), facts: []pubsub.PRLifecycleEvent{deployFact()},
-			want: []PlannedFact{{Fact: pinned(deployFact()), Key: factKey("pr_fact_deploy_success", "m1", "eri"), Agent: "miorine"}},
+			want: []PlannedFact{{Fact: pinned(deployFact()), Key: factKey("pr_fact_deploy_success", "m1", "eri"), Agent: "agent-alpha"}},
 		},
 		{
 			name: "stored head keys a sha-less fact", state: effectPR(), facts: []pubsub.PRLifecycleEvent{{Event: "pr_updated"}},
-			want: []PlannedFact{{Fact: pinned(pubsub.PRLifecycleEvent{Event: "pr_updated"}), Key: factKey("pr_fact_pr_updated", "h1", ""), Agent: "miorine"}},
+			want: []PlannedFact{{Fact: pinned(pubsub.PRLifecycleEvent{Event: "pr_updated"}), Key: factKey("pr_fact_pr_updated", "h1", ""), Agent: "agent-alpha"}},
 		},
 		{name: "nameless fact is dropped", state: effectPR(), facts: []pubsub.PRLifecycleEvent{{Event: "  ", HeadSHA: "h1"}}},
 		{
 			name: "same-key duplicates collapse to the first", state: effectPR(), facts: []pubsub.PRLifecycleEvent{conflictFact(), {Event: "conflict", HeadSHA: "h1"}},
-			want: []PlannedFact{{Fact: pinned(conflictFact()), Key: factKey("pr_fact_conflict", "h1", ""), Agent: "miorine"}},
+			want: []PlannedFact{{Fact: pinned(conflictFact()), Key: factKey("pr_fact_conflict", "h1", ""), Agent: "agent-alpha"}},
 		},
 		{name: "already fired key is skipped", state: fired, facts: []pubsub.PRLifecycleEvent{conflictFact()}},
 	}
@@ -264,7 +264,7 @@ func TestPRObjectServiceHandleConflict(t *testing.T) {
 			name: "legacy owner commits and records the intended fact", state: effectPR(), pub: &fakeFactPublisher{},
 			ev:   PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EffectsOwner: EffectsOwnerLegacy, Facts: []pubsub.PRLifecycleEvent{conflictFact()}},
 			want: ConflictDispatchDecision{Disposition: DispositionApply, ShouldPublish: true}, wantSet: true, wantStatus: RegistryStatusConflict, wantDispatched: true,
-			wantIntended: []IntendedEffect{{Kind: "pr_fact_conflict", Agent: "miorine", EffectKey: testConflictKey, MatchKey: testConflictMatch, Digest: testConflictDigest}},
+			wantIntended: []IntendedEffect{{Kind: "pr_fact_conflict", Agent: "agent-alpha", EffectKey: testConflictKey, MatchKey: testConflictMatch, Digest: testConflictDigest}},
 		},
 		{
 			name: "failed publish keeps the commit and schedules a retry", state: effectPR(), pub: &fakeFactPublisher{err: errFakeBus},
@@ -325,7 +325,7 @@ func TestPRObjectServiceHandleConflict(t *testing.T) {
 // deployingMergedPR seeds a merged PR deploying eri on merge m1.
 func deployingMergedPR() *PRState {
 	st := svcRow("h1", "m1", RegistryStatusDeploying, TerminalMerged)
-	st.Agent = "miorine"
+	st.Agent = "agent-alpha"
 	return st
 }
 
