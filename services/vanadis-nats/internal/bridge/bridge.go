@@ -9,7 +9,6 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -41,16 +40,8 @@ func NewNATSBridge(cfg config.Config, bus pubsub.Bus, httpClient *http.Client) *
 	}
 }
 
-func (b *NATSBridge) buildServiceName() string {
-	return config.BuildServiceName(b.cfg.AgentName)
-}
-
 func (b *NATSBridge) buildRouterServiceName() string {
 	return config.BuildRouterServiceName(b.cfg.AgentName)
-}
-
-func (b *NATSBridge) restateObjectSendPath(buildID, handler string) string {
-	return "/" + b.buildServiceName() + "/" + url.PathEscape(buildID) + "/" + handler + "/send"
 }
 
 func (b *NATSBridge) restateRouterSendPath(handler string) string {
@@ -236,11 +227,11 @@ func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Messa
 	}
 
 	if buildID := strings.TrimSpace(args.BuildID); buildID != "" {
-		body, err := json.Marshal(map[string]string{"reason": "widget_sync"})
+		body, err := json.Marshal(buildID)
 		if err != nil {
 			return fmt.Errorf("marshal build widget sync body: %w", err)
 		}
-		return b.postRestateIngress(ctx, b.restateObjectSendPath(buildID, "Reconcile"), widgetSyncIdempotencyKey(msg, args), body, msg)
+		return b.postRestateIngress(ctx, b.restateRouterSendPath("RouteBuildReconcile"), widgetSyncIdempotencyKey(msg, args), body, msg)
 	}
 
 	if repo := strings.TrimSpace(args.Repo); repo != "" && args.PRNumber > 0 {
