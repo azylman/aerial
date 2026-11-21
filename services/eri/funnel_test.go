@@ -1334,7 +1334,7 @@ func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
 				ChannelID: chanID,
 				GuildID:   "",
 				Content:   "Hello Aerial via Restate",
-				Author:    &discordgo.User{ID: "user-456", Username: "alex"},
+				Author:    &discordgo.User{ID: "user-456", Username: "alice"},
 				Timestamp: time.Now().UTC(),
 			}
 

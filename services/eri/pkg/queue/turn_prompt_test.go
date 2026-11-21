@@ -450,8 +450,8 @@ func TestBuildTurnPrompt(t *testing.T) {
 	ambCfg := &config.AmbientContextConfig{Template: "Kitchen Temp: {{.temp}}"}
 	now := time.Now().UTC()
 	twoMsgs := []HistoryMessage{
-		{ID: "h-1", AuthorName: "Alex", Content: "plan the build", CreatedAt: now.Add(-time.Hour)},
-		{ID: "h-2", AuthorName: "Alex", Content: "ship it", CreatedAt: now.Add(-time.Minute)},
+		{ID: "h-1", AuthorName: "Alice", Content: "plan the build", CreatedAt: now.Add(-time.Hour)},
+		{ID: "h-2", AuthorName: "Alice", Content: "ship it", CreatedAt: now.Add(-time.Minute)},
 	}
 	summaryOut := "<THREAD_SUMMARY>Shipping the build</THREAD_SUMMARY>"
 	tests := []buildTurnPromptCase{
@@ -525,7 +525,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 		{
 			name: "WarmThreadInjectsWidgetLookback", threadSnapshot: true,
 			histMsgs: []HistoryMessage{
-				{ID: "h-user", AuthorName: "Alex", Content: "regular thread message", CreatedAt: now.Add(-time.Hour)},
+				{ID: "h-user", AuthorName: "Alice", Content: "regular thread message", CreatedAt: now.Add(-time.Hour)},
 				{ID: "h-widget", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: "Build #42 passed", CreatedAt: now.Add(-time.Minute)},
 			},
 			cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,

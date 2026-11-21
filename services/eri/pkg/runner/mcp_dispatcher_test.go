@@ -578,7 +578,7 @@ func TestExecute(t *testing.T) {
 		{"ClosedPortFails", mkDispWithRoute("closed", "http://127.0.0.1:59996", "closed_tool"), "closed_tool", nil, "", true, "failed to call"},
 		{"SSEStreamCall", mkDispWithRoute("sse", sseTs.URL, "sse_tool"), "sse_tool", nil, "sse text call", false, ""},
 		{"EmailNormalizationPrimary", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "PRIMARY", "foo": "bar"}, "ok", false, ""},
-		{"EmailNormalizationPreserve", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "alex@domain.com"}, "ok", false, ""},
+		{"EmailNormalizationPreserve", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "alice@domain.com"}, "ok", false, ""},
 	}
 
 	for _, tc := range tests {
