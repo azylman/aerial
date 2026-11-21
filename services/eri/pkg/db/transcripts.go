@@ -13,6 +13,7 @@ import (
 
 	pgvector "github.com/pgvector/pgvector-go"
 
+	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
@@ -286,7 +287,7 @@ func (s *SQLTranscriptStore) UpsertSessionSummary(ctx context.Context, summary S
 		is_settled = CASE WHEN EXCLUDED.is_settled THEN TRUE WHEN EXCLUDED.last_indexed_step > session_summaries.summary_step_watermark AND session_summaries.summary_step_watermark >= 0 THEN FALSE ELSE session_summaries.is_settled END,
 		updated_at = EXCLUDED.updated_at;`
 
-	_, err = s.db.ExecContext(queryCtx, query, s.stack, summary.SessionID, summary.Engine, summary.ThreadID, sanitizeTranscriptText(summary.Summary), optionalVectorArg(summary.Embedding), summary.LastIndexedStep, mtimeVal, summary.SummaryStepWatermark, summary.IsSettled, createdAt, now)
+	_, err = s.db.ExecContext(queryCtx, query, s.stack, summary.SessionID, summary.Engine, summary.ThreadID, transcriptwire.SanitizeText(summary.Summary), optionalVectorArg(summary.Embedding), summary.LastIndexedStep, mtimeVal, summary.SummaryStepWatermark, summary.IsSettled, createdAt, now)
 	if err != nil {
 		return fmt.Errorf("upsert session summary failed: %w", err)
 	}
@@ -332,7 +333,7 @@ func (s *SQLTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, ste
 				placeholders[k] = fmt.Sprintf("$%d", j*cols+k+1)
 			}
 			valStrings = append(valStrings, "("+strings.Join(placeholders, ", ")+")")
-			valArgs = append(valArgs, s.stack, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.ToolKind, st.ToolCallID, sanitizeTranscriptText(st.Content), createdAt)
+			valArgs = append(valArgs, s.stack, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.ToolKind, st.ToolCallID, transcriptwire.SanitizeText(st.Content), createdAt)
 		}
 
 		query := fmt.Sprintf(`INSERT INTO transcript_steps (agent, session_id, step_index, step_type, tool_name, tool_kind, tool_call_id, content, created_at)
@@ -518,12 +519,6 @@ func scanSessionToolNames(rows *sql.Rows) (map[string][]string, []string, error)
 // it holds no stranded pre-migration rows. Routed stores reclaim those across the primary and shared DBs.
 func (s *SQLTranscriptStore) PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error) {
 	return 0, s.checkDB()
-}
-
-// sanitizeTranscriptText strips NUL bytes and replaces invalid UTF-8 so Postgres text columns
-// accept the value; one dirty step must not reject its whole insert batch.
-func sanitizeTranscriptText(s string) string {
-	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 }
 
 const sessionSummaryColumns = `s.agent, s.session_id, s.engine, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime,

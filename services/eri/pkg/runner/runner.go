@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 var (
@@ -140,27 +142,18 @@ type StepUpdateEvent struct {
 	Content        string        `json:"content,omitempty"`
 }
 
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 func (e *StepUpdateEvent) ResolvedType() string {
 	if e == nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(firstNonEmpty(e.StepType, e.Type)))
+	return strings.ToLower(strings.TrimSpace(strutil.FirstNonEmpty(e.StepType, e.Type)))
 }
 
 func (e *StepUpdateEvent) ResolvedToolName() string {
 	if e == nil {
 		return ""
 	}
-	return strings.TrimSpace(firstNonEmpty(e.ToolName, e.Name))
+	return strings.TrimSpace(strutil.FirstNonEmpty(e.ToolName, e.Name))
 }
 
 func (e *StepUpdateEvent) ResolvedCommandLine() string {
@@ -168,7 +161,7 @@ func (e *StepUpdateEvent) ResolvedCommandLine() string {
 		return ""
 	}
 	p := e.ToolInfo.Parameters
-	return firstNonEmpty(p.CommandLine, p.CommandLineSnake, p.Command, p.Cmd)
+	return strutil.FirstNonEmpty(p.CommandLine, p.CommandLineSnake, p.Command, p.Cmd)
 }
 
 func (e *StepUpdateEvent) ResolvedCommandName() string {

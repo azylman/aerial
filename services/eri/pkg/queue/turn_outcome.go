@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -201,7 +202,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 }
 
 func compareSnowflakeIDs(a, b string) int {
-	if !IsNumericSnowflake(a) || !IsNumericSnowflake(b) {
+	if !discordutil.IsSnowflake(a) || !discordutil.IsSnowflake(b) {
 		return 0
 	}
 	if len(a) != len(b) {
@@ -237,7 +238,7 @@ func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[
 }
 
 func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
-	if te == nil || te.isDispatch() || !IsNumericSnowflake(deliveryTarget) {
+	if te == nil || te.isDispatch() || !discordutil.IsSnowflake(deliveryTarget) {
 		return ""
 	}
 	te.activeSessionMu.Lock()
@@ -249,7 +250,7 @@ func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
 	burstIDs := make(map[string]bool, len(burst))
 	for _, m := range burst {
 		burstIDs[m.ID] = true
-		if isDiscordMessage(m) && IsNumericSnowflake(m.ID) {
+		if isDiscordMessage(m) && discordutil.IsSnowflake(m.ID) {
 			triggerMsg = m
 			hasTrigger = true
 		}
@@ -346,7 +347,7 @@ func (te *turnExecution) resolveTokenChannel() string {
 	if tokenChannel == "" {
 		if te.triggerType == "http" || strings.HasPrefix(te.triggerType, "dispatch:") {
 			tokenChannel = te.triggerType
-		} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
+		} else if !discordutil.IsSnowflake(te.threadID) && te.threadID != "" {
 			tokenChannel = te.threadID
 		}
 	}

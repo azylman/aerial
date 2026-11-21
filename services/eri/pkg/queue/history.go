@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -207,11 +208,11 @@ func fetchDiscordChannelMessagesWithRetry(ctx context.Context, dg *discordgo.Ses
 
 func fetchDiscordHistory(ctx context.Context, dg *discordgo.Session, metricSource, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
-	if dg == nil || channelID == "" || !IsNumericSnowflake(channelID) {
+	if dg == nil || channelID == "" || !discordutil.IsSnowflake(channelID) {
 		return nil, fmt.Errorf("discord history fetch unavailable for %q", channelID)
 	}
 	before := beforeID
-	if !IsNumericSnowflake(before) {
+	if !discordutil.IsSnowflake(before) {
 		before = ""
 	}
 	discordMsgs, err := fetchDiscordChannelMessagesWithRetry(ctx, dg, channelID, before, limit)
