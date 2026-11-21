@@ -30,26 +30,26 @@ jobs:
     name: Detect Changed Microservices
     runs-on: [self-hosted, ci]
     outputs:
-      pkg: ${{ steps.filter.outputs.pkg }}
-      eri: ${{ steps.filter.outputs.eri }}
-      eri-restate: ${{ steps.filter.outputs.eri-restate }}
-      haro: ${{ steps.filter.outputs.haro }}
-      coven: ${{ steps.filter.outputs.coven }}
-      discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
-      docket-mcp: ${{ steps.filter.outputs.docket-mcp }}
-      kernel-mcp: ${{ steps.filter.outputs.kernel-mcp }}
-      infisical-mcp: ${{ steps.filter.outputs.infisical-mcp }}
-      console: ${{ steps.filter.outputs.console }}
-      docs: ${{ steps.filter.outputs.docs }}
-      synapse: ${{ steps.filter.outputs.synapse }}
-      transcripts: ${{ steps.filter.outputs.transcripts }}
-      vanadis: ${{ steps.filter.outputs.vanadis }}
-      vanadis-restate: ${{ steps.filter.outputs.vanadis-restate }}
-      vanadis-nats: ${{ steps.filter.outputs.vanadis-nats }}
-      coverage-ingest: ${{ steps.filter.outputs.coverage-ingest }}
-      prospera: ${{ steps.filter.outputs.prospera }}
-      github-runner: ${{ steps.filter.outputs.github-runner }}
-      migrator: ${{ steps.filter.outputs.migrator }}
+      pkg: ${{ steps.affected.outputs.pkg }}
+      eri: ${{ steps.affected.outputs.eri }}
+      eri-restate: ${{ steps.affected.outputs.eri-restate }}
+      haro: ${{ steps.affected.outputs.haro }}
+      coven: ${{ steps.affected.outputs.coven }}
+      discord-mcp: ${{ steps.affected.outputs.discord-mcp }}
+      docket-mcp: ${{ steps.affected.outputs.docket-mcp }}
+      kernel-mcp: ${{ steps.affected.outputs.kernel-mcp }}
+      infisical-mcp: ${{ steps.affected.outputs.infisical-mcp }}
+      console: ${{ steps.affected.outputs.console }}
+      docs: ${{ steps.affected.outputs.docs }}
+      synapse: ${{ steps.affected.outputs.synapse }}
+      transcripts: ${{ steps.affected.outputs.transcripts }}
+      vanadis: ${{ steps.affected.outputs.vanadis }}
+      vanadis-restate: ${{ steps.affected.outputs.vanadis-restate }}
+      vanadis-nats: ${{ steps.affected.outputs.vanadis-nats }}
+      coverage-ingest: ${{ steps.affected.outputs.coverage-ingest }}
+      prospera: ${{ steps.affected.outputs.prospera }}
+      github-runner: ${{ steps.affected.outputs.github-runner }}
+      migrator: ${{ steps.affected.outputs.migrator }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
     steps:
@@ -57,66 +57,26 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          list-files: json
           filters: |
-            pkg:
-              - 'pkg/**'
-            eri:
-              - 'services/eri/**'
-              - 'pkg/**'
-            eri-restate:
-              - 'services/eri-restate/**'
-              - 'services/eri/**'
-              - 'pkg/**'
-            haro:
-              - 'services/haro/**'
-              - 'pkg/**'
-            coven:
-              - 'services/coven/**'
-              - 'pkg/**'
-            discord-mcp:
-              - 'mcp/discord-mcp/**'
-              - 'pkg/**'
-            docket-mcp:
-              - 'mcp/docket-mcp/**'
-              - 'pkg/**'
-            kernel-mcp:
-              - 'mcp/kernel-mcp/**'
-              - 'pkg/**'
-            infisical-mcp:
-              - 'mcp/infisical-mcp/**'
-            console:
-              - 'services/console/**'
-              - 'web/theme/**'
-              - 'pkg/**'
-            docs:
-              - 'services/docs-service/**'
-              - 'web/theme/**'
-            synapse:
-              - 'services/synapse/**'
-              - 'pkg/**'
-            transcripts:
-              - 'services/transcripts/**'
-              - 'pkg/**'
-            vanadis:
-              - 'services/vanadis/**'
-              - 'pkg/**'
-            vanadis-restate:
-              - 'services/vanadis-restate/**'
-              - 'pkg/**'
-            vanadis-nats:
-              - 'services/vanadis-nats/**'
-              - 'pkg/**'
-            coverage-ingest:
-              - 'services/coverage-ingest/**'
-            prospera:
-              - 'services/prospera/**'
-              - 'pkg/**'
-            github-runner:
-              - 'services/github-runner/**'
-            migrator:
-              - 'services/eri/pkg/db/migrations/**'
-              - 'services/migrator/**'
-              - 'services/eri/atlas.hcl'
+            changed:
+              - '**'
+
+      # Images are selected from the Go import graph plus each image's explicit non-Go
+      # Docker inputs (scripts/affected/catalog.json); see scripts/affected/main.go.
+      - name: Select Images From The Go Import Graph
+        id: affected
+        env:
+          CHANGED_FILES_JSON: ${{ steps.filter.outputs.changed_files }}
+          FORCE_ALL: ${{ inputs.force_all }}
+        run: |
+          set -euo pipefail
+          FORCE_FLAG=""
+          if [ "$FORCE_ALL" = "true" ]; then
+            FORCE_FLAG="-force-all"
+          fi
+          printf '%s' "${CHANGED_FILES_JSON:-[]}" | jq -r '.[]' > "$RUNNER_TEMP/changed-files.txt"
+          (cd scripts/affected && go run . -root ../.. $FORCE_FLAG -github-output "$GITHUB_OUTPUT") < "$RUNNER_TEMP/changed-files.txt"
 
       - name: Test Build Metadata Publisher
         run: node --test scripts/build-metadata.test.cjs
@@ -126,54 +86,13 @@ jobs:
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
+        env:
+          AFFECTED_IMAGES: ${{ steps.affected.outputs.images }}
         run: |
           node -e '
-            const filter = {
-              eri: "${{ steps.filter.outputs.eri }}",
-              "eri-restate": "${{ steps.filter.outputs.eri-restate }}",
-              haro: "${{ steps.filter.outputs.haro }}",
-              coven: "${{ steps.filter.outputs.coven }}",
-              "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
-              "docket-mcp": "${{ steps.filter.outputs.docket-mcp }}",
-              "kernel-mcp": "${{ steps.filter.outputs.kernel-mcp }}",
-              "infisical-mcp": "${{ steps.filter.outputs.infisical-mcp }}",
-              console: "${{ steps.filter.outputs.console }}",
-              docs: "${{ steps.filter.outputs.docs }}",
-              synapse: "${{ steps.filter.outputs.synapse }}",
-              transcripts: "${{ steps.filter.outputs.transcripts }}",
-              vanadis: "${{ steps.filter.outputs.vanadis }}",
-              "vanadis-restate": "${{ steps.filter.outputs.vanadis-restate }}",
-              "vanadis-nats": "${{ steps.filter.outputs.vanadis-nats }}",
-              "coverage-ingest": "${{ steps.filter.outputs.coverage-ingest }}",
-              prospera: "${{ steps.filter.outputs.prospera }}",
-              "github-runner": "${{ steps.filter.outputs.github-runner }}",
-              migrator: "${{ steps.filter.outputs.migrator }}"
-            };
-
-            const catalog = [
-              { service: "eri", context: ".", file: "./services/eri/Dockerfile", image_name: "aerial-eri" },
-              { service: "eri-restate", context: ".", file: "./services/eri-restate/Dockerfile", image_name: "aerial-eri-restate" },
-              { service: "haro", context: ".", file: "./services/haro/Dockerfile", image_name: "aerial-haro" },
-              { service: "coven", context: ".", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
-              { service: "discord-mcp", context: ".", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
-              { service: "docket-mcp", context: ".", file: "./mcp/docket-mcp/Dockerfile", image_name: "aerial-docket-mcp" },
-              { service: "kernel-mcp", context: ".", file: "./mcp/kernel-mcp/Dockerfile", image_name: "aerial-kernel-mcp" },
-              { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
-              { service: "console", context: ".", file: "./services/console/Dockerfile", image_name: "aerial-console" },
-              { service: "docs", context: "./services/docs-service", build_contexts: "theme=./web/theme", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
-              { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
-              { service: "transcripts", context: ".", file: "./services/transcripts/Dockerfile", image_name: "aerial-transcripts" },
-              { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
-              { service: "vanadis-restate", context: ".", file: "./services/vanadis-restate/Dockerfile", image_name: "aerial-vanadis-restate" },
-              { service: "vanadis-nats", context: ".", file: "./services/vanadis-nats/Dockerfile", image_name: "aerial-vanadis-nats" },
-              { service: "coverage-ingest", context: ".", file: "./services/coverage-ingest/Dockerfile", image_name: "aerial-coverage-ingest" },
-              { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },
-              { service: "github-runner", context: ".", file: "./services/github-runner/Dockerfile", image_name: "aerial-github-runner" },
-              { service: "migrator", context: ".", file: "./services/migrator/Dockerfile", image_name: "aerial-migrator" }
-            ];
-
-            const forceAll = "${{ inputs.force_all }}" === "true";
-            const active = forceAll ? catalog : catalog.filter(c => filter[c.service] === "true");
+            const selected = new Set(JSON.parse(process.env.AFFECTED_IMAGES || "[]"));
+            const catalog = require("./scripts/affected/catalog.json").map(({ select, ...row }) => row);
+            const active = catalog.filter(c => selected.has(c.service));
             const fs = require("fs");
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(active)}\n`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_builds=${active.length > 0}\n`);
@@ -202,17 +121,24 @@ jobs:
           FORCE_ALL: ${{ inputs.force_all }}
         run: |
           set -euo pipefail
-          GO_MODULES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort)
           CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
-          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '^(pkg/|scripts/check-coverage\.sh$)'; then
+          # scripts/affected maps the changed files to the modules whose tests can see them
+          # (Go import graph incl. test imports); it selects every module on any doubt.
+          TEST_ALL=0
+          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
+            TEST_ALL=1
+          elif ! AFFECTED=$(printf '%s\n' "$CHANGED_FILES" | (cd scripts/affected && go run . -root ../..)); then
+            echo "::warning::scripts/affected failed; testing every module."
+            TEST_ALL=1
+          elif [ "$(printf '%s' "$AFFECTED" | jq -r '.test.all')" = "true" ]; then
+            TEST_ALL=1
+          fi
+          if [ "$TEST_ALL" -eq 1 ]; then
             sh scripts/check-coverage.sh --check --summary
           else
             RAN_ANY=0
             FAILED_ANY=0
-            for svc in $GO_MODULES; do
-              if ! echo "$CHANGED_FILES" | grep -q "^${svc}/"; then
-                continue
-              fi
+            for svc in $(printf '%s' "$AFFECTED" | jq -r '.test.selected[]'); do
               RAN_ANY=1
               sh scripts/check-coverage.sh --check --summary --service "$svc" || FAILED_ANY=1
             done
@@ -296,14 +222,21 @@ jobs:
           set -euo pipefail
           GO_MODULES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort)
           CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          # Same import-graph selection as the test gate; .golangci.yml selects every module.
           LINT_ALL=0
-          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml$)'; then
+          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
+            LINT_ALL=1
+          elif ! AFFECTED=$(printf '%s\n' "$CHANGED_FILES" | (cd scripts/affected && go run . -root ../..)); then
+            echo "::warning::scripts/affected failed; linting every module."
+            LINT_ALL=1
+          elif [ "$(printf '%s' "$AFFECTED" | jq -r '.lint.all')" = "true" ]; then
             LINT_ALL=1
           fi
-          for svc in $GO_MODULES; do
-            if [ "$LINT_ALL" -eq 0 ] && ! echo "$CHANGED_FILES" | grep -q "^${svc}/"; then
-              continue
-            fi
+          LINT_MODULES="$GO_MODULES"
+          if [ "$LINT_ALL" -eq 0 ]; then
+            LINT_MODULES=$(printf '%s' "$AFFECTED" | jq -r '.lint.selected[]')
+          fi
+          for svc in $LINT_MODULES; do
             echo "=== Linting & checking deadcode in $svc ==="
             (
               cd "$svc"

@@ -612,7 +612,7 @@ if [ "$MODE" = "staged" ]; then
         if [ "$lint_all_go" -eq 1 ]; then
             run_golangci_lint "$svc" "./..."
         elif [ "$svc_staged" -eq 1 ]; then
-            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | grep -v -E "(^|/)testdata/" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             staged_pkg_targets=""
             for p in $pkgs; do
                 if [ -d "$svc/$p" ]; then
@@ -630,7 +630,7 @@ if [ "$MODE" = "staged" ]; then
             fi
         fi
         if [ "$svc_staged" -eq 1 ]; then
-            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | grep -v -E "(^|/)testdata/" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             if [ -n "$pkgs" ]; then
                 run_deadcode "$svc"
             fi
