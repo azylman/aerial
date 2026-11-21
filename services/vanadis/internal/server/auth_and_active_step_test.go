@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -182,7 +183,20 @@ func TestServer_AuthMiddleware_ExemptAndProtected(t *testing.T) {
 func TestServer_RBAC_Endpoints(t *testing.T) {
 	restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		var routed struct {
+			Agent string `json:"agent"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&routed)
+		if strings.HasSuffix(r.URL.Path, "/Create") && !strings.HasPrefix(r.URL.Path, "/"+BuildServiceName(routed.Agent)+"/") {
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte(`{"message":"misrouted build object"}`))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "RouteAttachPR") {
+			_, _ = w.Write([]byte(`{"status":"attached","build_id":"b-new","chunk_id":"c-new","thread_id":"thread-` + routed.Agent + `"}`))
+			return
+		}
 		if strings.Contains(r.URL.Path, "AppendChunks") {
 			_, _ = w.Write([]byte(`[{"id":"c2","status":"pending"}]`))
 			return
@@ -213,6 +227,8 @@ func TestServer_RBAC_Endpoints(t *testing.T) {
 		{name: "create build allowed", path: "/builds", method: http.MethodPost, body: `{"thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: true, wantCode: http.StatusAccepted},
 		{name: "create build forbidden", path: "/builds", method: http.MethodPost, body: `{"thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: false, wantCode: http.StatusForbidden},
 		{name: "create build invalid agent slug", path: "/builds", method: http.MethodPost, body: `{"agent":"BAD_SLUG!","thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: true, wantCode: http.StatusBadRequest, wantSubstr: "invalid target agent"},
+		{name: "create build for another agent targets its runner", path: "/builds", method: http.MethodPost, body: `{"agent":"agent-alpha","thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: true, wantCode: http.StatusAccepted},
+		{name: "attach pr pins agent caller to its own agent", path: "/chunks/attach-pr", method: http.MethodPost, body: `{"repo":"aerial","pr_number":7,"agent":"agent-alpha"}`, sarOk: true, wantCode: http.StatusOK, wantSubstr: `"thread_id":"thread-aerial"`},
 		{name: "get build allowed", path: "/builds/b1", method: http.MethodGet, sarOk: true, wantCode: http.StatusOK, wantSubstr: "b1"},
 		{name: "get build forbidden", path: "/builds/b1", method: http.MethodGet, sarOk: false, wantCode: http.StatusForbidden},
 		{name: "cancel build allowed", path: "/builds/b1/cancel", method: http.MethodPost, body: `{"reason":"cancel"}`, sarOk: true, wantCode: http.StatusOK},

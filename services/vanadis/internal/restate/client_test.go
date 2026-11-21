@@ -294,6 +294,10 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if r.URL.Path != "/Build-agent-alpha/b1/RetryActionChunk" {
+				w.WriteHeader(http.StatusTeapot)
+				return
+			}
 			w.WriteHeader(tc.status)
 			_, _ = w.Write([]byte(tc.body))
 		}))
@@ -301,7 +305,7 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 		serverURL = ts.URL
 	}
 	var out retryAck
-	err := retryActionClient(t, tc, serverURL).CallRetryAction(context.Background(), "b1", []byte(`{"build_id":"b1"}`), "retry-action-key", &out)
+	err := retryActionClient(t, tc, serverURL).CallRetryAction(context.Background(), "Build-agent-alpha", "b1", []byte(`{"build_id":"b1"}`), "retry-action-key", &out)
 	if tc.wantErr {
 		checkRetryActionErr(t, err, tc)
 		return
@@ -316,9 +320,9 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 
 type scopedNameCase struct {
 	name           string
-	agent          string
+	clientAgent    string
+	runnerAgent    string
 	buildID        string
-	wantBuild      string
 	wantRouter     string
 	wantObjectPath string
 	wantRouterPath string
@@ -327,28 +331,21 @@ type scopedNameCase struct {
 func TestClientScopedNames(t *testing.T) {
 	t.Parallel()
 	tests := []scopedNameCase{
-		{name: "empty defaults to legacy", agent: "", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "aerial defaults to legacy", agent: "aerial", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "agent-beta scoped", agent: "agent-beta", buildID: "b1", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter-agent-beta/RouteFailChunk"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", buildID: "b1", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantObjectPath: "/Build-agent-alpha/b1/Create", wantRouterPath: "/BuildRouter-agent-alpha/RouteFailChunk"},
-		{name: "mixed case scoped normalized", agent: "Agent-Beta", buildID: "b1", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter-agent-beta/RouteFailChunk"},
-		{name: "special characters in buildID are escaped", agent: "agent-beta", buildID: "build/1#test:special", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta", wantObjectPath: "/Build-agent-beta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter-agent-beta/RouteFailChunk"},
+		{name: "empty runner targets legacy build", clientAgent: "", runnerAgent: "", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "aerial runner targets legacy build", clientAgent: "aerial", runnerAgent: "aerial", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "sibling runner targets its build service while router stays shared", clientAgent: "aerial", runnerAgent: "agent-beta", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "default runner ignores scoped client agent", clientAgent: "agent-alpha", runnerAgent: "aerial", buildID: "b1", wantRouter: "BuildRouter-agent-alpha", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter-agent-alpha/RouteFailChunk"},
+		{name: "mixed case runner normalized", clientAgent: "aerial", runnerAgent: "Agent-Beta", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "special characters in buildID are escaped", clientAgent: "aerial", runnerAgent: "agent-beta", buildID: "build/1#test:special", wantRouter: "BuildRouter", wantObjectPath: "/Build-agent-beta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := NewClient(config.RestateConfig{AgentName: tc.agent}, nil)
-			if got := c.BuildServiceName(); got != tc.wantBuild {
-				t.Errorf("BuildServiceName() = %q, want %q", got, tc.wantBuild)
-			}
+			c := NewClient(config.RestateConfig{AgentName: tc.clientAgent}, nil)
 			if got := c.BuildRouterServiceName(); got != tc.wantRouter {
 				t.Errorf("BuildRouterServiceName() = %q, want %q", got, tc.wantRouter)
 			}
-			bid := tc.buildID
-			if bid == "" {
-				bid = "b1"
-			}
-			if got := c.ObjectPath(bid, "Create"); got != tc.wantObjectPath {
+			if got := c.ObjectPath(config.BuildServiceName(tc.runnerAgent), tc.buildID, "Create"); got != tc.wantObjectPath {
 				t.Errorf("ObjectPath() = %q, want %q", got, tc.wantObjectPath)
 			}
 			if got := c.RouterPath("RouteFailChunk"); got != tc.wantRouterPath {

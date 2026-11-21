@@ -113,6 +113,11 @@ type AttachChunkPRRequest struct {
 	Title    string `json:"title,omitempty"`
 	TargetID string `json:"target_id,omitempty"`
 	Quiet    bool   `json:"quiet,omitempty"`
+	// Agent is the caller agent that owns a new standalone build.
+	Agent string `json:"agent,omitempty"`
+	// RunnerAgent is the agent of the Build object executing the attach. The
+	// Build object overwrites it with its own agent; requests never set it.
+	RunnerAgent string `json:"runner_agent,omitempty"`
 }
 
 type CreateChunkInput struct {

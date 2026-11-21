@@ -31,19 +31,17 @@ func NewClient(cfg config.RestateConfig, httpClient *http.Client) *Client {
 	return &Client{cfg: cfg, httpClient: httpClient}
 }
 
-// BuildServiceName returns the Restate Build Virtual Object name for the configured agent.
-func (c *Client) BuildServiceName() string {
-	return config.BuildServiceName(c.cfg.AgentName)
-}
-
-// BuildRouterServiceName returns the Restate BuildRouter service name for the configured agent.
+// BuildRouterServiceName returns the single shared Restate BuildRouter
+// service name, owned by the configured (default) agent's vanadis-restate.
 func (c *Client) BuildRouterServiceName() string {
 	return config.BuildRouterServiceName(c.cfg.AgentName)
 }
 
-// ObjectPath returns the Restate ingress path for a Build Virtual Object handler.
-func (c *Client) ObjectPath(buildID, handler string) string {
-	return "/" + c.BuildServiceName() + "/" + url.PathEscape(buildID) + "/" + handler
+// ObjectPath returns the Restate ingress path for a handler on the Build
+// Virtual Object named buildService. Callers derive buildService from the
+// build's runner agent via config.BuildServiceName.
+func (*Client) ObjectPath(buildService, buildID, handler string) string {
+	return "/" + buildService + "/" + url.PathEscape(buildID) + "/" + handler
 }
 
 // RouterPath returns the Restate ingress path for a BuildRouter service handler.
@@ -163,13 +161,14 @@ func (c *Client) CallIngress(ctx context.Context, path string, payload any, out 
 	return nil
 }
 
-// CallRetryAction posts a durable action-retry request for a build and decodes the acknowledgement into out.
-func (c *Client) CallRetryAction(ctx context.Context, buildID string, body []byte, idempotencyKey string, out any) error {
+// CallRetryAction posts a durable action-retry request to the build's Build
+// object named buildService and decodes the acknowledgement into out.
+func (c *Client) CallRetryAction(ctx context.Context, buildService, buildID string, body []byte, idempotencyKey string, out any) error {
 	base := c.IngressURL()
 	if base == "" {
 		return errors.New("restate ingress URL not configured")
 	}
-	target := base + "/" + c.BuildServiceName() + "/" + url.PathEscape(buildID) + "/RetryActionChunk"
+	target := base + c.ObjectPath(buildService, buildID, "RetryActionChunk")
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return err

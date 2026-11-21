@@ -329,3 +329,46 @@ func TestRouterFacingHelpers(t *testing.T) {
 	assert.True(t, CanFallbackThreadRepoLookup(pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1, Event: "opened", Branch: "feat/aerial-pr-20261116-123456", TargetID: "thread-1"}))
 	assert.NotEmpty(t, GenerateBuildID())
 }
+
+// attachRunnerSpyStore passes the runner guard as an unknown (new) build and
+// records the attach request the Build object persists.
+type attachRunnerSpyStore struct {
+	runnerLookupStore
+
+	attached store.AttachChunkPRRequest
+}
+
+func (s *attachRunnerSpyStore) AttachChunkPR(_ context.Context, req store.AttachChunkPRRequest) (string, string, string, error) {
+	s.attached = req
+	return "b1", "b1-chunk-1", "th-1", nil
+}
+
+// TestBuildObject_AttachPRStampsOwnRunner proves a standalone build created
+// by AttachPR runs on the executing Build object, never on a runner named by
+// the request.
+func TestBuildObject_AttachPRStampsOwnRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		ownAgent   string
+		reqRunner  string
+		wantRunner string
+	}{
+		{name: "default object stamps default runner", wantRunner: "aerial"},
+		{name: "sibling object stamps itself", ownAgent: "agent-alpha", wantRunner: "agent-alpha"},
+		{name: "forged runner is overwritten", ownAgent: "agent-alpha", reqRunner: "agent-beta", wantRunner: "agent-alpha"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &attachRunnerSpyStore{}
+			spy.missing = true
+			rt := newFakeObjectRuntime("b1")
+			rt.runStepErr = errors.New("stop after attach")
+			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, nil)
+			_, _ = bo.AttachPR(makeObjectMockContext(t, "b1"), store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: "agent-alpha", RunnerAgent: tc.reqRunner})
+			assert.Equal(t, tc.wantRunner, spy.attached.RunnerAgent)
+			assert.Equal(t, "agent-alpha", spy.attached.Agent)
+		})
+	}
+}

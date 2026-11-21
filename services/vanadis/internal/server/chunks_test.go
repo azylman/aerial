@@ -349,6 +349,29 @@ func TestVanadisServer_HandleChunkByID(t *testing.T) {
 	}
 }
 
+// mockRestateMisrouted rejects Build object calls that miss the build's
+// runner: builds whose ID contains "runner-alpha" run on agent-alpha, Create
+// must target the requested agent, and every other build runs on Build.
+func mockRestateMisrouted(w http.ResponseWriter, path string, bodyBytes []byte) bool {
+	if strings.HasPrefix(path, "/BuildRouter") {
+		return false
+	}
+	want := "/Build/"
+	if strings.HasSuffix(path, "/Create") {
+		var createReq CreateBuildRequest
+		_ = json.Unmarshal(bodyBytes, &createReq)
+		want = "/" + BuildServiceName(createReq.Agent) + "/"
+	} else if strings.Contains(path, "runner-alpha") {
+		want = "/Build-agent-alpha/"
+	}
+	if strings.HasPrefix(path, want) {
+		return false
+	}
+	w.WriteHeader(http.StatusTeapot)
+	_, _ = w.Write([]byte(`{"message":"misrouted build object"}`))
+	return true
+}
+
 func mockRestateCheckErrors(w http.ResponseWriter, path, bodyStr string) bool {
 	if strings.Contains(path, "fail") {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -383,7 +406,7 @@ func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byt
 			Status:   "attached",
 			BuildID:  "build-1",
 			ChunkID:  chunkID,
-			ThreadID: "thread-1",
+			ThreadID: "thread-" + firstNonEmpty(req.Agent, "none"),
 		})
 		return
 	}
@@ -443,7 +466,7 @@ func newMockRestateServer() *httptest.Server {
 			bodyBytes, _ = io.ReadAll(r.Body)
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
-		if mockRestateCheckErrors(w, path, string(bodyBytes)) {
+		if mockRestateMisrouted(w, path, bodyBytes) || mockRestateCheckErrors(w, path, string(bodyBytes)) {
 			return
 		}
 		mockRestateRouteSuccess(w, path, bodyBytes)
@@ -472,6 +495,7 @@ func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 		{"zero_pr_number", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":0}`, http.StatusBadRequest, "", nil},
 		{"method_not_allowed", false, false, http.MethodGet, "", http.StatusMethodNotAllowed, "", nil},
 		{"nil_store", true, false, http.MethodPost, `{}`, http.StatusInternalServerError, "", nil},
+		{"invalid_agent", false, false, http.MethodPost, `{"repo":"aerial","pr_number":402,"agent":"BAD_SLUG!"}`, http.StatusBadRequest, "", nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -555,6 +579,14 @@ func TestServer_MutationEndpoints(t *testing.T) {
 			{ID: "c2", Status: "pending", ChunkIndex: 1},
 		}, http.MethodDelete, "/builds/b1/chunks/c2", "", http.StatusOK},
 
+		// Per-build mutations route to the build's runner, not the server agent.
+		{"patch_build_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, nil, http.MethodPatch, "/builds/b-runner-alpha", `{"title":"New Title"}`, http.StatusOK},
+		{"patch_chunk_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodPatch, "/builds/b-runner-alpha/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK},
+		{"append_chunks_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, nil, http.MethodPost, "/builds/b-runner-alpha/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I"}]}`, http.StatusOK},
+		{"delete_chunk_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running", ChunkIndex: 0}, {ID: "c2", Status: "pending", ChunkIndex: 1}}, http.MethodDelete, "/builds/b-runner-alpha/chunks/c2", "", http.StatusOK},
+		{"active_step_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running"}}, http.MethodPost, "/builds/b-runner-alpha/active-step", `{"chunk_id":"c1","step":"testing"}`, http.StatusOK},
+		{"sibling_owned_build_pinned_to_default_runner", false, false, &VanadisBuild{ID: "b1", Agent: "agent-alpha", RunnerAgent: "aerial", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK},
+
 		// Method and path errors
 		{"method_not_allowed_put_build", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPut, "/builds/b1", "", http.StatusMethodNotAllowed},
 		{"method_not_allowed_get_chunks_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks", "", http.StatusMethodNotAllowed},
@@ -576,6 +608,33 @@ func TestServer_MutationEndpoints(t *testing.T) {
 			rec := serveChunkRequest(srv, tc.method, tc.path, tc.body, tc.useErrBody)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestResolveAttachCallerAgent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		requested string
+		want      string
+		wantErr   bool
+	}{
+		{name: "empty defaults to the default agent", want: "aerial"},
+		{name: "named agent is normalized", requested: " Agent-Alpha ", want: "agent-alpha"},
+		{name: "invalid slug rejected", requested: "BAD_SLUG!", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewVanadisServer(Config{}, nil, nil)
+			got, err := srv.resolveAttachCallerAgent(context.Background(), tc.requested)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Fatalf("agent = %q, want %q", got, tc.want)
 			}
 		})
 	}

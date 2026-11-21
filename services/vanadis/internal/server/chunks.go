@@ -90,6 +90,10 @@ type AttachChunkPRRequest struct {
 	Title    string `json:"title,omitempty"`
 	TargetID string `json:"target_id,omitempty"`
 	Quiet    bool   `json:"quiet,omitempty"`
+	// Agent is the caller agent that owns a new standalone build. Agent
+	// callers are always resolved from their ServiceAccount token; the body
+	// value is honored only for service principals and unauthenticated mode.
+	Agent string `json:"agent,omitempty"`
 }
 
 // ChunkPRRequest represents generic repo + pr_number request payloads.
@@ -172,25 +176,35 @@ func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, agent string) 
 	return s.auth.Authorize(ctx, caller, "builds", "update", agent)
 }
 
-func (s *VanadisServer) authorizeBuildMutation(w http.ResponseWriter, r *http.Request, buildID string) bool {
+// authorizeBuildMutation loads the build and authorizes the caller to update
+// it, returning the build so the mutation can route to its runner.
+func (s *VanadisServer) authorizeBuildMutation(w http.ResponseWriter, r *http.Request, buildID string) (*VanadisBuild, bool) {
+	if s.store == nil {
+		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+		return nil, false
+	}
 	build, _, err := s.store.GetBuild(r.Context(), buildID)
+	if err == nil && build == nil {
+		err = ErrBuildNotFound
+	}
 	if err != nil {
 		writeStoreErr(r.Context(), w, err)
-		return false
+		return nil, false
 	}
 	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
 		writeAuthErr(w, err)
-		return false
+		return nil, false
 	}
-	return true
+	return build, true
 }
 
-func (s *VanadisServer) mutateBuildObject(ctx context.Context, buildID, handler string, req, out any) error {
-	return s.callRestateIngress(ctx, s.restateObjectPath(buildID, handler), req, out)
+// mutateBuildObject calls a handler on the Build object of the build's runner.
+func (s *VanadisServer) mutateBuildObject(ctx context.Context, build *VanadisBuild, handler string, req, out any) error {
+	return s.callRestateIngress(ctx, s.restateObjectPath(build.RunnerAgent, build.ID, handler), req, out)
 }
 
-func (s *VanadisServer) forwardActiveStep(ctx context.Context, buildID string, req UpdateActiveStepRequest) error {
-	path := s.restateObjectPath(buildID, "UpdateActiveStep") + "/send"
+func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBuild, req UpdateActiveStepRequest) error {
+	path := s.restateObjectPath(build.RunnerAgent, build.ID, "UpdateActiveStep") + "/send"
 	return s.callRestateIngress(ctx, path, req, nil)
 }
 
@@ -199,7 +213,7 @@ func (s *VanadisServer) processActiveStepUpdate(w http.ResponseWriter, r *http.R
 		writeAuthErr(w, err)
 		return
 	}
-	if err := s.forwardActiveStep(r.Context(), build.ID, req); err != nil {
+	if err := s.forwardActiveStep(r.Context(), build, req); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -322,6 +336,12 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	agent, err := s.resolveAttachCallerAgent(r.Context(), req.Agent)
+	if err != nil {
+		writeAuthErr(w, err)
+		return
+	}
+	req.Agent = agent
 	var resp AttachChunkPRResponse
 	if err := s.callRestateIngress(r.Context(), s.restateRouterPath("RouteAttachPR"), req, &resp); err != nil {
 		writeStoreErr(r.Context(), w, err)
@@ -333,6 +353,27 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		"chunk_id":   resp.ChunkID,
 		"thread_id":  resp.ThreadID,
 	})
+}
+
+// resolveAttachCallerAgent returns the agent that owns, and whose runner
+// executes, a standalone build created by an attach-PR call. Agent callers
+// are pinned to their own ServiceAccount agent; service principals and
+// unauthenticated deployments may name one, defaulting to the default agent.
+func (s *VanadisServer) resolveAttachCallerAgent(ctx context.Context, requested string) (string, error) {
+	requested = NormalizeAgentName(requested)
+	if s.authEnabled() {
+		caller, ok := k8sauth.CallerFromContext(ctx)
+		if !ok {
+			return "", &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity}
+		}
+		if !caller.IsService {
+			requested = NormalizeAgentName(caller.CallerAgent)
+		}
+	}
+	if requested != "" && !k8sauth.IsValidAgentSlug(requested) {
+		return "", &k8sauth.ValidationError{Message: fmt.Sprintf("invalid agent %q", requested)}
+	}
+	return firstNonEmpty(requested, "aerial"), nil
 }
 
 func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) (string, error) {
@@ -383,23 +424,38 @@ func (s *VanadisServer) decodeJSONBody(w http.ResponseWriter, r *http.Request, t
 }
 
 func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request, buildID string) {
-	var req UpdateBuildRequest
+	serveBuildMutation(s, w, r, buildID, "UpdateBuild", func(req *UpdateBuildRequest) error {
+		if strings.TrimSpace(req.Title) == "" && strings.TrimSpace(req.Objective) == "" && strings.TrimSpace(req.SharedContext) == "" {
+			return fmt.Errorf("%w: at least one of title, objective, or shared_context must be provided", ErrInvalidBuildInput)
+		}
+		return nil
+	}, func(updated VanadisBuild) map[string]any {
+		return map[string]any{fieldStatus: statusUpdated, fieldBuild: updated}
+	})
+}
+
+// serveBuildMutation decodes and prepares a per-build mutation request,
+// authorizes it against the stored build, and forwards it to the Build object
+// of the runner that executes that build.
+func serveBuildMutation[Req, Out any](s *VanadisServer, w http.ResponseWriter, r *http.Request, buildID, handler string, prepare func(*Req) error, respond func(Out) map[string]any) {
+	var req Req
 	if !s.decodeJSONBody(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Title) == "" && strings.TrimSpace(req.Objective) == "" && strings.TrimSpace(req.SharedContext) == "" {
-		writeStoreErr(r.Context(), w, fmt.Errorf("%w: at least one of title, objective, or shared_context must be provided", ErrInvalidBuildInput))
-		return
-	}
-	if !s.authorizeBuildMutation(w, r, buildID) {
-		return
-	}
-	var updated VanadisBuild
-	if err := s.mutateBuildObject(r.Context(), buildID, "UpdateBuild", req, &updated); err != nil {
+	if err := prepare(&req); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: statusUpdated, fieldBuild: updated})
+	build, ok := s.authorizeBuildMutation(w, r, buildID)
+	if !ok {
+		return
+	}
+	var out Out
+	if err := s.mutateBuildObject(r.Context(), build, handler, req, &out); err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusOK, respond(out))
 }
 
 func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
@@ -425,44 +481,26 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
-	var req UpdateChunkRequest
-	if !s.decodeJSONBody(w, r, &req) {
-		return
-	}
-	if _, err := validateUpdateChunkInput(buildID, chunkRef, req); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	req.ChunkRef = chunkRef
-	if !s.authorizeBuildMutation(w, r, buildID) {
-		return
-	}
-	var updated VanadisChunk
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "UpdateChunk"), req, &updated); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: statusUpdated, fieldChunk: updated})
+	serveBuildMutation(s, w, r, buildID, "UpdateChunk", func(req *UpdateChunkRequest) error {
+		if _, err := validateUpdateChunkInput(buildID, chunkRef, *req); err != nil {
+			return err
+		}
+		req.ChunkRef = chunkRef
+		return nil
+	}, func(updated VanadisChunk) map[string]any {
+		return map[string]any{fieldStatus: statusUpdated, fieldChunk: updated}
+	})
 }
 
 func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Request, buildID string) {
-	var req AppendChunksRequest
-	if !s.decodeJSONBody(w, r, &req) {
-		return
-	}
-	if len(req.Chunks) == 0 {
-		writeStoreErr(r.Context(), w, fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput))
-		return
-	}
-	if !s.authorizeBuildMutation(w, r, buildID) {
-		return
-	}
-	var appended []VanadisChunk
-	if err := s.mutateBuildObject(r.Context(), buildID, "AppendChunks", req, &appended); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: "appended", fieldBuildID: buildID, fieldChunks: appended})
+	serveBuildMutation(s, w, r, buildID, "AppendChunks", func(req *AppendChunksRequest) error {
+		if len(req.Chunks) == 0 {
+			return fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput)
+		}
+		return nil
+	}, func(appended []VanadisChunk) map[string]any {
+		return map[string]any{fieldStatus: "appended", fieldBuildID: buildID, fieldChunks: appended}
+	})
 }
 
 func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
@@ -484,7 +522,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		removedID = chs[idx].ID
 	}
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "RemoveChunk"), req, nil); err != nil {
+	if err := s.mutateBuildObject(r.Context(), build, "RemoveChunk", req, nil); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}

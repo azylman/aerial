@@ -390,7 +390,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	req.Agent = targetAgent
 
 	var created VanadisBuild
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "Create"), req, &created); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(targetAgent, buildID, "Create"), req, &created); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -408,23 +408,12 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if s.authEnabled() {
-		if s.store == nil {
-			writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-			return
-		}
-		build, _, err := s.store.GetBuild(r.Context(), id)
-		if err != nil {
-			writeStoreErr(r.Context(), w, err)
-			return
-		}
-		if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
-			writeAuthErr(w, err)
-			return
-		}
+	build, ok := s.authorizeBuildMutation(w, r, id)
+	if !ok {
+		return
 	}
 	var cancelled VanadisBuild
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(id, "Cancel"), CancelBuildRequest{}, &cancelled); err != nil {
+	if err := s.mutateBuildObject(r.Context(), build, "Cancel", CancelBuildRequest{}, &cancelled); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}

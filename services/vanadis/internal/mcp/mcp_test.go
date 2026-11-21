@@ -285,6 +285,13 @@ func newMCPToolsStore(listErr, getErr error) *memoryStore {
 	st.builds["build-mcp-1"], st.chunks["build-mcp-1"] = b1, []model.VanadisChunk{c1_0, c1_1}
 	st.builds["build-mcp-2"], st.chunks["build-mcp-2"] = b2, []model.VanadisChunk{mkChunk("chunk-2-0", "build-mcp-2", 0, "C2", "I2", "low", "completed")}
 	st.builds["build-mcp-3"], st.chunks["build-mcp-3"] = b3, []model.VanadisChunk{mkChunk("chunk-3-0", "build-mcp-3", 0, "C3", "I3", "low", "completed")}
+	b4 := mkBuild("build-mcp-4", "4444444444", "Build 4 Title", "Objective 4", "running")
+	b4.Agent, b4.RunnerAgent = "agent-alpha", "agent-alpha"
+	b4.CreatedAt = now.Add(-20 * time.Minute)
+	st.builds["build-mcp-4"], st.chunks["build-mcp-4"] = b4, []model.VanadisChunk{
+		mkChunk("chunk-4-0", "build-mcp-4", 0, "C4", "I4", "low", "running"),
+		mkChunk("chunk-4-1", "build-mcp-4", 1, "C4b", "I4b", "low", "pending"),
+	}
 	st.listErr = listErr
 	st.getErr = getErr
 	return st
@@ -318,6 +325,20 @@ func mockMCPRestateHandler(actionGen *int) http.HandlerFunc {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		bodyStr := string(bodyBytes)
+
+		// Build object calls must reach the build's runner: build-mcp-4 runs
+		// on agent-alpha, every other fixture build on the default runner.
+		if !strings.HasPrefix(path, "/BuildRouter/") {
+			want := "/Build/"
+			if strings.Contains(path, "build-mcp-4") {
+				want = "/Build-agent-alpha/"
+			}
+			if !strings.HasPrefix(path, want) {
+				w.WriteHeader(http.StatusTeapot)
+				_, _ = w.Write([]byte(`{"message":"misrouted build object"}`))
+				return
+			}
+		}
 
 		if strings.Contains(path, "nonexistent") {
 			w.WriteHeader(http.StatusNotFound)
@@ -546,6 +567,11 @@ func TestMCP_UpdateBuild(t *testing.T) {
 			wantSubstr: `"status":"updated"`,
 		},
 		{
+			name:       "update_build routes to the build runner",
+			args:       `{"build_id":"build-mcp-4","title":"Updated Runner Title"}`,
+			wantSubstr: `"status":"updated"`,
+		},
+		{
 			name:        "update_build conflict status",
 			args:        `{"build_id":"build-mcp-2","title":"Conflict Title"}`,
 			wantToolErr: true,
@@ -598,6 +624,11 @@ func TestMCP_UpdateChunk(t *testing.T) {
 			args:       `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"","title":"Updated Chunk 2 Title Again"}`,
 			wantSubstr: `"status":"updated"`,
 		},
+		{
+			name:       "update_chunk routes to the build runner",
+			args:       `{"build_id":"build-mcp-4","chunk_ref":"1","title":"Runner Chunk"}`,
+			wantSubstr: `"status":"updated"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -640,6 +671,11 @@ func TestMCP_AppendChunk(t *testing.T) {
 			args:       `{"build_id":"build-mcp-1","chunks":[{"mode":"action","title":"Action Step","instructions":"Run migration","effort":"low","depends_on":["chunk-2"]}]}`,
 			wantSubstr: `"status":"appended"`,
 		},
+		{
+			name:       "append_chunk routes to the build runner",
+			args:       `{"build_id":"build-mcp-4","chunks":[{"repo":"aerial","title":"Runner Part","instructions":"Do it","effort":"low","depends_on":[]}]}`,
+			wantSubstr: `"status":"appended"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -678,10 +714,16 @@ func TestMCP_RemoveChunk(t *testing.T) {
 			wantSubstr: `"status":"removed"`,
 		},
 		{
-			name:       "remove_chunk store read error keeps chunk ref",
-			getErr:     errors.New("simulated get failure"),
-			args:       `{"build_id":"build-mcp-1","chunk_ref":"1"}`,
-			wantSubstr: `"removed_chunk_id":"1"`,
+			name:       "remove_chunk routes to the build runner",
+			args:       `{"build_id":"build-mcp-4","chunk_ref":"1"}`,
+			wantSubstr: `"removed_chunk_id":"chunk-4-1"`,
+		},
+		{
+			name:        "remove_chunk store read error refuses to guess the runner",
+			getErr:      errors.New("simulated get failure"),
+			args:        `{"build_id":"build-mcp-1","chunk_ref":"1"}`,
+			wantToolErr: true,
+			wantSubstr:  "simulated get failure",
 		},
 	}
 

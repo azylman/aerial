@@ -105,15 +105,6 @@ func (s *BuildRouterService) ServiceName() string {
 	return model.BuildRouterServiceName(s.agentName)
 }
 
-// ownRunner is the router deployment's own normalized agent, used only for
-// builds that do not exist yet.
-func (s *BuildRouterService) ownRunner() string {
-	if s == nil {
-		return store.NormalizeRunnerAgent("")
-	}
-	return store.NormalizeRunnerAgent(s.agentName)
-}
-
 func (s *BuildRouterService) getInvoker(ctx restate.Context) BuildObjectInvoker {
 	if s != nil && s.invokerFactory != nil {
 		return s.invokerFactory(ctx)
@@ -227,9 +218,10 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 		return model.AttachChunkPRResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	// A new standalone build stays on the router's own Build service for now.
+	// A new standalone build runs on the caller agent's own Build service;
+	// an empty caller means the default agent.
 	newBuild := func() store.BuildRoute {
-		return store.BuildRoute{BuildID: build.GenerateBuildID(), RunnerAgent: s.ownRunner()}
+		return store.BuildRoute{BuildID: build.GenerateBuildID(), RunnerAgent: store.NormalizeRunnerAgent(req.Agent)}
 	}
 	route, err := build.RunJournaled(ctx, build.LabelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {

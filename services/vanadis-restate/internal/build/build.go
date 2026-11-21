@@ -782,6 +782,9 @@ func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req store.AttachChunkP
 	if err := b.guardRunner(ctx, labelAttachPR); err != nil {
 		return model.AttachChunkPRResponse{}, err
 	}
+	// A standalone build created here runs on this object, never on a
+	// runner named by the request.
+	req.RunnerAgent = b.runnerAgent()
 	return b.executePRAttachment(ctx, req)
 }
 
