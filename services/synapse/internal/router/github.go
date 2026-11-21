@@ -80,15 +80,16 @@ func (s *RouterServer) ghClient() *github.Client {
 	if s == nil {
 		return nil
 	}
-	cfg := s.cfgSrc.Current()
-	return github.NewClient(s.githubClient, cfg.GitHubAPIURL, cfg.GitHubToken)
+	// Empty token: s.githubClient's githubauth.Transport is the only place
+	// a credential is attached.
+	return github.NewClient(s.githubClient, s.cfgSrc.Current().GitHubAPIURL, "")
 }
 
-// newGitHubRequest builds an authenticated GitHub REST request against the
-// live config snapshot's API URL and token.
+// newGitHubRequest builds a GitHub REST request against the live config
+// snapshot's API URL. s.githubClient's githubauth.Transport attaches the
+// credential, so requests must be sent through it.
 func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	cfg := s.cfgSrc.Current()
-	return github.NewRequest(ctx, cfg.GitHubAPIURL, cfg.GitHubToken, method, path, body)
+	return github.NewRequest(ctx, s.cfgSrc.Current().GitHubAPIURL, "", method, path, body)
 }
 
 func isGitHubNotFound(err error) bool {
