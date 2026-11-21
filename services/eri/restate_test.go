@@ -9,12 +9,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -25,6 +27,7 @@ type remoteQuotaCase struct {
 	transportError bool
 	wantGroups     int
 	wantFirstName  string
+	wantUpdatedAt  string
 }
 
 func runRemoteQuotaCase(t *testing.T, tc remoteQuotaCase) {
@@ -46,15 +49,20 @@ func runRemoteQuotaCase(t *testing.T, tc remoteQuotaCase) {
 
 	p := NewRemoteQuotaProvider(ts.URL, client)
 	require.NotNil(t, p)
-	groups := p.LatestQuotaGroups()
-	assert.Len(t, groups, tc.wantGroups)
+	snap := p.LatestQuotaSnapshot()
+	assert.Len(t, snap.Groups, tc.wantGroups)
 	if tc.wantGroups > 0 {
-		assert.Equal(t, tc.wantFirstName, groups[0].Name)
+		assert.Equal(t, tc.wantFirstName, snap.Groups[0].Name)
+	}
+	if tc.wantUpdatedAt == "" {
+		assert.True(t, snap.UpdatedAt.IsZero())
+	} else {
+		assert.Equal(t, tc.wantUpdatedAt, snap.UpdatedAt.UTC().Format(time.RFC3339))
 	}
 
-	fn := p.ProviderFunc()
-	fnGroups := fn()
-	assert.Len(t, fnGroups, tc.wantGroups)
+	fnSnap := p.ProviderFunc()()
+	assert.Len(t, fnSnap.Groups, tc.wantGroups)
+	assert.Equal(t, snap.UpdatedAt, fnSnap.UpdatedAt)
 }
 
 func TestRemoteQuotaProvider(t *testing.T) {
@@ -64,9 +72,23 @@ func TestRemoteQuotaProvider(t *testing.T) {
 		{
 			name:          "successful quota retrieval",
 			statusCode:    http.StatusOK,
-			responseBody:  `[{"name":"Claude","buckets":[{"id":"claude-5h","window":"5h","remaining_fraction":0.8}]}]`,
+			responseBody:  `{"groups":[{"name":"Claude","buckets":[{"id":"claude-5h","window":"5h","remaining_fraction":0.8}]}],"updated_at":"2026-11-21T10:30:00Z"}`,
 			wantGroups:    1,
 			wantFirstName: "Claude",
+			wantUpdatedAt: "2026-11-21T10:30:00Z",
+		},
+		{
+			name:          "zero updated_at",
+			statusCode:    http.StatusOK,
+			responseBody:  `{"groups":[{"name":"Claude","buckets":[]}],"updated_at":"0001-01-01T00:00:00Z"}`,
+			wantGroups:    1,
+			wantFirstName: "Claude",
+		},
+		{
+			name:         "legacy bare array body",
+			statusCode:   http.StatusOK,
+			responseBody: `[{"name":"Claude","buckets":[]}]`,
+			wantGroups:   0,
 		},
 		{
 			name:         "server error status",
@@ -99,14 +121,14 @@ func TestRemoteQuotaProvider_NilSafetyAndDefaultURL(t *testing.T) {
 	t.Parallel()
 
 	var nilProvider *RemoteQuotaProvider
-	assert.Nil(t, nilProvider.LatestQuotaGroups())
-	assert.Nil(t, nilProvider.ProviderFunc()())
+	assert.Equal(t, metrics.QuotaSnapshot{}, nilProvider.LatestQuotaSnapshot())
+	assert.Equal(t, metrics.QuotaSnapshot{}, nilProvider.ProviderFunc()())
 
 	defaultProvider := NewRemoteQuotaProvider("")
 	assert.Equal(t, "http://eri-restate-health:4028", defaultProvider.eriRestateURL)
 
 	malformedProvider := NewRemoteQuotaProvider("http://bad\x7fhost")
-	assert.Nil(t, malformedProvider.LatestQuotaGroups())
+	assert.Equal(t, metrics.QuotaSnapshot{}, malformedProvider.LatestQuotaSnapshot())
 }
 
 type remoteLLMCase struct {

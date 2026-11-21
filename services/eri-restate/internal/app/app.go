@@ -229,8 +229,7 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		groups := metrics.LatestQuotaGroups()
-		httpkit.WriteJSON(w, http.StatusOK, groups)
+		httpkit.WriteJSON(w, http.StatusOK, metrics.LatestQuotaSnapshot())
 	})
 
 	llmFn := opts.LLMFunc
