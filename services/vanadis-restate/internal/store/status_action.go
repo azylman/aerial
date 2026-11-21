@@ -122,9 +122,11 @@ func currentActionIdentity(chunk model.VanadisChunk, dispatchID string) bool {
 }
 
 // ActionCompletionAllowed reports whether an action chunk completion applies.
+// A chunk with an attached repair PR qualifies once the repair deployed and
+// moved it back to running.
 func ActionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
 	identityMatches := currentActionIdentity(chunk, dispatchID) || (dispatchID == "" && chunk.StallNudges == 0)
-	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
+	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && identityMatches
 }
 
 func (s *Store) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {

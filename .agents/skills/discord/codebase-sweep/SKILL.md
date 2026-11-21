@@ -74,7 +74,7 @@ Load the self-improvement skill and the Vanadis build authoring reference. Sweep
 
 Pitfalls the review panel caught last time:
 - Clones go stale within hours on a busy day. Re-fetch every repo right before writing the plan, and re-derive config-repo items.
-- An action gate that ends its turn on HOLD still counts as completed. Gates keep resumable evidence files, wait for real traffic in checkpointed batches, and call `fail_chunk` (a retryable pause) when blocked.
+- An action gate completes only when its worker calls `complete_chunk`, so a gate that finds HOLD must not call it: it calls `fail_chunk` (a retryable pause) instead. Gates keep resumable evidence files, wait for real traffic in checkpointed batches, and time-box each wait to 45 min per turn.
 - A config key removal unblocks when the code PR merges, not when it deploys. Put a live-check chunk between them, or hot reload flips behavior while the old image is still running.
 - Moving tests off an in-memory SQL dialect onto fakes loses real query coverage. Only do it alongside a real hermetic SQL path.
 - New shared packages with no callers trip the deadcode gate. Land each one with its first adopter.

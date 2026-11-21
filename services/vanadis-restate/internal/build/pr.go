@@ -76,12 +76,15 @@ func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []model.V
 	if mutation == nil {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(mutation.Action)) {
-	case mutationActionCompleted, mutationChunkDeploySuccess:
-		for _, chunk := range chunks {
-			if chunk.ID == mutation.ChunkID && chunk.Mode == "action" && chunk.PRNumber == 0 {
-				return true
-			}
+	action := strings.ToLower(strings.TrimSpace(mutation.Action))
+	if action != mutationActionCompleted && action != mutationChunkDeploySuccess {
+		return false
+	}
+	for _, chunk := range chunks {
+		// A verdict completes an action chunk even after a repair PR deployed;
+		// a repair PR's deploy_success never completes one.
+		if chunk.ID == mutation.ChunkID && chunk.Mode == "action" && (chunk.PRNumber == 0 || action == mutationActionCompleted) {
+			return true
 		}
 	}
 	return false
@@ -163,6 +166,9 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	if deploying.Status == statusFailed || deploying.Status == statusCancelled || build.Status == statusCancelled {
 		return nil
 	}
+	if deploying.Mode == chunkModeAction {
+		return b.markActionRepairDeployed(ctx, deploying, chunks, mutation)
+	}
 	if err := b.store.CompletePRDeployment(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
 		if errors.Is(err, errPRTransitionSkipped) {
 			return nil
@@ -193,6 +199,27 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	return nil
 }
 
+// markActionRepairDeployed handles deploy_success for a repair PR attached to
+// an action chunk. The repair is a step inside the chunk: the chunk moves back
+// to running and completes only on its complete_chunk verdict, so no
+// completed event is published and its dispatch is never cancelled. The
+// landed commit still supersedes earlier merged chunks, so both sweeps run.
+func (b *BuildObject) markActionRepairDeployed(ctx context.Context, deploying model.VanadisChunk, chunks []model.VanadisChunk, mutation *BuildMutationRequest) error {
+	if err := b.store.MarkActionRepairDeployed(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			return nil
+		}
+		return err
+	}
+	if mutation.RolloutState != nil {
+		deploying.RolloutState = mutation.RolloutState
+	}
+	if err := b.completeSweptDeployments(ctx, chunks, mutation.ChunkID); err != nil {
+		return err
+	}
+	return b.completeCrossBuildSweptDeployments(ctx, deploying)
+}
+
 // completeCrossBuildSweptDeployments completes eligible earlier chunks in
 // other builds superseded by the deploying chunk's landed commit, including
 // already-completed chunks re-derived for retry recovery. Skewed or
@@ -215,12 +242,20 @@ func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, de
 	return err
 }
 
-// completeSweptDeployments completes earlier chunks superseded by the
+// completeSweptDeployments completes earlier PR chunks superseded by the
 // deploying chunk's landed commit, publishing a completed event per chunk.
+// Superseded action chunks only have their repair marked deployed.
 // Skipped transitions (a concurrent completion, failure, or cancellation)
 // are harmless; other errors abort so the journaled step retries the sweep.
 func (b *BuildObject) completeSweptDeployments(ctx context.Context, chunks []model.VanadisChunk, chunkID string) error {
 	for _, sweptID := range store.EarlierDeploymentSweepIDs(chunks, chunkID) {
+		if idx := findChunkIndex(chunks, sweptID); idx >= 0 && chunks[idx].Mode == chunkModeAction {
+			// A swept action chunk's repair deployed; it stays running.
+			if err := b.store.MarkActionRepairDeployed(ctx, sweptID, nil); err != nil && !errors.Is(err, errPRTransitionSkipped) {
+				return err
+			}
+			continue
+		}
 		if err := b.store.CompletePRDeployment(ctx, sweptID, nil); err != nil {
 			if errors.Is(err, errPRTransitionSkipped) {
 				continue
