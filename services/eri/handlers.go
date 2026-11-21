@@ -21,6 +21,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/sanitizer"
@@ -107,7 +108,7 @@ func handleDuplicatePrompt(ctx context.Context, w http.ResponseWriter, store db.
 	}
 	if exists {
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus:    statusAlreadyExists,
+			jsonKeyStatus:    eriwire.StatusAlreadyExists,
 			jsonKeyChannelID: channelID,
 			jsonKeySessionID: channelID,
 			jsonKeyMessageID: msgID,
@@ -129,7 +130,7 @@ func handleRestatePrompt(ctx context.Context, w http.ResponseWriter, client *Res
 		return
 	}
 	httpCode := http.StatusAccepted
-	if status == statusSkippedActive || status == statusAlreadyExists {
+	if status == eriwire.StatusSkippedActive || status == eriwire.StatusAlreadyExists {
 		httpCode = http.StatusOK
 	}
 	httpkit.WriteJSON(w, httpCode, map[string]string{
@@ -318,7 +319,7 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 	}
 	if exists {
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus: statusAlreadyExists, jsonKeyDispatchID: dispatchID,
+			jsonKeyStatus: eriwire.StatusAlreadyExists, jsonKeyDispatchID: dispatchID,
 			jsonKeyMessageID: dispatchID, jsonKeySessionID: sessionID,
 		})
 		return true
@@ -347,7 +348,7 @@ func buildDispatchRecord(req DispatchRequest, dispatchID, sessionID, traceparent
 func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *RestateIngressClient, req DispatchRequest, sessionID, dispatchID string) {
 	sessionKey := sessionID
 	if sessionKey == "" {
-		sessionKey = queue.ResolveDispatchSessionKey(queue.BrainDispatchRequest{
+		sessionKey = eriwire.ResolveDispatchSessionKey(eriwire.BrainDispatchRequest{
 			SessionID:      req.SessionID,
 			VanadisChunkID: req.VanadisChunkID,
 			ID:             dispatchID,
@@ -360,7 +361,7 @@ func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *R
 		return
 	}
 	httpCode := http.StatusAccepted
-	if status == statusSkippedActive || status == statusAlreadyExists {
+	if status == eriwire.StatusSkippedActive || status == eriwire.StatusAlreadyExists {
 		httpCode = http.StatusOK
 	}
 	httpkit.WriteJSON(w, httpCode, map[string]string{
@@ -426,7 +427,7 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		if !inserted {
 			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				jsonKeyStatus:     statusAlreadyExists,
+				jsonKeyStatus:     eriwire.StatusAlreadyExists,
 				jsonKeyDispatchID: dispatchID,
 				jsonKeyMessageID:  dispatchID,
 				jsonKeySessionID:  sessionID,
