@@ -37,6 +37,7 @@
     }
   ],
   "effects": [],
+  "fact_rollout_states": [],
   "rows": [
     {
       "repo": "azylman/aerial",

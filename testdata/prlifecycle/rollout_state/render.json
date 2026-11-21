@@ -1,0 +1,488 @@
+{
+ "description": "Rollout state renders for one pr_registry row: synapse buildPRRolloutState over the row metadata (build_metadata kept only when build_metadata_fenced, i.e. LoadPRBuildMetadata returns it) and prstate BuildPRRolloutState over the hydrated PRState must both equal rollout_state. Hand-derived.",
+ "cases": [
+  {
+   "name": "no_jobs",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "",
+    "target_id": "100000000000000001",
+    "status": "open",
+    "title": "T",
+    "metadata": {
+     "agent": "aerial"
+    }
+   },
+   "rollout_state": null
+  },
+  {
+   "name": "partially_started",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "2222222222222222222222222222222222222222",
+    "target_id": "100000000000000001",
+    "status": "deploying",
+    "title": "T",
+    "metadata": {
+     "jobs": [
+      "apps",
+      "core"
+     ],
+     "started_jobs": [
+      "apps"
+     ]
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "apps",
+     "core"
+    ],
+    "started_jobs": [
+     "apps"
+    ]
+   }
+  },
+  {
+   "name": "partially_deployed",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "2222222222222222222222222222222222222222",
+    "target_id": "100000000000000001",
+    "status": "deploying",
+    "title": "T",
+    "metadata": {
+     "jobs": [
+      "core"
+     ],
+     "started_jobs": [
+      "apps",
+      "core"
+     ],
+     "deployed_jobs": [
+      "apps"
+     ]
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "core"
+    ],
+    "started_jobs": [
+     "apps",
+     "core"
+    ],
+    "deployed_jobs": [
+     "apps"
+    ]
+   }
+  },
+  {
+   "name": "fully_deployed_kustomizations_render_no_statuses",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "2222222222222222222222222222222222222222",
+    "target_id": "100000000000000001",
+    "status": "deployed",
+    "title": "T",
+    "metadata": {
+     "started_jobs": [
+      "apps",
+      "core"
+     ],
+     "deployed_jobs": [
+      "apps",
+      "core"
+     ],
+     "deployed_kustomizations": [
+      "aerial-apps",
+      "aerial-core"
+     ],
+     "kustomization_requests": {
+      "aerial-apps": {
+       "namespace": "flux-system",
+       "requested_at": "2026-11-21T19:00:00Z"
+      },
+      "aerial-core": {
+       "namespace": "flux-system",
+       "requested_at": "2026-11-21T19:00:00Z"
+      }
+     }
+    }
+   },
+   "rollout_state": {
+    "started_jobs": [
+     "apps",
+     "core"
+    ],
+    "deployed_jobs": [
+     "apps",
+     "core"
+    ]
+   }
+  },
+  {
+   "name": "job_states_keys_normalized",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "2222222222222222222222222222222222222222",
+    "target_id": "100000000000000001",
+    "status": "deploying",
+    "title": "T",
+    "metadata": {
+     "jobs": [
+      "eri"
+     ],
+     "started_jobs": [
+      "eri"
+     ],
+     "job_states": {
+      " Eri ": " rolling "
+     }
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "eri"
+    ],
+    "started_jobs": [
+     "eri"
+    ],
+    "job_states": {
+     "eri": "rolling"
+    }
+   }
+  },
+  {
+   "name": "build_metadata_open_head_job_states",
+   "build_metadata_fenced": true,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "",
+    "target_id": "100000000000000001",
+    "status": "open",
+    "title": "T",
+    "metadata": {
+     "job_states": {
+      "haro": "deployed"
+     },
+     "build_metadata": {
+      "version": 1,
+      "kind": "progress",
+      "repository": "azylman/aerial",
+      "workflow_path": ".github/workflows/build.yml",
+      "run_id": 501,
+      "run_number": 77,
+      "run_attempt": 2,
+      "event": "pull_request",
+      "source_sha": "1111111111111111111111111111111111111111",
+      "execution_sha": "3333333333333333333333333333333333333333",
+      "pr_number": 7,
+      "selected": [
+       {
+        "service": "eri",
+        "image_name": "eri"
+       },
+       {
+        "service": "haro",
+        "image_name": "haro"
+       },
+       {
+        "service": "coven",
+        "image_name": "coven"
+       },
+       {
+        "service": "vision",
+        "image_name": "vision"
+       },
+       {
+        "service": "senses",
+        "image_name": "senses"
+       }
+      ],
+      "results": [
+       {
+        "service": "eri",
+        "image_name": "eri",
+        "state": "running",
+        "pushed": false,
+        "source_attempt": 1
+       },
+       {
+        "service": "haro",
+        "image_name": "haro",
+        "state": "success",
+        "pushed": true,
+        "source_attempt": 1
+       },
+       {
+        "service": "coven",
+        "image_name": "coven",
+        "state": "success",
+        "pushed": false,
+        "source_attempt": 1
+       },
+       {
+        "service": "vision",
+        "image_name": "vision",
+        "state": "failure",
+        "pushed": false,
+        "source_attempt": 1
+       }
+      ]
+     }
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "eri",
+     "haro",
+     "coven",
+     "vision",
+     "senses"
+    ],
+    "job_states": {
+     "eri": "image_building",
+     "haro": "deployed",
+     "coven": "image_unpublished",
+     "vision": "image_failed",
+     "senses": "image_pending"
+    }
+   }
+  },
+  {
+   "name": "build_metadata_merged_extends_jobs",
+   "build_metadata_fenced": true,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "2222222222222222222222222222222222222222",
+    "target_id": "100000000000000001",
+    "status": "merged",
+    "title": "T",
+    "metadata": {
+     "jobs": [
+      "apps"
+     ],
+     "build_metadata": {
+      "version": 1,
+      "kind": "progress",
+      "repository": "azylman/aerial",
+      "workflow_path": ".github/workflows/build.yml",
+      "run_id": 501,
+      "run_number": 77,
+      "run_attempt": 2,
+      "event": "pull_request",
+      "source_sha": "2222222222222222222222222222222222222222",
+      "execution_sha": "3333333333333333333333333333333333333333",
+      "pr_number": 7,
+      "selected": [
+       {
+        "service": "eri",
+        "image_name": "eri"
+       }
+      ],
+      "results": [
+       {
+        "service": "eri",
+        "image_name": "eri",
+        "state": "success",
+        "pushed": true,
+        "source_attempt": 1
+       }
+      ]
+     }
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "apps",
+     "eri"
+    ],
+    "job_states": {
+     "eri": "image_built"
+    }
+   }
+  },
+  {
+   "name": "build_metadata_stale_head_ignored",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "",
+    "target_id": "100000000000000001",
+    "status": "open",
+    "title": "T",
+    "metadata": {
+     "jobs": [
+      "apps"
+     ],
+     "build_metadata": {
+      "version": 1,
+      "kind": "progress",
+      "repository": "azylman/aerial",
+      "workflow_path": ".github/workflows/build.yml",
+      "run_id": 501,
+      "run_number": 77,
+      "run_attempt": 2,
+      "event": "pull_request",
+      "source_sha": "4444444444444444444444444444444444444444",
+      "execution_sha": "3333333333333333333333333333333333333333",
+      "pr_number": 7,
+      "selected": [
+       {
+        "service": "eri",
+        "image_name": "eri"
+       }
+      ],
+      "results": [
+       {
+        "service": "eri",
+        "image_name": "eri",
+        "state": "running",
+        "pushed": false,
+        "source_attempt": 1
+       }
+      ]
+     }
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "apps"
+    ]
+   }
+  },
+  {
+   "name": "build_metadata_deploying_ignored",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "2222222222222222222222222222222222222222",
+    "target_id": "100000000000000001",
+    "status": "deploying",
+    "title": "T",
+    "metadata": {
+     "jobs": [
+      "apps"
+     ],
+     "started_jobs": [
+      "apps"
+     ],
+     "build_metadata": {
+      "version": 1,
+      "kind": "progress",
+      "repository": "azylman/aerial",
+      "workflow_path": ".github/workflows/build.yml",
+      "run_id": 501,
+      "run_number": 77,
+      "run_attempt": 2,
+      "event": "pull_request",
+      "source_sha": "2222222222222222222222222222222222222222",
+      "execution_sha": "3333333333333333333333333333333333333333",
+      "pr_number": 7,
+      "selected": [
+       {
+        "service": "eri",
+        "image_name": "eri"
+       }
+      ],
+      "results": [
+       {
+        "service": "eri",
+        "image_name": "eri",
+        "state": "running",
+        "pushed": false,
+        "source_attempt": 1
+       }
+      ]
+     }
+    }
+   },
+   "rollout_state": {
+    "expected_jobs": [
+     "apps"
+    ],
+    "started_jobs": [
+     "apps"
+    ]
+   }
+  },
+  {
+   "name": "build_metadata_other_pr_ignored",
+   "build_metadata_fenced": false,
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 7,
+    "branch": "feat/x",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "merge_sha": "",
+    "target_id": "100000000000000001",
+    "status": "open",
+    "title": "T",
+    "metadata": {
+     "build_metadata": {
+      "version": 1,
+      "kind": "progress",
+      "repository": "azylman/aerial",
+      "workflow_path": ".github/workflows/build.yml",
+      "run_id": 501,
+      "run_number": 77,
+      "run_attempt": 2,
+      "event": "pull_request",
+      "source_sha": "1111111111111111111111111111111111111111",
+      "execution_sha": "3333333333333333333333333333333333333333",
+      "pr_number": 99,
+      "selected": [
+       {
+        "service": "eri",
+        "image_name": "eri"
+       }
+      ],
+      "results": [
+       {
+        "service": "eri",
+        "image_name": "eri",
+        "state": "running",
+        "pushed": false,
+        "source_attempt": 1
+       }
+      ]
+     }
+    }
+   },
+   "rollout_state": null
+  }
+ ]
+}

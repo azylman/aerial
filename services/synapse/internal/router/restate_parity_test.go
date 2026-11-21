@@ -36,6 +36,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -132,7 +133,17 @@ type parityScenario struct {
 	GitHubRoutes    map[string]string   `json:"github_routes"`
 	Synapse         []paritySynapseStep `json:"synapse"`
 	Effects         []parityEffect      `json:"effects"`
-	Rows            []parityRow         `json:"rows"`
+	// FactRolloutStates is the rollout state each published fact carries;
+	// prstate's restate-owned publishes must match it.
+	FactRolloutStates []parityFactState `json:"fact_rollout_states"`
+	Rows              []parityRow       `json:"rows"`
+}
+
+// parityFactState is the rollout state one published fact carried, keyed
+// by the fact's generation-free match key.
+type parityFactState struct {
+	Key          string                 `json:"key"`
+	RolloutState *pubsub.PRRolloutState `json:"rollout_state"`
 }
 
 func loadParityScenarios(t *testing.T) []parityScenario {
@@ -844,6 +855,33 @@ func (h *parityHarness) effects() []parityEffect {
 	return out
 }
 
+// factRolloutStates renders fact rollout states as sorted JSON lines, so
+// goldens compare as a multiset.
+func factRolloutStates(t *testing.T, facts []parityFactState) []string {
+	t.Helper()
+	out := make([]string, 0, len(facts))
+	for _, f := range facts {
+		raw, err := json.Marshal(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, string(raw))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// publishedFactStates is the rollout state of every fact legacy published.
+func (h *parityHarness) publishedFactStates() []parityFactState {
+	h.bus.mu.Lock()
+	defer h.bus.mu.Unlock()
+	out := make([]parityFactState, 0, len(h.bus.publishedPREvents))
+	for _, f := range h.bus.publishedPREvents {
+		out = append(out, parityFactState{Key: restateclient.FactMatchKey(f), RolloutState: f.RolloutState})
+	}
+	return out
+}
+
 func sortParityEffects(in []parityEffect) []parityEffect {
 	out := append([]parityEffect{}, in...)
 	sort.Slice(out, func(i, j int) bool {
@@ -880,6 +918,9 @@ func TestLegacyLifecycleParity(t *testing.T) {
 			}
 			if got, want := sortParityEffects(h.effects()), sortParityEffects(tc.Effects); !slices.Equal(got, want) {
 				t.Errorf("effects =\n%+v\nwant\n%+v", got, want)
+			}
+			if got, want := factRolloutStates(t, h.publishedFactStates()), factRolloutStates(t, tc.FactRolloutStates); !slices.Equal(got, want) {
+				t.Errorf("fact rollout states =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 			gotRows, wantRows := h.reg.rowsView(), goldenRows(t, tc.Rows)
 			gotJSON, _ := json.MarshalIndent(gotRows, "", " ")

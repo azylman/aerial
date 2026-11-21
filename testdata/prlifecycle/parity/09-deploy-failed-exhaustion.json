@@ -124,6 +124,16 @@
       "key": "azylman/aerial#109@m109:pr_fact_deploy_failed"
     }
   ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#109@h109:pr_fact_merged",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#109@m109:pr_fact_deploy_failed",
+      "rollout_state": null
+    }
+  ],
   "rows": [
     {
       "repo": "azylman/aerial",

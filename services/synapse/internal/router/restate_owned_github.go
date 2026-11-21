@@ -121,8 +121,9 @@ func (s *RouterServer) processRestateOwnedGitHubEvent(ctx context.Context, event
 }
 
 // ownedFact renders one stateless aerial.pr.> fact for a restate-owned
-// event. Rollout state is a registry read-model render, so it stays empty;
-// PRObject pins the PR identity and fills a missing target.
+// event. It carries no rollout state: synapse holds no PR state, and
+// PRObject pins the PR identity, fills a missing target and renders the
+// rollout state from its committed state when it publishes the fact.
 func ownedFact(res *ResolvedGitHubEvent, event, status string) pubsub.PRLifecycleEvent {
 	return pubsub.PRLifecycleEvent{
 		Event:      event,

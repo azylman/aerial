@@ -85,6 +85,12 @@
       "key": "azylman/aerial#105@h105:pr_fact_closed_unmerged"
     }
   ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#105@h105:pr_fact_closed_unmerged",
+      "rollout_state": null
+    }
+  ],
   "rows": [
     {
       "repo": "azylman/aerial",

@@ -53,13 +53,13 @@ func wrapHermeticTransport() {
 
 func init() {
 	wrapHermeticTransport()
-	if os.Getenv("AERIAL_SA_TOKEN_PATH") == "" {
-		if f, err := os.CreateTemp("", "eri-test-sa-token-*"); err == nil {
-			_, _ = f.WriteString("test-sa-token")
-			_ = f.Close()
-			_ = os.Setenv("AERIAL_SA_TOKEN_PATH", f.Name())
-			transcriptsProxyHTTPClient.Transport = k8sauth.NewServiceAccountTransport(http.DefaultTransport, f.Name())
-		}
+	// Always use a temp token: a pod-provided AERIAL_SA_TOKEN_PATH must never
+	// leak the real ServiceAccount token into test requests.
+	if f, err := os.CreateTemp("", "eri-test-sa-token-*"); err == nil {
+		_, _ = f.WriteString("test-sa-token")
+		_ = f.Close()
+		_ = os.Setenv("AERIAL_SA_TOKEN_PATH", f.Name())
+		transcriptsProxyHTTPClient.Transport = k8sauth.NewServiceAccountTransport(http.DefaultTransport, f.Name())
 	}
 }
 
