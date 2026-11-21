@@ -51,7 +51,11 @@ func APIHandler(cfg *config.Config) http.HandlerFunc {
 			http.Error(w, patMissingBody, http.StatusServiceUnavailable)
 			return
 		}
-		forward(w, r, APIPrefix, defaultAPIBase, apiBaseEnv, "token "+pat)
+		body, ok := scanAPIWrite(w, r, cfg, pat)
+		if !ok {
+			return
+		}
+		forward(w, r, body, APIPrefix, defaultAPIBase, apiBaseEnv, "token "+pat)
 	}
 }
 
@@ -65,7 +69,11 @@ func GitHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 		authVal := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + pat))
-		forward(w, r, GitPrefix, defaultGitBase, gitBaseEnv, "Basic "+authVal)
+		body, ok := scanGitPush(w, r, cfg, pat)
+		if !ok {
+			return
+		}
+		forward(w, r, body, GitPrefix, defaultGitBase, gitBaseEnv, "Basic "+authVal)
 	}
 }
 
@@ -118,20 +126,24 @@ func resolvePAT(cfg *config.Config) (string, bool) {
 	return cur.GitHubPAT, true
 }
 
-func forward(w http.ResponseWriter, r *http.Request, pathPrefix, defaultBase, envBaseVar, authHeader string) {
+func upstreamBase(envBaseVar, defaultBase string) string {
+	if base := os.Getenv(envBaseVar); base != "" {
+		return strings.TrimSuffix(base, "/")
+	}
+	return defaultBase
+}
+
+// forward relays r upstream with body (r.Body when the request was not scanned).
+func forward(w http.ResponseWriter, r *http.Request, body io.Reader, pathPrefix, defaultBase, envBaseVar, authHeader string) {
 	subpath := strings.TrimPrefix(r.URL.Path, pathPrefix)
 	subpath = strings.TrimPrefix(subpath, "/")
 
-	upstreamBase := os.Getenv(envBaseVar)
-	if upstreamBase == "" {
-		upstreamBase = defaultBase
-	}
-	targetURL := strings.TrimSuffix(upstreamBase, "/") + "/" + subpath
+	targetURL := upstreamBase(envBaseVar, defaultBase) + "/" + subpath
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"Failed to create proxy request: %v"}`, err), http.StatusInternalServerError)
 		return
