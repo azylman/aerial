@@ -141,3 +141,66 @@ func TestShadowUntrackedUpstreamGolden(t *testing.T) {
 		})
 	}
 }
+
+// legacyOwnerWant is the hand-derived outcome of one legacy-owner case.
+type legacyOwnerWant struct {
+	Owner           string   `json:"owner"`
+	Status          string   `json:"status"`
+	Divergent       []string `json:"divergent"`
+	IntendedEffects []string `json:"intended_effects"`
+}
+
+// legacyOwnerCase hydrates PRObject from row, replays stream, then compares
+// the projection against compare_row (row when absent).
+type legacyOwnerCase struct {
+	Name       string             `json:"name"`
+	Row        RegistryRow        `json:"row"`
+	CompareRow *RegistryRow       `json:"compare_row"`
+	Stream     []parityInvocation `json:"stream"`
+	Want       legacyOwnerWant    `json:"want"`
+}
+
+// TestShadowLegacyAgentColumnOwnerGolden pins that a legacy-era row whose
+// owner lives only in the agent column agrees on ownership with the
+// PRObject Hydrate built from it after a main push, with no intended
+// effect, while an explicit metadata.agent naming another owner diverges.
+func TestShadowLegacyAgentColumnOwnerGolden(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/legacy-agent-column-owner.json")
+	require.NoError(t, err)
+	var g struct {
+		Cases []legacyOwnerCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &g))
+	require.NotEmpty(t, g.Cases)
+	tests := g.Cases
+	for _, tc := range tests {
+		t.Run(tc.Name, func(t *testing.T) {
+			t.Parallel()
+			sim := newParitySim(t)
+			hydrate, err := json.Marshal(struct {
+				Repo     string      `json:"repo"`
+				PRNumber int         `json:"pr_number"`
+				Row      RegistryRow `json:"row"`
+			}{tc.Row.Repo, tc.Row.PRNumber, tc.Row})
+			require.NoError(t, err)
+			sim.send(parityInvocation{Object: PRObjectServiceName, Handler: "Hydrate", Event: hydrate})
+			for _, inv := range tc.Stream {
+				sim.send(inv)
+			}
+			stRaw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, tc.Stream[0])+"/"+prObjectStateKey]
+			require.True(t, ok, "PRObject state committed")
+			st, err := decodeInput[PRState](stRaw)
+			require.NoError(t, err)
+			row := tc.Row
+			if tc.CompareRow != nil {
+				row = *tc.CompareRow
+			}
+			got := legacyOwnerWant{Owner: st.OwnerAgent(), Status: st.RegistryStatus(), Divergent: CompareProjection(BuildProjection(&st), row, true).Divergent}
+			for _, e := range st.IntendedEffects {
+				got.IntendedEffects = append(got.IntendedEffects, e.EffectKey)
+			}
+			require.Equal(t, tc.Want, got)
+		})
+	}
+}

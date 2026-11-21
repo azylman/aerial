@@ -2,7 +2,9 @@ package prstate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -539,7 +541,9 @@ func TestPgProjectionStoreLoadRegistryRow(t *testing.T) {
 // TestCompareProjection pins the shadow verdict: a missing row, a row that
 // moved past the snapshot (superseded), a matching row whose empty
 // collections and set order differ only cosmetically, and real column and
-// metadata divergences; the agent column is never compared.
+// metadata divergences. Ownership compares semantically through RowOwner
+// (a legacy agent-column owner agrees with the hydrated owner, blank means
+// the default agent), while an explicit other owner and raw bot_id differ.
 func TestCompareProjection(t *testing.T) {
 	t.Parallel()
 	snap := ProjectionSnapshot{
@@ -563,6 +567,39 @@ func TestCompareProjection(t *testing.T) {
 	untracked.TargetID = " "
 	untrackedRow := row
 	untrackedRow.TargetID = ""
+	// legacy-agent-column-owner.json: azylman/aerial-config#735 as Hydrate
+	// saw it (owner only in the agent column) and the contrasting row whose
+	// explicit metadata.agent names another owner.
+	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/legacy-agent-column-owner.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		Cases []struct {
+			Row        RegistryRow  `json:"row"`
+			CompareRow *RegistryRow `json:"compare_row"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	columnOwnerRow := legacy.Cases[0].Row
+	explicitOtherRow := *legacy.Cases[1].CompareRow
+	sulettaSnap := ProjectionSnapshot{
+		Repo: "azylman/aerial-config", PRNumber: 735, Agent: "suletta", Branch: "feat/suletta-config-tweak", HeadSHA: "2057427900000000000000000000000000000735",
+		TargetID: "1571760143723401259", Title: "Tweak suletta config", Status: "ci_failed",
+		Metadata: ProjectionMetadata{Agent: "suletta", CIChecks: map[string]string{"ci": "failed"}, CIFailCount: 1},
+	}
+	unownedSnap := snap
+	unownedSnap.Agent, unownedSnap.Metadata.Agent = "aerial", ""
+	unownedRow := row
+	unownedRow.Metadata.Agent = ""
+	defaultSnap := snap
+	defaultSnap.Agent, defaultSnap.Metadata.Agent = "aerial", "aerial"
+	columnOtherRow := row
+	columnOtherRow.Agent, columnOtherRow.Metadata.Agent = "suletta", ""
+	botOwnerRow := row
+	botOwnerRow.Metadata.Agent, botOwnerRow.Metadata.BotID = "", "agent-beta"
 	tests := []struct {
 		name  string
 		snap  ProjectionSnapshot
@@ -578,6 +615,12 @@ func TestCompareProjection(t *testing.T) {
 		{name: "status moved is superseded", snap: snap, row: movedStatus, found: true, want: ProjectionComparison{Superseded: true}},
 		{name: "merge sha moved is superseded", snap: snap, row: movedMerge, found: true, want: ProjectionComparison{Superseded: true}},
 		{name: "real differences name every field", snap: snap, row: diverged, found: true, want: ProjectionComparison{Divergent: []string{"metadata.agent", "metadata.banner", "metadata.jobs", "title"}}},
+		{name: "legacy agent column owner agrees with hydrated owner", snap: sulettaSnap, row: columnOwnerRow, found: true, want: ProjectionComparison{}},
+		{name: "explicit metadata agent naming another owner diverges", snap: sulettaSnap, row: explicitOtherRow, found: true, want: ProjectionComparison{Divergent: []string{"metadata.agent"}}},
+		{name: "agent column naming another owner diverges", snap: snap, row: columnOtherRow, found: true, want: ProjectionComparison{Divergent: []string{"metadata.agent"}}},
+		{name: "unknown owner on both sides agrees", snap: unownedSnap, row: unownedRow, found: true, want: ProjectionComparison{}},
+		{name: "default owner agrees with unknown row owner", snap: defaultSnap, row: unownedRow, found: true, want: ProjectionComparison{}},
+		{name: "bot id only owner diverges on raw bot id", snap: snap, row: botOwnerRow, found: true, want: ProjectionComparison{Divergent: []string{"metadata.bot_id"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
