@@ -371,7 +371,7 @@ func TestIsTier1Wake(t *testing.T) {
 		{"structured role in mention_role_ids", db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}, "123", []string{"999888"}, true},
 		{"non-matching replying_to author", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @random_user\n- content: hi\n</USER_REQUEST>"}, "123", nil, false},
 		{"bot in mention_user_ids", db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}, "123", nil, true},
-		{"Zero incident quoted role snowflake", db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1543462881624858624>' role snowflake\n- mentions: [harperwallbanger]\n- mention_user_ids: [179407724335988736]\n- mention_role_ids: []\n</USER_REQUEST>"}, "1542035925603713086", []string{"1543462881624858624"}, false},
+		{"Zero incident quoted role snowflake", db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1000000000000000003>' role snowflake\n- mentions: [example-user]\n- mention_user_ids: [1000000000000000002]\n- mention_role_ids: []\n</USER_REQUEST>"}, "1000000000000000001", []string{"1000000000000000003"}, false},
 		{"replying_to without author line", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n- mentions: [user]\n- content: hi\n</USER_REQUEST>"}, "bot-123", nil, false},
 		{"body direct snowflake mention", db.Message{Content: "hey <@12345> check this"}, "12345", nil, true},
 		{"body role snowflake mention", db.Message{Content: "hey <@&role999> check this"}, "99999", []string{"role999"}, true},

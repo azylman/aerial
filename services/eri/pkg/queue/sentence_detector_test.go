@@ -14,7 +14,7 @@ func TestSentenceDetector_TableDriven(t *testing.T) {
 		minExpectedChunks int
 	}{
 		{"single complete sentence", []string{"Hello, world. "}, []string{"Hello, world."}, 0},
-		{"token deltas streaming sentences", []string{"Hello", ", ", "Alex", ". ", "How", " are", " you?"}, []string{"Hello, Alex.", "How are you?"}, 0},
+		{"token deltas streaming sentences", []string{"Hello", ", ", "Alice", ". ", "How", " are", " you?"}, []string{"Hello, Alice.", "How are you?"}, 0},
 		{"multiple sentences in single delta", []string{"First sentence. Second sentence! Third sentence? "}, []string{"First sentence.", "Second sentence!", "Third sentence?"}, 0},
 		{"decimal numbers are not split", []string{"The price is $3.14 today. ", "That is cheap."}, []string{"The price is $3.14 today.", "That is cheap."}, 0},
 		{"abbreviations are not split", []string{"Dr. Smith visited e.g. the clinic at 5 p.m. yesterday. ", "All was well."}, []string{"Dr. Smith visited e.g. the clinic at 5 p.m. yesterday.", "All was well."}, 0},
