@@ -31,6 +31,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/env"
+	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -236,6 +237,9 @@ type HealthMuxOptions struct {
 	MCPRoutes     *env.MCPProxyRoutes
 	ActiveTurns   *runner.ActiveTurnRegistry
 	ReloadTrigger *ReloadTrigger
+	// Config supplies the live GitHub PAT for the loopback-only GitHub egress
+	// proxy. A nil Config still mounts the routes; they answer 503.
+	Config *config.Config
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
@@ -337,6 +341,10 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 		Turns: opts.ActiveTurns,
 		Stack: opts.AgentName,
 	}).Register(mux)
+
+	// Agent turns in this pod push and call the GitHub API through this proxy;
+	// it is loopback-only so the PAT-injecting routes never face the pod network.
+	githubproxy.Register(mux, opts.Config)
 
 	return mux
 }
@@ -661,6 +669,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		MCPRoutes:     mcpRoutes,
 		ActiveTurns:   activeTurns,
 		ReloadTrigger: reloadTrigger,
+		Config:        appCfg,
 	})
 
 	reconcileTrigger := startDiscoveryTimeoutReconciler(ctx, cfg.AdminURL, cfg.AgentName, appOpts.httpClient, reconcileMaxAttempts, reconcileRetryDelay)

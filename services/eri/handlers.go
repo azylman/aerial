@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
+	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -728,7 +729,7 @@ func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL, 
 	}
 	defer resp.Body.Close()
 
-	streamProxyResponse(w, resp)
+	githubproxy.StreamResponse(w, resp)
 }
 
 func handleTranscriptsSearch(indexerURL string, store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
@@ -1340,8 +1341,11 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	} else {
 		cfg = config.ActiveConfig()
 	}
-	mux.HandleFunc("/internal/github-api/", handleInternalGitHubAPIProxy(cfg))
-	mux.HandleFunc("/internal/github-git/", handleInternalGitHubGitProxy(cfg))
+	// eri-restate pods still reach this proxy cross-pod (AERIAL_INTERNAL_ERI_URL)
+	// until the cutover, so plain eri mounts the shared handlers without the
+	// loopback guard that githubproxy.Register applies inside eri-restate.
+	mux.HandleFunc(githubproxy.APIPrefix, githubproxy.APIHandler(cfg))
+	mux.HandleFunc(githubproxy.GitPrefix, githubproxy.GitHandler(cfg))
 
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
