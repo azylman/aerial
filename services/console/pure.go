@@ -812,3 +812,84 @@ func FilterActiveTasksByAgent(tasks []ActiveTaskStatus, filterAgent string) []Ac
 	}
 	return out
 }
+
+// AgentBrainTarget is one agent stack's eri base URL.
+type AgentBrainTarget struct {
+	Agent string
+	URL   string
+}
+
+// AgentBrainURL derives an agent's eri base URL from the configured default eri URL by
+// naming convention: the default agent uses the configured URL as-is; any other agent
+// replaces the host's first DNS label "eri" with "eri-<agent>", keeping scheme, port and
+// path. It returns "" when the URL cannot be derived (unparseable, or first label not "eri").
+func AgentBrainURL(defaultURL, defaultAgent, agent string) string {
+	base := strings.TrimSpace(defaultURL)
+	a := NormalizeAgent(agent)
+	if base == "" || a == "" {
+		return ""
+	}
+	if a == NormalizeAgent(defaultAgent) {
+		return base
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	label, rest, _ := strings.Cut(host, ".")
+	if !strings.EqualFold(label, "eri") {
+		return ""
+	}
+	newHost := "eri-" + a
+	if rest != "" {
+		newHost += "." + rest
+	}
+	if port := u.Port(); port != "" {
+		newHost += ":" + port
+	}
+	u.Host = newHost
+	return u.String()
+}
+
+// SiblingBrainTargets returns eri targets for every discovered agent other than the default,
+// deduplicated by normalized agent and skipping agents whose URL cannot be derived.
+func SiblingBrainTargets(defaultURL, defaultAgent string, agents []string) []AgentBrainTarget {
+	def := NormalizeAgent(defaultAgent)
+	seen := map[string]bool{}
+	out := []AgentBrainTarget{}
+	for _, raw := range agents {
+		a := NormalizeAgent(raw)
+		if a == "" || a == def || seen[a] {
+			continue
+		}
+		seen[a] = true
+		if u := AgentBrainURL(defaultURL, def, a); u != "" {
+			out = append(out, AgentBrainTarget{Agent: a, URL: u})
+		}
+	}
+	return out
+}
+
+// DefaultAgentFromTasks returns the agent the configured (default) eri reports in its task
+// rows, falling back to defaultAgentTenant when none of its rows carry an agent.
+func DefaultAgentFromTasks(tasks []ActiveTaskStatus) string {
+	for _, t := range tasks {
+		if a := NormalizeAgent(t.Agent); a != "" {
+			return a
+		}
+	}
+	return defaultAgentTenant
+}
+
+// StampTaskAgent sets Agent on rows that have none, returning a new slice.
+func StampTaskAgent(tasks []ActiveTaskStatus, agent string) []ActiveTaskStatus {
+	out := make([]ActiveTaskStatus, len(tasks))
+	for i, t := range tasks {
+		if strings.TrimSpace(t.Agent) == "" {
+			t.Agent = agent
+		}
+		out[i] = t
+	}
+	return out
+}

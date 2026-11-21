@@ -439,6 +439,62 @@ func discoverConfiguredAgents(ctx context.Context, allTasks []ActiveTaskStatus, 
 	return SortConfiguredAgents(discovered)
 }
 
+// fetchAllAgentsActiveTasks queries the configured (default) eri and discovers agents from
+// haro and vanadis concurrently, then fans out to every sibling stack's eri (derived by naming
+// convention) and merges the rows, each stamped with the agent that was queried. A failing eri
+// only drops that agent's rows.
+func fetchAllAgentsActiveTasks(ctx context.Context, brainURL, haroURL, vanadisURL string, now time.Time) ([]ActiveTaskStatus, []string) {
+	var defaultTasks []ActiveTaskStatus
+	var upstreamAgents []string
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		tasks, err := fetchActiveTasksFromBrain(ctx, brainURL)
+		if err != nil {
+			slog.WarnContext(ctx, "[Console] failed to fetch active tasks from brain", "brain_url", brainURL, "error", err)
+			tasks = nil
+		}
+		defaultTasks = tasks
+	})
+	wg.Go(func() {
+		upstreamAgents = discoverConfiguredAgents(ctx, nil, haroURL, vanadisURL, now)
+	})
+	wg.Wait()
+
+	defaultAgent := DefaultAgentFromTasks(defaultTasks)
+	allTasks := StampTaskAgent(defaultTasks, defaultAgent)
+	allTasks = append(allTasks, fetchActiveTasksFromAgents(ctx, SiblingBrainTargets(brainURL, defaultAgent, upstreamAgents))...)
+
+	discovered := append([]string{}, upstreamAgents...)
+	for _, t := range allTasks {
+		discovered = append(discovered, t.Agent)
+	}
+	return allTasks, SortConfiguredAgents(discovered)
+}
+
+// fetchActiveTasksFromAgents fetches /tasks from each target concurrently and merges the rows
+// in target order, stamping rows without an agent with the queried agent. Unreachable targets
+// are logged and skipped.
+func fetchActiveTasksFromAgents(ctx context.Context, targets []AgentBrainTarget) []ActiveTaskStatus {
+	results := make([][]ActiveTaskStatus, len(targets))
+	var wg sync.WaitGroup
+	for i, target := range targets {
+		wg.Go(func() {
+			tasks, err := fetchActiveTasksFromBrain(ctx, target.URL)
+			if err != nil {
+				slog.WarnContext(ctx, "[Console] failed to fetch active tasks from agent eri", "agent", target.Agent, "brain_url", target.URL, "error", err)
+				return
+			}
+			results[i] = StampTaskAgent(tasks, target.Agent)
+		})
+	}
+	wg.Wait()
+	out := []ActiveTaskStatus{}
+	for _, r := range results {
+		out = append(out, r...)
+	}
+	return out
+}
+
 func statusHandler(brainURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
 	kubeAPIServer := ""
 	if len(optionalAddrs) > 0 {
@@ -475,16 +531,7 @@ func statusHandler(brainURL, configPath, gitCommit string, optionalAddrs ...stri
 		}
 
 		agentParam := strings.TrimSpace(r.URL.Query().Get("agent"))
-		allTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
-		if taskErr != nil {
-			slog.WarnContext(ctx, "[Console] failed to fetch active tasks from brain", "brain_url", brainURL, "error", taskErr)
-			allTasks = []ActiveTaskStatus{}
-		}
-		if allTasks == nil {
-			allTasks = []ActiveTaskStatus{}
-		}
-
-		configuredAgents := discoverConfiguredAgents(ctx, allTasks, haroURL, vanadisURL, now)
+		allTasks, configuredAgents := fetchAllAgentsActiveTasks(ctx, brainURL, haroURL, vanadisURL, now)
 
 		activeTasks := allTasks
 		if agentParam != "" && !strings.EqualFold(agentParam, "all") {

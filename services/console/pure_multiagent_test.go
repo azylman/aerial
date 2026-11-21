@@ -471,3 +471,181 @@ func TestDiscoverConfiguredAgents_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentBrainURL_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		defaultURL   string
+		defaultAgent string
+		agent        string
+		want         string
+	}{
+		{name: "default agent keeps configured host", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "aerial", want: "http://eri.aerial"},
+		{name: "default agent match is normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: " Aerial ", want: "http://eri.aerial"},
+		{name: "sibling replaces first label", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "miorine", want: "http://eri-miorine.aerial"},
+		{name: "sibling agent normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  Suletta! ", want: "http://eri-suletta.aerial"},
+		{name: "port and scheme preserved", defaultURL: "https://eri.default.svc.cluster.local:8080", defaultAgent: "aerial", agent: "miorine", want: "https://eri-miorine.default.svc.cluster.local:8080"},
+		{name: "bare host with port", defaultURL: "http://eri:80", defaultAgent: "aerial", agent: "miorine", want: "http://eri-miorine:80"},
+		{name: "default stack not named aerial", defaultURL: "http://eri.aerial", defaultAgent: "miorine", agent: "aerial", want: "http://eri-aerial.aerial"},
+		{name: "first label not eri is underivable", defaultURL: "http://brain.aerial", defaultAgent: "aerial", agent: "miorine", want: ""},
+		{name: "eri only in later label is underivable", defaultURL: "http://x.eri.aerial", defaultAgent: "aerial", agent: "miorine", want: ""},
+		{name: "empty configured url", defaultURL: "", defaultAgent: "aerial", agent: "miorine", want: ""},
+		{name: "empty agent", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  ", want: ""},
+		{name: "unparseable url", defaultURL: "http://eri.aerial:bad port", defaultAgent: "aerial", agent: "miorine", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AgentBrainURL(tc.defaultURL, tc.defaultAgent, tc.agent); got != tc.want {
+				t.Errorf("AgentBrainURL(%q, %q, %q) = %q, want %q", tc.defaultURL, tc.defaultAgent, tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSiblingBrainTargets_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		defaultURL   string
+		defaultAgent string
+		agents       []string
+		want         []AgentBrainTarget
+	}{
+		{
+			name: "default excluded, duplicates collapsed", defaultURL: "http://eri.aerial", defaultAgent: "aerial",
+			agents: []string{"aerial", "miorine", "Miorine", "suletta", ""},
+			want:   []AgentBrainTarget{{Agent: "miorine", URL: "http://eri-miorine.aerial"}, {Agent: "suletta", URL: "http://eri-suletta.aerial"}},
+		},
+		{name: "underivable host yields none", defaultURL: "http://127.0.0.1:9999", defaultAgent: "aerial", agents: []string{"miorine"}, want: []AgentBrainTarget{}},
+		{name: "no agents", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agents: nil, want: []AgentBrainTarget{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SiblingBrainTargets(tc.defaultURL, tc.defaultAgent, tc.agents); !slices.Equal(got, tc.want) {
+				t.Errorf("SiblingBrainTargets() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultAgentFromTasks_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		tasks []ActiveTaskStatus
+		want  string
+	}{
+		{name: "no tasks falls back to default tenant", tasks: nil, want: "aerial"},
+		{name: "rows without agent fall back", tasks: []ActiveTaskStatus{{ID: "1"}}, want: "aerial"},
+		{name: "first reported agent wins", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: " Miorine "}}, want: "miorine"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := DefaultAgentFromTasks(tc.tasks); got != tc.want {
+				t.Errorf("DefaultAgentFromTasks() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func newEriTasksServer(t *testing.T, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tasks" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func downServerURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	u := srv.URL
+	srv.Close()
+	return u
+}
+
+func TestFetchActiveTasksFromAgents_TableDriven(t *testing.T) {
+	t.Parallel()
+	healthy := newEriTasksServer(t, `{"status":"ok","total":2,"tasks":[{"id":"m1","status":"PROCESSING"},{"id":"m2","status":"PENDING","agent":"miorine"}]}`)
+	other := newEriTasksServer(t, `{"status":"ok","total":1,"tasks":[{"id":"s1","status":"PROCESSING"}]}`)
+	down := downServerURL(t)
+	broken := newEriTasksServer(t, `not json`)
+
+	tests := []struct {
+		name      string
+		targets   []AgentBrainTarget
+		wantIDs   []string
+		wantAgent []string
+	}{
+		{
+			name:      "healthy rows stamped, down agent dropped",
+			targets:   []AgentBrainTarget{{Agent: "miorine", URL: healthy}, {Agent: "suletta", URL: down}},
+			wantIDs:   []string{"m1", "m2"},
+			wantAgent: []string{"miorine", "miorine"},
+		},
+		{
+			name:      "merge preserves target order",
+			targets:   []AgentBrainTarget{{Agent: "suletta", URL: other}, {Agent: "miorine", URL: healthy}},
+			wantIDs:   []string{"s1", "m1", "m2"},
+			wantAgent: []string{"suletta", "miorine", "miorine"},
+		},
+		{
+			name:      "undecodable body dropped",
+			targets:   []AgentBrainTarget{{Agent: "suletta", URL: broken}, {Agent: "miorine", URL: healthy}},
+			wantIDs:   []string{"m1", "m2"},
+			wantAgent: []string{"miorine", "miorine"},
+		},
+		{name: "all down yields empty list", targets: []AgentBrainTarget{{Agent: "suletta", URL: down}}, wantIDs: []string{}, wantAgent: []string{}},
+		{name: "no targets", targets: nil, wantIDs: []string{}, wantAgent: []string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := fetchActiveTasksFromAgents(context.Background(), tc.targets)
+			if got == nil {
+				t.Fatal("expected non-nil slice")
+			}
+			ids := make([]string, 0, len(got))
+			agents := make([]string, 0, len(got))
+			for _, task := range got {
+				ids = append(ids, task.ID)
+				agents = append(agents, task.Agent)
+			}
+			if !slices.Equal(ids, tc.wantIDs) || !slices.Equal(agents, tc.wantAgent) {
+				t.Errorf("got ids=%v agents=%v, want ids=%v agents=%v", ids, agents, tc.wantIDs, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestStampTaskAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		tasks []ActiveTaskStatus
+		agent string
+		want  []ActiveTaskStatus
+	}{
+		{name: "nil yields empty", tasks: nil, agent: "aerial", want: []ActiveTaskStatus{}},
+		{name: "fills empty, keeps reported", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: "miorine"}}, agent: "aerial", want: []ActiveTaskStatus{{ID: "1", Agent: "aerial"}, {ID: "2", Agent: "miorine"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := StampTaskAgent(tc.tasks, tc.agent)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Errorf("StampTaskAgent() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
