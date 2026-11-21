@@ -161,7 +161,75 @@ var (
 		},
 		[]string{"path"},
 	)
+	// GitHubRequestsBySource counts GitHub REST requests by the credential
+	// the githubauth transport attached ("app" or "pat").
+	GitHubRequestsBySource = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "github_requests_by_source_total",
+			Help: "GitHub REST requests sent, by credential source (app or pat).",
+		},
+		[]string{"source"},
+	)
+	// GitHubRateLimitRemaining is the last X-RateLimit-Remaining per source.
+	GitHubRateLimitRemaining = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "github_rate_limit_remaining",
+			Help: "Last X-RateLimit-Remaining GitHub returned, by credential source.",
+		},
+		[]string{"source"},
+	)
+	// GitHubTokenMints counts GitHub App installation token mints by result.
+	GitHubTokenMints = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "github_token_mint_total",
+			Help: "GitHub App installation token mints, by result.",
+		},
+		[]string{"result"},
+	)
+	// GitHubCredentialConfigured is 1 for the configured github_credential.
+	GitHubCredentialConfigured = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "github_credential_configured",
+			Help: "1 for the github_credential choice currently configured (app or pat), 0 otherwise.",
+		},
+		[]string{"credential"},
+	)
 )
+
+// GitHubAuthMetrics backs githubauth.Metrics with the synapse collectors.
+type GitHubAuthMetrics struct{}
+
+// IncRequest counts one GitHub request sent with source's credential.
+func (GitHubAuthMetrics) IncRequest(source string) {
+	GitHubRequestsBySource.WithLabelValues(source).Inc()
+}
+
+// SetRateLimitRemaining records the last rate-limit headroom for source.
+func (GitHubAuthMetrics) SetRateLimitRemaining(source string, remaining float64) {
+	GitHubRateLimitRemaining.WithLabelValues(source).Set(remaining)
+}
+
+// IncTokenMint counts one App token mint attempt by result.
+func (GitHubAuthMetrics) IncTokenMint(result string) {
+	GitHubTokenMints.WithLabelValues(result).Inc()
+}
+
+// SetGitHubCredentialConfigured exports 1 for the active credential and 0
+// for the other. Like githubauth.NewSelectingTokenSource, only "pat" selects
+// the PAT; anything else (including unset) is app.
+func SetGitHubCredentialConfigured(credential string) {
+	active := "app"
+	if strings.EqualFold(strings.TrimSpace(credential), "pat") {
+		active = "pat"
+	}
+	for _, c := range []string{"app", "pat"} {
+		v := 0.0
+		if c == active {
+			v = 1
+		}
+		GitHubCredentialConfigured.WithLabelValues(c).Set(v)
+	}
+}
 
 var (
 	knownQueues = []string{
@@ -187,6 +255,10 @@ func init() {
 	registerCollector(RegistryCallsTotal)
 	registerCollector(RestateLookupDivergenceTotal)
 	registerCollector(RestateMergeRecoveredTotal)
+	registerCollector(GitHubRequestsBySource)
+	registerCollector(GitHubRateLimitRemaining)
+	registerCollector(GitHubTokenMints)
+	registerCollector(GitHubCredentialConfigured)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
