@@ -83,7 +83,7 @@ Flat `package main` at `services/<name>/`:
 - One file per domain concern, named for the concern: `handlers.go`, `db.go`, `store.go`, `tools.go`, `metrics.go`, `pure.go`.
 - `pure.go` — pure, deterministic helpers with no I/O, extracted so they can be tested with fast table-driven unit tests. Follow the local convention: same name for the test file (`pure_test.go`).
 - Tests beside the code they cover: `<concern>_test.go` in the same package, plus `goleak_test.go` at the module root for goroutine-leak detection and `main_test.go` for wiring-level coverage.
-- `Dockerfile` — multi-stage build that copies `pkg/` and `services/<name>/`, then `go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/<name> .`
+- `Dockerfile` — multi-stage build that copies `pkg/` and `services/<name>/`, then `go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/<name> .` A service that links another module's packages adds `-coverpkg` for them (eri-restate instruments `services/eri/...` and `pkg/...`) so that code reports coverage under the host service.
 
 ### 4.3 File placement rules
 
@@ -101,7 +101,7 @@ Flat `package main` at `services/<name>/`:
 - `services/vanadis/` — `main.go`, `chunks.go`, `dag.go`, `mcp.go`, `metrics.go`, `restate_proxy.go`. Archetype A plus a Restate client proxy; it is not itself a Restate service.
 - `services/prospera/` — `main.go`, `config.go`, `server.go`, `store.go`, `tools.go`, `twilio.go`, `gemini_live.go`. Archetype A (voice/telephony webhooks).
 - `services/console/` — `main.go`, `config.go`, `handlers.go`, `deployments.go`, `github.go`, `k8s.go`, plus `ui/` (React) and `static/`. Archetype A with a frontend asset pipeline; the `ui/` build in `services/console/Dockerfile` is part of this archetype, not a separate service.
-- `services/coverage-ingest/` — `main.go`, `server.go`, `ingest.go`. Archetype A (coverage collector; deliberately not built with `-cover`).
+- `services/coverage-ingest/` — `main.go`, `server.go`, `ingest.go`. Archetype A (coverage collector; deliberately not built with `-cover`). Each loaded config prunes rows of services outside its `targets` and `push_services`; eri-restate rows are never pruned.
 
 ---
 

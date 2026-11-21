@@ -17,15 +17,20 @@ COPY pkg/ /src/pkg/
 COPY services/eri/ /src/services/eri/
 COPY services/eri-restate/ ./
 
-# Exclude CLI helpers (transcript-search, hook-guard) from -cover to avoid per-hook counter file floods.
+# Exclude CLI helpers (transcript-search, hook-guard) from -cover: every hook invocation is a
+# short-lived process that would write its own counter file (a flood of tiny files per turn).
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hook-guard /src/services/eri/cmd/hook-guard && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search /src/services/eri/cmd/transcript-search
 
+# -coverpkg instruments the eri and shared pkg packages linked into eri-restate too, so eri code
+# that only runs here reports prod coverage (service eri-restate) instead of looking dead.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/eri-restate ./cmd/eri-restate
+    CGO_ENABLED=0 go build -cover -covermode=atomic \
+    -coverpkg=github.com/azylman/aerial/services/eri-restate/...,github.com/azylman/aerial/services/eri/...,github.com/azylman/aerial/pkg/... \
+    -trimpath -ldflags="-s -w" -o /app/eri-restate ./cmd/eri-restate
 
 # --- Superpowers stage ---------------------------------------------------
 FROM alpine:3.24 AS superpowers

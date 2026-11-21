@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,15 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// run() opens a pool from the libpq PG* environment and the pull loop prunes through
+	// it, so point it at a socket directory that cannot exist: tests never reach a real
+	// database even when the shell exports one.
+	for _, k := range []string{"PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGPORT"} {
+		_ = os.Unsetenv(k)
+	}
+	_ = os.Setenv("PGHOST", "/nonexistent/coverage-ingest-test")
+	_ = os.Setenv("PGPASSFILE", "/nonexistent/coverage-ingest-test/pgpass")
+	_ = os.Setenv("PGCONNECT_TIMEOUT", "1")
 	goleak.VerifyTestMain(m)
 }
 
@@ -274,6 +284,12 @@ type fakeTx struct {
 
 	execErrs  map[string]error
 	commitErr error
+	// queryRows are the (service, count) rows Query returns; queryErr fails Query,
+	// scanErr fails every Scan and rowsErr is reported by Rows.Err.
+	queryRows []prunedRow
+	queryErr  error
+	scanErr   error
+	rowsErr   error
 
 	mu         sync.Mutex
 	execs      []recordedExec
@@ -300,6 +316,58 @@ func (f *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.Comman
 	f.execs = append(f.execs, recordedExec{kind: kind, args: args})
 	return pgconn.CommandTag{}, f.execErrs[kind]
 }
+
+// prunedRow is one (service, deleted count) row of the prune query.
+type prunedRow struct {
+	service string
+	count   int64
+}
+
+func (f *fakeTx) Query(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execs = append(f.execs, recordedExec{kind: "prune", args: args})
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+	return &fakeRows{rows: f.queryRows, scanErr: f.scanErr, err: f.rowsErr}, nil
+}
+
+// fakeRows iterates canned prune rows.
+type fakeRows struct {
+	pgx.Rows
+
+	rows    []prunedRow
+	next    int
+	scanErr error
+	err     error
+}
+
+func (r *fakeRows) Next() bool {
+	r.next++
+	return r.next <= len(r.rows)
+}
+
+func (r *fakeRows) Scan(dest ...any) error {
+	if r.scanErr != nil {
+		return r.scanErr
+	}
+	row := r.rows[r.next-1]
+	service, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("scan: service dest is not *string")
+	}
+	count, ok := dest[1].(*int64)
+	if !ok {
+		return errors.New("scan: count dest is not *int64")
+	}
+	*service, *count = row.service, row.count
+	return nil
+}
+
+func (*fakeRows) Close() {}
+
+func (r *fakeRows) Err() error { return r.err }
 
 func (f *fakeTx) Commit(context.Context) error {
 	f.mu.Lock()
@@ -379,6 +447,88 @@ func TestPostgresStoreUpsertService(t *testing.T) {
 	}
 }
 
+func TestPruneKeepSet(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		cfg     Config
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "targets and push services deduped with eri-restate",
+			cfg:  Config{Targets: []Target{{Service: "haro"}, {Service: "eri"}, {Service: "eri"}}, PushServices: []string{"photos-sync"}},
+			want: []string{"eri", "eri-restate", "haro", "photos-sync"},
+		},
+		{
+			name: "eri-restate target is not duplicated",
+			cfg:  Config{Targets: []Target{{Service: "eri-restate"}, {Service: "eri"}}},
+			want: []string{"eri", "eri-restate"},
+		},
+		{name: "push services only", cfg: Config{PushServices: []string{"photos-sync"}}, want: []string{"eri-restate", "photos-sync"}},
+		{name: "empty config refused", cfg: Config{}, wantErr: "keep set is empty"},
+		{name: "blank names refused", cfg: Config{Targets: []Target{{Service: " "}}, PushServices: []string{""}}, wantErr: "keep set is empty"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := PruneKeepSet(tc.cfg)
+			assertErrContains(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("PruneKeepSet = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPostgresStorePruneServices(t *testing.T) {
+	t.Parallel()
+	keep := []string{"eri", "eri-restate"}
+	pruneExec := []recordedExec{{kind: "prune", args: []any{keep}}}
+	twoServices := []prunedRow{{service: "dashboard", count: 12}, {service: "hangar", count: 3}}
+	tests := []struct {
+		name           string
+		keep           []string
+		beginErr       error
+		queryRows      []prunedRow
+		queryErr       error
+		scanErr        error
+		rowsErr        error
+		commitErr      error
+		want           map[string]int64
+		wantErr        string
+		wantExecs      []recordedExec
+		wantCommitted  bool
+		wantRolledBack bool
+	}{
+		{name: "prunes retired services", keep: keep, queryRows: twoServices, want: map[string]int64{"dashboard": 12, "hangar": 3}, wantExecs: pruneExec, wantCommitted: true},
+		{name: "nothing to prune", keep: keep, want: map[string]int64{}, wantExecs: pruneExec, wantCommitted: true},
+		{name: "empty keep set refused", keep: nil, wantErr: "refusing empty keep set"},
+		{name: "begin fails", keep: keep, beginErr: errors.New("conn refused"), wantErr: "begin prune: conn refused"},
+		{name: "query fails rolls back", keep: keep, queryErr: errors.New("boom"), wantErr: "prune: boom", wantExecs: pruneExec, wantRolledBack: true},
+		{name: "scan fails rolls back", keep: keep, queryRows: twoServices, scanErr: errors.New("bad type"), wantErr: "prune scan: bad type", wantExecs: pruneExec, wantRolledBack: true},
+		{name: "rows error rolls back", keep: keep, rowsErr: errors.New("conn reset"), wantErr: "prune rows: conn reset", wantExecs: pruneExec, wantRolledBack: true},
+		{name: "commit fails rolls back", keep: keep, queryRows: twoServices, commitErr: errors.New("serialization"), wantErr: "commit prune: serialization", wantExecs: pruneExec, wantRolledBack: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tx := &fakeTx{queryRows: tc.queryRows, queryErr: tc.queryErr, scanErr: tc.scanErr, rowsErr: tc.rowsErr, commitErr: tc.commitErr}
+			got, err := PostgresStore{DB: fakeBeginner{tx: tx, beginErr: tc.beginErr}}.PruneServices(context.Background(), tc.keep)
+			assertErrContains(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("pruned = %v, want %v", got, tc.want)
+			}
+			if !reflect.DeepEqual(tx.execs, tc.wantExecs) {
+				t.Fatalf("execs = %+v, want %+v", tx.execs, tc.wantExecs)
+			}
+			if tx.committed != tc.wantCommitted || tx.rolledBack != tc.wantRolledBack {
+				t.Fatalf("committed=%v rolledBack=%v, want %v/%v", tx.committed, tx.rolledBack, tc.wantCommitted, tc.wantRolledBack)
+			}
+		})
+	}
+}
+
 // fakeRunner returns out (or err) for every call and records the dir count per call.
 type fakeRunner struct {
 	out []byte
@@ -405,9 +555,11 @@ func (r *fakeRunner) Func(_ context.Context, dirs []string) ([]byte, error) {
 	return r.out, r.err
 }
 
-// fakeStore fails services listed in errs and records upserted rows per service.
+// fakeStore fails services listed in errs and holds upserted rows per service; a prune
+// drops services outside the keep set unless pruneErr is set.
 type fakeStore struct {
-	errs map[string]error
+	errs     map[string]error
+	pruneErr error
 
 	mu      sync.Mutex
 	upserts map[string][]CoverageRow
@@ -424,6 +576,29 @@ func (s *fakeStore) UpsertService(_ context.Context, service string, rows []Cove
 	}
 	s.upserts[service] = rows
 	return nil
+}
+
+func (s *fakeStore) PruneServices(_ context.Context, keep []string) (map[string]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pruneErr != nil {
+		return nil, s.pruneErr
+	}
+	pruned := map[string]int64{}
+	for service, rows := range s.upserts {
+		if !slices.Contains(keep, service) {
+			pruned[service] = int64(len(rows))
+			delete(s.upserts, service)
+		}
+	}
+	return pruned, nil
+}
+
+// services returns the sorted services that still hold rows.
+func (s *fakeStore) services() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Keys(s.upserts))
 }
 
 // flushResponse is a canned HTTP reply for one flush path on the shared test server.
