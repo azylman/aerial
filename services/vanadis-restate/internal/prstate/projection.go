@@ -90,7 +90,7 @@ type ProjectionSnapshot struct {
 
 // RegistryRow is one pr_registry row as stored: the shadow compare reads it
 // and PRObject.Hydrate takes it as input. Ownership comes from
-// metadata.agent and metadata.bot_id; the agent column is an owner source
+// metadata.agent, then metadata.bot_id; the agent column is an owner source
 // only when it holds a non-default value (see RowOwner).
 type RegistryRow struct {
 	Repo     string             `json:"repo"`
@@ -118,7 +118,11 @@ func OwnedMetadataKeys() []string {
 
 // BuildProjection maps committed PRState to a full registry row write. It
 // reads only the state it is given and never consults the projection, so
-// the projection can never feed back into a transition decision.
+// the projection can never feed back into a transition decision. It always
+// writes metadata.agent from the stored owner, including for legacy-era
+// rows whose owner Hydrate took from the agent column: that write fills the
+// same owner the column names (CompareProjection treats the two as equal)
+// and matches the typed owner column the registry moves to.
 func BuildProjection(s *PRState) ProjectionSnapshot {
 	snap := ProjectionSnapshot{Agent: s.OwnerAgent(), Status: s.RegistryStatus()}
 	if s == nil {
@@ -357,8 +361,17 @@ type ProjectionComparison struct {
 // PRObject derived for the same event. It compares only when the row's
 // head/merge SHA and status match the snapshot; otherwise the row is
 // superseded and nothing is compared. The agent column is never compared
-// (synapse leaves it at the schema default); ownership is compared through
-// metadata.agent and metadata.bot_id.
+// as a column (synapse leaves it at the schema default). Ownership is
+// compared semantically: metadata.agent diverges only when the row's
+// effective owner (RowOwner: metadata.agent, else metadata.bot_id, else a
+// non-default agent column, the same resolution Hydrate uses) differs from
+// the snapshot owner, with an unknown owner on either side meaning
+// DefaultAgent. A legacy-era row whose owner lives only in the agent column
+// therefore agrees with the PRObject Hydrate built from it, while a row
+// whose explicit metadata.agent names another owner still diverges.
+// metadata.bot_id and every other owned key compare raw. Under authority
+// Project still writes metadata.agent (fill-only, the same owner the agent
+// column already names), so effective ownership never changes.
 func CompareProjection(snap ProjectionSnapshot, row RegistryRow, found bool) ProjectionComparison {
 	if !found {
 		if !snap.Tracked() {
@@ -385,12 +398,27 @@ func CompareProjection(snap ProjectionSnapshot, row RegistryRow, found bool) Pro
 	got := metadataFields(row.Metadata)
 	want := metadataFields(snap.Metadata)
 	for _, key := range OwnedMetadataKeys() {
+		if key == "agent" {
+			continue
+		}
 		if string(got[key]) != string(want[key]) {
 			diverged = append(diverged, "metadata."+key)
 		}
 	}
+	if effectiveOwner(RowOwner(row)) != effectiveOwner(snap.Metadata.Agent) {
+		diverged = append(diverged, "metadata.agent")
+	}
 	sort.Strings(diverged)
 	return ProjectionComparison{Divergent: diverged}
+}
+
+// effectiveOwner normalizes an owner the way PRState.OwnerAgent resolves
+// it: blank means DefaultAgent.
+func effectiveOwner(owner string) string {
+	if owner = strings.TrimSpace(owner); owner != "" {
+		return owner
+	}
+	return DefaultAgent
 }
 
 // ShadowConfirm carries a first-pass divergence into the confirming

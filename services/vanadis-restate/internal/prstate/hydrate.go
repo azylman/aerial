@@ -8,8 +8,11 @@ package prstate
 // then to the agent column only when it holds a non-default value: the
 // retired per-stack synapses recorded the owning stack only in that column,
 // while today's single synapse never writes it, so its schema default
-// ('aerial') carries no information and is ignored. Hydrate is an authoritative owner source, so it replaces an
-// owner that only an event hint filled, but never an owner Register claimed.
+// ('aerial') carries no information and is ignored. Hydrate is an
+// authoritative owner source, so it replaces an owner that only an event
+// hint filled, but never an owner Register claimed. CompareProjection
+// resolves a row's owner through the same RowOwner, so a hydrated
+// legacy-era row never diverges on ownership against its own PRObject.
 
 import "strings"
 
@@ -28,6 +31,7 @@ type HydrateResponse struct {
 // RowOwner returns the owning agent a registry row records:
 // metadata.agent, else metadata.bot_id, else a non-default agent column,
 // else "" (an unknown owner resolves to DefaultAgent and stays hintable).
+// Both Hydrate and CompareProjection use it, so they always agree.
 func RowOwner(row RegistryRow) string {
 	if agent := strings.TrimSpace(row.Metadata.Agent); agent != "" {
 		return agent
