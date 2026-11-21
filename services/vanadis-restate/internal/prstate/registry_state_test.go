@@ -697,17 +697,27 @@ func TestPRState_ApplyDeployEvent(t *testing.T) {
 		nilState bool
 		terminal TerminalState
 		merge    string
+		prior    []string
 		ev       PREvent
 		want     EventDisposition
 	}{
 		{name: "nil state drops", nilState: true, ev: PREvent{HeadSHA: "h1"}, want: DispositionDropStale},
 		{name: "merged applies head sha deploy", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h1"}, want: DispositionApply},
 		{name: "merged applies merge sha deploy", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "m1", MergeSHA: "m1"}, want: DispositionApply},
+		{name: "merged applies merge commit as head without merge sha", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "m1"}, want: DispositionApply},
 		{name: "merged applies shaless status", terminal: TerminalMerged, merge: "m1", ev: PREvent{}, want: DispositionApply},
+		{name: "merged applies zero head without merge sha", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "0000000000000000000000000000000000000000"}, want: DispositionApply},
+		{name: "merged same merge sha with stale head applies", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, want: DispositionApply},
+		{name: "merged same merge sha with prior head applies", terminal: TerminalMerged, merge: "m1", prior: []string{"h0"}, ev: PREvent{HeadSHA: "h0", MergeSHA: "m1"}, want: DispositionApply},
+		{name: "merged different merge sha drops stale", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h1", MergeSHA: "m9"}, want: DispositionDropStale},
+		{name: "merged drops foreign merge sha alone", terminal: TerminalMerged, merge: "m1", ev: PREvent{MergeSHA: "m9"}, want: DispositionDropStale},
+		{name: "merged no merge sha prior head drops stale", terminal: TerminalMerged, merge: "m1", prior: []string{"h0"}, ev: PREvent{HeadSHA: "h0"}, want: DispositionDropStale},
+		{name: "merged no merge sha unknown head applies", terminal: TerminalMerged, merge: "m1", prior: []string{"h0"}, ev: PREvent{HeadSHA: "h2"}, want: DispositionApply},
 		{name: "merged without merge sha applies any sha", terminal: TerminalMerged, ev: PREvent{MergeSHA: "m9"}, want: DispositionApply},
-		{name: "merged drops foreign sha", terminal: TerminalMerged, merge: "m1", ev: PREvent{MergeSHA: "m9"}, want: DispositionDropStale},
+		{name: "merged without merge sha applies prior head", terminal: TerminalMerged, prior: []string{"h0"}, ev: PREvent{HeadSHA: "h0"}, want: DispositionApply},
 		{name: "closed absorbs", terminal: TerminalClosed, ev: PREvent{HeadSHA: "h1"}, want: DispositionAbsorbTerminal},
 		{name: "newer epoch falls through", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h2", ReopenEpoch: 1}, want: DispositionDropStale},
+		{name: "newer epoch applies current head", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h1", ReopenEpoch: 1}, want: DispositionApply},
 		{name: "open falls through to stale guard", ev: PREvent{HeadSHA: "h2"}, want: DispositionDropStale},
 	}
 	for _, tc := range tests {
@@ -716,9 +726,55 @@ func TestPRState_ApplyDeployEvent(t *testing.T) {
 			var s *PRState
 			if !tc.nilState {
 				s = rowState("h1", tc.merge, "")
-				s.Terminal = tc.terminal
+				s.Terminal, s.PriorHeads = tc.terminal, tc.prior
 			}
 			require.Equal(t, tc.want, s.ApplyDeployEvent(tc.ev))
+		})
+	}
+}
+
+func TestPRState_RecoverMergedHead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		nilState  bool
+		terminal  TerminalState
+		merge     string
+		prior     []string
+		ev        PREvent
+		wantPrev  string
+		wantOK    bool
+		wantHead  string
+		wantPrior []string
+	}{
+		{name: "nil state", nilState: true, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}},
+		{name: "same merge sha adopts real head", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, wantPrev: "h1", wantOK: true, wantHead: "h2", wantPrior: []string{"h1"}},
+		{name: "no merge sha adopts unknown head", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h2"}, wantPrev: "h1", wantOK: true, wantHead: "h2", wantPrior: []string{"h1"}},
+		{name: "merge-only ref never overwrites", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "m1", MergeSHA: "m1"}, wantHead: "h1"},
+		{name: "merge commit without merge sha never overwrites", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "m1"}, wantHead: "h1"},
+		{name: "other merge sha never overwrites", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h2", MergeSHA: "m9"}, wantHead: "h1"},
+		{name: "prior head never overwrites", terminal: TerminalMerged, merge: "m1", prior: []string{"h0"}, ev: PREvent{HeadSHA: "h0", MergeSHA: "m1"}, wantHead: "h1", wantPrior: []string{"h0"}},
+		{name: "same head is no change", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h1", MergeSHA: "m1"}, wantHead: "h1"},
+		{name: "empty head is no change", terminal: TerminalMerged, merge: "m1", ev: PREvent{MergeSHA: "m1"}, wantHead: "h1"},
+		{name: "unknown merge sha is no change", terminal: TerminalMerged, ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, wantHead: "h1"},
+		{name: "open pr is no change", merge: "m1", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1"}, wantHead: "h1"},
+		{name: "newer epoch is no change", terminal: TerminalMerged, merge: "m1", ev: PREvent{HeadSHA: "h2", MergeSHA: "m1", ReopenEpoch: 1}, wantHead: "h1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s *PRState
+			if !tc.nilState {
+				s = rowState("h1", tc.merge, "")
+				s.Terminal, s.PriorHeads = tc.terminal, tc.prior
+			}
+			prev, ok := s.RecoverMergedHead(tc.ev)
+			require.Equal(t, tc.wantPrev, prev)
+			require.Equal(t, tc.wantOK, ok)
+			if s != nil {
+				require.Equal(t, tc.wantHead, s.HeadSHA)
+				require.Equal(t, tc.wantPrior, s.PriorHeads)
+			}
 		})
 	}
 }
