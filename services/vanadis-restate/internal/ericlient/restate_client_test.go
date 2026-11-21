@@ -380,6 +380,8 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 		wantErr    bool
 		errContain string
 		errIs      error
+		attempt    string
+		wantKey    string
 	}{
 		{
 			name:       "restate success accepted with dispatch_id",
@@ -387,6 +389,35 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			status:     http.StatusOK,
 			body:       `{"status":"accepted","dispatch_id":"d1"}`,
 			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			wantKey:    "d1",
+		},
+		{
+			name:       "launch attempt scopes idempotency key",
+			restateSrv: true,
+			status:     http.StatusOK,
+			body:       `{"status":"accepted","dispatch_id":"d1"}`,
+			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			attempt:    "inv-7",
+			wantKey:    "d1:inv-7",
+		},
+		{
+			name:       "blank launch attempt keeps dispatch key",
+			restateSrv: true,
+			status:     http.StatusOK,
+			body:       `{"status":"accepted","dispatch_id":"d1"}`,
+			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			attempt:    "  ",
+			wantKey:    "d1",
+		},
+		{
+			name:       "launch attempt without dispatch id sends no key",
+			restateSrv: true,
+			status:     http.StatusOK,
+			body:       `{"status":"accepted"}`,
+			req:        BrainDispatchRequest{Source: "test"},
+			attempt:    "inv-7",
+			wantErr:    true,
+			errContain: "restate did not accept dispatch",
 		},
 		{
 			name:       "restate success already_exists with message_id",
@@ -394,6 +425,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			status:     http.StatusOK,
 			body:       `{"status":"already_exists","message_id":"d1"}`,
 			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			wantKey:    "d1",
 		},
 		{
 			name:       "restate skipped_active maps to ErrDispatchActive",
@@ -403,6 +435,18 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errIs:      ErrDispatchActive,
+			wantKey:    "d1",
+		},
+		{
+			name:       "skipped_active re-send under new attempt uses fresh key",
+			restateSrv: true,
+			status:     http.StatusOK,
+			body:       `{"status":"skipped_active"}`,
+			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			attempt:    "inv-8",
+			wantErr:    true,
+			errIs:      ErrDispatchActive,
+			wantKey:    "d1:inv-8",
 		},
 		{
 			name:       "restate mismatched identity",
@@ -412,6 +456,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errContain: "restate did not accept dispatch",
+			wantKey:    "d1",
 		},
 		{
 			name:     "fallback to http eri",
@@ -426,8 +471,10 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var restateURL, eriURL string
+			gotKey := make(chan string, 1)
 			if tc.restateSrv {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					gotKey <- r.Header.Get("Idempotency-Key")
 					w.WriteHeader(tc.status)
 					_, _ = w.Write([]byte(tc.body))
 				}))
@@ -444,23 +491,34 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			}
 
 			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil)
-			err := client.DispatchAccepted(context.Background(), tc.req)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
+			err := client.DispatchAccepted(WithDispatchAttempt(context.Background(), tc.attempt), tc.req)
+			if tc.restateSrv {
+				if key := <-gotKey; key != tc.wantKey {
+					t.Fatalf("Idempotency-Key = %q, want %q", key, tc.wantKey)
 				}
-				if tc.errIs != nil && !errors.Is(err, tc.errIs) {
-					t.Fatalf("error %v is not %v", err, tc.errIs)
-				}
-				if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-				}
-				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			checkDispatchErr(t, err, tc.wantErr, tc.errIs, tc.errContain)
 		})
+	}
+}
+
+// checkDispatchErr asserts a dispatch outcome against its expected error.
+func checkDispatchErr(t *testing.T, err error, wantErr bool, errIs error, errContain string) {
+	t.Helper()
+	if !wantErr {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if errIs != nil && !errors.Is(err, errIs) {
+		t.Fatalf("error %v is not %v", err, errIs)
+	}
+	if errContain != "" && !strings.Contains(err.Error(), errContain) {
+		t.Fatalf("error %q does not contain %q", err.Error(), errContain)
 	}
 }
 
