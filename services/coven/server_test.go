@@ -489,19 +489,20 @@ ollama:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DATABASE_URL", "postgres://localhost/test")
-			t.Setenv("ERI_URL", "")
-			t.Setenv("ERI_LLM_URL", "")
-			t.Setenv("PR_REGISTER_URL", "")
-			t.Setenv("SYNAPSE_PR_REGISTER_URL", "")
-			t.Setenv("CUSTOM_SKILLS_DIR", tc.envSkillsDir)
-			t.Setenv("GITHUB_PAT", tc.envPAT)
-			t.Setenv("CONFIG_REPO_OWNER", tc.envOwner)
-			t.Setenv("CONFIG_REPO_NAME", tc.envRepo)
-			t.Setenv("BRAIN_PR_REGISTER_URL", tc.envBrainReg)
-			t.Setenv("SYSTEM_CHANNEL_ID", tc.envChannelID)
+			env := map[string]string{}
+			env["DATABASE_URL"] = "postgres://localhost/test"
+			env["ERI_URL"] = ""
+			env["ERI_LLM_URL"] = ""
+			env["PR_REGISTER_URL"] = ""
+			env["SYNAPSE_PR_REGISTER_URL"] = ""
+			env["CUSTOM_SKILLS_DIR"] = tc.envSkillsDir
+			env["GITHUB_PAT"] = tc.envPAT
+			env["CONFIG_REPO_OWNER"] = tc.envOwner
+			env["CONFIG_REPO_NAME"] = tc.envRepo
+			env["BRAIN_PR_REGISTER_URL"] = tc.envBrainReg
+			env["SYSTEM_CHANNEL_ID"] = tc.envChannelID
 
-			cfg, err := LoadConfigFile(tc.path, "")
+			cfg, err := LoadConfigFile(tc.path, "", mapEnv(env))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -590,10 +591,11 @@ ollama:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ERI_URL", "")
-			t.Setenv("ERI_LLM_URL", "")
-			t.Setenv("PR_REGISTER_URL", "")
-			cfg, err := LoadConfigFile(tc.path, "")
+			env := map[string]string{}
+			env["ERI_URL"] = ""
+			env["ERI_LLM_URL"] = ""
+			env["PR_REGISTER_URL"] = ""
+			cfg, err := LoadConfigFile(tc.path, "", mapEnv(env))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -731,14 +733,15 @@ ollama:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DATABASE_URL", tc.envDB)
-			t.Setenv("POSTGRES_URL", "")
-			t.Setenv("POSTGRES_HOST", "")
-			t.Setenv("POSTGRES_PORT", "")
-			t.Setenv("POSTGRES_USER", "")
-			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
-			t.Setenv("POSTGRES_DB", "")
-			cfg, err := LoadConfig(tc.path)
+			env := map[string]string{}
+			env["DATABASE_URL"] = tc.envDB
+			env["POSTGRES_URL"] = ""
+			env["POSTGRES_HOST"] = ""
+			env["POSTGRES_PORT"] = ""
+			env["POSTGRES_USER"] = ""
+			env["POSTGRES_PASSWORD"] = tc.envPassword
+			env["POSTGRES_DB"] = ""
+			cfg, err := LoadConfig(tc.path, mapEnv(env))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}

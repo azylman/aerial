@@ -328,7 +328,7 @@ func main() {
 	}))))
 
 	resolvedPath := ResolveConfigPath(configPath)
-	cfg, err := LoadConfig(resolvedPath)
+	cfg, err := LoadConfig(resolvedPath, os.Getenv)
 	if err != nil {
 		exitFn("Fatal configuration error: %v", err)
 		return
