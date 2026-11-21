@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
@@ -261,8 +262,8 @@ func (m *stubScenarioDispatcher) DispatchPrompt(_ context.Context, req dispatch.
 	return m.response, m.err
 }
 
-func (*stubScenarioDispatcher) Dispatch(_ context.Context, _ dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
-	return dispatch.DispatchResponse{}, nil
+func (*stubScenarioDispatcher) Dispatch(_ context.Context, _ eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
+	return eriwire.DispatchEnqueueResponse{}, nil
 }
 
 func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {

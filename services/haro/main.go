@@ -17,11 +17,11 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
-	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/server"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/ticker"
@@ -30,7 +30,7 @@ import (
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
 var (
-	openDBFn = store.NewDB
+	openDBFn = store.OpenDB
 	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 		return pubsub.NewJetStreamBus(ctx, url)
 	}
@@ -146,7 +146,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, model.RedactDSN(cfg.DatabaseURL))
+		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, pgutil.RedactDSN(cfg.DatabaseURL))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
