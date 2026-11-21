@@ -9,6 +9,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -90,6 +91,27 @@ func (b *BuildObject) checkRunner(handlerLabel, buildID string, res runnerGuardR
 	err := fmt.Errorf("%w: build %s runs on %s, not %s", ErrForeignRunner, buildID, model.BuildServiceName(res.RunnerAgent), b.ServiceName())
 	RecordReconcileError(handlerLabel, err)
 	return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusConflict))
+}
+
+// checkCreateOwner refuses, with a terminal 400, to create a build whose
+// owner agent belongs to a different Build service. An empty owner counts as
+// the default agent, so a sibling runner never accepts an unowned build.
+func (b *BuildObject) checkCreateOwner(agent string) error {
+	if RunsBuild(b.runnerAgent(), agent) {
+		return nil
+	}
+	err := fmt.Errorf("%w: build owned by %q belongs on %s, not %s", store.ErrInvalidBuildInput, strings.TrimSpace(agent), model.BuildServiceName(store.NormalizeRunnerAgent(agent)), b.ServiceName())
+	RecordReconcileError(labelCreate, err)
+	return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
+}
+
+// withBuildOwner scopes ctx to the build owner's agent so eri calls for the
+// build reach the owner's sessions rather than this runner's AGENT_NAME.
+func withBuildOwner(ctx context.Context, bld *model.VanadisBuild) context.Context {
+	if bld == nil || strings.TrimSpace(bld.Agent) == "" {
+		return ctx
+	}
+	return ericlient.WithAgent(ctx, bld.Agent)
 }
 
 // crossBuildReconcileKey carries the collector for builds other than the

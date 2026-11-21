@@ -453,6 +453,9 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		RecordReconcileError(labelCreate, err)
 		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
+	if err := b.checkCreateOwner(req.Agent); err != nil {
+		return model.VanadisBuild{}, err
+	}
 
 	now, err := RunJournaled(ctx, labelCreate, "create-build-clock", func(rc restate.RunContext) (time.Time, error) {
 		return time.Now().UTC(), nil
@@ -688,7 +691,11 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 			return false, rErr
 		}
 		if b.executor != nil && removedChunk != nil {
-			if cErr := b.executor.CancelChunkDispatch(rc, removedChunk.ID); cErr != nil {
+			var owner *model.VanadisBuild
+			if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil {
+				owner = bld
+			}
+			if cErr := b.executor.CancelChunkDispatch(withBuildOwner(rc, owner), removedChunk.ID); cErr != nil {
 				slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", removedChunk.ID, "error", cErr)
 			}
 		}

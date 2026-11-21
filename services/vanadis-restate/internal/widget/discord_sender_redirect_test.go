@@ -109,7 +109,7 @@ channels:
 			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-123"}}
 			d, err := NewDiscordWidgetDeliverer("", "", tc.cfgPath)
 			require.NoError(t, err)
-			d.sender = mockSender
+			d.SetAgentSender("aerial", mockSender)
 			if tc.resolverSysID != "" || tc.resolverErr != nil {
 				d.channelResolver = func(_ string) (string, error) {
 					return tc.resolverSysID, tc.resolverErr
@@ -161,7 +161,7 @@ func TestDelivererChannelRedirectionCustomPolicy(t *testing.T) {
 			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-1"}}
 			d, err := NewDiscordWidgetDeliverer("", "")
 			require.NoError(t, err)
-			d.sender = mockSender
+			d.SetAgentSender("aerial", mockSender)
 			d.channelPolicyResolver = func(_ string) (bool, string) {
 				return tc.noBuild, tc.sysChan
 			}
@@ -254,8 +254,8 @@ func TestSessionStateChannelResolution(t *testing.T) {
 
 	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-res"}}
 	d := &DiscordWidgetDeliverer{
-		session: sess,
-		sender:  mockSender,
+		session:      sess,
+		agentSenders: map[string]DiscordWidgetSender{"aerial": mockSender},
 	}
 
 	tests := []struct {
