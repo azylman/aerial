@@ -8,12 +8,11 @@ import (
 )
 
 func init() {
-	if os.Getenv("AERIAL_SA_TOKEN_PATH") == "" {
-		if f, err := os.CreateTemp("", "eri-interactions-test-sa-token-*"); err == nil {
-			_, _ = f.WriteString("test-sa-token")
-			_ = f.Close()
-			_ = os.Setenv("AERIAL_SA_TOKEN_PATH", f.Name())
-		}
+	// Always use a temp token so a pod-provided AERIAL_SA_TOKEN_PATH is never read.
+	if f, err := os.CreateTemp("", "eri-interactions-test-sa-token-*"); err == nil {
+		_, _ = f.WriteString("test-sa-token")
+		_ = f.Close()
+		_ = os.Setenv("AERIAL_SA_TOKEN_PATH", f.Name())
 	}
 }
 

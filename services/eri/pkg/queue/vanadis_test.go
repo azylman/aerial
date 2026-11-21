@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
@@ -393,6 +396,7 @@ type flushActiveStepTestCase struct {
 	serverBody      string
 	restateURL      string
 	vanadisURL      string
+	appVanadisURL   string
 	expectErr       bool
 	expectErrSubstr string
 	wantURI         string
@@ -428,12 +432,16 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 	restateIngress := tc.restateURL
 	vanadisIngress := tc.vanadisURL
 	switch {
-	case !tc.skipServer && restateIngress == "" && vanadisIngress == "":
+	case !tc.skipServer && restateIngress == "" && vanadisIngress == "" && tc.appVanadisURL == "":
 		restateIngress = serverURL
 	case restateIngress == "USE_SERVER":
 		restateIngress = serverURL
 	case vanadisIngress == "USE_SERVER":
 		vanadisIngress = serverURL
+	}
+	appVanadis := tc.appVanadisURL
+	if appVanadis == "USE_SERVER" {
+		appVanadis = serverURL + "/"
 	}
 
 	pool := &WorkerPool{
@@ -443,6 +451,9 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 			VanadisURL:        vanadisIngress,
 			VanadisHTTPClient: vanClient,
 		},
+	}
+	if appVanadis != "" {
+		pool.appCfg = config.NewFromData(&config.ConfigData{VanadisURL: appVanadis})
 	}
 
 	err := pool.FlushChunkActiveStepToRestate(context.Background(), tc.buildID, tc.chunkID, tc.step)
@@ -599,6 +610,25 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		wantActiveStep: "Running custom chunk...",
 	},
 	{
+		name:           "app config vanadis_url routes to vanadis API",
+		appVanadisURL:  "USE_SERVER",
+		buildID:        "build-appcfg-1",
+		chunkID:        "chunk-appcfg-1",
+		step:           "Reading app config...",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/builds/build-appcfg-1/active-step",
+		wantChunkID:    "chunk-appcfg-1",
+		wantActiveStep: "Reading app config...",
+	},
+	{
+		name:       "unconfigured vanadis URL skips flush without dialing a default",
+		buildID:    "build-unconfigured",
+		chunkID:    "chunk-unconfigured",
+		step:       "anything",
+		skipServer: true,
+	},
+	{
 		name:            "missing buildID with non-empty chunkID fails loud on direct restate fallback",
 		restateURL:      "http://restate.test:8080",
 		buildID:         "",
@@ -645,6 +675,74 @@ func TestWorkerPool_FlushChunkActiveStepToRestate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runFlushActiveStepCase(t, tc)
+		})
+	}
+}
+
+type vanadisHTTPClientCase struct {
+	name       string
+	injected   bool
+	token      string
+	wantAuth   string
+	wantErrSub string
+}
+
+func runVanadisHTTPClientCase(t *testing.T, tc vanadisHTTPClientCase) {
+	t.Helper()
+	var gotAuth string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if tc.token != "" {
+		if err := os.WriteFile(tokenPath, []byte(tc.token), 0o600); err != nil {
+			t.Fatalf("write token: %v", err)
+		}
+	}
+	pool := &WorkerPool{cfg: WorkerPoolConfig{SATokenPath: tokenPath}}
+	if tc.injected {
+		pool.cfg.VanadisHTTPClient = srv.Client()
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := pool.vanadisHTTPClient().Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	gotErr := ""
+	if err != nil {
+		gotErr = err.Error()
+	}
+	if (tc.wantErrSub == "") != (err == nil) || !strings.Contains(gotErr, tc.wantErrSub) {
+		t.Fatalf("error = %v, want substring %q", err, tc.wantErrSub)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAuth != tc.wantAuth {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, tc.wantAuth)
+	}
+}
+
+func TestWorkerPool_VanadisHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []vanadisHTTPClientCase{
+		{name: "injected client is used as-is", injected: true, wantAuth: ""},
+		{name: "configured token path sends bearer token", token: "pool-test-token", wantAuth: "Bearer pool-test-token"},
+		{name: "missing token file fails before dialing", wantErrSub: "obtain serviceaccount token"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runVanadisHTTPClientCase(t, tc)
 		})
 	}
 }
