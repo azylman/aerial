@@ -44,7 +44,7 @@ metadata:
 spec:
   telemetry:
     exporter:
-      endpoint: victoriatraces.default.svc.cluster.local:4317
+      endpoint: otel-collector.default.svc.cluster.local:4317
 ---
 apiVersion: gateway.nginx.org/v1alpha2
 kind: NginxProxy
@@ -57,7 +57,7 @@ spec:
       type: ClusterIP
   telemetry:
     exporter:
-      endpoint: victoriatraces.default.svc.cluster.local:4317
+      endpoint: otel-collector.default.svc.cluster.local:4317
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -361,7 +361,7 @@ spec:
       to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: victoriatraces
+              app.kubernetes.io/name: otel-collector
     - ports:
         - port: 443
           protocol: TCP

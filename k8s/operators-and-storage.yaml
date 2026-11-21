@@ -617,7 +617,7 @@ spec:
       - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
         value: 256 MiB
       - name: RESTATE_TRACING_ENDPOINT
-        value: http://victoriatraces.default.svc.cluster.local:4317
+        value: http://otel-collector.default.svc.cluster.local:4317
     image: docker.io/restatedev/restate:1.8.1-hotfix.2@sha256:e3a11e7c694cfe0c134eca1652992c068bef0bcba3caeec9d2a3b3bc50daa62e
     nodeSelector:
       storage-tier: nvme
