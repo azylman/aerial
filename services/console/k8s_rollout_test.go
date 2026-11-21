@@ -115,10 +115,10 @@ func mergeClusterBatch5Cases() []mergeClusterTestCase {
 
 	return []mergeClusterTestCase{
 		// 67. Synapse-only build fully rolled to both stacks long ago is live
-		{name: "K8sRollout_SynapseBothStacksOnSHA_Live", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "healthy", 900), mkK8sCont("synapse-miorine", synNew, "healthy", 900), console, grafana}, currentCommit: "0000000", wantList: []wantDep{{Commit: "de22ef4", Stage: "live", Progress: 100, StepStatuses: liveSteps}}},
+		{name: "K8sRollout_SynapseBothStacksOnSHA_Live", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "healthy", 900), mkK8sCont("synapse-agent-alpha", synNew, "healthy", 900), console, grafana}, currentCommit: "0000000", wantList: []wantDep{{Commit: "de22ef4", Stage: "live", Progress: 100, StepStatuses: liveSteps}}},
 
 		// 68. Sibling stack still on the old SHA keeps the card swapping
-		{name: "K8sRollout_SiblingOnOldSHA_Swapping", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "healthy", 900), mkK8sCont("synapse-miorine", synOld, "healthy", 7200), console}, currentCommit: "0000000", wantList: []wantDep{{Stage: "swapping", Progress: 72, StepStatuses: []string{"completed", "completed", "completed", "active", "active"}, HasContainerChip: true}}},
+		{name: "K8sRollout_SiblingOnOldSHA_Swapping", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "healthy", 900), mkK8sCont("synapse-agent-alpha", synOld, "healthy", 7200), console}, currentCommit: "0000000", wantList: []wantDep{{Stage: "swapping", Progress: 72, StepStatuses: []string{"completed", "completed", "completed", "active", "active"}, HasContainerChip: true}}},
 
 		// 69. eri and synapse built, only synapse rolled: not live
 		{name: "K8sRollout_PartialServiceRollout_Swapping", runs: mkRuns(run), jobs: eriSynJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "healthy", 900), mkK8sCont("eri", eriOld, "healthy", 7200)}, currentCommit: "0000000", wantList: []wantDep{{Stage: "swapping"}}},
@@ -142,7 +142,7 @@ func mergeClusterBatch5Cases() []mergeClusterTestCase {
 		{name: "K8sRollout_StartingOnSHA_Swapping", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "starting", 20)}, currentCommit: "0000000", wantList: []wantDep{{Stage: "swapping", Progress: 60}}},
 
 		// 76. Unhealthy Deployment running a built image degrades the card
-		{name: "K8sRollout_UnhealthyOnSHA_Degraded", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "unhealthy", 300), mkK8sCont("synapse-miorine", synNew, "healthy", 300)}, currentCommit: "0000000", wantList: []wantDep{{Stage: "degraded", Progress: 85, StepStatusMap: map[int]string{3: "completed", 4: "failed"}}}},
+		{name: "K8sRollout_UnhealthyOnSHA_Degraded", runs: mkRuns(run), jobs: synJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNew, "unhealthy", 300), mkK8sCont("synapse-agent-alpha", synNew, "healthy", 300)}, currentCommit: "0000000", wantList: []wantDep{{Stage: "degraded", Progress: 85, StepStatusMap: map[int]string{3: "completed", 4: "failed"}}}},
 
 		// 77. Containers already on a newer main run's SHA count as rolled for the older card
 		{name: "K8sRollout_NewerRunSHACountsAsRolled_BothLive", runs: mkRuns(run, nextRun), jobs: bothJobs, containers: []DockerContainerJSON{mkK8sCont("synapse", synNext, "healthy", 60)}, currentCommit: "0000000", wantList: []wantDep{{Commit: "abcdef0", Stage: "live"}, {Commit: "de22ef4", Stage: "live"}}},
@@ -163,7 +163,7 @@ func TestSynthesizeContainersFromServices(t *testing.T) {
 		wantCreated int64
 		wantLabels  map[string]string
 	}{
-		{name: "k8s service with sha image stamps commit and image", svc: ServiceStatus{Name: "synapse-miorine", Status: "healthy", UptimeSeconds: 900, Commit: sha, Image: "ghcr.io/azylman/aerial-synapse:" + sha}, wantState: "running", wantCreated: now.Unix() - 900, wantLabels: map[string]string{"aerial.service": "synapse-miorine", "aerial.commit_sha": sha, "aerial.image": "aerial-synapse"}},
+		{name: "k8s service with sha image stamps commit and image", svc: ServiceStatus{Name: "synapse-agent-alpha", Status: "healthy", UptimeSeconds: 900, Commit: sha, Image: "ghcr.io/azylman/aerial-synapse:" + sha}, wantState: "running", wantCreated: now.Unix() - 900, wantLabels: map[string]string{"aerial.service": "synapse-agent-alpha", "aerial.commit_sha": sha, "aerial.image": "aerial-synapse"}},
 		{name: "non-sha image stamps image only", svc: ServiceStatus{Name: "grafana", Status: "starting", UptimeSeconds: 5, Image: "grafana/grafana:11.3.0"}, wantState: "running", wantCreated: now.Unix() - 5, wantLabels: map[string]string{"aerial.service": "grafana", "aerial.image": "grafana"}},
 		{name: "unhealthy service without image is exited and unstamped", svc: ServiceStatus{Name: "eri", Status: "unhealthy"}, wantState: "exited", wantCreated: now.Unix(), wantLabels: map[string]string{"aerial.service": "eri"}},
 	}

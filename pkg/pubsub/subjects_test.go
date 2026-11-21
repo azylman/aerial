@@ -12,8 +12,8 @@ func TestEffectiveAgent(t *testing.T) {
 		ev   TranscriptsIndexedEvent
 		want string
 	}{
-		{name: "agent set", ev: TranscriptsIndexedEvent{Agent: "suletta", Stack: "aerial"}, want: "suletta"},
-		{name: "stack fallback", ev: TranscriptsIndexedEvent{Stack: "miorine"}, want: "miorine"},
+		{name: "agent set", ev: TranscriptsIndexedEvent{Agent: "agent-beta", Stack: "aerial"}, want: "agent-beta"},
+		{name: "stack fallback", ev: TranscriptsIndexedEvent{Stack: "agent-alpha"}, want: "agent-alpha"},
 		{name: "both empty", ev: TranscriptsIndexedEvent{}, want: "aerial"},
 	}
 
@@ -31,8 +31,8 @@ func TestEffectiveAgent(t *testing.T) {
 		args CovenExtractJobArgs
 		want string
 	}{
-		{name: "agent set", args: CovenExtractJobArgs{Agent: "suletta", Stack: "aerial"}, want: "suletta"},
-		{name: "stack fallback", args: CovenExtractJobArgs{Stack: "miorine"}, want: "miorine"},
+		{name: "agent set", args: CovenExtractJobArgs{Agent: "agent-beta", Stack: "aerial"}, want: "agent-beta"},
+		{name: "stack fallback", args: CovenExtractJobArgs{Stack: "agent-alpha"}, want: "agent-alpha"},
 		{name: "both empty", args: CovenExtractJobArgs{}, want: "aerial"},
 	}
 
@@ -55,8 +55,8 @@ func TestSubjectHelpers(t *testing.T) {
 		{"coven extract normal", SubjectCovenExtractCoalesced("thread-123"), "aerial.coalesced.coven_extract.thread-123"},
 		{"coven extract empty", SubjectCovenExtractCoalesced("   "), "aerial.coalesced.coven_extract.unknown"},
 		{"coven extract sanitize wildcards", SubjectCovenExtractCoalesced("thread*>1"), "aerial.coalesced.coven_extract.thread-1"},
-		{"coven extract for agent normal", SubjectCovenExtractCoalescedForAgent("miorine", "thread-123"), "aerial.coalesced.coven_extract.miorine.thread-123"},
-		{"coven extract for agent wildcard", SubjectCovenExtractCoalescedForAgent("miorine", ">"), "aerial.coalesced.coven_extract.miorine.>"},
+		{"coven extract for agent normal", SubjectCovenExtractCoalescedForAgent("agent-alpha", "thread-123"), "aerial.coalesced.coven_extract.agent-alpha.thread-123"},
+		{"coven extract for agent wildcard", SubjectCovenExtractCoalescedForAgent("agent-alpha", ">"), "aerial.coalesced.coven_extract.agent-alpha.>"},
 		{"coven extract for agent empty agent", SubjectCovenExtractCoalescedForAgent("", "thread-123"), "aerial.coalesced.coven_extract.aerial.thread-123"},
 		{"build widget sync normal", SubjectBuildWidgetSyncCoalesced("build-123"), "aerial.coalesced.widget_sync.build.build-123"},
 		{"build widget sync empty", SubjectBuildWidgetSyncCoalesced(""), "aerial.coalesced.widget_sync.build.unknown"},

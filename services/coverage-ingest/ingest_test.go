@@ -38,10 +38,10 @@ func TestParseConfig(t *testing.T) {
 	}{
 		{
 			name: "explicit timeout and shared service",
-			yaml: "targets:\n  - service: eri\n    url: http://eri.aerial/debug/coverage/flush\n  - service: eri\n    url: http://eri-miorine.aerial/debug/coverage/flush\nflush_timeout: 90s\n",
+			yaml: "targets:\n  - service: eri\n    url: http://eri.aerial/debug/coverage/flush\n  - service: eri\n    url: http://eri-agent-alpha.aerial/debug/coverage/flush\nflush_timeout: 90s\n",
 			want: Config{Targets: []Target{
 				{Service: "eri", URL: "http://eri.aerial/debug/coverage/flush"},
-				{Service: "eri", URL: "http://eri-miorine.aerial/debug/coverage/flush"},
+				{Service: "eri", URL: "http://eri-agent-alpha.aerial/debug/coverage/flush"},
 			}, FlushTimeout: 90 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
 		},
 		{
@@ -470,8 +470,8 @@ func TestIngest(t *testing.T) {
 	}{
 		{
 			name:          "multi-source service merges every stack",
-			paths:         []Target{{Service: "eri", URL: "/eri"}, {Service: "eri", URL: "/eri-miorine"}, {Service: "haro", URL: "/haro"}},
-			responses:     map[string]flushResponse{"/eri": good("e1"), "/eri-miorine": good("e2"), "/haro": good("h1")},
+			paths:         []Target{{Service: "eri", URL: "/eri"}, {Service: "eri", URL: "/eri-agent-alpha"}, {Service: "haro", URL: "/haro"}},
+			responses:     map[string]flushResponse{"/eri": good("e1"), "/eri-agent-alpha": good("e2"), "/haro": good("h1")},
 			runnerOut:     sampleReport,
 			wantDirCounts: []int{2, 1},
 			wantFileSets: [][]string{
@@ -482,10 +482,10 @@ func TestIngest(t *testing.T) {
 		},
 		{
 			name:          "failing targets are skipped and named",
-			paths:         []Target{{Service: "eri", URL: "/eri"}, {Service: "eri", URL: "/eri-suletta"}, {Service: "coven", URL: "/coven"}, {Service: "vanadis", URL: "/vanadis"}},
-			responses:     map[string]flushResponse{"/eri": good("e1"), "/eri-suletta": {status: http.StatusInternalServerError, body: []byte("no meta")}, "/vanadis": {status: http.StatusOK, body: buildTar(t, reg("covmeta.v", "m"))}},
+			paths:         []Target{{Service: "eri", URL: "/eri"}, {Service: "eri", URL: "/eri-agent-beta"}, {Service: "coven", URL: "/coven"}, {Service: "vanadis", URL: "/vanadis"}},
+			responses:     map[string]flushResponse{"/eri": good("e1"), "/eri-agent-beta": {status: http.StatusInternalServerError, body: []byte("no meta")}, "/vanadis": {status: http.StatusOK, body: buildTar(t, reg("covmeta.v", "m"))}},
 			runnerOut:     sampleReport,
-			wantErrs:      []string{"target eri (", "/eri-suletta): flush: HTTP 500: no meta", "target coven (", "HTTP 404", "target vanadis (", "no covcounters files"},
+			wantErrs:      []string{"target eri (", "/eri-agent-beta): flush: HTTP 500: no meta", "target coven (", "HTTP 404", "target vanadis (", "no covcounters files"},
 			wantDirCounts: []int{1},
 			wantFileSets:  [][]string{{"covcounters.e1.1.1", "covmeta.e1"}},
 			wantUpserts:   map[string][]CoverageRow{"eri": sampleRows},
