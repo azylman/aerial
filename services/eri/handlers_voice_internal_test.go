@@ -234,7 +234,7 @@ channels:
 		{
 			name:       "ValidTargetedMessage",
 			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1","message":{"id":"123456789012345678","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
+			body:       `{"bot_user_id":"bot-1","message":{"id":"123456789012345678","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
 			wantStatus: http.StatusOK,
 			wantSubstr: `"enqueued"`,
 		},
@@ -290,7 +290,7 @@ channels:
 		{
 			name:       "DatabaseErrorReturns500",
 			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-db-err-1","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
+			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-db-err-1","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
 			closedDB:   true,
 			wantStatus: http.StatusInternalServerError,
 			wantSubstr: "Failed to process message",

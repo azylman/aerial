@@ -874,7 +874,7 @@ func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
 	}{
 		{
 			name:        "interrupt application command",
-			body:        `{"id":"int-1","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"name":"interrupt"}}`,
+			body:        `{"id":"int-1","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"name":"interrupt"}}`,
 			statusCode:  http.StatusOK,
 			serverResp:  `{"status":"ok"}`,
 			wantCode:    http.StatusOK,
@@ -883,7 +883,7 @@ func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
 		},
 		{
 			name:        "rotate application command",
-			body:        `{"id":"int-2","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"name":"rotate"}}`,
+			body:        `{"id":"int-2","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"name":"rotate"}}`,
 			statusCode:  http.StatusOK,
 			serverResp:  `{"status":"ok"}`,
 			wantCode:    http.StatusOK,
@@ -892,7 +892,7 @@ func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
 		},
 		{
 			name:        "stop_turn message component",
-			body:        `{"id":"int-3","type":3,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"custom_id":"stop_turn:msg-1"}}`,
+			body:        `{"id":"int-3","type":3,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"custom_id":"stop_turn:msg-1"}}`,
 			statusCode:  http.StatusOK,
 			serverResp:  `{"status":"ok"}`,
 			wantCode:    http.StatusOK,
@@ -901,7 +901,7 @@ func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
 		},
 		{
 			name:        "interrupt failure propagates 500",
-			body:        `{"id":"int-4","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alex"},"data":{"name":"interrupt"}}`,
+			body:        `{"id":"int-4","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"name":"interrupt"}}`,
 			statusCode:  http.StatusInternalServerError,
 			serverResp:  `{"error":"restate down"}`,
 			wantCode:    http.StatusInternalServerError,

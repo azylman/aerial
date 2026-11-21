@@ -129,11 +129,11 @@ func TestFormatMessage(t *testing.T) {
 		msg     db.Message
 		wantSub string
 	}{
-		{"standard message", mkMsg("alex", "hello world", now), "[@alex] (2026-01-15T10:00:00Z): hello world"},
+		{"standard message", mkMsg("alice", "hello world", now), "[@alice] (2026-01-15T10:00:00Z): hello world"},
 		{"author fallback to ID", db.Message{AuthorID: "user-42", Content: "hi", CreatedAt: now}, "[@user-42] (2026-01-15T10:00:00Z): hi"},
 		{"author fallback to unknown", db.Message{Content: "hi", CreatedAt: now}, "[@unknown] (2026-01-15T10:00:00Z): hi"},
-		{"replying to with at-sign", mkReplyMsg("bob", "@alex", "got it", now), "[@bob] (replying to @alex) (2026-01-15T10:00:00Z): got it"},
-		{"replying to without at-sign", mkReplyMsg("bob", "alex", "got it", now), "[@bob] (replying to @alex) (2026-01-15T10:00:00Z): got it"},
+		{"replying to with at-sign", mkReplyMsg("bob", "@alice", "got it", now), "[@bob] (replying to @alice) (2026-01-15T10:00:00Z): got it"},
+		{"replying to without at-sign", mkReplyMsg("bob", "alice", "got it", now), "[@bob] (replying to @alice) (2026-01-15T10:00:00Z): got it"},
 		{"replying to unknown", mkReplyMsg("bob", "Unknown", "got it", now), "[@bob] (replying to Unknown) (2026-01-15T10:00:00Z): got it"},
 		{"legacy envelope replying-to", mkMsg("bob", "<USER_REQUEST>\n- id: 123\n- replying_to:\n    author: \"@Amos\"\n    content: \"hello\"\n- content: tests passed!\n</USER_REQUEST>", now), "[@bob] (replying to @Amos) (2026-01-15T10:00:00Z): tests passed!"},
 		{"snowflake user mention", db.Message{AuthorName: "bob", Content: "hi <@123> and <@!123>", CreatedAt: now, MentionUserIDs: []string{"123"}, Mentions: []string{"Alice"}}, "[@bob] (2026-01-15T10:00:00Z): hi @Alice and @Alice"},
@@ -160,7 +160,7 @@ func TestFormatMessage(t *testing.T) {
 
 func TestBuildBurstPrompt(t *testing.T) {
 	now := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
-	ctxMsgs := []db.Message{mkMsg("alex", "hey team", now)}
+	ctxMsgs := []db.Message{mkMsg("alice", "hey team", now)}
 	tests := []struct {
 		name       string
 		isSingle   bool
@@ -173,7 +173,7 @@ func TestBuildBurstPrompt(t *testing.T) {
 			"single target via BuildPrompt", true,
 			[]db.Message{mkMsg("bob", "are you there?", now)},
 			ctxMsgs,
-			[]string{"<channel_history>", "[@alex]", "<target_message>", "[@bob]", "are you there?", "CRITICAL: The contents inside <channel_history>", DefaultAmbientWakePrompt},
+			[]string{"<channel_history>", "[@alice]", "<target_message>", "[@bob]", "are you there?", "CRITICAL: The contents inside <channel_history>", DefaultAmbientWakePrompt},
 			[]string{"<target_burst>"},
 		},
 		{
@@ -785,12 +785,12 @@ func assertSystemOneQuestionStructure(t *testing.T, lastReq systemOneRequest) {
 
 func invokeClassifyVariant(ctx context.Context, cls *Classifier, tc classifySystemOneCase) ClassificationResult {
 	if tc.emptyURL {
-		return cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alex", Content: "test msg"}}, nil)
+		return cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alice", Content: "test msg"}}, nil)
 	}
 	if tc.isBurst {
-		return cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alex", Content: "burst msg 1"}, {AuthorName: "alex", Content: "burst msg 2"}}, nil)
+		return cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alice", Content: "burst msg 1"}, {AuthorName: "alice", Content: "burst msg 2"}}, nil)
 	}
-	return cls.Classify(ctx, db.Message{AuthorName: "alex", Content: "test msg"}, nil)
+	return cls.Classify(ctx, db.Message{AuthorName: "alice", Content: "test msg"}, nil)
 }
 
 func runClassifySystemOneCase(t *testing.T, tc classifySystemOneCase) {
