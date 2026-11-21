@@ -25,6 +25,25 @@ const (
 // ErrDispatchActive reports that Eri skipped a dispatch because a session is already active.
 var ErrDispatchActive = errors.New("dispatch active; reconciliation deferred")
 
+type agentContextKey struct{}
+
+// WithAgent returns a copy of parent context carrying the given agent identifier.
+func WithAgent(ctx context.Context, agent string) context.Context {
+	clean := strings.TrimSpace(agent)
+	if clean == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentContextKey{}, clean)
+}
+
+// AgentFromContext extracts the agent identifier from the context, or returns "".
+func AgentFromContext(ctx context.Context) string {
+	if val, ok := ctx.Value(agentContextKey{}).(string); ok {
+		return strings.TrimSpace(val)
+	}
+	return ""
+}
+
 // BrainDispatchRequest represents the JSON payload dispatched to Eri's POST /dispatch endpoint.
 type BrainDispatchRequest struct {
 	ID             string `json:"id,omitempty"`

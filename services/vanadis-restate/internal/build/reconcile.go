@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -297,6 +298,9 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.Vana
 	if b.executor == nil {
 		return nil
 	}
+	if build != nil && strings.TrimSpace(build.Agent) != "" {
+		ctx = ericlient.WithAgent(ctx, build.Agent)
+	}
 	if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", status, []string{build.ID}, reason); err != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 	}
@@ -308,12 +312,10 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.Vana
 			wakeErr = err
 		}
 	}
-	var widgetErr error
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build "+status); err != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
-		widgetErr = err
 	}
-	return errors.Join(wakeErr, widgetErr)
+	return wakeErr
 }
 
 func rolloutStateJobsEqual(a, b *pubsub.PRRolloutState) bool {

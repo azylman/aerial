@@ -288,7 +288,7 @@ func TestDeliverStatusWidgetSinking(t *testing.T) {
 				msgs:      tc.msgs,
 			}
 
-			id, err := DeliverStatusWidget(mock, tc.req, now)
+			id, err := DeliverStatusWidget(mock, tc.req, now, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectID, id)
 			if tc.expectDeleted {

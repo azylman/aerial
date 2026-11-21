@@ -346,6 +346,27 @@ func TestRestateEriClient_Dispatch(t *testing.T) {
 	}
 }
 
+func TestRestateEriClient_DispatchExplicitAgentPath(t *testing.T) {
+	t.Parallel()
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"accepted","dispatch_id":"d1"}`))
+	}))
+	defer srv.Close()
+
+	client := NewRestateEriClient(srv.URL, "", "aerial", nil)
+	err := client.Dispatch(context.Background(), BrainDispatchRequest{ID: "d1", Agent: "agent-alpha", VanadisChunkID: "c1", Source: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantSub := "/" + DispatchSessionServiceName("agent-alpha") + "/"
+	if !strings.Contains(capturedPath, wantSub) {
+		t.Errorf("captured path %q does not contain %q", capturedPath, wantSub)
+	}
+}
+
 func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 	t.Parallel()
 
@@ -870,5 +891,72 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	key3 := resolveSessionKey(BrainDispatchRequest{ID: "disp-3"})
 	if key3 != "dispatch-disp-3" {
 		t.Errorf("key3 = %q, want dispatch-disp-3", key3)
+	}
+}
+
+func TestAgentContextAndEffectiveResolution(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		clientAgent   string
+		ctxAgent      string
+		explicitAgent string
+		wantAgent     string
+	}{
+		{
+			name:      "all empty falls back to default agent",
+			wantAgent: defaultAgentName,
+		},
+		{
+			name:        "client agent used when context and explicit empty",
+			clientAgent: "agent-alpha",
+			wantAgent:   "agent-alpha",
+		},
+		{
+			name:        "context agent overrides client agent",
+			clientAgent: "agent-alpha",
+			ctxAgent:    "agent-beta",
+			wantAgent:   "agent-beta",
+		},
+		{
+			name:        "empty with-agent context preserves fallback",
+			clientAgent: "agent-alpha",
+			ctxAgent:    "   ",
+			wantAgent:   "agent-alpha",
+		},
+		{
+			name:          "explicit agent overrides context and client",
+			clientAgent:   "agent-alpha",
+			ctxAgent:      "agent-beta",
+			explicitAgent: "agent-gamma",
+			wantAgent:     "agent-gamma",
+		},
+		{
+			name:          "whitespace trimmed from explicit agent",
+			clientAgent:   "agent-alpha",
+			explicitAgent: "  agent-beta  ",
+			wantAgent:     "agent-beta",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			if tc.ctxAgent != "" {
+				ctx = WithAgent(ctx, tc.ctxAgent)
+			}
+			c := NewRestateEriClient("", "", tc.clientAgent, nil)
+			var got string
+			if tc.explicitAgent != "" {
+				got = c.effectiveAgent(ctx, tc.explicitAgent)
+			} else {
+				got = c.effectiveAgent(ctx)
+			}
+			if got != tc.wantAgent {
+				t.Errorf("effectiveAgent() = %q, want %q", got, tc.wantAgent)
+			}
+		})
 	}
 }

@@ -88,6 +88,7 @@ type FailChunkResponse struct {
 	ThreadID    string `json:"thread_id,omitempty"`
 	Objective   string `json:"objective,omitempty"`
 	Quiet       bool   `json:"quiet,omitempty"`
+	Agent       string `json:"agent,omitempty"`
 }
 
 // AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.

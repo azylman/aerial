@@ -73,7 +73,7 @@ func TestDeliverStatusWidgetFunction(t *testing.T) {
 				sender = mock
 			}
 
-			id, err := DeliverStatusWidget(sender, tc.req, now)
+			id, err := DeliverStatusWidget(sender, tc.req, now, nil)
 			if tc.expectErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.expectErrSub)
@@ -128,6 +128,88 @@ func TestIsForeignAuthorError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.expected, isForeignAuthorError(tc.err))
+		})
+	}
+}
+
+func TestDeliverStatusWidget_FallbackDelete(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	foreignAuthorErr := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}, Message: &discordgo.APIErrorMessage{Code: 50005, Message: "Cannot edit a message authored by another user"}}
+	missingPermsErr := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}, Message: &discordgo.APIErrorMessage{Code: 50013, Message: "Missing Permissions"}}
+
+	primary := &mockWidgetSender{
+		editErr:   foreignAuthorErr,
+		sendMsg:   &discordgo.Message{ID: "msg-reposted-fallback"},
+		deleteErr: missingPermsErr,
+	}
+	fallback := &mockWidgetSender{}
+
+	id, err := DeliverStatusWidget(primary, ericlient.StatusWidgetRequest{
+		ChannelID: "chan-1",
+		MessageID: "msg-foreign-fallback",
+		Title:     "Build 1",
+	}, now, []DiscordWidgetSender{fallback})
+
+	require.NoError(t, err)
+	assert.Equal(t, "msg-reposted-fallback", id)
+	assert.Equal(t, "msg-foreign-fallback", primary.lastDeleteID)
+	assert.Equal(t, "msg-foreign-fallback", fallback.lastDeleteID)
+}
+
+func TestDiscordWidgetDeliverer_FallbackSenders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		deliverer *DiscordWidgetDeliverer
+		primary   DiscordWidgetSender
+		wantCount int
+	}{
+		{
+			name:      "nil deliverer returns nil",
+			deliverer: nil,
+			wantCount: 0,
+		},
+		{
+			name: "dedupes senders and filters nil",
+			deliverer: func() *DiscordWidgetDeliverer {
+				s1 := &mockWidgetSender{}
+				s2 := &mockWidgetSender{}
+				return &DiscordWidgetDeliverer{
+					agentSenders: map[string]DiscordWidgetSender{
+						"agent-alpha": s1,
+						"agent-beta":  s2,
+						"nil-agent":   nil,
+					},
+					sender: s1,
+				}
+			}(),
+			primary:   &mockWidgetSender{},
+			wantCount: 2,
+		},
+		{
+			name: "primary excluded and sender added",
+			deliverer: func() *DiscordWidgetDeliverer {
+				s1 := &mockWidgetSender{}
+				s2 := &mockWidgetSender{}
+				return &DiscordWidgetDeliverer{
+					agentSenders: map[string]DiscordWidgetSender{
+						"agent-alpha": s1,
+					},
+					sender: s2,
+				}
+			}(),
+			primary:   &mockWidgetSender{},
+			wantCount: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.deliverer.fallbackSenders(tc.primary)
+			assert.Len(t, got, tc.wantCount)
 		})
 	}
 }

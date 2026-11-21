@@ -18,6 +18,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -362,7 +363,19 @@ func (g *Gate) DeliverDeadline(ctx context.Context, buildID string, a Attempt) (
 		// Eri's dedup retention bounds that guarantee; delivery after retention may
 		// duplicate a wake if an earlier acceptance response was lost.
 		id := fmt.Sprintf("vanadis-deploy-deadline-%s-%d-%s-%d", c.ID, a.PRNumber, a.Revision, a.Generation)
-		e = g.exec.EriClient.DispatchAccepted(ctx, executor.BrainDispatchRequest{ID: id, Source: "discord", SessionID: "vanadis-deploy-deadline-" + c.ID, TargetID: build.ThreadID, Prompt: executor.FormatDeployFailurePrompt(ev)})
+		agent := strings.TrimSpace(build.Agent)
+		wakeCtx := ctx
+		if agent != "" {
+			wakeCtx = ericlient.WithAgent(ctx, agent)
+		}
+		e = g.exec.EriClient.DispatchAccepted(wakeCtx, executor.BrainDispatchRequest{
+			ID:        id,
+			Source:    "discord",
+			SessionID: "vanadis-deploy-deadline-" + c.ID,
+			TargetID:  build.ThreadID,
+			Prompt:    executor.FormatDeployFailurePrompt(ev),
+			Agent:     agent,
+		})
 		if e != nil {
 			result.Error = e.Error()
 		}

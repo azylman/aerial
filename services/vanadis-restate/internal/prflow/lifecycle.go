@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -114,8 +115,16 @@ func (f *Flow) DispatchChunkRemediationForChunk(ctx context.Context, bld *model.
 	if len(skipIfActive) > 0 {
 		skip = skipIfActive[0]
 	}
+	agent := ""
+	if bld != nil && strings.TrimSpace(bld.Agent) != "" {
+		agent = strings.TrimSpace(bld.Agent)
+		ctx = ericlient.WithAgent(ctx, agent)
+	} else if fromCtx := ericlient.AgentFromContext(ctx); fromCtx != "" {
+		agent = fromCtx
+	}
 	return f.Exec.DispatchChunkRemediation(ctx, executor.BrainDispatchRequest{
 		ID:             dispatchID,
+		Agent:          agent,
 		Source:         "vanadis-restate",
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(bld.ThreadID),
@@ -131,6 +140,9 @@ func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, c
 	if f == nil || f.Exec == nil {
 		return nil
 	}
+	if strings.TrimSpace(bld.Agent) != "" {
+		ctx = ericlient.WithAgent(ctx, bld.Agent)
+	}
 	if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
@@ -144,12 +156,13 @@ func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, c
 		if fetched != nil {
 			buildObj = *fetched
 			chunks = fetchedChunks
+			if strings.TrimSpace(buildObj.Agent) != "" {
+				ctx = ericlient.WithAgent(ctx, buildObj.Agent)
+			}
 		}
 	}
-	var widgetErr error
 	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, buildObj, chunks, "Build failed: "+reason); sErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", sErr)
-		widgetErr = sErr
 	}
 	var wakeErr error
 	if !buildObj.Quiet {
@@ -165,7 +178,7 @@ func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, c
 	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_build", "failed", []string{buildObj.ID}, reason); pErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
 	}
-	return errors.Join(widgetErr, wakeErr)
+	return wakeErr
 }
 
 // dispatchSilentThreadWakePrompt wakes the build thread as a silent
@@ -180,6 +193,9 @@ func (f *Flow) dispatchSilentThreadWakePrompt(ctx context.Context, buildID, chun
 	}
 	if bld == nil {
 		return store.ErrBuildNotFound
+	}
+	if strings.TrimSpace(bld.Agent) != "" {
+		ctx = ericlient.WithAgent(ctx, bld.Agent)
 	}
 	if dErr := f.Exec.DispatchSilentWakePrompt(ctx, bld.ThreadID, chunkID, prompt, occurrence); dErr != nil {
 		if errors.Is(dErr, executor.ErrDispatchActive) {
@@ -247,6 +263,9 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if !isFailureNotificationEligible(chk, failed, "ci_remediation_cap_reached") || bld == nil || f.Exec == nil {
 		return nil
 	}
+	if strings.TrimSpace(bld.Agent) != "" {
+		ctx = ericlient.WithAgent(ctx, bld.Agent)
+	}
 	if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
 	}
@@ -264,10 +283,8 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if chk != nil {
 		chunks = append(chunks, *chk)
 	}
-	var widgetErr error
 	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, capBanner); sErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
-		widgetErr = sErr
 	}
 	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunkID}, "ci_remediation_cap_reached"); pErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
@@ -275,7 +292,7 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_build", "failed", []string{bld.ID}, "ci_remediation_cap_reached"); pErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
 	}
-	return errors.Join(msgErr, widgetErr)
+	return msgErr
 }
 
 // HandleConflictEvent marks the chunk conflicted and dispatches a
@@ -411,6 +428,11 @@ func (f *Flow) HandleDeployFailureEvent(ctx context.Context, buildID, chunkID st
 
 // HandlePREventType routes one PR lifecycle event to its transition.
 func (f *Flow) HandlePREventType(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+	if ericlient.AgentFromContext(ctx) == "" && f.Store != nil {
+		if bld, _, err := f.Store.GetBuild(ctx, buildID); err == nil && bld != nil && strings.TrimSpace(bld.Agent) != "" {
+			ctx = ericlient.WithAgent(ctx, bld.Agent)
+		}
+	}
 	switch event {
 	case prEventOpened, "synchronize":
 		return f.RecordPRHeadRevision(ctx, chunkID, ev)
