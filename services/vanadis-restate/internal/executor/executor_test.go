@@ -354,9 +354,6 @@ func TestExecutorCoordinatorBranches(t *testing.T) {
 	if got, err := (*Executor)(nil).ResolveCIFailureDetailsChecked(ctx, "aerial", 1, "unit", "sha", "", "details"); got != "details" || err != nil {
 		t.Errorf("nil ResolveCIFailureDetailsChecked = (%q, %v), want (details, nil)", got, err)
 	}
-	if got := (*Executor)(nil).ResolveCIFailureDetails(ctx, "aerial", 1, "unit", "sha", "", "details"); got != "details" {
-		t.Errorf("nil ResolveCIFailureDetails = %q, want details", got)
-	}
 
 	// Coordinator with deploy UI URL and explicit share root.
 	eri := &mockEriClient{}
@@ -388,8 +385,8 @@ func TestExecutorCoordinatorBranches(t *testing.T) {
 
 	// Hand-constructed executor without an HTTP client resolves to details, not a fetch.
 	bare := &Executor{gitHubToken: "t"}
-	if got := bare.ResolveCIFailureDetails(ctx, "aerial", 0, "unit", "sha", "", "details"); got != "details" {
-		t.Errorf("bare executor details = %q, want details", got)
+	if got, err := bare.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "sha", "", "details"); got != "details" || err != nil {
+		t.Errorf("bare executor details = (%q, %v), want (details, nil)", got, err)
 	}
 }
 
@@ -399,6 +396,8 @@ func TestExecutorCILogDelegation(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Header.Get("Authorization") != "Bearer token" || r.Header.Get("Accept") != "application/vnd.github+json":
+			w.WriteHeader(http.StatusUnauthorized)
 		case strings.Contains(r.URL.Path, "/comments"):
 			w.WriteHeader(http.StatusInternalServerError)
 		case strings.Contains(r.URL.Path, "/logs"):
@@ -418,15 +417,9 @@ func TestExecutorCILogDelegation(t *testing.T) {
 	if err != nil || !strings.Contains(got, "FAIL: TestDelegated") {
 		t.Errorf("delegated checked = (%q, %v), want FAIL log", got, err)
 	}
-	if got := exec.ResolveCIFailureDetails(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure"); !strings.Contains(got, "FAIL: TestDelegated") {
-		t.Errorf("delegated details = %q, want FAIL log", got)
-	}
-	// RoboRev errors fall back to details in the non-checked wrapper.
+	// RoboRev errors propagate through the checked path.
 	if _, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev-check", "abc123", "", "failure"); err == nil {
 		t.Error("expected delegated error for 500 comments, got nil")
-	}
-	if got := exec.ResolveCIFailureDetails(ctx, "aerial", 10, "roborev-check", "abc123", "", "fallback-details"); got != "fallback-details" {
-		t.Errorf("delegated fallback = %q, want fallback-details", got)
 	}
 }
 
