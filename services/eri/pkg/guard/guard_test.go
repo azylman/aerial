@@ -13,10 +13,22 @@ import (
 	"testing"
 )
 
-func runGuard(t *testing.T, mode string, input string) Decision {
+// mapEnv returns a getenv backed by m so tests never read the real process environment.
+func mapEnv(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
+}
+
+// testOptions returns hermetic guard Options: a fresh temp batch dir, an empty environment and no
+// SQL describer, so no test touches the live /tmp/aerial-batch-guard directory or Postgres.
+func testOptions(t *testing.T) Options {
+	t.Helper()
+	return Options{BatchDir: t.TempDir(), Getenv: mapEnv(nil)}
+}
+
+func runGuard(t *testing.T, opts Options, mode string, input string) Decision {
 	t.Helper()
 	var out bytes.Buffer
-	err := Process(strings.NewReader(input), &out, mode)
+	err := ProcessWithOptions(strings.NewReader(input), &out, mode, opts)
 	if err != nil {
 		t.Fatalf("unexpected Process error: %v", err)
 	}
@@ -52,8 +64,8 @@ func runGuard(t *testing.T, mode string, input string) Decision {
 }
 
 func TestGuardProcess_EndToEnd(t *testing.T) {
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", t.TempDir())
-	t.Setenv("DATABASE_URL", ":memory:")
+	// Not t.Parallel(): subtests share one batch dir sequentially.
+	opts := testOptions(t)
 
 	tests := []struct {
 		name             string
@@ -168,7 +180,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d := runGuard(t, tc.mode, tc.input)
+			d := runGuard(t, opts, tc.mode, tc.input)
 			if tc.wantDeny && d.Decision != DecisionDeny {
 				t.Fatalf("mode=%q input=%s: expected deny, got %v", tc.mode, tc.input, d)
 			}
@@ -394,7 +406,7 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := Process(tc.r, &out, tc.mode)
+			err := ProcessWithOptions(tc.r, &out, tc.mode, testOptions(t))
 			if err != nil {
 				t.Fatalf("expected nil error on fail-open, got: %v", err)
 			}
@@ -410,7 +422,7 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 
 	t.Run("panic recovery with failing writer", func(t *testing.T) {
 		t.Parallel()
-		err := Process(panicReader{}, errorWriter{}, "all")
+		err := ProcessWithOptions(panicReader{}, errorWriter{}, "all", testOptions(t))
 		if err == nil {
 			t.Fatalf("expected error from failing writer during panic recovery, got nil")
 		}
@@ -603,6 +615,29 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertToolArgs(t, tc)
+		})
+	}
+}
+
+func TestOptionsFromEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		env          map[string]string
+		wantBatchDir string
+		wantSQL      bool
+		wantScratch  string
+	}{
+		{"empty env uses defaults", nil, "/tmp/aerial-batch-guard", false, ""},
+		{"overrides carried through", map[string]string{"AERIAL_BATCH_GUARD_DIR": "/tmp/guard-test", "DATABASE_URL": "postgres://127.0.0.1:1/x", "SCRATCH_DIR": "/tmp/s"}, "/tmp/guard-test", true, "/tmp/s"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := OptionsFromEnv(mapEnv(tc.env))
+			if opts.BatchDir != tc.wantBatchDir || (opts.SQL != nil) != tc.wantSQL || opts.Getenv("SCRATCH_DIR") != tc.wantScratch {
+				t.Fatalf("OptionsFromEnv = {BatchDir:%q SQL:%v SCRATCH_DIR:%q}, want {%q %v %q}", opts.BatchDir, opts.SQL != nil, opts.Getenv("SCRATCH_DIR"), tc.wantBatchDir, tc.wantSQL, tc.wantScratch)
+			}
 		})
 	}
 }
