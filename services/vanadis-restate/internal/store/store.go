@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -200,24 +201,6 @@ type VanadisStore interface {
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
 }
 
-// FirstNonEmpty returns the first trimmed non-empty value.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
-// NonNilSlice normalizes a nil slice to an empty slice.
-func NonNilSlice[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return s
-}
-
 // CapChunkEffort clamps an effort value to a valid effort.
 func CapChunkEffort(effort string) string {
 	eff, err := buildplan.NormalizeChunkEffort(effort)
@@ -260,8 +243,8 @@ func ScanBuild(s rowScanner) (model.VanadisBuild, error) {
 
 // NormalizeRunnerAgent canonicalizes a runner agent name: trimmed and
 // lowercased, with empty meaning the default agent.
-func NormalizeRunnerAgent(agent string) string {
-	if name := model.NormalizeAgentName(agent); name != "" {
+func NormalizeRunnerAgent(runner string) string {
+	if name := agent.Clean(runner); name != "" {
 		return name
 	}
 	return defaultAgent
@@ -335,8 +318,8 @@ func scanChunkRow(row rowScanner, extra ...any) (model.VanadisChunk, error) {
 	if completedAt.Valid {
 		c.CompletedAt = completedAt.Time
 	}
-	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = NonNilSlice(c.TargetFiles), NonNilSlice(c.TargetSymbols), NonNilSlice(c.AcceptanceCriteria)
-	c.DependsOn = NonNilSlice(c.DependsOn)
+	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), buildplan.NonNilSlice(c.AcceptanceCriteria)
+	c.DependsOn = buildplan.NonNilSlice(c.DependsOn)
 	c.Effort = CapChunkEffort(c.Effort)
 	ApplyRawChunkCIChecks(&c, rawCIChecks)
 	if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {

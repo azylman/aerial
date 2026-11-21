@@ -18,6 +18,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -119,7 +120,7 @@ func NewGate(st Store, exec *executor.Executor) *Gate {
 }
 
 func revision(c model.VanadisChunk) string {
-	return store.FirstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
+	return strutil.FirstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
 }
 
 func nextAttempt(old Attempt, c model.VanadisChunk, start time.Time, retry bool) Attempt {
@@ -136,7 +137,7 @@ func eligible(c model.VanadisChunk) bool {
 func buildActive(status string) bool { return status == "" || status == statusRunning }
 
 func startAt(now time.Time, ev *pubsub.PRLifecycleEvent, c model.VanadisChunk) time.Time {
-	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) == revision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
+	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && strutil.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) == revision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
 		return ev.OccurredAt
 	}
 	return now
@@ -280,7 +281,7 @@ func (g *Gate) RecordDeploymentStart(ctx context.Context, buildID, chunkID strin
 		return false, "", nil
 	}
 	for _, c := range chunks {
-		if c.ID != chunkID || revision(c) != store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) {
+		if c.ID != chunkID || revision(c) != strutil.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) {
 			continue
 		}
 		if c.Status == statusDeployFailed {

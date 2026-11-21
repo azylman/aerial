@@ -185,7 +185,7 @@ func applyChunkUpdates(chunk *model.VanadisChunk, req UpdateChunkRequest, normEf
 		chunk.Effort = normEffort
 	}
 	if req.DependsOn != nil {
-		chunk.DependsOn = NonNilSlice(*req.DependsOn)
+		chunk.DependsOn = buildplan.NonNilSlice(*req.DependsOn)
 	}
 	return nil
 }
@@ -253,7 +253,7 @@ func (s *Store) UpdateChunk(ctx context.Context, buildID, chunkRef string, req U
 	updatedCandidate.DependsOn = normalizedDeps
 
 	const updQ = `UPDATE vanadis_chunks SET mode = $3, repo = $4, title = $5, instructions = $6, target_files = $7, target_symbols = $8, effort = $9, depends_on = $10, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND build_id = $2;`
-	_, err = tx.Exec(ctx, updQ, updatedCandidate.ID, buildID, updatedCandidate.Mode, updatedCandidate.Repo, updatedCandidate.Title, updatedCandidate.Instructions, NonNilSlice(updatedCandidate.TargetFiles), NonNilSlice(updatedCandidate.TargetSymbols), updatedCandidate.Effort, NonNilSlice(updatedCandidate.DependsOn))
+	_, err = tx.Exec(ctx, updQ, updatedCandidate.ID, buildID, updatedCandidate.Mode, updatedCandidate.Repo, updatedCandidate.Title, updatedCandidate.Instructions, buildplan.NonNilSlice(updatedCandidate.TargetFiles), buildplan.NonNilSlice(updatedCandidate.TargetSymbols), updatedCandidate.Effort, buildplan.NonNilSlice(updatedCandidate.DependsOn))
 	if err != nil {
 		return nil, fmt.Errorf("execute update chunk %s: %w", updatedCandidate.ID, err)
 	}
@@ -316,10 +316,10 @@ func buildAppendedChunks(buildID string, existingIDs map[string]bool, startIndex
 			Repo:               cRepo,
 			Title:              strings.TrimSpace(inp.Title),
 			Instructions:       strings.TrimSpace(inp.Instructions),
-			TargetFiles:        NonNilSlice(inp.TargetFiles),
-			TargetSymbols:      NonNilSlice(inp.TargetSymbols),
+			TargetFiles:        buildplan.NonNilSlice(inp.TargetFiles),
+			TargetSymbols:      buildplan.NonNilSlice(inp.TargetSymbols),
 			Effort:             cEffort,
-			AcceptanceCriteria: NonNilSlice(inp.AcceptanceCriteria),
+			AcceptanceCriteria: buildplan.NonNilSlice(inp.AcceptanceCriteria),
 			Status:             statusPending,
 			DependsOn:          inp.DependsOn,
 			CreatedAt:          now,
@@ -488,7 +488,7 @@ func reindexRemainingChunks(ctx context.Context, tx pgx.Tx, buildID string, chun
 	const updQ = `UPDATE vanadis_chunks SET chunk_index = $3, depends_on = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND build_id = $2;`
 	for i := range chunks {
 		chunks[i].ChunkIndex = i
-		if _, err := tx.Exec(ctx, updQ, chunks[i].ID, buildID, i, NonNilSlice(chunks[i].DependsOn)); err != nil {
+		if _, err := tx.Exec(ctx, updQ, chunks[i].ID, buildID, i, buildplan.NonNilSlice(chunks[i].DependsOn)); err != nil {
 			return fmt.Errorf("reindex chunk %s: %w", chunks[i].ID, err)
 		}
 	}

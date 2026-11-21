@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -483,7 +484,7 @@ func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *
 		return true, nil
 	}
 	if build.Status == statusFailed && isFailureCompletionMutation(mutation, chunks) {
-		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, store.FirstNonEmpty(mutation.Reason, "chunk failed"), "VANADIS BUILD FAILED", "Build encountered failures."); nErr != nil {
+		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, strutil.FirstNonEmpty(mutation.Reason, "chunk failed"), "VANADIS BUILD FAILED", "Build encountered failures."); nErr != nil {
 			return false, nErr
 		}
 		return true, nil
