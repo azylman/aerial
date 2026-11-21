@@ -27,3 +27,30 @@ func TestIsSnowflake(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeThreadID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty", input: "", want: ""},
+		{name: "bare id", input: "123456789012345678", want: "123456789012345678"},
+		{name: "padded id", input: "  123  ", want: "123"},
+		{name: "discord prefix", input: "discord-123", want: "123"},
+		{name: "channel prefix", input: "discord:123", want: "123"},
+		{name: "last colon wins", input: "a:b: discord-456 ", want: "456"},
+		{name: "trailing colon", input: "discord:", want: ""},
+		{name: "prefix only stripped once", input: "discord-discord-7", want: "discord-7"},
+		{name: "non numeric kept", input: "thread-abc", want: "thread-abc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := NormalizeThreadID(tc.input); got != tc.want {
+				t.Errorf("NormalizeThreadID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

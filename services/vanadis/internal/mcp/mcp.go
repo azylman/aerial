@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
@@ -306,14 +307,6 @@ func (h *Handler) authEnabled() bool {
 	return h != nil && h.Auth != nil && h.Auth.Enabled()
 }
 
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
-}
-
 // storeErrorStatus maps a store or Restate error onto its HTTP status.
 func storeErrorStatus(err error) int {
 	switch {
@@ -418,7 +411,7 @@ func (h *Handler) handleMCPGetBuild(ctx context.Context, args MCPGetBuildArgs) (
 		}
 	}
 	buildID := strings.TrimSpace(args.BuildID)
-	threadID := normalizeDiscordThreadID(args.ThreadID)
+	threadID := discordutil.NormalizeThreadID(args.ThreadID)
 	if buildID == "" && threadID == "" {
 		return MCPGetBuildOutput{}, fmt.Errorf("%w: build_id or thread_id is required", model.ErrInvalidBuildInput)
 	}

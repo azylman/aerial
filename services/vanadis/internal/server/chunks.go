@@ -162,7 +162,7 @@ func (s *VanadisServer) authorizeBuildMutation(w http.ResponseWriter, r *http.Re
 		return nil, false
 	}
 	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return nil, false
 	}
 	return build, true
@@ -180,7 +180,7 @@ func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBui
 
 func (s *VanadisServer) processActiveStepUpdate(w http.ResponseWriter, r *http.Request, build *VanadisBuild, req UpdateActiveStepRequest) {
 	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	if err := s.forwardActiveStep(r.Context(), build, req); err != nil {
@@ -254,7 +254,7 @@ func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/chunks/"), "/")
@@ -308,7 +308,7 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	}
 	attachAgent, err := s.resolveAttachCallerAgent(r.Context(), req.Agent)
 	if err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	req.Agent = attachAgent
@@ -434,7 +434,7 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	build, chunks, err := s.store.GetBuild(r.Context(), buildID)
@@ -484,7 +484,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	removedID := chunkRef
