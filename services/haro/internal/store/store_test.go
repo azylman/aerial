@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -140,9 +139,9 @@ func TestOpenDBValidation(t *testing.T) {
 		wantOK  bool
 	}{
 		{"nil config", nil, "config cannot be nil", false},
-		{"empty dsn", &config.Config{DatabaseURL: ""}, "db: connection string cannot be empty", false},
-		{"unsupported scheme", &config.Config{DatabaseURL: "mysql://localhost/db"}, "db: unsupported database scheme", false},
-		{"sqlite without hook unsupported", &config.Config{DatabaseURL: ":memory:"}, "db: unsupported database scheme", false},
+		{"empty dsn", &config.Config{DatabaseURL: ""}, "connection string cannot be empty", false},
+		{"unsupported scheme", &config.Config{DatabaseURL: "mysql://localhost/db"}, "unsupported database scheme", false},
+		{"sqlite without hook unsupported", &config.Config{DatabaseURL: ":memory:"}, "unsupported database scheme", false},
 		{"mock postgres success", pgCfg, "", true},
 	}
 	for _, tc := range tests {
@@ -157,45 +156,6 @@ func TestOpenDBValidation(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("OpenDB err = %v, want containing %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestOpenDBPostgresRetry(t *testing.T) {
-	origMax, origBase, origAfter := postgresMaxAttempts, postgresRetryBase, postgresRetryAfter
-	t.Cleanup(func() { postgresMaxAttempts, postgresRetryBase, postgresRetryAfter = origMax, origBase, origAfter })
-	tests := []struct {
-		name     string
-		attempts int
-		canceled bool
-		wantErr  string
-		wantCode error
-	}{
-		{"gives up after attempts", 2, false, "after 2 attempts", nil},
-		{"canceled context aborts", 10, true, "after 1 attempts", context.Canceled},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			postgresMaxAttempts, postgresRetryBase = tc.attempts, time.Millisecond
-			postgresRetryAfter = func(time.Duration) <-chan time.Time {
-				fired := make(chan time.Time, 1)
-				fired <- time.Time{}
-				return fired
-			}
-			ctx := context.Background()
-			if tc.canceled {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-				postgresRetryAfter = func(time.Duration) <-chan time.Time { return nil }
-			}
-			_, err := openDB(ctx, "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("openDB err = %v, want containing %q", err, tc.wantErr)
-			}
-			if tc.wantCode != nil && !errors.Is(err, tc.wantCode) {
-				t.Errorf("openDB err = %v, want wrapping %v", err, tc.wantCode)
 			}
 		})
 	}

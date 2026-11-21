@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -311,8 +312,8 @@ type mockDispatcher struct {
 	response   dispatch.PromptDispatchResponse
 	err        error
 
-	dispatchedRequests []dispatch.DispatchRequest
-	dispatchResponse   dispatch.DispatchResponse
+	dispatchedRequests []eriwire.BrainDispatchRequest
+	dispatchResponse   eriwire.DispatchEnqueueResponse
 	dispatchErr        error
 }
 
@@ -321,7 +322,7 @@ func (m *mockDispatcher) DispatchPrompt(ctx context.Context, req dispatch.Prompt
 	return m.response, m.err
 }
 
-func (m *mockDispatcher) Dispatch(ctx context.Context, req dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
+func (m *mockDispatcher) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	m.dispatchedRequests = append(m.dispatchedRequests, req)
 	return m.dispatchResponse, m.dispatchErr
 }

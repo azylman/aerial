@@ -11,7 +11,7 @@ import (
 func TestMockPostgresConnection(t *testing.T) {
 	addr := testutil.StartMockPostgres(t)
 	dsn := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
-	db, err := store.NewDB(t.Context(), &config.Config{DatabaseURL: dsn})
+	db, err := store.OpenDB(t.Context(), &config.Config{DatabaseURL: dsn})
 	if err != nil {
 		t.Fatalf("store.NewDB with mock postgres failed: %v", err)
 	}
