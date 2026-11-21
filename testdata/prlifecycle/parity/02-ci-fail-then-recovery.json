@@ -1,6 +1,6 @@
 {
   "name": "02-ci-fail-then-recovery",
-  "description": "A lint failure moves the PR to ci_failed, publishes ci_failed and triggers the auto-update cascade; the recovering success reopens it, publishes the recovery synchronize and check_updated facts, and re-triggers the cascade for the check.",
+  "description": "A lint failure moves the PR to ci_failed, publishes ci_failed and triggers the auto-update cascade; the recovering success reopens it, publishes the recovery synchronize and check_updated facts, and PRObject, which alone knows the check recovered, forwards the cascade trigger for the check to RepoObject.",
   "github_routes": {
     "GET /repos/azylman/aerial/pulls": "[]"
   },
@@ -141,6 +141,12 @@
             "head_sha": "h102"
           }
         ],
+        "auto_update": {
+          "authors": [
+            "azylman"
+          ],
+          "default_owner": true
+        },
         "repo": "azylman/aerial",
         "effects_owner": "restate"
       }
@@ -168,18 +174,13 @@
       }
     },
     {
-      "object": "RepoObject",
-      "handler": "HandleAutoUpdate",
+      "object": "PRObject",
+      "handler": "HandleCheckPassed",
       "event": {
         "pr_number": 102,
         "head_sha": "h102",
         "check_name": "lint",
-        "auto_update": {
-          "authors": [
-            "azylman"
-          ],
-          "default_owner": true
-        },
+        "branch": "feat/ci",
         "repo": "azylman/aerial",
         "effects_owner": "restate"
       }

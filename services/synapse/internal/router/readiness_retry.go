@@ -21,7 +21,7 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 	receivedAt := time.Now()
 	// The effects owner is snapshotted once per request, so a hot reload
 	// mid-request cannot split it between the registry and Restate.
-	ctx := stampEffectsOwner(r.Context())
+	ctx := s.stampEffectsOwner(r.Context())
 	var req struct {
 		Repo   string `json:"repo"`
 		Number int    `json:"pr_number"`

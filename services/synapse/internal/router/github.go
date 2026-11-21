@@ -373,7 +373,7 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
 		return
 	}
-	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body, EffectsOwner: newEventEffectsOwner()}); err != nil {
+	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body, EffectsOwner: s.acceptEffectsOwner()}); err != nil {
 		slog.ErrorContext(r.Context(), "[synapse] [github] failed to publish job to jetstream", "error", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 		return
