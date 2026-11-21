@@ -2599,7 +2599,7 @@ spec:
     spec:
       containers:
         - name: nats
-          image: nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
+          image: mirror.gcr.io/library/nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
           args:
             - "-c"
             - "/etc/nats/nats.conf"
@@ -2633,27 +2633,6 @@ spec:
             - mountPath: /etc/nats
               name: nats-config
               readOnly: true
-        - name: metrics
-          image: natsio/prometheus-nats-exporter:0.20.3@sha256:4b8ddc1c86fec360b5cd3d5e1fbc6fb52bdafd5805bba3901cc52926538af255
-          args:
-            - "-p"
-            - "7777"
-            - "-varz"
-            - "-connz"
-            - "-healthz"
-            - "-accstatz"
-            - "-jsz=all"
-            - "http://localhost:8222"
-          ports:
-            - containerPort: 7777
-              name: metrics
-              protocol: TCP
-          resources:
-            limits:
-              memory: 64Mi
-            requests:
-              cpu: 10m
-              memory: 16Mi
       volumes:
         - name: jetstream-data
           persistentVolumeClaim:
@@ -2683,6 +2662,52 @@ spec:
   selector:
     app.kubernetes.io/name: nats
   type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: nats-exporter
+  name: nats-exporter
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-exporter
+    spec:
+      containers:
+        - name: metrics
+          image: mirror.gcr.io/natsio/prometheus-nats-exporter:0.20.3@sha256:4b8ddc1c86fec360b5cd3d5e1fbc6fb52bdafd5805bba3901cc52926538af255
+          args:
+            - "-p"
+            - "7777"
+            - "-varz"
+            - "-connz"
+            - "-healthz"
+            - "-accstatz"
+            - "-jsz=all"
+            - "http://nats.aerial:8222"
+          ports:
+            - containerPort: 7777
+              name: metrics
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 7777
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
 ---
 apiVersion: v1
 kind: Service
