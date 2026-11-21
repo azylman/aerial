@@ -151,7 +151,7 @@ type paritySim struct {
 func newParitySim(t *testing.T) *paritySim {
 	t.Helper()
 	sim := &paritySim{t: t, kv: map[string][]byte{}, rows: map[string]ProjectionSnapshot{}}
-	pr := NewPRObjectService().WithProjection(sim, nil).WithFactPublisher(sim).WithEriEffector(sim).WithGitHub(sim).WithKube(sim)
+	pr := NewPRObjectService().WithProjection(sim).WithFactPublisher(sim).WithEriEffector(sim).WithGitHub(sim).WithKube(sim)
 	repo := NewRepoObjectService().WithGitHub(sim).WithKube(sim)
 	sim.handlers = map[string]simHandler{
 		"PRObject/" + "Register":                      bindOut(pr.Register),
@@ -221,8 +221,15 @@ func (s *paritySim) send(inv parityInvocation) {
 	}
 }
 
-// invoke runs one queued call on a mock context backed by the sim K/V.
+// invoke runs one queued call on a mock context backed by the sim K/V and
+// requires it to succeed.
 func (s *paritySim) invoke(call simCall) {
+	require.NoError(s.t, s.run(call), "%s/%s on %s", call.service, call.handler, call.key)
+}
+
+// run runs one call on a mock context backed by the sim K/V and returns
+// the handler error; only a successful call queues its sends.
+func (s *paritySim) run(call simCall) error {
 	h, ok := s.handlers[call.service+"/"+call.handler]
 	require.True(s.t, ok, "unbound handler %s/%s", call.service, call.handler)
 	slot := call.service + "/" + call.key
@@ -243,7 +250,9 @@ func (s *paritySim) invoke(call simCall) {
 		s.kv[slot+"/"+args.String(0)] = raw
 	}).Maybe()
 	s.current, s.seen = call, map[string]bool{}
-	require.NoError(s.t, h(restate.WithMockContext(mc), call.input), "%s/%s on %s", call.service, call.handler, call.key)
+	if err := h(restate.WithMockContext(mc), call.input); err != nil {
+		return err
+	}
 	for _, sent := range sends.snapshot() {
 		raw, err := json.Marshal(sent.input)
 		require.NoError(s.t, err)
@@ -254,6 +263,7 @@ func (s *paritySim) invoke(call simCall) {
 		}
 		s.pending = append(s.pending, next)
 	}
+	return nil
 }
 
 // stubParityRun executes every journaled restate.Run once, whatever run

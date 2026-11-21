@@ -121,7 +121,7 @@ func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 		wantRun   bool
 		wantSends []sentCall
 	}{
-		{name: "legacy push records intent", ev: push(EffectsOwnerLegacy, 0), kube: &fakeKube{}, wantSet: true, wantRun: true},
+		{name: "legacy push is rejected", ev: push(EffectsOwnerLegacy, 0), kube: &fakeKube{}, wantErr: true},
 		{name: "restate push dispatches", ev: push(EffectsOwnerRestate, 0), kube: &fakeKube{}, wantSet: true, wantRun: true},
 		{
 			name: "retryable failure schedules a delayed retry", ev: push(EffectsOwnerRestate, 1), kube: &fakeKube{pushErr: errKubeDown}, wantRun: true,
@@ -156,7 +156,11 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 		wantCalls []string
 		wantSends []sentCall
 	}{
-		{name: "legacy promotion records both intents", ev: RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{}, wantSet: true, wantRun: true},
+		{name: "legacy promotion is rejected", ev: RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests, EffectsOwner: EffectsOwnerLegacy}, kube: &fakeKube{}, wantErr: true},
+		{
+			name: "unstamped untracked promotion promotes and reconciles", ev: RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{},
+			wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s2", "reconcile flux-system/core@t1"},
+		},
 		{
 			name: "restate pr promotion forwards the rollout", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Images: []string{"eri"}, KustomizationRequests: requests, EffectsOwner: EffectsOwnerRestate},
 			kube: &fakeKube{}, wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s1"},
@@ -210,7 +214,7 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 		kube           *fakeKube
 		wantCalls      []string
 		wantDispatched bool
-		wantIntended   []IntendedEffect
+		wantErr        bool
 		wantSends      []sentCall
 	}{
 		{
@@ -221,10 +225,7 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 			name: "retryable patch failure schedules a delayed retry", ev: ev(EffectsOwnerRestate, coreRequests), kube: &fakeKube{reconcileErr: map[string]*KubeError{"core": errKubeDown}},
 			wantCalls: []string{"reconcile flux-system/core@t1"}, wantSends: []sentCall{indexSend, retrySend},
 		},
-		{
-			name: "legacy request records the intended reconcile", ev: ev(EffectsOwnerLegacy, coreRequests), kube: &fakeKube{}, wantDispatched: true, wantSends: []sentCall{indexSend},
-			wantIntended: []IntendedEffect{{Kind: EffectFluxReconcile, Agent: "agent-alpha", EffectKey: "azylman/aerial#101@m1:gen1:flux_reconcile", MatchKey: "azylman/aerial#101@m1:flux_reconcile", Digest: KustomizationRequestsDigest(coreRequests)}},
-		},
+		{name: "legacy request is rejected", ev: ev(EffectsOwnerLegacy, coreRequests), kube: &fakeKube{}, wantErr: true},
 		{name: "request without kustomizations patches nothing", ev: ev(EffectsOwnerRestate, nil), kube: &fakeKube{}, wantSends: []sentCall{indexSend}},
 	}
 	for _, tc := range tests {
@@ -234,10 +235,10 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 			seed.Agent = "agent-alpha"
 			mc, rec := newStateMock(t, seed)
 			stubRunKeepTerminal(mc)
-			require.NoError(t, NewPRObjectService().WithKube(tc.kube).HandleKustomizationRequested(restate.WithMockContext(mc), tc.ev))
+			err := NewPRObjectService().WithKube(tc.kube).HandleKustomizationRequested(restate.WithMockContext(mc), tc.ev)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, tc.wantCalls, tc.kube.Calls())
 			require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(gen1Key))
-			require.Equal(t, tc.wantIntended, rec.saved.IntendedEffects)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
 	}
@@ -258,16 +259,15 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 		wantStatus     string
 		wantCalls      []string
 		wantDispatched bool
-		wantIntended   []IntendedEffect
 		wantSends      []sentCall
 	}{
 		{name: "unknown pr has no gate", req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{}, want: RetryReadinessResponse{Status: 409}},
 		{name: "mismatched merge sha has no gate", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m9"}, kube: &fakeKube{}, want: RetryReadinessResponse{Status: 409}},
+		{name: "legacy retry is rejected", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy}, kube: &fakeKube{}, wantErr: true},
 		{
-			name: "legacy retry re-arms the gate and records the reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
+			name: "unstamped retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
-			wantSet: true, wantStatus: RegistryStatusDeploying, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
-			wantIntended: []IntendedEffect{{Kind: EffectFluxReconcile, Agent: "agent-alpha", EffectKey: readinessKey, MatchKey: "azylman/aerial#101@m1:flux_reconcile:job=readiness", Digest: KustomizationRequestsDigest(coreRequests)}},
+			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},
 		{
 			name: "restate retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate}, kube: &fakeKube{},
@@ -300,7 +300,6 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 			require.Empty(t, rec.saved.DeployedKustomizations)
 			require.Equal(t, uint64(2), rec.saved.GateGeneration)
 			require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 2, Kind: EffectFluxReconcile, JobName: "readiness-1"}))
-			require.Equal(t, tc.wantIntended, rec.saved.IntendedEffects)
 		})
 	}
 }
@@ -309,15 +308,17 @@ func TestPRObjectServiceHandleReadinessRetry(t *testing.T) {
 	t.Parallel()
 	merged := func() *PRState { return svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged) }
 	tests := []struct {
-		name         string
-		seed         *PRState
-		ev           PREvent
-		wantSet      bool
-		wantStatus   string
-		wantIntended int
-		wantSends    int
+		name       string
+		seed       *PRState
+		ev         PREvent
+		wantErr    bool
+		wantSet    bool
+		wantStatus string
+		wantCalls  []string
+		wantSends  int
 	}{
-		{name: "legacy retry applies the gate", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantIntended: 1, wantSends: 2},
+		{name: "retry applies the gate and re-requests the reconcile", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantSends: 2},
+		{name: "legacy retry is rejected", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy}, wantErr: true},
 		{name: "stale merge sha drops", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m9"}},
 		{name: "merged pr without a rollout persists unchanged", seed: merged(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusMerged},
 		{name: "missing merge sha does nothing", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101}},
@@ -327,14 +328,16 @@ func TestPRObjectServiceHandleReadinessRetry(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.seed)
 			stubRunKeepTerminal(mc)
-			require.NoError(t, NewPRObjectService().HandleReadinessRetry(restate.WithMockContext(mc), tc.ev))
+			kube := &fakeKube{}
+			err := NewPRObjectService().WithKube(kube).HandleReadinessRetry(restate.WithMockContext(mc), tc.ev)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, tc.wantSet, rec.setCalled)
+			require.Equal(t, tc.wantCalls, kube.Calls())
 			require.Len(t, rec.sends.snapshot(), tc.wantSends)
 			if !tc.wantSet {
 				return
 			}
 			require.Equal(t, tc.wantStatus, rec.saved.Status)
-			require.Len(t, rec.saved.IntendedEffects, tc.wantIntended)
 		})
 	}
 }

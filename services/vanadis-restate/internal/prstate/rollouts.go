@@ -130,8 +130,7 @@ func (s *PRState) TakeRolloutIndexUpdate() (RolloutIndexEvent, bool) {
 }
 
 // syncRolloutIndex sends the rollout index the membership change st owes,
-// after persisting the advanced sequence. Legacy and restate-owned commits
-// both maintain it: state transitions always apply.
+// after persisting the advanced sequence.
 func (s *PRObjectService) syncRolloutIndex(ctx restate.ObjectContext, st *PRState) {
 	ev, ok := st.TakeRolloutIndexUpdate()
 	if !ok {
@@ -314,6 +313,9 @@ func (s *PRState) ApplyDeployObserved(ev PREvent) bool {
 // event, so merged PRs apply it) and publishes the carried facts:
 // deploy_started only when the PR transitioned, every other fact always.
 func (s *PRObjectService) HandleDeployObserved(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleDeployObserved", ev.EffectsOwner); err != nil {
+		return err
+	}
 	started, rest := SplitDeployStartedFacts(ev.Facts)
 	var transitioned bool
 	ev.Facts = nil
@@ -324,7 +326,7 @@ func (s *PRObjectService) HandleDeployObserved(ctx restate.ObjectContext, ev PRE
 	}); err != nil || committed == nil {
 		return err
 	}
-	s.runFacts(ctx, committed, ev.EffectsOwner, gatedStartedFacts(started, rest, transitioned))
+	s.runFacts(ctx, committed, gatedStartedFacts(started, rest, transitioned))
 	return nil
 }
 
@@ -349,9 +351,11 @@ func ReconcileLostKey(s *PRState, name, observedAt string) EffectKey {
 // annotation Flux lost (the watcher saw a Kustomization handle a value older
 // than the recorded request): it patches only that Kustomization with its
 // recorded requestedAt. A PR no longer in rollout, or a name with no
-// recorded request, does nothing. Legacy owners record the intended
-// re-patch; a retryable failure schedules the delayed reconcile retry.
+// recorded request, does nothing. A retryable failure schedules the delayed reconcile retry.
 func (s *PRObjectService) HandleReconcileLost(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleReconcileLost", ev.EffectsOwner); err != nil {
+		return err
+	}
 	name := strings.TrimSpace(ev.JobName)
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || name == "" {
 		return nil
@@ -365,6 +369,6 @@ func (s *PRObjectService) HandleReconcileLost(ctx restate.ObjectContext, ev PREv
 		return nil
 	}
 	key := ReconcileLostKey(st, name, ev.ObservedReconcileAt)
-	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey(), owner: ev.EffectsOwner, requests: map[string]KustomizationRequest{name: req}})
+	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey(), requests: map[string]KustomizationRequest{name: req}})
 	return nil
 }
