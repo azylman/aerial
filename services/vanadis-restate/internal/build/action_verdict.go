@@ -110,6 +110,9 @@ func (b *BuildObject) applyChunkVerdict(ctx context.Context, buildID string, req
 	if chunks[idx].Mode != chunkModeAction {
 		return "", fmt.Errorf("%w: chunk %s is not an action chunk", store.ErrInvalidBuildInput, req.ChunkID)
 	}
+	if store.ActionRepairInFlight(chunks[idx]) {
+		return "", fmt.Errorf("%w: repair PR not deployed yet for chunk %s", store.ErrBuildConflict, req.ChunkID)
+	}
 	res, err := b.store.CompleteActionChunk(ctx, req.ChunkID, req.DispatchID)
 	if err != nil {
 		return "", err

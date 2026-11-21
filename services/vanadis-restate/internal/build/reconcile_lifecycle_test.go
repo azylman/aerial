@@ -207,18 +207,19 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 		readFailure                    bool
 		prNumber                       int
 		nilEvidence                    bool
+		wantStatus                     string
 	}{
-		{"failure prevents reconciliation", "running", "deploying", true, true, "pr", false, 0, false},
-		{"success completes before reconciliation", "running", "deploying", false, false, "pr", false, 0, false},
-		{"completed metadata under failed build", "failed", "completed", false, false, "pr", false, 0, false},
-		{"cancelled build guarded", "cancelled", "deploying", true, false, "pr", false, 0, false},
-		{"cancelled chunk guarded", "running", "cancelled", true, false, "pr", false, 0, false},
-		{"failed chunk guarded", "running", "failed", true, false, "pr", false, 0, false},
-		{"read error prevents reconciliation", "running", "deploying", false, true, "pr", true, 0, false},
-		{"action compatibility", "running", "running", false, false, "action", false, 0, false},
-		{"action persistence failure", "running", "running", true, true, "action", false, 0, false},
-		{"attached action evidence", "running", "deploying", false, false, "action", false, 42, false},
-		{"attached action nil evidence", "running", "deploying", false, false, "action", false, 42, true},
+		{"failure prevents reconciliation", "running", "deploying", true, true, "pr", false, 0, false, "completed"},
+		{"success completes before reconciliation", "running", "deploying", false, false, "pr", false, 0, false, "completed"},
+		{"completed metadata under failed build", "failed", "completed", false, false, "pr", false, 0, false, "completed"},
+		{"cancelled build guarded", "cancelled", "deploying", true, false, "pr", false, 0, false, "completed"},
+		{"cancelled chunk guarded", "running", "cancelled", true, false, "pr", false, 0, false, "completed"},
+		{"failed chunk guarded", "running", "failed", true, false, "pr", false, 0, false, "completed"},
+		{"read error prevents reconciliation", "running", "deploying", false, true, "pr", true, 0, false, "completed"},
+		{"action compatibility", "running", "running", false, false, "action", false, 0, false, "completed"},
+		{"action persistence failure", "running", "running", true, true, "action", false, 0, false, "completed"},
+		{"attached action evidence", "running", "deploying", false, false, "action", false, 42, false, "running"},
+		{"attached action nil evidence", "running", "deploying", false, false, "action", false, 42, true, "running"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -253,7 +254,7 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 			if tc.buildStatus == "cancelled" || tc.chunkStatus == "cancelled" || tc.chunkStatus == "failed" {
 				return
 			}
-			assert.Equal(t, "completed", observed.observed.Status)
+			assert.Equal(t, tc.wantStatus, observed.observed.Status)
 			if tc.mode != "pr" && tc.prNumber == 0 {
 				return
 			}
@@ -359,6 +360,9 @@ func (db *deploymentEvidenceDB) Exec(ctx context.Context, query string, args ...
 			chunk.RolloutState = &evidence
 		}
 		chunk.Status = "completed"
+		if strings.Contains(query, "SET status = 'running'") {
+			chunk.Status = "running"
+		}
 	}
 	if strings.Contains(query, "SET status = 'completed'") {
 		chunk.Status = "completed"
