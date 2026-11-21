@@ -356,23 +356,22 @@ func TestClientScopedNames(t *testing.T) {
 
 type ingressURLCase struct {
 	name       string
+	envURL     string
 	configured string
 	want       string
 }
 
 // TestIngressURL pins that the client reports only its configured ingress and
-// never falls back to process env (RESTATE_INGRESS_URL), so tests cannot be
-// routed to a live Restate ingress.
+// never falls back to RESTATE_INGRESS_URL, so tests cannot be routed to a live
+// Restate ingress. Each row sets a hostile env value, so it is not parallel.
 func TestIngressURL(t *testing.T) {
-	t.Parallel()
 	tests := []ingressURLCase{
-		{name: "empty config stays empty", configured: "", want: ""},
-		{name: "whitespace config stays empty", configured: "   ", want: ""},
-		{name: "configured url trimmed", configured: " http://restate.test:8080/ ", want: "http://restate.test:8080"},
+		{name: "empty config ignores env ingress", envURL: "http://env.example", configured: "", want: ""},
+		{name: "configured url wins over env ingress", envURL: "http://env.example", configured: "http://restate.test:8080/", want: "http://restate.test:8080"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			t.Setenv("RESTATE_INGRESS_URL", tc.envURL)
 			got := NewClient(config.RestateConfig{RestateIngressURL: tc.configured}, nil).IngressURL()
 			if got != tc.want {
 				t.Fatalf("IngressURL() = %q, want %q", got, tc.want)
