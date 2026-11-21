@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,6 +141,17 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 		wantLaunched map[string]bool
 		wantErr      bool
 		wantCleared  bool
+		// Dispatch deferral lease.
+		dispatchErr        error
+		priorDeferrals     map[string]model.DispatchDeferral
+		priorSeq           int
+		tick               int
+		wantSends          []deferredSend
+		wantDeferralCounts map[string]int
+		wantSeq            int
+		wantReserved       []string
+		wantFailed         []string
+		failErr            error
 	}{
 		{
 			name:  "successful_reconcile_running",
@@ -147,12 +159,18 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			chunks: []model.VanadisChunk{
 				{ID: "c1", BuildID: "b-trans", Status: "pending", Repo: "aerial", Mode: "pr"},
 			},
-			stateLaunch: map[string]bool{"c0": true},
-			wantStatus:  "running",
-			wantChunks:  []string{"c1"},
-			wantErr:     false,
-			wantCleared: false,
+			stateLaunch:  map[string]bool{"c0": true},
+			wantStatus:   "running",
+			wantChunks:   []string{"c1"},
+			wantReserved: []string{"c1"},
 		},
+		{name: "deferred_launch_stays_pending_and_starts_lease_chain", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: executor.ErrDispatchActive, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 1}}, wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 1},
+		{name: "deferred_launch_while_chain_pending_schedules_nothing", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: executor.ErrDispatchActive, priorSeq: 3, wantStatus: "running", wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 3},
+		{name: "chain_tick_schedules_next_tick", build: runningBuild, chunks: leaseChunks("running", 0), dispatchErr: executor.ErrDispatchActive, priorSeq: 3, tick: 3, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 4}}, wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 4},
+		{name: "lease_expiry_fails_pending_action_chunk_resumably", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: executor.ErrDispatchActive, priorDeferrals: expiredLease("c1"), priorSeq: 40, tick: 40, wantStatus: statusFailed, wantReserved: []string{"c1"}, wantFailed: []string{"c1 vanadis-c1-turn-0 RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"}},
+		{name: "lease_expiry_fails_running_retry_generation", build: runningBuild, chunks: leaseChunks("running", 2), dispatchErr: executor.ErrDispatchActive, priorDeferrals: expiredLease("dispatch:vanadis-c1-turn-2"), wantStatus: statusFailed, wantFailed: []string{"c1 vanadis-c1-turn-2 RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"}},
+		{name: "lease_expiry_fail_write_error_retries_step", build: runningBuild, chunks: leaseChunks("running", 0), dispatchErr: executor.ErrDispatchActive, priorDeferrals: expiredLease("c1"), failErr: errors.New("database unavailable"), wantErr: true},
+		{name: "accepted_launch_clears_lease", build: runningBuild, chunks: leaseChunks("pending", 0), priorDeferrals: expiredLease("c1"), priorSeq: 5, wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}},
 		{
 			name:  "successful_mutate_completed_clears_state",
 			build: runningBuild,
@@ -165,7 +183,6 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			},
 			stateLaunch: map[string]bool{"c0": true},
 			wantStatus:  statusCompleted,
-			wantErr:     false,
 			wantCleared: true,
 		},
 		{
@@ -177,8 +194,6 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			stateLaunch:  map[string]bool{"c0": true},
 			wantStatus:   statusFailed,
 			wantLaunched: map[string]bool{"c0": true},
-			wantErr:      false,
-			wantCleared:  false,
 		},
 		{
 			name:  "terminal_cancelled_clears_state",
@@ -187,14 +202,12 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 				{ID: "c1", BuildID: "b-trans", Status: statusCancelled, Repo: "aerial", Mode: "pr"},
 			},
 			wantStatus:  statusCancelled,
-			wantErr:     false,
 			wantCleared: true,
 		},
 		{
 			name:        "build_not_found_reports_not_found",
 			notFound:    true,
 			wantStatus:  statusNotFound,
-			wantErr:     false,
 			wantCleared: true,
 		},
 		{
@@ -220,8 +233,9 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			if tc.notFound {
 				script = dbScript{row: errRow(store.ErrBuildNotFound)}
 			}
-			st, _ := script.open()
-			eri := &mockEriClient{}
+			raw, _ := script.open()
+			st := &leaseStore{VanadisStore: raw, failErr: tc.failErr}
+			eri := &mockEriClient{dispatchFn: func(context.Context, executor.BrainDispatchRequest) error { return tc.dispatchErr }}
 			bus := pubsub.NewMemoryBus()
 			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
 			bo := NewBuildObject("", nil)
@@ -229,14 +243,14 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 				bo = bo.WithAuthority(st, exec)
 			}
 			rt := newFakeObjectRuntime("b-trans")
-			if tc.stateLaunch != nil {
-				rt.state = &model.BuildObjectState{Build: tc.build, Launched: tc.stateLaunch}
+			if tc.stateLaunch != nil || tc.priorDeferrals != nil || tc.priorSeq != 0 {
+				rt.state = &model.BuildObjectState{Build: tc.build, Launched: tc.stateLaunch, DispatchDeferrals: tc.priorDeferrals, DeferralReconcileSeq: tc.priorSeq}
 			}
 			stepName := "reconcile"
 			if tc.mutation != nil {
 				stepName = "mutate"
 			}
-			res, err := bo.executeObjectTransition(rt, stepName, tc.mutation)
+			res, err := bo.executeObjectTransitionTick(rt, stepName, tc.mutation, tc.tick)
 			if tc.wantErr {
 				assert.Error(t, err)
 				return
@@ -248,8 +262,83 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			if tc.wantLaunched != nil {
 				assert.Equal(t, tc.wantLaunched, rt.launched)
 			}
+			assert.Equal(t, tc.wantSends, rt.deferredSends)
+			assert.Equal(t, tc.wantReserved, st.reserved)
+			assert.Equal(t, tc.wantFailed, st.failed)
+			seq, counts := deferralSummary(rt.state)
+			assert.Equal(t, tc.wantSeq, seq)
+			assert.Equal(t, tc.wantDeferralCounts, counts)
 		})
 	}
+}
+
+// leaseChunks is one action chunk at the given status and retry generation.
+func leaseChunks(status string, nudges int) []model.VanadisChunk {
+	return []model.VanadisChunk{{ID: "c1", BuildID: "b-trans", Status: status, Repo: "aerial", Mode: "action", StallNudges: nudges}}
+}
+
+// expiredLease is a deferral that began well over ten minutes ago.
+func expiredLease(key string) map[string]model.DispatchDeferral {
+	return map[string]model.DispatchDeferral{key: {FirstDeferredAt: time.Date(2026, 11, 21, 3, 0, 0, 0, time.UTC), Count: 40}}
+}
+
+// deferralSummary reduces state to its chain seq and per-launch counts.
+func deferralSummary(state *model.BuildObjectState) (int, map[string]int) {
+	if state == nil || len(state.DispatchDeferrals) == 0 {
+		return deferralSeqOf(state), nil
+	}
+	counts := make(map[string]int, len(state.DispatchDeferrals))
+	for key, entry := range state.DispatchDeferrals {
+		counts[key] = entry.Count
+	}
+	return state.DeferralReconcileSeq, counts
+}
+
+func deferralSeqOf(state *model.BuildObjectState) int {
+	if state == nil {
+		return 0
+	}
+	return state.DeferralReconcileSeq
+}
+
+// leaseStore records launch reservations and failures and reflects them in
+// later reads, like the PostgreSQL authority does.
+type leaseStore struct {
+	store.VanadisStore
+
+	reserved   []string
+	failed     []string
+	reserveErr error
+	failErr    error
+	skipFail   bool
+}
+
+func (s *leaseStore) ReserveChunkForLaunch(_ context.Context, chunkID string) error {
+	s.reserved = append(s.reserved, chunkID)
+	return s.reserveErr
+}
+
+func (s *leaseStore) FailChunk(_ context.Context, chunkID, reason, dispatchID string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
+	if s.failErr != nil || s.skipFail {
+		return nil, nil, false, s.failErr
+	}
+	s.failed = append(s.failed, chunkID+" "+dispatchID+" "+reason)
+	return nil, nil, true, nil
+}
+
+func (s *leaseStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	b, chunks, err := s.VanadisStore.GetBuild(ctx, buildID)
+	if err != nil || b == nil {
+		return b, chunks, err
+	}
+	for i := range chunks {
+		for _, f := range s.failed {
+			if strings.HasPrefix(f, chunks[i].ID+" ") {
+				chunks[i].Status, b.Status = statusFailed, statusFailed
+			}
+		}
+	}
+	return b, chunks, nil
 }
 
 func TestBuildObject_Transitions_WidgetSyncTable(t *testing.T) {
@@ -993,7 +1082,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
 			prior := &model.BuildObjectState{Build: b}
 			for range 2 {
-				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil)
+				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil, transitionAttempt{})
 				require.Error(t, err)
 			}
 			assert.Equal(t, tc.wantCalls, widgetCalls)
