@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -181,10 +182,9 @@ func TestBuildObject_CreateRecordsOwnRunner(t *testing.T) {
 		wantAgent  string
 		wantRunner string
 	}{
-		{name: "default object runs default build", wantAgent: "aerial", wantRunner: "aerial"},
-		{name: "sibling object runs its own build", ownAgent: "Agent-Alpha", wantAgent: "Agent-Alpha", wantRunner: "agent-alpha"},
-		{name: "request agent sets owner never runner", ownAgent: "", reqAgent: "agent-beta", wantAgent: "agent-beta", wantRunner: "aerial"},
-		{name: "sibling runner keeps foreign owner", ownAgent: "agent-alpha", reqAgent: "agent-beta", wantAgent: "agent-beta", wantRunner: "agent-alpha"},
+		{name: "default object runs unowned build", wantAgent: "aerial", wantRunner: "aerial"},
+		{name: "default object runs default-owned build", reqAgent: "aerial", wantAgent: "aerial", wantRunner: "aerial"},
+		{name: "sibling object runs its own build", ownAgent: "Agent-Alpha", reqAgent: "agent-alpha", wantAgent: "agent-alpha", wantRunner: "agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,6 +199,101 @@ func TestBuildObject_CreateRecordsOwnRunner(t *testing.T) {
 			assert.Equal(t, tc.wantRunner, st.created.RunnerAgent)
 			require.NotNil(t, rt.state)
 			assert.Equal(t, tc.wantRunner, rt.state.Build.RunnerAgent)
+		})
+	}
+}
+
+func TestBuildObject_CreateRefusesForeignOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		ownAgent string
+		reqAgent string
+	}{
+		{name: "default object refuses sibling-owned build", reqAgent: "agent-beta"},
+		{name: "sibling object refuses unowned build", ownAgent: "agent-alpha"},
+		{name: "sibling object refuses default-owned build", ownAgent: "agent-alpha", reqAgent: "aerial"},
+		{name: "sibling object refuses other sibling build", ownAgent: "agent-alpha", reqAgent: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := &createCaptureStore{}
+			rt := newFakeObjectRuntime("b1")
+			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
+			req := CreateBuildRequest{Agent: tc.reqAgent, ThreadID: "t1", Objective: "o", Chunks: []store.CreateChunkInput{{ID: "c1", Title: "c", Mode: "action", Instructions: "i", DependsOn: []string{}}}}
+			_, err := bo.Create(makeObjectMockContext(t, "b1"), req)
+			var terminal restate.TerminalError
+			require.ErrorAs(t, err, &terminal)
+			assert.Equal(t, restate.Code(400), terminal.Code())
+			assert.Empty(t, st.created.ID)
+			assert.Nil(t, rt.state)
+			assert.Empty(t, rt.stepsRun)
+		})
+	}
+}
+
+func TestWithBuildOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		ctxAgent  string
+		build     *model.VanadisBuild
+		wantAgent string
+	}{
+		{name: "nil build keeps context agent", ctxAgent: "aerial", wantAgent: "aerial"},
+		{name: "unowned build keeps context agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: " "}, wantAgent: "aerial"},
+		{name: "owner overrides runner agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: "agent-alpha", RunnerAgent: "aerial"}, wantAgent: "agent-alpha"},
+		{name: "owner set on bare context", build: &model.VanadisBuild{Agent: "agent-beta"}, wantAgent: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			if tc.ctxAgent != "" {
+				ctx = ericlient.WithAgent(ctx, tc.ctxAgent)
+			}
+			assert.Equal(t, tc.wantAgent, ericlient.AgentFromContext(withBuildOwner(ctx, tc.build)))
+		})
+	}
+}
+
+// removalStore answers the chunk-removal step for a build owned by owner.
+type removalStore struct {
+	store.VanadisStore
+
+	owner string
+}
+
+func (s *removalStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	return &model.VanadisBuild{ID: buildID, Agent: s.owner, RunnerAgent: "aerial"}, nil, nil
+}
+
+func (*removalStore) RemoveChunk(_ context.Context, buildID, chunkRef string) (*model.VanadisChunk, []model.VanadisChunk, error) {
+	return &model.VanadisChunk{ID: chunkRef, BuildID: buildID}, nil, nil
+}
+
+func TestBuildObject_ChunkRemovalCancelsOnOwnerSessions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		owner     string
+		wantAgent string
+	}{
+		{name: "pinned sibling build cancels on owner", owner: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "default build cancels on default agent", owner: "aerial", wantAgent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &mockEriClient{}
+			exec := executor.NewExecutor("", eri, pubsub.NewMemoryBus(), "test-token", nil)
+			rt := newFakeObjectRuntime("b1")
+			rt.runStepErr = errors.New("stop after removal")
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(&removalStore{owner: tc.owner}, exec)
+			_ = bo.executeChunkRemoval(makeObjectMockContext(t, "b1"), rt, "b1", "c1")
+			assert.Equal(t, "c1", eri.lastCancel)
+			assert.Equal(t, tc.wantAgent, eri.cancelAgent)
 		})
 	}
 }

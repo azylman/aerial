@@ -176,7 +176,7 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 		deploying.RolloutState = mutation.RolloutState
 	}
 	if b.executor != nil && !alreadyCompleted {
-		if cErr := b.executor.CancelChunkDispatch(ctx, mutation.ChunkID); cErr != nil {
+		if cErr := b.executor.CancelChunkDispatch(withBuildOwner(ctx, build), mutation.ChunkID); cErr != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", mutation.ChunkID, "error", cErr)
 		}
 		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {

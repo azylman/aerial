@@ -288,7 +288,7 @@ func TestDeliverStatusWidgetSinking(t *testing.T) {
 				msgs:      tc.msgs,
 			}
 
-			id, err := DeliverStatusWidget(mock, tc.req, now, nil)
+			id, err := DeliverStatusWidget(mock, tc.req, now)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectID, id)
 			if tc.expectDeleted {
@@ -309,7 +309,7 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	require.NoError(t, nErr)
 	_, dErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
 	require.Error(t, dErr)
-	assert.Contains(t, dErr.Error(), "discord widget sender is nil")
+	require.ErrorIs(t, dErr, ErrNoSenderForAgent)
 
 	assert.Equal(t, "", d.redirectChannelIfNoBuildUpdates(""))
 	assert.Equal(t, "fallback", d.resolveChannelID("", "fallback"))
@@ -319,7 +319,8 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	sess, err := discordgo.New("Bot fake-token")
 	require.NoError(t, err)
 	dWithSession := &DiscordWidgetDeliverer{
-		session: sess,
+		session:      sess,
+		agentSenders: map[string]DiscordWidgetSender{"aerial": sess},
 	}
 	_, sErr := dWithSession.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{})
 	require.Error(t, sErr)
@@ -356,12 +357,12 @@ func TestDeliverDirectMessage(t *testing.T) {
 			errContain:   "discord widget deliverer is nil",
 		},
 		{
-			name:       "nil sender returns error",
+			name:       "missing sender returns error",
 			nilSender:  true,
 			channelID:  "123456",
 			content:    "alert",
 			wantErr:    true,
-			errContain: "discord widget sender is nil",
+			errContain: "no discord sender configured for agent \"aerial\"",
 		},
 		{
 			name:       "empty channel is no-op",
@@ -408,16 +409,16 @@ func TestDeliverDirectMessage(t *testing.T) {
 			t.Parallel()
 			var d *DiscordWidgetDeliverer
 			var mock *mockWidgetSender
-			var sender DiscordWidgetSender
+			senders := map[string]DiscordWidgetSender{}
 
 			if !tc.nilDeliverer {
 				if !tc.nilSender {
 					mock = &mockWidgetSender{sendErr: tc.sendErr}
-					sender = mock
+					senders["aerial"] = mock
 				}
 				d = &DiscordWidgetDeliverer{
-					sender: sender,
-					nowFn:  func() time.Time { return now },
+					agentSenders: senders,
+					nowFn:        func() time.Time { return now },
 					channelPolicyResolver: func(channelID string) (bool, string) {
 						return tc.noBuildUpdates, tc.sysChannel
 					},
@@ -870,7 +871,7 @@ func TestDelivererWithNow(t *testing.T) {
 	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-clock"}}
 	d, err := NewDiscordWidgetDeliverer("", "")
 	require.NoError(t, err)
-	d.sender = mockSender
+	d.SetAgentSender("aerial", mockSender)
 	d.nowFn = func() time.Time { return fixedTime }
 
 	req := ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build Clock @everyone"}
@@ -1140,7 +1141,9 @@ func TestNewDiscordWidgetDelivererTokens(t *testing.T) {
 			}
 			require.NotNil(t, d.session)
 			assert.Same(t, d.session, d.agentSenders[tc.wantOwner])
-			assert.Same(t, d.session, d.senderForAgent(tc.wantOwner))
+			got, sErr := d.senderForAgent(tc.wantOwner)
+			require.NoError(t, sErr)
+			assert.Same(t, d.session, got)
 		})
 	}
 }
@@ -1175,8 +1178,8 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 				sendMsg: &discordgo.Message{ID: "msg-sync"},
 			}
 			deliverer := &DiscordWidgetDeliverer{
-				sender: mock,
-				nowFn:  func() time.Time { return now },
+				agentSenders: map[string]DiscordWidgetSender{"aerial": mock},
+				nowFn:        func() time.Time { return now },
 			}
 
 			chStarted := make(chan struct{})
@@ -1196,7 +1199,7 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 					mu.Unlock()
 				},
 			}
-			deliverer.sender = firstSender
+			deliverer.SetAgentSender("aerial", firstSender)
 
 			doneFirst := make(chan struct{})
 			go func() {
@@ -1217,7 +1220,7 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 					mu.Unlock()
 				},
 			}
-			deliverer.sender = secondSender
+			deliverer.SetAgentSender("aerial", secondSender)
 
 			doneSecond := make(chan struct{})
 			go func() {
@@ -1277,26 +1280,40 @@ func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
 			"agent-alpha": mockAlpha,
 		},
 	}
+	alphaOnly := &DiscordWidgetDeliverer{
+		agentSenders: map[string]DiscordWidgetSender{"agent-alpha": mockAlpha},
+	}
+	nilEntry := &DiscordWidgetDeliverer{
+		agentSenders: map[string]DiscordWidgetSender{"aerial": nil},
+	}
 
 	tests := []struct {
 		name       string
 		deliverer  *DiscordWidgetDeliverer
 		agent      string
 		wantSender DiscordWidgetSender
+		wantErr    bool
 	}{
-		{name: "nil deliverer returns nil", deliverer: nil, agent: "aerial", wantSender: nil},
+		{name: "nil deliverer errors", deliverer: nil, agent: "aerial", wantErr: true},
 		{name: "empty agent resolves aerial", deliverer: d, agent: "", wantSender: mockAerial},
 		{name: "aerial agent resolves aerial", deliverer: d, agent: "aerial", wantSender: mockAerial},
+		{name: "agent is normalized", deliverer: d, agent: " Agent-Alpha ", wantSender: mockAlpha},
 		{name: "agent-alpha resolves alpha", deliverer: d, agent: "agent-alpha", wantSender: mockAlpha},
-		{name: "unknown agent falls back to aerial", deliverer: d, agent: "agent-unknown", wantSender: mockAerial},
+		{name: "unknown agent never falls back to aerial", deliverer: d, agent: "agent-unknown", wantErr: true},
+		{name: "default agent never falls back to a sibling", deliverer: alphaOnly, agent: "", wantErr: true},
+		{name: "nil sender entry errors", deliverer: nilEntry, agent: "aerial", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := tc.deliverer.senderForAgent(tc.agent)
-			if got != tc.wantSender {
-				t.Fatalf("senderForAgent(%q) = %v, want %v", tc.agent, got, tc.wantSender)
+			got, err := tc.deliverer.senderForAgent(tc.agent)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrNoSenderForAgent)
+				assert.Nil(t, got)
+				return
 			}
+			require.NoError(t, err)
+			assert.Same(t, tc.wantSender, got)
 		})
 	}
 
@@ -1305,13 +1322,71 @@ func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
 
 	newD := &DiscordWidgetDeliverer{}
 	newD.SetAgentSender("", mockAerial)
-	if got := newD.senderForAgent("aerial"); got != mockAerial {
-		t.Fatalf("expected aerial sender after SetAgentSender, got %v", got)
-	}
+	got, err := newD.senderForAgent("aerial")
+	require.NoError(t, err)
+	assert.Same(t, mockAerial, got)
 
 	newD.SetAgentSender("agent-beta", mockAlpha)
-	if got := newD.senderForAgent("agent-beta"); got != mockAlpha {
-		t.Fatalf("expected agent-beta sender after SetAgentSender, got %v", got)
+	got, err = newD.senderForAgent("agent-beta")
+	require.NoError(t, err)
+	assert.Same(t, mockAlpha, got)
+}
+
+func newAlphaOnlyDeliverer(alpha DiscordWidgetSender, now time.Time) *DiscordWidgetDeliverer {
+	return &DiscordWidgetDeliverer{
+		agentSenders:          map[string]DiscordWidgetSender{"agent-alpha": alpha},
+		nowFn:                 func() time.Time { return now },
+		channelPolicyResolver: func(string) (bool, string) { return false, "" },
+		resolvedChannels:      make(map[string]cachedResolvedChannel),
+		channelMetaCache:      make(map[string]cachedChannelMeta),
+	}
+}
+
+func TestDeliverStatusWidget_NoCrossAgentSender(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		agent string
+	}{
+		{name: "unconfigured sibling agent", agent: "agent-beta"},
+		{name: "empty agent on sibling runner", agent: ""},
+		{name: "default agent on sibling runner", agent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alpha := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-alpha"}}
+			d := newAlphaOnlyDeliverer(alpha, now)
+			_, err := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{Agent: tc.agent, ChannelID: "123456", MessageID: "msg-old", Title: "Build"})
+			require.ErrorIs(t, err, ErrNoSenderForAgent)
+			assert.Nil(t, alpha.lastSendData)
+			assert.Nil(t, alpha.lastEditData)
+			assert.Empty(t, alpha.lastDeleteID)
+		})
+	}
+}
+
+func TestDeliverDirectMessageWithAgent_NoCrossAgentSender(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		agent string
+	}{
+		{name: "unconfigured sibling agent", agent: "agent-beta"},
+		{name: "empty agent on sibling runner", agent: ""},
+		{name: "default agent on sibling runner", agent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alpha := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-alpha"}}
+			d := newAlphaOnlyDeliverer(alpha, now)
+			err := d.DeliverDirectMessageWithAgent(context.Background(), tc.agent, "123456", "hello")
+			require.ErrorIs(t, err, ErrNoSenderForAgent)
+			assert.Nil(t, alpha.lastSendData)
+		})
 	}
 }
 

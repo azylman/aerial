@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -581,6 +582,7 @@ type mockEriClient struct {
 
 	lastDispatch *executor.BrainDispatchRequest
 	lastCancel   string
+	cancelAgent  string
 	lastThreadID string
 	lastPrompt   string
 	lastWidget   *executor.StatusWidgetRequest
@@ -602,6 +604,7 @@ func (m *mockEriClient) Dispatch(ctx context.Context, req executor.BrainDispatch
 
 func (m *mockEriClient) CancelDispatch(ctx context.Context, chunkID string) error {
 	m.lastCancel = chunkID
+	m.cancelAgent = ericlient.AgentFromContext(ctx)
 	if m.cancelFn != nil {
 		return m.cancelFn(ctx, chunkID)
 	}
