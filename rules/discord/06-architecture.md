@@ -48,7 +48,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`victoriatraces`**: OTLP trace store (`:10428`, 30-day retention) receiving gateway and service spans. LAN-only (never on the edge gateway).
   - **`vmalert`**: Alert rule evaluator (`:8880`) assessing recording and alerting anomaly rules against VictoriaMetrics.
   - **`grafana`**: Cyberpunk-themed visual telemetry dashboards.
-  - **`senses`**: Unified Rust CUDA ONNX Runtime service handling speech recognition (NeMo Parakeet TDT 0.6B v2 STT), voice synthesis (Kokoro-82M TTS), vector embeddings (BAAI/bge-small-en-v1.5), speaker verification (ECAPA-TDNN), and object detection (YOLO11n).
+  - **`senses`**: Unified Rust CUDA ONNX Runtime service handling speech recognition (NeMo Parakeet TDT 0.6B v2 STT), voice synthesis (Kokoro-82M TTS), vector embeddings (BAAI/bge-small-en-v1.5), and speaker verification (ECAPA-TDNN).
   - **`pjev`**: Local CUDA GGUF LLM and embedding inference service serving System-1 ambient triage (`/v1/systemone`).
   - **`vision`**: Camera vision and multimodal event orchestration service.
   - **`prospera`**: Autonomous PSTN voice call and SMS interaction service.
@@ -66,7 +66,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/vanadis-restate`, `services/vanadis-nats`, `services/migrator`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/kubernetes-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/` including `pkg/pubsub` and `pkg/tracing`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/vanadis-restate`, `services/vanadis-nats`, `services/migrator`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/infisical-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/` including `pkg/pubsub` and `pkg/tracing`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.

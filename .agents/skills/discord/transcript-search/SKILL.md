@@ -134,5 +134,5 @@ transcript-search search "atlas migration validate" --json | jq '.steps[] | {sta
 
 - **Zero Arbitrary Transcript Scrapes**: Avoid running heavy `find` or `grep` loops against `/data/runtimes/discord/.gemini/antigravity-cli/brain/*/transcript.jsonl`. Always prefer `transcript-search` for fast, indexed queries and step-window zoom (`transcript-search get`).
 - **Link Navigation**: Results include `[conv_id](conversation://<conv_id>)` links. Use these IDs directly if you need to read the full transcript file on disk (`<appDataDir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`).
-- **HTTP Only**: `transcript-search` talks only to the local eri daemon over HTTP (`/api/transcripts/search`, `/steps`, `/stats`). If eri is restarting, the command fails; retry shortly instead of querying PostgreSQL directly.
+- **HTTP Only**: `transcript-search` talks only to the transcripts service over HTTP, proxied by the eri daemon (`/api/transcripts/search`, `/steps`, `/stats`). If either is restarting, the command fails; retry shortly instead of querying PostgreSQL directly.
 - **Cross-Bot Sessions**: A session labelled with another stack lives on that bot's disk, so its raw transcript file is not available locally; use `transcript-search get --stack <stack>` to read its steps.

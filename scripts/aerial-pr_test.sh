@@ -1,1 +1,0 @@
-test-aerial-pr.sh
