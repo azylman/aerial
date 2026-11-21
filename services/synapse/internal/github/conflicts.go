@@ -51,15 +51,14 @@ func UpdatePRBranch(ctx context.Context, client *Client, repo string, prNumber i
 	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK {
 		return false, nil
 	}
+	if err := classifyForbidden(ctx, resp, req.URL.Path); err != nil {
+		return false, err
+	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if readErr != nil {
 		body = nil
 	}
 	bodyLower := strings.ToLower(string(body))
-	if resp.StatusCode == http.StatusForbidden {
-		remaining := resp.Header.Get("X-Ratelimit-Remaining")
-		return false, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
-	}
 	if resp.StatusCode == http.StatusConflict || (resp.StatusCode == http.StatusUnprocessableEntity && strings.Contains(bodyLower, "conflict")) {
 		return true, nil
 	}
