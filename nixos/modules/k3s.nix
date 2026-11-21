@@ -25,6 +25,11 @@ in
       default = true;
       description = "Enable Spegel embedded P2P OCI registry mirror (server only)";
     };
+    dockerHubMirrors = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "https://mirror.gcr.io" ];
+      description = "Upstream registry mirror endpoints for docker.io in /etc/rancher/k3s/registries.yaml";
+    };
     nodeLabels = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -43,6 +48,19 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    environment.etc."rancher/k3s/registries.yaml" = lib.mkIf (cfg.dockerHubMirrors != [ ] || cfg.embeddedRegistry) {
+      text =
+        if cfg.dockerHubMirrors == [ ] then ''
+          mirrors:
+            docker.io:
+        '' else ''
+          mirrors:
+            docker.io:
+              endpoint:
+          ${lib.concatMapStrings (m: "      - \"${m}\"\n") cfg.dockerHubMirrors}
+        '';
+    };
+
     services.k3s = {
       enable = true;
       role = cfg.role;
