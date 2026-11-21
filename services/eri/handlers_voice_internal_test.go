@@ -89,13 +89,9 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 		{"empty prompt", http.MethodPost, strings.NewReader(`{"prompt":""}`), "", http.StatusBadRequest, "'prompt' field is required"},
 		{"malformed JSON", http.MethodPost, strings.NewReader(`{invalid-json`), "", http.StatusBadRequest, "Invalid JSON payload"},
 		{"body read error", http.MethodPost, &errReadCloser{readErr: errors.New("simulated body read error")}, "", http.StatusBadRequest, "Failed to read request body"},
-		{"conversation_id fallback", http.MethodPost, strings.NewReader(`{"conversation_id":"conv-123","prompt":"hello"}`), "", http.StatusOK, ""},
 		{"missing session_id", http.MethodPost, strings.NewReader(`{"prompt":"hello"}`), "", http.StatusBadRequest, "session_id"},
-		{"node_id provided", http.MethodPost, strings.NewReader(`{"prompt":"hello","node_id":"touch-kiosk-kitchen"}`), "", http.StatusOK, ""},
-		{"node_id priority", http.MethodPost, strings.NewReader(`{"prompt":"hello","node_id":"touch-kiosk-kitchen","session_id":"turn-123","conversation_id":"conv-456"}`), "", http.StatusOK, ""},
 		{"oversized device ID", http.MethodPost, strings.NewReader(fmt.Sprintf(`{"prompt":"hello","node_id":%q}`, strings.Repeat("a", 129))), "", http.StatusBadRequest, "exceeds 128 characters"},
 		{"control characters in device ID", http.MethodPost, strings.NewReader(`{"prompt":"hello","node_id":"dock\ninvalid"}`), "", http.StatusBadRequest, "contains invalid characters"},
-		{"body close error handled", http.MethodPost, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`), closeErr: errors.New("simulated close error")}, "", http.StatusOK, ""},
 	}
 
 	for _, tc := range tests {
@@ -124,125 +120,6 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	})
 }
 
-func newVoiceHandler(cfg queue.WorkerPoolConfig) (http.HandlerFunc, func()) {
-	if cfg.Store == nil {
-		cfg.Store = dbtest.NewFakeStore()
-	}
-	pool := queue.New(nil, cfg)
-	pool.Start()
-	return handleVoiceAsk(pool), pool.Stop
-}
-
-func runVoiceAskSSESuccess(t *testing.T) {
-	t.Helper()
-	store := dbtest.NewFakeStore()
-	handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-		Store: store,
-		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			if onStatus != nil {
-				onStatus("⚡ Checking smart lights...")
-			}
-			return "Lights have been turned off.", "sess-test-456", nil
-		},
-	})
-	defer stop()
-
-	w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"turn off the lights","session_id":"sess-test-456"}`), "Accept", "text/event-stream")
-	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") || w.Header().Get("X-Accel-Buffering") != "no" {
-		t.Fatalf("unexpected headers or status: code=%d, ct=%s", w.Code, w.Header().Get("Content-Type"))
-	}
-	body := w.Body.String()
-	for _, want := range []string{
-		"event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n",
-		"event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n",
-		"event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("missing SSE event %q in body:\n%s", want, body)
-		}
-	}
-
-	gotConvID, err := store.GetSessionID(context.Background(), "voice-sess-test-456")
-	if err != nil {
-		t.Fatalf("GetSessionID voice-sess-test-456 failed: %v", err)
-	}
-	if gotConvID != "sess-test-456" {
-		t.Errorf("persisted voice conversation id = %q, want %q", gotConvID, "sess-test-456")
-	}
-}
-
-func runVoiceAskSSESentenceStreaming(t *testing.T) {
-	t.Helper()
-	handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-			if onStatus != nil {
-				onStatus("⚡ Checking status...")
-			}
-			if onSentence != nil {
-				onSentence("Here is sentence one.")
-				onSentence("And here is sentence two.")
-			}
-			return "Here is sentence one. And here is sentence two.", "sess-stream-789", nil
-		},
-	})
-	defer stop()
-
-	w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"tell me two things","session_id":"sess-stream-789"}`), "Accept", "text/event-stream")
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w.Code)
-	}
-	body := w.Body.String()
-	for _, want := range []string{
-		"event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n",
-		"event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n",
-		"event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n",
-		"event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n",
-		"event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("missing SSE event %q in body:\n%s", want, body)
-		}
-	}
-	idxSent1 := strings.Index(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}")
-	idxSent2 := strings.Index(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}")
-	idxReply := strings.Index(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\"")
-	if idxSent1 == -1 || idxSent2 == -1 || idxReply == -1 || idxSent1 > idxSent2 || idxSent2 > idxReply {
-		t.Errorf("invalid event ordering: idxSent1=%d, idxSent2=%d, idxReply=%d", idxSent1, idxSent2, idxReply)
-	}
-}
-
-func runVoiceAskSSEErrors(t *testing.T) {
-	t.Helper()
-	jsonErrBefore := voiceTTFRSampleCount(t, "json", "error")
-	sseErrBefore := voiceTTFRSampleCount(t, "sse", "error")
-	hErr, stop := newVoiceHandler(queue.WorkerPoolConfig{
-		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-			return "", "", errors.New("deliberation timed out")
-		},
-	})
-	defer stop()
-
-	wJSON := runHTTP(hErr, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`), "Accept", "application/json")
-	if wJSON.Code != http.StatusInternalServerError || !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
-		t.Errorf("expected 500 error, got %d: %s", wJSON.Code, wJSON.Body.String())
-	}
-
-	hNil := handleVoiceAsk(nil)
-	if w := runHTTP(hNil, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`)); w.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for nil pool, got %d", w.Code)
-	}
-	if w := runHTTP(hNil, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`), "Accept", "text/event-stream"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "event: error") {
-		t.Errorf("expected 200 SSE error for nil pool, got %d: %s", w.Code, w.Body.String())
-	}
-
-	if got := voiceTTFRSampleCount(t, "json", "error") - jsonErrBefore; got != 2 {
-		t.Errorf("json/error voice TTFR samples delta = %d, want 2", got)
-	}
-	if got := voiceTTFRSampleCount(t, "sse", "error") - sseErrBefore; got != 1 {
-		t.Errorf("sse/error voice TTFR samples delta = %d, want 1", got)
-	}
-}
-
 // voiceTTFRSampleCount reads the observation count of one voice TTFR histogram series.
 func voiceTTFRSampleCount(t *testing.T, mode, status string) uint64 {
 	t.Helper()
@@ -261,81 +138,32 @@ func voiceTTFRSampleCount(t *testing.T, mode, status string) uint64 {
 	return m.GetHistogram().GetSampleCount()
 }
 
-func TestHandleVoiceAsk_SSE(t *testing.T) {
-	t.Run("Success", func(t *testing.T) {
-		runVoiceAskSSESuccess(t)
-	})
-
-	t.Run("SentenceStreaming", func(t *testing.T) {
-		runVoiceAskSSESentenceStreaming(t)
-	})
-
-	t.Run("CancelledContext", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				cancel()
-				if onStatus != nil {
-					onStatus("status after cancel")
-				}
-				return "done", "sess-1", nil
-			},
+func TestHandleVoiceAsk_NoRestateClient(t *testing.T) {
+	tests := []struct {
+		name       string
+		accept     string
+		body       string
+		wantStatus int
+		wantBody   string
+		wantMode   string
+	}{
+		{"json", "application/json", `{"prompt":"hello","session_id":"sess-nil"}`, http.StatusServiceUnavailable, `"error":"voice turns unavailable: restate client not configured"`, "json"},
+		{"sse", "text/event-stream", `{"prompt":"hello","session_id":"sess-nil-sse"}`, http.StatusOK, "event: error\ndata: {\"error\":\"voice turns unavailable: restate client not configured\"}\n\nevent: done", "sse"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := activeRestateIngressClient.Swap(nil)
+			defer activeRestateIngressClient.Store(orig)
+			before := voiceTTFRSampleCount(t, tc.wantMode, "error")
+			w := runHTTP(handleVoiceAsk(nil), http.MethodPost, "/voice/ask", strings.NewReader(tc.body), "Accept", tc.accept)
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantBody) {
+				t.Errorf("got %d %q, want %d containing %q", w.Code, w.Body.String(), tc.wantStatus, tc.wantBody)
+			}
+			if got := voiceTTFRSampleCount(t, tc.wantMode, "error") - before; got != 1 {
+				t.Errorf("%s/error TTFR samples delta = %d, want 1", tc.wantMode, got)
+			}
 		})
-		defer stop()
-
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
-		req.Header.Set("Accept", "text/event-stream")
-		rec := httptest.NewRecorder()
-		handler(rec, req)
-		if body := rec.Body.String(); body != "" {
-			t.Errorf("expected no SSE events after client cancel, got %q", body)
-		}
-	})
-
-	t.Run("VoiceRunnerError", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "", "", errors.New("synthetic voice failure")
-			},
-		})
-		defer stop()
-
-		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`), "Accept", "text/event-stream")
-		if !strings.Contains(w.Body.String(), "event: error") {
-			t.Errorf("expected SSE error event, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("JSON_Success", func(t *testing.T) {
-		store := dbtest.NewFakeStore()
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			Store: store,
-			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "The temperature is 72 degrees.", "sess-json-789", nil
-			},
-		})
-		defer stop()
-
-		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"what is the temperature?","session_id":"sess-json-789"}`), "Accept", "application/json")
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", w.Code)
-		}
-		var resp VoiceAskResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Reply != "The temperature is 72 degrees." || resp.SessionID != "sess-json-789" {
-			t.Fatalf("unexpected JSON response: %+v, err: %v", resp, err)
-		}
-		gotConvID, err := store.GetSessionID(context.Background(), "voice-sess-json-789")
-		if err != nil {
-			t.Fatalf("GetSessionID failed: %v", err)
-		}
-		if gotConvID != "sess-json-789" {
-			t.Errorf("persisted voice conversation id = %q, want %q", gotConvID, "sess-json-789")
-		}
-	})
-
-	t.Run("Errors", func(t *testing.T) {
-		runVoiceAskSSEErrors(t)
-	})
+	}
 }
 
 func TestPersistVoiceConversationID(t *testing.T) {

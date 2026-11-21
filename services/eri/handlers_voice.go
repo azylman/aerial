@@ -168,6 +168,8 @@ func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, clien
 	}
 }
 
+const errVoiceRestateUnavailable = "voice turns unavailable: restate client not configured"
+
 func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.WorkerPool, req VoiceAskRequest, sessionID string, reqStart time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -247,25 +249,8 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		return
 	}
 
-	if pool == nil {
-		emitSSE(sseEventError, map[string]string{jsonKeyError: "worker pool is uninitialized"})
-		emitSSE("done", map[string]any{})
-		return
-	}
-
-	reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus, onSentence)
-	if turnErr != nil {
-		if r.Context().Err() == nil {
-			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
-			emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizedErr})
-			emitSSE("done", map[string]any{})
-		}
-		return
-	}
-
-	emitSSE(sseEventReply, map[string]string{sseEventReply: reply, sseFieldConversationID: convID})
-	emitSSE("done", map[string]any{sseFieldConversationID: convID})
-	persistVoiceConversationID(r.Context(), pool, sessionID, convID)
+	emitSSE(sseEventError, map[string]string{jsonKeyError: errVoiceRestateUnavailable})
+	emitSSE("done", map[string]any{})
 }
 
 func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
@@ -327,27 +312,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if pool == nil {
-			metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: "worker pool is uninitialized"})
-			return
-		}
-
-		reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, nil)
-		if turnErr != nil {
-			metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
-			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: sanitizedErr})
-			return
-		}
-
-		metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))
-		httpkit.WriteJSON(w, http.StatusOK, VoiceAskResponse{
-			Reply:          reply,
-			ConversationID: convID,
-			SessionID:      convID,
-			NodeID:         req.NodeID,
-		})
-		persistVoiceConversationID(r.Context(), pool, sessionID, convID)
+		metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
+		httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{jsonKeyError: errVoiceRestateUnavailable})
 	}
 }
