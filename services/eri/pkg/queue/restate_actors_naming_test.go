@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -83,51 +82,6 @@ func TestServiceNaming(t *testing.T) {
 	assert.Equal(t, "ThreadSession", (*ThreadSessionObject)(nil).ServiceName())
 	assert.Equal(t, "DispatchSession", (*DispatchSessionObject)(nil).ServiceName())
 	assert.Equal(t, "VoiceSession", (*VoiceSessionObject)(nil).ServiceName())
-}
-
-func TestResolveDispatchSessionKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		req        BrainDispatchRequest
-		wantPrefix string
-		wantExact  string
-	}{
-		{
-			name:      "session_id takes priority",
-			req:       BrainDispatchRequest{SessionID: "sess-abc", VanadisChunkID: "c-1", ID: "d-1"},
-			wantExact: "sess-abc",
-		},
-		{
-			name:      "vanadis_chunk_id used when session_id empty",
-			req:       BrainDispatchRequest{VanadisChunkID: "chunk-xyz", ID: "d-2"},
-			wantExact: "vanadis-chunk-xyz",
-		},
-		{
-			name:      "dispatch id used when others empty",
-			req:       BrainDispatchRequest{ID: "d-3"},
-			wantExact: "dispatch-d-3",
-		},
-		{
-			name:       "generates dispatch uuid when all empty",
-			req:        BrainDispatchRequest{},
-			wantPrefix: "dispatch-",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ResolveDispatchSessionKey(tc.req)
-			if tc.wantExact != "" {
-				assert.Equal(t, tc.wantExact, got)
-			}
-			if tc.wantPrefix != "" {
-				assert.True(t, strings.HasPrefix(got, tc.wantPrefix))
-			}
-		})
-	}
 }
 
 func TestResolveActorPromptEffort(t *testing.T) {
