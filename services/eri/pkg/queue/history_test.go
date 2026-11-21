@@ -269,7 +269,7 @@ func TestFormatSummaryTranscript(t *testing.T) {
 		{
 			name: "user message and assistant reply keep the 2500-rune head cut",
 			msgs: []HistoryMessage{
-				{ID: "u-1", AuthorName: "Alex", Role: "User", Content: longUser, CreatedAt: now.Add(-time.Minute)},
+				{ID: "u-1", AuthorName: "Alice", Role: "User", Content: longUser, CreatedAt: now.Add(-time.Minute)},
 				{ID: "a-1", AuthorName: "Aerial", Role: "Assistant", Content: longReply, CreatedAt: now},
 			},
 			wantContains: []string{strings.Repeat("u", 2500) + truncationMarker, strings.Repeat("a", 2500) + truncationMarker},
@@ -594,7 +594,7 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 func datedHistory(now time.Time, n int) []HistoryMessage {
 	msgs := make([]HistoryMessage, n)
 	for i := range msgs {
-		msgs[i] = HistoryMessage{ID: fmt.Sprintf("h-%d", i), AuthorName: "Alex", Role: "User", Content: fmt.Sprintf("body-%d", i), CreatedAt: now.Add(time.Duration(i-n) * time.Minute)}
+		msgs[i] = HistoryMessage{ID: fmt.Sprintf("h-%d", i), AuthorName: "Alice", Role: "User", Content: fmt.Sprintf("body-%d", i), CreatedAt: now.Add(time.Duration(i-n) * time.Minute)}
 	}
 	return msgs
 }
