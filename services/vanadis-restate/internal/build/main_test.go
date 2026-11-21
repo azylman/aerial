@@ -33,6 +33,14 @@ type fakeObjectRuntime struct {
 	cleared            bool
 	reconcileScheduled bool
 	reconcilesSent     []sentReconcile
+	invocationID       string
+	deferredSends      []deferredSend
+}
+
+// deferredSend records one delayed deferral Reconcile.
+type deferredSend struct {
+	Delay time.Duration
+	Seq   int
 }
 
 // sentReconcile records one cross-build Reconcile send.
@@ -153,6 +161,7 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	mc := mocks.NewMockContext(t)
 	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe() // slog handlers look up the span context.
 	mc.EXPECT().Key().Return(key).Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-test"}).Maybe()
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get(deploygate.PendingDeploymentKey, mock.Anything).Return(false, nil).Maybe()
@@ -482,6 +491,13 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }
+
+func (f *fakeObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq int) {
+	f.reconcileScheduled = true
+	f.deferredSends = append(f.deferredSends, deferredSend{Delay: delay, Seq: seq})
+}
+
+func (f *fakeObjectRuntime) InvocationID() string { return f.invocationID }
 
 func (*fakeObjectRuntime) RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error) {
 	return fn(context.Background())
