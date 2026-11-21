@@ -381,17 +381,13 @@ func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo strin
 	return ""
 }
 
-func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
-	if s == nil || s.registry == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "registry not initialized"})
-		return
-	}
-
+// readPRRegisterRequest decodes one register body and trims every field,
+// returning the raw target alongside its normalized form.
+func readPRRegisterRequest(w http.ResponseWriter, r *http.Request) (PRRegisterRequest, string, bool) {
 	var req PRRegisterRequest
 	if !readWebhookJSON(w, r, 1<<20, &req) {
-		return
+		return req, "", false
 	}
-
 	req.Repo = strings.TrimSpace(req.Repo)
 	req.Branch = strings.TrimSpace(req.Branch)
 	req.HeadSHA = strings.TrimSpace(req.HeadSHA)
@@ -400,6 +396,25 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	req.Title = strings.TrimSpace(req.Title)
 	req.BotID = strings.TrimSpace(req.BotID)
 	req.Agent = strings.TrimSpace(req.Agent)
+	return req, rawTargetID, true
+}
+
+func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
+	if s != nil {
+		if ctx := stampEffectsOwner(r.Context()); restateOwnsEffects(ctx) {
+			s.handlePRRegisterRestate(w, r.WithContext(ctx))
+			return
+		}
+	}
+	if s == nil || s.registry == nil {
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "registry not initialized"})
+		return
+	}
+
+	req, rawTargetID, ok := readPRRegisterRequest(w, r)
+	if !ok {
+		return
+	}
 
 	if err := s.resolvePRAgent(r.Context(), r, &req); err != nil {
 		if errors.Is(err, errBotMismatch) {
@@ -420,7 +435,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	targetID, err := s.registry.RegisterPR(r.Context(), req)
 	if err != nil {
 		if errors.Is(err, model.ErrInvalidTargetID) || strings.Contains(err.Error(), "target_id") {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "target_id must be a valid Discord snowflake (17-20 digits)"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: errMsgInvalidTargetID})
 			return
 		}
 		slog.ErrorContext(r.Context(), "[synapse] failed to register PR", "pr", req.PRNumber, "repo", req.Repo, "error", err)
@@ -436,7 +451,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		fieldStatus:   "registered",
 		"repo":        req.Repo,
 		fieldPRNumber: req.PRNumber,
-		"target_id":   targetID,
+		fieldTargetID: targetID,
 		"agent":       req.Agent,
 	})
 }
@@ -499,7 +514,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		fieldEvent:    processed.Event,
 		fieldJobName:  processed.JobName,
 		fieldPRNumber: processed.PRNumber,
-		"target_id":   processed.TargetID,
+		fieldTargetID: processed.TargetID,
 	})
 }
 

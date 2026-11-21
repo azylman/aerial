@@ -32,6 +32,7 @@ const (
 	ghActionSynchronize = "synchronize"
 	ghActionOpened      = "opened"
 	ghActionClosed      = "closed"
+	ghActionReopened    = "reopened"
 )
 
 // GitHubIssueComment represents a comment on a GitHub issue or pull request.
@@ -204,13 +205,9 @@ func (s *RouterServer) resolveOwningAgent(ctx context.Context, repo string, prNu
 	if err != nil || len(meta) == 0 {
 		return defaultOwner
 	}
-	if a, ok := meta["agent"].(string); ok && strings.TrimSpace(a) != "" {
-		return strings.TrimSpace(a)
-	}
-	if b, ok := meta["bot_id"].(string); ok && strings.TrimSpace(b) != "" {
-		return strings.TrimSpace(b)
-	}
-	return defaultOwner
+	owner := extractExistingAgent(meta, "")
+	s.shadowCompareOwnerLookup(ctx, repo, prNum, owner)
+	return firstNonEmpty(owner, defaultOwner)
 }
 
 type GitHubPingPayload struct {
@@ -392,6 +389,7 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 		if prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err != nil {
 			slog.WarnContext(ctx, "[synapse] [registry] failed resolving PR by SHA locally", "event", res.Event, "head_sha", res.HeadSHA, "error", err)
 		} else if prNum > 0 {
+			s.shadowCompareSHALookup(ctx, res.Repo, res.HeadSHA, prNum)
 			res.PRNumber = prNum
 			if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
 				res.Branch = firstNonEmpty(branch, res.Branch)
@@ -520,7 +518,7 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 			return nil, err
 		}
 	}
-	if res.Action == "reopened" && res.PRNumber > 0 && strings.TrimSpace(res.HeadSHA) != "" {
+	if res.Action == ghActionReopened && res.PRNumber > 0 && strings.TrimSpace(res.HeadSHA) != "" {
 		if err := s.routePREvent(ctx, "HandleReopened", restateclient.PREvent{
 			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA,
 			Branch: res.Branch, Title: p.PullRequest.Title,
@@ -790,6 +788,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 	}()
 
+	// Restate-owned jobs take the Postgres-free path: normalize and send,
+	// with zero registry calls and zero lifecycle effects.
+	if restateOwnsEffects(ctx) {
+		return s.processRestateOwnedGitHubEvent(ctx, event, delivery, body, res)
+	}
 	switch event {
 	case "ping":
 		return s.processGitHubPingEvent(delivery, body, res)

@@ -12,6 +12,13 @@ import (
 
 var errBotMismatch = errors.New("bot_id mismatch for local pr_registry")
 
+// errMsgInvalidTargetID is the register response for a target that is not
+// (and cannot resolve to) a Discord snowflake.
+const errMsgInvalidTargetID = "target_id must be a valid Discord snowflake (17-20 digits)"
+
+// fieldTargetID is the register response key carrying the resolved target.
+const fieldTargetID = "target_id"
+
 const defaultOwnerAgent = "aerial"
 
 func extractExistingAgent(meta map[string]any, defaultAgent string) string {
@@ -25,7 +32,9 @@ func extractExistingAgent(meta map[string]any, defaultAgent string) string {
 }
 
 func (s *RouterServer) authorizeExistingPROwner(ctx context.Context, auth *k8sauth.Authenticator, caller k8sauth.CallerIdentity, repo string, prNum int) error {
-	if s.registry == nil || repo == "" || prNum <= 0 {
+	// Restate-owned registers fence the existing owner inside
+	// PRObject.Register (enforce_owner), never via pr_registry.
+	if restateOwnsEffects(ctx) || s.registry == nil || repo == "" || prNum <= 0 {
 		return nil
 	}
 	existingMeta, exists, err := s.registry.LoadRawPRMetadata(ctx, repo, prNum)
@@ -148,7 +157,7 @@ func (s *RouterServer) validatePRRegisterRequest(ctx context.Context, req *PRReg
 		req.TargetID = s.resolveHeadlessPRTargetID(ctx, req.Repo, req.PRNumber)
 	}
 	if !isValidDiscordSnowflake(req.TargetID) {
-		return "target_id must be a valid Discord snowflake (17-20 digits)"
+		return errMsgInvalidTargetID
 	}
 	return ""
 }

@@ -41,26 +41,37 @@ const (
 	DefaultRepoService = "RepoObject"
 )
 
+// PRObject handlers named by more than one routing table.
+const (
+	HandlerCheckFailed         = "HandleCheckFailed"
+	HandlerCheckPassed         = "HandleCheckPassed"
+	HandlerCheckRerunRequested = "HandleCheckRerunRequested"
+	HandlerCollaboratorAlert   = "HandleCollaboratorAlert"
+	HandlerMerged              = "HandleMerged"
+	HandlerRolloutProgress     = "HandleRolloutProgress"
+)
+
 // Frozen PRObject handler surface from chunk-01. SendPREvent rejects any
 // handler outside this set without emitting a request.
 var prHandlers = map[string]bool{
-	"HandleCheckFailed":            true,
-	"HandleCheckPassed":            true,
-	"HandleCheckRerunRequested":    true,
+	HandlerCheckFailed:             true,
+	HandlerCheckPassed:             true,
+	HandlerCheckRerunRequested:     true,
 	"HandleCIRecovery":             true,
 	"HandleCIRecovered":            true,
 	"HandleConflict":               true,
 	"HandleDeploySuccess":          true,
 	"HandleDeployAttemptFailed":    true,
-	"HandleCollaboratorAlert":      true,
+	HandlerCollaboratorAlert:       true,
 	"HandleConflictDetected":       true,
 	"HandleConflictPublished":      true,
 	"HandleConflictResolved":       true,
-	"HandleMerged":                 true,
+	HandlerMerged:                  true,
 	"HandleClosed":                 true,
 	"HandleReopened":               true,
+	"HandleOpened":                 true,
 	"HandleReadinessRetry":         true,
-	"HandleRolloutProgress":        true,
+	HandlerRolloutProgress:         true,
 	"HandleDeployDispatched":       true,
 	"HandleDeploySuccessPublished": true,
 	"HandleKustomizationRequested": true,
@@ -201,6 +212,9 @@ type RegisterRequest struct {
 	FallbackTargetID string            `json:"fallback_target_id,omitempty"`
 	EnforceOwner     bool              `json:"enforce_owner,omitempty"`
 	ExpectedOwner    string            `json:"expected_owner,omitempty"`
+	// EffectsOwner is the request's effect-owner stamp: restate makes
+	// PRObject write the registry row, legacy leaves it to synapse.
+	EffectsOwner string `json:"effects_owner,omitempty"`
 }
 
 // RegisterResponse is the PRObject.Register result.
@@ -220,6 +234,34 @@ type BuildLifecycle struct {
 	Started          bool                 `json:"started"`
 	HasBuildMetadata bool                 `json:"has_build_metadata"`
 	BuildMetadata    *model.BuildMetadata `json:"build_metadata,omitempty"`
+	// Agent is the stored owner, empty when nothing claimed the PR yet.
+	Agent string `json:"agent,omitempty"`
+}
+
+// SHA-only RepoObject handlers: each wraps the PRObject event it would
+// deliver once RepoObject resolves the SHA from its durable index, holding
+// the event until the SHA is indexed. The wrapped PRObject handler must be
+// one RepoObject accepts for that SHA kind.
+var repoSHAHandlers = map[string]map[string]bool{
+	"HandleCheckRunBySHA":    {HandlerCheckFailed: true, HandlerCheckPassed: true, HandlerCheckRerunRequested: true, HandlerCollaboratorAlert: true},
+	"HandleWorkflowRunBySHA": {HandlerCheckFailed: true, HandlerCheckPassed: true, HandlerCheckRerunRequested: true, HandlerCollaboratorAlert: true},
+	"HandlePushBySHA":        {HandlerMerged: true, HandlerRolloutProgress: true},
+}
+
+// SHAEvent is the RepoObject SHA-only routing payload. JSON tags mirror the
+// prstate SHAEvent contract exactly.
+type SHAEvent struct {
+	Repo    string  `json:"repo"`
+	SHA     string  `json:"sha"`
+	Handler string  `json:"handler"`
+	Event   PREvent `json:"event"`
+}
+
+// ResolveSHAResponse is the RepoObject.ResolvePRBySHA result.
+type ResolveSHAResponse struct {
+	PRNumber int    `json:"pr_number"`
+	Branch   string `json:"branch"`
+	Found    bool   `json:"found"`
 }
 
 // RepoEvent is the canonical RepoObject payload: main-push indexing,
@@ -438,6 +480,54 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent
 	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
 }
 
+// SendSHAEvent enqueues one SHA-only event at a RepoObject SHA handler as a
+// one-way send. RepoObject resolves the SHA from its own durable index and
+// forwards ev.Event to ev.Handler on PRObject; synapse never resolves it.
+func (c *Client) SendSHAEvent(ctx context.Context, handler string, ev SHAEvent) error {
+	allowed, ok := repoSHAHandlers[handler]
+	if !ok {
+		return fmt.Errorf("%w: unknown repo sha handler %q", ErrInvalidEvent, handler)
+	}
+	if !allowed[ev.Handler] {
+		return fmt.Errorf("%w: pr handler %q is not routable by %s", ErrInvalidEvent, ev.Handler, handler)
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return errors.New("restate is not configured")
+	}
+	ev.Repo = model.NormalizeRepo(ev.Repo)
+	ev.SHA = strings.TrimSpace(ev.SHA)
+	if ev.Repo == "" {
+		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
+	}
+	if ev.SHA == "" || isZeroSHA(ev.SHA) {
+		return fmt.Errorf("%w: sha is required", ErrInvalidEvent)
+	}
+	ev.Event.Repo = ev.Repo
+	ev.Event.EffectsOwner = NormalizeEffectsOwner(ev.Event.EffectsOwner)
+	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
+}
+
+// ResolvePRBySHA invokes the shared, read-only RepoObject.ResolvePRBySHA
+// lookup. It records nothing; shadow comparisons use it read-only.
+func (c *Client) ResolvePRBySHA(ctx context.Context, repo, sha string) (ResolveSHAResponse, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return ResolveSHAResponse{}, errors.New("restate is not configured")
+	}
+	repo = model.NormalizeRepo(repo)
+	sha = strings.TrimSpace(sha)
+	if repo == "" || sha == "" {
+		return ResolveSHAResponse{}, fmt.Errorf("%w: repo and sha are required", ErrInvalidEvent)
+	}
+	var out ResolveSHAResponse
+	if err := c.callService(ctx, c.repoService, RepoObjectKey(repo), "ResolvePRBySHA", struct {
+		Repo string `json:"repo"`
+		SHA  string `json:"sha"`
+	}{Repo: repo, SHA: sha}, &out); err != nil {
+		return ResolveSHAResponse{}, err
+	}
+	return out, nil
+}
+
 // InvokePREvent delivers ev to one frozen PRObject handler and decodes the
 // JSON verdict into out. Unknown handlers, unconfigured clients, and invalid
 // payloads fail closed without emitting a request; transport failures and
@@ -514,11 +604,17 @@ func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber in
 // call is one request-response PRObject invocation without an
 // Idempotency-Key: the result reflects current state and must not be cached.
 func (c *Client) call(ctx context.Context, key, handler string, payload, out any) error {
+	return c.callService(ctx, c.prService, key, handler, payload, out)
+}
+
+// callService is one request-response invocation on service without an
+// Idempotency-Key.
+func (c *Client) callService(ctx context.Context, service, key, handler string, payload, out any) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal restate payload: %w", err)
 	}
-	body, err := c.post(ctx, c.ingressURL(c.prService, key, handler), bodyBytes, "")
+	body, err := c.post(ctx, c.ingressURL(service, key, handler), bodyBytes, "")
 	if err != nil {
 		return err
 	}

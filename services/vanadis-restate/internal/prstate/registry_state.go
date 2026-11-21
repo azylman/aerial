@@ -163,6 +163,9 @@ type BuildLifecycle struct {
 	Started          bool           `json:"started"`
 	HasBuildMetadata bool           `json:"has_build_metadata"`
 	BuildMetadata    *BuildMetadata `json:"build_metadata,omitempty"`
+	// Agent is the stored owner, empty when no authoritative source has
+	// claimed the PR yet, so synapse shadow lookups can compare owners.
+	Agent string `json:"agent,omitempty"`
 }
 
 var discordSnowflake = regexp.MustCompile(`^\d{17,20}$`)
@@ -688,6 +691,7 @@ func (s *PRState) BuildLifecycleView() BuildLifecycle {
 		HeadSHA:  s.HeadSHA,
 		MergeSHA: s.MergeSHA,
 		Started:  len(s.StartedJobs) > 0,
+		Agent:    strings.TrimSpace(s.Agent),
 	}
 	if m := s.BuildMetadata; m != nil && s.buildMetadataRevisionMatches(m.SourceSHA) {
 		clone := *m

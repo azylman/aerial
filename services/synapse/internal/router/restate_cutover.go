@@ -28,6 +28,12 @@ import (
 // events retry on a long backoff; terminal 4xx rejections drop the job. Shadow (fail-closed) sends only run when the flag is
 // off; authoritative and shadow sends never double-fire.
 //
+// Restate-owned GitHub jobs (effects_owner=restate) never enter this
+// pipeline: ProcessGitHubEvent hands them to restate_owned_github.go, which
+// normalizes and sends with zero registry calls and zero verdict
+// round-trips, and routePREvent/routeRepoEvent send any restate-owned event
+// directly (no shadow fallback, no registry owner lookup).
+//
 // What stays live: the registry-backed pipeline (registry atomic
 // transitions, publishes, dispatches) runs unchanged for effects_owner=legacy
 // events. Every effect decision resolves from the Restate PRObject when
@@ -235,6 +241,11 @@ func (s *RouterServer) routeEvent(ctx context.Context, handler string, journal f
 // routePREvent journals one PRObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev restateclient.PREvent) error {
+	// Restate-owned events always journal, never shadow, and never look
+	// the owner up in pr_registry: an unknown owner travels empty.
+	if restateOwnsEffects(ctx) {
+		return s.sendOwnedPR(ctx, handler, ev)
+	}
 	// With Restate neither authoritative nor shadowing, the legacy path
 	// stays exactly as it was: no owner lookup, no request.
 	if !s.restateAuthoritative() && !s.restateShadow().Enabled() {
@@ -261,6 +272,9 @@ func (s *RouterServer) routePREvent(ctx context.Context, handler string, ev rest
 // routeRepoEvent journals one RepoObject event when authoritative (error
 // surfaces for retry) and mirrors it fail-closed when shadowing.
 func (s *RouterServer) routeRepoEvent(ctx context.Context, handler string, ev restateclient.RepoEvent) error {
+	if restateOwnsEffects(ctx) {
+		return s.sendOwnedRepo(ctx, handler, ev)
+	}
 	ev.EffectsOwner = effectsOwnerFromContext(ctx)
 	if ev.Agent == "" && s.cfgSrc != nil && s.cfgSrc.Current() != nil {
 		ev.Agent = s.cfgSrc.Current().DefaultOwnerAgent()

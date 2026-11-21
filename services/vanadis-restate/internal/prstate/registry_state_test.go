@@ -636,6 +636,11 @@ func TestPRState_BuildLifecycleView(t *testing.T) {
 		s.BuildMetadata = meta("final", 5, 1, 50, source, 1)
 		return s
 	}
+	ownedState := func(agent string) *PRState {
+		s := rowState("h1", "", "")
+		s.Agent = agent
+		return s
+	}
 	tests := []struct {
 		name     string
 		state    *PRState
@@ -646,6 +651,7 @@ func TestPRState_BuildLifecycleView(t *testing.T) {
 		{name: "merged stale head metadata is hidden", state: withMeta(RegistryStatusMerged, "h1", []string{"eri"}), want: BuildLifecycle{Found: true, Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1", Started: true}},
 		{name: "deploying hides metadata", state: withMeta(RegistryStatusDeploying, "m1", []string{"eri"}), want: BuildLifecycle{Found: true, Status: RegistryStatusDeploying, HeadSHA: "h1", MergeSHA: "m1", Started: true}},
 		{name: "blank status reads open", state: rowState("h1", "", ""), want: BuildLifecycle{Found: true, Status: RegistryStatusOpen, HeadSHA: "h1"}},
+		{name: "stored owner is exposed trimmed", state: ownedState(" bot-b "), want: BuildLifecycle{Found: true, Status: RegistryStatusOpen, HeadSHA: "h1", Agent: "bot-b"}},
 		{name: "nil state is zero", want: BuildLifecycle{}},
 	}
 	for _, tc := range tests {

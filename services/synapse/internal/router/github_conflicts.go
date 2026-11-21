@@ -361,7 +361,7 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 }
 
 func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPullRequestPayload) {
-	if s == nil || !s.cfgSrc.Current().DefaultOwner || !isDependabotPR(p) || (res.Action != ghActionOpened && res.Action != "reopened" && res.Action != ghActionSynchronize) {
+	if s == nil || !s.cfgSrc.Current().DefaultOwner || !isDependabotPR(p) || (res.Action != ghActionOpened && res.Action != ghActionReopened && res.Action != ghActionSynchronize) {
 		return
 	}
 	if s.registry == nil || res.PRNumber <= 0 {
