@@ -559,23 +559,30 @@ func TestCompareProjection(t *testing.T) {
 	movedStatus.Status = "deployed"
 	movedMerge := row
 	movedMerge.MergeSHA = ""
+	untracked := snap
+	untracked.TargetID = " "
+	untrackedRow := row
+	untrackedRow.TargetID = ""
 	tests := []struct {
 		name  string
+		snap  ProjectionSnapshot
 		row   RegistryRow
 		found bool
 		want  ProjectionComparison
 	}{
-		{name: "missing row", row: RegistryRow{}, found: false, want: ProjectionComparison{Missing: true}},
-		{name: "matching row compares clean", row: row, found: true, want: ProjectionComparison{}},
-		{name: "head moved is superseded", row: movedHead, found: true, want: ProjectionComparison{Superseded: true}},
-		{name: "status moved is superseded", row: movedStatus, found: true, want: ProjectionComparison{Superseded: true}},
-		{name: "merge sha moved is superseded", row: movedMerge, found: true, want: ProjectionComparison{Superseded: true}},
-		{name: "real differences name every field", row: diverged, found: true, want: ProjectionComparison{Divergent: []string{"metadata.agent", "metadata.banner", "metadata.jobs", "title"}}},
+		{name: "missing row", snap: snap, row: RegistryRow{}, found: false, want: ProjectionComparison{Missing: true}},
+		{name: "untracked pr with no row matches legacy", snap: untracked, row: RegistryRow{}, found: false, want: ProjectionComparison{Untracked: true}},
+		{name: "untracked pr with a row still compares", snap: untracked, row: untrackedRow, found: true, want: ProjectionComparison{}},
+		{name: "matching row compares clean", snap: snap, row: row, found: true, want: ProjectionComparison{}},
+		{name: "head moved is superseded", snap: snap, row: movedHead, found: true, want: ProjectionComparison{Superseded: true}},
+		{name: "status moved is superseded", snap: snap, row: movedStatus, found: true, want: ProjectionComparison{Superseded: true}},
+		{name: "merge sha moved is superseded", snap: snap, row: movedMerge, found: true, want: ProjectionComparison{Superseded: true}},
+		{name: "real differences name every field", snap: snap, row: diverged, found: true, want: ProjectionComparison{Divergent: []string{"metadata.agent", "metadata.banner", "metadata.jobs", "title"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := CompareProjection(snap, tc.row, tc.found); !reflect.DeepEqual(got, tc.want) {
+			if got := CompareProjection(tc.snap, tc.row, tc.found); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("CompareProjection = %+v, want %+v", got, tc.want)
 			}
 		})

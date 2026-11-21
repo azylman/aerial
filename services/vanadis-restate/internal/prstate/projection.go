@@ -332,12 +332,22 @@ func ProjectRegistry(ctx context.Context, store ProjectionStore, snap Projection
 	return store.UpsertProjection(ctx, snap)
 }
 
+// Tracked reports whether the snapshot is for a PR the registry tracks: one
+// that Register, Hydrate or a target-carrying event gave a target thread.
+// Synapse writes a row only for registered PRs, and registration always
+// resolves a target, so an untracked PR has no row on either writer.
+func (s ProjectionSnapshot) Tracked() bool {
+	return strings.TrimSpace(s.TargetID) != ""
+}
+
 // ProjectionComparison is the shadow-compare verdict for one legacy event:
-// Missing when synapse wrote no row, Superseded when the row has already
-// moved past the snapshot (head/merge SHA or status differ), otherwise the
-// sorted list of fields whose values diverge.
+// Missing when synapse wrote no row for a tracked PR, Untracked when neither
+// writer keeps a row (no row and an untracked snapshot), Superseded when the
+// row has already moved past the snapshot (head/merge SHA or status differ),
+// otherwise the sorted list of fields whose values diverge.
 type ProjectionComparison struct {
 	Missing    bool     `json:"missing"`
+	Untracked  bool     `json:"untracked,omitempty"`
 	Superseded bool     `json:"superseded"`
 	Divergent  []string `json:"divergent,omitempty"`
 }
@@ -350,6 +360,9 @@ type ProjectionComparison struct {
 // metadata.agent and metadata.bot_id.
 func CompareProjection(snap ProjectionSnapshot, row RegistryRow, found bool) ProjectionComparison {
 	if !found {
+		if !snap.Tracked() {
+			return ProjectionComparison{Untracked: true}
+		}
 		return ProjectionComparison{Missing: true}
 	}
 	if strings.TrimSpace(row.HeadSHA) != strings.TrimSpace(snap.HeadSHA) ||

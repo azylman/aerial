@@ -126,10 +126,16 @@ func TestAfterCommitSkipsInvalidState(t *testing.T) {
 // write into a delayed self-send instead of failing.
 func TestPRObjectServiceProject(t *testing.T) {
 	t.Parallel()
+	tracked := openPR()
+	tracked.TargetID = snowA
 	projected := openPR()
-	projected.ProjectedKey = ProjectionJournalKey(BuildProjection(openPR()))
+	projected.TargetID = snowA
+	projected.ProjectedKey = ProjectionJournalKey(BuildProjection(tracked))
 	stale := openPR()
+	stale.TargetID = snowA
 	stale.ProjectedKey = "projection:old"
+	untracked := openPR()
+	untracked.ProjectedKey = "projection:old"
 	tests := []struct {
 		name          string
 		state         *PRState
@@ -146,13 +152,14 @@ func TestPRObjectServiceProject(t *testing.T) {
 		{name: "missing state projects nothing", state: nil, store: &FakeProjectionStore{}},
 		{name: "no store projects nothing", state: openPR(), store: nil},
 		{name: "identical snapshot is skipped", state: projected, store: &FakeProjectionStore{}},
+		{name: "untracked pr without a target projects nothing", state: untracked, store: &FakeProjectionStore{}},
 		{
 			name: "changed snapshot writes the full row", state: stale, store: &FakeProjectionStore{}, wantRun: true, wantSet: true,
 			wantKeyPrefix: "projection:aerial:azylman/aerial:101@h1:gen0:epoch0:",
-			wantRecorded:  []ProjectionSnapshot{{Repo: "azylman/aerial", PRNumber: 101, Agent: "aerial", HeadSHA: "h1", Status: "open"}},
+			wantRecorded:  []ProjectionSnapshot{{Repo: "azylman/aerial", PRNumber: 101, Agent: "aerial", HeadSHA: "h1", TargetID: snowA, Status: "open"}},
 		},
 		{
-			name: "exhausted write retries later", state: openPR(), store: &FakeProjectionStore{Err: errFakeProjection}, wantRun: true,
+			name: "exhausted write retries later", state: tracked, store: &FakeProjectionStore{Err: errFakeProjection}, wantRun: true,
 			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial", method: "Project", input: ProjectRequest{}, delayed: true}},
 		},
 	}
@@ -202,6 +209,7 @@ func TestPRObjectServiceCompareProjection(t *testing.T) {
 		{name: "divergent row", reader: fakeProjectionReader{row: RegistryRow{Branch: "old", HeadSHA: "h1", Status: "open"}, found: true}, snap: snap, wantRun: true},
 		{name: "superseded row", reader: fakeProjectionReader{row: RegistryRow{HeadSHA: "h2", Status: "open"}, found: true}, snap: snap, wantRun: true},
 		{name: "missing row", reader: fakeProjectionReader{}, snap: snap, wantRun: true},
+		{name: "missing row for a tracked pr", reader: fakeProjectionReader{}, snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", TargetID: snowA, Status: "open"}, wantRun: true},
 		{name: "read failure is dropped", reader: fakeProjectionReader{err: errFakeProjection}, snap: snap, wantRun: true},
 		{name: "no reader skips", reader: nil, snap: snap, wantRun: false},
 		{name: "unkeyed snapshot skips", reader: fakeProjectionReader{}, snap: ProjectionSnapshot{Status: "open"}, wantRun: false},
