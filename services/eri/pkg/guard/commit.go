@@ -43,14 +43,13 @@ var BuiltinPatterns = []PatternRule{
 }
 
 // LoadCustomPatterns reads dynamic patterns from ~/.gemini/config/commit-guard.json,
-// ~/.gemini/config/guard.json, or the AERIAL_COMMIT_GUARD_PATTERNS environment variable.
-func LoadCustomPatterns(homeDir string) []PatternRule {
+// ~/.gemini/config/guard.json, or the AERIAL_COMMIT_GUARD_PATTERNS variable resolved through getenv.
+// An empty homeDir falls back to getenv("HOME").
+func LoadCustomPatterns(homeDir string, getenv func(string) string) []PatternRule {
 	var rules []PatternRule
 
 	if homeDir == "" {
-		if uHome, err := os.UserHomeDir(); err == nil {
-			homeDir = uHome
-		}
+		homeDir = getenv("HOME")
 	}
 
 	// 1. Check file candidates in homeDir
@@ -68,7 +67,7 @@ func LoadCustomPatterns(homeDir string) []PatternRule {
 	}
 
 	// 2. Check environment variable
-	if envVal := os.Getenv("AERIAL_COMMIT_GUARD_PATTERNS"); strings.TrimSpace(envVal) != "" {
+	if envVal := getenv("AERIAL_COMMIT_GUARD_PATTERNS"); strings.TrimSpace(envVal) != "" {
 		rules = append(rules, parsePatternPayload([]byte(envVal))...)
 	}
 
@@ -162,9 +161,9 @@ func parsePatternPayload(data []byte) []PatternRule {
 	return parseDelimitedPatternLines(trimmed)
 }
 
-// GetActivePatterns returns BuiltinPatterns augmented with any custom user patterns.
-func GetActivePatterns() []PatternRule {
-	custom := LoadCustomPatterns("")
+// GetActivePatterns returns BuiltinPatterns augmented with any custom user patterns found via getenv.
+func GetActivePatterns(getenv func(string) string) []PatternRule {
+	custom := LoadCustomPatterns("", getenv)
 	if len(custom) == 0 {
 		return BuiltinPatterns
 	}
@@ -218,8 +217,8 @@ func ScanTextForSecrets(text, sourceLabel string, patterns []PatternRule) []Viol
 
 // scanLocal scans text in-process against registered secrets and the active
 // pattern rules. Pushed content is scanned by the eri-restate GitHub proxy.
-func scanLocal(text, sourceLabel string) []Violation {
-	return ScanTextForSecrets(text, sourceLabel, GetActivePatterns())
+func scanLocal(text, sourceLabel string, getenv func(string) string) []Violation {
+	return ScanTextForSecrets(text, sourceLabel, GetActivePatterns(getenv))
 }
 
 // unwrapShellScriptCommand unwraps bash/sh/zsh -c <script> commands.
@@ -254,7 +253,8 @@ func FormatCommitDenyReason(violations []Violation) string {
 
 // CheckOutboundSecrets inspects run_command (args.CommandLine) and call_mcp_tool / mcp_*
 // (marshaling args.Arguments/Extra + args.CommandLine) against registered Infisical secrets and pattern rules.
-func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
+// getenv resolves the custom pattern sources (HOME, AERIAL_COMMIT_GUARD_PATTERNS).
+func CheckOutboundSecrets(toolName string, args ToolArgs, getenv func(string) string) *Decision {
 	rawLower := strings.ToLower(strings.TrimSpace(toolName))
 	cleanName := normalizeToolName(toolName)
 	if isInfisicalMCPCall(toolName, args) {
@@ -284,7 +284,7 @@ func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
 		return &Decision{Decision: DecisionAllow}
 	}
 
-	violations := scanLocal(textToScan, cleanName)
+	violations := scanLocal(textToScan, cleanName, getenv)
 	if len(violations) > 0 {
 		return &Decision{
 			Decision: DecisionDeny,

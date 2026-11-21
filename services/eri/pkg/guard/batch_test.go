@@ -51,7 +51,7 @@ func runCheckBatchStepCase(t *testing.T, tc checkBatchTestCase, now time.Time) {
 				EndLine:     inv.end,
 				CommandLine: inv.cmd,
 			}
-			lastDec = CheckBatchWithDir(payload, args, dir, stepTime)
+			lastDec = CheckBatchWithDir(payload, args, dir, stepTime, mapEnv(nil))
 		}
 	}
 
@@ -86,7 +86,7 @@ func testBatchFaultInjectionAndConcurrency(t *testing.T, now time.Time) {
 	if err := os.WriteFile(statePath, []byte("{invalid-json-data"), 0o600); err != nil {
 		t.Fatalf("failed to write corrupted state: %v", err)
 	}
-	dec := CheckBatchWithDir(Payload{ConversationID: convID, StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/foo.txt"}, dir, now)
+	dec := CheckBatchWithDir(Payload{ConversationID: convID, StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/foo.txt"}, dir, now, mapEnv(nil))
 	if dec.Decision != DecisionAllow {
 		t.Fatalf("expected allow after corrupt state recovery, got: %v", dec)
 	}
@@ -102,7 +102,7 @@ func testBatchFaultInjectionAndConcurrency(t *testing.T, now time.Time) {
 				StepIdx:        idx + 1,
 				ToolCall:       ToolCall{Name: "view_file"},
 			}
-			d := CheckBatchWithDir(p, ToolArgs{TargetFile: fmt.Sprintf("/tmp/concurrent_%d.go", idx)}, dir, now)
+			d := CheckBatchWithDir(p, ToolArgs{TargetFile: fmt.Sprintf("/tmp/concurrent_%d.go", idx)}, dir, now, mapEnv(nil))
 			if d == nil {
 				t.Errorf("got nil decision in concurrent call")
 			}
@@ -121,7 +121,7 @@ func testBatchLimitsAndDirectoryOverrides(t *testing.T, now time.Time) {
 			StepIdx:        i + 1,
 			ToolCall:       ToolCall{Name: "run_command"},
 		}
-		d := CheckBatchWithDir(p, ToolArgs{CommandLine: fmt.Sprintf("echo rec-%d && true", i)}, truncDir, now)
+		d := CheckBatchWithDir(p, ToolArgs{CommandLine: fmt.Sprintf("echo rec-%d && true", i)}, truncDir, now, mapEnv(nil))
 		if d.Decision != DecisionAllow {
 			t.Fatalf("call %d expected allow, got %v", i, d)
 		}
@@ -131,40 +131,81 @@ func testBatchLimitsAndDirectoryOverrides(t *testing.T, now time.Time) {
 		t.Fatalf("records length = %d, want <= %d", len(st.Records), DefaultMaxRecords)
 	}
 
-	dFail := CheckBatchWithDir(Payload{ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/a.go"}, "/dev/null/impossible", now)
+	dFail := CheckBatchWithDir(Payload{ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/a.go"}, "/dev/null/impossible", now, mapEnv(nil))
 	if dFail.Decision != DecisionAllow {
 		t.Fatalf("expected allow on uncreatable dir, got %v", dFail)
 	}
 
-	if defDir := GetBatchDir(); defDir != DefaultBatchDir {
-		t.Fatalf("GetBatchDir() default = %q, want %q", defDir, DefaultBatchDir)
-	}
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", "/tmp/custom-batch-guard-dir")
-	if envDir := GetBatchDir(); envDir != "/tmp/custom-batch-guard-dir" {
-		t.Fatalf("GetBatchDir() = %q, want /tmp/custom-batch-guard-dir", envDir)
-	}
-
-	customDir := t.TempDir()
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", customDir)
-	dDefault := CheckBatch(Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/fresh.txt"})
+	dDefault := CheckBatchWithDir(Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/fresh.txt"}, t.TempDir(), now, mapEnv(nil))
 	if dDefault == nil || dDefault.Decision != DecisionAllow {
-		t.Fatalf("expected allow from CheckBatch, got %v", dDefault)
+		t.Fatalf("expected allow from CheckBatchWithDir, got %v", dDefault)
 	}
+}
 
-	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "80")
-	t.Setenv("SCRATCH_DIR", "/tmp/custom-worktree")
-	if got := minAnchorReadLines(); got != 80 {
-		t.Fatalf("minAnchorReadLines() = %d, want 80", got)
+func TestGetBatchDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"unset uses production default", nil, "/tmp/aerial-batch-guard"},
+		{"override wins", map[string]string{"AERIAL_BATCH_GUARD_DIR": "/tmp/custom-batch-guard-dir"}, "/tmp/custom-batch-guard-dir"},
 	}
-	if got := normalizeBatchTarget("/tmp/custom-worktree/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
-		t.Fatalf("normalizeBatchTarget(custom-worktree) = %q, want /share/aerial/pkg/a.go", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := GetBatchDir(mapEnv(tc.env)); got != tc.want {
+				t.Fatalf("GetBatchDir() = %q, want %q", got, tc.want)
+			}
+		})
 	}
-	if got := normalizeBatchTarget("$SCRATCH_DIR/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
-		t.Fatalf("normalizeBatchTarget($SCRATCH_DIR) = %q, want /share/aerial/pkg/a.go", got)
+}
+
+func TestMinAnchorReadLines(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want int
+	}{
+		{"unset uses default", nil, 120},
+		{"anchor override", map[string]string{"AERIAL_BATCH_MIN_ANCHOR_LINES": "80"}, 80},
+		{"legacy paginated override", map[string]string{"AERIAL_BATCH_MIN_PAGINATED_LINES": "45"}, 45},
+		{"invalid falls back", map[string]string{"AERIAL_BATCH_MIN_ANCHOR_LINES": "invalid"}, 120},
+		{"non-positive falls back", map[string]string{"AERIAL_BATCH_MIN_ANCHOR_LINES": "0"}, 120},
 	}
-	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "invalid")
-	if got := minAnchorReadLines(); got != DefaultMinAnchorReadLines {
-		t.Fatalf("minAnchorReadLines() fallback = %d, want %d", got, DefaultMinAnchorReadLines)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := minAnchorReadLines(mapEnv(tc.env)); got != tc.want {
+				t.Fatalf("minAnchorReadLines() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeBatchTargetEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		path string
+		want string
+	}{
+		{"scratch dir prefix mapped to share", map[string]string{"SCRATCH_DIR": "/tmp/custom-worktree"}, "/tmp/custom-worktree/pkg/a.go", "/share/aerial/pkg/a.go"},
+		{"scratch var expanded", map[string]string{"SCRATCH_DIR": "/tmp/custom-worktree"}, "$SCRATCH_DIR/pkg/a.go", "/share/aerial/pkg/a.go"},
+		{"compact scratch var expanded", map[string]string{"SCRATCHDIR": "/tmp/other-tree/"}, "${SCRATCHDIR}/pkg/b.go", "/share/aerial/pkg/b.go"},
+		{"unset scratch var defaults to share", nil, "$SCRATCH_DIR/pkg/a.go", "/share/aerial/pkg/a.go"},
+		{"unrelated path unchanged", map[string]string{"SCRATCH_DIR": "/tmp/custom-worktree"}, "/tmp/elsewhere/a.go", "/tmp/elsewhere/a.go"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeBatchTarget(tc.path, mapEnv(tc.env)); got != tc.want {
+				t.Fatalf("normalizeBatchTarget(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -200,29 +241,28 @@ func testBatchGCAndPreInvocation(t *testing.T, now time.Time) {
 	opportunisticGC(gcDir, now)
 
 	invDir := t.TempDir()
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", invDir)
-	_ = RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 1})
+	_ = RecordPreInvocationWithDir(Payload{ConversationID: "inv-s", InvocationNum: 1}, invDir, now)
 	for i := range 4 {
-		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second)); d.Decision != DecisionAllow {
+		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second), mapEnv(nil)); d.Decision != DecisionAllow {
 			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
 		}
 	}
 	for i := 1; i <= 3; i++ {
 		_ = RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second))
-		if d := CheckBatchWithDir(Payload{ConversationID: "post-s", StepIdx: i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now.Add(time.Duration(i*2)*time.Second)); d.Decision != DecisionAllow {
+		if d := CheckBatchWithDir(Payload{ConversationID: "post-s", StepIdx: i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now.Add(time.Duration(i*2)*time.Second), mapEnv(nil)); d.Decision != DecisionAllow {
 			t.Fatalf("turn %d expected allow after rolling back turn 2 failed edit, got: %+v", i, d)
 		}
 		if i == 2 {
-			_ = RecordPostBatch(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"})
+			_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil))
 		}
 	}
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now)
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil))
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil))
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now, mapEnv(nil))
 }
 
 func TestCheckBatch(t *testing.T) {
-	// Not t.Parallel() because it exercises SetBatchDir and t.Setenv
+	// Not t.Parallel(): subtests share batch state sequentially.
 	now := time.Now()
 
 	turn := func(items ...batchHookInput) []batchHookInput { return items }
@@ -424,7 +464,7 @@ func checkBatchMutationAndCategory(t *testing.T) {
 	for _, tc := range categoryTests {
 		t.Run("category_"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			cat, tgt := categorizeInvocation(tc.tool, tc.args)
+			cat, tgt := categorizeInvocation(tc.tool, tc.args, mapEnv(nil))
 			if cat != tc.wantCat || tgt != tc.wantTgt {
 				t.Fatalf("categorizeInvocation = (%q, %q), want (%q, %q)", cat, tgt, tc.wantCat, tc.wantTgt)
 			}
