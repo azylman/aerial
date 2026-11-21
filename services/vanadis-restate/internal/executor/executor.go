@@ -227,6 +227,7 @@ func (e *Executor) DispatchSilentWakePrompt(ctx context.Context, threadID, chunk
 	sum := sha256.Sum256([]byte(strings.TrimSpace(threadID) + "\x00" + cleanChunk + "\x00" + strings.TrimSpace(wakePrompt) + "\x00" + strings.TrimSpace(occurrence)))
 	return e.EriClient.Dispatch(ctx, BrainDispatchRequest{
 		ID:             "vanadis-deploy-fail-" + cleanChunk + "-" + hex.EncodeToString(sum[:8]),
+		Agent:          ericlient.AgentFromContext(ctx),
 		Source:         "vanadis-restate",
 		SessionID:      "vanadis-" + cleanChunk,
 		TargetID:       strings.TrimSpace(threadID),

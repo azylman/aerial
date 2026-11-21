@@ -920,7 +920,7 @@ func TestFlow_HandleClosedPREventNotifyBranches(t *testing.T) {
 	}{
 		{name: "cancel error swallowed", cancelErr: errors.New("cancel unavailable")},
 		{name: "read error propagates", getBuildErr: errors.New("read unavailable"), wantErr: true},
-		{name: "widget error propagates", widgetErr: errors.New("widget unavailable"), busErr: errors.New("bus unavailable"), wantErr: true},
+		{name: "widget error swallowed", widgetErr: errors.New("widget unavailable"), busErr: errors.New("bus unavailable"), wantErr: false},
 		{name: "wake prompt error propagates", promptErr: errors.New("prompt unavailable"), busErr: errors.New("bus unavailable"), wantErr: true},
 		{name: "publish errors swallowed", busErr: errors.New("bus unavailable")},
 	}

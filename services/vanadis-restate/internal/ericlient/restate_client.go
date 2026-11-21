@@ -289,6 +289,25 @@ func resolveSessionKey(req BrainDispatchRequest) string {
 	return sessionKey
 }
 
+// effectiveAgent resolves the first non-empty explicit value, else AgentFromContext(ctx), else c.agentName, else defaultAgentName.
+func (c *RestateEriClient) effectiveAgent(ctx context.Context, explicit ...string) string {
+	for _, exp := range explicit {
+		clean := strings.TrimSpace(exp)
+		if clean != "" {
+			return NormalizeAgentName(clean)
+		}
+	}
+	if ctx != nil {
+		if fromCtx := AgentFromContext(ctx); fromCtx != "" {
+			return NormalizeAgentName(fromCtx)
+		}
+	}
+	if c != nil && c.agentName != "" {
+		return NormalizeAgentName(c.agentName)
+	}
+	return defaultAgentName
+}
+
 func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req BrainDispatchRequest) (restateDispatchResult, error) {
 	if c == nil {
 		return restateDispatchResult{}, errors.New("restate eri client is nil")
@@ -296,13 +315,7 @@ func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req Brain
 	if c.restateURL == "" {
 		return restateDispatchResult{}, errors.New("restate url not configured")
 	}
-	dispatchAgent := strings.TrimSpace(req.Agent)
-	if dispatchAgent == "" {
-		dispatchAgent = c.agentName
-	}
-	if dispatchAgent == "" {
-		dispatchAgent = defaultAgentName
-	}
+	dispatchAgent := c.effectiveAgent(ctx, req.Agent)
 	req.Agent = dispatchAgent
 	dispatchID := strings.TrimSpace(req.ID)
 	sessionKey := resolveSessionKey(req)
@@ -382,7 +395,7 @@ func (c *RestateEriClient) CancelDispatch(ctx context.Context, chunkID string) e
 	}
 	if c.restateURL != "" {
 		key := "vanadis-" + targetChunk
-		actionURL := fmt.Sprintf("%s/%s/%s/Cancel", c.restateURL, DispatchSessionServiceName(c.agentName), url.PathEscape(key))
+		actionURL := fmt.Sprintf("%s/%s/%s/Cancel", c.restateURL, DispatchSessionServiceName(c.effectiveAgent(ctx)), url.PathEscape(key))
 		_, err := c.postRestateJSON(ctx, actionURL, "", "cancel dispatch", map[string]string{"chunk_id": targetChunk})
 		return err
 	}
@@ -408,7 +421,7 @@ func (c *RestateEriClient) Prompt(ctx context.Context, threadID, prompt string) 
 	}
 
 	msgID := deterministicPromptMessageID(cleanThreadID, cleanPrompt)
-	return c.enqueueThreadPrompt(ctx, c.agentName, cleanThreadID, cleanPrompt, msgID, "prompt:"+cleanThreadID+":"+msgID)
+	return c.enqueueThreadPrompt(ctx, c.effectiveAgent(ctx), cleanThreadID, cleanPrompt, msgID, "prompt:"+cleanThreadID+":"+msgID)
 }
 
 // enqueueThreadPrompt enqueues one prompt turn on agent's ThreadSession
@@ -505,6 +518,9 @@ func (c *RestateEriClient) Widget(ctx context.Context, req StatusWidgetRequest) 
 	if c == nil {
 		return "", errors.New("restate eri client is nil")
 	}
+	if strings.TrimSpace(req.Agent) == "" {
+		req.Agent = c.effectiveAgent(ctx)
+	}
 	// Direct widget delivery takes priority when widgetDeliverer is configured, or falls back to HTTPEriClient
 	// when Discord authentication or RESTATE_INGRESS_URL is unconfigured.
 	c.widgetMu.RLock()
@@ -540,7 +556,7 @@ func (c *RestateEriClient) Message(ctx context.Context, channelID, content strin
 
 	if c.restateURL != "" && hasDiscordAuth {
 		if mda, ok := deliverer.(agentMessageDeliverer); ok && mda != nil {
-			return mda.DeliverDirectMessageWithAgent(ctx, c.agentName, cleanChannelID, cleanContent)
+			return mda.DeliverDirectMessageWithAgent(ctx, c.effectiveAgent(ctx), cleanChannelID, cleanContent)
 		}
 		if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {
 			return md.DeliverDirectMessage(ctx, cleanChannelID, cleanContent)

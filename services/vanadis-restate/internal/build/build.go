@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -575,16 +576,20 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		}
 		bld.Status = statusCancelled
 		if b.executor != nil {
+			var cancelCtx context.Context = rc
+			if bld != nil && strings.TrimSpace(bld.Agent) != "" {
+				cancelCtx = ericlient.WithAgent(rc, bld.Agent)
+			}
 			for _, c := range chunks {
-				if cErr := b.executor.CancelChunkDispatch(rc, c.ID); cErr != nil {
-					slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
+				if cErr := b.executor.CancelChunkDispatch(cancelCtx, c.ID); cErr != nil {
+					slog.WarnContext(cancelCtx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
 				}
 			}
-			if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
-				slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
+			if _, sErr := b.executor.SyncBuildWidget(cancelCtx, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
+				slog.WarnContext(cancelCtx, "[vanadis-restate] sync widget warning", "error", sErr)
 			}
-			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
-				slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
+			if pErr := b.executor.PublishExternalEvent(cancelCtx, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
+				slog.WarnContext(cancelCtx, "[vanadis-restate] publish event warning", "error", pErr)
 			}
 		}
 		return *bld, nil
@@ -740,6 +745,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 			resp.ThreadID = bld.ThreadID
 			resp.Objective = bld.Objective
 			resp.Quiet = bld.Quiet
+			resp.Agent = bld.Agent
 		}
 		return resp, nil
 	})
@@ -753,6 +759,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 				ThreadID:  res.ThreadID,
 				Objective: res.Objective,
 				Quiet:     res.Quiet,
+				Agent:     res.Agent,
 			}
 			if err := b.notifyChunkFailure(rc, bld, chunkID, reason); err != nil {
 				return false, err

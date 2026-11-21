@@ -9,6 +9,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prflow"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -292,17 +293,23 @@ func (b *BuildObject) locateOrAttachPRChunk(ctx context.Context, buildID string,
 
 // dispatchPREvent applies one PR event and returns the other builds a
 // deploy_success sweep changed, for reconciliation by their own runners.
-func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) ([]store.BuildRoute, error) {
+func (b *BuildObject) dispatchPREvent(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) ([]store.BuildRoute, error) {
 	if event == "deploy_success" {
-		ctx, crossBuild := withCrossBuildReconciles(rc)
-		err := b.applyMutation(ctx, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
+		cctx, crossBuild := withCrossBuildReconciles(ctx)
+		err := b.applyMutation(cctx, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
 		return crossBuild.list(), err
 	}
-	return nil, b.handlePREventType(rc, buildID, chunkID, event, ev)
+	return nil, b.handlePREventType(ctx, buildID, chunkID, event, ev)
 }
 
 func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (prEventOutcome, error) {
-	chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
+	eventCtx := context.Context(rc)
+	if b.store != nil {
+		if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil && bld != nil && strings.TrimSpace(bld.Agent) != "" {
+			eventCtx = ericlient.WithAgent(rc, bld.Agent)
+		}
+	}
+	chunkID, cErr := b.locateOrAttachPRChunk(eventCtx, buildID, ev)
 	if cErr != nil || chunkID == "" {
 		return prEventOutcome{}, cErr
 	}
@@ -316,7 +323,7 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 		}
 	}
 
-	reconcileTargets, eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
+	reconcileTargets, eventErr := b.dispatchPREvent(eventCtx, buildID, chunkID, event, ev)
 	if eventErr != nil {
 		if errors.Is(eventErr, errPRTransitionSkipped) {
 			return prEventOutcome{}, nil

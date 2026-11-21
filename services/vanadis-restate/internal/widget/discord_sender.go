@@ -609,7 +609,35 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 		defer chLock.Unlock()
 	}
 
-	return DeliverStatusWidget(sender, req, now, opts...)
+	fallbacks := d.fallbackSenders(sender)
+	return DeliverStatusWidget(sender, req, now, fallbacks, opts...)
+}
+
+func (d *DiscordWidgetDeliverer) fallbackSenders(primary DiscordWidgetSender) []DiscordWidgetSender {
+	if d == nil {
+		return nil
+	}
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	seen := make(map[DiscordWidgetSender]bool)
+	seen[primary] = true
+	var fallbacks []DiscordWidgetSender
+	for _, s := range d.agentSenders {
+		if isNilSender(s) || seen[s] {
+			continue
+		}
+		seen[s] = true
+		fallbacks = append(fallbacks, s)
+	}
+	if !isNilSender(d.sender) && !seen[d.sender] {
+		seen[d.sender] = true
+		fallbacks = append(fallbacks, d.sender)
+	}
+	if !isNilSender(d.session) && !seen[d.session] {
+		seen[d.session] = true
+		fallbacks = append(fallbacks, d.session)
+	}
+	return fallbacks
 }
 
 // DeliverDirectMessageWithAgent delivers a direct plain-text channel alert message using the specified agent sender.
@@ -694,13 +722,23 @@ func isForeignAuthorError(err error) bool {
 
 // deleteOldWidgetBestEffort removes a replaced widget message. Failures never propagate:
 // the replacement card is already posted, and the current bot may lack permission to
-// delete another bot's message (403 code 50013).
-func deleteOldWidgetBestEffort(s DiscordWidgetSender, channelID, msgID string, opts ...discordgo.RequestOption) {
+// delete another bot's message (403 code 50013). When missing permissions error occurs,
+// it retries across fallbackSenders so a card posted by another agent bot is cleaned up.
+func deleteOldWidgetBestEffort(s DiscordWidgetSender, channelID, msgID string, fallbackSenders []DiscordWidgetSender, opts ...discordgo.RequestOption) {
 	delErr := s.ChannelMessageDelete(channelID, msgID, opts...)
 	switch {
 	case delErr == nil, isNotFoundError(delErr):
 		return
 	case discordErrorCode(delErr) == discordCodeMissingPermissions:
+		for _, fb := range fallbackSenders {
+			if isNilSender(fb) || fb == s {
+				continue
+			}
+			fbErr := fb.ChannelMessageDelete(channelID, msgID, opts...)
+			if fbErr == nil || isNotFoundError(fbErr) {
+				return
+			}
+		}
 		log.Printf("[Widget] Old status widget message %s left in place: missing permission to delete it: %v", msgID, delErr)
 	default:
 		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", msgID, delErr)
@@ -715,19 +753,19 @@ func newWidgetMessageSend(components []discordgo.MessageComponent) *discordgo.Me
 	}
 }
 
-func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent, opts ...discordgo.RequestOption) (string, bool) {
+func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent, fallbackSenders []DiscordWidgetSender, opts ...discordgo.RequestOption) (string, bool) {
 	send := newWidgetMessageSend(components)
 	created, sendErr := s.ChannelMessageSendComplex(channelID, send, opts...)
 	if sendErr != nil || created == nil {
 		return "", false
 	}
-	deleteOldWidgetBestEffort(s, channelID, trimmedMsgID, opts...)
+	deleteOldWidgetBestEffort(s, channelID, trimmedMsgID, fallbackSenders, opts...)
 	return created.ID, true
 }
 
-func updateExistingStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, now time.Time, opts ...discordgo.RequestOption) (string, error) {
+func updateExistingStatusWidget(s DiscordWidgetSender, fallbackSenders []DiscordWidgetSender, req ericlient.StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, now time.Time, opts ...discordgo.RequestOption) (string, error) {
 	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID, now, opts...) {
-		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components, opts...); ok {
+		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components, fallbackSenders, opts...); ok {
 			return id, nil
 		}
 	}
@@ -768,15 +806,16 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidge
 		if created == nil {
 			return "", errors.New("failed to send new status widget message after foreign-author edit: received nil message")
 		}
-		deleteOldWidgetBestEffort(s, req.ChannelID, trimmedMsgID, opts...)
+		deleteOldWidgetBestEffort(s, req.ChannelID, trimmedMsgID, fallbackSenders, opts...)
 		return created.ID, nil
 	}
 
 	return "", fmt.Errorf("failed to edit status widget message %s: %w", trimmedMsgID, editErr)
 }
 
-// DeliverStatusWidget delivers or updates a status widget via Discord Components V2.
-func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, now time.Time, opts ...discordgo.RequestOption) (string, error) {
+// DeliverStatusWidget delivers or updates a status widget via Discord Components V2,
+// attempting fallbackSenders for cross-bot message deletions when the primary sender hits permissions errors.
+func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, now time.Time, fallbackSenders []DiscordWidgetSender, opts ...discordgo.RequestOption) (string, error) {
 	if isNilSender(s) {
 		return "", errors.New("discord widget sender is nil")
 	}
@@ -791,7 +830,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetReques
 
 	trimmedMsgID := strings.TrimSpace(req.MessageID)
 	if trimmedMsgID != "" {
-		return updateExistingStatusWidget(s, req, trimmedMsgID, components, now, opts...)
+		return updateExistingStatusWidget(s, fallbackSenders, req, trimmedMsgID, components, now, opts...)
 	}
 
 	send := newWidgetMessageSend(components)
