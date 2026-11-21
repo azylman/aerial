@@ -327,7 +327,7 @@ func insertBatchSteps(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 ON CONFLICT (agent, session_id, step_index) DO NOTHING`,
 			stack, sessionID, st.StepIndex, strings.TrimSpace(st.Type), strings.TrimSpace(st.ToolName),
-			"", toolCallID, sanitizeTranscriptText(st.Content), createdAt)
+			"", toolCallID, transcriptwire.SanitizeText(st.Content), createdAt)
 		if err != nil {
 			return indexed, fmt.Errorf("insert transcript step %d: %w", st.StepIndex, err)
 		}
@@ -340,10 +340,6 @@ func insertBatchSteps(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		}
 	}
 	return indexed, nil
-}
-
-func sanitizeTranscriptText(s string) string {
-	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 }
 
 // summaryLockKey scopes the per-thread summarizer advisory lock.
