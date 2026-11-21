@@ -231,7 +231,7 @@ func syncHeadSHA(s *PRState, headSHA string) {
 		return
 	}
 	if clean := strings.TrimSpace(headSHA); clean != "" && !IsZeroSHA(clean) {
-		s.HeadSHA = clean
+		s.SetHead(clean)
 	}
 }
 

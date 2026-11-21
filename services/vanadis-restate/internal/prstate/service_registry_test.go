@@ -94,7 +94,10 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	mc14, rec14 := newStateMock(t, synced)
 	mc15, rec15 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalClosed))
 	mc16, rec16 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
-	mc17, rec17 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
+	redelivered := svcRow("h1", "", RegistryStatusOpen, TerminalNone)
+	redelivered.PriorHeads = []string{"h0", "h2"}
+	mc17, rec17 := newStateMock(t, redelivered)
+	mc19, rec19 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc18, rec18 := newStateMock(t, svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged))
 	_, err12 := svc.HandleDeploySuccessPublished(restate.WithMockContext(mc12), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", JobName: "core"})
 	_, err16 := svc.HandleConflictPublished(restate.WithMockContext(mc16), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1"})
@@ -165,7 +168,11 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 			name: "synchronize from stored head syncs the row", got: svc.HandleSynchronized(restate.WithMockContext(mc14), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h1", Branch: "feat"}), rec: rec14, wantSet: true,
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h2", Branch: "feat"},
 		},
-		{name: "late synchronize drops stale", got: svc.HandleSynchronized(restate.WithMockContext(mc17), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h0"}), rec: rec17, wantSet: false},
+		{name: "late synchronize of a prior head drops stale", got: svc.HandleSynchronized(restate.WithMockContext(mc17), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h0"}), rec: rec17, wantSet: false},
+		{
+			name: "missed synchronize recovers the stale head", got: svc.HandleSynchronized(restate.WithMockContext(mc19), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h3", BeforeSHA: "h2"}), rec: rec19, wantSet: true,
+			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h3"},
+		},
 		{name: "closed absorbs deploy failure", got: svc.HandleDeployFailed(restate.WithMockContext(mc15), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", Banner: "boom"}), rec: rec15, wantSet: false},
 		{
 			name: "conflict publish records conflict", got: err16, rec: rec16, wantSet: true,
@@ -264,6 +271,56 @@ func TestPRObjectService_GetBuildLifecycle(t *testing.T) {
 			got, err := NewPRObjectService().GetBuildLifecycle(restate.WithMockContext(mc), BuildLifecycleRequest{})
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestPRObjectService_HandleSynchronized pins the synchronize head guard end
+// to end: the committed head and PriorHeads ring, and the RepoObject index
+// update that lets ResolvePRBySHA find the new head, for a normal advance, a
+// recovered stale head and a late redelivery.
+func TestPRObjectService_HandleSynchronized(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		stored    string
+		prior     []string
+		ev        PREvent
+		wantSet   bool
+		wantHead  string
+		wantPrior []string
+		wantSends []sentCall
+	}{
+		{
+			name: "before matches stored head", stored: "c00b710c",
+			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "79e9dfc2", BeforeSHA: "c00b710c", Branch: "feat/x"},
+			wantSet: true, wantHead: "79e9dfc2", wantPrior: []string{"c00b710c"},
+			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
+		},
+		{
+			name: "missed synchronize recovers and indexes the new head", stored: "c00b710c",
+			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", BeforeSHA: "79e9dfc2", Branch: "feat/x"},
+			wantSet: true, wantHead: "701c341c", wantPrior: []string{"c00b710c"},
+			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive}}},
+		},
+		{
+			name: "late redelivery of a prior head drops", stored: "701c341c", prior: []string{"c00b710c", "79e9dfc2"},
+			ev:       PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "79e9dfc2", BeforeSHA: "c00b710c", Branch: "feat/x"},
+			wantHead: "701c341c", wantPrior: []string{"c00b710c", "79e9dfc2"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seed := NewPRState("azylman/aerial", 2308)
+			seed.HeadSHA, seed.Status, seed.Branch = tc.stored, RegistryStatusOpen, "feat/x"
+			seed.PriorHeads = tc.prior
+			mc, rec := newStateMock(t, seed)
+			require.NoError(t, NewPRObjectService().HandleSynchronized(restate.WithMockContext(mc), tc.ev))
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			require.Equal(t, tc.wantHead, seed.HeadSHA)
+			require.Equal(t, tc.wantPrior, seed.PriorHeads)
+			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
 	}
 }
