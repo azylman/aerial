@@ -383,7 +383,7 @@ func scanMockPRRegistryRows(idx int, dest []any, tc postgresPRRegistryUnitCase) 
 		return scanValues(dest, int64(200+idx), "azylman/aerial", 200+idx, "main", "headsha", "mergesha", "100000000000000001", meta)
 	}
 	if len(dest) == 3 {
-		return scanValues(dest, "arcane103", "wrap it up", "done")
+		return scanValues(dest, "octo-user", "wrap it up", "done")
 	}
 	return nil
 }
