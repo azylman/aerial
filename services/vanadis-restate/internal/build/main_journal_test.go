@@ -17,7 +17,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -474,6 +476,95 @@ func TestReconcile_DeferralJournalCommandSequence(t *testing.T) {
 				want = append(want, tc.wantSend)
 			}
 			assert.Equal(t, want, commands)
+		})
+	}
+}
+
+// runStepName reads the restate.WithName option of a Run call.
+func runStepName(opts []restate.RunOption) string {
+	for _, opt := range opts {
+		m := reflect.ValueOf(opt).MethodByName("BeforeRun")
+		arg := reflect.New(m.Type().In(0).Elem())
+		m.Call([]reflect.Value{arg})
+		if name := arg.Elem().FieldByName("Name").String(); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// makeOutcomeJournalContext replays journaled Run results by step name and
+// records every Restate command OnDispatchOutcome issues.
+func makeOutcomeJournalContext(t *testing.T, journal map[string]any, commands *[]string) restate.ObjectContext {
+	t.Helper()
+	mc := mocks.NewMockContext(t)
+	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe()
+	mc.EXPECT().Key().Return("b1").Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-1"}).Maybe()
+	mc.EXPECT().Get(mock.Anything, mock.Anything).RunAndReturn(func(key string, _ any, _ ...restate.GetOption) (bool, restate.TerminalError) {
+		*commands = append(*commands, "get "+key)
+		return false, nil
+	}).Maybe()
+	mc.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key string, _ any, _ ...restate.SetOption) {
+		*commands = append(*commands, "set "+key)
+	}).Maybe()
+	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(_ func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
+		name := runStepName(opts)
+		*commands = append(*commands, "run "+name)
+		if res, ok := journal[name]; ok {
+			setJournalOutput(output, res)
+		}
+		return nil
+	}).Maybe()
+	mClient := mocks.NewMockClient(t)
+	mc.EXPECT().Object(mock.Anything, mock.Anything, mock.Anything).Return(mClient).Maybe()
+	mClient.EXPECT().Send(mock.Anything, mock.Anything).RunAndReturn(func(input any, _ ...restate.SendOption) restate.Invocation {
+		payload, err := json.Marshal(input)
+		require.NoError(t, err)
+		*commands = append(*commands, fmt.Sprintf("send %s", payload))
+		return mocks.NewMockInvocation(t)
+	}).Maybe()
+	return restate.WithMockContext(mc)
+}
+
+// Invocations journaled before the verdict cutover replay their recorded step
+// results onto the same command sequence; the cutover only adds the
+// fail_action result on the existing handle-nopr-turn-outcome step.
+func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
+	t.Parallel()
+	transition := reconcileStepOutput{BuildStatus: "running", LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: model.VanadisBuild{ID: "b1", Status: "running"}}}
+	prefix := []string{"run runner-guard", "run handle-dispatch-outcome-postgres"}
+	tests := []struct {
+		name    string
+		status  string
+		applied bool
+		noPR    noPRAction
+		want    []string
+	}{
+		{name: "legacy accepted action completion reconciles", status: "completed", applied: true, want: []string{"get state", "get launched", "run reconcile-after-dispatch-outcome", "set state", "set launched"}},
+		{name: "verdictless turn resumed", status: "completed", noPR: noPRActionResume, want: []string{"run handle-nopr-turn-outcome"}},
+		{name: "verdictless turn ignored", status: "completed", noPR: noPRActionNone, want: []string{"run handle-nopr-turn-outcome"}},
+		{name: "legacy no-pr failure reconciles", status: "completed", noPR: noPRActionFail, want: []string{"run handle-nopr-turn-outcome", "get state", "get launched", "run reconcile-after-nopr-fail", "set state", "set launched"}},
+		{name: "action resume cap reconciles failure", status: "completed", noPR: noPRActionFailAction, want: []string{"run handle-nopr-turn-outcome", "get state", "get launched", "run reconcile-after-nopr-fail", "set state", "set launched"}},
+		{name: "timeout turn resumed", status: "timeout", noPR: noPRActionResume, want: []string{"run handle-nopr-turn-outcome"}},
+		{name: "unapplied failed outcome stops", status: "failed", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var commands []string
+			journal := map[string]any{
+				labelRunnerGuard:                   runnerGuardResult{},
+				"handle-dispatch-outcome-postgres": tc.applied,
+				"handle-nopr-turn-outcome":         tc.noPR,
+				labelReconcileAfterDispatch:        transition,
+				labelReconcileAfterNoPRFail:        transition,
+			}
+			ctx := makeOutcomeJournalContext(t, journal, &commands)
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", nil))
+			err := bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", DispatchID: "vanadis-c1-turn-0", Status: tc.status})
+			require.NoError(t, err)
+			assert.Equal(t, append(append([]string{}, prefix...), tc.want...), commands)
 		})
 	}
 }

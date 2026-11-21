@@ -237,16 +237,22 @@ func (b *BuildObject) completeSweptDeployments(ctx context.Context, chunks []mod
 }
 
 func (b *BuildObject) validateActionBuild(ctx context.Context, buildID, chunkID string) error {
+	_, err := b.buildChunk(ctx, buildID, chunkID)
+	return err
+}
+
+// buildChunk returns the chunk snapshot when it belongs to the build.
+func (b *BuildObject) buildChunk(ctx context.Context, buildID, chunkID string) (model.VanadisChunk, error) {
 	_, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
-		return err
+		return model.VanadisChunk{}, err
 	}
 	for _, c := range chunks {
 		if c.ID == chunkID && c.BuildID == buildID {
-			return nil
+			return c, nil
 		}
 	}
-	return ErrChunkNotFound
+	return model.VanadisChunk{}, ErrChunkNotFound
 }
 
 func (b *BuildObject) completeActionDeploymentMutation(ctx context.Context, mutation *BuildMutationRequest) error {
@@ -387,36 +393,13 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 		return err
 	}
 	applied, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", func(rc restate.RunContext) (bool, error) {
-		chunkID := strings.TrimSpace(ev.VanadisChunkID)
-		if chunkID == "" {
-			return false, nil
-		}
-		status := strings.ToLower(strings.TrimSpace(ev.Status))
-		switch status {
-		case "completed", dispatchStatusSuccess:
-			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
-				return false, err
-			}
-			res, err := b.store.CompleteActionChunk(rc, chunkID, ev.DispatchID)
-			if err != nil {
-				return false, err
-			}
-			return res != nil && res.CompletionAccepted, nil
-		case statusFailed, statusTimeout, statusCrashed:
-			reason := store.FirstNonEmpty(ev.Error, "dispatch outcome failed")
-			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
-				return false, err
-			}
-			_, _, failed, err := b.store.FailChunk(rc, chunkID, reason, ev.DispatchID)
-			return failed, err
-		}
-		return true, nil
+		return b.applyDispatchOutcome(rc, restate.Key(ctx), ev)
 	})
 	if err != nil {
 		return err
 	}
 	if !applied {
-		if b.executor != nil && isCompletedDispatchStatus(ev.Status) {
+		if b.executor != nil && isVerdictlessDispatchStatus(ev.Status) {
 			return b.handleNoPRTurnOutcome(ctx, ev)
 		}
 		return nil
@@ -429,14 +412,62 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	return nil
 }
 
+// applyDispatchOutcome applies a dispatch outcome inside the journaled
+// handle-dispatch-outcome-postgres step and reports whether it changed the
+// chunk. Completed and timeout outcomes never complete an action chunk: only
+// the CompleteChunk verdict does.
+func (b *BuildObject) applyDispatchOutcome(rc context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) (bool, error) {
+	chunkID := strings.TrimSpace(ev.VanadisChunkID)
+	if chunkID == "" {
+		return false, nil
+	}
+	status := strings.ToLower(strings.TrimSpace(ev.Status))
+	switch status {
+	case "completed", dispatchStatusSuccess:
+		chunk, err := b.buildChunk(rc, buildID, chunkID)
+		if err != nil {
+			return false, err
+		}
+		// Action chunks complete only through the CompleteChunk verdict.
+		if chunk.Mode == chunkModeAction {
+			return false, nil
+		}
+		res, err := b.store.CompleteActionChunk(rc, chunkID, ev.DispatchID)
+		if err != nil {
+			return false, err
+		}
+		return res != nil && res.CompletionAccepted, nil
+	case statusTimeout:
+		chunk, err := b.buildChunk(rc, buildID, chunkID)
+		if err != nil {
+			return false, err
+		}
+		// A timed-out action turn is a verdictless turn: resume, never fail.
+		if chunk.Mode == chunkModeAction {
+			return false, nil
+		}
+		_, _, failed, err := b.store.FailChunk(rc, chunkID, store.FirstNonEmpty(ev.Error, "dispatch outcome failed"), ev.DispatchID)
+		return failed, err
+	case statusFailed, statusCrashed:
+		reason := store.FirstNonEmpty(ev.Error, "dispatch outcome failed")
+		if err := b.validateActionBuild(rc, buildID, chunkID); err != nil {
+			return false, err
+		}
+		_, _, failed, err := b.store.FailChunk(rc, chunkID, reason, ev.DispatchID)
+		return failed, err
+	}
+	return true, nil
+}
+
 // noPRAction aliases the prflow recovery decision so existing callers keep
 // compiling against the thin build surface.
 type noPRAction = prflow.NoPRAction
 
 const (
-	noPRActionNone   = prflow.NoPRActionNone
-	noPRActionResume = prflow.NoPRActionResume
-	noPRActionFail   = prflow.NoPRActionFail
+	noPRActionNone       = prflow.NoPRActionNone
+	noPRActionResume     = prflow.NoPRActionResume
+	noPRActionFail       = prflow.NoPRActionFail
+	noPRActionFailAction = prflow.NoPRActionFailAction
 )
 
 const noPRFailureReason = prflow.NoPRFailureReason
@@ -447,6 +478,12 @@ func isCompletedDispatchStatus(status string) bool {
 		return true
 	}
 	return false
+}
+
+// isVerdictlessDispatchStatus reports outcomes that end a turn without a
+// verdict: completed turns and turns eri stopped at its time limit.
+func isVerdictlessDispatchStatus(status string) bool {
+	return isCompletedDispatchStatus(status) || strings.EqualFold(strings.TrimSpace(status), statusTimeout)
 }
 
 // noPRTurnAction decides how to react when a PR chunk's turn completes. The
@@ -464,6 +501,17 @@ func (b *BuildObject) resumeNoPRChunk(ctx context.Context, bld *model.VanadisBui
 	return b.flow().ResumeNoPRChunk(ctx, bld, chunks, idx)
 }
 
+// resumeVerdictlessChunk dispatches the next automatic resume: the counted
+// action resume for action chunks, the single no-PR resume for PR chunks.
+func (b *BuildObject) resumeVerdictlessChunk(ctx context.Context, bld *model.VanadisBuild, chunks []model.VanadisChunk, idx int, dispatchID string) error {
+	if chunks[idx].Mode != chunkModeAction {
+		return b.resumeNoPRChunk(ctx, bld, chunks, idx)
+	}
+	// noPRTurnAction only resumes current-generation IDs below the cap.
+	k, _ := prflow.NextActionResume(chunks[idx], dispatchID)
+	return b.flow().ResumeActionChunk(ctx, bld, chunks, idx, k)
+}
+
 // handleNoPRTurnOutcome resumes a PR chunk whose launch turn ended without a PR
 // once, then fails it loudly when the resume turn also ends without one.
 func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
@@ -478,9 +526,15 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 		if bld == nil || idx < 0 {
 			return noPRActionNone, nil
 		}
-		action := noPRTurnAction(chunks[idx], bld.Status, ev.DispatchID)
+		chunk := chunks[idx]
+		// Only action turns treat a time-limit stop as verdictless; PR chunks keep
+		// their failed-outcome handling.
+		if chunk.Mode != chunkModeAction && !isCompletedDispatchStatus(ev.Status) {
+			return noPRActionNone, nil
+		}
+		action := noPRTurnAction(chunk, bld.Status, ev.DispatchID)
 		if action == noPRActionResume {
-			if err := b.resumeNoPRChunk(rc, bld, chunks, idx); err != nil {
+			if err := b.resumeVerdictlessChunk(rc, bld, chunks, idx, ev.DispatchID); err != nil {
 				return noPRActionNone, err
 			}
 		}
@@ -489,10 +543,15 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 	if err != nil {
 		return err
 	}
-	if action != noPRActionFail {
+	reason := noPRFailureReason
+	switch action {
+	case noPRActionFail:
+	case noPRActionFailAction:
+		reason = prflow.ActionResumeFailureReason
+	default:
 		return nil
 	}
-	mutation := &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunkID, DispatchID: ev.DispatchID, Reason: noPRFailureReason}
+	mutation := &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunkID, DispatchID: ev.DispatchID, Reason: reason}
 	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterNoPRFail, mutation); tErr != nil {
 		return ToTerminalErr(tErr)
 	}

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,9 +84,46 @@ func (s *Store) ReserveChunkForLaunch(ctx context.Context, chunkID string) error
 	return nil
 }
 
+// maxActionResumes caps the automatic resumes of an action chunk whose turns
+// end without a complete_chunk verdict.
+const maxActionResumes = 12
+
+// MaxActionResumes exposes maxActionResumes to the lifecycle and prompt layers.
+const MaxActionResumes = maxActionResumes
+
+// ActionResumeDispatchID identifies automatic resume k of an action chunk's
+// current generation.
+func ActionResumeDispatchID(chunk model.VanadisChunk, k int) string {
+	return model.ActionDispatchID(chunk) + "-resume-" + strconv.Itoa(k)
+}
+
+// ActionResumeIndex maps a current-generation action dispatch ID to its resume
+// ordinal: 0 for the launch turn, k for resume 1..maxActionResumes. Any other
+// ID, including other generations' IDs, reports false.
+func ActionResumeIndex(chunk model.VanadisChunk, dispatchID string) (int, bool) {
+	launch := model.ActionDispatchID(chunk)
+	if dispatchID == launch {
+		return 0, true
+	}
+	suffix, ok := strings.CutPrefix(dispatchID, launch+"-resume-")
+	if !ok {
+		return 0, false
+	}
+	k, err := strconv.Atoi(suffix)
+	if err != nil || k < 1 || k > maxActionResumes || strconv.Itoa(k) != suffix {
+		return 0, false
+	}
+	return k, true
+}
+
+func currentActionIdentity(chunk model.VanadisChunk, dispatchID string) bool {
+	_, ok := ActionResumeIndex(chunk, dispatchID)
+	return ok
+}
+
 // ActionCompletionAllowed reports whether an action chunk completion applies.
 func ActionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	identityMatches := dispatchID == model.ActionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
+	identityMatches := currentActionIdentity(chunk, dispatchID) || (dispatchID == "" && chunk.StallNudges == 0)
 	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
 }
 
@@ -299,7 +337,7 @@ func ActionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) 
 	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
 		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
 	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
-		(prIdentity || dispatchID == model.ActionDispatchID(c))
+		(prIdentity || currentActionIdentity(c, dispatchID))
 }
 
 func failureSkipped(c model.VanadisChunk, buildStatus, dispatchID string) bool {

@@ -604,7 +604,21 @@ const (
 	NoPRActionResume NoPRAction = "resume"
 	// NoPRActionFail fails the chunk after the resume turn also ended dirty.
 	NoPRActionFail NoPRAction = "fail"
+	// NoPRActionFailAction fails an action chunk whose last automatic resume
+	// also ended without a complete_chunk verdict.
+	NoPRActionFailAction NoPRAction = "fail_action"
 )
+
+// ActionResumeFailureReason is the failure reason recorded when an action
+// chunk exhausts its automatic resumes without a complete_chunk verdict.
+var ActionResumeFailureReason = fmt.Sprintf("RESUMABLE: action turn ended without complete_chunk after %d automatic resumes", store.MaxActionResumes)
+
+// actionRepairPRStatuses are the PR stages an action chunk passes through
+// while a repair PR it submitted moves toward deployment.
+var actionRepairPRStatuses = map[string]bool{
+	"pr_opened": true, statusCIFailed: true, statusConflict: true, statusMerged: true,
+	"synced": true, "deploying": true, "deployed": true, "deploy_failed": true,
+}
 
 // NoPRFailureReason is the failure reason recorded when a PR chunk turn ends
 // without opening a PR even after the automatic resume.
@@ -618,8 +632,15 @@ func NoPRResumeDispatchID(chunkID string) string {
 // NoPRTurnAction decides how to react when a PR chunk's turn completes. The
 // submit script attaches PRs synchronously, so a completed launch or resume
 // turn on a still-running chunk without a PR means the turn ended without one.
+//
+// Action chunks complete only through a complete_chunk verdict, so a turn of
+// the current generation that ends without one resumes the chunk until
+// maxActionResumes is spent, then fails it as resumable.
 func NoPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) NoPRAction {
-	if chunk.Mode == chunkModeAction || chunk.PRNumber != 0 || buildStatus != statusRunning {
+	if chunk.Mode == chunkModeAction {
+		return actionTurnAction(chunk, buildStatus, dispatchID)
+	}
+	if chunk.PRNumber != 0 || buildStatus != statusRunning {
 		return NoPRActionNone
 	}
 	if chunk.Status != statusRunning && chunk.Status != statusCoding {
@@ -634,6 +655,34 @@ func NoPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) No
 	return NoPRActionNone
 }
 
+func actionTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) NoPRAction {
+	if buildStatus != statusRunning {
+		return NoPRActionNone
+	}
+	if chunk.Status != statusRunning && (chunk.PRNumber == 0 || !actionRepairPRStatuses[chunk.Status]) {
+		return NoPRActionNone
+	}
+	k, ok := store.ActionResumeIndex(chunk, dispatchID)
+	switch {
+	case !ok:
+		return NoPRActionNone
+	case k < store.MaxActionResumes:
+		return NoPRActionResume
+	default:
+		return NoPRActionFailAction
+	}
+}
+
+// NextActionResume returns the resume ordinal that follows a verdictless turn
+// of the chunk's current generation, or false for any other dispatch ID.
+func NextActionResume(chunk model.VanadisChunk, dispatchID string) (int, bool) {
+	k, ok := store.ActionResumeIndex(chunk, dispatchID)
+	if !ok || k >= store.MaxActionResumes {
+		return 0, false
+	}
+	return k + 1, true
+}
+
 // FindChunkIndex returns the index of a chunk ID, or -1 when absent.
 func FindChunkIndex(chunks []model.VanadisChunk, chunkID string) int {
 	for i := range chunks {
@@ -642,6 +691,26 @@ func FindChunkIndex(chunks []model.VanadisChunk, chunkID string) int {
 		}
 	}
 	return -1
+}
+
+// ResumeActionChunk dispatches automatic resume k for an action chunk whose
+// previous turn ended without a complete_chunk verdict.
+func (f *Flow) ResumeActionChunk(ctx context.Context, bld *model.VanadisBuild, chunks []model.VanadisChunk, idx, k int) error {
+	chunk := chunks[idx]
+	chunkPrompt, err := f.Exec.FormatChunkPrompt(*bld, chunks, idx)
+	if err != nil {
+		return fmt.Errorf("format chunk prompt: %w", err)
+	}
+	chunk.Effort = store.CapChunkEffort(chunk.Effort)
+	// eri dedupes by dispatch ID, so never skip: a dropped resume would stall the chunk.
+	if err := f.DispatchChunkRemediationForChunk(ctx, bld, chunk, store.ActionResumeDispatchID(chunk, k), executor.FormatActionResumePrompt(chunk, chunkPrompt, k, store.MaxActionResumes), false); err != nil {
+		return err
+	}
+	banner := fmt.Sprintf("Chunk %d turn ended without complete_chunk — automatic resume %d/%d dispatched", chunk.ChunkIndex+1, k, store.MaxActionResumes)
+	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, banner); sErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
+	}
+	return nil
 }
 
 // ResumeNoPRChunk dispatches the single automatic resume turn for a chunk
