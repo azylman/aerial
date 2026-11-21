@@ -24,6 +24,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/mcpkit"
 	"github.com/azylman/aerial/pkg/ollama"
 	"github.com/azylman/aerial/pkg/tracing"
 )
@@ -65,16 +66,6 @@ func NewServer(cfg *Config, vikunja *VikunjaClient, store TaskStore, ollamaClien
 	return s
 }
 
-// HandleHealth handles GET and HEAD readiness requests.
-func (*Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
 // HandleMCPStreamable serves MCP over streamable HTTP, accepting legacy docket_-prefixed tool names.
 func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
 	httpkit.ServeMCPStream(w, r, s.streamHandler, "docket-mcp ready\n", "docket_", "")
@@ -83,85 +74,62 @@ func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
 var taskStatusFilters = []any{taskStatusOpen, taskStatusCompleted, taskStatusWontDo, taskStatusAll}
 
 func (s *Server) registerTools(srv *mcp.Server) {
-	listSchema := inputSchema[ListArgs]()
+	listSchema := mcpkit.InputSchema[ListArgs]()
 	setEnum(listSchema, "status", `"open"`, taskStatusFilters...)
-	searchSchema := inputSchema[SearchArgs]()
+	searchSchema := mcpkit.InputSchema[SearchArgs]()
 	setEnum(searchSchema, "status", `"open"`, taskStatusFilters...)
 	searchSchema.Properties["limit"].Default = json.RawMessage(`10`)
-	linkSchema := inputSchema[LinkArgs]()
+	linkSchema := mcpkit.InputSchema[LinkArgs]()
 	setEnum(linkSchema, "type", "", "parent", "blocks", "related")
 	linkSchema.Properties["remove"].Default = json.RawMessage(`false`)
-	closeSchema := inputSchema[CloseArgs]()
+	closeSchema := mcpkit.InputSchema[CloseArgs]()
 	setEnum(closeSchema, "resolution", "", taskStatusCompleted, taskStatusWontDo)
 
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "ready",
 		Description: "Returns unblocked open tasks ready for execution, top-down with subtasks nested in ready_subtasks. If parent_id is omitted, returns top-level tasks. If parent_id is provided, returns ready subtasks under that parent.",
-		InputSchema: inputSchema[ReadyArgs](),
+		InputSchema: mcpkit.InputSchema[ReadyArgs](),
 	}, s.toolReady)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "list",
 		Description: "List tasks filtered by status ('open', 'completed', 'wont_do', 'all', default 'open') and optional parent_id.",
 		InputSchema: listSchema,
 	}, s.toolList)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "search",
 		Description: "Search tasks using hybrid semantic and keyword search (Weighted RRF) with status pre-filtering.",
 		InputSchema: searchSchema,
 	}, s.toolSearch)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "show",
 		Description: "Show full details of a task including parent, subtasks, blockers, blocked tasks, related tasks, and comments.",
-		InputSchema: inputSchema[ShowArgs](),
+		InputSchema: mcpkit.InputSchema[ShowArgs](),
 	}, s.toolShow)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "create",
 		Description: "Create a new task with optional description, parent, blocker relations, and related links; any unknown referenced task ID rejects the create.",
-		InputSchema: inputSchema[CreateArgs](),
+		InputSchema: mcpkit.InputSchema[CreateArgs](),
 	}, s.toolCreate)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "update",
 		Description: "Update task title and/or description.",
-		InputSchema: inputSchema[UpdateArgs](),
+		InputSchema: mcpkit.InputSchema[UpdateArgs](),
 	}, s.toolUpdate)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "comment",
 		Description: "Add a comment to a task.",
-		InputSchema: inputSchema[CommentArgs](),
+		InputSchema: mcpkit.InputSchema[CommentArgs](),
 	}, s.toolComment)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "link",
 		Description: "Create or remove a relation between tasks ('parent', 'blocks', 'related'); new parent and blocks edges that would form a cycle are rejected.",
 		InputSchema: linkSchema,
 	}, s.toolLink)
-	addTextTool(srv, &mcp.Tool{
+	mcpkit.AddTextTool(srv, &mcp.Tool{
 		Name:        "close",
 		Description: "Close a task with resolution 'completed' or 'wont_do' and a required reason. Validates no open blockers/subtasks for completed, cascades for wont_do.",
 		InputSchema: closeSchema,
 	}, s.toolClose)
-}
-
-// addTextTool registers a tool whose logic returns its result text and whether it is an error.
-func addTextTool[In any](srv *mcp.Server, tool *mcp.Tool, run func(context.Context, In) (string, bool)) {
-	mcp.AddTool(srv, tool, func(ctx context.Context, _ *mcp.CallToolRequest, args In) (*mcp.CallToolResult, any, error) {
-		text, isErr := run(ctx, args)
-		return &mcp.CallToolResult{IsError: isErr, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
-	})
-}
-
-// inputSchema infers T's input schema and collapses the ["null", X] unions inferred
-// for pointer and slice fields to plain X, matching the types clients have always seen.
-func inputSchema[T any]() *jsonschema.Schema {
-	schema, err := jsonschema.For[T](nil)
-	if err != nil {
-		panic(fmt.Sprintf("docket-mcp: infer input schema: %v", err))
-	}
-	for _, prop := range schema.Properties {
-		if len(prop.Types) == 2 && prop.Types[0] == "null" {
-			prop.Type, prop.Types = prop.Types[1], nil
-		}
-	}
-	return schema
 }
 
 // setEnum restricts a string property to values, with an optional JSON-encoded default.
@@ -871,7 +839,7 @@ func writeRESTError(w http.ResponseWriter, status int, err error) {
 // NewHTTPMux registers HTTP endpoints for docket-mcp.
 func NewHTTPMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", srv.HandleHealth)
+	mux.HandleFunc("/health", mcpkit.HandleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("docket-mcp"))
 	mux.Handle("/mcp", tracing.Middleware("docket-mcp", http.HandlerFunc(srv.HandleMCPStreamable)))
 	mux.HandleFunc("/api/tasks", srv.HandleTasks)
