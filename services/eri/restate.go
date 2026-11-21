@@ -16,6 +16,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -233,14 +234,12 @@ func (c *RestateIngressClient) RotateThreadSession(ctx context.Context, threadID
 }
 
 // EnqueueDispatch enqueues a dispatch request into DispatchSession via Restate Ingress.
-func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey string, req queue.BrainDispatchRequest, idempotencyKey ...string) (queue.DispatchEnqueueResponse, error) {
-	var resp queue.DispatchEnqueueResponse
+func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey string, req eriwire.BrainDispatchRequest, idempotencyKey ...string) (eriwire.DispatchEnqueueResponse, error) {
+	var resp eriwire.DispatchEnqueueResponse
 	svcName := queue.DispatchSessionServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, sessionKey, "Enqueue", req, &resp, idempotencyKey...)
 	return resp, err
 }
-
-const statusSkippedActive = "skipped_active"
 
 // AskVoice executes a synchronous voice turn via Restate Ingress.
 func (c *RestateIngressClient) AskVoice(ctx context.Context, deviceKey string, req queue.VoiceSessionRequest) (queue.VoiceSessionResult, error) {
@@ -278,7 +277,7 @@ func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, r
 }
 
 func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient, req DispatchRequest, sessionKey, dispatchID string) (string, error) {
-	bReq := queue.BrainDispatchRequest{
+	bReq := eriwire.BrainDispatchRequest{
 		ID:             dispatchID,
 		Source:         strings.ToLower(strings.TrimSpace(req.Source)),
 		SessionID:      sessionKey,
