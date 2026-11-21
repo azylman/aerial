@@ -401,11 +401,11 @@ func TestSetupHealthMux(t *testing.T) {
 			wantBodySub: `{"status":"ok"}`,
 		},
 		{
-			name:        "GET /internal/quota returns 200 array",
+			name:        "GET /internal/quota returns 200 snapshot object",
 			method:      http.MethodGet,
 			path:        "/internal/quota",
 			wantStatus:  http.StatusOK,
-			wantBodySub: `[`,
+			wantBodySub: `"groups":[`,
 		},
 		{
 			name:        "GET /internal/quota with usage populated",

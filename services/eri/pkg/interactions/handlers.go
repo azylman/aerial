@@ -30,17 +30,13 @@ var (
 )
 
 func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	var groups []metrics.QuotaGroup
-	var updatedAt time.Time
+	var snapshot metrics.QuotaSnapshot
 	if r.deps.QuotaProvider != nil {
-		groups = r.deps.QuotaProvider()
+		snapshot = r.deps.QuotaProvider()
 	} else {
-		groups = metrics.LatestQuotaGroups()
-		updatedAt = metrics.LatestQuotaUpdatedAt()
+		snapshot = metrics.LatestQuotaSnapshot()
 	}
-	if r.deps.QuotaTimeProvider != nil {
-		updatedAt = r.deps.QuotaTimeProvider()
-	}
+	groups, updatedAt := snapshot.Groups, snapshot.UpdatedAt
 	var lines []string
 	now := time.Now().UTC()
 	for _, g := range groups {
