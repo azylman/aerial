@@ -33,6 +33,8 @@ case "$0" in
 esac
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" && (pwd -W 2>/dev/null || pwd))"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && (pwd -W 2>/dev/null || pwd))"
+# shellcheck source=lib/hermetic-go-env.sh
+. "$SCRIPT_DIR/lib/hermetic-go-env.sh"
 
 if [ "$MODE" != "staged" ]; then
     echo "⚡ [Aerial Verify] Running $MODE verification checks..."
@@ -320,31 +322,7 @@ run_go_test() {
             race_flag="-race"
         fi
         if has_cmd go; then
-            (cd "$svc" && env -i \
-                ${PATH:+PATH="$PATH"} \
-                ${HOME:+HOME="$HOME"} \
-                ${GOROOT:+GOROOT="$GOROOT"} \
-                ${GOPATH:+GOPATH="$GOPATH"} \
-                ${GOCACHE:+GOCACHE="$GOCACHE"} \
-                ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
-                ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
-                ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
-                ${TMPDIR:+TMPDIR="$TMPDIR"} \
-                ${SystemRoot:+SystemRoot="$SystemRoot"} \
-                ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
-                ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
-                ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
-                ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
-                ${TMP:+TMP="$TMP"} \
-                ${TEMP:+TEMP="$TEMP"} \
-                ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
-                ${APPDATA:+APPDATA="$APPDATA"} \
-                ${COMSPEC:+COMSPEC="$COMSPEC"} \
-                ${PATHEXT:+PATHEXT="$PATHEXT"} \
-                MSYS_NO_PATHCONV=1 \
-                LANG="${LANG:-en_US.UTF-8}" \
-                LC_ALL="${LC_ALL:-en_US.UTF-8}" \
-                GIT_TERMINAL_PROMPT=0 \
+            (cd "$svc" && hermetic_go \
                 CGO_ENABLED="$cgo_val" \
                 go test ${race_flag:+"$race_flag"} -trimpath ./...)
         elif has_docker; then
@@ -386,31 +364,7 @@ run_go_pkg_coverage() {
             race_flag="-race"
         fi
         prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
-        if ! (cd "$svc" && env -i \
-            ${PATH:+PATH="$PATH"} \
-            ${HOME:+HOME="$HOME"} \
-            ${GOROOT:+GOROOT="$GOROOT"} \
-            ${GOPATH:+GOPATH="$GOPATH"} \
-            ${GOCACHE:+GOCACHE="$GOCACHE"} \
-            ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
-            ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
-            ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
-            ${TMPDIR:+TMPDIR="$TMPDIR"} \
-            ${SystemRoot:+SystemRoot="$SystemRoot"} \
-            ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
-            ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
-            ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
-            ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
-            ${TMP:+TMP="$TMP"} \
-            ${TEMP:+TEMP="$TEMP"} \
-            ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
-            ${APPDATA:+APPDATA="$APPDATA"} \
-            ${COMSPEC:+COMSPEC="$COMSPEC"} \
-            ${PATHEXT:+PATHEXT="$PATHEXT"} \
-            MSYS_NO_PATHCONV=1 \
-            LANG="${LANG:-en_US.UTF-8}" \
-            LC_ALL="${LC_ALL:-en_US.UTF-8}" \
-            GIT_TERMINAL_PROMPT=0 \
+        if ! (cd "$svc" && hermetic_go \
             CGO_ENABLED="$cgo_val" \
             go test ${race_flag:+"$race_flag"} -trimpath -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
             rm -f "$prof_file"
