@@ -45,35 +45,35 @@ func NewRemoteQuotaProvider(eriRestateURL string, httpClient ...*http.Client) *R
 	}
 }
 
-// LatestQuotaGroups calls GET /internal/quota on eri-restate, returning []metrics.QuotaGroup or empty on error.
-func (p *RemoteQuotaProvider) LatestQuotaGroups() []metrics.QuotaGroup {
+// LatestQuotaSnapshot calls GET /internal/quota on eri-restate, returning a zero snapshot on error.
+func (p *RemoteQuotaProvider) LatestQuotaSnapshot() metrics.QuotaSnapshot {
 	if p == nil || p.httpClient == nil {
-		return nil
+		return metrics.QuotaSnapshot{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.eriRestateURL+"/internal/quota", http.NoBody)
 	if err != nil {
-		return nil
+		return metrics.QuotaSnapshot{}
 	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil
+		return metrics.QuotaSnapshot{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return metrics.QuotaSnapshot{}
 	}
-	var groups []metrics.QuotaGroup
-	if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
-		return nil
+	var snap metrics.QuotaSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		return metrics.QuotaSnapshot{}
 	}
-	return groups
+	return snap
 }
 
 // ProviderFunc returns a function conforming to interactions.QuotaProvider.
-func (p *RemoteQuotaProvider) ProviderFunc() func() []metrics.QuotaGroup {
-	return p.LatestQuotaGroups
+func (p *RemoteQuotaProvider) ProviderFunc() func() metrics.QuotaSnapshot {
+	return p.LatestQuotaSnapshot
 }
 
 // NewRemoteEphemeralLLMFunc creates a runner.LLMFunc that delegates ephemeral LLM generation to eri-restate over HTTP.
