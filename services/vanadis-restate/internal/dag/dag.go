@@ -2,13 +2,15 @@
 // explicit dependency normalization, Kahn cycle detection, transitive
 // closure, and concurrent same-repo disjoint target-file validation.
 // It has zero Restate dependency so the graph rules stay independently
-// testable from the reconciliation engine.
+// testable from the reconciliation engine. This is the single copy of the
+// build-DAG rules: internal/store and internal/build both call it.
 package dag
 
 import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -299,4 +301,62 @@ func CheckChunkDependenciesReady(chunk model.VanadisChunk, chunks []model.Vanadi
 		}
 	}
 	return nil
+}
+
+// ValidateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
+func ValidateUpdateChunkDAG(existing []model.VanadisChunk, updatedIdx int, updated model.VanadisChunk) ([]string, error) {
+	candidateChunks := make([]model.VanadisChunk, len(existing))
+	copy(candidateChunks, existing)
+	candidateChunks[updatedIdx] = updated
+
+	validated, err := NormalizeAndValidateBuildDAG(candidateChunks)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", model.ErrInvalidBuildInput, err)
+	}
+	return validated[updatedIdx].DependsOn, nil
+}
+
+// ValidateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
+func ValidateAppendChunksDAG(existing []model.VanadisChunk, appended []model.VanadisChunk) ([]model.VanadisChunk, error) {
+	allChunks := make([]model.VanadisChunk, 0, len(existing)+len(appended))
+	allChunks = append(allChunks, existing...)
+	allChunks = append(allChunks, appended...)
+
+	validatedAll, err := NormalizeAndValidateBuildDAG(allChunks)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", model.ErrInvalidBuildInput, err)
+	}
+	out := make([]model.VanadisChunk, len(appended))
+	copy(out, appended)
+	for i := range out {
+		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
+	}
+	return out, nil
+}
+
+// RelinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
+// removing removedID and replacing it with removedDeps.
+func RelinkDependenciesAfterRemoval(remaining []model.VanadisChunk, removedID string, removedDeps []string) {
+	for i := range remaining {
+		c := &remaining[i]
+		if !slices.Contains(c.DependsOn, removedID) {
+			continue
+		}
+		newDeps := make([]string, 0, len(c.DependsOn)+len(removedDeps))
+		seen := make(map[string]bool)
+		for _, dep := range c.DependsOn {
+			if dep == removedID {
+				for _, rd := range removedDeps {
+					if rd != c.ID && !seen[rd] {
+						seen[rd] = true
+						newDeps = append(newDeps, rd)
+					}
+				}
+			} else if !seen[dep] {
+				seen[dep] = true
+				newDeps = append(newDeps, dep)
+			}
+		}
+		c.DependsOn = newDeps
+	}
 }
