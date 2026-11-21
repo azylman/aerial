@@ -33,15 +33,16 @@ ollama:
 `
 
 func TestLoadConfigFile_DarkStackDefaults(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/coven_test")
-	t.Setenv("POSTGRES_PASSWORD", "")
-	t.Setenv("COVEN_STACK", "")
-	t.Setenv("STACK", "")
-	t.Setenv("COVEN_ROLE", "")
-	t.Setenv("TRANSCRIPTS_URL", "")
-	t.Setenv("LLM_EFFORT", "")
-	t.Setenv("EXTRACT_TIMEOUT_SECONDS", "")
-	t.Setenv("EXTRACT_MAX_STEPS", "")
+	env := map[string]string{}
+	env["DATABASE_URL"] = "postgres://localhost/coven_test"
+	env["POSTGRES_PASSWORD"] = ""
+	env["COVEN_STACK"] = ""
+	env["STACK"] = ""
+	env["COVEN_ROLE"] = ""
+	env["TRANSCRIPTS_URL"] = ""
+	env["LLM_EFFORT"] = ""
+	env["EXTRACT_TIMEOUT_SECONDS"] = ""
+	env["EXTRACT_MAX_STEPS"] = ""
 
 	tests := []struct {
 		name            string
@@ -92,7 +93,7 @@ func TestLoadConfigFile_DarkStackDefaults(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeCovenDarkConfig(t, covenDarkBaseConfig+tc.extraYAML)
-			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test")
+			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test", mapEnv(env))
 			if err != nil {
 				t.Fatalf("LoadConfigFile() error = %v", err)
 			}
@@ -163,15 +164,16 @@ func TestLoadConfigFile_DarkEnvOverrides(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DATABASE_URL", "postgres://localhost/coven_test")
-			t.Setenv("POSTGRES_PASSWORD", "")
-			t.Setenv("COVEN_STACK", "")
-			t.Setenv("STACK", "")
-			t.Setenv("EXTRACT_TIMEOUT_SECONDS", tc.envTimeout)
-			t.Setenv("EXTRACT_MAX_STEPS", tc.envMaxSteps)
-			t.Setenv("LLM_EFFORT", tc.envEffort)
+			env := map[string]string{}
+			env["DATABASE_URL"] = "postgres://localhost/coven_test"
+			env["POSTGRES_PASSWORD"] = ""
+			env["COVEN_STACK"] = ""
+			env["STACK"] = ""
+			env["EXTRACT_TIMEOUT_SECONDS"] = tc.envTimeout
+			env["EXTRACT_MAX_STEPS"] = tc.envMaxSteps
+			env["LLM_EFFORT"] = tc.envEffort
 			path := writeCovenDarkConfig(t, covenDarkBaseConfig+tc.extraYAML)
-			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test")
+			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test", mapEnv(env))
 			if err != nil {
 				t.Fatalf("LoadConfigFile() error = %v", err)
 			}
@@ -222,6 +224,7 @@ func TestNormalizeStack(t *testing.T) {
 }
 
 func TestLoadConfigFile_ExtractorRole(t *testing.T) {
+	env := map[string]string{}
 	extractorMinimalYAML := `port: '4011'
 database_url: 'postgres://localhost/coven_test'
 eri_url: 'http://eri.aerial'
@@ -279,7 +282,7 @@ ollama:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeCovenDarkConfig(t, tc.yaml)
-			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test")
+			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test", mapEnv(env))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -326,13 +329,9 @@ func TestLoadConfigFile_Auth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envEnabled != "" {
-				t.Setenv("K8S_AUTH_ENABLED", tc.envEnabled)
-			} else {
-				t.Setenv("K8S_AUTH_ENABLED", "")
-			}
+			env := map[string]string{"K8S_AUTH_ENABLED": tc.envEnabled}
 			path := writeCovenDarkConfig(t, covenDarkBaseConfig+tc.yaml)
-			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test")
+			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test", mapEnv(env))
 			if err != nil {
 				t.Fatalf("LoadConfigFile() error = %v", err)
 			}
@@ -341,4 +340,9 @@ func TestLoadConfigFile_Auth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mapEnv returns a getenv backed by m so loaders never read the process env.
+func mapEnv(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
 }
