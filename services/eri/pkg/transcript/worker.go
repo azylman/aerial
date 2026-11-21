@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/enginefmt"
 )
 
 // Step vocabulary for synthesized transcript steps.
@@ -640,36 +642,6 @@ type codexPayload struct {
 	IsError   bool            `json:"is_error"`
 }
 
-func extractCodexText(content json.RawMessage, textFallback string) string {
-	if textFallback != "" {
-		return textFallback
-	}
-	if len(content) == 0 {
-		return ""
-	}
-	var text string
-	if err := json.Unmarshal(content, &text); err == nil {
-		return text
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(content, &blocks); err == nil {
-		var parts []string
-		for _, b := range blocks {
-			switch b.Type {
-			case "text", "input_text", "output_text":
-				if strings.TrimSpace(b.Text) != "" {
-					parts = append(parts, b.Text)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return string(content)
-}
-
 func extractOutputText(raw json.RawMessage, textFallback string) string {
 	if textFallback != "" {
 		return textFallback
@@ -708,7 +680,7 @@ func (st *transcriptScanState) parseCodexEntry(env codexLineEnvelope) bool {
 
 	switch payload.Type {
 	case "message":
-		text := extractCodexText(payload.Content, payload.Text)
+		text := enginefmt.ExtractCodexTextOrRaw(payload.Content, payload.Text)
 		switch payload.Role {
 		case roleUser:
 			raw := rawTranscriptStep{
@@ -737,7 +709,7 @@ func (st *transcriptScanState) parseCodexEntry(env codexLineEnvelope) bool {
 		}
 
 	case "reasoning":
-		text := extractCodexText(payload.Content, payload.Text)
+		text := enginefmt.ExtractCodexTextOrRaw(payload.Content, payload.Text)
 		if text == "" && payload.Summary != "" {
 			text = payload.Summary
 		}
