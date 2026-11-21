@@ -1,7 +1,6 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-nats/internal/config"
 )
@@ -40,12 +40,8 @@ func NewNATSBridge(cfg config.Config, bus pubsub.Bus, httpClient *http.Client) *
 	}
 }
 
-func (b *NATSBridge) buildRouterServiceName() string {
-	return config.BuildRouterServiceName(b.cfg.AgentName)
-}
-
 func (b *NATSBridge) restateRouterSendPath(handler string) string {
-	return "/" + b.buildRouterServiceName() + "/" + handler + "/send"
+	return "/" + config.BuildRouterServiceName(b.cfg.AgentName) + "/" + handler + "/send"
 }
 
 // StartConsumers verifies JetStream streams and binds durable queue consumers for dispatch and PR events.
@@ -74,6 +70,8 @@ func (b *NATSBridge) StartConsumers(ctx context.Context) error {
 
 	return nil
 }
+
+const maxIngressResponseBytes = 1 << 20
 
 func isRetryableIngressStatus(code int) bool {
 	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
@@ -129,35 +127,30 @@ func widgetSyncIdempotencyKey(msg pubsub.Message, args pubsub.WidgetSyncJobArgs)
 }
 
 func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempotencyKey string, body []byte, msg pubsub.Message) error {
-	targetURL := fmt.Sprintf("%s%s", b.cfg.RestateIngressURL, endpoint)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
+	targetURL := b.cfg.RestateIngressURL + endpoint
+	if _, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, http.NoBody); err != nil {
 		if termErr := msg.Term(); termErr != nil {
 			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on request creation failure", "error", termErr)
 		}
 		return fmt.Errorf("create request to %s: %w", targetURL, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
+	_, err := restateingress.Post(ctx, b.httpClient, targetURL, idempotencyKey, json.RawMessage(body), maxIngressResponseBytes)
+	if err == nil {
+		return nil
 	}
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
+	var httpErr *restateingress.HTTPError
+	if !errors.As(err, &httpErr) {
 		settleFailedDelivery(ctx, msg)
 		return fmt.Errorf("post to restate ingress %s: %w", targetURL, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || isRetryableIngressStatus(resp.StatusCode) {
+	if httpErr.Status < 200 || isRetryableIngressStatus(httpErr.Status) {
 		settleFailedDelivery(ctx, msg)
-		return fmt.Errorf("restate ingress error (status %d)", resp.StatusCode)
+		return fmt.Errorf("restate ingress error (status %d)", httpErr.Status)
 	}
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+	if httpErr.Status >= 400 && httpErr.Status < 500 {
 		if termErr := msg.Term(); termErr != nil {
-			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on non-retryable restate status", "status", resp.StatusCode, "error", termErr)
+			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on non-retryable restate status", "status", httpErr.Status, "error", termErr)
 		}
-		return nil
 	}
 	return nil
 }
