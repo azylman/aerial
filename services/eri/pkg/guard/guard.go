@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"maps"
+	"time"
 )
 
 // Tool names the guards inspect.
@@ -137,10 +138,29 @@ func mergeClaudeOverwrite(toolInput json.RawMessage, overwrite map[string]any) m
 	return merged
 }
 
-// Process reads an Antigravity PreToolUse hook payload from r, evaluates guards per mode,
-// and writes the resulting Decision JSON to w.
+// Options carries every environment-dependent input of the guards so library code never reads
+// the process environment: BatchDir holds batch-guard state, Getenv resolves the remaining
+// settings (SCRATCH_DIR, AERIAL_COMMIT_GUARD_PATTERNS, HOME, ...) and SQL describes psql
+// queries (nil skips plan validation).
+type Options struct {
+	BatchDir string
+	Getenv   func(string) string
+	SQL      SQLDescriber
+}
+
+// OptionsFromEnv builds the production Options from getenv (os.Getenv in hook-guard's main): the batch directory from
+// AERIAL_BATCH_GUARD_DIR (default DefaultBatchDir) and a describer from DATABASE_URL.
+func OptionsFromEnv(getenv func(string) string) Options {
+	return Options{BatchDir: GetBatchDir(getenv), Getenv: getenv, SQL: DefaultSQLDescriber(getenv)}
+}
+
+// ProcessWithOptions reads an Antigravity PreToolUse hook payload from r, evaluates guards per
+// mode with opts, and writes the resulting Decision JSON to w.
 // Guaranteed fail-open: on unexpected error or panic, it outputs {"decision": "allow"}.
-func Process(r io.Reader, w io.Writer, mode string) (err error) {
+func ProcessWithOptions(r io.Reader, w io.Writer, mode string, opts Options) (err error) {
+	if opts.Getenv == nil {
+		opts.Getenv = noEnv
+	}
 	var isClaude bool
 	writeAllow := func() error {
 		if isClaude {
@@ -184,11 +204,11 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 
 	switch mode {
 	case string(ModeInv), "invocation":
-		return json.NewEncoder(w).Encode(RecordPreInvocation(payload))
+		return json.NewEncoder(w).Encode(RecordPreInvocationWithDir(payload, opts.BatchDir, time.Now()))
 	case string(ModePost), "post-tool":
-		return json.NewEncoder(w).Encode(RecordPostBatch(payload, args))
+		return json.NewEncoder(w).Encode(RecordPostBatchWithDir(payload, args, opts.BatchDir, time.Now(), opts.Getenv))
 	default:
-		decision := evaluateGuardMode(payload, args, mode)
+		decision := evaluateGuardMode(payload, args, mode, opts)
 		if isClaude {
 			return json.NewEncoder(w).Encode(FormatClaudeResponse(decision, payload.ToolInput))
 		}
@@ -196,7 +216,10 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 	}
 }
 
-func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
+// noEnv resolves every variable to empty; it stands in for a missing Options.Getenv.
+func noEnv(string) string { return "" }
+
+func evaluateGuardMode(payload Payload, args ToolArgs, mode string, opts Options) *Decision {
 	switch mode {
 	case "share":
 		return CheckShare(payload.ToolCall.Name, args)
@@ -205,24 +228,24 @@ func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
 	case "schedule":
 		return CheckSchedule(payload, args)
 	case "batch":
-		return CheckBatch(payload, args)
+		return CheckBatchWithDir(payload, args, opts.BatchDir, time.Now(), opts.Getenv)
 	case "search":
-		return CheckSearch(payload.ToolCall.Name, args)
+		return CheckSearchWithSQL(payload.ToolCall.Name, args, opts.SQL)
 	case string(ModeCommit):
-		return CheckOutboundSecrets(payload.ToolCall.Name, args)
+		return CheckOutboundSecrets(payload.ToolCall.Name, args, opts.Getenv)
 	default:
-		return evaluateAllGuards(payload, args)
+		return evaluateAllGuards(payload, args, opts)
 	}
 }
 
-func evaluateAllGuards(payload Payload, args ToolArgs) *Decision {
+func evaluateAllGuards(payload Payload, args ToolArgs, opts Options) *Decision {
 	checks := []func() *Decision{
 		func() *Decision { return CheckShare(payload.ToolCall.Name, args) },
 		func() *Decision { return CheckLiveState(payload.ToolCall.Name, args) },
 		func() *Decision { return CheckSchedule(payload, args) },
-		func() *Decision { return CheckBatch(payload, args) },
-		func() *Decision { return CheckSearch(payload.ToolCall.Name, args) },
-		func() *Decision { return CheckOutboundSecrets(payload.ToolCall.Name, args) },
+		func() *Decision { return CheckBatchWithDir(payload, args, opts.BatchDir, time.Now(), opts.Getenv) },
+		func() *Decision { return CheckSearchWithSQL(payload.ToolCall.Name, args, opts.SQL) },
+		func() *Decision { return CheckOutboundSecrets(payload.ToolCall.Name, args, opts.Getenv) },
 	}
 	var lastDecision *Decision
 	var mergedOverwrite map[string]any
