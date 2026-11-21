@@ -325,7 +325,8 @@ func TestActionCompletionAllowed(t *testing.T) {
 		{"empty id rejected after retry", running, "running", "", false},
 		{"empty id accepted on first generation", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running"}, "running", "", true},
 		{"pr chunk rejected", model.VanadisChunk{ID: "c1", Mode: "pr", Status: "running", StallNudges: 1}, "running", "vanadis-c1-turn-1", false},
-		{"attached pr rejected", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", false},
+		{"deployed repair pr accepted", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", true},
+		{"repair pr in flight rejected", model.VanadisChunk{ID: "c1", Mode: "action", Status: "deploying", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", false},
 		{"failed build rejected", running, "failed", "vanadis-c1-turn-1-resume-1", false},
 	}
 	for _, tc := range tests {

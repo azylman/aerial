@@ -568,3 +568,38 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 		})
 	}
 }
+
+// Pins the Restate command sequence OnPREvent issues for deploy_success, the
+// only OnPREvent journal sequence test. Deploy handling of either chunk mode
+// runs inside the handle-pr-event-postgres step, so adding, renaming or
+// reordering a command on this path (which would break in-flight invocations
+// with RT0016) fails here. Mode-specific behavior is covered by the
+// TestCompletePRDeploymentMutation_* tests.
+func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
+	t.Parallel()
+	transition := reconcileStepOutput{BuildStatus: "running", LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: model.VanadisBuild{ID: "b1", Status: "running"}}}
+	tests := []struct {
+		name    string
+		outcome prEventOutcome
+		want    []string
+	}{
+		{name: "deploy success reconciles", outcome: prEventOutcome{Applied: true}, want: []string{"run runner-guard", "run handle-pr-event-postgres", "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}}, want: []string{"run runner-guard", "run handle-pr-event-postgres", `send {"reason":"widget_sync"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var commands []string
+			journal := map[string]any{
+				labelRunnerGuard:           runnerGuardResult{},
+				"handle-pr-event-postgres": tc.outcome,
+				labelReconcileAfterPREvent: transition,
+			}
+			ctx := makeOutcomeJournalContext(t, journal, &commands)
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", nil))
+			err := bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 9, Event: "deploy_success"})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, commands)
+		})
+	}
+}
