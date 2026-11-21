@@ -303,17 +303,11 @@ type dbScript struct {
 	chunkRowsErr error
 }
 
-func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
-	candidates := new([]string)
+func (s dbScript) open() *PostgresVanadisStore {
 	if s.bare != nil {
-		return s.bare.store, candidates
+		return s.bare.store
 	}
-	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
-		if len(args) > 0 {
-			if c, ok := args[0].([]string); ok {
-				*candidates = c
-			}
-		}
+	queryRow := func(context.Context, string, ...any) pgx.Row {
 		if s.buildErr != nil {
 			return &scriptRow{err: s.buildErr}
 		}
@@ -331,7 +325,7 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		}
 		return &mockRows{items: s.chunks, scanErr: s.chunkScanErr, rowsErr: s.chunkRowsErr}, nil
 	}
-	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query}}, candidates
+	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query}}
 }
 
 func mkBuild(id, threadID, title, objective, status string) model.VanadisBuild {
@@ -384,7 +378,7 @@ func TestGetBuild(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s, _ := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.chunksErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
+			s := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.chunksErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
 			gotB, gotC, err := s.GetBuild(context.Background(), tc.buildID)
 			if tc.wantErrIs != nil {
 				if !errors.Is(err, tc.wantErrIs) {
@@ -471,7 +465,7 @@ func captureBuildLimit(s *PostgresVanadisStore, wantLimit int, gotLimit *any) {
 
 func runListBuildsCase(t *testing.T, tc listBuildsCase) {
 	t.Helper()
-	s, _ := dbScript{bare: tc.bare, builds: tc.builds, buildsErr: tc.buildsErr, buildScanErr: tc.scanErr, buildRowsErr: tc.rowsErr, chunks: tc.chunks, chunksErr: tc.chunksErr}.open()
+	s := dbScript{bare: tc.bare, builds: tc.builds, buildsErr: tc.buildsErr, buildScanErr: tc.scanErr, buildRowsErr: tc.rowsErr, chunks: tc.chunks, chunksErr: tc.chunksErr}.open()
 	var gotLimit any
 	captureBuildLimit(s, tc.wantLimit, &gotLimit)
 	got, err := s.ListBuilds(context.Background(), tc.limit)
@@ -536,7 +530,7 @@ func TestGetChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s, _ := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.queryErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
+			s := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.queryErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
 			c, b, err := s.GetChunk(context.Background(), tc.chunkID)
 			if tc.wantErrIs != nil {
 				if !errors.Is(err, tc.wantErrIs) {
@@ -555,131 +549,6 @@ func TestGetChunk(t *testing.T) {
 			}
 			if c.ID != tc.wantChunk || b.ID != tc.wantBuild {
 				t.Errorf("GetChunk = chunk %q build %q, want chunk %q build %q", c.ID, b.ID, tc.wantChunk, tc.wantBuild)
-			}
-		})
-	}
-}
-
-type getChunkByPRCase struct {
-	name           string
-	bare           *bareStore
-	repo           string
-	prNumber       int
-	rowErr         error
-	rowEffort      string
-	wantErr        bool
-	wantLookup     VanadisChunkPRLookup
-	wantCandidates []string
-}
-
-func TestGetChunkByPR(t *testing.T) {
-	t.Parallel()
-	tests := []getChunkByPRCase{
-		{name: "nil receiver errors", bare: nilReceiver, repo: "aerial", prNumber: 1, wantErr: true},
-		{name: "nil db errors", bare: nilDB, repo: "aerial", prNumber: 1, wantErr: true},
-		{name: "invalid args return unmatched", repo: "", prNumber: 0, wantLookup: VanadisChunkPRLookup{}},
-		{name: "no rows returns unmatched", repo: "aerial", prNumber: 101, rowErr: pgx.ErrNoRows, wantLookup: VanadisChunkPRLookup{}, wantCandidates: []string{"aerial", "azylman/aerial"}},
-		{name: "chunk query error propagates", repo: "aerial", prNumber: 101, rowErr: errors.New("db down"), wantErr: true, wantCandidates: []string{"aerial", "azylman/aerial"}},
-		{name: "successful match returns lookup", repo: "aerial", prNumber: 101, rowEffort: "low", wantLookup: VanadisChunkPRLookup{Matched: true, ChunkID: "c1", BuildID: "b1", Effort: "low"}, wantCandidates: []string{"aerial", "azylman/aerial"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runGetChunkByPRCase(t, tc)
-		})
-	}
-}
-
-func stubPRRow(s *PostgresVanadisStore, gotCandidates *[]string, rowErr error, rowEffort string) {
-	if s == nil {
-		return
-	}
-	db, ok := s.db.(*mockDB)
-	if !ok {
-		return
-	}
-	db.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
-		if len(args) > 0 {
-			captureCandidates(args[0], gotCandidates)
-		}
-		if rowErr != nil {
-			return checkedQueryRow(query, &scriptRow{err: rowErr})
-		}
-		return checkedQueryRow(query, &scriptRow{vals: []any{"c1", "b1", 0, rowEffort, true}})
-	}
-}
-
-func captureCandidates(arg any, gotCandidates *[]string) {
-	c, ok := arg.([]string)
-	if !ok {
-		return
-	}
-	*gotCandidates = c
-}
-
-func checkCandidates(t *testing.T, gotCandidates *[]string, want []string) {
-	t.Helper()
-	if len(*gotCandidates) != len(want) {
-		t.Errorf("GetChunkByPR candidates = %v, want %v", *gotCandidates, want)
-		return
-	}
-	for i := range want {
-		if (*gotCandidates)[i] != want[i] {
-			t.Errorf("GetChunkByPR candidates = %v, want %v", *gotCandidates, want)
-			return
-		}
-	}
-}
-
-func runGetChunkByPRCase(t *testing.T, tc getChunkByPRCase) {
-	t.Helper()
-	s, gotCandidates := dbScript{bare: tc.bare}.open()
-	stubPRRow(s, gotCandidates, tc.rowErr, tc.rowEffort)
-	got, err := s.GetChunkByPR(context.Background(), tc.repo, tc.prNumber)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if *got != tc.wantLookup {
-		t.Errorf("GetChunkByPR() = %+v, want %+v", *got, tc.wantLookup)
-	}
-	if len(tc.wantCandidates) > 0 {
-		checkCandidates(t, gotCandidates, tc.wantCandidates)
-	}
-}
-
-type repoCandidatesCase struct {
-	name     string
-	input    string
-	expected []string
-}
-
-func TestRepoMatchCandidates(t *testing.T) {
-	t.Parallel()
-	tests := []repoCandidatesCase{
-		{name: "empty repo returns nil", input: "", expected: nil},
-		{name: "bare repo adds default owner prefix", input: "aerial", expected: []string{"aerial", "azylman/aerial"}},
-		{name: "whitespace trims then prefixes", input: "  aerial  ", expected: []string{"aerial", "azylman/aerial"}},
-		{name: "prefixed repo adds bare candidate", input: "azylman/aerial", expected: []string{"azylman/aerial", "aerial"}},
-		{name: "other org repo returns single candidate", input: "other-org/aerial", expected: []string{"other-org/aerial"}},
-		{name: "nested slash returns single candidate", input: "azylman/sub/repo", expected: []string{"azylman/sub/repo"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := RepoMatchCandidates(tc.input)
-			if len(got) != len(tc.expected) {
-				t.Fatalf("RepoMatchCandidates(%q) = %v, want %v", tc.input, got, tc.expected)
-			}
-			for i := range tc.expected {
-				if got[i] != tc.expected[i] {
-					t.Fatalf("RepoMatchCandidates(%q) = %v, want %v", tc.input, got, tc.expected)
-				}
 			}
 		})
 	}
