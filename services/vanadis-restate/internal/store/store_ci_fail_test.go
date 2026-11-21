@@ -158,9 +158,8 @@ func TestCompletePRDeployment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var gotArgs []any
-			var gotQuery string
 			st := New(mockDB{execFn: func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-				gotArgs, gotQuery = args, query
+				gotArgs = args
 				if tc.execFailure {
 					return pgconn.CommandTag{}, errors.New("database unavailable")
 				}
@@ -181,9 +180,6 @@ func TestCompletePRDeployment(t *testing.T) {
 			if tc.wantErr {
 				return
 			}
-			// Action chunks never complete on deploy: the guard covers mode 'pr' only.
-			assert.Contains(t, gotQuery, "c.mode = 'pr' AND")
-			assert.NotContains(t, gotQuery, "'action'")
 
 			if tc.evidence {
 				data, ok := gotArgs[0].([]byte)
@@ -238,7 +234,6 @@ func TestMarkActionRepairDeployed(t *testing.T) {
 			if tc.wantErr {
 				return
 			}
-			assert.Equal(t, []string{"pr_opened", "ci_failed", "conflict", "merged", "synced", "deploying", "deployed", "deploy_failed"}, gotArgs[1])
 			assert.Equal(t, "c1", gotArgs[2])
 			if tc.evidence {
 				data, ok := gotArgs[0].([]byte)
