@@ -21,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -59,10 +59,10 @@ func (s *Store) CreateBuild(ctx context.Context, build model.VanadisBuild, chunk
 		return errors.New("database connection is nil")
 	}
 	buildID, threadID, objective := strings.TrimSpace(build.ID), strings.TrimSpace(build.ThreadID), strings.TrimSpace(build.Objective)
-	if err := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
+	if err := buildplan.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
 		return err
 	}
-	normChunks, err := dag.NormalizeAndValidateBuildDAG(chunks)
+	normChunks, err := buildplan.NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		return err
 	}
@@ -149,13 +149,13 @@ func (s *Store) GetBuild(ctx context.Context, buildID string) (*model.VanadisBui
 // InsertBuildChunk validates and inserts one chunk row in tx. Exported so the
 // still-rooted append and attachment paths can call it until their chunks move.
 func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.VanadisChunk, cQ string) error {
-	cMode, err := NormalizeChunkMode(c.Mode)
+	cMode, err := buildplan.NormalizeChunkMode(c.Mode)
 	if err != nil {
 		return fmt.Errorf("chunk %s: %w", c.ID, err)
 	}
 	cRepo := ""
 	if cMode == "pr" {
-		cRepo = NormalizeRepo(c.Repo)
+		cRepo = buildplan.NormalizeRepo(c.Repo)
 		if cRepo == "" {
 			return fmt.Errorf("chunk %s: repo is required for pr mode", c.ID)
 		}
@@ -168,7 +168,7 @@ func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.Va
 		}
 	}
 	cStatus := FirstNonEmpty(strings.TrimSpace(c.Status), "pending")
-	cEffort, err := NormalizeChunkEffort(c.Effort)
+	cEffort, err := buildplan.NormalizeChunkEffort(c.Effort)
 	if err != nil {
 		return fmt.Errorf("chunk %s: %w", c.ID, err)
 	}
@@ -183,7 +183,7 @@ func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.Va
 	}
 	if !c.CompletedAt.IsZero() {
 		completedAt = c.CompletedAt
-	} else if dag.IsTerminalChunkStatus(cStatus) {
+	} else if buildplan.IsTerminalChunkStatus(cStatus) {
 		completedAt = time.Now().UTC()
 	}
 	ciChecksJSON := marshalJSONBOrEmpty(c.CIChecks)
@@ -233,17 +233,17 @@ func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.Va
 		return false
 	}
 	chunkKey := func(c model.VanadisChunk) (model.VanadisChunk, error) {
-		mode, err := NormalizeChunkMode(c.Mode)
+		mode, err := buildplan.NormalizeChunkMode(c.Mode)
 		if err != nil {
 			return model.VanadisChunk{}, err
 		}
-		effort, err := NormalizeChunkEffort(c.Effort)
+		effort, err := buildplan.NormalizeChunkEffort(c.Effort)
 		if err != nil {
 			return model.VanadisChunk{}, err
 		}
 		repo := ""
 		if mode == "pr" {
-			repo = NormalizeRepo(c.Repo)
+			repo = buildplan.NormalizeRepo(c.Repo)
 		}
 		return model.VanadisChunk{
 			ID: strings.TrimSpace(c.ID), ChunkIndex: c.ChunkIndex, Mode: mode, Repo: repo,

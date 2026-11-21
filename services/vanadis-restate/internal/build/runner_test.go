@@ -422,7 +422,6 @@ func TestRouterFacingHelpers(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "chunk-1-router", ExtractChunkIDFromBranch("aerial", "feat/aerial-pr-vanadis-chunk-1-router-a1b2c3"))
 	assert.True(t, CanFallbackThreadRepoLookup(pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1, Event: "opened", Branch: "feat/aerial-pr-20261116-123456", TargetID: "thread-1"}))
-	assert.NotEmpty(t, GenerateBuildID())
 }
 
 // attachRunnerSpyStore passes the runner guard as an unknown (new) build and

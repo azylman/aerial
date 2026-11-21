@@ -1,10 +1,11 @@
-// Package dag holds the pure build-DAG math for Vanadis multi-chunk builds:
+// This file holds the pure build-DAG math for Vanadis multi-chunk builds:
 // explicit dependency normalization, Kahn cycle detection, transitive
 // closure, and concurrent same-repo disjoint target-file validation.
 // It has zero Restate dependency so the graph rules stay independently
 // testable from the reconciliation engine. This is the single copy of the
-// build-DAG rules: internal/store and internal/build both call it.
-package dag
+// build-DAG rules.
+
+package buildplan
 
 import (
 	"errors"
@@ -13,8 +14,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // Status literals mirrored from the build package. They stay package-private
@@ -29,21 +28,21 @@ const (
 )
 
 // NormalizeAndValidateBuildDAG validates the build DAG: explicit depends_on arrays, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
-func NormalizeAndValidateBuildDAG(chunks []model.VanadisChunk) ([]model.VanadisChunk, error) {
+func NormalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error) {
 	if len(chunks) == 0 {
 		return chunks, nil
 	}
-	out := make([]model.VanadisChunk, len(chunks))
+	out := make([]VanadisChunk, len(chunks))
 	copy(out, chunks)
 
 	idMap := make(map[string]int, len(out))
 	for i, c := range out {
 		cid := strings.TrimSpace(c.ID)
 		if cid == "" {
-			return nil, fmt.Errorf("%w: chunk[%d] id cannot be empty", model.ErrInvalidBuildInput, i)
+			return nil, fmt.Errorf("%w: chunk[%d] id cannot be empty", ErrInvalidBuildInput, i)
 		}
 		if _, exists := idMap[cid]; exists {
-			return nil, fmt.Errorf("%w: duplicate chunk id %q", model.ErrInvalidBuildInput, cid)
+			return nil, fmt.Errorf("%w: duplicate chunk id %q", ErrInvalidBuildInput, cid)
 		}
 		idMap[cid] = i
 	}
@@ -67,17 +66,17 @@ func NormalizeAndValidateBuildDAG(chunks []model.VanadisChunk) ([]model.VanadisC
 // ResolveChunkDependencies normalizes each chunk's DependsOn entries to
 // canonical chunk IDs (accepting index strings) and rejects empty,
 // unknown, self, or implicit dependencies.
-func ResolveChunkDependencies(out []model.VanadisChunk, idMap map[string]int) error {
+func ResolveChunkDependencies(out []VanadisChunk, idMap map[string]int) error {
 	for i := range out {
 		if out[i].DependsOn == nil {
-			return fmt.Errorf("%w: chunk %q must explicitly specify depends_on", model.ErrInvalidBuildInput, out[i].ID)
+			return fmt.Errorf("%w: chunk %q must explicitly specify depends_on", ErrInvalidBuildInput, out[i].ID)
 		}
 		normalizedDeps := make([]string, 0, len(out[i].DependsOn))
 		seenDeps := make(map[string]bool, len(out[i].DependsOn))
 		for _, rawDep := range out[i].DependsOn {
 			dep := strings.TrimSpace(rawDep)
 			if dep == "" {
-				return fmt.Errorf("%w: chunk %q has empty dependency reference", model.ErrInvalidBuildInput, out[i].ID)
+				return fmt.Errorf("%w: chunk %q has empty dependency reference", ErrInvalidBuildInput, out[i].ID)
 			}
 			var targetID string
 			if idx, ok := idMap[dep]; ok {
@@ -85,10 +84,10 @@ func ResolveChunkDependencies(out []model.VanadisChunk, idMap map[string]int) er
 			} else if idx, err := strconv.Atoi(dep); err == nil && idx >= 0 && idx < len(out) {
 				targetID = out[idx].ID
 			} else {
-				return fmt.Errorf("%w: chunk %q references unknown dependency %q", model.ErrInvalidBuildInput, out[i].ID, dep)
+				return fmt.Errorf("%w: chunk %q references unknown dependency %q", ErrInvalidBuildInput, out[i].ID, dep)
 			}
 			if targetID == out[i].ID {
-				return fmt.Errorf("%w: chunk %q cannot depend on itself", model.ErrInvalidBuildInput, out[i].ID)
+				return fmt.Errorf("%w: chunk %q cannot depend on itself", ErrInvalidBuildInput, out[i].ID)
 			}
 			if !seenDeps[targetID] {
 				seenDeps[targetID] = true
@@ -101,7 +100,7 @@ func ResolveChunkDependencies(out []model.VanadisChunk, idMap map[string]int) er
 }
 
 // CheckKahnDAGCycles rejects dependency graphs that contain a cycle.
-func CheckKahnDAGCycles(out []model.VanadisChunk, idMap map[string]int) error {
+func CheckKahnDAGCycles(out []VanadisChunk, idMap map[string]int) error {
 	N := len(out)
 	inDegree := make([]int, N)
 	adj := make([][]int, N)
@@ -133,13 +132,13 @@ func CheckKahnDAGCycles(out []model.VanadisChunk, idMap map[string]int) error {
 		}
 	}
 	if visitedCount != N {
-		return fmt.Errorf("%w: cycle detected in chunk dependencies", model.ErrInvalidBuildInput)
+		return fmt.Errorf("%w: cycle detected in chunk dependencies", ErrInvalidBuildInput)
 	}
 	return nil
 }
 
 // BuildTransitiveClosure computes reachability over the dependency DAG.
-func BuildTransitiveClosure(out []model.VanadisChunk, idMap map[string]int) [][]bool {
+func BuildTransitiveClosure(out []VanadisChunk, idMap map[string]int) [][]bool {
 	N := len(out)
 	reach := make([][]bool, N)
 	for i := range N {
@@ -167,26 +166,26 @@ func BuildTransitiveClosure(out []model.VanadisChunk, idMap map[string]int) [][]
 
 // ValidateConcurrentDisjointPRChunks requires concurrent same-repo PR chunks
 // to declare disjoint target_files.
-func ValidateConcurrentDisjointPRChunks(out []model.VanadisChunk, reach [][]bool) error {
+func ValidateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) error {
 	for i, chunkI := range out {
 		if IsTerminalChunkStatus(chunkI.Status) {
 			continue
 		}
-		modeI, err := model.NormalizeChunkMode(chunkI.Mode)
+		modeI, err := NormalizeChunkMode(chunkI.Mode)
 		if err != nil || modeI != "pr" {
 			continue
 		}
-		repoI := model.NormalizeRepo(chunkI.Repo)
+		repoI := NormalizeRepo(chunkI.Repo)
 		for j := i + 1; j < len(out); j++ {
 			chunkJ := out[j]
 			if IsTerminalChunkStatus(chunkJ.Status) {
 				continue
 			}
-			modeJ, err := model.NormalizeChunkMode(chunkJ.Mode)
+			modeJ, err := NormalizeChunkMode(chunkJ.Mode)
 			if err != nil || modeJ != "pr" {
 				continue
 			}
-			repoJ := model.NormalizeRepo(chunkJ.Repo)
+			repoJ := NormalizeRepo(chunkJ.Repo)
 			if !strings.EqualFold(repoI, repoJ) {
 				continue
 			}
@@ -202,12 +201,12 @@ func ValidateConcurrentDisjointPRChunks(out []model.VanadisChunk, reach [][]bool
 }
 
 // CheckDisjointFiles rejects two chunks that claim the same target file.
-func CheckDisjointFiles(a, b model.VanadisChunk, repo string) error {
+func CheckDisjointFiles(a, b VanadisChunk, repo string) error {
 	if len(a.TargetFiles) == 0 {
-		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", model.ErrInvalidBuildInput, a.ID, repo)
+		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", ErrInvalidBuildInput, a.ID, repo)
 	}
 	if len(b.TargetFiles) == 0 {
-		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", model.ErrInvalidBuildInput, b.ID, repo)
+		return fmt.Errorf("%w: concurrent PR chunk %q on repo %q must specify target_files", ErrInvalidBuildInput, b.ID, repo)
 	}
 	filesA := make(map[string]bool, len(a.TargetFiles))
 	for _, f := range a.TargetFiles {
@@ -219,7 +218,7 @@ func CheckDisjointFiles(a, b model.VanadisChunk, repo string) error {
 	for _, f := range b.TargetFiles {
 		normF := filepath.Clean(strings.TrimSpace(f))
 		if normF != "" && normF != "." && filesA[normF] {
-			return fmt.Errorf("%w: concurrent PR chunks %q and %q on repo %q have overlapping target_files: %s", model.ErrInvalidBuildInput, a.ID, b.ID, repo, normF)
+			return fmt.Errorf("%w: concurrent PR chunks %q and %q on repo %q have overlapping target_files: %s", ErrInvalidBuildInput, a.ID, b.ID, repo, normF)
 		}
 	}
 	return nil
@@ -227,7 +226,7 @@ func CheckDisjointFiles(a, b model.VanadisChunk, repo string) error {
 
 // ValidateCreateBuildInputs rejects empty build fields, malformed chunks,
 // and invalid DAGs before a build is persisted.
-func ValidateCreateBuildInputs(buildID, threadID, objective string, chunks []model.VanadisChunk) error {
+func ValidateCreateBuildInputs(buildID, threadID, objective string, chunks []VanadisChunk) error {
 	if buildID == "" || threadID == "" || objective == "" {
 		return errors.New("build id, thread_id, and objective cannot be empty")
 	}
@@ -235,16 +234,16 @@ func ValidateCreateBuildInputs(buildID, threadID, objective string, chunks []mod
 		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.Instructions) == "" {
 			return fmt.Errorf("chunk[%d] id, title, and instructions cannot be empty", i)
 		}
-		if !model.IsValidVanadisChunkID(strings.TrimSpace(c.ID)) {
+		if !IsValidVanadisChunkID(strings.TrimSpace(c.ID)) {
 			return fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
 		}
 		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
 			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
 		}
-		if err := model.ValidateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
+		if err := ValidateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
 			return err
 		}
-		if _, err := model.NormalizeChunkEffort(c.Effort); err != nil {
+		if _, err := NormalizeChunkEffort(c.Effort); err != nil {
 			return fmt.Errorf("chunk[%d] %w", i, err)
 		}
 	}
@@ -267,7 +266,7 @@ func IsTerminalChunkStatus(status string) bool {
 
 // IsPRDependencyCodeReady reports whether a chunk's code is available to
 // dependent PR chunks (completed code, or merged/deploying PRs).
-func IsPRDependencyCodeReady(other model.VanadisChunk) bool {
+func IsPRDependencyCodeReady(other VanadisChunk) bool {
 	status := strings.ToLower(strings.TrimSpace(other.Status))
 	if status == dagStatusCompleted {
 		return true
@@ -283,7 +282,7 @@ func IsPRDependencyCodeReady(other model.VanadisChunk) bool {
 
 // CheckChunkDependenciesReady verifies every declared dependency of chunk
 // has reached a launchable state for the chunk's mode.
-func CheckChunkDependenciesReady(chunk model.VanadisChunk, chunks []model.VanadisChunk) error {
+func CheckChunkDependenciesReady(chunk VanadisChunk, chunks []VanadisChunk) error {
 	for _, depID := range chunk.DependsOn {
 		depReady := false
 		for _, other := range chunks {
@@ -304,29 +303,29 @@ func CheckChunkDependenciesReady(chunk model.VanadisChunk, chunks []model.Vanadi
 }
 
 // ValidateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
-func ValidateUpdateChunkDAG(existing []model.VanadisChunk, updatedIdx int, updated model.VanadisChunk) ([]string, error) {
-	candidateChunks := make([]model.VanadisChunk, len(existing))
+func ValidateUpdateChunkDAG(existing []VanadisChunk, updatedIdx int, updated VanadisChunk) ([]string, error) {
+	candidateChunks := make([]VanadisChunk, len(existing))
 	copy(candidateChunks, existing)
 	candidateChunks[updatedIdx] = updated
 
 	validated, err := NormalizeAndValidateBuildDAG(candidateChunks)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", model.ErrInvalidBuildInput, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 	}
 	return validated[updatedIdx].DependsOn, nil
 }
 
 // ValidateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
-func ValidateAppendChunksDAG(existing []model.VanadisChunk, appended []model.VanadisChunk) ([]model.VanadisChunk, error) {
-	allChunks := make([]model.VanadisChunk, 0, len(existing)+len(appended))
+func ValidateAppendChunksDAG(existing []VanadisChunk, appended []VanadisChunk) ([]VanadisChunk, error) {
+	allChunks := make([]VanadisChunk, 0, len(existing)+len(appended))
 	allChunks = append(allChunks, existing...)
 	allChunks = append(allChunks, appended...)
 
 	validatedAll, err := NormalizeAndValidateBuildDAG(allChunks)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", model.ErrInvalidBuildInput, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 	}
-	out := make([]model.VanadisChunk, len(appended))
+	out := make([]VanadisChunk, len(appended))
 	copy(out, appended)
 	for i := range out {
 		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
@@ -336,7 +335,7 @@ func ValidateAppendChunksDAG(existing []model.VanadisChunk, appended []model.Van
 
 // RelinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
 // removing removedID and replacing it with removedDeps.
-func RelinkDependenciesAfterRemoval(remaining []model.VanadisChunk, removedID string, removedDeps []string) {
+func RelinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, removedDeps []string) {
 	for i := range remaining {
 		c := &remaining[i]
 		if !slices.Contains(c.DependsOn, removedID) {

@@ -20,7 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -73,7 +73,7 @@ func (s *Store) RetryActionChunk(ctx context.Context, req RetryActionChunkReques
 }
 
 func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bool {
-	if err := dag.CheckChunkDependenciesReady(c, chunks); err != nil {
+	if err := buildplan.CheckChunkDependenciesReady(c, chunks); err != nil {
 		return false
 	}
 	descendants := map[string]bool{c.ID: true}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -59,7 +60,7 @@ func (s *Store) attachToExistingChunk(ctx context.Context, chunkID string, req A
 		return "", "", "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
 	}
 	if mode == chunkModeAction {
-		repo := NormalizeRepo(req.Repo)
+		repo := buildplan.NormalizeRepo(req.Repo)
 		if repo == "" {
 			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", ErrInvalidBuildInput)
 		}
@@ -137,7 +138,7 @@ func (s *Store) attachPRTransaction(ctx context.Context, chunkID string, req Att
 }
 
 func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
-	repo := NormalizeRepo(req.Repo)
+	repo := buildplan.NormalizeRepo(req.Repo)
 	if repo == "" {
 		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", ErrInvalidBuildInput)
 	}
@@ -163,7 +164,7 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 	if !errors.Is(fErr, pgx.ErrNoRows) {
 		return "", "", "", fmt.Errorf("find existing pr attach %s#%d: %w", repo, req.PRNumber, fErr)
 	}
-	buildID := model.GenerateBuildID()
+	buildID := buildplan.GenerateBuildID()
 	chunkID := buildID + "-chunk-1"
 	title := FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, model.CleanRepoName(repo)))
 	threadID := model.NormalizeDiscordThreadID(req.TargetID)

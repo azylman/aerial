@@ -34,11 +34,6 @@ func ExtractChunkIDFromBranch(repo, branch string) string {
 	return model.ExtractChunkIDFromBranch(repo, branch)
 }
 
-// GenerateBuildID delegates to the canonical internal/model helper.
-func GenerateBuildID() string {
-	return model.GenerateBuildID()
-}
-
 func actionDispatchID(chunk model.VanadisChunk) string {
 	return model.ActionDispatchID(chunk)
 }
