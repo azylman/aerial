@@ -89,6 +89,7 @@ const (
 	buildResultFailure           = model.BuildResultFailure
 	buildResultCancelled         = model.BuildResultCancelled
 	jobGitSync                   = "git-sync"
+	jobGitMerge                  = "git-merge"
 	maxPromptRunes               = model.MaxPromptRunes
 	maxRoboRevCommentRunes       = model.MaxRoboRevCommentRunes
 )

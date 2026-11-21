@@ -38,8 +38,8 @@ import (
 // missing one.
 //
 // Main-branch workflow_run handling (image dispatch and promotion, failed
-// job reruns, merge-SHA failures) is deploy-path work owned by the deploy
-// cutover; this path journals nothing for those runs.
+// job reruns, deploy failures) is deploy-path work: processOwnedWorkflowRun
+// hands it to processOwnedMainWorkflowRun in restate_owned_deploy.go.
 
 // ownedSend runs one restate-owned send through the configured client and
 // classifies failures for the job retry policy: nothing else performs a
@@ -319,11 +319,19 @@ func (s *RouterServer) processOwnedWorkflowRun(ctx context.Context, delivery str
 	res.Status = p.WorkflowRun.Status
 	res.Conclusion = p.WorkflowRun.Conclusion
 	resolveOwnedPayloadPR(res, p.WorkflowRun.PullRequests, "workflow_run_payload")
+	mainBranch := isMainBranch(res.Branch)
+	prBranch := ""
+	if mainBranch {
+		prBranch = s.resolveOwnedMainPR(ctx, res)
+	}
 	slog.InfoContext(ctx, "[synapse] [restate-cutover] restate-owned workflow_run", "repo", res.Repo, "workflow", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "branch", res.Branch, "status", res.Status, "conclusion", res.Conclusion, "delivery", delivery)
 	if err := s.refreshOwnedWorkflowRunBuildMetadata(ctx, p, res); err != nil {
 		logBuildMetadataWarning(ctx, "refreshing build metadata on workflow run", res.Repo, res.PRNumber, err)
 	}
-	if isMainBranch(res.Branch) {
+	if mainBranch {
+		if err := s.processOwnedMainWorkflowRun(ctx, p, res, prBranch); err != nil {
+			return nil, err
+		}
 		return res, nil
 	}
 	details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)

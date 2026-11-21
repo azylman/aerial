@@ -920,6 +920,9 @@ func (s *RouterServer) deferOwnedDeployEventToWatcher(ctx context.Context, evt D
 }
 
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
+	if restateOwnsEffects(ctx) {
+		return s.processOwnedDeployEvent(ctx, evt)
+	}
 	s.enrichDeployEventPRAndTarget(ctx, &evt)
 
 	slog.InfoContext(ctx, "[synapse] [deploy] deploy event", "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber, "commit", evt.CommitSHA, "status", evt.Status, "target_id", evt.TargetID, "deployment_id", evt.DeploymentID, "details", evt.Details)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -315,6 +316,85 @@ func TestClientResolvePRBySHA(t *testing.T) {
 				t.Fatalf("ResolvePRBySHA() = %+v, want %+v", got, tc.want)
 			}
 			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/RepoObject/azylman%2Faerial/ResolvePRBySHA", `"sha":"abc"`)
+		})
+	}
+}
+
+func TestClientGetDeployView(t *testing.T) {
+	t.Parallel()
+	const viewBody = `{"found":true,"repo":"azylman/aerial","pr_number":7,"status":"deploying","branch":"feat/x","head_sha":"h1","merge_sha":"m1","target_id":"123456789012345678","kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["core"],"has_expected_deploy_jobs":true}`
+	tests := []struct {
+		name         string
+		unconfigured bool
+		repo         string
+		pr           int
+		status       int
+		body         string
+		wantErrSub   string
+		wantCalls    int
+		want         DeployView
+	}{
+		{
+			name: "view round-trips", repo: "aerial", pr: 7, status: 200, body: viewBody, wantCalls: 1,
+			want: DeployView{
+				Found: true, Repo: "azylman/aerial", PRNumber: 7, Status: "deploying", Branch: "feat/x", HeadSHA: "h1", MergeSHA: "m1", TargetID: "123456789012345678",
+				KustomizationRequests: map[string]model.KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t1"}}, DeployedKustomizations: []string{"core"}, HasExpectedDeployJobs: true,
+			},
+		},
+		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
+		{name: "missing pr rejected without request", repo: "aerial", wantErrSub: "required"},
+		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", pr: 7, wantErrSub: "not configured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []registryCall
+			var mu sync.Mutex
+			baseURL := ""
+			if !tc.unconfigured {
+				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
+			}
+			got, err := NewClient(baseURL, "", "", nil).GetDeployView(t.Context(), tc.repo, tc.pr)
+			assertErrSub(t, "GetDeployView", err, tc.wantErrSub)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("GetDeployView() = %+v, want %+v", got, tc.want)
+			}
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/azylman%2Faerial%237/GetDeployView", "{}")
+		})
+	}
+}
+
+func TestClientListRollouts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		unconfigured bool
+		status       int
+		body         string
+		wantErrSub   string
+		wantCalls    int
+		want         []RolloutRef
+	}{
+		{name: "rollouts round-trip", status: 200, body: `{"rollouts":[{"repo":"azylman/aerial","pr_number":7}]}`, wantCalls: 1, want: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 7}}},
+		{name: "empty index", status: 200, body: `{"rollouts":null}`, wantCalls: 1},
+		{name: "undecodable body surfaces", status: 200, body: `nope`, wantErrSub: "decode", wantCalls: 1},
+		{name: "unconfigured fails closed", unconfigured: true, wantErrSub: "not configured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []registryCall
+			var mu sync.Mutex
+			baseURL := ""
+			if !tc.unconfigured {
+				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
+			}
+			got, err := NewClient(baseURL, "", "", nil).ListRollouts(t.Context())
+			assertErrSub(t, "ListRollouts", err, tc.wantErrSub)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ListRollouts() = %+v, want %+v", got, tc.want)
+			}
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/RepoObject/_rollouts/ListRollouts", "{}")
 		})
 	}
 }

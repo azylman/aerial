@@ -41,12 +41,12 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		HeadSHA:      headSHA,
 		TargetID:     targetID,
 		Status:       statusDeployed,
-		JobName:      "git-merge",
+		JobName:      jobGitMerge,
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
 		OccurredAt:   time.Now().UTC(),
 	}
-	if err := s.routeDeployDispatched(ctx, repo, "git-merge", headSHA, "", prNum, fact); err != nil {
+	if err := s.routeDeployDispatched(ctx, repo, jobGitMerge, headSHA, "", prNum, fact); err != nil {
 		return err
 	}
 	if restateOwnsEffects(ctx) {

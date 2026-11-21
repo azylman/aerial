@@ -145,17 +145,29 @@ func (s *PRObjectService) WithKube(k KubeEffector) *PRObjectService {
 // commit are the recorded requests patched (restate) or recorded as
 // intended (legacy), so a watch event can never observe an unrecorded
 // request.
+//
+// A carried deploy_started fact publishes only when the jobs moved the PR to
+// deploying (the registry TransitionDeploying target ID gate); every other
+// carried fact publishes on any applied request.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
-	var recorded *PRState
+	started, rest := SplitDeployStartedFacts(ev.Facts)
+	ev.Facts = nil
+	var recorded, committed *PRState
+	var transitioned bool
 	if err := s.mutateDeployEvent(ctx, ev, func(st *PRState) {
 		st.DisarmDeployFailure()
-		st.TransitionDeploying(ev.Jobs)
+		transitioned = st.TransitionDeploying(ev.Jobs)
 		if st.RecordKustomizationRequestSet(ev.KustomizationRequests) {
 			recorded = st
 		}
 		st.RecordKustomizationRequests()
-	}); err != nil || recorded == nil {
+		committed = st
+	}); err != nil || committed == nil {
 		return err
+	}
+	s.runFacts(ctx, committed, ev.EffectsOwner, gatedStartedFacts(started, rest, transitioned))
+	if recorded == nil {
+		return nil
 	}
 	st := recorded
 	key := RolloutReconcileKey(st, ev.HeadSHA)
@@ -257,11 +269,22 @@ func (s *PRObjectService) applyReadinessRetry(ctx restate.ObjectContext, st *PRS
 
 // reconcileRun is one PR reconcile effect: its key, the match key synapse
 // logs, the effects owner, and the delayed-retry ordinal.
+// requests narrows the patch to a subset of the recorded requests (a lost
+// reconcile re-patch); nil patches every recorded request.
 type reconcileRun struct {
-	key     EffectKey
-	match   string
-	owner   EffectsOwner
-	attempt int
+	key      EffectKey
+	match    string
+	owner    EffectsOwner
+	attempt  int
+	requests map[string]KustomizationRequest
+}
+
+// patchSet returns the requests the run patches.
+func (run reconcileRun) patchSet(st *PRState) map[string]KustomizationRequest {
+	if run.requests != nil {
+		return run.requests
+	}
+	return st.KustomizationRequests
 }
 
 // FluxReconcileRetryRequest is the delayed RetryFluxReconcile input naming
@@ -295,7 +318,7 @@ func (s *PRObjectService) runReconcile(ctx restate.ObjectContext, st *PRState, r
 		return
 	}
 	if ParseEffectsOwner(string(run.owner)) != EffectsOwnerRestate {
-		intended := IntendedEffect{Kind: EffectFluxReconcile, Agent: st.OwnerAgent(), EffectKey: run.key.String(), MatchKey: run.match, Digest: KustomizationRequestsDigest(st.KustomizationRequests)}
+		intended := IntendedEffect{Kind: EffectFluxReconcile, Agent: st.OwnerAgent(), EffectKey: run.key.String(), MatchKey: run.match, Digest: KustomizationRequestsDigest(run.patchSet(st))}
 		recordIntendedEffect(ctx, intended)
 		st.RecordIntendedEffect(intended)
 		st.MarkEffectDispatched(run.key)
@@ -304,7 +327,7 @@ func (s *PRObjectService) runReconcile(ctx restate.ObjectContext, st *PRState, r
 	}
 	kerr := errKubeUnconfigured
 	if s.kube != nil {
-		kerr = reconcileRequests(ctx, journaledKubeFor(ctx, s.kube), st.KustomizationRequests)
+		kerr = reconcileRequests(ctx, journaledKubeFor(ctx, s.kube), run.patchSet(st))
 	}
 	if kerr != nil && kerr.Retryable() {
 		s.scheduleReconcileRetry(ctx, st, run, kerr)

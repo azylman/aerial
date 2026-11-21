@@ -172,6 +172,7 @@ func newParitySim(t *testing.T) *paritySim {
 		"RepoObject/" + RepoHandlerGitPush:            bindErr(repo.HandleGitPush),
 		"RepoObject/" + RepoHandlerImagePromotion:     bindErr(repo.HandleImagePromotion),
 		"RepoObject/" + "HandleKustomizationStatus":   bindErr(repo.HandleKustomizationStatus),
+		"RepoObject/" + RepoHandlerRolloutIndex:       bindErr(repo.HandleRolloutIndex),
 	}
 	return sim
 }
@@ -213,15 +214,17 @@ func (s *paritySim) invoke(call simCall) {
 	sends := captureSends(s.t, mc)
 	stubParityRun(mc)
 	mc.On("Key").Return(call.key).Maybe()
-	mc.On("Get", "state", mock.Anything).Run(func(args mock.Arguments) {
-		if raw, ok := s.kv[slot]; ok {
+	// Each object key has one K/V slot per state key ("state", plus the
+	// rollout index slot on its RepoObject key).
+	mc.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		if raw, ok := s.kv[slot+"/"+args.String(0)]; ok {
 			require.NoError(s.t, json.Unmarshal(raw, args.Get(1)))
 		}
 	}).Return(true, nil).Maybe()
-	mc.On("Set", "state", mock.Anything).Run(func(args mock.Arguments) {
+	mc.On("Set", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		raw, err := json.Marshal(args.Get(1))
 		require.NoError(s.t, err)
-		s.kv[slot] = raw
+		s.kv[slot+"/"+args.String(0)] = raw
 	}).Maybe()
 	s.current, s.seen = call, map[string]bool{}
 	require.NoError(s.t, h(restate.WithMockContext(mc), call.input), "%s/%s on %s", call.service, call.handler, call.key)

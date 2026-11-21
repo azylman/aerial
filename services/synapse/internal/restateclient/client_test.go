@@ -276,6 +276,7 @@ func TestPayloadJSONShape(t *testing.T) {
 		{name: "github repo payload keys match prstate contract", got: marshalKeys(t, RepoEvent{CheckName: "c", RunID: 1, AutoUpdate: &AutoUpdatePolicy{}}), want: `agent,auto_update,check_name,effects_owner,generation,head_sha,main_sha,pr_number,repo,run_id`},
 		{name: "register request keys match prstate contract", got: marshalKeys(t, RegisterRequest{Title: "t", Agent: "a", BotID: "a", Metadata: map[string]string{"k": "v"}, FallbackTargetID: "f", EnforceOwner: true, ExpectedOwner: "a", EffectsOwner: "restate"}), want: `agent,bot_id,branch,effects_owner,enforce_owner,expected_owner,fallback_target_id,head_sha,metadata,pr_number,repo,target_id,title`},
 		{name: "sha event keys match prstate contract", got: marshalKeys(t, SHAEvent{}), want: `event,handler,repo,sha`},
+		{name: "deploy path payload keys match prstate contract", got: marshalKeys(t, PREvent{ExpectedJobs: []string{"a"}, ObservedReconcileAt: "t"}), want: `agent,branch,build_id,check_name,effects_owner,event,expected_jobs,gate_generation,head_sha,job_name,merge_sha,observed_reconcile_at,pr_number,reopen_epoch,repo,title,unmanaged`},
 		{name: "build lifecycle keys carry the owner", got: marshalKeys(t, BuildLifecycle{Agent: "a"}), want: `agent,found,has_build_metadata,head_sha,merge_sha,started,status`},
 	}
 	for _, tc := range tests {
