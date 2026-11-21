@@ -1044,11 +1044,7 @@ spec:
   noUpper: true
   secretKeys:
     - NATS_AERIAL_PASSWORD
-    - NATS_MIORINE_PASSWORD
-    - NATS_SULETTA_PASSWORD
     - NATS_ERI_AERIAL_PASSWORD
-    - NATS_ERI_MIORINE_PASSWORD
-    - NATS_ERI_SULETTA_PASSWORD
   symbols: 0
 ---
 apiVersion: external-secrets.io/v1alpha1
@@ -1064,24 +1060,8 @@ spec:
         secretKey: NATS_AERIAL_PASSWORD
     - match:
         remoteRef:
-          remoteKey: NATS_MIORINE_PASSWORD
-        secretKey: NATS_MIORINE_PASSWORD
-    - match:
-        remoteRef:
-          remoteKey: NATS_SULETTA_PASSWORD
-        secretKey: NATS_SULETTA_PASSWORD
-    - match:
-        remoteRef:
           remoteKey: NATS_ERI_AERIAL_PASSWORD
         secretKey: NATS_ERI_AERIAL_PASSWORD
-    - match:
-        remoteRef:
-          remoteKey: NATS_ERI_MIORINE_PASSWORD
-        secretKey: NATS_ERI_MIORINE_PASSWORD
-    - match:
-        remoteRef:
-          remoteKey: NATS_ERI_SULETTA_PASSWORD
-        secretKey: NATS_ERI_SULETTA_PASSWORD
   deletionPolicy: None
   refreshInterval: 1h
   secretStoreRefs:
@@ -1251,20 +1231,8 @@ spec:
         key: NATS_AERIAL_PASSWORD
       secretKey: aerial_password
     - remoteRef:
-        key: NATS_MIORINE_PASSWORD
-      secretKey: miorine_password
-    - remoteRef:
-        key: NATS_SULETTA_PASSWORD
-      secretKey: suletta_password
-    - remoteRef:
         key: NATS_ERI_AERIAL_PASSWORD
       secretKey: eri_aerial_password
-    - remoteRef:
-        key: NATS_ERI_MIORINE_PASSWORD
-      secretKey: eri_miorine_password
-    - remoteRef:
-        key: NATS_ERI_SULETTA_PASSWORD
-      secretKey: eri_suletta_password
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -1306,70 +1274,8 @@ spec:
                       ]
                     }
                   }
-                },
-                {
-                  user: "eri-miorine",
-                  password: "{{ .eri_miorine_password }}",
-                  permissions: {
-                    publish: {
-                      allow: [
-                        "aerial.transcripts.steps.miorine.>",
-                        "aerial.events.>",
-                        "aerial.turn.>",
-                        "aerial.dispatch.>",
-                        "aerial.coalesced.widget_sync.>",
-                        "voice.stream.>",
-                        "_INBOX.>",
-                        "$JS.API.INFO",
-                        "$JS.API.STREAM.INFO.>",
-                        "$JS.API.STREAM.CREATE.>",
-                        "$JS.API.STREAM.UPDATE.>"
-                      ]
-                    },
-                    subscribe: {
-                      allow: [
-                        "voice.stream.>",
-                        "_INBOX.>"
-                      ]
-                    }
-                  }
-                },
-                {
-                  user: "eri-suletta",
-                  password: "{{ .eri_suletta_password }}",
-                  permissions: {
-                    publish: {
-                      allow: [
-                        "aerial.transcripts.steps.suletta.>",
-                        "aerial.events.>",
-                        "aerial.turn.>",
-                        "aerial.dispatch.>",
-                        "aerial.coalesced.widget_sync.>",
-                        "voice.stream.>",
-                        "_INBOX.>",
-                        "$JS.API.INFO",
-                        "$JS.API.STREAM.INFO.>",
-                        "$JS.API.STREAM.CREATE.>",
-                        "$JS.API.STREAM.UPDATE.>"
-                      ]
-                    },
-                    subscribe: {
-                      allow: [
-                        "voice.stream.>",
-                        "_INBOX.>"
-                      ]
-                    }
-                  }
                 }
               ]
-            }
-            miorine: {
-              jetstream: enabled
-              users: [{ user: "miorine", password: "{{ .miorine_password }}" }]
-            }
-            suletta: {
-              jetstream: enabled
-              users: [{ user: "suletta", password: "{{ .suletta_password }}" }]
             }
           }
 ---
