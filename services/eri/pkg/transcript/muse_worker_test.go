@@ -74,7 +74,7 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 				RecordedAt:  1762510000000000,
 				Payload: musePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: "[Chat Alex]: hello"},
+					Event: museEvent{Kind: "started", Prompt: "[Chat Alice]: hello"},
 				},
 			},
 			wantHandled: true,
