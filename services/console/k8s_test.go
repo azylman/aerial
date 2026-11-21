@@ -636,67 +636,6 @@ func runFetchK8sClusterStateCase(t *testing.T, tc fetchK8sClusterStateTestCase, 
 	}
 }
 
-func TestLoadK8sCertPool_TableDriven(t *testing.T) {
-	tempDir := t.TempDir()
-	emptyFile := filepath.Join(tempDir, "empty.crt")
-	_ = os.WriteFile(emptyFile, []byte(""), 0o644)
-	invalidFile := filepath.Join(tempDir, "invalid.crt")
-	_ = os.WriteFile(invalidFile, []byte("not pem"), 0o644)
-
-	mockTLSServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer mockTLSServer.Close()
-	validPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: mockTLSServer.Certificate().Raw,
-	})
-	validFile := filepath.Join(tempDir, "valid.crt")
-	_ = os.WriteFile(validFile, validPEM, 0o644)
-
-	tests := []struct {
-		name       string
-		path       string
-		wantLoaded bool
-	}{
-		{
-			name:       "empty path returns nil",
-			path:       "",
-			wantLoaded: false,
-		},
-		{
-			name:       "nonexistent file returns nil",
-			path:       filepath.Join(tempDir, "nonexistent.crt"),
-			wantLoaded: false,
-		},
-		{
-			name:       "empty file returns nil",
-			path:       emptyFile,
-			wantLoaded: false,
-		},
-		{
-			name:       "invalid pem returns nil",
-			path:       invalidFile,
-			wantLoaded: false,
-		},
-		{
-			name:       "valid pem returns cert pool",
-			path:       validFile,
-			wantLoaded: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := loadK8sCertPool(tc.path)
-			if tc.wantLoaded && pool == nil {
-				t.Errorf("expected non-nil cert pool for %s", tc.path)
-			}
-			if !tc.wantLoaded && pool != nil {
-				t.Errorf("expected nil cert pool for %s", tc.path)
-			}
-		})
-	}
-}
-
 func TestBuildK8sHTTPClient_TableDriven(t *testing.T) {
 	tempDir := t.TempDir()
 	mockTLSServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

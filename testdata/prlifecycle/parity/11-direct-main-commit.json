@@ -34,6 +34,28 @@
     },
     {
       "object": "RepoObject",
+      "handler": "HandlePushBySHA",
+      "event": {
+        "repo": "azylman/aerial",
+        "sha": "c111",
+        "handler": "HandleMerged",
+        "event": {
+          "head_sha": "c111",
+          "merge_sha": "c111",
+          "facts": [
+            {
+              "event": "merged",
+              "repo": "azylman/aerial",
+              "head_sha": "c111"
+            }
+          ],
+          "repo": "azylman/aerial",
+          "effects_owner": "restate"
+        }
+      }
+    },
+    {
+      "object": "RepoObject",
       "handler": "HandleAutoUpdate",
       "event": {
         "main_sha": "c111",

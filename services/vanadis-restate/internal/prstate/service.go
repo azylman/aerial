@@ -551,8 +551,24 @@ func (s *PRObjectService) HandleCIRecovered(ctx restate.ObjectContext, ev PREven
 		func(st *PRState) error {
 			applyCIRecovered(st, ev)
 			restate.Set(ctx, s.stateKey, st)
+			forwardRecoveredAutoUpdate(ctx, st, ev)
 			return nil
 		})
+}
+
+// forwardRecoveredAutoUpdate re-triggers the open-PR auto-update cascade for
+// an applied CI recovery that carries an auto-update policy (restate-owned
+// check_run recoveries only). Only PRObject knows the PR was CI-failed, so
+// it replaces legacy synapse's recovered-check trigger; RepoObject keys the
+// effect on the PR head and check, exactly as the legacy trigger did.
+func forwardRecoveredAutoUpdate(ctx restate.ObjectContext, st *PRState, ev PREvent) {
+	if ev.AutoUpdate == nil {
+		return
+	}
+	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerAutoUpdate).Send(RepoEvent{
+		Repo: st.Repo, PRNumber: st.PRNumber, HeadSHA: ev.HeadSHA, CheckName: ev.CheckName,
+		AutoUpdate: ev.AutoUpdate, EffectsOwner: ev.EffectsOwner,
+	})
 }
 
 // applyCIRecovered clears the recovered check and, once no failed check
@@ -581,10 +597,16 @@ func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectSharedContext, ev P
 // HandleConflictResolved applies one conflict-resolved event dark.
 func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
-		st.ClearConflictPublished()
-		st.ClearCollaboratorConflict(ev.HeadSHA)
-		st.ApplyRegistryRecovered(RegistryStatusConflict)
+		resolveConflict(st, ev.HeadSHA)
 	})
+}
+
+// resolveConflict clears the published conflict and the collaborator
+// conflict alert for headSHA and reopens a conflict row.
+func resolveConflict(st *PRState, headSHA string) {
+	st.ClearConflictPublished()
+	st.ClearCollaboratorConflict(headSHA)
+	st.ApplyRegistryRecovered(RegistryStatusConflict)
 }
 
 // HandleMerged applies one merge event. A squash-merge push that arrives
@@ -796,6 +818,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	}
 	before := snapshotIndexView(st)
 	prevHead := st.HeadSHA
+	wasConflict := st.Status == RegistryStatusConflict
 	if disp == DispositionRecoverStale {
 		synchronizeRecoveredTotal.Inc()
 		slog.WarnContext(ctx, "[prstate] synchronize recovered stale head", "pr", PRObjectKey(st.Repo, st.PRNumber),
@@ -803,6 +826,12 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	}
 	st.SetHead(ev.HeadSHA)
 	st.ApplyRegistrySync(prevHead, st.HeadSHA)
+	if wasConflict {
+		// A synchronize resolves a stored conflict (legacy's follow-up
+		// HandleConflictResolved): only PRObject knows the row was in
+		// conflict, so a restate-owned edge never sends that follow-up.
+		resolveConflict(st, ev.HeadSHA)
+	}
 	st.DisarmDeployFailure()
 	st.ApplyIdentity(ev.Branch, ev.Title)
 	restate.Set(ctx, s.stateKey, st)

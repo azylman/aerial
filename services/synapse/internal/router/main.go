@@ -398,7 +398,7 @@ func readPRRegisterRequest(w http.ResponseWriter, r *http.Request) (PRRegisterRe
 
 func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
 	if s != nil {
-		if ctx := stampEffectsOwner(r.Context()); restateOwnsEffects(ctx) {
+		if ctx := s.stampEffectsOwner(r.Context()); restateOwnsEffects(ctx) {
 			s.handlePRRegisterRestate(w, r.WithContext(ctx))
 			return
 		}
@@ -472,9 +472,17 @@ func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 }
 
 func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *http.Request, evt DeployEvent, originPrefix string) {
-	s.enrichDeployEventPRAndTarget(r.Context(), &evt)
+	// One effect-owner snapshot per request: stamped into the job when
+	// queued, or bound into ctx when processed inline. A restate-owned event
+	// skips the registry-backed enrichment and pre-image gate: the owned
+	// path resolves the PR from RepoObject and the image wait from PRObject.
+	owner := s.acceptEffectsOwner()
+	restateOwned := owner == restateclient.EffectsOwnerRestate
+	if !restateOwned {
+		s.enrichDeployEventPRAndTarget(r.Context(), &evt)
+	}
 	logPrefix := firstNonEmpty(originPrefix, "deploy")
-	if (evt.Event == eventDeployStarted || evt.Event == eventDeploySuccess) && s.shouldTreatDeploySuccessAsSync(r.Context(), evt) {
+	if !restateOwned && (evt.Event == eventDeployStarted || evt.Event == eventDeploySuccess) && s.shouldTreatDeploySuccessAsSync(r.Context(), evt) {
 		slog.InfoContext(r.Context(), "[synapse] ignoring pre-image event (waiting for image build)", "origin", logPrefix, "event", evt.Event, "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 			fieldStatus:   "ignored",
@@ -484,9 +492,6 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		})
 		return
 	}
-	// One effect-owner snapshot per request: stamped into the job when
-	// queued, or bound into ctx when processed inline.
-	owner := newEventEffectsOwner()
 	idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 	if s.bus != nil {
 		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt, EffectsOwner: owner}); err != nil {
@@ -728,7 +733,7 @@ func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt Dep
 
 func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt DeployEvent, prefix string) error {
 	targetID := evt.TargetID
-	if s.registry != nil && evt.PRNumber > 0 && restateOwnsEffects(ctx) {
+	if evt.PRNumber > 0 && restateOwnsEffects(ctx) {
 		// PRObject applies deploy_failed and publishes the carried fact.
 		return s.routeDeployFailed(ctx, evt.Repo, evt.PRNumber, "", evt.CommitSHA, false, s.deployLifecycleFact(ctx, evt, eventDeployFailed, eventDeployFailed))
 	}
