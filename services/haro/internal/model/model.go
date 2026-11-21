@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/agent"
 )
 
 // Schedule types shared by the schedule tables, metrics labels and run records.
@@ -54,11 +56,11 @@ const (
 )
 
 // DefaultAgent is the fallback agent tenancy identifier across haro schedules.
-const DefaultAgent = "aerial"
+const DefaultAgent = agent.Default
 
-// NormalizeAgent trims agent and defaults empty strings to DefaultAgent.
-func NormalizeAgent(agent string) string {
-	if trimmed := strings.TrimSpace(agent); trimmed != "" {
+// NormalizeAgent trims name and defaults empty strings to DefaultAgent.
+func NormalizeAgent(name string) string {
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
 		return trimmed
 	}
 	return DefaultAgent
@@ -233,20 +235,6 @@ func NormalizeEffort(effort string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid effort tier %q: expected 'low', 'medium', or 'high'", effort)
 	}
-}
-
-// IsNumericSnowflake reports whether id is a non-empty string consisting only of ASCII digits [0-9].
-func IsNumericSnowflake(id string) bool {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return false
-	}
-	for i := range len(id) {
-		if id[i] < '0' || id[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 var (
