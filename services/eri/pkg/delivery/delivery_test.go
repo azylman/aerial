@@ -650,30 +650,6 @@ func TestErrorClassifiers_RESTError(t *testing.T) {
 	}
 }
 
-func TestIsSnowflake(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{name: "empty snowflake", input: "", want: false},
-		{name: "alphanumeric snowflake", input: "12345abc6789", want: false},
-		{name: "valid numeric snowflake", input: "123456789012345678", want: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := isSnowflake(tc.input)
-			if got != tc.want {
-				t.Errorf("isSnowflake(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
 const dummyOutboundSecret = "plain-dummy-outbound-secret"
 
 func registerDummyOutboundSecret(t *testing.T) {

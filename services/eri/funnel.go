@@ -10,6 +10,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -107,7 +108,7 @@ func currentFunnelClassifier() *classifier.Classifier {
 }
 
 func fetchAndCacheDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
-	if s == nil || s.Token == "" || !queue.IsNumericSnowflake(channelID) {
+	if s == nil || s.Token == "" || !discordutil.IsSnowflake(channelID) {
 		return nil
 	}
 	ch, err := s.Channel(channelID)
@@ -271,7 +272,7 @@ func getOrCreateThreadID(ctx context.Context, s *discordgo.Session, m *discordgo
 
 	thread, err := delivery.StartMessageThread(s, m.ChannelID, m.ID, title)
 	if err != nil {
-		if IsThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
+		if IsThreadAlreadyExistsError(err) && discordutil.IsSnowflake(m.ID) {
 			return recoverExistingThreadOnConflict(s, m.ID, m.ChannelID, guildID)
 		}
 		metrics.RecordThreadCreated(outcomeError)

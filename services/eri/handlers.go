@@ -21,6 +21,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
@@ -59,7 +60,7 @@ func validateSnowflakeID(w http.ResponseWriter, id, field string) bool {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Invalid payload: '%s' field is required and cannot be empty", field))
 		return false
 	}
-	if !queue.IsNumericSnowflake(id) {
+	if !discordutil.IsSnowflake(id) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Invalid payload: '%s' must be a valid numeric Discord snowflake", field))
 		return false
 	}
@@ -74,7 +75,7 @@ func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive boo
 }
 
 func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
-	if channelID = strings.TrimSpace(channelID); channelID != "" && !queue.IsNumericSnowflake(channelID) && pool != nil {
+	if channelID = strings.TrimSpace(channelID); channelID != "" && !discordutil.IsSnowflake(channelID) && pool != nil {
 		if resolved, err := pool.ResolveChannelID(channelID); err == nil {
 			return resolved
 		}
@@ -606,7 +607,7 @@ func resolveDirectMessageTarget(pool *queue.WorkerPool, req DirectMessageRequest
 	if targetID == "" {
 		targetID = strings.TrimSpace(req.ChannelID)
 	}
-	if !queue.IsNumericSnowflake(targetID) && targetID != "" {
+	if !discordutil.IsSnowflake(targetID) && targetID != "" {
 		if resolved, err := pool.ResolveChannelID(targetID); err == nil {
 			targetID = resolved
 		}

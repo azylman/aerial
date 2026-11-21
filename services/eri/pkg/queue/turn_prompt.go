@@ -10,6 +10,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
@@ -123,12 +124,12 @@ func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]
 		return nil, nil
 	}
 	dg := te.pool.getDiscordSession()
-	if dg == nil || threadID == "" || !IsNumericSnowflake(threadID) {
+	if dg == nil || threadID == "" || !discordutil.IsSnowflake(threadID) {
 		return nil, nil
 	}
 
 	beforeID := ""
-	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ID) {
+	if len(te.burst) > 0 && discordutil.IsSnowflake(te.burst[0].ID) {
 		beforeID = te.burst[0].ID
 	}
 
@@ -311,7 +312,7 @@ func (te *turnExecution) fetchLatestThreadHistory(fetchCtx context.Context, limi
 }
 
 func (te *turnExecution) fetchThreadHistoryBefore(fetchCtx context.Context, beforeID string, limit int) []HistoryMessage {
-	if !IsNumericSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
+	if !discordutil.IsSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
 		return nil
 	}
 	fetchCtx, span := te.startPromptStep(fetchCtx, spanPromptHistoryFetch, attrPromptHistoryLimit.Int(limit))
@@ -595,7 +596,7 @@ func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, 
 func newestBurstMessageID(burst []db.Message) string {
 	var newest string
 	for _, m := range burst {
-		if IsNumericSnowflake(m.ID) && (newest == "" || compareSnowflakeIDs(m.ID, newest) > 0) {
+		if discordutil.IsSnowflake(m.ID) && (newest == "" || compareSnowflakeIDs(m.ID, newest) > 0) {
 			newest = m.ID
 		}
 	}
@@ -617,7 +618,7 @@ func dropNextBurstMessages(msgs []HistoryMessage, newestBurstID string) []Histor
 		return msgs
 	}
 	return slices.DeleteFunc(slices.Clone(msgs), func(m HistoryMessage) bool {
-		return IsNumericSnowflake(m.ID) && compareSnowflakeIDs(m.ID, cutoff) >= 0
+		return discordutil.IsSnowflake(m.ID) && compareSnowflakeIDs(m.ID, cutoff) >= 0
 	})
 }
 
