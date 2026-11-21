@@ -2,12 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
 func newFactsMockBrain(capturedQuery *url.Values) *httptest.Server {
@@ -605,9 +610,30 @@ type vanadisBuildTestCase struct {
 	wantBodyNotSubstr []string
 }
 
+// requireVanadisBearer mirrors vanadis authorizeBuildRead: every read needs the console
+// ServiceAccount bearer token, so each success row also proves console sent it. The
+// status=unauthorized query and build-401 detail force a 401 for the error-path rows.
+func requireVanadisBearer(t *testing.T, next http.Handler) http.Handler {
+	t.Helper()
+	tokenBytes, err := os.ReadFile(os.Getenv("AERIAL_SA_TOKEN_PATH"))
+	if err != nil {
+		t.Fatalf("read test ServiceAccount token: %v", err)
+	}
+	wantAuth := "Bearer " + strings.TrimSpace(string(tokenBytes))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != wantAuth || r.URL.Query().Get("status") == "unauthorized" || r.URL.Path == "/builds/build-401" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"missing or invalid bearer token"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func newVanadisMockServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(requireVanadisBearer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/builds" && r.Method == http.MethodGet:
 			q := r.URL.Query()
@@ -748,7 +774,7 @@ func newVanadisMockServer(t *testing.T) *httptest.Server {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 }
 
 func vanadisBuildsTestCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
@@ -807,6 +833,15 @@ func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTes
 			method:     http.MethodGet,
 			target:     "/api/builds?status=error500",
 			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:              "Builds_Upstream401_ErrorPayload",
+			vanadisURL:        mockVanadisURL,
+			method:            http.MethodGet,
+			target:            "/api/builds?status=unauthorized",
+			wantStatus:        http.StatusUnauthorized,
+			wantBodySubstr:    []string{`"status":"error"`, `"error":"Upstream vanadis error occurred"`, `"builds":[]`},
+			wantBodyNotSubstr: []string{`"status":"ok"`},
 		},
 		{
 			name:       "Builds_BadGateway_InvalidJSON",
@@ -887,6 +922,15 @@ func vanadisBuildsDetailCases(mockVanadisURL, offlineURL string) []vanadisBuildT
 			method:     http.MethodGet,
 			target:     "/api/builds/build-500",
 			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:           "BuildDetail_Upstream401_ErrorPayload",
+			isDetail:       true,
+			vanadisURL:     mockVanadisURL,
+			method:         http.MethodGet,
+			target:         "/api/builds/build-401",
+			wantStatus:     http.StatusUnauthorized,
+			wantBodySubstr: []string{`"status":"error"`, "missing or invalid bearer token", `"chunks":[]`},
 		},
 		{
 			name:       "BuildDetail_EmptyID_BadRequest",
@@ -1107,5 +1151,59 @@ func runDocketHandlerCase(t *testing.T, tc docketHandlerTestCase) {
 		if !strings.Contains(body, sub) {
 			t.Errorf("body %s missing %q", body, sub)
 		}
+	}
+}
+
+func TestVanadisHTTPClientAuthorization(t *testing.T) {
+	t.Parallel()
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Header.Get("Authorization")))
+	}))
+	t.Cleanup(echo.Close)
+
+	tests := []struct {
+		name      string
+		writeFile bool
+		token     string
+		wantAuth  string
+		wantErr   bool
+	}{
+		{name: "ProjectedTokenSentAsBearer", writeFile: true, token: "sa-token-abc\n", wantAuth: "Bearer sa-token-abc"},
+		{name: "MissingTokenFileSendsUnauthenticated", writeFile: false, wantAuth: ""},
+		{name: "EmptyTokenFileFailsRequest", writeFile: true, token: "  \n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tokenPath := filepath.Join(t.TempDir(), "token")
+			if tc.writeFile {
+				if err := os.WriteFile(tokenPath, []byte(tc.token), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := newVanadisHTTPClient(k8sauth.NewTokenSource(tokenPath, time.Now))
+			defer client.CloseIdleConnections()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, echo.URL, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if tc.wantErr {
+				if err == nil {
+					resp.Body.Close()
+					t.Fatalf("expected request error, got none")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if string(body) != tc.wantAuth {
+				t.Fatalf("Authorization = %q, want %q", string(body), tc.wantAuth)
+			}
+		})
 	}
 }

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -188,10 +190,14 @@ type BuildDetailAPIResponse struct {
 	Error  string            `json:"error,omitempty"`
 }
 
-// Singleton tuned HTTP client for upstream vanadis communication
-var vanadisHTTPClient = tracing.Client(&http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
+// Singleton tuned HTTP client for upstream vanadis communication. Every request carries the
+// console ServiceAccount token (vanadis authorizes reads via TokenReview + SubjectAccessReview).
+var vanadisHTTPClient = newVanadisHTTPClient(k8sauth.NewTokenSource("", time.Now))
+
+// newVanadisHTTPClient builds the vanadis client around ts: the projected token is re-read
+// through ts (60s cache), so kubelet rotations are picked up without a restart.
+func newVanadisHTTPClient(ts *k8sauth.TokenSource) *http.Client {
+	base := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   2 * time.Second,
@@ -202,8 +208,40 @@ var vanadisHTTPClient = tracing.Client(&http.Client{
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 4 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-	},
-})
+	}
+	return tracing.Client(&http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &optionalServiceAccountTransport{
+			base:   base,
+			tokens: ts,
+			authed: k8sauth.NewServiceAccountTransportWithSource(base, ts),
+		},
+	})
+}
+
+// optionalServiceAccountTransport injects the ServiceAccount bearer token when the token file
+// exists and sends the request unauthenticated when it does not (local dev outside a pod), so
+// the upstream answers 401 visibly instead of the client failing before the request leaves.
+// Any other token error (unreadable or empty file) fails the request.
+type optionalServiceAccountTransport struct {
+	base   http.RoundTripper
+	tokens *k8sauth.TokenSource
+	authed http.RoundTripper
+}
+
+func (t *optionalServiceAccountTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if _, err := t.tokens.Token(); errors.Is(err, fs.ErrNotExist) {
+		return t.base.RoundTrip(req)
+	}
+	return t.authed.RoundTrip(req)
+}
+
+// CloseIdleConnections forwards to the shared base transport.
+func (t *optionalServiceAccountTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
 
 // fetchUpstreamJSON executes an HTTP GET request with a 4-second timeout against targetURL,
 // decodes any non-200 JSON error into upstreamErrMsg, or unmarshals the 200 OK JSON response into dest.
