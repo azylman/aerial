@@ -95,6 +95,12 @@ func restateCallError(parent context.Context, err error) error {
 
 // CallIngress proxies a synchronous command to Restate ingress.
 func (c *Client) CallIngress(ctx context.Context, path string, payload any, out any) error {
+	return c.CallIngressKeyed(ctx, path, "", payload, out)
+}
+
+// CallIngressKeyed is CallIngress with an Idempotency-Key header when
+// idempotencyKey is non-empty.
+func (c *Client) CallIngressKeyed(ctx context.Context, path, idempotencyKey string, payload any, out any) error {
 	ingressURL := c.IngressURL()
 	if ingressURL == "" {
 		return errors.New("restate ingress URL not configured")
@@ -120,6 +126,9 @@ func (c *Client) CallIngress(ctx context.Context, path string, payload any, out 
 		return fmt.Errorf("create restate request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 
 	client := http.DefaultClient
 	if c.httpClient != nil {
