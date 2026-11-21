@@ -23,6 +23,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -49,6 +50,8 @@ type Config struct {
 	DiscordToken      string
 	ShareRoot         string
 	AgentName         string
+	// ConfigPath is the agent config.yaml read for widget channel policy (shared CONFIG_PATH convention).
+	ConfigPath string
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -79,6 +82,7 @@ func LoadConfigFromEnv() Config {
 	discordToken := strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
 	shareRoot := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("SHARE_ROOT"), executor.DefaultShareRoot))
 	agentName := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
+	configPath := strings.TrimSpace(store.FirstNonEmpty(os.Getenv("CONFIG_PATH"), widget.DefaultWidgetConfigPath))
 
 	return Config{
 		RestatePort:       restatePort,
@@ -92,23 +96,32 @@ func LoadConfigFromEnv() Config {
 		DiscordToken:      discordToken,
 		ShareRoot:         shareRoot,
 		AgentName:         agentName,
+		ConfigPath:        configPath,
 	}
 }
 
-// bindRestateServices assembles the Restate worker server with Build,
-// BuildRouter, and the dark PRObject/RepoObject state services. The synapse
-// ingress invoker addresses PRObject/RepoObject, but all synapse consumers
-// stay on legacy trackers: nothing routes here until the cutover chunk.
+// bindRestateServices assembles the Restate worker server with Build and
+// BuildRouter for agent, plus PRObject/RepoObject only on the default-agent
+// runner.
 //
 // Build and BuildRouter stay agent-scoped (their names come from restateObj
-// and routerSvc), while PRObject/RepoObject are the single objects every
-// agent's PRs route to.
-func bindRestateServices(restateObj *build.BuildObject, routerSvc *router.BuildRouterService) *server.Restate {
+// and routerSvc). PRObject/RepoObject are single cluster-wide objects owned by
+// the default-agent runner ("" or "aerial", the BuildServiceName rule): a
+// sibling runner registering them would steal PR lifecycle traffic from
+// whichever deployment registered last.
+func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService) *server.Restate {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))
-	prstate.RegisterPRStateServices(srv, prstate.NewPRObjectService(), prstate.NewRepoObjectService())
+	if ownsPRState(agent) {
+		prstate.RegisterPRStateServices(srv, prstate.NewPRObjectService(), prstate.NewRepoObjectService())
+	}
 	return srv
+}
+
+// ownsPRState reports whether agent is the default agent that owns prstate.
+func ownsPRState(agent string) bool {
+	return model.BuildServiceName(agent) == model.BuildServiceName("")
 }
 
 // SetupHealthMux creates the ServeMux for health, metrics, and coverage flush.
@@ -168,7 +181,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	// Internal clients propagate traceparent; GitHub calls record spans without leaking headers.
 	var widgetDeliverer ericlient.StatusWidgetDeliverer
-	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.DiscordToken); dErr != nil {
+	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.AgentName, cfg.DiscordToken, cfg.ConfigPath); dErr != nil {
 		log.Printf("[vanadis-restate] warning: failed to construct discord widget deliverer: %v", dErr)
 	} else {
 		widgetDeliverer = deliverer
@@ -183,7 +196,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
-	restateServer := bindRestateServices(restateObj, routerSvc)
+	restateServer := bindRestateServices(cfg.AgentName, restateObj, routerSvc)
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)

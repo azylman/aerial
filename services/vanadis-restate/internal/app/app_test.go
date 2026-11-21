@@ -174,7 +174,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 	// 3. Widget deliverer constructor error logs warning without failing RunApp
 	origDeliverer := newDiscordWidgetDelivererFn
 	defer func() { newDiscordWidgetDelivererFn = origDeliverer }()
-	newDiscordWidgetDelivererFn = func(string, ...string) (*widget.DiscordWidgetDeliverer, error) {
+	newDiscordWidgetDelivererFn = func(string, string, ...string) (*widget.DiscordWidgetDeliverer, error) {
 		return nil, errors.New("mock deliverer fail")
 	}
 
@@ -237,36 +237,24 @@ type discoveryManifest struct {
 func TestBindRestateServices(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		agent      string
-		wantBuild  string
-		wantRouter string
-		wantPR     string
-		wantRepo   string
+		name         string
+		agent        string
+		wantBuild    string
+		wantRouter   string
+		wantPRState  bool
+		wantServices int
 	}{
-		{
-			name:       "default agent binds dark services",
-			agent:      "",
-			wantBuild:  "Build",
-			wantRouter: "BuildRouter",
-			wantPR:     "PRObject",
-			wantRepo:   "RepoObject",
-		},
-		{
-			name:       "scoped agent keeps single pr state services",
-			agent:      "marida",
-			wantBuild:  "Build-marida",
-			wantRouter: "BuildRouter-marida",
-			wantPR:     "PRObject",
-			wantRepo:   "RepoObject",
-		},
+		{name: "empty agent owns pr state", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
+		{name: "aerial agent owns pr state", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
+		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
+		{name: "sibling agent never binds pr state", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantPRState: false, wantServices: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
 			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
-			srv := bindRestateServices(restateObj, routerSvc)
+			srv := bindRestateServices(tc.agent, restateObj, routerSvc)
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -287,24 +275,28 @@ func TestBindRestateServices(t *testing.T) {
 				byName[svc.Name] = handlers
 				types[svc.Name] = svc.Ty
 			}
-			require.Len(t, byName, 4)
-			for _, want := range []string{tc.wantBuild, tc.wantRouter, tc.wantPR, tc.wantRepo} {
-				require.Contains(t, byName, want)
+			require.Len(t, byName, tc.wantServices)
+			require.Contains(t, byName, tc.wantBuild)
+			require.Contains(t, byName, tc.wantRouter)
+			if !tc.wantPRState {
+				require.NotContains(t, byName, "PRObject")
+				require.NotContains(t, byName, "RepoObject")
+				return
 			}
-			require.Len(t, byName[tc.wantPR], 17)
-			require.True(t, byName[tc.wantPR]["HandleCheckFailed"])
-			require.True(t, byName[tc.wantPR]["HandleDeploySuccessPublished"])
-			require.True(t, byName[tc.wantPR]["HandleConflictDetected"])
-			require.True(t, byName[tc.wantPR]["HandleConflictPublished"])
-			require.True(t, byName[tc.wantPR]["HandleCIRecovery"])
-			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantPR])
-			require.True(t, byName[tc.wantPR]["HandleMainAdvanced"])
-			require.Len(t, byName[tc.wantRepo], 11)
-			require.True(t, byName[tc.wantRepo]["ResolvePRBySHA"])
-			require.True(t, byName[tc.wantRepo]["HandlePRIndex"])
-			require.True(t, byName[tc.wantRepo]["HandleHeldReplay"])
-			require.True(t, byName[tc.wantRepo]["HandleCheckRunBySHA"])
-			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantRepo])
+			require.Len(t, byName["PRObject"], 17)
+			require.True(t, byName["PRObject"]["HandleCheckFailed"])
+			require.True(t, byName["PRObject"]["HandleDeploySuccessPublished"])
+			require.True(t, byName["PRObject"]["HandleConflictDetected"])
+			require.True(t, byName["PRObject"]["HandleConflictPublished"])
+			require.True(t, byName["PRObject"]["HandleCIRecovery"])
+			require.Equal(t, "VIRTUAL_OBJECT", types["PRObject"])
+			require.True(t, byName["PRObject"]["HandleMainAdvanced"])
+			require.Len(t, byName["RepoObject"], 11)
+			require.True(t, byName["RepoObject"]["ResolvePRBySHA"])
+			require.True(t, byName["RepoObject"]["HandlePRIndex"])
+			require.True(t, byName["RepoObject"]["HandleHeldReplay"])
+			require.True(t, byName["RepoObject"]["HandleCheckRunBySHA"])
+			require.Equal(t, "VIRTUAL_OBJECT", types["RepoObject"])
 		})
 	}
 }

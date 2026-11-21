@@ -97,6 +97,9 @@ type DiscordWidgetSender interface {
 	ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error
 }
 
+// DefaultWidgetConfigPath is the channel-policy config read when the runner supplies no path.
+const DefaultWidgetConfigPath = "/share/aerial-config/config.yaml"
+
 type cachedResolvedChannel struct {
 	id        string
 	expiresAt time.Time
@@ -131,7 +134,18 @@ type DiscordWidgetDeliverer struct {
 	channelLocks sync.Map
 }
 
-func discoverAgentTokens() map[string]string {
+// normalizeRunnerAgent lowercases and trims a runner's AGENT_NAME, mapping "" to the default agent.
+func normalizeRunnerAgent(agent string) string {
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" {
+		return defaultAgent
+	}
+	return clean
+}
+
+// discoverAgentTokens loads every DISCORD_TOKEN_<AGENT> entry, then keys the plain DISCORD_TOKEN
+// (or DISCORD_BOT_TOKEN) under the runner's own normalized agent unless an explicit entry exists.
+func discoverAgentTokens(runnerAgent string) map[string]string {
 	tokens := make(map[string]string)
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
@@ -149,24 +163,28 @@ func discoverAgentTokens() map[string]string {
 			}
 		}
 	}
-	if _, ok := tokens[defaultAgent]; !ok {
+	owner := normalizeRunnerAgent(runnerAgent)
+	if _, ok := tokens[owner]; !ok {
 		if t := strings.TrimSpace(os.Getenv("DISCORD_TOKEN")); t != "" {
-			tokens[defaultAgent] = t
+			tokens[owner] = t
 		} else if t := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); t != "" {
-			tokens[defaultAgent] = t
+			tokens[owner] = t
 		}
 	}
 	return tokens
 }
 
-// NewDiscordWidgetDeliverer constructs a DiscordWidgetDeliverer using the provided token or DISCORD_TOKEN env.
-func NewDiscordWidgetDeliverer(token string, configPath ...string) (*DiscordWidgetDeliverer, error) {
-	tokens := discoverAgentTokens()
+// NewDiscordWidgetDeliverer constructs a DiscordWidgetDeliverer for the runner agent agentName.
+// The explicit token (or DISCORD_TOKEN env) is keyed under the normalized agentName and becomes
+// the deliverer's default session; DISCORD_TOKEN_<AGENT> entries stay available per agent.
+func NewDiscordWidgetDeliverer(agentName, token string, configPath ...string) (*DiscordWidgetDeliverer, error) {
+	owner := normalizeRunnerAgent(agentName)
+	tokens := discoverAgentTokens(owner)
 	cleanToken := strings.TrimSpace(token)
 	if cleanToken != "" {
-		tokens[defaultAgent] = cleanToken
+		tokens[owner] = cleanToken
 	}
-	cfgPath := "/share/aerial-config/config.yaml"
+	cfgPath := DefaultWidgetConfigPath
 	if len(configPath) > 0 && strings.TrimSpace(configPath[0]) != "" {
 		cfgPath = strings.TrimSpace(configPath[0])
 	}
@@ -183,7 +201,7 @@ func NewDiscordWidgetDeliverer(token string, configPath ...string) (*DiscordWidg
 			continue
 		}
 		agentSenders[agent] = sess
-		if agent == defaultAgent {
+		if agent == owner {
 			defaultSess = sess
 		}
 	}
@@ -501,7 +519,7 @@ func (d *DiscordWidgetDeliverer) loadConfigFile(now time.Time) *rawConfigFile {
 
 	cfgPath := d.configPath
 	if cfgPath == "" {
-		cfgPath = "/share/aerial-config/config.yaml"
+		cfgPath = DefaultWidgetConfigPath
 	}
 
 	if d.cachedConfig != nil && now.Sub(d.configReadAt) < configCacheTTL && d.cachedConfigPath == cfgPath {
