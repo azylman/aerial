@@ -88,6 +88,7 @@ Each host configuration under `./hosts/<hostname>/default.nix` composes the modu
 - `serverAddr` (`str`, default `"https://k3s-server.lan:6443"`): Upstream K3s server endpoint for agents.
 - `tokenFile` (`path`, default `"/etc/rancher/k3s/cluster-token"`): Cluster join token file.
 - `embeddedRegistry` (`bool`, default `true`): Enable Spegel embedded P2P OCI registry mirror across both servers and agents.
+- `dockerHubMirrors` (`listOf str`, default `[ "https://mirror.gcr.io" ]`): Upstream registry mirror endpoints for docker.io in `/etc/rancher/k3s/registries.yaml`.
 - `nodeLabels` (`listOf str`, default `[ ]`): Node labels passed to K3s (`--node-label key=value`).
 - `nodeTaints` (`listOf str`, default `[ ]`): Node taints passed to K3s (`--node-taint key=value:effect`).
 - `extraFlags` (`listOf str`, default `[ ]`): Additional command-line flags for K3s.
