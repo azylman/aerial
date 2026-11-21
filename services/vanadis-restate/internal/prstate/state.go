@@ -81,11 +81,6 @@ type PRState struct {
 	// PRObject.Project wrote, so an identical snapshot is never rewritten.
 	ProjectedKey string
 
-	// IntendedEffects is the bounded ring of effects prstate recorded but
-	// skipped because synapse owned the event's effects (legacy). Shadow
-	// gates compare it key for key with synapse's [synapse-effect] log.
-	IntendedEffects []IntendedEffect
-
 	// PendingDeployFailure is the armed deploy-failure deadline for a
 	// restate-owned deploy attempt that failed; DeployFailureSeq numbers
 	// the deadlines so a stale timer never fires a newer attempt.
@@ -907,19 +902,15 @@ type RepoState struct {
 	// and held event IDs. It replaces wall-clock updated_at ordering.
 	Seq uint64
 	// RepoEffects are the keys of repo-level GitHub effects (auto-update
-	// cascades, workflow reruns) already executed or recorded, oldest
+	// cascades, workflow reruns) already executed, oldest
 	// first, bounded by MaxRepoEffects.
 	RepoEffects []string
-	// IntendedEffects is the bounded ring of repo effects recorded but
-	// skipped because synapse owned the triggering event (legacy).
-	IntendedEffects []IntendedEffect
 }
 
 // MaxRepoEffects bounds the RepoObject repo-effect key history.
 const MaxRepoEffects = 64
 
-// WasRepoEffect reports whether the repo effect key already fired or was
-// recorded.
+// WasRepoEffect reports whether the repo effect key already fired.
 func (s *RepoState) WasRepoEffect(k EffectKey) bool {
 	return s != nil && slices.Contains(s.RepoEffects, k.String())
 }
@@ -933,18 +924,6 @@ func (s *RepoState) MarkRepoEffect(k EffectKey) {
 	s.RepoEffects = append(s.RepoEffects, k.String())
 	if over := len(s.RepoEffects) - MaxRepoEffects; over > 0 {
 		s.RepoEffects = append([]string(nil), s.RepoEffects[over:]...)
-	}
-}
-
-// RecordIntendedEffect appends one intended repo effect, keeping the newest
-// MaxIntendedEffects entries.
-func (s *RepoState) RecordIntendedEffect(e IntendedEffect) {
-	if s == nil {
-		return
-	}
-	s.IntendedEffects = append(s.IntendedEffects, e)
-	if over := len(s.IntendedEffects) - MaxIntendedEffects; over > 0 {
-		s.IntendedEffects = append([]IntendedEffect(nil), s.IntendedEffects[over:]...)
 	}
 }
 

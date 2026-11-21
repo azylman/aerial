@@ -19,10 +19,6 @@ package prstate
 // them. A retryable failure that survives the step retries leaves the effect
 // key uncommitted and schedules a delayed self-send, so no exclusive object
 // lock is held across a long backoff.
-//
-// effects_owner=legacy triggers never call GitHub: they commit the effect
-// key, record an IntendedEffect, and log [prstate-shadow] with the match key
-// synapse logs as [synapse-effect] for the call it really made.
 
 import (
 	"context"
@@ -146,12 +142,18 @@ func (s *RepoObjectService) WithGitHub(gh GitHubEffector) *RepoObjectService {
 
 // HandleAutoUpdate runs one open-PR auto-update cascade trigger.
 func (s *RepoObjectService) HandleAutoUpdate(ctx restate.ObjectContext, ev RepoEvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleAutoUpdate", ev.EffectsOwner); err != nil {
+		return err
+	}
 	out, err := s.handlers(ctx).HandleAutoUpdate(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerAutoUpdate, ev, out, err)
 }
 
 // HandleWorkflowRerun reruns the failed jobs of one workflow run.
 func (s *RepoObjectService) HandleWorkflowRerun(ctx restate.ObjectContext, ev RepoEvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleWorkflowRerun", ev.EffectsOwner); err != nil {
+		return err
+	}
 	out, err := s.handlers(ctx).HandleWorkflowRerun(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerWorkflowRerun, ev, out, err)
 }
@@ -171,11 +173,6 @@ func (s *RepoObjectService) reportRepoEffect(ctx restate.ObjectContext, handler 
 	}
 	kind := out.Key.Kind
 	switch {
-	case out.Intended != nil:
-		recordIntendedEffect(ctx, *out.Intended)
-		for _, more := range out.MoreIntended {
-			recordIntendedEffect(ctx, more)
-		}
 	case out.Retry:
 		s.scheduleRepoEffectRetry(ctx, handler, ev, out)
 	case out.Deduped:
@@ -250,20 +247,19 @@ func (s *PRObjectService) WithGitHub(gh GitHubEffector) *PRObjectService {
 	return s
 }
 
-// HandleConflictCheck runs the per-PR mergeability conflict check. A
-// legacy-owned check (synapse fetched mergeability itself) records the
-// intended effect. A restate-owned check runs ConflictHandlers over this
+// HandleConflictCheck runs the per-PR mergeability conflict check through
+// ConflictHandlers over this
 // object's K/V: the journaled mergeability read, a delayed recheck on a
 // failed or conflicted read, and on a fresh conflict the branch-conflict
 // follow-up (conflict fact for a registered PR, the carried collaborator DM
 // otherwise). A failed read never fails the invocation: the delayed recheck
 // is its retry.
 func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleConflictCheck", ev.EffectsOwner); err != nil {
+		return err
+	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || usableHeadSHA(ev.HeadSHA) == "" {
 		return nil
-	}
-	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
-		return s.recordConflictCheckIntent(ctx, ev)
 	}
 	store := &restatePRStore{ctx: ctx, svc: s, ev: ev}
 	h := NewConflictHandlers(store, restateConflictChecker{gh: journaled(ctx, s.github)}, restateConflictRescheduler{ctx: ctx})
@@ -282,36 +278,16 @@ func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREv
 	return s.HandleBranchConflict(ctx, ev)
 }
 
-// recordConflictCheckIntent commits the conflict-check key for a legacy
-// event and records it as intended.
-func (s *PRObjectService) recordConflictCheckIntent(ctx restate.ObjectContext, ev PREvent) error {
-	st, err := s.loadOrCreatePRState(ctx, ev)
-	if err != nil {
-		return err
-	}
-	if st.ApplyEvent(ev) != DispositionApply {
-		return nil
-	}
-	head := usableHeadSHA(ev.HeadSHA)
-	key := st.EffectKeyFor(EffectGitHubConflictCheck, head, "", "")
-	if st.WasEffectDispatched(key) {
-		return nil
-	}
-	intended := IntendedEffect{Kind: EffectGitHubConflictCheck, Agent: st.OwnerAgent(), EffectKey: key.String(), MatchKey: key.MatchKey(), Digest: digestStrings(EffectGitHubConflictCheck, head)}
-	recordIntendedEffect(ctx, intended)
-	st.RecordIntendedEffect(intended)
-	st.MarkEffectDispatched(key)
-	restate.Set(ctx, s.stateKey, st)
-	return nil
-}
-
 // HandleBranchConflict applies one observed merge conflict, mirroring
 // synapse handleDirtyPRConflict. A registered PR (it has a target) runs the
 // conflict verdict: an unpublished head commits the conflict keys and row
-// status, then publishes (restate) or records (legacy) the conflict fact
-// rendered here. An unregistered collaborator PR marks the conflict and
-// fires (or records) the collaborator DM the event carries.
+// status, then publishes the conflict fact rendered here. An unregistered
+// collaborator PR marks the conflict and fires the collaborator DM the event
+// carries.
 func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleBranchConflict", ev.EffectsOwner); err != nil {
+		return err
+	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -343,16 +319,18 @@ func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PRE
 	if _, err := s.commitConflictPublished(ctx, st, ev); err != nil {
 		return err
 	}
-	s.runFacts(ctx, st, ev.EffectsOwner, []pubsub.PRLifecycleEvent{prFact(st, FactEventConflict, ev.Branch, ev.HeadSHA, journaledNow(ctx))})
-	s.afterCommit(ctx, st, ev.EffectsOwner)
+	s.runFacts(ctx, st, []pubsub.PRLifecycleEvent{prFact(st, FactEventConflict, ev.Branch, ev.HeadSHA, journaledNow(ctx))})
+	s.afterCommit(ctx, st)
 	return nil
 }
 
 // HandleHeadRefMissing closes a PR whose head ref vanished and GitHub shows
 // closed unmerged, mirroring synapse handleStaleOpenPR: the close transition
-// commits, then the closed_unmerged fact rendered here publishes (restate)
-// or records (legacy). Like synapse's stale publish, the fact is not quiet.
+// commits, then the closed_unmerged fact rendered here publishes. Like synapse's stale publish, the fact is not quiet.
 func (s *PRObjectService) HandleHeadRefMissing(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleHeadRefMissing", ev.EffectsOwner); err != nil {
+		return err
+	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -375,8 +353,8 @@ func (s *PRObjectService) HandleHeadRefMissing(ctx restate.ObjectContext, ev PRE
 	}
 	fact := prFact(st, FactEventClosedUnmerged, ev.Branch, ev.HeadSHA, journaledNow(ctx))
 	fact.Quiet = false
-	s.runFacts(ctx, st, ev.EffectsOwner, []pubsub.PRLifecycleEvent{fact})
-	s.afterCommit(ctx, st, ev.EffectsOwner)
+	s.runFacts(ctx, st, []pubsub.PRLifecycleEvent{fact})
+	s.afterCommit(ctx, st)
 	return nil
 }
 

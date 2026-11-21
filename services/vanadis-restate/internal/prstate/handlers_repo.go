@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -159,9 +158,6 @@ type RepoHandlers struct {
 	kube    KubeEffector
 }
 
-// Compile-time freeze: the handlers satisfy the full RepoObject surface.
-var _ RepoObject = (*RepoHandlers)(nil)
-
 // NewRepoHandlers builds RepoObject handlers; nil dependencies fall back to
 // in-memory/no-op defaults so zero-value wiring never nil-panics.
 func NewRepoHandlers(store RepoStateStore, project RepoProjector, prs PRSender, self RepoSelfScheduler) *RepoHandlers {
@@ -245,8 +241,7 @@ func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState, owne
 // HandleFanout delivers the latest main push to every open PR as one-way
 // HandleMainAdvanced sends, as a journaled effect keyed by the main SHA: a
 // main SHA already fanned out (by HandleMainPush or an earlier fan-out)
-// sends nothing, so a redelivered fan-out never re-fires. The sends are
-// state transitions, so they run for legacy and restate owners alike.
+// sends nothing, so a redelivered fan-out never re-fires.
 func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 	repo := NormalizeRepo(ev.Repo)
 	if repo == "" {
@@ -484,21 +479,17 @@ type BranchUpdate struct {
 	Outcome  UpdateBranchOutcome
 }
 
-// RepoEffectOutcome reports one repo-level GitHub effect: deduped, recorded
-// as intended (legacy), skipped, executed, or failed. Retry means the
+// RepoEffectOutcome reports one repo-level GitHub effect: deduped, skipped,
+// executed, or failed. Retry means the
 // failure is retryable and the effect key was NOT committed, so the binding
 // schedules a delayed retry.
 type RepoEffectOutcome struct {
 	Key      EffectKey
 	Deduped  bool
-	Intended *IntendedEffect
-	// MoreIntended are further intended effects one legacy trigger records
-	// (an untracked promotion's reconcile).
-	MoreIntended []IntendedEffect
-	Skipped      bool
-	Executed     bool
-	Retry        bool
-	Err          *GitHubError
+	Skipped  bool
+	Executed bool
+	Retry    bool
+	Err      *GitHubError
 	// Kube is the failure of a Flux or image effect.
 	Kube     *KubeError
 	Updates  []BranchUpdate
@@ -535,23 +526,10 @@ func RepoEffectKey(kind string, ev RepoEvent) EffectKey {
 	return EffectKey{Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: repoEffectTrigger(ev), Kind: kind, CheckName: ev.CheckName}
 }
 
-// AutoUpdatePolicyDigest fingerprints the policy an auto-update ran under.
-func AutoUpdatePolicyDigest(p *AutoUpdatePolicy) string {
-	if p == nil {
-		return digestStrings(EffectGitHubAutoUpdate)
-	}
-	parts := []string{EffectGitHubAutoUpdate, strconv.FormatBool(p.DefaultOwner)}
-	parts = append(parts, p.Authors...)
-	for _, c := range p.Collaborators {
-		parts = append(parts, c.Author, c.ChannelID, c.Mention)
-	}
-	return digestStrings(parts...)
-}
-
-// beginRepoEffect loads the repo state and resolves dedup and the legacy
-// record for one repo effect. done reports that the outcome is final (deduped
-// or recorded as intended); otherwise the caller executes the effect.
-func (h *RepoHandlers) beginRepoEffect(kind, digest string, ev RepoEvent) (*RepoState, RepoEffectOutcome, bool, error) {
+// beginRepoEffect loads the repo state and resolves dedup for one repo
+// effect. done reports that the outcome is final (deduped); otherwise the
+// caller executes the effect.
+func (h *RepoHandlers) beginRepoEffect(kind string, ev RepoEvent) (*RepoState, RepoEffectOutcome, bool, error) {
 	repo := NormalizeRepo(ev.Repo)
 	if repo == "" || repoEffectTrigger(ev) == "" {
 		return nil, RepoEffectOutcome{}, true, fmt.Errorf("%w: repo and trigger sha are required for %s", ErrInvalidRepoEvent, kind)
@@ -565,20 +543,11 @@ func (h *RepoHandlers) beginRepoEffect(kind, digest string, ev RepoEvent) (*Repo
 		out.Deduped = true
 		return st, out, true, nil
 	}
-	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
-		intended := IntendedEffect{Kind: kind, EffectKey: out.Key.String(), MatchKey: out.Key.MatchKey(), Digest: digest}
-		st.RecordIntendedEffect(intended)
-		st.MarkRepoEffect(out.Key)
-		h.store.SaveRepo(st)
-		out.Intended = &intended
-		return st, out, true, nil
-	}
 	return st, out, false, nil
 }
 
 // HandleAutoUpdate runs the open-PR auto-update cascade synapse's
-// checkOpenPRConflicts runs, once per trigger key. Legacy-owned triggers
-// only record the intended cascade. Restate-owned triggers list open PRs
+// checkOpenPRConflicts runs, once per trigger key. It lists open PRs
 // targeting main and, for each eligible PR (not draft, allowlisted author,
 // and indexed here unless the policy is the default owner) whose head checks
 // are neither pending nor failed, update the branch: a conflict forwards
@@ -588,7 +557,7 @@ func (h *RepoHandlers) beginRepoEffect(kind, digest string, ev RepoEvent) (*Repo
 // rate limit or retryable list failure stops without committing the key so
 // the binding retries; other per-PR failures are skipped.
 func (h *RepoHandlers) HandleAutoUpdate(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
-	st, out, done, err := h.beginRepoEffect(EffectGitHubAutoUpdate, AutoUpdatePolicyDigest(ev.AutoUpdate), ev)
+	st, out, done, err := h.beginRepoEffect(EffectGitHubAutoUpdate, ev)
 	if done || err != nil {
 		return out, err
 	}
@@ -701,15 +670,14 @@ func (h *RepoHandlers) staleCloseEvent(ctx context.Context, repo string, prNumbe
 }
 
 // HandleWorkflowRerun reruns the failed jobs of one workflow run once per
-// trigger key (repo, PR, head SHA, workflow name). Legacy-owned reruns only
-// record the intended effect. A retryable failure leaves the key
+// trigger key (repo, PR, head SHA, workflow name). A retryable failure leaves the key
 // uncommitted for the binding's delayed retry; a terminal 4xx commits it and
 // reports the error, since no retry can succeed.
 func (h *RepoHandlers) HandleWorkflowRerun(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
 	if ev.RunID <= 0 {
 		return RepoEffectOutcome{}, fmt.Errorf("%w: run id is required for workflow rerun", ErrInvalidRepoEvent)
 	}
-	st, out, done, err := h.beginRepoEffect(EffectGitHubRerun, digestStrings(EffectGitHubRerun, strconv.FormatInt(ev.RunID, 10)), ev)
+	st, out, done, err := h.beginRepoEffect(EffectGitHubRerun, ev)
 	if done || err != nil {
 		return out, err
 	}
@@ -762,13 +730,13 @@ func (h *RepoHandlers) finishKubeEffect(st *RepoState, out RepoEffectOutcome, ke
 // HandleGitPush forwards one main push to the Flux receiver once per
 // trigger key (repo, PR or 0, pushed SHA), mirroring synapse
 // dispatchGitPush. It is repo-level, so a direct commit to main with no PR
-// still dispatches. Legacy-owned pushes only record the intended effect.
+// still dispatches.
 func (h *RepoHandlers) HandleGitPush(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
 	ref := strings.TrimSpace(ev.Ref)
 	if !strings.HasPrefix(ref, "refs/heads/main") {
 		return RepoEffectOutcome{}, fmt.Errorf("%w: git push dispatch requires a main ref, got %q", ErrInvalidRepoEvent, ref)
 	}
-	st, out, done, err := h.beginRepoEffect(EffectFluxGitPush, digestStrings(EffectFluxGitPush, ref, strings.TrimSpace(ev.TargetID)), ev)
+	st, out, done, err := h.beginRepoEffect(EffectFluxGitPush, ev)
 	if done || err != nil {
 		return out, err
 	}
@@ -780,22 +748,6 @@ func (h *RepoHandlers) HandleGitPush(ctx context.Context, ev RepoEvent) (RepoEff
 		Repo: st.Repo, Ref: ref, Commit: repoEffectTrigger(ev), TargetID: strings.TrimSpace(ev.TargetID), PRNumber: ev.PRNumber,
 	})
 	return h.finishKubeEffect(st, out, kerr), nil
-}
-
-// ImagePromotionDigest fingerprints the images one promotion writes.
-func ImagePromotionDigest(images []string) string {
-	return digestStrings(append([]string{EffectImagePromote}, cleanStrings(images)...)...)
-}
-
-// KustomizationRequestsDigest fingerprints one reconcile request set.
-func KustomizationRequestsDigest(requests map[string]KustomizationRequest) string {
-	names := sortedRequestNames(requests)
-	parts := make([]string, 0, 1+3*len(names))
-	parts = append(parts, EffectFluxReconcile)
-	for _, name := range names {
-		parts = append(parts, name, requests[name].Namespace, requests[name].RequestedAt)
-	}
-	return digestStrings(parts...)
 }
 
 // sortedRequestNames returns the non-empty request names in order.
@@ -818,9 +770,7 @@ func sortedRequestNames(requests map[string]KustomizationRequest) []string {
 // reconcile renders all of them: a PR rollout forwards
 // HandleKustomizationRequested to PRObject (which records the requests
 // before patching them), and an untracked rollout (no PR) reconciles here
-// under its own key. Legacy-owned triggers only record the intended
-// promotion (and untracked reconcile); synapse journals the PR rollout
-// itself. A retryable failure leaves the failed key uncommitted for the
+// under its own key. A retryable failure leaves the failed key uncommitted for the
 // binding's delayed retry; a failed restate-owned PR promotion also reports
 // HandleDeployAttemptFailed so the PR's deploy-failure deadline arms.
 func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
@@ -844,10 +794,6 @@ func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (
 	reconcileDone := reconcileKey.Kind == "" || st.WasRepoEffect(reconcileKey)
 	if promoteDone && reconcileDone {
 		out.Deduped = true
-		return out, nil
-	}
-	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
-		h.recordPromotionIntent(st, &out, promoteDone, reconcileKey, reconcileDone, images, ev.KustomizationRequests)
 		return out, nil
 	}
 	if h.kube == nil {
@@ -880,7 +826,7 @@ func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (
 // rollout it starts is tracked on the owning PR. The carried facts take the
 // resolved PR number. An unresolved commit stays an untracked rollout.
 func resolvePromotionPR(st *RepoState, ev RepoEvent) RepoEvent {
-	if ev.PRNumber > 0 || ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate {
+	if ev.PRNumber > 0 {
 		return ev
 	}
 	entry, ok := st.ResolveSHA(ev.HeadSHA)
@@ -909,26 +855,6 @@ func withFactPR(facts []pubsub.PRLifecycleEvent, pr int) []pubsub.PRLifecycleEve
 		out[i] = f
 	}
 	return out
-}
-
-// recordPromotionIntent commits the legacy promotion (and untracked
-// reconcile) keys and records them as intended.
-func (h *RepoHandlers) recordPromotionIntent(st *RepoState, out *RepoEffectOutcome, promoteDone bool, reconcileKey EffectKey, reconcileDone bool, images []string, requests map[string]KustomizationRequest) {
-	var intents []IntendedEffect
-	if !promoteDone {
-		intents = append(intents, IntendedEffect{Kind: EffectImagePromote, EffectKey: out.Key.String(), MatchKey: out.Key.MatchKey(), Digest: ImagePromotionDigest(images)})
-		st.MarkRepoEffect(out.Key)
-	}
-	if !reconcileDone {
-		intents = append(intents, IntendedEffect{Kind: EffectFluxReconcile, EffectKey: reconcileKey.String(), MatchKey: reconcileKey.MatchKey(), Digest: KustomizationRequestsDigest(requests)})
-		st.MarkRepoEffect(reconcileKey)
-	}
-	for _, e := range intents {
-		st.RecordIntendedEffect(e)
-	}
-	h.store.SaveRepo(st)
-	out.Intended = &intents[0]
-	out.MoreIntended = intents[1:]
 }
 
 // promoteImages promotes every image (one failure never skips the rest,

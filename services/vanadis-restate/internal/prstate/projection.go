@@ -14,8 +14,7 @@ package prstate
 // mirrors its metadata-blob idioms (jsonb `-` / `||`, ON CONFLICT (repo,
 // pr_number)).
 //
-// Ordering contract: for effects_owner=restate the projection runs as a
-// one-way PRObject self-send AFTER the state commit (PRObject.ProjectRegistry).
+// Ordering contract: the projection runs as a one-way PRObject self-send AFTER the state commit (PRObject.ProjectRegistry).
 // The send re-derives the snapshot from committed state at delivery time, so
 // a queued older send can never land a stale row: sends for one PR are
 // totally ordered by the PRObject queue and every one projects current
@@ -26,10 +25,6 @@ package prstate
 // RebuildProjection enumerates only the RepoObject touched-PR index, never
 // the projection being rebuilt, so rebuild is non-circular.
 //
-// Shadow compare: for effects_owner=legacy synapse still writes the row, so
-// prstate never writes; a delayed shared-handler send compares the row
-// synapse wrote against the snapshot (CompareProjection).
-//
 // External idempotency tolerance: the registry upsert has no external
 // idempotency-key parameter, so at-least-once delivery is accepted here and
 // absorbed by the idempotent upsert (same snapshot, same row).
@@ -37,15 +32,12 @@ package prstate
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -121,8 +113,7 @@ func OwnedMetadataKeys() []string {
 // the projection can never feed back into a transition decision. It always
 // writes metadata.agent from the stored owner, including for legacy-era
 // rows whose owner Hydrate took from the agent column: that write fills the
-// same owner the column names (CompareProjection treats the two as equal)
-// and matches the typed owner column the registry moves to.
+// same owner the column names and matches the typed owner column the registry moves to.
 func BuildProjection(s *PRState) ProjectionSnapshot {
 	snap := ProjectionSnapshot{Agent: s.OwnerAgent(), Status: s.RegistryStatus()}
 	if s == nil {
@@ -254,29 +245,18 @@ func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 	return projectionUpsertSQL, args
 }
 
-// registryRowSQL loads one pr_registry row for the shadow compare.
-const registryRowSQL = `SELECT agent, branch, head_sha, COALESCE(merge_sha, ''), target_id, status, title, COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2;`
-
 // ProjectionStore is the pr_registry write boundary.
 type ProjectionStore interface {
 	UpsertProjection(ctx context.Context, snap ProjectionSnapshot) error
-}
-
-// ProjectionReader is the read-only pr_registry boundary the shadow compare
-// uses. It never feeds a transition decision.
-type ProjectionReader interface {
-	LoadRegistryRow(ctx context.Context, repo string, prNumber int) (RegistryRow, bool, error)
 }
 
 // ProjectionDB is the pgx surface the Postgres projection store needs;
 // *pgxpool.Pool satisfies it.
 type ProjectionDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// PgProjectionStore is the production ProjectionStore and ProjectionReader
-// over vanadis-restate's existing Postgres pool.
+// PgProjectionStore is the production ProjectionStore over vanadis-restate's existing Postgres pool.
 type PgProjectionStore struct {
 	db ProjectionDB
 }
@@ -296,26 +276,6 @@ func (p *PgProjectionStore) UpsertProjection(ctx context.Context, snap Projectio
 		return fmt.Errorf("upsert pr_registry projection %s#%d: %w", snap.Repo, snap.PRNumber, err)
 	}
 	return nil
-}
-
-// LoadRegistryRow reads one row; a missing row returns found=false.
-func (p *PgProjectionStore) LoadRegistryRow(ctx context.Context, repo string, prNumber int) (RegistryRow, bool, error) {
-	if p == nil || p.db == nil {
-		return RegistryRow{}, false, errors.New("projection database is nil")
-	}
-	row := RegistryRow{Repo: NormalizeRepo(repo), PRNumber: prNumber}
-	var raw []byte
-	err := p.db.QueryRow(ctx, registryRowSQL, row.Repo, prNumber).Scan(&row.Agent, &row.Branch, &row.HeadSHA, &row.MergeSHA, &row.TargetID, &row.Status, &row.Title, &raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return RegistryRow{}, false, nil
-	}
-	if err != nil {
-		return RegistryRow{}, false, fmt.Errorf("load pr_registry row %s#%d: %w", row.Repo, prNumber, err)
-	}
-	if err := json.Unmarshal(raw, &row.Metadata); err != nil {
-		return RegistryRow{}, true, fmt.Errorf("decode pr_registry metadata %s#%d: %w", row.Repo, prNumber, err)
-	}
-	return row, true, nil
 }
 
 // ProjectRegistry validates the snapshot and performs exactly one store
@@ -345,210 +305,24 @@ func (s ProjectionSnapshot) Tracked() bool {
 	return strings.TrimSpace(s.TargetID) != ""
 }
 
-// ProjectionComparison is the shadow-compare verdict for one legacy event:
-// Missing when synapse wrote no row for a tracked PR, Untracked when neither
-// writer keeps a row (no row and an untracked snapshot), Superseded when the
-// row has already moved past the snapshot (head/merge SHA or status differ),
-// otherwise the sorted list of fields whose values diverge.
-type ProjectionComparison struct {
-	Missing    bool     `json:"missing"`
-	Untracked  bool     `json:"untracked,omitempty"`
-	Superseded bool     `json:"superseded"`
-	Divergent  []string `json:"divergent,omitempty"`
-}
-
-// CompareProjection compares the row synapse wrote with the snapshot
-// PRObject derived for the same event. It compares only when the row's
-// head/merge SHA and status match the snapshot; otherwise the row is
-// superseded and nothing is compared. The agent column is never compared
-// as a column (synapse leaves it at the schema default). Ownership is
-// compared semantically: metadata.agent diverges only when the row's
-// effective owner (RowOwner: metadata.agent, else metadata.bot_id, else a
-// non-default agent column, the same resolution Hydrate uses) differs from
-// the snapshot owner, with an unknown owner on either side meaning
-// DefaultAgent. A legacy-era row whose owner lives only in the agent column
-// therefore agrees with the PRObject Hydrate built from it, while a row
-// whose explicit metadata.agent names another owner still diverges.
-// metadata.bot_id and every other owned key compare raw. Under authority
-// Project still writes metadata.agent (fill-only, the same owner the agent
-// column already names), so effective ownership never changes.
-func CompareProjection(snap ProjectionSnapshot, row RegistryRow, found bool) ProjectionComparison {
-	if !found {
-		if !snap.Tracked() {
-			return ProjectionComparison{Untracked: true}
-		}
-		return ProjectionComparison{Missing: true}
-	}
-	if strings.TrimSpace(row.HeadSHA) != strings.TrimSpace(snap.HeadSHA) ||
-		strings.TrimSpace(row.MergeSHA) != strings.TrimSpace(snap.MergeSHA) ||
-		strings.TrimSpace(row.Status) != strings.TrimSpace(snap.Status) {
-		return ProjectionComparison{Superseded: true}
-	}
-	var diverged []string
-	columns := [][3]string{
-		{"branch", row.Branch, snap.Branch},
-		{"target_id", row.TargetID, snap.TargetID},
-		{"title", row.Title, snap.Title},
-	}
-	for _, c := range columns {
-		if strings.TrimSpace(c[1]) != strings.TrimSpace(c[2]) {
-			diverged = append(diverged, c[0])
-		}
-	}
-	got := metadataFields(row.Metadata)
-	want := metadataFields(snap.Metadata)
-	for _, key := range OwnedMetadataKeys() {
-		if key == "agent" {
-			continue
-		}
-		if string(got[key]) != string(want[key]) {
-			diverged = append(diverged, "metadata."+key)
-		}
-	}
-	if effectiveOwner(RowOwner(row)) != effectiveOwner(snap.Metadata.Agent) {
-		diverged = append(diverged, "metadata.agent")
-	}
-	sort.Strings(diverged)
-	return ProjectionComparison{Divergent: diverged}
-}
-
-// effectiveOwner normalizes an owner the way PRState.OwnerAgent resolves
-// it: blank means DefaultAgent.
-func effectiveOwner(owner string) string {
-	if owner = strings.TrimSpace(owner); owner != "" {
-		return owner
-	}
-	return DefaultAgent
-}
-
-// ShadowConfirm carries a first-pass divergence into the confirming
-// re-read: the digest of the row the first pass read and the fields that
-// diverged then.
+// ShadowConfirm is the confirming-pass evidence the retired shadow compare
+// carried. It survives only as part of the ShadowCompareRequest payload so
+// queued CompareProjection sends still decode.
 type ShadowConfirm struct {
 	RowDigest string   `json:"row_digest"`
 	Fields    []string `json:"fields"`
 }
 
-// ShadowCompareRequest is the CompareProjection input: the snapshot taken
-// at commit plus, on the confirming pass, the first pass's evidence. A
-// first-pass request is wire-identical to a bare ProjectionSnapshot.
+// ShadowCompareRequest is the CompareProjection input, kept unchanged so
+// delayed compare sends queued before the shadow compare retired still
+// decode; the handler ignores it.
 type ShadowCompareRequest struct {
 	ProjectionSnapshot
 
 	Confirm *ShadowConfirm `json:"confirm,omitempty"`
 }
 
-// ShadowVerdict is one shadow-compare pass outcome. Recheck is set when a
-// first-pass divergence must be confirmed by a delayed re-read before it
-// counts; Comparison is then empty and records nothing.
-type ShadowVerdict struct {
-	Comparison ProjectionComparison `json:"comparison"`
-	Recheck    *ShadowConfirm       `json:"recheck,omitempty"`
-}
-
-// ResolveShadowCompare decides one shadow-compare pass. The two writers
-// update the row and PRObject state for each event at slightly different
-// times, so a single read can land between them. A divergence therefore
-// counts only when it persists:
-//   - first pass: a missing, untracked, superseded or clean verdict records
-//     at once; a divergence asks for a delayed re-read (Recheck).
-//   - confirming pass: if the row changed between the two reads, or
-//     PRObject's projected state moved past the snapshot, the snapshot is
-//     superseded (the later event's own compare covers the newer state).
-//     Otherwise the row and state both stood still across the delay and
-//     the re-read's divergences are real.
-//
-// current is BuildProjection of the object's state at the confirming read.
-func ResolveShadowCompare(req ShadowCompareRequest, row RegistryRow, found bool, current ProjectionSnapshot) ShadowVerdict {
-	snap := req.ProjectionSnapshot
-	cmp := CompareProjection(snap, row, found)
-	if req.Confirm == nil {
-		if len(cmp.Divergent) > 0 {
-			return ShadowVerdict{Recheck: &ShadowConfirm{RowDigest: RegistryRowDigest(row), Fields: cmp.Divergent}}
-		}
-		return ShadowVerdict{Comparison: cmp}
-	}
-	if !found || cmp.Superseded {
-		return ShadowVerdict{Comparison: cmp}
-	}
-	if RegistryRowDigest(row) != req.Confirm.RowDigest || ProjectionJournalKey(current) != ProjectionJournalKey(snap) {
-		return ShadowVerdict{Comparison: ProjectionComparison{Superseded: true}}
-	}
-	return ShadowVerdict{Comparison: cmp}
-}
-
-// RegistryRowDigest is a content digest of one stored row: every column
-// plus the normalized metadata blob, NUL-delimited.
-func RegistryRowDigest(row RegistryRow) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
-		NormalizeRepo(row.Repo), row.PRNumber, strings.TrimSpace(row.Agent), strings.TrimSpace(row.Branch),
-		strings.TrimSpace(row.HeadSHA), strings.TrimSpace(row.MergeSHA), strings.TrimSpace(row.TargetID),
-		strings.TrimSpace(row.Status), strings.TrimSpace(row.Title), metadataJSON(normalizeMetadata(row.Metadata)))
-	sum := sha256.Sum256([]byte(sb.String()))
-	return hex.EncodeToString(sum[:16])
-}
-
-// metadataFields splits a normalized metadata blob into per-key canonical
-// JSON values; empty values are absent (omitempty).
-func metadataFields(m ProjectionMetadata) map[string]json.RawMessage {
-	fields := map[string]json.RawMessage{}
-	if err := json.Unmarshal(metadataJSON(normalizeMetadata(m)), &fields); err != nil {
-		return map[string]json.RawMessage{}
-	}
-	return fields
-}
-
-// SnapshotLoader resolves one touched PR key to its projection snapshot.
-// Implementations load from Restate object state, never from the projection.
-type SnapshotLoader interface {
-	LoadPR(prKey string) (ProjectionSnapshot, bool)
-}
-
-// RebuildProjection replays the full projection by enumerating the
-// RepoObject touched-PR index and projecting each key via loader. Keys the
-// loader cannot resolve skip silently; a store failure aborts the rebuild
-// with the committed object state untouched.
-func RebuildProjection(ctx context.Context, store ProjectionStore, repo *RepoState, loader SnapshotLoader) error {
-	if store == nil {
-		return errors.New("projection store is nil")
-	}
-	if repo == nil || loader == nil {
-		return errors.New("rebuild requires repo state and snapshot loader")
-	}
-	seen := make(map[string]bool)
-	for _, key := range repo.PRKeys() {
-		if strings.TrimSpace(key) == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		snap, ok := loader.LoadPR(key)
-		if !ok {
-			continue
-		}
-		if err := ProjectRegistry(ctx, store, snap); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// MapSnapshotLoader is the hermetic SnapshotLoader backed by a map.
-type MapSnapshotLoader struct {
-	Snaps map[string]ProjectionSnapshot
-}
-
 // Compile-time freeze: the loader must satisfy the interface.
-var _ SnapshotLoader = MapSnapshotLoader{}
 
-// LoadPR resolves one PR key from the map.
-func (m MapSnapshotLoader) LoadPR(prKey string) (ProjectionSnapshot, bool) {
-	snap, ok := m.Snaps[prKey]
-	return snap, ok
-}
-
-// Compile-time freeze: the Postgres store satisfies both boundaries.
-var (
-	_ ProjectionStore  = (*PgProjectionStore)(nil)
-	_ ProjectionReader = (*PgProjectionStore)(nil)
-)
+// Compile-time freeze: the Postgres store satisfies the write boundary.
+var _ ProjectionStore = (*PgProjectionStore)(nil)

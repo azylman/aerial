@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -77,12 +78,12 @@ func (s *Store) CreateBuild(ctx context.Context, build model.VanadisBuild, chunk
 	}()
 	bQ := `INSERT INTO vanadis_builds (id, agent, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at, runner_agent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (id) DO NOTHING;`
 	now := time.Now().UTC()
-	bTitle := FirstNonEmpty(strings.TrimSpace(build.Title), objective)
+	bTitle := strutil.FirstNonEmpty(strings.TrimSpace(build.Title), objective)
 	agent := strings.TrimSpace(build.Agent)
 	if agent == "" {
 		agent = defaultAgent
 	}
-	tag, err := tx.Exec(ctx, bQ, buildID, agent, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), FirstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now, NormalizeRunnerAgent(build.RunnerAgent))
+	tag, err := tx.Exec(ctx, bQ, buildID, agent, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), strutil.FirstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now, NormalizeRunnerAgent(build.RunnerAgent))
 	if err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
@@ -167,7 +168,7 @@ func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.Va
 			return fmt.Errorf("chunk %s: action chunk must not specify target files or symbols", c.ID)
 		}
 	}
-	cStatus := FirstNonEmpty(strings.TrimSpace(c.Status), "pending")
+	cStatus := strutil.FirstNonEmpty(strings.TrimSpace(c.Status), "pending")
 	cEffort, err := buildplan.NormalizeChunkEffort(c.Effort)
 	if err != nil {
 		return fmt.Errorf("chunk %s: %w", c.ID, err)
@@ -191,9 +192,9 @@ func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.Va
 	if _, err := tx.Exec(ctx, cQ,
 		strings.TrimSpace(c.ID), buildID, c.ChunkIndex, cMode, cRepo,
 		strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions),
-		NonNilSlice(c.TargetFiles), NonNilSlice(c.TargetSymbols), cEffort,
-		NonNilSlice(c.AcceptanceCriteria), cStatus, prNum, c.StallNudges,
-		NonNilSlice(c.DependsOn), c.CIFailCount, ciChecksJSON, rolloutStateJSON,
+		buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), cEffort,
+		buildplan.NonNilSlice(c.AcceptanceCriteria), cStatus, prNum, c.StallNudges,
+		buildplan.NonNilSlice(c.DependsOn), c.CIFailCount, ciChecksJSON, rolloutStateJSON,
 		strings.TrimSpace(c.Banner), strings.TrimSpace(c.MergeAwakeableID),
 		strings.TrimSpace(c.DeployAwakeableID), startedAt, completedAt,
 	); err != nil {
@@ -225,7 +226,7 @@ func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.Va
 		}
 		return model.VanadisBuild{
 			ID: strings.TrimSpace(v.ID), Agent: agent, RunnerAgent: NormalizeRunnerAgent(v.RunnerAgent), ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
-			Title:     FirstNonEmpty(strings.TrimSpace(v.Title), strings.TrimSpace(v.Objective)),
+			Title:     strutil.FirstNonEmpty(strings.TrimSpace(v.Title), strings.TrimSpace(v.Objective)),
 			Objective: strings.TrimSpace(v.Objective), SharedContext: strings.TrimSpace(v.SharedContext), Quiet: v.Quiet,
 		}
 	}
@@ -248,8 +249,8 @@ func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.Va
 		return model.VanadisChunk{
 			ID: strings.TrimSpace(c.ID), ChunkIndex: c.ChunkIndex, Mode: mode, Repo: repo,
 			Title: strings.TrimSpace(c.Title), Instructions: strings.TrimSpace(c.Instructions),
-			TargetFiles: NonNilSlice(c.TargetFiles), TargetSymbols: NonNilSlice(c.TargetSymbols),
-			Effort: effort, AcceptanceCriteria: NonNilSlice(c.AcceptanceCriteria), DependsOn: NonNilSlice(c.DependsOn),
+			TargetFiles: buildplan.NonNilSlice(c.TargetFiles), TargetSymbols: buildplan.NonNilSlice(c.TargetSymbols),
+			Effort: effort, AcceptanceCriteria: buildplan.NonNilSlice(c.AcceptanceCriteria), DependsOn: buildplan.NonNilSlice(c.DependsOn),
 		}, nil
 	}
 	byID := make(map[string]model.VanadisChunk, len(ac))

@@ -7,18 +7,12 @@ package prstate
 // Synapse renders each effect from stateless inputs and attaches it to the
 // PREvent it already routes (PREvent.EriEffects). PRObject applies the state
 // transition first, then for every rendered effect whose generation-scoped
-// EffectKey has not fired:
-//
-//   - effects_owner=restate: one journaled restate.Run attempts delivery to
-//     the stored owner through the Restate session path (EriEffector). It
-//     fails fast with 1 attempt to avoid holding the exclusive PR object lock
-//     across backoff sleeps. Success commits the effect key; failure
-//     schedules a delayed RetryEriEffect self-send instead of failing the
-//     invocation, so an eri outage never blocks later transitions for the PR.
-//   - effects_owner=legacy: synapse already performed it. PRObject commits
-//     the effect key, appends an IntendedEffect to the bounded per-PR ring,
-//     bumps prstate_intended_effects_total{kind}, and logs [prstate-shadow]
-//     with the generation-free match key synapse logs as [synapse-effect].
+// EffectKey has not fired, one journaled restate.Run attempts delivery to
+// the stored owner through the Restate session path (EriEffector). It fails
+// fast with 1 attempt to avoid holding the exclusive PR object lock across
+// backoff sleeps. Success commits the effect key; failure schedules a
+// delayed RetryEriEffect self-send instead of failing the invocation, so an
+// eri outage never blocks later transitions for the PR.
 //
 // Idempotency: prompts and background dispatches carry a deterministic
 // Idempotency-Key / dispatch ID derived from the EffectKey, so Restate
@@ -34,7 +28,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -43,9 +36,6 @@ import (
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 )
-
-// MaxIntendedEffects bounds the per-PR intended-effect ring.
-const MaxIntendedEffects = 32
 
 // PRHandlerRetryEriEffect is the delayed self-send that retries one
 // restate-owned eri effect whose delivery exhausted its journaled retries.
@@ -77,19 +67,12 @@ const (
 	effectResultDropped      = "dropped"
 )
 
-var (
-	intendedEffectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "prstate_intended_effects_total",
-		Help: "Effects PRObject recorded but skipped because synapse owned the event (effects_owner=legacy), by kind.",
-	}, []string{metricLabelKind})
-	effectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "prstate_effects_total",
-		Help: "Restate-owned effects PRObject executed, by kind and result.",
-	}, []string{metricLabelKind, metricLabelResult})
-)
+var effectsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "prstate_effects_total",
+	Help: "Effects PRObject and RepoObject executed, by kind and result.",
+}, []string{metricLabelKind, metricLabelResult})
 
 func init() {
-	registerCollector(intendedEffectsTotal)
 	registerCollector(effectsTotal)
 }
 
@@ -100,16 +83,7 @@ type EriEffector interface {
 	DeliverEri(ctx context.Context, agent string, key EffectKey, eff EriEffect) error
 }
 
-// IntendedEffect is one effect PRObject recorded for a legacy-owned event.
-type IntendedEffect struct {
-	Kind      string
-	Agent     string
-	EffectKey string
-	MatchKey  string
-	Digest    string
-}
-
-// PlannedEriEffect is one normalized effect PRObject will fire or record.
+// PlannedEriEffect is one normalized effect PRObject will fire.
 type PlannedEriEffect struct {
 	Effect EriEffect
 	Key    EffectKey
@@ -179,45 +153,11 @@ func PlanEriEffects(st *PRState, ev PREvent) []PlannedEriEffect {
 	return out
 }
 
-// EriEffectDigest fingerprints the rendered payload so gates can tell a
-// matching key with a different body apart.
-func EriEffectDigest(eff EriEffect) string {
-	return digestStrings(eff.Kind, eff.ChannelID, eff.Content, eff.Effort, strconv.FormatBool(eff.SkipIfActive))
-}
-
-// digestStrings is the short payload fingerprint shared by every effect.
-func digestStrings(parts ...string) string {
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(sum[:8])
-}
-
 // EffectIdempotencyKey is the deterministic Restate Idempotency-Key and
 // dispatch ID for one effect: a bounded hash of the generation-scoped key.
 func EffectIdempotencyKey(key EffectKey) string {
 	sum := sha256.Sum256([]byte(key.String()))
 	return "prstate-" + hex.EncodeToString(sum[:16])
-}
-
-// RecordIntendedEffect appends one intended effect, keeping the newest
-// MaxIntendedEffects entries.
-func (s *PRState) RecordIntendedEffect(e IntendedEffect) {
-	if s == nil {
-		return
-	}
-	s.IntendedEffects = append(s.IntendedEffects, e)
-	if over := len(s.IntendedEffects) - MaxIntendedEffects; over > 0 {
-		s.IntendedEffects = append([]IntendedEffect(nil), s.IntendedEffects[over:]...)
-	}
-}
-
-func intendedEffectFor(p PlannedEriEffect) IntendedEffect {
-	return IntendedEffect{
-		Kind:      p.Effect.Kind,
-		Agent:     p.Agent,
-		EffectKey: p.Key.String(),
-		MatchKey:  p.Key.MatchKey(),
-		Digest:    EriEffectDigest(p.Effect),
-	}
 }
 
 // WithEriEffector injects the eri effect boundary and returns s. Without it
@@ -227,33 +167,21 @@ func (s *PRObjectService) WithEriEffector(e EriEffector) *PRObjectService {
 	return s
 }
 
-// runEriEffects fires or records every planned eri effect for one applied
-// event and persists the committed effect keys.
+// runEriEffects fires every planned eri effect for one applied event and
+// persists the committed effect keys.
 func (s *PRObjectService) runEriEffects(ctx restate.ObjectContext, st *PRState, ev PREvent) {
 	planned := PlanEriEffects(st, ev)
 	if len(planned) == 0 {
 		return
 	}
-	owner := ParseEffectsOwner(string(ev.EffectsOwner))
 	for _, p := range planned {
-		if owner == EffectsOwnerRestate {
-			if !s.deliverEriEffect(ctx, p) {
-				s.scheduleEriRetry(ctx, EriEffectRetry{Effect: p.Effect, HeadSHA: p.Key.HeadSHA, JobName: p.Key.JobName, CheckName: p.Key.CheckName, Generation: p.Key.GateGeneration})
-				continue
-			}
-		} else {
-			recordIntended(ctx, p)
-			st.RecordIntendedEffect(intendedEffectFor(p))
+		if !s.deliverEriEffect(ctx, p) {
+			s.scheduleEriRetry(ctx, EriEffectRetry{Effect: p.Effect, HeadSHA: p.Key.HeadSHA, JobName: p.Key.JobName, CheckName: p.Key.CheckName, Generation: p.Key.GateGeneration})
+			continue
 		}
 		st.MarkEffectDispatched(p.Key)
 	}
 	restate.Set(ctx, s.stateKey, st)
-}
-
-// recordIntended journals the intended-effect metric and log once, so a
-// handler replay never double counts what the shadow gate compares.
-func recordIntended(ctx restate.ObjectContext, p PlannedEriEffect) {
-	recordIntendedEffect(ctx, intendedEffectFor(p))
 }
 
 // eriPlanned binds one eri effect to the configured effector.

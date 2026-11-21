@@ -16,6 +16,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"gopkg.in/yaml.v3"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 )
 
@@ -306,19 +307,6 @@ type rawConfigFile struct {
 	Channels      map[string]channelConfigData `yaml:"channels"`
 }
 
-func isNumericSnowflake(s string) bool {
-	clean := strings.TrimSpace(s)
-	if clean == "" {
-		return false
-	}
-	for i := range len(clean) {
-		if clean[i] < '0' || clean[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func matchChannelPolicy(key string, channels map[string]channelConfigData) bool {
 	clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(key), "#"))
 	if clean == "" {
@@ -447,7 +435,7 @@ func (d *DiscordWidgetDeliverer) resolveChannelID(targetNameOrID, fallback strin
 	if target == "" {
 		return fallback
 	}
-	if isNumericSnowflake(target) {
+	if discordutil.IsSnowflake(strings.TrimSpace(target)) {
 		return target
 	}
 	currentTime := d.now()
@@ -458,7 +446,7 @@ func (d *DiscordWidgetDeliverer) resolveChannelID(targetNameOrID, fallback strin
 		return cachedID
 	}
 	if d.channelResolver != nil {
-		if id, err := d.channelResolver(target); err == nil && isNumericSnowflake(id) {
+		if id, err := d.channelResolver(target); err == nil && discordutil.IsSnowflake(strings.TrimSpace(id)) {
 			d.setCachedChannelID(target, id, currentTime)
 			return id
 		}

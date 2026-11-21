@@ -119,12 +119,18 @@ func (s *RepoObjectService) WithKube(k KubeEffector) *RepoObjectService {
 
 // HandleGitPush forwards one main push to the Flux receiver.
 func (s *RepoObjectService) HandleGitPush(ctx restate.ObjectContext, ev RepoEvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleGitPush", ev.EffectsOwner); err != nil {
+		return err
+	}
 	out, err := s.handlers(ctx).HandleGitPush(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerGitPush, ev, out, err)
 }
 
 // HandleImagePromotion promotes one commit's images and starts its rollout.
 func (s *RepoObjectService) HandleImagePromotion(ctx restate.ObjectContext, ev RepoEvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleImagePromotion", ev.EffectsOwner); err != nil {
+		return err
+	}
 	out, err := s.handlers(ctx).HandleImagePromotion(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerImagePromotion, ev, out, err)
 }
@@ -142,8 +148,7 @@ func (s *PRObjectService) WithKube(k KubeEffector) *PRObjectService {
 // carried requests replace the recorded set (RecordKustomizationRequests),
 // in the registry's order. The generation bump sends RepoObject a deploying
 // index update so kustomization status fans out to this PR. Only after that
-// commit are the recorded requests patched (restate) or recorded as
-// intended (legacy), so a watch event can never observe an unrecorded
+// commit are the recorded requests patched, so a watch event can never observe an unrecorded
 // request.
 //
 // A carried deploy_started fact publishes only when the jobs moved the PR to
@@ -154,6 +159,9 @@ func (s *PRObjectService) WithKube(k KubeEffector) *PRObjectService {
 // resolved to a PR nobody registered) drops the request entirely, like the
 // legacy registry, which has no row to transition or record into.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleKustomizationRequested", ev.EffectsOwner); err != nil {
+		return err
+	}
 	started, rest := SplitDeployStartedFacts(ev.Facts)
 	ev.Facts = nil
 	var recorded, committed *PRState
@@ -169,13 +177,13 @@ func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext
 	}); err != nil || committed == nil {
 		return err
 	}
-	s.runFacts(ctx, committed, ev.EffectsOwner, gatedStartedFacts(started, rest, transitioned))
+	s.runFacts(ctx, committed, gatedStartedFacts(started, rest, transitioned))
 	if recorded == nil {
 		return nil
 	}
 	st := recorded
 	key := RolloutReconcileKey(st, ev.HeadSHA)
-	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey(), owner: ev.EffectsOwner})
+	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey()})
 	return nil
 }
 
@@ -205,11 +213,13 @@ type RetryReadinessResponse struct {
 // decision synapse readiness_retry.go makes today (409 when no matching
 // merged rollout gate exists, else 202), applies RetryReadinessGate, commits,
 // re-indexes the PR as deploying so kustomization status fans out to it
-// again, and re-requests the original reconciles (restate) or records them
-// as intended (legacy). The reconcile never gates the answer: a failure
+// again, and re-requests the original reconciles. The reconcile never gates the answer: a failure
 // schedules its delayed retry. A missing merge SHA fails terminally (400),
 // and a fenced caller not authorized for the stored owner with 409.
 func (s *PRObjectService) RetryReadiness(ctx restate.ObjectContext, req RetryReadinessRequest) (RetryReadinessResponse, error) {
+	if err := rejectLegacyOwner(ctx, "RetryReadiness", req.EffectsOwner); err != nil {
+		return RetryReadinessResponse{}, err
+	}
 	merge := strings.TrimSpace(req.MergeSHA)
 	if merge == "" {
 		return RetryReadinessResponse{}, restate.ToTerminalError(errReadinessInvalid, restate.WithErrorCode(http.StatusBadRequest))
@@ -225,7 +235,7 @@ func (s *PRObjectService) RetryReadiness(ctx restate.ObjectContext, req RetryRea
 		return RetryReadinessResponse{}, restate.ToTerminalError(errReadinessOwnerMismatch, restate.WithErrorCode(http.StatusConflict))
 	}
 	st.ApplyAgentHint(req.Agent)
-	return s.applyReadinessRetry(ctx, st, merge, req.EffectsOwner), nil
+	return s.applyReadinessRetry(ctx, st, merge), nil
 }
 
 // Readiness retry error causes, wrapped as terminal errors.
@@ -234,11 +244,13 @@ var (
 	errReadinessOwnerMismatch = errors.New("prstate: readiness retry caller is not authorized for the existing owner")
 )
 
-// HandleReadinessRetry is the one-way readiness retry synapse journals after
-// its legacy retry. It applies the same gate transition and records (legacy)
-// or re-requests (restate) the reconcile; retry never mints a generation and
+// HandleReadinessRetry is the one-way readiness retry. It applies the same
+// gate transition as RetryReadiness and re-requests the reconcile; retry never mints a generation and
 // never clears effect keys.
 func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PREvent) error {
+	if err := rejectLegacyOwner(ctx, "HandleReadinessRetry", ev.EffectsOwner); err != nil {
+		return err
+	}
 	merge := strings.TrimSpace(ev.MergeSHA)
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || merge == "" {
 		return nil
@@ -251,14 +263,14 @@ func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PRE
 		return nil
 	}
 	st.RetryPRReadiness()
-	if resp := s.applyReadinessRetry(ctx, st, merge, ev.EffectsOwner); resp.Status != http.StatusAccepted {
+	if resp := s.applyReadinessRetry(ctx, st, merge); resp.Status != http.StatusAccepted {
 		restate.Set(ctx, s.stateKey, st)
 	}
 	return nil
 }
 
 // applyReadinessRetry runs the shared readiness transition and effects.
-func (s *PRObjectService) applyReadinessRetry(ctx restate.ObjectContext, st *PRState, merge string, owner EffectsOwner) RetryReadinessResponse {
+func (s *PRObjectService) applyReadinessRetry(ctx restate.ObjectContext, st *PRState, merge string) RetryReadinessResponse {
 	requests, ok := st.RetryReadinessGate(merge)
 	if !ok {
 		return RetryReadinessResponse{Status: http.StatusConflict}
@@ -266,19 +278,18 @@ func (s *PRObjectService) applyReadinessRetry(ctx restate.ObjectContext, st *PRS
 	restate.Set(ctx, s.stateKey, st)
 	sendPRIndex(ctx, st, PREvent{MergeSHA: merge, Branch: st.Branch}, IndexDeploying)
 	key, match := ReadinessReconcileKey(st, merge)
-	s.runReconcile(ctx, st, reconcileRun{key: key, match: match, owner: owner})
-	s.afterCommit(ctx, st, owner)
+	s.runReconcile(ctx, st, reconcileRun{key: key, match: match})
+	s.afterCommit(ctx, st)
 	return RetryReadinessResponse{Status: http.StatusAccepted, Requests: requests, EffectKey: key.String()}
 }
 
 // reconcileRun is one PR reconcile effect: its key, the match key synapse
-// logs, the effects owner, and the delayed-retry ordinal.
+// logs, and the delayed-retry ordinal.
 // requests narrows the patch to a subset of the recorded requests (a lost
 // reconcile re-patch); nil patches every recorded request.
 type reconcileRun struct {
 	key      EffectKey
 	match    string
-	owner    EffectsOwner
 	attempt  int
 	requests map[string]KustomizationRequest
 }
@@ -309,24 +320,15 @@ func (s *PRObjectService) RetryFluxReconcile(ctx restate.ObjectContext, req Flux
 		return err
 	}
 	key := st.EffectKeyFor(EffectFluxReconcile, req.HeadSHA, req.JobName, "")
-	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey(), owner: EffectsOwnerRestate, attempt: req.Attempt})
+	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey(), attempt: req.Attempt})
 	return nil
 }
 
-// runReconcile patches the PR's recorded requests once per key. Legacy
-// owners commit the key and record the intended reconcile. A retryable
+// runReconcile patches the PR's recorded requests once per key. A retryable
 // failure leaves the key uncommitted and schedules a delayed retry (dropped
 // after maxRepoEffectRetries); success or a terminal failure commits it.
 func (s *PRObjectService) runReconcile(ctx restate.ObjectContext, st *PRState, run reconcileRun) {
 	if st.WasEffectDispatched(run.key) || len(st.KustomizationRequests) == 0 {
-		return
-	}
-	if ParseEffectsOwner(string(run.owner)) != EffectsOwnerRestate {
-		intended := IntendedEffect{Kind: EffectFluxReconcile, Agent: st.OwnerAgent(), EffectKey: run.key.String(), MatchKey: run.match, Digest: KustomizationRequestsDigest(run.patchSet(st))}
-		recordIntendedEffect(ctx, intended)
-		st.RecordIntendedEffect(intended)
-		st.MarkEffectDispatched(run.key)
-		restate.Set(ctx, s.stateKey, st)
 		return
 	}
 	kerr := errKubeUnconfigured

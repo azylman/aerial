@@ -6,23 +6,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNormalizeAgentName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, agent, want string
-	}{
-		{"empty stays empty", "", ""},
-		{"trims whitespace", "  agent-beta  ", "agent-beta"},
-		{"lowercases", "Agent-Beta", "agent-beta"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, NormalizeAgentName(tc.agent))
-		})
-	}
-}
-
 func TestServiceNameDerivation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -35,6 +18,8 @@ func TestServiceNameDerivation(t *testing.T) {
 		{"agent-alpha scoped", "agent-alpha", "Build-agent-alpha", "BuildRouter-agent-alpha"},
 		{"whitespace trimmed", "  agent-beta  ", "Build-agent-beta", "BuildRouter-agent-beta"},
 		{"mixed case scoped normalized", "Agent-Beta", "Build-agent-beta", "BuildRouter-agent-beta"},
+		{"unsafe chars route to default", "Foo Bar", "Build", "BuildRouter"},
+		{"underscore allowed", "agent_beta", "Build-agent_beta", "BuildRouter-agent_beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

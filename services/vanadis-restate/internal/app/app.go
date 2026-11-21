@@ -20,6 +20,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -98,15 +99,15 @@ func LoadConfig(getenv func(string) string) Config {
 		vanadisURL = "http://vanadis.aerial:4025"
 	}
 
-	pgURL := strings.TrimSpace(store.FirstNonEmpty(getenv("DATABASE_URL"), getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(getenv, "aerial")))
-	eriURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(getenv("ERI_URL"), "http://eri.aerial")), "/")
-	restateIngressURL := strings.TrimRight(strings.TrimSpace(store.FirstNonEmpty(getenv("RESTATE_INGRESS_URL"), "http://restate.aerial:8080")), "/")
-	natsURL := strings.TrimSpace(store.FirstNonEmpty(getenv("NATS_URL"), "nats://nats.aerial:4222"))
-	ghToken := strings.TrimSpace(store.FirstNonEmpty(getenv("GITHUB_TOKEN"), getenv("GITHUB_PAT")))
+	pgURL := strings.TrimSpace(strutil.FirstNonEmpty(getenv("DATABASE_URL"), getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(getenv, "aerial")))
+	eriURL := strings.TrimRight(strings.TrimSpace(strutil.FirstNonEmpty(getenv("ERI_URL"), "http://eri.aerial")), "/")
+	restateIngressURL := strings.TrimRight(strings.TrimSpace(strutil.FirstNonEmpty(getenv("RESTATE_INGRESS_URL"), "http://restate.aerial:8080")), "/")
+	natsURL := strings.TrimSpace(strutil.FirstNonEmpty(getenv("NATS_URL"), "nats://nats.aerial:4222"))
+	ghToken := strings.TrimSpace(strutil.FirstNonEmpty(getenv("GITHUB_TOKEN"), getenv("GITHUB_PAT")))
 	discordToken := strings.TrimSpace(getenv("DISCORD_TOKEN"))
-	shareRoot := strings.TrimSpace(store.FirstNonEmpty(getenv("SHARE_ROOT"), executor.DefaultShareRoot))
-	agentName := strings.TrimSpace(store.FirstNonEmpty(getenv("AGENT_NAME"), "aerial"))
-	configPath := strings.TrimSpace(store.FirstNonEmpty(getenv("CONFIG_PATH"), DefaultConfigPath))
+	shareRoot := strings.TrimSpace(strutil.FirstNonEmpty(getenv("SHARE_ROOT"), executor.DefaultShareRoot))
+	agentName := strings.TrimSpace(strutil.FirstNonEmpty(getenv("AGENT_NAME"), "aerial"))
+	configPath := strings.TrimSpace(strutil.FirstNonEmpty(getenv("CONFIG_PATH"), DefaultConfigPath))
 
 	return Config{
 		RestatePort:             restatePort,
@@ -166,7 +167,7 @@ func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEf
 	pr := prstate.NewPRObjectService()
 	repo := prstate.NewRepoObjectService()
 	if projection != nil {
-		pr = pr.WithProjection(projection, projection)
+		pr = pr.WithProjection(projection)
 	}
 	if eri != nil {
 		pr = pr.WithEriEffector(eri)

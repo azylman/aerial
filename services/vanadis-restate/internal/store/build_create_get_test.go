@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -84,7 +85,7 @@ func (s dbScript) open() (*Store, *[]string) {
 	if s.bare != nil {
 		return s.bare.store, candidates
 	}
-	tag := FirstNonEmpty(s.execTag, "UPDATE 1")
+	tag := strutil.FirstNonEmpty(s.execTag, "UPDATE 1")
 	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
 		return s.resolveQueryRow(query, args, candidates)
 	}
