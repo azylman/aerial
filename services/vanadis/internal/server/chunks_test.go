@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 type memoryVanadisStore struct {
@@ -28,7 +31,7 @@ func (m *memoryVanadisStore) CreateBuild(_ context.Context, build VanadisBuild, 
 	if m.createErr != nil {
 		return m.createErr
 	}
-	normChunks, err := normalizeAndValidateBuildDAG(chunks)
+	normChunks, err := buildplan.NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		return err
 	}
@@ -101,7 +104,7 @@ func mkChunk(id, buildID string, idx int, title, instr, effort, status string) V
 	if effort == "" {
 		effort = "medium"
 	}
-	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: normalizeRepo("aerial"), Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
+	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: "aerial", Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
 }
 
 func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
@@ -317,13 +320,13 @@ func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byt
 			_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
 			return
 		}
-		chunkID := firstNonEmpty(req.ChunkID, "chunk-standalone")
+		chunkID := strutil.FirstNonEmpty(req.ChunkID, "chunk-standalone")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(AttachChunkPRResponse{
 			Status:   "attached",
 			BuildID:  "build-1",
 			ChunkID:  chunkID,
-			ThreadID: "thread-" + firstNonEmpty(req.Agent, "none"),
+			ThreadID: "thread-" + strutil.FirstNonEmpty(req.Agent, "none"),
 		})
 		return
 	}
@@ -359,7 +362,7 @@ func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byt
 	if strings.Contains(path, "Create") {
 		var createReq CreateBuildRequest
 		_ = json.Unmarshal(bodyBytes, &createReq)
-		buildID := firstNonEmpty(createReq.ID, "b1")
+		buildID := strutil.FirstNonEmpty(createReq.ID, "b1")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(VanadisBuild{
 			ID:              buildID,
@@ -541,6 +544,7 @@ func TestResolveAttachCallerAgent(t *testing.T) {
 		{name: "empty defaults to the default agent", want: "aerial"},
 		{name: "named agent is normalized", requested: " Agent-Alpha ", want: "agent-alpha"},
 		{name: "invalid slug rejected", requested: "BAD_SLUG!", wantErr: true},
+		{name: "spaced name rejected not defaulted", requested: "Foo Bar", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

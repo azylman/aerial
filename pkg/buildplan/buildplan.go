@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -148,4 +149,34 @@ func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 		}
 	}
 	return nil
+}
+
+// NonNilSlice normalizes a nil slice to an empty slice so it encodes as [].
+func NonNilSlice[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
+// ResolveChunkRef resolves a chunk ID, or failing that a chunk_index, to a
+// slice position. It returns -1 when nothing matches.
+func ResolveChunkRef(chunks []VanadisChunk, chunkRef string) int {
+	clean := strings.TrimSpace(chunkRef)
+	if clean == "" {
+		return -1
+	}
+	for i, c := range chunks {
+		if c.ID == clean {
+			return i
+		}
+	}
+	if idx, err := strconv.Atoi(clean); err == nil {
+		for i, c := range chunks {
+			if c.ChunkIndex == idx {
+				return i
+			}
+		}
+	}
+	return -1
 }

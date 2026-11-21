@@ -23,6 +23,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
+	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
 func scrapeRootMetrics(t *testing.T) string {
@@ -486,9 +487,9 @@ func TestParseCreateBuildChunks_InitialStatus(t *testing.T) {
 		{Title: "First Chunk", Instructions: "Do 1", Repo: "aerial", DependsOn: []string{}},
 		{Title: "Second Chunk", Instructions: "Do 2", Repo: "aerial", DependsOn: []string{"b-initial-chunk-1"}},
 	}
-	chunks, err := parseCreateBuildChunks("b-initial", now, raw)
+	chunks, err := model.ParseCreateBuildChunks("b-initial", now, raw)
 	if err != nil {
-		t.Fatalf("parseCreateBuildChunks failed: %v", err)
+		t.Fatalf("ParseCreateBuildChunks failed: %v", err)
 	}
 	if len(chunks) != 2 {
 		t.Fatalf("expected 2 chunks, got %d", len(chunks))
@@ -578,39 +579,6 @@ func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
 	}
 	if code := doReq(http.MethodPost, "/builds/b1/cancel", ""); code != http.StatusInternalServerError {
 		t.Errorf("expected 500 on CancelBuild err, got %d", code)
-	}
-}
-
-func TestValidVanadisChunkID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		id        string
-		wantValid bool
-	}{
-		{
-			name:      "valid",
-			id:        "valid-chunk_1",
-			wantValid: true,
-		},
-		{
-			name:      "empty",
-			id:        "",
-			wantValid: false,
-		},
-		{
-			name:      "too_long",
-			id:        strings.Repeat("a", 121),
-			wantValid: false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isValidVanadisChunkID(tc.id); got != tc.wantValid {
-				t.Fatalf("isValidVanadisChunkID(%q) = %v, want %v", tc.id, got, tc.wantValid)
-			}
-		})
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
@@ -274,7 +275,7 @@ func ToMCPChunkBriefs(chunks []model.VanadisChunk) []MCPChunkBrief {
 			Status:     c.Status,
 			Repo:       c.Repo,
 			PRNumber:   c.PRNumber,
-			DependsOn:  model.NonNilSlice(c.DependsOn),
+			DependsOn:  buildplan.NonNilSlice(c.DependsOn),
 		}
 	}
 	return briefs
@@ -491,7 +492,7 @@ func (h *Handler) handleMCPGetChunk(ctx context.Context, args MCPGetChunkArgs) (
 	if err != nil {
 		return MCPGetChunkOutput{}, err
 	}
-	idx := model.ResolveChunkRef(chunks, chunkRef)
+	idx := buildplan.ResolveChunkRef(chunks, chunkRef)
 	if idx < 0 {
 		return MCPGetChunkOutput{}, fmt.Errorf("%w: chunk ref %s not found in build %s", model.ErrChunkNotFound, chunkRef, buildID)
 	}
@@ -675,7 +676,7 @@ func (h *Handler) handleMCPRemoveChunk(ctx context.Context, args MCPRemoveChunkA
 
 	removedID := chunkRef
 	if _, chs, err := h.Store.GetBuild(ctx, buildID); err == nil {
-		if idx := model.ResolveChunkRef(chs, chunkRef); idx >= 0 {
+		if idx := buildplan.ResolveChunkRef(chs, chunkRef); idx >= 0 {
 			removedID = chs[idx].ID
 		}
 	}

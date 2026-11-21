@@ -1,6 +1,7 @@
 package model
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,58 +12,7 @@ func mkBuild(id, threadID, title, objective, status string) VanadisBuild {
 }
 
 func mkChunk(id, buildID string, idx int, title, instr, effort, status string) VanadisChunk {
-	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: NormalizeRepo("aerial"), Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
-}
-
-func TestFirstNonEmpty(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		vals []string
-		want string
-	}{
-		{name: "empty", vals: nil, want: ""},
-		{name: "all blank", vals: []string{"", "   "}, want: ""},
-		{name: "first wins", vals: []string{"a", "b"}, want: "a"},
-		{name: "skips blanks", vals: []string{"", "   ", "a", "b"}, want: "a"},
-		{name: "trims whitespace", vals: []string{"  a  "}, want: "a"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := FirstNonEmpty(tc.vals...); got != tc.want {
-				t.Errorf("FirstNonEmpty(%q) = %q, want %q", tc.vals, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestNonNilSlice(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		input    []string
-		wantLen  int
-		wantVals []string
-	}{
-		{name: "nil becomes empty", input: nil, wantLen: 0, wantVals: []string{}},
-		{name: "empty stays empty", input: []string{}, wantLen: 0, wantVals: []string{}},
-		{name: "values preserved", input: []string{"a", "b"}, wantLen: 2, wantVals: []string{"a", "b"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := NonNilSlice(tc.input)
-			if got == nil || len(got) != tc.wantLen {
-				t.Fatalf("NonNilSlice(%v) = %v, want len %d non-nil", tc.input, got, tc.wantLen)
-			}
-			for i, want := range tc.wantVals {
-				if got[i] != want {
-					t.Errorf("NonNilSlice(%v)[%d] = %q, want %q", tc.input, i, got[i], want)
-				}
-			}
-		})
-	}
+	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: "aerial", Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
 }
 
 func TestCapChunkEffort(t *testing.T) {
@@ -85,193 +35,6 @@ func TestCapChunkEffort(t *testing.T) {
 			t.Parallel()
 			if got := CapChunkEffort(tc.effort); got != tc.want {
 				t.Errorf("CapChunkEffort(%q) = %q, want %q", tc.effort, got, tc.want)
-			}
-		})
-	}
-}
-
-func checkStringResult(t *testing.T, label, input, got, want, wantErr string, err error) {
-	t.Helper()
-	if wantErr != "" {
-		if err == nil || !strings.Contains(err.Error(), wantErr) {
-			t.Fatalf("%s(%q) err = %v, want containing %q", label, input, err, wantErr)
-		}
-		return
-	}
-	if err != nil || got != want {
-		t.Errorf("%s(%q) = %q, %v; want %q", label, input, got, err, want)
-	}
-}
-
-func TestNormalizeChunkEffort(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		effort  string
-		want    string
-		wantErr string
-	}{
-		{name: "empty defaults medium", effort: "", want: "medium"},
-		{name: "medium", effort: "medium", want: "medium"},
-		{name: "high maps medium", effort: "high", want: "medium"},
-		{name: "upper high maps medium", effort: "HIGH", want: "medium"},
-		{name: "low", effort: "low", want: "low"},
-		{name: "upper low", effort: "LOW", want: "low"},
-		{name: "padded low", effort: "  low  ", want: "low"},
-		{name: "invalid", effort: "huge", wantErr: "invalid chunk effort"},
-		{name: "blank invalid", effort: "   huge   ", wantErr: "invalid chunk effort"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := NormalizeChunkEffort(tc.effort)
-			checkStringResult(t, "NormalizeChunkEffort", tc.effort, got, tc.want, tc.wantErr, err)
-		})
-	}
-}
-
-func TestNormalizeChunkMode(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		mode    string
-		want    string
-		wantErr string
-	}{
-		{name: "empty defaults pr", mode: "", want: "pr"},
-		{name: "pr", mode: "pr", want: "pr"},
-		{name: "upper pr", mode: "PR", want: "pr"},
-		{name: "padded pr", mode: "  pr  ", want: "pr"},
-		{name: "action", mode: "action", want: "action"},
-		{name: "upper action", mode: "ACTION", want: "action"},
-		{name: "invalid", mode: "bogus", wantErr: "invalid chunk mode"},
-		{name: "blank invalid", mode: "  bogus  ", wantErr: "invalid chunk mode"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := NormalizeChunkMode(tc.mode)
-			checkStringResult(t, "NormalizeChunkMode", tc.mode, got, tc.want, tc.wantErr, err)
-		})
-	}
-}
-
-func TestValidateChunkModeAndRepo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		mode    string
-		repo    string
-		files   []string
-		symbols []string
-		wantErr string
-	}{
-		{name: "pr ok", mode: "pr", repo: "aerial"},
-		{name: "pr default mode ok", mode: "", repo: "aerial"},
-		{name: "pr trims repo", mode: "pr", repo: "  aerial  "},
-		{name: "pr missing repo", mode: "pr", repo: "", wantErr: "repo is required for pr mode"},
-		{name: "pr blank repo", mode: "pr", repo: "   ", wantErr: "repo is required for pr mode"},
-		{name: "invalid mode", mode: "bogus", repo: "aerial", wantErr: "invalid chunk mode"},
-		{name: "action ok", mode: "action"},
-		{name: "action blank repo ok", mode: "action", repo: "   "},
-		{name: "action with repo", mode: "action", repo: "aerial", wantErr: "must have empty repo"},
-		{name: "action with files", mode: "action", files: []string{"a.go"}, wantErr: "must not specify target_files"},
-		{name: "action with symbols", mode: "action", symbols: []string{"Foo"}, wantErr: "must not specify target_symbols"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := ValidateChunkModeAndRepo(0, tc.mode, tc.repo, tc.files, tc.symbols)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("ValidateChunkModeAndRepo(%q, %q) err = %v, want containing %q", tc.mode, tc.repo, err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("ValidateChunkModeAndRepo(%q, %q) unexpected err: %v", tc.mode, tc.repo, err)
-			}
-		})
-	}
-}
-
-func TestIsValidVanadisChunkID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		id    string
-		valid bool
-	}{
-		{name: "single char", id: "a", valid: true},
-		{name: "max length", id: strings.Repeat("a", 120), valid: true},
-		{name: "blank", id: "   ", valid: false},
-		{name: "space invalid", id: "chunk 1", valid: false},
-		{name: "dot invalid", id: "chunk.1", valid: false},
-		{name: "slash invalid", id: "chunk/1", valid: false},
-		{name: "padded valid", id: "  chunk-1  ", valid: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsValidVanadisChunkID(tc.id); got != tc.valid {
-				t.Errorf("IsValidVanadisChunkID(%q) = %v, want %v", tc.id, got, tc.valid)
-			}
-		})
-	}
-}
-
-func TestGenerateBuildID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-	}{
-		{name: "prefixed unique ids"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			a, b := GenerateBuildID(), GenerateBuildID()
-			for _, id := range []string{a, b} {
-				if !strings.HasPrefix(id, "build-") || strings.Count(id, "-") != 2 {
-					t.Errorf("GenerateBuildID() = %q, want build-<unix>-<hex>", id)
-				}
-			}
-			if a == b {
-				t.Errorf("GenerateBuildID() not unique: %q", a)
-			}
-		})
-	}
-}
-
-func TestResolveChunkRef(t *testing.T) {
-	t.Parallel()
-	chunks := []VanadisChunk{
-		{ID: "chunk-a", ChunkIndex: 0},
-		{ID: "chunk-b", ChunkIndex: 1},
-		{ID: "10", ChunkIndex: 2},
-	}
-	tests := []struct {
-		name     string
-		chunks   []VanadisChunk
-		chunkRef string
-		wantIdx  int
-	}{
-		{"empty_ref", chunks, "", -1},
-		{"whitespace_ref", chunks, "   ", -1},
-		{"match_id_exact", chunks, "chunk-a", 0},
-		{"match_id_with_whitespace", chunks, "  chunk-b  ", 1},
-		{"match_index_string", chunks, "0", 0},
-		{"match_index_second", chunks, "1", 1},
-		{"match_id_takes_precedence_over_index", chunks, "10", 2},
-		{"no_match_index_out_of_bounds", chunks, "99", -1},
-		{"no_match_unknown_id", chunks, "unknown", -1},
-		{"empty_slice", nil, "chunk-a", -1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := ResolveChunkRef(tc.chunks, tc.chunkRef); got != tc.wantIdx {
-				t.Errorf("ResolveChunkRef() = %d, want %d", got, tc.wantIdx)
 			}
 		})
 	}
@@ -352,6 +115,192 @@ func TestSummarizeBuildEntryCounts(t *testing.T) {
 			if entry.Chunks == nil {
 				t.Errorf("SummarizeBuildEntry().Chunks is nil, want non-nil")
 			}
+		})
+	}
+}
+
+type parseChunkCase struct {
+	name        string
+	buildID     string
+	raw         []CreateChunkInput
+	wantErr     string
+	wantCount   int
+	wantFirstID string
+	wantRepo    string
+	wantEffort  string
+	wantDepends []string
+	wantMode    string
+	wantLastDep []string
+}
+
+func checkParsedChunks(t *testing.T, got []VanadisChunk, tc parseChunkCase, now time.Time) {
+	t.Helper()
+	if len(got) != tc.wantCount {
+		t.Fatalf("ParseCreateBuildChunks() count = %d, want %d", len(got), tc.wantCount)
+	}
+	first := got[0]
+	if first.ID != tc.wantFirstID || first.Repo != tc.wantRepo || first.Effort != tc.wantEffort || first.Mode != tc.wantMode {
+		t.Errorf("first chunk = %+v, want id=%q repo=%q effort=%q mode=%q", first, tc.wantFirstID, tc.wantRepo, tc.wantEffort, tc.wantMode)
+	}
+	if len(first.DependsOn) != len(tc.wantDepends) || (len(tc.wantDepends) > 0 && !slices.Equal(first.DependsOn, tc.wantDepends)) {
+		t.Errorf("first chunk DependsOn = %v, want %v", first.DependsOn, tc.wantDepends)
+	}
+	if first.Title != strings.TrimSpace(tc.raw[0].Title) || first.Instructions != strings.TrimSpace(tc.raw[0].Instructions) {
+		t.Errorf("first chunk title/instructions not trimmed: %+v", first)
+	}
+	if !first.CreatedAt.Equal(now) || !first.UpdatedAt.Equal(now) || !first.StartedAt.IsZero() {
+		t.Errorf("first chunk timestamps = %+v, want created/updated %v zero started", first, now)
+	}
+	if first.BuildID != tc.buildID || first.ChunkIndex != 0 {
+		t.Errorf("first chunk identity = %+v, want build %q index 0", first, tc.buildID)
+	}
+	if last := got[len(got)-1]; tc.wantLastDep != nil && !slices.Equal(last.DependsOn, tc.wantLastDep) {
+		t.Errorf("last chunk DependsOn = %v, want %v", last.DependsOn, tc.wantLastDep)
+	}
+}
+
+func TestParseCreateBuildChunks(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0).UTC()
+	tests := []parseChunkCase{
+		{
+			name:    "missing title rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Instructions: "i", DependsOn: []string{}}},
+			wantErr: "title and instructions are required",
+		},
+		{
+			name:    "missing instructions rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Title: "t", DependsOn: []string{}}},
+			wantErr: "title and instructions are required",
+		},
+		{
+			name:    "invalid id rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "bad id!", Title: "t", Instructions: "i", DependsOn: []string{}}},
+			wantErr: "must be 1..120 characters",
+		},
+		{
+			name:    "invalid mode rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Mode: "bogus", Title: "t", Instructions: "i", DependsOn: []string{}}},
+			wantErr: "invalid chunk mode",
+		},
+		{
+			name:    "pr missing repo rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Title: "t", Instructions: "i", DependsOn: []string{}}},
+			wantErr: "repo is required for pr mode",
+		},
+		{
+			name:    "action with repo rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Mode: "action", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}}},
+			wantErr: "must have empty repo",
+		},
+		{
+			name:    "invalid effort rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", Effort: "huge", DependsOn: []string{}}},
+			wantErr: "invalid effort",
+		},
+		{
+			name:    "missing depends_on rejected",
+			buildID: "b1",
+			raw:     []CreateChunkInput{{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i"}},
+			wantErr: "must explicitly specify depends_on",
+		},
+		{
+			name:    "duplicate ids rejected",
+			buildID: "b1",
+			raw: []CreateChunkInput{
+				{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}},
+				{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}},
+			},
+			wantErr: "duplicate chunk id",
+		},
+		{
+			name:    "cycle rejected",
+			buildID: "b1",
+			raw: []CreateChunkInput{
+				{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", TargetFiles: []string{"a.go"}, DependsOn: []string{"c2"}},
+				{ID: "c2", Repo: "aerial", Title: "t", Instructions: "i", TargetFiles: []string{"b.go"}, DependsOn: []string{"c1"}},
+			},
+			wantErr: "cycle detected",
+		},
+		{
+			name:    "overlapping files rejected",
+			buildID: "b1",
+			raw: []CreateChunkInput{
+				{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", TargetFiles: []string{"a.go"}, DependsOn: []string{}},
+				{ID: "c2", Repo: "aerial", Title: "t", Instructions: "i", TargetFiles: []string{"a.go"}, DependsOn: []string{}},
+			},
+			wantErr: "overlapping target_files",
+		},
+		{
+			name:        "minimal pr defaults",
+			buildID:     "b1",
+			raw:         []CreateChunkInput{{Title: "  t  ", Instructions: "  i  ", Repo: "  aerial  ", DependsOn: []string{}}},
+			wantCount:   1,
+			wantFirstID: "b1-chunk-1",
+			wantRepo:    "aerial",
+			wantEffort:  "medium",
+			wantDepends: []string{},
+			wantMode:    "pr",
+		},
+		{
+			name:        "custom id high effort index dep",
+			buildID:     "b1",
+			raw:         []CreateChunkInput{{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", Effort: "high", DependsOn: []string{}}},
+			wantCount:   1,
+			wantFirstID: "c1",
+			wantRepo:    "aerial",
+			wantEffort:  "medium",
+			wantDepends: []string{},
+			wantMode:    "pr",
+		},
+		{
+			name:    "low effort chained chunks",
+			buildID: "b1",
+			raw: []CreateChunkInput{
+				{ID: "c1", Repo: "aerial", Title: "t", Instructions: "i", Effort: "low", TargetFiles: []string{"a.go"}, DependsOn: []string{}},
+				{ID: "c2", Repo: "aerial", Title: "t", Instructions: "i", TargetFiles: []string{"a.go"}, DependsOn: []string{"0"}},
+			},
+			wantCount:   2,
+			wantFirstID: "c1",
+			wantRepo:    "aerial",
+			wantEffort:  "low",
+			wantDepends: []string{},
+			wantMode:    "pr",
+			wantLastDep: []string{"c1"},
+		},
+		{
+			name:        "action chunk repo forced empty",
+			buildID:     "b1",
+			raw:         []CreateChunkInput{{ID: "c1", Mode: "action", Repo: "   ", Title: "t", Instructions: "i", DependsOn: []string{}}},
+			wantCount:   1,
+			wantFirstID: "c1",
+			wantRepo:    "",
+			wantEffort:  "medium",
+			wantDepends: []string{},
+			wantMode:    "action",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseCreateBuildChunks(tc.buildID, now, tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ParseCreateBuildChunks() err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseCreateBuildChunks() unexpected err: %v", err)
+			}
+			checkParsedChunks(t, got, tc, now)
 		})
 	}
 }
