@@ -302,6 +302,7 @@ func TestLoadConfigFile_Auth(t *testing.T) {
 		yaml        string
 		envEnabled  string
 		wantEnabled bool
+		wantErr     string
 	}{
 		{
 			name:        "auth enabled from yaml",
@@ -325,6 +326,12 @@ func TestLoadConfigFile_Auth(t *testing.T) {
 			envEnabled:  "false",
 			wantEnabled: false,
 		},
+		{
+			name:       "invalid env fails config load",
+			yaml:       "auth:\n  enabled: true\n",
+			envEnabled: "yes-please",
+			wantErr:    `config: invalid K8S_AUTH_ENABLED "yes-please"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -332,6 +339,12 @@ func TestLoadConfigFile_Auth(t *testing.T) {
 			env := map[string]string{"K8S_AUTH_ENABLED": tc.envEnabled}
 			path := writeCovenDarkConfig(t, covenDarkBaseConfig+tc.yaml)
 			cfg, err := LoadConfigFile(path, "postgres://localhost/coven_test", mapEnv(env))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LoadConfigFile() error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("LoadConfigFile() error = %v", err)
 			}
