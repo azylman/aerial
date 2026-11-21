@@ -167,7 +167,7 @@ func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEf
 	pr := prstate.NewPRObjectService()
 	repo := prstate.NewRepoObjectService()
 	if projection != nil {
-		pr = pr.WithProjection(projection, projection)
+		pr = pr.WithProjection(projection)
 	}
 	if eri != nil {
 		pr = pr.WithEriEffector(eri)

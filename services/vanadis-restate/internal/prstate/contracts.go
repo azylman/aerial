@@ -26,11 +26,9 @@
 package prstate
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -166,12 +164,6 @@ func (k EffectKey) render(withGeneration bool) string {
 	return sb.String()
 }
 
-// DeployPRKey returns the PR-keyed deploy dedup key. Mirrors the pr: key in
-// services/synapse/internal/flux DeployDedupTracker.
-func DeployPRKey(repo string, prNumber int) string {
-	return fmt.Sprintf("pr:%s:%d", NormalizeRepo(repo), prNumber)
-}
-
 // DeploySHAJobKey returns the job-plus-SHA deploy dedup key. Mirrors the sha:
 // key in services/synapse/internal/flux DeployDedupTracker.
 func DeploySHAJobKey(repo, jobName, sha string) string {
@@ -187,31 +179,6 @@ func IsStaleEvent(currentHeadSHA, eventSHA string) bool {
 		return false
 	}
 	return !strings.EqualFold(current, event)
-}
-
-// PROwnership classifies whether a PR is owned by a Vanadis build.
-type PROwnership string
-
-const (
-	// PROwned marks a build-owned PR whose events route to the Build object.
-	PROwned PROwnership = "owned"
-	// PRUnmanaged marks a collaborator PR handled inside PRObject only.
-	PRUnmanaged PROwnership = "unmanaged"
-)
-
-// ClassifyOwnership returns PROwned only for non-unmanaged PRs carrying a
-// build ID; every other PR is unmanaged.
-func ClassifyOwnership(buildID string, unmanaged bool) PROwnership {
-	if unmanaged || strings.TrimSpace(buildID) == "" {
-		return PRUnmanaged
-	}
-	return PROwned
-}
-
-// UnmanagedMustNotRoute reports whether the PR must never signal
-// BuildRouter.RoutePREvent. True for every unmanaged collaborator PR.
-func UnmanagedMustNotRoute(o PROwnership) bool {
-	return o != PROwned
 }
 
 // TerminalState is the absorbing lifecycle end state of a PR within one
@@ -246,10 +213,12 @@ const (
 	DispositionRecoverStale EventDisposition = "recover_stale"
 )
 
-// EffectsOwner says who performs an event's side effects. Synapse stamps
-// every event exactly once when it first accepts it. For legacy events
-// prstate still applies the state transition and commits effect keys but
-// skips the side effect itself; for restate events prstate executes it.
+// EffectsOwner is the effect-owner stamp synapse still puts on the wire.
+// Restate owns every effect and every pr_registry write: PRObject and
+// RepoObject reject an event explicitly stamped legacy with a terminal
+// error (rejectLegacyOwner), so no second writer can exist. A missing or
+// empty stamp is restate-owned, so internal one-way sends and a synapse
+// that stops sending the field both keep working.
 type EffectsOwner string
 
 // Effect owner values on the wire.
@@ -259,14 +228,12 @@ const (
 )
 
 // ParseEffectsOwner maps a wire stamp to an owner. Only an exact
-// (case-insensitive) restate stamp hands effects to prstate; a missing,
-// empty, or unknown stamp is legacy, so a malformed value can never make
-// prstate double-fire an effect synapse already performed.
+// (case-insensitive) legacy stamp is legacy; anything else is restate.
 func ParseEffectsOwner(raw string) EffectsOwner {
-	if strings.EqualFold(strings.TrimSpace(raw), string(EffectsOwnerRestate)) {
-		return EffectsOwnerRestate
+	if strings.EqualFold(strings.TrimSpace(raw), string(EffectsOwnerLegacy)) {
+		return EffectsOwnerLegacy
 	}
-	return EffectsOwnerLegacy
+	return EffectsOwnerRestate
 }
 
 // PREvent is the canonical PRObject payload. It carries the head or merge SHA
@@ -629,173 +596,4 @@ func (ev *RepoEvent) UnmarshalJSON(data []byte) error {
 	*ev = RepoEvent(w)
 	ev.EffectsOwner = ParseEffectsOwner(string(ev.EffectsOwner))
 	return nil
-}
-
-// PRObject is the frozen PR handler surface. One method per lifecycle event;
-// implementations live in chunks 04-06, dark registration in chunk 07.
-type PRObject interface {
-	HandleCheckFailed(ctx context.Context, ev PREvent) error
-	HandleCheckPassed(ctx context.Context, ev PREvent) error
-	HandleCheckRerunRequested(ctx context.Context, ev PREvent) error
-	HandleCollaboratorAlert(ctx context.Context, ev PREvent) error
-	HandleConflictDetected(ctx context.Context, ev PREvent) (ConflictDispatchDecision, error)
-	HandleConflictPublished(ctx context.Context, ev PREvent) (ConflictPublishedOutcome, error)
-	HandleCIRecovery(ctx context.Context, ev PREvent) (CIRecoveryDecision, error)
-	HandleConflictResolved(ctx context.Context, ev PREvent) error
-	HandleMerged(ctx context.Context, ev PREvent) error
-	HandleClosed(ctx context.Context, ev PREvent) error
-	HandleReopened(ctx context.Context, ev PREvent) error
-	HandleOpened(ctx context.Context, ev PREvent) error
-	HandleReadinessRetry(ctx context.Context, ev PREvent) error
-	HandleRolloutProgress(ctx context.Context, ev PREvent) error
-	HandleDeployDispatched(ctx context.Context, ev PREvent) (DeployDispatchDecision, error)
-	HandleDeploySuccessPublished(ctx context.Context, ev PREvent) (DeployPublishedOutcome, error)
-	HandleKustomizationRequested(ctx context.Context, ev PREvent) error
-	HandleMainAdvanced(ctx context.Context, ev PREvent) error
-	HandleDeployFailed(ctx context.Context, ev PREvent) error
-	HandleBuildMetadata(ctx context.Context, ev PREvent) error
-	HandleSynchronized(ctx context.Context, ev PREvent) error
-	HandleCheckStatus(ctx context.Context, ev PREvent) error
-}
-
-// RepoObject is the frozen repo handler surface: main-push index,
-// dispatched-SHA tombstones, fan-out sends, the PRObject-fed routing index,
-// SHA-only event routing with held replays, and durable SHA resolution.
-type RepoObject interface {
-	HandleMainPush(ctx context.Context, ev RepoEvent) error
-	HandleFanout(ctx context.Context, ev RepoEvent) error
-	HandleKustomizationStatus(ctx context.Context, ev RepoEvent) error
-	HandlePRIndex(ctx context.Context, ev PRIndexEvent) error
-	RouteBySHA(ctx context.Context, kind string, ev SHAEvent) (SHARouteOutcome, error)
-	ReplayHeld(ctx context.Context, repo, sha string) error
-	ExpireHeld(ctx context.Context, repo string, id uint64) (bool, error)
-	ResolvePRBySHA(ctx context.Context, repo, sha string) (int, string, bool)
-}
-
-// PRObjectStub is the empty registered handler stub for PRObject. Chunk 07
-// binds the real implementations; until then every handler is a no-op.
-type PRObjectStub struct{}
-
-// Compile-time surface freeze: stub must satisfy the full interface.
-var _ PRObject = PRObjectStub{}
-
-func (PRObjectStub) HandleCheckFailed(context.Context, PREvent) error         { return nil }
-func (PRObjectStub) HandleCheckPassed(context.Context, PREvent) error         { return nil }
-func (PRObjectStub) HandleCheckRerunRequested(context.Context, PREvent) error { return nil }
-func (PRObjectStub) HandleCollaboratorAlert(context.Context, PREvent) error   { return nil }
-func (PRObjectStub) HandleConflictDetected(context.Context, PREvent) (ConflictDispatchDecision, error) {
-	return ConflictDispatchDecision{}, nil
-}
-
-func (PRObjectStub) HandleConflictPublished(context.Context, PREvent) (ConflictPublishedOutcome, error) {
-	return ConflictPublishedOutcome{}, nil
-}
-
-func (PRObjectStub) HandleCIRecovery(context.Context, PREvent) (CIRecoveryDecision, error) {
-	return CIRecoveryDecision{}, nil
-}
-func (PRObjectStub) HandleConflictResolved(context.Context, PREvent) error { return nil }
-func (PRObjectStub) HandleMerged(context.Context, PREvent) error           { return nil }
-func (PRObjectStub) HandleClosed(context.Context, PREvent) error           { return nil }
-func (PRObjectStub) HandleReopened(context.Context, PREvent) error         { return nil }
-func (PRObjectStub) HandleOpened(context.Context, PREvent) error           { return nil }
-func (PRObjectStub) HandleReadinessRetry(context.Context, PREvent) error   { return nil }
-func (PRObjectStub) HandleRolloutProgress(context.Context, PREvent) error  { return nil }
-func (PRObjectStub) HandleDeployDispatched(context.Context, PREvent) (DeployDispatchDecision, error) {
-	return DeployDispatchDecision{}, nil
-}
-
-func (PRObjectStub) HandleDeploySuccessPublished(context.Context, PREvent) (DeployPublishedOutcome, error) {
-	return DeployPublishedOutcome{}, nil
-}
-
-func (PRObjectStub) HandleKustomizationRequested(context.Context, PREvent) error {
-	return nil
-}
-
-func (PRObjectStub) HandleMainAdvanced(context.Context, PREvent) error  { return nil }
-func (PRObjectStub) HandleDeployFailed(context.Context, PREvent) error  { return nil }
-func (PRObjectStub) HandleBuildMetadata(context.Context, PREvent) error { return nil }
-func (PRObjectStub) HandleSynchronized(context.Context, PREvent) error  { return nil }
-func (PRObjectStub) HandleCheckStatus(context.Context, PREvent) error   { return nil }
-
-// RepoObjectStub is the empty registered handler stub for RepoObject.
-type RepoObjectStub struct{}
-
-// Compile-time surface freeze: stub must satisfy the full interface.
-var _ RepoObject = RepoObjectStub{}
-
-func (RepoObjectStub) HandleMainPush(context.Context, RepoEvent) error            { return nil }
-func (RepoObjectStub) HandleFanout(context.Context, RepoEvent) error              { return nil }
-func (RepoObjectStub) HandleKustomizationStatus(context.Context, RepoEvent) error { return nil }
-func (RepoObjectStub) HandlePRIndex(context.Context, PRIndexEvent) error          { return nil }
-func (RepoObjectStub) RouteBySHA(context.Context, string, SHAEvent) (SHARouteOutcome, error) {
-	return SHARouteOutcome{}, nil
-}
-func (RepoObjectStub) ReplayHeld(context.Context, string, string) error { return nil }
-func (RepoObjectStub) ExpireHeld(context.Context, string, uint64) (bool, error) {
-	return false, nil
-}
-
-func (RepoObjectStub) ResolvePRBySHA(context.Context, string, string) (int, string, bool) {
-	return 0, "", false
-}
-
-// BuildRouterInvoker routes build-owned PR events to the owning Build object.
-// Unmanaged collaborator PRs never reach this interface.
-type BuildRouterInvoker interface {
-	RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error
-}
-
-// RoutedCall records one FakeBuildRouterInvoker route.
-type RoutedCall struct {
-	BuildID string
-	Event   pubsub.PRLifecycleEvent
-}
-
-// FakeBuildRouterInvoker is the ONE shared fake BuildRouter invoker for this
-// package. Chunks 03a-03c reuse it; no chunk registers a second fake.
-type FakeBuildRouterInvoker struct {
-	mu    sync.Mutex
-	Calls []RoutedCall
-	Err   error
-}
-
-// Compile-time freeze: the shared fake must satisfy the invoker interface.
-var _ BuildRouterInvoker = (*FakeBuildRouterInvoker)(nil)
-
-// RoutePREvent records the route and returns the configured error.
-func (f *FakeBuildRouterInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
-	_ = ctx
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, RoutedCall{BuildID: buildID, Event: ev})
-	return f.Err
-}
-
-// CallCount returns the number of recorded routes.
-func (f *FakeBuildRouterInvoker) CallCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.Calls)
-}
-
-// CallsFor returns the recorded routes for one build ID.
-func (f *FakeBuildRouterInvoker) CallsFor(buildID string) []RoutedCall {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []RoutedCall
-	for _, c := range f.Calls {
-		if c.BuildID == buildID {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// Reset clears all recorded routes.
-func (f *FakeBuildRouterInvoker) Reset() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Calls = nil
 }

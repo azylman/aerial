@@ -231,7 +231,7 @@ func TestResolvePromotionPR(t *testing.T) {
 		wantFactPR int
 	}{
 		{name: "restate sha-only promotion takes the indexed pr", ev: RepoEvent{HeadSHA: "m42", EffectsOwner: EffectsOwnerRestate, Facts: []pubsub.PRLifecycleEvent{fact}, DeployFailedFacts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 42, wantBranch: "feat/y", wantFactPR: 42},
-		{name: "legacy promotion keeps its pr", ev: RepoEvent{HeadSHA: "m42", Facts: []pubsub.PRLifecycleEvent{fact}}},
+		{name: "unstamped sha-only promotion takes the indexed pr", ev: RepoEvent{HeadSHA: "m42", Facts: []pubsub.PRLifecycleEvent{fact}, DeployFailedFacts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 42, wantBranch: "feat/y", wantFactPR: 42},
 		{name: "unindexed sha stays untracked", ev: RepoEvent{HeadSHA: "m9", EffectsOwner: EffectsOwnerRestate, Facts: []pubsub.PRLifecycleEvent{fact}}},
 		{name: "known pr is kept", ev: RepoEvent{HeadSHA: "m42", PRNumber: 7, Branch: "b", EffectsOwner: EffectsOwnerRestate, Facts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 7, wantBranch: "b"},
 	}
@@ -326,19 +326,18 @@ func TestPRObjectServiceHandleKustomizationRequestedStartedFact(t *testing.T) {
 
 func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 	t.Parallel()
-	lostKey := "azylman/aerial#101@:gen1:flux_reconcile:job=repatch:web@t0"
 	ev := func(owner EffectsOwner, name string) PREvent {
 		return PREvent{Repo: "aerial", PRNumber: 101, JobName: name, ObservedReconcileAt: "t0", EffectsOwner: owner}
 	}
 	tests := []struct {
-		name         string
-		seed         *PRState
-		ev           PREvent
-		wantCalls    []string
-		wantIntended []string
+		name      string
+		seed      *PRState
+		ev        PREvent
+		wantCalls []string
+		wantErr   bool
 	}{
 		{name: "restate re-patches only the lost kustomization", seed: deployingRollout(), ev: ev(EffectsOwnerRestate, "web"), wantCalls: []string{"reconcile flux-system/web@t1"}},
-		{name: "legacy records the intended re-patch", seed: deployingRollout(), ev: ev(EffectsOwnerLegacy, "web"), wantIntended: []string{lostKey}},
+		{name: "legacy owner is rejected", seed: deployingRollout(), ev: ev(EffectsOwnerLegacy, "web"), wantErr: true},
 		{name: "unknown kustomization does nothing", seed: deployingRollout(), ev: ev(EffectsOwnerRestate, "api")},
 		{name: "pr out of rollout does nothing", seed: deployedRollout(), ev: ev(EffectsOwnerRestate, "core")},
 		{name: "missing name does nothing", seed: deployingRollout(), ev: ev(EffectsOwnerRestate, "")},
@@ -347,18 +346,12 @@ func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, rec := newStateMock(t, tc.seed)
+			mc, _ := newStateMock(t, tc.seed)
 			stubRunKeepTerminal(mc)
 			kube := &fakeKube{}
-			require.NoError(t, NewPRObjectService().WithKube(kube).HandleReconcileLost(restate.WithMockContext(mc), tc.ev))
+			err := NewPRObjectService().WithKube(kube).HandleReconcileLost(restate.WithMockContext(mc), tc.ev)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, tc.wantCalls, kube.Calls())
-			var intended []string
-			if rec.saved != nil {
-				for _, e := range rec.saved.IntendedEffects {
-					intended = append(intended, e.EffectKey)
-				}
-			}
-			require.Equal(t, tc.wantIntended, intended)
 		})
 	}
 }
@@ -498,12 +491,13 @@ func TestPRObjectServiceHandleKustomizationRequestedUntracked(t *testing.T) {
 		name      string
 		seed      *PRState
 		owner     EffectsOwner
+		wantErr   bool
 		wantSaved *PRState
 		wantSends []sentCall
 	}{
-		{name: "fresh legacy request persists nothing", owner: EffectsOwnerLegacy},
+		{name: "legacy request is rejected", owner: EffectsOwnerLegacy, wantErr: true},
 		{name: "fresh restate request persists nothing", owner: EffectsOwnerRestate},
-		{name: "stored pre-guard rollout is cleaned", seed: untrackedResidue(), owner: EffectsOwnerLegacy, wantSaved: untrackedCleaned(), wantSends: untrackedCleanupSends},
+		{name: "stored pre-guard rollout is cleaned", seed: untrackedResidue(), owner: EffectsOwnerRestate, wantSaved: untrackedCleaned(), wantSends: untrackedCleanupSends},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -513,7 +507,8 @@ func TestPRObjectServiceHandleKustomizationRequestedUntracked(t *testing.T) {
 			kube := &fakeKube{}
 			pub := &fakeFactPublisher{}
 			ev := PREvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Jobs: []string{"gateway-api-crds"}, KustomizationRequests: requests, EffectsOwner: tc.owner, Facts: []pubsub.PRLifecycleEvent{started}}
-			require.NoError(t, NewPRObjectService().WithKube(kube).WithFactPublisher(pub).HandleKustomizationRequested(restate.WithMockContext(mc), ev))
+			err := NewPRObjectService().WithKube(kube).WithFactPublisher(pub).HandleKustomizationRequested(restate.WithMockContext(mc), ev)
+			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, tc.wantSaved, rec.saved)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 			require.Empty(t, kube.Calls())
