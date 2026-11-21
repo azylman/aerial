@@ -1959,18 +1959,6 @@ spec:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
                   optional: true
-            - name: DISCORD_TOKEN_MIORINE
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: miorine-secrets
-                  optional: true
-            - name: DISCORD_TOKEN_SULETTA
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: suletta-secrets
-                  optional: true
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -2743,18 +2731,6 @@ spec:
                 secretKeyRef:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
-                  optional: true
-            - name: DISCORD_TOKEN_MIORINE
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: miorine-secrets
-                  optional: true
-            - name: DISCORD_TOKEN_SULETTA
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: suletta-secrets
                   optional: true
             - name: NATS_AERIAL_PASSWORD
               valueFrom:

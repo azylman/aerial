@@ -488,13 +488,7 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-miorine-restate
-                  - eri-suletta
-                  - eri-suletta-restate
                   - coven
-                  - coven-miorine
-                  - coven-suletta
                   - vmsingle
                   - victoriametrics
                   - gatus
@@ -580,10 +574,6 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-miorine-restate
-                  - eri-suletta
-                  - eri-suletta-restate
                   - synapse
                   - haro
                   - vanadis-restate
@@ -613,10 +603,6 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-miorine-restate
-                  - eri-suletta
-                  - eri-suletta-restate
                   - synapse
                   - console
                   - vision
@@ -644,8 +630,6 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-suletta
                   - synapse
                   - gatus
                   - coverage-ingest
@@ -760,19 +744,9 @@ spec:
                   - vanadis
                   - vanadis-nats
                   - vanadis-restate
-                  - vanadis-miorine
-                  - vanadis-miorine-nats
-                  - vanadis-miorine-restate
-                  - vanadis-suletta
-                  - vanadis-suletta-nats
-                  - vanadis-suletta-restate
                   - haro
-                  - haro-miorine
-                  - haro-suletta
                   - synapse
                   - eri
-                  - eri-miorine
-                  - eri-suletta
                   - console
                   - vmsingle
                   - victoriametrics
