@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
@@ -466,7 +467,7 @@ func compileLeasePrompt(turn *TurnContext, isCold bool, prevSessID string) strin
 	}
 	p := turn.Prompt
 	if isCold {
-		scope := strings.TrimSpace(firstNonEmpty(turn.ScopeInstructions, turn.ChannelInstructions))
+		scope := strings.TrimSpace(strutil.FirstNonEmpty(turn.ScopeInstructions, turn.ChannelInstructions))
 		if scope != "" && !strings.Contains(p, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(p, "<CHANNEL_INSTRUCTIONS>") {
 			p = "<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n" + scope + "\n</SCOPE_INSTRUCTIONS>\n\n" + p
 		}

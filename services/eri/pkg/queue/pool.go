@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -605,7 +606,7 @@ func (p *WorkerPool) AppConfig() *config.Config {
 func (p *WorkerPool) ResolveChannelID(nameOrID string) (string, error) {
 	trimmed := strings.TrimSpace(nameOrID)
 	trimmed = strings.TrimPrefix(trimmed, "#")
-	if IsNumericSnowflake(trimmed) {
+	if discordutil.IsSnowflake(trimmed) {
 		return trimmed, nil
 	}
 	if p == nil {
@@ -869,7 +870,7 @@ func isScopeKeyForThread(scopeKey, threadID string) bool {
 }
 
 func (p *WorkerPool) hasNewerEnqueuedDiscordMessage(threadID, triggerID string) bool {
-	if p == nil || threadID == "" || !IsNumericSnowflake(triggerID) {
+	if p == nil || threadID == "" || !discordutil.IsSnowflake(triggerID) {
 		return false
 	}
 	p.mu.Lock()

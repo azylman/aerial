@@ -8,6 +8,7 @@ import (
 	// Embed fallback timezone database.
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -88,7 +89,7 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 			p.wg.Add(1)
 			newWorkers = append(newWorkers, newWorker{scopeKey: scopeKey, state: state})
 		}
-		if isDiscordMessage(msg) && IsNumericSnowflake(msg.ID) && (state.lastEnqueuedDiscordMsgID == "" || compareSnowflakeIDs(msg.ID, state.lastEnqueuedDiscordMsgID) > 0) {
+		if isDiscordMessage(msg) && discordutil.IsSnowflake(msg.ID) && (state.lastEnqueuedDiscordMsgID == "" || compareSnowflakeIDs(msg.ID, state.lastEnqueuedDiscordMsgID) > 0) {
 			state.lastEnqueuedDiscordMsgID = msg.ID
 		}
 
