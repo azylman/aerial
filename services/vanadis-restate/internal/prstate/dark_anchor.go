@@ -41,13 +41,9 @@ func init() {
 		NewMemRepoStore,
 		MemRepoStore{},
 
-		// Registry projection sends (chunk 02).
-		BuildProjection,
-		ProjectionJournalKey,
-		ProjectionUpsertQuery,
+		// Registry projection rebuild stays dark; the live writer is
+		// PRObject.Project.
 		RebuildProjection,
-		OwnedMetadataKeys,
-		IsOwnedMetadataKey,
 
 		// Frozen key, ownership, and deploy-dedup helpers (chunk 01).
 		PRObjectKey,
@@ -60,7 +56,6 @@ func init() {
 		PRObjectStub{},
 		RepoObjectStub{},
 		FakeBuildRouterInvoker{},
-		FakeProjectionStore{},
 		MapSnapshotLoader{},
 	)
 }

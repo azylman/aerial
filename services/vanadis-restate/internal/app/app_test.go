@@ -18,6 +18,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/widget"
@@ -243,7 +244,9 @@ func TestBindRestateServices(t *testing.T) {
 		wantRouter   string
 		wantPRState  bool
 		wantServices int
+		projection   bool
 	}{
+		{name: "aerial agent with projection store owns pr state", agent: "aerial", projection: true, wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "empty agent owns pr state", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "aerial agent owns pr state", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
@@ -254,7 +257,11 @@ func TestBindRestateServices(t *testing.T) {
 			t.Parallel()
 			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
 			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
-			srv := bindRestateServices(tc.agent, restateObj, routerSvc)
+			var projection *prstate.PgProjectionStore
+			if tc.projection {
+				projection = prstate.NewPgProjectionStore(nil)
+			}
+			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection)
 			require.NotNil(t, srv)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -283,7 +290,10 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 23)
+			require.Len(t, byName["PRObject"], 26)
+			require.True(t, byName["PRObject"]["Hydrate"])
+			require.True(t, byName["PRObject"]["Project"])
+			require.True(t, byName["PRObject"]["CompareProjection"])
 			require.True(t, byName["PRObject"]["HandleCheckFailed"])
 			require.True(t, byName["PRObject"]["HandleDeploySuccessPublished"])
 			require.True(t, byName["PRObject"]["HandleConflictDetected"])

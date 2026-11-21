@@ -129,6 +129,9 @@ type RegisterRequest struct {
 	// PR already owned by someone else is rejected.
 	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
 	ExpectedOwner string `json:"expected_owner,omitempty"`
+	// EffectsOwner is the synapse stamp for this register: restate makes
+	// PRObject write the registry row, legacy leaves it to synapse.
+	EffectsOwner EffectsOwner `json:"effects_owner,omitempty"`
 }
 
 // RegisterResponse is the PRObject.Register result.
