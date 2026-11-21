@@ -404,7 +404,8 @@ describe('App with a fully seeded store', () => {
     await flush();
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('BUILD CHUNK DAG (3)')).toBeTruthy();
-  });
+    // Loads all six lazy view chunks; ~1.3s alone but past the 5s default under CI coverage load.
+  }, 20_000);
 });
 
 describe('visited views stay mounted', () => {
