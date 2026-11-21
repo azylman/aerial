@@ -6,7 +6,6 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -70,15 +69,6 @@ func (s *Server) EventBus() pubsub.Bus {
 	s.busMu.RLock()
 	defer s.busMu.RUnlock()
 	return s.bus
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if t := strings.TrimSpace(v); t != "" {
-			return t
-		}
-	}
-	return ""
 }
 
 // NewServer initializes a new Server.
