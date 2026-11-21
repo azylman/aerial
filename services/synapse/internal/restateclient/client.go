@@ -49,6 +49,7 @@ const (
 	HandlerCollaboratorAlert   = "HandleCollaboratorAlert"
 	HandlerMerged              = "HandleMerged"
 	HandlerRolloutProgress     = "HandleRolloutProgress"
+	HandlerSelfRegistered      = "HandleSelfRegistered"
 )
 
 // Frozen PRObject handler surface from chunk-01. SendPREvent rejects any
@@ -70,6 +71,7 @@ var prHandlers = map[string]bool{
 	"HandleClosed":                 true,
 	"HandleReopened":               true,
 	"HandleOpened":                 true,
+	HandlerSelfRegistered:          true,
 	"HandleReadinessRetry":         true,
 	HandlerRolloutProgress:         true,
 	"HandleDeployDispatched":       true,

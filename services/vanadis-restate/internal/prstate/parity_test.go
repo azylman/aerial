@@ -159,6 +159,7 @@ func newParitySim(t *testing.T) *paritySim {
 		"PRObject/" + "HandleClosed":                  bindErr(pr.HandleClosed),
 		"PRObject/" + "HandleReopened":                bindErr(pr.HandleReopened),
 		"PRObject/" + PRHandlerOpened:                 bindErr(pr.HandleOpened),
+		"PRObject/" + PRHandlerSelfRegistered:         bindErr(pr.HandleSelfRegistered),
 		"PRObject/" + PRHandlerMainAdvanced:           bindErr(pr.HandleMainAdvanced),
 		"PRObject/" + PRHandlerKustomizationRequested: bindErr(pr.HandleKustomizationRequested),
 		"PRObject/" + PRHandlerRolloutProgress:        bindErr(pr.HandleRolloutProgress),

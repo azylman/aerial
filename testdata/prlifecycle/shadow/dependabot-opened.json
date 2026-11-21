@@ -1,0 +1,364 @@
+{
+ "description": "Unregistered default-owner dependabot PRs (the 2026-11-21 14:00-14:40Z wave: aerial#2329, aerial-config#846, aerial-sidecars#339-#342, mirrormere#1031-#1032) were self-registered by legacy synapse (handleDependabotPROpen -> registry.EnsurePRRegistered with the headless target = the system channel and the PR title) while the legacy pull_request path sent PRObject nothing: rows had target_id + title, PRObject had TargetID '' and Title '' (prstate_projection_divergence_total target_id +86, title +58 in window r11), so under authority the PR is untracked, Project writes no row and CI/deploy notifications lose their target. Fix: every EnsurePRRegistered write is journaled first as PRObject.HandleSelfRegistered (fill-only branch/head/target/title, insert-only owner seed), and the restate-owned path sends the same event from the same rule. opened_shadow / opened_restate are what synapse sends for the opened webhook (legacy-owned and restate-owned), legacy.ensure the EnsurePRRegistered writes (target|title|agent). prstate replays opened + CI + merge + kustomization requested + rollout progress + deploy_success in both modes: the projection agrees with the legacy row (target_id and title included), the PR is tracked, ListRollouts is empty and the legacy intended deploy effects equal the restate-owned published ones. Contrast: a PR with no Aerial metadata and no dependabot rule is registered by nobody and stays untracked in both modes (no row on either writer).",
+ "system_channel_id": "100000000000000009",
+ "cases": [
+  {
+   "name": "default-owner dependabot PR opened, CI, merged and deployed",
+   "pull_request": {
+    "repo": "azylman/aerial",
+    "pr_number": 2329,
+    "action": "opened",
+    "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+    "head_sha": "dbab232900000000000000000000000000002329",
+    "title": "chore(deps-dev): bump the console-ui-npm group",
+    "user": "dependabot[bot]",
+    "body": ""
+   },
+   "legacy": {
+    "ensure": [
+     "100000000000000009|chore(deps-dev): bump the console-ui-npm group|"
+    ]
+   },
+   "opened_shadow": [
+    {
+     "object": "PRObject",
+     "handler": "HandleSelfRegistered",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+      "title": "chore(deps-dev): bump the console-ui-npm group",
+      "target_id": "100000000000000009",
+      "effects_owner": "legacy"
+     }
+    }
+   ],
+   "opened_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleSelfRegistered",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+      "title": "chore(deps-dev): bump the console-ui-npm group",
+      "target_id": "100000000000000009",
+      "effects_owner": "restate"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleOpened",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+      "effects_owner": "restate",
+      "facts": [
+       {
+        "event": "opened",
+        "repo": "azylman/aerial",
+        "pr_number": 2329,
+        "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+        "head_sha": "dbab232900000000000000000000000000002329",
+        "title": "chore(deps-dev): bump the console-ui-npm group",
+        "target_id": "100000000000000009",
+        "status": "open",
+        "quiet": true
+       }
+      ]
+     }
+    }
+   ],
+   "lifecycle_shadow": [
+    {
+     "object": "PRObject",
+     "handler": "HandleCheckPassed",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "check_name": "ci",
+      "effects_owner": "legacy",
+      "agent": "aerial"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "merge_sha": "81e9d8c000000000000000000000000000002329",
+      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+      "effects_owner": "legacy",
+      "agent": "aerial"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleKustomizationRequested",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "81e9d8c000000000000000000000000000002329",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "legacy",
+      "jobs": [
+       "console"
+      ],
+      "kustomization_requests": {
+       "aerial-core": {
+        "namespace": "flux-system",
+        "requested_at": "2026-11-21T14:20:02Z"
+       }
+      }
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleRolloutProgress",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "merge_sha": "81e9d8c000000000000000000000000000002329",
+      "job_name": "aerial-core",
+      "effects_owner": "legacy",
+      "deployed_jobs": [
+       "console",
+       "aerial-core"
+      ],
+      "deployed_kustomizations": [
+       "aerial-core"
+      ]
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleDeploySuccess",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "merge_sha": "81e9d8c000000000000000000000000000002329",
+      "job_name": "aerial-core",
+      "effects_owner": "legacy",
+      "facts": [
+       {
+        "event": "deploy_success",
+        "repo": "azylman/aerial",
+        "pr_number": 2329,
+        "head_sha": "dbab232900000000000000000000000000002329",
+        "merge_sha": "81e9d8c000000000000000000000000000002329",
+        "target_id": "100000000000000009",
+        "status": "deployed",
+        "job_name": "aerial-core"
+       }
+      ]
+     }
+    }
+   ],
+   "lifecycle_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleCheckPassed",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "check_name": "ci",
+      "effects_owner": "restate"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleMerged",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "merge_sha": "81e9d8c000000000000000000000000000002329",
+      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+      "effects_owner": "restate"
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleKustomizationRequested",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "81e9d8c000000000000000000000000000002329",
+      "branch": "main",
+      "agent": "aerial",
+      "effects_owner": "restate",
+      "jobs": [
+       "console"
+      ],
+      "kustomization_requests": {
+       "aerial-core": {
+        "namespace": "flux-system",
+        "requested_at": "2026-11-21T14:20:02Z"
+       }
+      }
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleRolloutProgress",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "merge_sha": "81e9d8c000000000000000000000000000002329",
+      "job_name": "aerial-core",
+      "effects_owner": "restate",
+      "deployed_jobs": [
+       "console",
+       "aerial-core"
+      ],
+      "deployed_kustomizations": [
+       "aerial-core"
+      ]
+     }
+    },
+    {
+     "object": "PRObject",
+     "handler": "HandleDeploySuccess",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2329,
+      "head_sha": "dbab232900000000000000000000000000002329",
+      "merge_sha": "81e9d8c000000000000000000000000000002329",
+      "job_name": "aerial-core",
+      "effects_owner": "restate",
+      "facts": [
+       {
+        "event": "deploy_success",
+        "repo": "azylman/aerial",
+        "pr_number": 2329,
+        "head_sha": "dbab232900000000000000000000000000002329",
+        "merge_sha": "81e9d8c000000000000000000000000000002329",
+        "target_id": "100000000000000009",
+        "status": "deployed",
+        "job_name": "aerial-core"
+       }
+      ]
+     }
+    }
+   ],
+   "want": {
+    "status": "deployed",
+    "target_id": "100000000000000009",
+    "title": "chore(deps-dev): bump the console-ui-npm group",
+    "tracked": true,
+    "deployed_jobs": [
+     "console"
+    ],
+    "rollouts": null,
+    "divergent": null,
+    "effects": [
+     {
+      "kind": "flux_reconcile",
+      "key": "azylman/aerial#2329@81e9d8c000000000000000000000000000002329:flux_reconcile"
+     },
+     {
+      "kind": "pr_fact_deploy_success",
+      "key": "azylman/aerial#2329@dbab232900000000000000000000000000002329:pr_fact_deploy_success:job=aerial-core"
+     }
+    ]
+   },
+   "row": {
+    "repo": "azylman/aerial",
+    "pr_number": 2329,
+    "agent": "aerial",
+    "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
+    "head_sha": "dbab232900000000000000000000000000002329",
+    "merge_sha": "81e9d8c000000000000000000000000000002329",
+    "target_id": "100000000000000009",
+    "status": "deployed",
+    "title": "chore(deps-dev): bump the console-ui-npm group",
+    "metadata": {
+     "jobs": [
+      "console"
+     ],
+     "started_jobs": [
+      "console"
+     ],
+     "deployed_jobs": [
+      "console"
+     ],
+     "kustomization_requests": {
+      "aerial-core": {
+       "namespace": "flux-system",
+       "requested_at": "2026-11-21T14:20:02Z"
+      }
+     },
+     "deployed_kustomizations": [
+      "aerial-core"
+     ]
+    }
+   }
+  },
+  {
+   "name": "PR without Aerial metadata stays untracked",
+   "pull_request": {
+    "repo": "azylman/aerial",
+    "pr_number": 2330,
+    "action": "opened",
+    "branch": "feat/fix-typo",
+    "head_sha": "aaaa230000000000000000000000000000002330",
+    "title": "Fix a typo",
+    "user": "octocat",
+    "body": "Plain PR"
+   },
+   "legacy": {
+    "ensure": null
+   },
+   "opened_shadow": [],
+   "opened_restate": [
+    {
+     "object": "PRObject",
+     "handler": "HandleOpened",
+     "event": {
+      "repo": "azylman/aerial",
+      "pr_number": 2330,
+      "head_sha": "aaaa230000000000000000000000000000002330",
+      "branch": "feat/fix-typo",
+      "effects_owner": "restate",
+      "facts": [
+       {
+        "event": "opened",
+        "repo": "azylman/aerial",
+        "pr_number": 2330,
+        "branch": "feat/fix-typo",
+        "head_sha": "aaaa230000000000000000000000000000002330",
+        "title": "Fix a typo",
+        "status": "open"
+       }
+      ]
+     }
+    }
+   ],
+   "lifecycle_shadow": [],
+   "lifecycle_restate": [],
+   "want": {
+    "status": "open",
+    "target_id": "",
+    "title": "",
+    "tracked": false,
+    "deployed_jobs": null,
+    "rollouts": null,
+    "divergent": null,
+    "effects": null
+   },
+   "row": null
+  }
+ ]
+}

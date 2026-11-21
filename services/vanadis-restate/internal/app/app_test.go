@@ -296,7 +296,7 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 43)
+			require.Len(t, byName["PRObject"], 44)
 			require.True(t, byName["PRObject"]["RetryReadiness"])
 			require.True(t, byName["PRObject"]["RetryFluxReconcile"])
 			require.True(t, byName["PRObject"]["HandleConflictCheck"])
@@ -316,6 +316,7 @@ func TestBindRestateServices(t *testing.T) {
 			require.True(t, byName["PRObject"]["Register"])
 			require.True(t, byName["PRObject"]["GetBuildLifecycle"])
 			require.True(t, byName["PRObject"]["HandleSynchronized"])
+			require.True(t, byName["PRObject"]["HandleSelfRegistered"])
 			require.True(t, byName["PRObject"]["HandleCheckStatus"])
 			require.True(t, byName["PRObject"]["HandleDeployFailed"])
 			require.True(t, byName["PRObject"]["HandleBuildMetadata"])

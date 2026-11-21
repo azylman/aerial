@@ -700,6 +700,38 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 	})
 }
 
+// HandleSelfRegistered applies synapse's pull_request self-registration
+// (the EnsurePRRegistered upsert, see PRState.ApplySelfRegistration). Synapse
+// journals it before the legacy write in shadow mode and sends it in the
+// restate-owned path, carrying the target legacy resolves, the title and the
+// PR-body owner. It is neither opened (no owner claim on a tracked PR, no
+// fact) nor a synchronize (the head only fills when empty, so a later
+// HandleSynchronized still sees the head change and clears head-scoped
+// state). The agent is the insert's owner seed, not a lifecycle hint, so it
+// skips loadPRState's hint.
+func (s *PRObjectService) HandleSelfRegistered(ctx restate.ObjectContext, ev PREvent) error {
+	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return nil
+	}
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil {
+		return err
+	}
+	if st == nil {
+		st = NewPRState(ev.Repo, ev.PRNumber)
+	}
+	before := snapshotIndexView(st)
+	if !st.ApplySelfRegistration(ev.Branch, ev.HeadSHA, ev.TargetID, ev.Title, ev.Agent) {
+		return nil
+	}
+	restate.Set(ctx, s.stateKey, st)
+	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
+		sendPRIndex(ctx, st, ev, lifecycle)
+	}
+	s.afterCommit(ctx, st, ev.EffectsOwner)
+	return nil
+}
+
 // HandleRolloutProgress applies one rollout-progress event. It is a
 // deploy-phase event, so merged PRs apply it: ready jobs union into
 // deployed_jobs, completed Kustomizations into deployed_kustomizations

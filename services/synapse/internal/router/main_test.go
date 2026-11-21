@@ -201,6 +201,7 @@ type mockPRRegistry struct {
 
 	ensureCalls    []prCall
 	ensureAgents   []string
+	ensureWrites   []string
 	ensureTargetID string
 	ensureErr      error
 
@@ -468,6 +469,7 @@ func (m *mockPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) 
 func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, agent string) (string, error) {
 	m.ensureCalls = append(m.ensureCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA})
 	m.ensureAgents = append(m.ensureAgents, agent)
+	m.ensureWrites = append(m.ensureWrites, targetID+"|"+strings.TrimSpace(title)+"|"+agent)
 	if err := m.checkErr(m.ensureErr); err != nil {
 		return "", err
 	}

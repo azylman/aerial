@@ -463,6 +463,7 @@ const (
 	PRHandlerDeployFailed        = "HandleDeployFailed"
 	PRHandlerBuildMetadata       = "HandleBuildMetadata"
 	PRHandlerSynchronized        = "HandleSynchronized"
+	PRHandlerSelfRegistered      = "HandleSelfRegistered"
 	PRHandlerCheckStatus         = "HandleCheckStatus"
 	// PRHandlerConflict and the handlers below are the merged
 	// decide-commit-execute verdicts and the deploy-failure deadline pair.
