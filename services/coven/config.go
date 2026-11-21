@@ -12,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -124,15 +125,6 @@ func (c *Config) ExtractBatchLimit() int {
 	return c.ExtractMaxSteps
 }
 
-func resolveFirstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
 // resolvePositiveInt prefers a positive env override, falling back to the YAML value.
 func resolvePositiveInt(env string, yamlVal int) int {
 	if n, err := strconv.Atoi(strings.TrimSpace(env)); err == nil && n > 0 {
@@ -191,18 +183,18 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 	if port == "" {
 		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-	eriURL := resolveFirstNonEmpty(getenv("ERI_URL"), ycfg.EriURL)
+	eriURL := strutil.FirstNonEmpty(getenv("ERI_URL"), ycfg.EriURL)
 	if eriURL == "" {
 		return nil, fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
-	eriLLMURL := resolveFirstNonEmpty(getenv("ERI_LLM_URL"), ycfg.EriLLMURL)
+	eriLLMURL := strutil.FirstNonEmpty(getenv("ERI_LLM_URL"), ycfg.EriLLMURL)
 	if eriLLMURL == "" {
 		return nil, fmt.Errorf("config: eri_llm_url is required in %s", cleanPath)
 	}
-	role := resolveFirstNonEmpty(getenv("COVEN_ROLE"), ycfg.Role)
-	stack := resolveFirstNonEmpty(getenv("COVEN_STACK"), getenv("STACK"), ycfg.Stack)
+	role := strutil.FirstNonEmpty(getenv("COVEN_ROLE"), ycfg.Role)
+	stack := strutil.FirstNonEmpty(getenv("COVEN_STACK"), getenv("STACK"), ycfg.Stack)
 
-	prRegisterURL := resolveFirstNonEmpty(getenv("PR_REGISTER_URL"), getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
+	prRegisterURL := strutil.FirstNonEmpty(getenv("PR_REGISTER_URL"), getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
 	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
 	rulesDir := strings.TrimSpace(ycfg.RulesDir)
 	configRepoOwner := strings.TrimSpace(ycfg.ConfigRepoOwner)
@@ -223,22 +215,22 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 		return nil, fmt.Errorf("config: ollama.num_ctx must be positive in %s", cleanPath)
 	}
 
-	databaseURL := resolveFirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(getenv, "aerial"), ycfg.DatabaseURL)
+	databaseURL := strutil.FirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(getenv, "aerial"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
-	gitHubPAT := resolveFirstNonEmpty(getenv("GITHUB_PAT"), ycfg.GitHubPAT)
-	systemChannelID := resolveFirstNonEmpty(getenv("SYSTEM_CHANNEL_ID"), ycfg.SystemChannelID)
+	gitHubPAT := strutil.FirstNonEmpty(getenv("GITHUB_PAT"), ycfg.GitHubPAT)
+	systemChannelID := strutil.FirstNonEmpty(getenv("SYSTEM_CHANNEL_ID"), ycfg.SystemChannelID)
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
 	}
-	natsURL := resolveFirstNonEmpty(getenv("NATS_URL"), ycfg.NATSURL)
-	transcriptsURL := resolveFirstNonEmpty(getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL, ycfg.IndexerURL)
+	natsURL := strutil.FirstNonEmpty(getenv("NATS_URL"), ycfg.NATSURL)
+	transcriptsURL := strutil.FirstNonEmpty(getenv("TRANSCRIPTS_URL"), ycfg.TranscriptsURL, ycfg.IndexerURL)
 	if transcriptsURL == "" && NormalizeStack(stack) == DefaultStack {
 		transcriptsURL = "http://transcripts.aerial"
 	}
-	llmEffort := resolveFirstNonEmpty(getenv("LLM_EFFORT"), ycfg.LLMEffort)
+	llmEffort := strutil.FirstNonEmpty(getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
 	authCfg := ycfg.Auth
 	if err := k8sauth.ApplyEnvOverride(&authCfg, getenv); err != nil {

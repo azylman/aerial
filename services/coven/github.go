@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/githubapi"
 )
 
 var validSkillRelPathRegex = regexp.MustCompile(`^custom-skills/(common|discord)/[a-z0-9-]+/SKILL\.md$`)
@@ -170,20 +172,17 @@ func (p *GitHubSkillPublisher) doRequest(ctx context.Context, method, endpoint s
 		bodyReader = bytes.NewReader(data)
 	}
 
-	url := endpoint
-	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
-		url = p.baseURL + endpoint
+	apiURL, path := p.baseURL, endpoint
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		apiURL, path = endpoint, ""
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	req, err := githubapi.NewRequest(ctx, apiURL, p.token, method, path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request: %w", err)
 	}
+	url := req.URL.String()
 
-	if p.token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.token)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
