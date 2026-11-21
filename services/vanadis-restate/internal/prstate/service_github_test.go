@@ -136,8 +136,16 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", EffectsOwner: EffectsOwnerRestate, AutoUpdate: policy}, wantErr: true,
 		},
 		{
-			name: "legacy cascade records intent", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "unstamped cascade executes", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{},
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
+		},
+		{
+			name: "legacy cascade is rejected", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", EffectsOwner: EffectsOwnerLegacy, AutoUpdate: policy}, wantErr: true,
+		},
+		{
+			name: "legacy rerun is rejected", handler: RepoHandlerWorkflowRerun, gh: &fakeGitHub{},
+			ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", RunID: 55, EffectsOwner: EffectsOwnerLegacy}, wantErr: true,
 		},
 		{
 			name: "restate cascade executes and forwards conflicts", handler: RepoHandlerAutoUpdate, gh: conflictGH(),
@@ -214,11 +222,6 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 	conflicted := false
 	dirty := fetchResult{pr: GitHubPR{Number: 101, State: "open", Mergeable: &conflicted, Head: GitHubPRRef{SHA: "h1"}}}
 	clean := fetchResult{pr: GitHubPR{Number: 101, State: "open", MergeableState: "clean", Head: GitHubPRRef{SHA: "h1"}}}
-	checked := func() *PRState {
-		st := registeredPR()
-		st.MarkEffectDispatched(st.EffectKeyFor(EffectGitHubConflictCheck, "h1", "", ""))
-		return st
-	}
 	ev := func(owner EffectsOwner, head string) PREvent {
 		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: head, Branch: "feat", EffectsOwner: owner, EriEffects: []EriEffect{dmEffect()}}
 	}
@@ -234,18 +237,11 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 		wantGHCalls   []string
 		wantFacts     []string
 		wantDMs       int
-		wantIntended  []string
 		wantConflict  string
 		wantSendCount int
 		wantFirstSend *sentCall
 	}{
-		{
-			name: "legacy check records intent", state: registeredPR(), ev: ev(EffectsOwnerLegacy, "h1"), gh: &fakeGitHub{},
-			wantSet: true, wantIntended: []string{"azylman/aerial#101@h1:github_conflict_check"},
-		},
-		{name: "legacy repeat is deduped", state: checked(), ev: ev(EffectsOwnerLegacy, "h1"), gh: &fakeGitHub{}},
-		{name: "legacy stale head drops", state: registeredPR(), ev: ev(EffectsOwnerLegacy, "h0"), gh: &fakeGitHub{}},
-		{name: "legacy kv failure surfaces", failGet: true, ev: ev(EffectsOwnerLegacy, "h1"), wantErr: true},
+		{name: "legacy owner is rejected", state: registeredPR(), ev: ev(EffectsOwnerLegacy, "h1"), gh: &fakeGitHub{}, wantErr: true},
 		{
 			name: "restate conflict on a registered pr publishes the conflict fact", state: registeredPR(), ev: ev(EffectsOwnerRestate, "h1"), gh: &fakeGitHub{mergeability: dirty},
 			wantSet: true, wantGHCalls: []string{"mergeability 101"}, wantFacts: []string{"conflict"}, wantConflict: "h1", wantSendCount: 1, wantFirstSend: &recheck,
@@ -292,11 +288,6 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 			}
 			require.Equal(t, tc.wantFacts, gotFacts)
 			require.Len(t, eri.Calls(), tc.wantDMs)
-			var intended []string
-			for _, e := range tc.state.IntendedEffects {
-				intended = append(intended, e.MatchKey)
-			}
-			require.Equal(t, tc.wantIntended, intended)
 			require.Equal(t, tc.wantConflict, tc.state.CollaboratorConflict)
 			sends := rec.sends.snapshot()
 			require.Len(t, sends, tc.wantSendCount)

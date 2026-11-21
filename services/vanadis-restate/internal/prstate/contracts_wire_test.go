@@ -58,10 +58,10 @@ func TestParseEffectsOwner(t *testing.T) {
 		raw  string
 		want EffectsOwner
 	}{
-		{name: "missing stamp is legacy", raw: "", want: EffectsOwnerLegacy},
+		{name: "missing stamp is restate", raw: "", want: EffectsOwnerRestate},
 		{name: "legacy stays legacy", raw: "legacy", want: EffectsOwnerLegacy},
 		{name: "restate with padding and case", raw: " RESTATE ", want: EffectsOwnerRestate},
-		{name: "unknown stamp is legacy", raw: "both", want: EffectsOwnerLegacy},
+		{name: "unknown stamp is restate", raw: "both", want: EffectsOwnerRestate},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,9 +83,10 @@ func TestPREventUnmarshalEffectsOwner(t *testing.T) {
 		wantPR    int
 		wantAgent string
 	}{
-		{name: "missing stamp decodes legacy", payload: `{"repo":"azylman/aerial","pr_number":7,"agent":"aerial"}`, wantOwner: EffectsOwnerLegacy, wantPR: 7, wantAgent: "aerial"},
+		{name: "missing stamp decodes restate", payload: `{"repo":"azylman/aerial","pr_number":7,"agent":"aerial"}`, wantOwner: EffectsOwnerRestate, wantPR: 7, wantAgent: "aerial"},
 		{name: "restate stamp decodes restate", payload: `{"repo":"azylman/aerial","pr_number":8,"effects_owner":"restate"}`, wantOwner: EffectsOwnerRestate, wantPR: 8},
-		{name: "unknown stamp decodes legacy", payload: `{"repo":"azylman/aerial","pr_number":9,"effects_owner":"synapse"}`, wantOwner: EffectsOwnerLegacy, wantPR: 9},
+		{name: "unknown stamp decodes restate", payload: `{"repo":"azylman/aerial","pr_number":9,"effects_owner":"synapse"}`, wantOwner: EffectsOwnerRestate, wantPR: 9},
+		{name: "legacy stamp decodes legacy", payload: `{"repo":"azylman/aerial","pr_number":10,"effects_owner":" Legacy "}`, wantOwner: EffectsOwnerLegacy, wantPR: 10},
 		{name: "malformed payload errors", payload: `{"pr_number":"seven"}`, wantErr: true},
 	}
 	for _, tc := range tests {
@@ -115,8 +116,9 @@ func TestRepoEventUnmarshalEffectsOwner(t *testing.T) {
 		wantOwner EffectsOwner
 		wantSHA   string
 	}{
-		{name: "missing stamp decodes legacy", payload: `{"repo":"azylman/aerial","main_sha":"abc","agent":"aerial"}`, wantOwner: EffectsOwnerLegacy, wantSHA: "abc"},
+		{name: "missing stamp decodes restate", payload: `{"repo":"azylman/aerial","main_sha":"abc","agent":"aerial"}`, wantOwner: EffectsOwnerRestate, wantSHA: "abc"},
 		{name: "restate stamp decodes restate", payload: `{"repo":"azylman/aerial","main_sha":"def","effects_owner":"Restate"}`, wantOwner: EffectsOwnerRestate, wantSHA: "def"},
+		{name: "legacy stamp decodes legacy", payload: `{"repo":"azylman/aerial","main_sha":"0a1","effects_owner":"legacy"}`, wantOwner: EffectsOwnerLegacy, wantSHA: "0a1"},
 		{name: "malformed payload errors", payload: `{"generation":"one"}`, wantErr: true},
 	}
 	for _, tc := range tests {

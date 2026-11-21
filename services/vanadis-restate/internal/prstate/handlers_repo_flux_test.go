@@ -64,23 +64,16 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 		return RepoEvent{Repo: "aerial", MainSHA: "m1", PRNumber: 7, Ref: "refs/heads/main", TargetID: "t1", EffectsOwner: owner}
 	}
 	tests := []struct {
-		name         string
-		ev           RepoEvent
-		seed         *RepoState
-		kube         *fakeKube
-		noKube       bool
-		wantErr      error
-		wantOutcome  RepoEffectOutcome
-		wantCalls    []string
-		wantEffects  []string
-		wantIntended []IntendedEffect
+		name        string
+		ev          RepoEvent
+		seed        *RepoState
+		kube        *fakeKube
+		noKube      bool
+		wantErr     error
+		wantOutcome RepoEffectOutcome
+		wantCalls   []string
+		wantEffects []string
 	}{
-		{
-			name: "legacy push records the intended dispatch", ev: push(EffectsOwnerLegacy), kube: &fakeKube{},
-			wantOutcome:  RepoEffectOutcome{Key: pushKey, Intended: &IntendedEffect{Kind: EffectFluxGitPush, EffectKey: pushKeyStr, MatchKey: "azylman/aerial#7@m1:flux_git_push", Digest: digestStrings(EffectFluxGitPush, "refs/heads/main", "t1")}},
-			wantEffects:  []string{pushKeyStr},
-			wantIntended: []IntendedEffect{{Kind: EffectFluxGitPush, EffectKey: pushKeyStr, MatchKey: "azylman/aerial#7@m1:flux_git_push", Digest: digestStrings(EffectFluxGitPush, "refs/heads/main", "t1")}},
-		},
 		{
 			name: "restate push dispatches once", ev: push(EffectsOwnerRestate), kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Executed: true},
@@ -136,11 +129,10 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 			if tc.kube != nil {
 				require.Equal(t, tc.wantCalls, tc.kube.Calls())
 			}
-			effects, intended := storedRepoEffects(t, store)
+			effects := storedRepoEffects(t, store)
 			if tc.wantErr == nil {
 				require.Equal(t, tc.wantEffects, effects)
 			}
-			require.Equal(t, tc.wantIntended, intended)
 		})
 	}
 }
@@ -185,39 +177,23 @@ func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 	mainKey := EffectKey{Repo: "azylman/aerial", HeadSHA: "s2", Kind: EffectImagePromote}
 	mainKeyStr := "azylman/aerial#0@s2:gen0:image_promote"
 	mainReconcileStr := "azylman/aerial#0@s2:gen0:flux_reconcile"
-	promoteIntent := IntendedEffect{Kind: EffectImagePromote, EffectKey: mainKeyStr, MatchKey: "azylman/aerial#0@s2:image_promote", Digest: ImagePromotionDigest([]string{"eri"})}
-	reconcileIntent := IntendedEffect{Kind: EffectFluxReconcile, EffectKey: mainReconcileStr, MatchKey: "azylman/aerial#0@s2:flux_reconcile", Digest: KustomizationRequestsDigest(requests)}
-	prIntent := IntendedEffect{Kind: EffectImagePromote, EffectKey: prKeyStr, MatchKey: "azylman/aerial#7@s1:image_promote", Digest: ImagePromotionDigest([]string{"eri", "haro"})}
 	rolloutForward := sentPR{handler: PRHandlerKustomizationRequested, ev: PREvent{
 		Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", Branch: "feat", TargetID: "t9", Jobs: []string{"eri"},
 		KustomizationRequests: requests, Facts: []pubsub.PRLifecycleEvent{promotionStarted}, EffectsOwner: EffectsOwnerRestate,
 	}}
 	failureForward := promotionFailureForward
 	tests := []struct {
-		name         string
-		ev           RepoEvent
-		seed         *RepoState
-		kube         *fakeKube
-		noKube       bool
-		wantErr      error
-		wantOutcome  RepoEffectOutcome
-		wantCalls    []string
-		wantSent     []sentPR
-		wantEffects  []string
-		wantIntended []IntendedEffect
+		name        string
+		ev          RepoEvent
+		seed        *RepoState
+		kube        *fakeKube
+		noKube      bool
+		wantErr     error
+		wantOutcome RepoEffectOutcome
+		wantCalls   []string
+		wantSent    []sentPR
+		wantEffects []string
 	}{
-		{
-			name: "legacy untracked promotion records promotion and reconcile intents", ev: mainPromotion(EffectsOwnerLegacy), kube: &fakeKube{},
-			wantOutcome:  RepoEffectOutcome{Key: mainKey, Intended: &promoteIntent, MoreIntended: []IntendedEffect{reconcileIntent}},
-			wantEffects:  []string{mainKeyStr, mainReconcileStr},
-			wantIntended: []IntendedEffect{promoteIntent, reconcileIntent},
-		},
-		{
-			name: "legacy pr promotion records only the promotion intent", ev: prPromotion(EffectsOwnerLegacy), kube: &fakeKube{},
-			wantOutcome:  RepoEffectOutcome{Key: prKey, Intended: &prIntent, MoreIntended: []IntendedEffect{}},
-			wantEffects:  []string{prKeyStr},
-			wantIntended: []IntendedEffect{prIntent},
-		},
 		{
 			name: "restate pr promotion writes every tag then forwards the rollout", ev: prPromotion(EffectsOwnerRestate), kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: prKey, Executed: true, Forwards: 1, Promoted: []string{"eri", "haro"}},
@@ -310,9 +286,8 @@ func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 				require.Equal(t, tc.wantCalls, tc.kube.Calls())
 			}
 			require.Equal(t, tc.wantSent, prs.calls)
-			effects, intended := storedRepoEffects(t, store)
+			effects := storedRepoEffects(t, store)
 			require.Equal(t, tc.wantEffects, effects)
-			require.Equal(t, tc.wantIntended, intended)
 		})
 	}
 }
