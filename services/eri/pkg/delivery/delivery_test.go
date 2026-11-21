@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
@@ -673,79 +674,208 @@ func TestIsSnowflake(t *testing.T) {
 	}
 }
 
-type messageSanitizationTestCase struct {
-	name       string
-	token      string
-	rawText    string
-	wantSubstr string
-	wantAbsent string
+const dummyOutboundSecret = "plain-dummy-outbound-secret"
+
+func registerDummyOutboundSecret(t *testing.T) {
+	t.Helper()
+	sanitizer.RegisterSensitiveTokens(dummyOutboundSecret)
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
 }
 
-func runMessageSanitizationTest(t *testing.T, tc messageSanitizationTestCase, isEdit bool) {
-	t.Helper()
-	if tc.token != "" {
-		sanitizer.RegisterSensitiveTokens(tc.token)
-		defer sanitizer.ResetSensitiveTokensForTest()
-	}
+type outboundCapture struct {
+	mu      sync.Mutex
+	payload string
+}
 
-	var capturedPayload string
+func (c *outboundCapture) last() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.payload
+}
+
+func newCaptureSession(responseBody string) (*discordgo.Session, *outboundCapture) {
+	c := &outboundCapture{}
 	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
 		if req.Body != nil {
 			b, _ := io.ReadAll(req.Body)
-			capturedPayload = string(b)
+			c.mu.Lock()
+			c.payload = string(b)
+			c.mu.Unlock()
 		}
-		return mockJSONResponse(http.StatusOK, `{"id":"msg-san","channel_id":"ch-san","content":"ok"}`)
+		return mockJSONResponse(http.StatusOK, responseBody)
 	})
+	return sess, c
+}
 
-	if isEdit {
-		if err := EditMessage(sess, "ch-san", "msg-san", tc.rawText); err != nil {
-			t.Fatalf("EditMessage failed: %v", err)
-		}
-	} else {
-		if err := SendMessageWithAttachments(sess, "ch-san", tc.rawText, nil); err != nil {
-			t.Fatalf("SendMessageWithAttachments failed: %v", err)
-		}
+func assertRedactedPayload(t *testing.T, payload, wantSubstr string) {
+	t.Helper()
+	if !strings.Contains(payload, wantSubstr) {
+		t.Errorf("payload missing %q: %s", wantSubstr, payload)
 	}
-	if !strings.Contains(capturedPayload, tc.wantSubstr) {
-		t.Errorf("expected payload to contain %q, got: %s", tc.wantSubstr, capturedPayload)
-	}
-	if strings.Contains(capturedPayload, tc.wantAbsent) {
-		t.Errorf("expected payload to NOT contain %q, got: %s", tc.wantAbsent, capturedPayload)
+	if strings.Contains(payload, dummyOutboundSecret) {
+		t.Errorf("payload leaked secret: %s", payload)
 	}
 }
 
-func TestSendMessageWithAttachments_Sanitization_TableDriven(t *testing.T) {
-	tests := []messageSanitizationTestCase{
-		{
-			name:       "sensitive token redacted from outbound message",
-			token:      "discord_outbound_secret_token_12345",
-			rawText:    "here is the key: discord_outbound_secret_token_12345",
-			wantSubstr: "here is the key: [REDACTED]",
-			wantAbsent: "discord_outbound_secret_token_12345",
-		},
-	}
+const (
+	messageResponse = `{"id":"msg-1","channel_id":"ch-1","content":"ok"}`
+	threadResponse  = `{"id":"th-1","type":11,"name":"t"}`
+)
 
+func TestRedactOutbound(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"clean text passes through", "deploy finished", "deploy finished"},
+		{"registered secret masked", "key " + dummyOutboundSecret + " here", "key [REDACTED] here"},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runMessageSanitizationTest(t, tc, false)
+			if got := RedactOutbound(tc.input); got != tc.want {
+				t.Errorf("RedactOutbound(%q) = %q, want %q", tc.input, got, tc.want)
+			}
 		})
 	}
 }
 
-func TestEditMessage_Sanitization_TableDriven(t *testing.T) {
-	tests := []messageSanitizationTestCase{
-		{
-			name:       "sensitive token redacted from edited message",
-			token:      "discord_edit_secret_token_67890",
-			rawText:    "updated key: discord_edit_secret_token_67890",
-			wantSubstr: "updated key: [REDACTED]",
-			wantAbsent: "discord_edit_secret_token_67890",
-		},
+func TestSendMessageWithAttachments_Redaction(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name       string
+		text       string
+		wantSubstr string
+	}{
+		{"secret masked in message", "here is the key: " + dummyOutboundSecret, "here is the key: [REDACTED]"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runMessageSanitizationTest(t, tc, true)
+			sess, c := newCaptureSession(messageResponse)
+			if err := SendMessageWithAttachments(sess, "ch-1", tc.text, nil); err != nil {
+				t.Fatalf("SendMessageWithAttachments: %v", err)
+			}
+			assertRedactedPayload(t, c.last(), tc.wantSubstr)
+		})
+	}
+}
+
+func TestEditMessage_Redaction(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name       string
+		text       string
+		wantSubstr string
+	}{
+		{"secret masked in edit", "updated key: " + dummyOutboundSecret, "updated key: [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sess, c := newCaptureSession(messageResponse)
+			if err := EditMessage(sess, "ch-1", "msg-1", tc.text); err != nil {
+				t.Fatalf("EditMessage: %v", err)
+			}
+			assertRedactedPayload(t, c.last(), tc.wantSubstr)
+		})
+	}
+}
+
+func TestSendSingleMessage(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name       string
+		nilSession bool
+		channelID  string
+		text       string
+		wantID     string
+		wantErr    bool
+		wantSubstr string
+	}{
+		{"nil session", true, "ch-1", "hi", "", true, ""},
+		{"empty channel", false, "", "hi", "", true, ""},
+		{"secret masked in status message", false, "ch-1", "status " + dummyOutboundSecret, "msg-1", false, "status [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sess, c := newCaptureSession(messageResponse)
+			if tc.nilSession {
+				sess = nil
+			}
+			id, err := SendSingleMessage(sess, tc.channelID, tc.text)
+			if (err != nil) != tc.wantErr || id != tc.wantID {
+				t.Fatalf("SendSingleMessage = (%q, %v), want (%q, err=%v)", id, err, tc.wantID, tc.wantErr)
+			}
+			if tc.wantSubstr != "" {
+				assertRedactedPayload(t, c.last(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestStartMessageThread(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name       string
+		nilSession bool
+		title      string
+		wantID     string
+		wantErr    bool
+		wantSubstr string
+	}{
+		{"nil session", true, "t", "", true, ""},
+		{"secret masked in thread title", false, "Title " + dummyOutboundSecret, "th-1", false, "Title [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sess, c := newCaptureSession(threadResponse)
+			if tc.nilSession {
+				sess = nil
+			}
+			ch, err := StartMessageThread(sess, "ch-1", "msg-1", tc.title)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("StartMessageThread err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantID != "" && (ch == nil || ch.ID != tc.wantID) {
+				t.Fatalf("StartMessageThread channel = %+v, want ID %q", ch, tc.wantID)
+			}
+			if tc.wantSubstr != "" {
+				assertRedactedPayload(t, c.last(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestStartThread(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name       string
+		nilSession bool
+		title      string
+		wantID     string
+		wantErr    bool
+		wantSubstr string
+	}{
+		{"nil session", true, "t", "", true, ""},
+		{"secret masked in standalone thread title", false, "Routine " + dummyOutboundSecret, "th-1", false, "Routine [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sess, c := newCaptureSession(threadResponse)
+			if tc.nilSession {
+				sess = nil
+			}
+			ch, err := StartThread(sess, "ch-1", tc.title)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("StartThread err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantID != "" && (ch == nil || ch.ID != tc.wantID) {
+				t.Fatalf("StartThread channel = %+v, want ID %q", ch, tc.wantID)
+			}
+			if tc.wantSubstr != "" {
+				assertRedactedPayload(t, c.last(), tc.wantSubstr)
+			}
 		})
 	}
 }

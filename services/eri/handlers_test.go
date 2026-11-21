@@ -891,11 +891,11 @@ func runHandleTasksEphemeralCase(t *testing.T, now time.Time) {
 func TestHandleTasks(t *testing.T) {
 	store := dbtest.NewFakeStore()
 	now := time.Now().UTC()
-	longPrompt := strings.Repeat("A", 600) + " ghp_123456789012345678901234567890123456"
+	longPrompt := strings.Repeat("A", 600) + " plain-internal-detail"
 	_ = store.InsertMessage(context.Background(), db.Message{
 		ID: "msg-test-task", ThreadID: "thread-1", AuthorID: "user-1",
-		AuthorName: "Tester with token ghp_999999999999999999999999999999999999",
-		Content:    "Secret token ghp_123456789012345678901234567890123456 in prompt " + longPrompt,
+		AuthorName: "Tester",
+		Content:    "Internal prompt " + longPrompt,
 		Status:     db.StatusProcessing, CreatedAt: now, UpdatedAt: now,
 	})
 
@@ -916,8 +916,8 @@ func TestHandleTasks(t *testing.T) {
 	}
 
 	task := resp.Tasks[0]
-	if strings.Contains(task.Prompt, "ghp_123456") || strings.Contains(task.Summary, "ghp_123456") || task.Summary == "" || strings.Contains(task.AuthorName, "ghp_999999") {
-		t.Errorf("token leaked or summary empty: %+v", task)
+	if task.Prompt != "Internal prompt "+longPrompt || task.Summary == "" || task.AuthorName != "Tester" {
+		t.Errorf("internal task fields altered or summary empty: %+v", task)
 	}
 	if len(task.Prompt) < 600 {
 		t.Errorf("prompt unexpectedly truncated: len=%d, text=%s", len(task.Prompt), task.Prompt)

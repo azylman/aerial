@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 func TestPureHelpers_IsScheduleStale(t *testing.T) {
@@ -398,38 +396,6 @@ func TestFormatCronDescription(t *testing.T) {
 	}
 }
 
-func TestSanitizeScheduleTextAndFormatters(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	sanitizer.RegisterSensitiveTokens(
-		"ghp_1234567890abcdefghijklmnopqrstuvwxyz",
-		"github_pat_11AAAAAAA_bbbbbbbbbbbbbb",
-		"Bearer mysecrettoken123456789",
-		"supersecretpassword",
-		"my_top_secret_token",
-	)
-	tests := []struct {
-		name     string
-		input    string
-		wantText string
-	}{
-		{"empty string", "", ""},
-		{"clean string", "hello world", "hello world"},
-		{"github pat classic", "token ghp_1234567890abcdefghijklmnopqrstuvwxyz", "token [REDACTED]"},
-		{"github pat fine grained", "my github_pat_11AAAAAAA_bbbbbbbbbbbbbb token", "my [REDACTED] token"},
-		{"bearer token", "Authorization: Bearer mysecrettoken123456789", "Authorization: [REDACTED]"},
-		{"key value secret assignment", "API_KEY: supersecretpassword", "API_KEY: [REDACTED]"},
-		{"key value token assignment", "TOKEN=my_top_secret_token", "TOKEN=[REDACTED]"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := SanitizeScheduleText(tc.input)
-			if got != tc.wantText {
-				t.Errorf("SanitizeScheduleText(%q) = %q, want %q", tc.input, got, tc.wantText)
-			}
-		})
-	}
-}
-
 type formatScheduleTestCase struct {
 	name          string
 	cronCount     int
@@ -447,8 +413,8 @@ func assertFormatCronSchedules(t *testing.T, tc formatScheduleTestCase, formatte
 		if formattedCrons[0].ChannelID != tc.wantChannelID || formattedCrons[0].TargetID != tc.wantChannelID {
 			t.Errorf("channel/target id mismatch: %v", formattedCrons[0])
 		}
-		if strings.Contains(formattedCrons[0].TitlePrefix, "ghp_") || strings.Contains(formattedCrons[0].Prompt, "ghp_") {
-			t.Errorf("cron text not sanitized: %v", formattedCrons[0])
+		if formattedCrons[0].TitlePrefix != "Daily Report" || formattedCrons[0].Prompt != "Check the build queue" {
+			t.Errorf("cron text altered: %v", formattedCrons[0])
 		}
 		if formattedCrons[0].CronDescription == "" {
 			t.Errorf("cron description missing")
@@ -461,8 +427,8 @@ func assertFormatHeartbeatSchedules(t *testing.T, tc formatScheduleTestCase, for
 	if len(formattedHBs) != tc.hbCount {
 		t.Fatalf("FormatHeartbeatSchedulesWithDesc got len=%d, want %d", len(formattedHBs), tc.hbCount)
 	}
-	if tc.hbCount > 0 && strings.Contains(formattedHBs[0].Prompt, "secrettoken") {
-		t.Errorf("heartbeat text not sanitized: %v", formattedHBs[0])
+	if tc.hbCount > 0 && formattedHBs[0].Prompt != "Heartbeat check flight status" {
+		t.Errorf("heartbeat text altered: %v", formattedHBs[0])
 	}
 }
 
@@ -471,8 +437,8 @@ func assertFormatOneShotSchedules(t *testing.T, tc formatScheduleTestCase, forma
 	if len(formattedOS) != tc.oneShotCount {
 		t.Fatalf("FormatOneShotSchedulesJSON got len=%d, want %d", len(formattedOS), tc.oneShotCount)
 	}
-	if tc.oneShotCount > 0 && strings.Contains(formattedOS[0].Prompt, "secrettoken") {
-		t.Errorf("oneshot text not sanitized: %v", formattedOS[0])
+	if tc.oneShotCount > 0 && formattedOS[0].Prompt != "Remind about laundry" {
+		t.Errorf("oneshot text altered: %v", formattedOS[0])
 	}
 }
 
@@ -485,9 +451,9 @@ func runFormatScheduleCase(t *testing.T, tc formatScheduleTestCase) {
 		crons = append(crons, CronSchedule{
 			ID:          "cron-1",
 			TargetID:    tc.wantChannelID,
-			TitlePrefix: "Report GITHUB_PAT=ghp_1234567890abcdef",
+			TitlePrefix: "Daily Report",
 			CronExpr:    "0 9 * * 1-5",
-			Prompt:      "Check ghp_secret",
+			Prompt:      "Check the build queue",
 			Timezone:    "America/Los_Angeles",
 			NextRunAt:   time.Now().UTC(),
 			Enabled:     true,
@@ -500,7 +466,7 @@ func runFormatScheduleCase(t *testing.T, tc formatScheduleTestCase) {
 			TargetID:    tc.wantChannelID,
 			TitlePrefix: "HB Alert",
 			CronExpr:    "*/5 * * * *",
-			Prompt:      "Heartbeat Bearer secrettoken123456",
+			Prompt:      "Heartbeat check flight status",
 			Timezone:    "UTC",
 			Effort:      "high",
 			NextRunAt:   time.Now().UTC(),
@@ -511,7 +477,7 @@ func runFormatScheduleCase(t *testing.T, tc formatScheduleTestCase) {
 		oneshots = append(oneshots, OneShotSchedule{
 			ID:       "os-1",
 			ThreadID: tc.wantChannelID,
-			Prompt:   "Remind Bearer secrettoken123456",
+			Prompt:   "Remind about laundry",
 			RunAt:    time.Now().UTC(),
 			Effort:   "medium",
 		})
@@ -523,8 +489,6 @@ func runFormatScheduleCase(t *testing.T, tc formatScheduleTestCase) {
 }
 
 func TestFormatScheduleHelpers(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	sanitizer.RegisterSensitiveTokens("ghp_1234567890abcdef", "ghp_secret", "secrettoken123456")
 	tests := []formatScheduleTestCase{
 		{"empty slices", 0, 0, 0, ""},
 		{"populated slices", 1, 1, 1, "chan-123"},

@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 )
 
 // ChannelSnapshot holds immutable channel metadata to avoid cross-goroutine pointer races.
@@ -542,7 +543,7 @@ func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now ti
 	if !ShouldCreateThread(ok && snap.IsThread, policy.Mode) {
 		return channelID
 	}
-	threadTitle := FormatThreadTitle(title, prompt, now)
+	threadTitle := delivery.RedactOutbound(FormatThreadTitle(title, prompt, now))
 	if p.createThreadFn != nil {
 		if tid, err := p.createThreadFn(channelID, threadTitle); err == nil && tid != "" {
 			return tid
@@ -550,7 +551,7 @@ func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now ti
 		return channelID
 	}
 	if sess != nil && sess.Token != "" {
-		if ch, err := sess.ThreadStart(channelID, threadTitle, discordgo.ChannelTypeGuildPublicThread, 1440); err == nil && ch != nil && ch.ID != "" {
+		if ch, err := delivery.StartThread(sess, channelID, threadTitle); err == nil && ch != nil && ch.ID != "" {
 			CacheDiscordChannel(ch)
 			return ch.ID
 		}

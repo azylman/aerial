@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -67,7 +68,7 @@ func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral},
+		Data: &discordgo.InteractionResponseData{Content: delivery.RedactOutbound(content), Flags: discordgo.MessageFlagsEphemeral},
 	}); err != nil {
 		log.Printf("[Interactions] Failed to respond to /quota: %v", err)
 	}
@@ -86,6 +87,7 @@ func (r *Router) handleStatus(ctx context.Context, s *discordgo.Session, i *disc
 		"**Runtime**: %s\n**Deployment**: %s\n**Memory**: %d facts recorded • *Latest: %s*\n**Next Action**: %s",
 		runtimeStr, deployStr, factCount, latestFactStr, nextActionStr,
 	)
+	content = delivery.RedactOutbound(content)
 
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -284,6 +286,7 @@ func (r *Router) handleRotate(ctx context.Context, s *discordgo.Session, i *disc
 		msg += fmt.Sprintf(" Initial topic focus: %q.", topic)
 	}
 
+	msg = delivery.RedactOutbound(msg)
 	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: &msg,
 	}); err != nil {
@@ -449,7 +452,7 @@ func (r *Router) trackDeployProgress(ctx context.Context, s *discordgo.Session, 
 	}
 
 	if err := r.applyChannelPolicyUpdate(pollerCtx, channelID, key, val); err != nil {
-		errMsg := fmt.Sprintf("🚨 Failed to apply GitOps update for <#%s>: %v", channelID, err)
+		errMsg := delivery.RedactOutbound(fmt.Sprintf("🚨 Failed to apply GitOps update for <#%s>: %v", channelID, err))
 		if _, editErr := s.InteractionResponseEdit(interaction, &discordgo.WebhookEdit{Content: &errMsg}); editErr != nil {
 			log.Printf("[Interactions] Failed to edit deploy progress error: %v", editErr)
 		}
