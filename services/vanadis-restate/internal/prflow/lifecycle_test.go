@@ -678,6 +678,9 @@ func TestFlow_NoPRTurnAction(t *testing.T) {
 	pr := func(status string, prNumber int) model.VanadisChunk {
 		return model.VanadisChunk{ID: "c1", Mode: "pr", Status: status, PRNumber: prNumber}
 	}
+	act := func(status string, prNumber int) model.VanadisChunk {
+		return model.VanadisChunk{ID: "c1", Mode: "action", Status: status, PRNumber: prNumber, StallNudges: 1}
+	}
 	tests := []struct {
 		name        string
 		chunk       model.VanadisChunk
@@ -698,7 +701,20 @@ func TestFlow_NoPRTurnAction(t *testing.T) {
 		{"ci remediation dispatch ignored", pr("running", 0), "running", "vanadis-c1-cifail-abc123-1", NoPRActionNone},
 		{"conflict remediation dispatch ignored", pr("running", 0), "running", "vanadis-conflict-c1-abc123", NoPRActionNone},
 		{"other chunk resume id ignored", pr("running", 0), "running", "vanadis-c2-nopr-resume-1", NoPRActionNone},
-		{"action chunk ignored", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running"}, "running", "vanadis-c1-turn-0", NoPRActionNone},
+		{"action launch turn resumes", act("running", 0), "running", "vanadis-c1-turn-1", NoPRActionResume},
+		{"action resume below cap resumes", act("running", 0), "running", "vanadis-c1-turn-1-resume-11", NoPRActionResume},
+		{"action last resume fails", act("running", 0), "running", "vanadis-c1-turn-1-resume-12", NoPRActionFailAction},
+		{"action repair pr opened resumes", act("pr_opened", 7), "running", "vanadis-c1-turn-1", NoPRActionResume},
+		{"action repair deploying resumes", act("deploying", 7), "running", "vanadis-c1-turn-1-resume-2", NoPRActionResume},
+		{"action repair deploy failed at cap fails", act("deploy_failed", 7), "running", "vanadis-c1-turn-1-resume-12", NoPRActionFailAction},
+		{"action pr status without pr ignored", act("pr_opened", 0), "running", "vanadis-c1-turn-1", NoPRActionNone},
+		{"completed action ignored", act("completed", 0), "running", "vanadis-c1-turn-1", NoPRActionNone},
+		{"failed action ignored", act("failed", 0), "running", "vanadis-c1-turn-1-resume-12", NoPRActionNone},
+		{"completed action with pr ignored", act("completed", 7), "running", "vanadis-c1-turn-1", NoPRActionNone},
+		{"action on failed build ignored", act("running", 0), "failed", "vanadis-c1-turn-1", NoPRActionNone},
+		{"action stale generation ignored", act("running", 0), "running", "vanadis-c1-turn-0", NoPRActionNone},
+		{"action ci remediation ignored", act("running", 0), "running", "vanadis-c1-cifail-abc-1", NoPRActionNone},
+		{"action no-pr resume id ignored", act("running", 0), "running", "vanadis-c1-nopr-resume-1", NoPRActionNone},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -885,6 +901,76 @@ func TestFlow_ResumeNoPRChunk(t *testing.T) {
 			require.NotNil(t, eri.lastDispatch)
 			assert.Equal(t, "vanadis-c1-nopr-resume-1", eri.lastDispatch.ID)
 			assert.False(t, eri.lastDispatch.SkipIfActive)
+		})
+	}
+}
+
+func TestFlow_NextActionResume(t *testing.T) {
+	t.Parallel()
+	chunk := model.VanadisChunk{ID: "c1", Mode: "action", StallNudges: 2}
+	tests := []struct {
+		name       string
+		dispatchID string
+		wantK      int
+		wantOK     bool
+	}{
+		{"launch turn yields first resume", "vanadis-c1-turn-2", 1, true},
+		{"resume eleven yields last resume", "vanadis-c1-turn-2-resume-11", 12, true},
+		{"last resume yields none", "vanadis-c1-turn-2-resume-12", 0, false},
+		{"stale generation yields none", "vanadis-c1-turn-1", 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			k, ok := NextActionResume(chunk, tc.dispatchID)
+			assert.Equal(t, tc.wantK, k)
+			assert.Equal(t, tc.wantOK, ok)
+		})
+	}
+}
+
+func TestFlow_ResumeActionChunk(t *testing.T) {
+	t.Parallel()
+	bld := &model.VanadisBuild{ID: "b1", ThreadID: "th-1", Title: "Build", Objective: "Objective", Status: "running"}
+	chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", ChunkIndex: 0, Mode: "action", Status: "running", StallNudges: 1, Title: "Chunk 1", Instructions: "Verify it live"}}
+	tests := []struct {
+		name         string
+		k            int
+		dispatchErr  error
+		widgetErr    error
+		wantErr      bool
+		wantID       string
+		wantPrefix   string
+		wantBanner   string
+		wantNoWidget bool
+	}{
+		{name: "first resume dispatched", k: 1, wantID: "vanadis-c1-turn-1-resume-1", wantPrefix: "[VANADIS AUTOMATIC RESUME 1/12]\n", wantBanner: "Chunk 1 turn ended without complete_chunk — automatic resume 1/12 dispatched"},
+		{name: "last resume dispatched", k: 12, wantID: "vanadis-c1-turn-1-resume-12", wantPrefix: "[VANADIS AUTOMATIC RESUME 12/12]\n", wantBanner: "Chunk 1 turn ended without complete_chunk — automatic resume 12/12 dispatched"},
+		{name: "dispatch error propagates", k: 3, dispatchErr: errors.New("dispatch unavailable"), wantErr: true, wantID: "vanadis-c1-turn-1-resume-3", wantPrefix: "[VANADIS AUTOMATIC RESUME 3/12]\n", wantNoWidget: true},
+		{name: "widget error swallowed", k: 2, widgetErr: errors.New("widget unavailable"), wantID: "vanadis-c1-turn-1-resume-2", wantPrefix: "[VANADIS AUTOMATIC RESUME 2/12]\n", wantBanner: "Chunk 1 turn ended without complete_chunk — automatic resume 2/12 dispatched"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &mockEriClient{
+				dispatchFn: func(context.Context, executor.BrainDispatchRequest) error { return tc.dispatchErr },
+				widgetFn:   func(context.Context, executor.StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
+			}
+			f := NewFlow(&checkStatusSpyStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "token", nil))
+			err := f.ResumeActionChunk(context.Background(), bld, chunks, 0, tc.k)
+			assert.Equal(t, tc.wantErr, err != nil)
+			require.NotNil(t, eri.lastDispatch)
+			assert.Equal(t, tc.wantID, eri.lastDispatch.ID)
+			assert.Equal(t, "vanadis-c1", eri.lastDispatch.SessionID)
+			assert.False(t, eri.lastDispatch.SkipIfActive)
+			assert.True(t, strings.HasPrefix(eri.lastDispatch.Prompt, tc.wantPrefix), eri.lastDispatch.Prompt)
+			assert.Contains(t, eri.lastDispatch.Prompt, "Verify it live")
+			if tc.wantNoWidget {
+				assert.Nil(t, eri.lastWidget)
+				return
+			}
+			require.NotNil(t, eri.lastWidget)
+			assert.Contains(t, eri.lastWidget.Banner, tc.wantBanner)
 		})
 	}
 }

@@ -81,6 +81,13 @@ func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 		{name: "out of range index error", chunks: chunks, activeIdx: 5, wantErr: true},
 		{name: "first chunk prompt", chunks: chunks, activeIdx: 0, wantPart: "=== Active Chunk (Chunk 1 of 2) ==="},
 		{name: "action chunk prompt", chunks: chunks, activeIdx: 1, wantPart: "=== Active Chunk (Chunk 2 of 2) ==="},
+		{name: "action chunk states verdict contract", chunks: chunks, activeIdx: 1, wantPart: `This chunk completes ONLY when you call complete_chunk(chunk_id="c-2", dispatch_id="vanadis-c-2-turn-0", summary="<PASS evidence>")`},
+		{name: "action chunk states resume cap", chunks: chunks, activeIdx: 1, wantPart: "Vanadis resumes it automatically (up to 12 times) and then fails it as RESUMABLE."},
+		{name: "action chunk states turn budget", chunks: chunks, activeIdx: 1, wantPart: "Turns stop at about 1h. Wait at most 45 min per turn"},
+		{name: "action chunk states repair pr step", chunks: chunks, activeIdx: 1, wantPart: "is a step, not the verdict: after it deploys, re-verify live and then call complete_chunk."},
+		{name: "action chunk states resumable failure", chunks: chunks, activeIdx: 1, wantPart: `call fail_chunk(chunk_id="c-2", dispatch_id="vanadis-c-2-turn-0", reason="RESUMABLE: <blocker>")`},
+		{name: "action chunk contract finishes with verdict", chunks: chunks, activeIdx: 1, wantPart: "=== Mandatory Execution Contract ===\n1. Execute chunk instructions directly in this turn.\n2. Finish only with complete_chunk(chunk_id=\"c-2\", dispatch_id=\"vanadis-c-2-turn-0\", summary=\"<PASS evidence>\").\n"},
+		{name: "pr chunk contract submits pr", chunks: chunks, activeIdx: 0, wantPart: "2. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk c-1`.\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -454,6 +461,52 @@ func TestFormatNoPRResumePrompt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatNoPRResumePrompt(tc.chunk, tc.chunkPrompt)
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+		})
+	}
+}
+
+func TestFormatActionResumePrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		chunk        model.VanadisChunk
+		chunkPrompt  string
+		k            int
+		wantPrefix   string
+		wantContains []string
+	}{
+		{
+			name:        "first resume",
+			chunk:       model.VanadisChunk{ID: "c1", StallNudges: 1},
+			chunkPrompt: "ORIGINAL CHUNK PROMPT",
+			k:           1,
+			wantPrefix:  "[VANADIS AUTOMATIC RESUME 1/12]\nYour previous turn for action chunk c1 ended without calling complete_chunk. Dispatch ID for this turn: vanadis-c1-turn-1-resume-1 ",
+			wantContains: []string{
+				"Continue from your checkpoint (/tmp/vanadis-c1/checkpoint.md",
+				`complete_chunk(chunk_id="c1", dispatch_id="vanadis-c1-turn-1-resume-1", summary="<PASS evidence>")`,
+				"Wait at most 45 min per turn",
+				"is a step, not the verdict",
+				`fail_chunk(chunk_id="c1", dispatch_id="vanadis-c1-turn-1-resume-1", reason="RESUMABLE: <blocker>")`,
+				"The original chunk instructions follow.\n\nORIGINAL CHUNK PROMPT",
+			},
+		},
+		{
+			name:         "trims chunk id on last resume",
+			chunk:        model.VanadisChunk{ID: " c2 "},
+			chunkPrompt:  "P",
+			k:            12,
+			wantPrefix:   "[VANADIS AUTOMATIC RESUME 12/12]\nYour previous turn for action chunk c2 ended",
+			wantContains: []string{"Dispatch ID for this turn: vanadis-c2-turn-0-resume-12 ", "--vanadis-chunk c2)"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatActionResumePrompt(tc.chunk, tc.chunkPrompt, tc.k, 12)
+			assert.True(t, strings.HasPrefix(got, tc.wantPrefix), got)
 			for _, want := range tc.wantContains {
 				assert.Contains(t, got, want)
 			}
