@@ -103,6 +103,9 @@ func TestRemoteQuotaProvider_NilSafetyAndDefaultURL(t *testing.T) {
 
 	defaultProvider := NewRemoteQuotaProvider("")
 	assert.Equal(t, "http://eri-restate-health:4028", defaultProvider.eriRestateURL)
+
+	malformedProvider := NewRemoteQuotaProvider("http://bad\x7fhost")
+	assert.Nil(t, malformedProvider.LatestQuotaGroups())
 }
 
 type remoteLLMCase struct {

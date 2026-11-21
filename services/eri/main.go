@@ -502,7 +502,7 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 	case <-ctx.Done():
 		log.Println("Shutting down Aerial Brain gracefully...")
 		// ctx is already canceled here; the drain gets its own grace period.
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), httpShutdownDrain)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP shutdown error: %v", err)
@@ -512,7 +512,7 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 	case err := <-errChan:
 		return err
 	case err := <-leaderErrCh:
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), httpShutdownDrain)
 		defer shutdownCancel()
 		return errors.Join(err, srv.Shutdown(shutdownCtx))
 	}
@@ -724,3 +724,7 @@ func main() {
 func prepareReloadCandidate(candidate *config.Config, options *reloadConfigOptions) error {
 	return options.reloadSupplier(candidate)
 }
+
+// httpShutdownDrain must stay below the pod terminationGracePeriodSeconds
+// (30s default) so in-flight voice SSE streams survive a roll.
+const httpShutdownDrain = 25 * time.Second
