@@ -18,6 +18,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
+
+	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // FluxForwarder is the journaled Flux-forward boundary. Implementations
@@ -271,4 +276,127 @@ func HandleDeployEvent(ctx context.Context, s *PRState, ev PREvent, fwd FluxForw
 	syncHeadSHA(s, ev.HeadSHA)
 	out.Dispatched = true
 	return out, nil
+}
+
+// DefaultDeployFailureDeadline bounds how long a restate-owned deploy
+// attempt may keep failing before PRObject declares deploy_failed. It
+// replaces synapse's NumDelivered>=5 final-attempt rule for restate-owned
+// events, whose JetStream retries run on the longer restate backoff.
+const DefaultDeployFailureDeadline = 15 * time.Minute
+
+// PendingDeployFailure is one armed deploy-failure deadline: the attempt's
+// SHAs and gate generation, the newest failure banner, and the rendered
+// deploy_failed facts the deadline publishes.
+type PendingDeployFailure struct {
+	Seq        uint64
+	HeadSHA    string
+	MergeSHA   string
+	Generation uint64
+	Banner     string
+	Facts      []pubsub.PRLifecycleEvent
+}
+
+// DeployFailureDeadlineRequest is the delayed HandleDeployFailureDeadline
+// input naming the deadline it fires.
+type DeployFailureDeadlineRequest struct {
+	Seq uint64 `json:"seq"`
+}
+
+// ArmDeployFailure arms a deploy-failure deadline for ev and returns its
+// sequence number. An already-armed deadline keeps its timer and only
+// refreshes the banner and facts to the newest failure (armed false).
+func (s *PRState) ArmDeployFailure(ev PREvent) (uint64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	if p := s.PendingDeployFailure; p != nil {
+		if b := strings.TrimSpace(ev.Banner); b != "" {
+			p.Banner = b
+		}
+		if len(ev.Facts) > 0 {
+			p.Facts = append([]pubsub.PRLifecycleEvent(nil), ev.Facts...)
+		}
+		return p.Seq, false
+	}
+	s.DeployFailureSeq++
+	s.PendingDeployFailure = &PendingDeployFailure{
+		Seq:        s.DeployFailureSeq,
+		HeadSHA:    strings.TrimSpace(ev.HeadSHA),
+		MergeSHA:   strings.TrimSpace(ev.MergeSHA),
+		Generation: s.GateGeneration,
+		Banner:     strings.TrimSpace(ev.Banner),
+		Facts:      append([]pubsub.PRLifecycleEvent(nil), ev.Facts...),
+	}
+	return s.DeployFailureSeq, true
+}
+
+// DisarmDeployFailure cancels any armed deadline: deploy progress, a
+// recorded deploy outcome, a head move, or a close supersedes the attempt.
+func (s *PRState) DisarmDeployFailure() {
+	if s != nil {
+		s.PendingDeployFailure = nil
+	}
+}
+
+// TakeDeployFailure disarms and returns the armed deadline when seq names it
+// and its gate generation is still current. A stale seq leaves a newer
+// deadline armed; a moved generation disarms it without firing.
+func (s *PRState) TakeDeployFailure(seq uint64) (*PendingDeployFailure, bool) {
+	if s == nil || s.PendingDeployFailure == nil || s.PendingDeployFailure.Seq != seq {
+		return nil, false
+	}
+	p := s.PendingDeployFailure
+	s.PendingDeployFailure = nil
+	return p, p.Generation == s.GateGeneration
+}
+
+// HandleDeployAttemptFailed records one failed restate-owned deploy attempt
+// (image resolve, promotion, or reconcile-request record) and arms a bounded
+// deploy-failure deadline as a delayed self-send; the deadline, not a
+// delivery count, decides deploy_failed. Legacy-owned attempts are ignored:
+// synapse's final-attempt rule still owns them and journals the outcome
+// through HandleDeployFailed.
+func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, ev PREvent) error {
+	if ParseEffectsOwner(string(ev.EffectsOwner)) != EffectsOwnerRestate || NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return nil
+	}
+	st, err := s.loadOrCreatePRState(ctx, ev)
+	if err != nil {
+		return err
+	}
+	if st.ApplyDeployEvent(ev) != DispositionApply {
+		return nil
+	}
+	seq, armed := st.ArmDeployFailure(ev)
+	restate.Set(ctx, s.stateKey, st)
+	if armed {
+		restate.ObjectSend(ctx, PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), PRHandlerDeployFailureDeadline).
+			Send(DeployFailureDeadlineRequest{Seq: seq}, restate.WithDelay(s.deployFailureDeadline))
+	}
+	return nil
+}
+
+// HandleDeployFailureDeadline fires one armed deadline: when the attempt is
+// still the current one, it applies deploy_failed with the newest banner,
+// commits, publishes the captured deploy_failed facts, and acknowledges the
+// publish. A disarmed, superseded, or stale deadline does nothing.
+func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext, req DeployFailureDeadlineRequest) error {
+	st, err := restate.Get[*PRState](ctx, s.stateKey)
+	if err != nil || st == nil {
+		return err
+	}
+	p, current := st.TakeDeployFailure(req.Seq)
+	if p == nil {
+		return nil
+	}
+	if !current || !st.ApplyRegistryDeployFailed(p.Banner) {
+		restate.Set(ctx, s.stateKey, st)
+		return nil
+	}
+	restate.Set(ctx, s.stateKey, st)
+	s.runFacts(ctx, st, EffectsOwnerRestate, p.Facts)
+	st.AckDeployFailedPublished()
+	restate.Set(ctx, s.stateKey, st)
+	s.afterCommit(ctx, st, EffectsOwnerRestate)
+	return nil
 }

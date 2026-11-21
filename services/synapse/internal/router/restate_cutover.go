@@ -29,10 +29,18 @@ import (
 // off; authoritative and shadow sends never double-fire.
 //
 // What stays live: the registry-backed pipeline (registry atomic
-// transitions, publishes, dispatches) runs unchanged. Every effect decision
-// resolves from the Restate PRObject when authoritative: deploy_success via
-// HandleDeployDispatched, conflict republish via HandleConflictDetected with
-// the HandleConflictPublished ack, CI recovery via HandleCIRecovery. The
+// transitions, publishes, dispatches) runs unchanged for effects_owner=legacy
+// events. Every effect decision resolves from the Restate PRObject when
+// authoritative: deploy_success via HandleDeployDispatched with the
+// HandleDeploySuccessPublished ack, conflict republish via
+// HandleConflictDetected with the HandleConflictPublished ack, CI recovery
+// via HandleCIRecovery (legacy delegates kept until r1). Off the
+// authoritative path the journal targets the merged verdict handlers
+// (HandleConflict, HandleDeploySuccess, HandleCIRecovered) carrying the
+// rendered aerial.pr.> fact, so legacy-era state commits every key synapse
+// published and the flip never double-publishes. effects_owner=restate
+// events route the merged handler with the fact attached and skip the
+// synapse publish: PRObject decides, commits, then publishes. The
 // Postgres projection is never consulted on the authoritative path. The
 // projection stays only on the legacy fallback path (non-authoritative
 // conflict/deployed/ci_failed suppression) and for pure routing and
@@ -106,6 +114,38 @@ func recordLegacyEffect(ctx context.Context, kind, effectKey, repo string, prNum
 	metrics.RecordLegacyEffect(kind)
 	slog.InfoContext(ctx, "[synapse] [synapse-effect] legacy effect performed",
 		"kind", kind, "effect_key", effectKey, "repo", repo, "pr", prNumber)
+}
+
+// restateOwnsEffects reports whether the event bound into ctx is stamped
+// effects_owner=restate, so PRObject (not synapse) performs its effects.
+func restateOwnsEffects(ctx context.Context) bool {
+	return effectsOwnerFromContext(ctx) == restateclient.EffectsOwnerRestate
+}
+
+// recordLegacyFact records one aerial.pr.> fact synapse published on the
+// legacy pipeline as [synapse-effect], keyed exactly as prstate keys the
+// intended fact it records.
+func recordLegacyFact(ctx context.Context, fact pubsub.PRLifecycleEvent) {
+	fact.Repo = normalizeRepo(fact.Repo)
+	recordLegacyEffect(ctx, restateclient.FactEffectKind(fact.Event), restateclient.FactMatchKey(fact), fact.Repo, fact.PRNumber)
+}
+
+// publishLegacyFact publishes one lifecycle fact on the legacy pipeline and
+// records it as [synapse-effect]. Callers route effects_owner=restate events
+// to PRObject with the fact attached instead of calling this.
+func (s *RouterServer) publishLegacyFact(ctx context.Context, fact pubsub.PRLifecycleEvent) error {
+	if err := s.publishPRLifecycleEvent(ctx, fact); err != nil {
+		return err
+	}
+	if s != nil && s.bus != nil {
+		recordLegacyFact(ctx, fact)
+	}
+	return nil
+}
+
+// facts wraps one rendered fact for a PREvent.
+func facts(fact pubsub.PRLifecycleEvent) []pubsub.PRLifecycleEvent {
+	return []pubsub.PRLifecycleEvent{fact}
 }
 
 // restateOwnedSendError is a Restate send failure on an effects_owner=restate
@@ -275,21 +315,24 @@ func (s *RouterServer) routeConflictResolved(ctx context.Context, res *ResolvedG
 	})
 }
 
-// routeDeployDispatched journals one deploy_success dispatch. It mirrors
-// shadowDeployDispatched exactly: the deployed commit rides alongside
-// both SHAs with the job name scoping the journaled Restate effect key.
-// Non-PR dispatches journal nothing: no PRObject key exists for them,
-// legacy already emitted the prompt, and erroring would redelivery-loop.
-func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int) error {
+// routeDeployDispatched journals one deploy_success dispatch at the merged
+// HandleDeploySuccess verdict with the rendered fact attached. It mirrors
+// shadowDeployDispatched exactly: the deployed commit rides alongside both
+// SHAs with the job name scoping the journaled Restate effect key. A
+// legacy-owned dispatch commits its keys and records the fact as intended;
+// a restate-owned one makes PRObject decide and publish. Non-PR dispatches
+// journal nothing: no PRObject key exists for them, legacy already emitted
+// the prompt, and erroring would redelivery-loop.
+func (s *RouterServer) routeDeployDispatched(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int, fact pubsub.PRLifecycleEvent) error {
 	if !s.restateAuthoritative() {
-		s.shadowDeployDispatched(ctx, repo, jobName, headSHA, mergeSHA, prNumber)
+		s.shadowDeployDispatched(ctx, repo, jobName, headSHA, mergeSHA, prNumber, facts(fact))
 		return nil
 	}
 	if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
 		return nil
 	}
-	return s.routePREvent(ctx, "HandleDeployDispatched", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
+	return s.routePREvent(ctx, "HandleDeploySuccess", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName, Facts: facts(fact),
 	})
 }
 
@@ -353,6 +396,10 @@ func (s *RouterServer) recordDeployPublished(ctx context.Context, repo, jobName,
 // never consulted here; a deduped or stale verdict suppresses the publish,
 // and an ack failure surfaces so redelivery re-resolves and republishes.
 func (s *RouterServer) publishUnownedDeploySuccessAuthoritative(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
+	fact := s.deployLifecycleFact(ctx, evt, eventDeploySuccess, statusDeployed)
+	if restateOwnsEffects(ctx) {
+		return &evt, s.routeDeployDispatched(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber, fact)
+	}
 	decision, err := s.resolveDeployDispatch(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber)
 	if err != nil {
 		return &evt, err
@@ -360,7 +407,7 @@ func (s *RouterServer) publishUnownedDeploySuccessAuthoritative(ctx context.Cont
 	if !decision.ShouldPublish {
 		return &evt, nil
 	}
-	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", statusDeployed); err != nil {
+	if err := s.publishLegacyFact(ctx, fact); err != nil {
 		return &evt, err
 	}
 	if err := s.recordDeployPublished(ctx, evt.Repo, evt.JobName, "", evt.CommitSHA, evt.PRNumber); err != nil {
@@ -422,6 +469,13 @@ func (s *RouterServer) resolveCIRecovery(ctx context.Context, repo string, prNum
 // a deduped or stale verdict skips the publish, and an ack failure surfaces
 // so redelivery re-resolves and republishes.
 func (s *RouterServer) publishConflictAuthoritative(ctx context.Context, repo string, prNumber int, branch, headSHA, targetID string) (bool, error) {
+	fact := s.conflictFact(ctx, repo, prNumber, branch, headSHA, targetID)
+	if restateOwnsEffects(ctx) {
+		if err := s.routeConflict(ctx, repo, prNumber, branch, headSHA, fact); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	decision, err := s.resolveConflictDispatch(ctx, repo, branch, headSHA, prNumber)
 	if err != nil {
 		return false, err
@@ -429,7 +483,18 @@ func (s *RouterServer) publishConflictAuthoritative(ctx context.Context, repo st
 	if !decision.ShouldPublish {
 		return true, nil
 	}
-	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	if err := s.publishLegacyFact(ctx, fact); err != nil {
+		return false, err
+	}
+	if err := s.recordConflictPublished(ctx, repo, branch, headSHA, prNumber); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// conflictFact renders the conflict lifecycle fact for one PR head.
+func (s *RouterServer) conflictFact(ctx context.Context, repo string, prNumber int, branch, headSHA, targetID string) pubsub.PRLifecycleEvent {
+	return pubsub.PRLifecycleEvent{
 		Event:        prConflict,
 		Repo:         repo,
 		PRNumber:     prNumber,
@@ -440,13 +505,35 @@ func (s *RouterServer) publishConflictAuthoritative(ctx context.Context, repo st
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
 		Quiet:        isDependabotBranch(branch),
 		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
-		return false, err
 	}
-	if err := s.recordConflictPublished(ctx, repo, branch, headSHA, prNumber); err != nil {
-		return false, err
-	}
-	return true, nil
+}
+
+// routeConflict journals one conflict detection at the merged
+// HandleConflict verdict with the rendered fact attached: legacy-owned
+// events commit the conflict keys and record the fact as intended, while
+// restate-owned events make PRObject decide and publish.
+func (s *RouterServer) routeConflict(ctx context.Context, repo string, prNumber int, branch, headSHA string, fact pubsub.PRLifecycleEvent) error {
+	return s.routePREvent(ctx, "HandleConflict", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, Branch: branch, Facts: facts(fact),
+	})
+}
+
+// routeCIRecovered journals one CI recovery at the merged HandleCIRecovered
+// verdict with the rendered recovery fact attached.
+func (s *RouterServer) routeCIRecovered(ctx context.Context, res *ResolvedGitHubEvent, fact pubsub.PRLifecycleEvent) error {
+	return s.routePREvent(ctx, "HandleCIRecovered", restateclient.PREvent{
+		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, CheckName: res.CheckName, Branch: res.Branch, Facts: facts(fact),
+	})
+}
+
+// routeDeployAttemptFailed reports one failed restate-owned deploy attempt
+// to PRObject with the rendered deploy_failed fact, arming its bounded
+// deploy-failure deadline. Callers send only restate-owned attempts for
+// tracked PRs; legacy-owned attempts keep synapse's final-attempt rule.
+func (s *RouterServer) routeDeployAttemptFailed(ctx context.Context, repo string, prNumber int, headSHA, mergeSHA string, fact pubsub.PRLifecycleEvent) error {
+	return s.routePREvent(ctx, "HandleDeployAttemptFailed", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, Banner: fact.Details, Facts: facts(fact),
+	})
 }
 
 // routeRolloutProgress journals one rollout observation: the
@@ -476,13 +563,16 @@ func rolloutEvent(pr DeployingPR, name string, deployedJobs, deployedKustomizati
 
 // routeDeployFailed journals one deploy failure (or, when acknowledged,
 // the confirmed deploy_failed publish) into PRObject, mirroring
-// AtomicTransitionDeployFailed and AcknowledgeDeployFailedPublished.
-// PR-less failures have no PRObject key and journal nothing.
-func (s *RouterServer) routeDeployFailed(ctx context.Context, repo string, prNumber int, headSHA, mergeSHA string, acknowledged bool) error {
+// AtomicTransitionDeployFailed and AcknowledgeDeployFailedPublished. The
+// published deploy_failed fact rides the event that owns it: the ack for
+// legacy publishes (recorded as intended), the failure itself for
+// restate-owned events (PRObject publishes it). PR-less failures have no
+// PRObject key and journal nothing.
+func (s *RouterServer) routeDeployFailed(ctx context.Context, repo string, prNumber int, headSHA, mergeSHA string, acknowledged bool, published ...pubsub.PRLifecycleEvent) error {
 	if prNumber <= 0 {
 		return nil
 	}
 	return s.routePREvent(ctx, "HandleDeployFailed", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, Acknowledged: acknowledged,
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, Acknowledged: acknowledged, Facts: published,
 	})
 }

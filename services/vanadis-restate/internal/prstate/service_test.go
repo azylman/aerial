@@ -76,8 +76,9 @@ func captureSends(t *testing.T, mc *mocks.MockContext) *sendCapture {
 }
 
 // newStateMock stubs the Restate K/V surface for one dark handler call: Get
-// returns existing (nil for first touch), Set records the save. Set is Maybe
-// because drop/absorb/idempotent dispositions must not persist.
+// returns existing (nil for first touch), Set records the save. Get is Maybe
+// because malformed events return before loading; Set is Maybe because
+// drop/absorb/idempotent dispositions must not persist.
 func newStateMock[T any](t *testing.T, existing T) (*mocks.MockContext, *stateCapture[T]) {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
@@ -87,7 +88,7 @@ func newStateMock[T any](t *testing.T, existing T) (*mocks.MockContext, *stateCa
 		if pp, ok := args.Get(1).(*T); ok && pp != nil {
 			*pp = existing
 		}
-	}).Return(true, nil)
+	}).Return(true, nil).Maybe()
 	mc.On("Set", "state", mock.Anything).Run(func(args mock.Arguments) {
 		rec.setCalled = true
 		if saved, ok := args.Get(1).(T); ok {
@@ -139,7 +140,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 			repoNil:         true,
 			wantPRName:      "PRObject",
 			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBuildMetadata,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployDispatched,HandleDeployFailed,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect",
+			wantPRHandlers:  "CompareProjection,GetBuildLifecycle,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeploySuccess,HandleDeploySuccessPublished,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleReadinessRetry,HandleReopened,HandleRolloutProgress,HandleSynchronized,Hydrate,Project,Register,RetryEriEffect,RetryFactEffect",
 			wantRepoHandler: "HandleCheckRunBySHA,HandleFanout,HandleHeldExpiry,HandleHeldReplay,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleWorkflowRunBySHA,ResolvePRBySHA",
 		},
 	}
@@ -889,7 +890,7 @@ func TestRepoObjectService_Handlers(t *testing.T) {
 		{name: "duplicate main push persists nothing", got: svc.HandleMainPush(restate.WithMockContext(dupMc), RepoEvent{Repo: "aerial", MainSHA: "main1"}), rec: dupRec},
 		{name: "zero sha main push fails terminally", got: svc.HandleMainPush(restate.WithMockContext(badPushMc), RepoEvent{Repo: "aerial", MainSHA: "0000000"}), rec: badPushRec, wantErr: true, wantTerminal: true},
 		{name: "main push load error surfaces", got: svc.HandleMainPush(restate.WithMockContext(errPushMc), RepoEvent{Repo: "aerial", MainSHA: "main1"}), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
-		{name: "fanout resends main advanced", got: svc.HandleFanout(restate.WithMockContext(fanMc), RepoEvent{Repo: "aerial"}), rec: fanRec, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101, EffectsOwner: EffectsOwnerLegacy})}},
+		{name: "fanout sends main advanced once per main sha", got: svc.HandleFanout(restate.WithMockContext(fanMc), RepoEvent{Repo: "aerial"}), rec: fanRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101, EffectsOwner: EffectsOwnerLegacy})}},
 		{name: "fanout without repo fails terminally", got: svc.HandleFanout(restate.WithMockContext(badFanMc), RepoEvent{}), rec: badFanRec, wantErr: true, wantTerminal: true},
 		{name: "kustomization status records tombstone and forwards", got: svc.HandleKustomizationStatus(restate.WithMockContext(kustMc), RepoEvent{Repo: "aerial", HeadSHA: "dep1", Generation: 2, Kustomization: "eri"}), rec: kustRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleRolloutProgress", PREvent{Event: "kustomization_status", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", GateGeneration: 2, EffectsOwner: EffectsOwnerLegacy, Kustomization: "eri"})}},
 		{name: "kustomization status without repo fails terminally", got: svc.HandleKustomizationStatus(restate.WithMockContext(badKustMc), RepoEvent{HeadSHA: "dep1"}), rec: badKustRec, wantErr: true, wantTerminal: true},

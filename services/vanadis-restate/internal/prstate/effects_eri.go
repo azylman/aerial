@@ -179,9 +179,12 @@ func PlanEriEffects(st *PRState, ev PREvent) []PlannedEriEffect {
 // EriEffectDigest fingerprints the rendered payload so gates can tell a
 // matching key with a different body apart.
 func EriEffectDigest(eff EriEffect) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		eff.Kind, eff.ChannelID, eff.Content, eff.Effort, strconv.FormatBool(eff.SkipIfActive),
-	}, "\x00")))
+	return digestStrings(eff.Kind, eff.ChannelID, eff.Content, eff.Effort, strconv.FormatBool(eff.SkipIfActive))
+}
+
+// digestStrings is the short payload fingerprint shared by every effect.
+func digestStrings(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -247,40 +250,21 @@ func (s *PRObjectService) runEriEffects(ctx restate.ObjectContext, st *PRState, 
 // recordIntended journals the intended-effect metric and log once, so a
 // handler replay never double counts what the shadow gate compares.
 func recordIntended(ctx restate.ObjectContext, p PlannedEriEffect) {
-	pr := PRObjectKey(p.Key.Repo, p.Key.PRNumber)
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		intendedEffectsTotal.WithLabelValues(p.Effect.Kind).Inc()
-		slog.InfoContext(rc, "[prstate-shadow] intended effect recorded (synapse owns effects)",
-			"pr", pr, "kind", p.Effect.Kind, "agent", p.Agent, "effect_key", p.Key.String(),
-			"match_key", p.Key.MatchKey(), "digest", EriEffectDigest(p.Effect))
-		return restate.Void{}, nil
-	}, restate.WithName("record-intended-"+p.Effect.Kind))
+	recordIntendedEffect(ctx, intendedEffectFor(p))
+}
+
+// eriPlanned binds one eri effect to the configured effector.
+func (s *PRObjectService) eriPlanned(p PlannedEriEffect) plannedEffect {
+	out := plannedEffect{key: p.Key, agent: p.Agent, name: "eri-effect-" + p.Effect.Kind}
+	if eri := s.eri; eri != nil {
+		out.do = func(ctx context.Context) error { return eri.DeliverEri(ctx, p.Agent, p.Key, p.Effect) }
+	}
+	return out
 }
 
 // deliverEriEffect runs one journaled delivery and reports success.
 func (s *PRObjectService) deliverEriEffect(ctx restate.ObjectContext, p PlannedEriEffect) bool {
-	pr := PRObjectKey(p.Key.Repo, p.Key.PRNumber)
-	eri := s.eri
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		if eri == nil {
-			effectsTotal.WithLabelValues(p.Effect.Kind, effectResultUnconfigured).Inc()
-			return restate.Void{}, restate.ToTerminalError(errEriEffectorUnconfigured)
-		}
-		if err := eri.DeliverEri(rc, p.Agent, p.Key, p.Effect); err != nil {
-			effectsTotal.WithLabelValues(p.Effect.Kind, effectResultError).Inc()
-			return restate.Void{}, err
-		}
-		effectsTotal.WithLabelValues(p.Effect.Kind, effectResultOK).Inc()
-		slog.InfoContext(rc, "[prstate] eri effect delivered", "pr", pr, "kind", p.Effect.Kind,
-			"agent", p.Agent, "effect_key", p.Key.String(), "match_key", p.Key.MatchKey())
-		return restate.Void{}, nil
-	}, restate.WithName("eri-effect-"+p.Effect.Kind), restate.WithMaxRetryAttempts(eriEffectRunAttempts))
-	if err != nil {
-		slog.ErrorContext(ctx, "[prstate] eri effect delivery failed", "pr", pr, "kind", p.Effect.Kind,
-			"agent", p.Agent, "effect_key", p.Key.String(), "error", err)
-		return false
-	}
-	return true
+	return executeEffect(ctx, s.eriPlanned(p))
 }
 
 var errEriEffectorUnconfigured = errors.New("prstate: no eri effector configured")
@@ -322,28 +306,13 @@ func (s *PRObjectService) scheduleEriRetry(ctx restate.ObjectContext, req EriEff
 // owner. It drops the retry when the PR is gone, the gate generation moved
 // on (a new generation re-fires its own effects), or the key already fired.
 func (s *PRObjectService) RetryEriEffect(ctx restate.ObjectContext, req EriEffectRetry) error {
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
-	if err != nil {
+	st, err := s.loadRetryState(ctx, req.Generation)
+	if err != nil || st == nil {
 		return err
 	}
-	if st == nil || st.GateGeneration != req.Generation {
-		return nil
-	}
 	eff, ok := normalizeEriEffect(st, req.Effect)
-	if !ok {
-		return nil
-	}
-	key := st.EffectKeyFor(eff.Kind, req.HeadSHA, req.JobName, req.CheckName)
-	if st.WasEffectDispatched(key) {
-		return nil
-	}
-	if !s.deliverEriEffect(ctx, PlannedEriEffect{Effect: eff, Key: key, Agent: st.OwnerAgent()}) {
-		s.scheduleEriRetry(ctx, req)
-		return nil
-	}
-	st.MarkEffectDispatched(key)
-	restate.Set(ctx, s.stateKey, st)
-	return nil
+	p := s.eriPlanned(PlannedEriEffect{Effect: eff, Key: st.EffectKeyFor(eff.Kind, req.HeadSHA, req.JobName, req.CheckName), Agent: st.OwnerAgent()})
+	return s.retryPlanned(ctx, st, p, ok, func() { s.scheduleEriRetry(ctx, req) })
 }
 
 // EriSessionClient is the Restate session surface SessionEriEffector drives:

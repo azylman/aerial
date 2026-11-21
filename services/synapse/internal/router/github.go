@@ -613,27 +613,10 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 
 	recovered := false
 	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
-		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
-		if err != nil {
+		if err := s.recoverCheckRun(ctx, res); err != nil {
 			return nil, err
 		}
 		recovered = true
-		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		s.populateMissingBranch(ctx, res)
-		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        ghActionSynchronize,
-			Repo:         res.Repo,
-			PRNumber:     res.PRNumber,
-			Branch:       res.Branch,
-			HeadSHA:      res.HeadSHA,
-			TargetID:     res.TargetID,
-			Status:       prOpen,
-			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-			Quiet:        isDependabotBranch(res.Branch),
-			OccurredAt:   time.Now().UTC(),
-		}); err != nil {
-			slog.WarnContext(ctx, "[synapse] [pr_lifecycle] failed publishing recovery synchronize event", "repo", res.Repo, "pr", res.PRNumber, "error", err)
-		}
 	}
 
 	s.recordCheckRunStatus(ctx, res)
@@ -651,6 +634,42 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		return nil, err
 	}
 	return res, nil
+}
+
+// recoverCheckRun reopens a CI-failed PR on a recovering check success: it
+// syncs the registry row, then journals the merged HandleCIRecovered verdict
+// with the recovery synchronize fact before the legacy publish. Legacy-owned
+// recoveries commit the recovery in PRObject and record the fact as
+// intended; restate-owned ones make PRObject decide and publish.
+func (s *RouterServer) recoverCheckRun(ctx context.Context, res *ResolvedGitHubEvent) error {
+	targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
+	if err != nil {
+		return err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	s.populateMissingBranch(ctx, res)
+	fact := pubsub.PRLifecycleEvent{
+		Event:        ghActionSynchronize,
+		Repo:         res.Repo,
+		PRNumber:     res.PRNumber,
+		Branch:       res.Branch,
+		HeadSHA:      res.HeadSHA,
+		TargetID:     res.TargetID,
+		Status:       prOpen,
+		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+		Quiet:        isDependabotBranch(res.Branch),
+		OccurredAt:   time.Now().UTC(),
+	}
+	if err := s.routeCIRecovered(ctx, res, fact); err != nil {
+		return err
+	}
+	if restateOwnsEffects(ctx) {
+		return nil
+	}
+	if err := s.publishLegacyFact(ctx, fact); err != nil {
+		slog.WarnContext(ctx, "[synapse] [pr_lifecycle] failed publishing recovery synchronize event", "repo", res.Repo, "pr", res.PRNumber, "error", err)
+	}
+	return nil
 }
 
 // reportCheckRunGateSuccess re-checks open-PR conflicts when a gate check

@@ -13,11 +13,13 @@ package prstate
 // PRObject and RepoObject, with all synapse consumers still on the legacy
 // pipeline until the cutover chunks. Each PRObject handler loads Restate K/V
 // state, applies the pure disposition guard (stale-drop, terminal-absorbing),
-// and persists on apply. No external effects fire here (Discord alerts,
-// GitHub update-branch/rerun, image promotion, Flux forward), and unmanaged
-// collaborator PRs never signal the BuildRouter: effect and routing wiring
-// lands in later chunks through the journaled, generation-scoped EffectKey
-// boundaries frozen in contracts.go.
+// and persists on apply. After the commit it runs the effects the event
+// carries through journaled, generation-scoped EffectKeys: eri wakes and DMs
+// (effects_eri.go) and aerial.pr.> lifecycle facts, whose publish also
+// carries the BuildRouter route via vanadis-nats (effects_facts.go). Verdict
+// handlers (HandleConflict, HandleDeploySuccess, HandleCIRecovered) decide,
+// commit, then execute in one exclusive invocation. GitHub, Flux, and image
+// effects land in later chunks.
 //
 // The only cross-object traffic is one-way sends: PRObject sends RepoObject
 // a HandlePRIndex update after each commit that changes a routed field, and
@@ -70,12 +72,19 @@ type PRObjectService struct {
 
 	eri           EriEffector
 	eriRetryDelay time.Duration
+
+	facts                 FactPublisher
+	factRetryDelay        time.Duration
+	deployFailureDeadline time.Duration
 }
 
 // NewPRObjectService builds the single PRObject service. Without
 // WithProjection it writes no pr_registry rows and runs no shadow compare.
 func NewPRObjectService() *PRObjectService {
-	return &PRObjectService{stateKey: prObjectStateKey, shadowDelay: DefaultShadowCompareDelay, retryDelay: DefaultProjectionRetry, eriRetryDelay: DefaultEriEffectRetryDelay}
+	return &PRObjectService{
+		stateKey: prObjectStateKey, shadowDelay: DefaultShadowCompareDelay, retryDelay: DefaultProjectionRetry,
+		eriRetryDelay: DefaultEriEffectRetryDelay, factRetryDelay: DefaultFactRetryDelay, deployFailureDeadline: DefaultDeployFailureDeadline,
+	}
 }
 
 // ServiceName returns the single PRObject service name for every agent.
@@ -138,6 +147,7 @@ func (s *PRObjectService) mutatePhase(ctx restate.ObjectContext, ev PREvent, pha
 		sendPRIndex(ctx, st, ev, lifecycle)
 	}
 	s.runEriEffects(ctx, st, ev)
+	s.runFacts(ctx, st, ev.EffectsOwner, ev.Facts)
 	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return nil
 }
@@ -276,10 +286,62 @@ func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev 
 	})
 }
 
-// HandleConflictDetected resolves the conflict-republish verdict without
-// recording anything, so a publish failure leaves the next invocation
-// returning ShouldPublish again. The verdict is the sole authority for the
-// synapse republish; only HandleConflictPublished completes the dispatch.
+// HandleConflict is the merged conflict verdict: one exclusive invocation
+// resolves the republish decision, commits the published conflict SHA and
+// the conflict row status, then publishes (effects_owner=restate) or records
+// as intended (legacy) the conflict facts the event carries. Legacy-owned
+// events commit the same keys and skip only the publish, so state learns
+// every conflict synapse published and the authority flip never
+// double-publishes.
+func (s *PRObjectService) HandleConflict(ctx restate.ObjectContext, ev PREvent) (ConflictDispatchDecision, error) {
+	return runVerdict(s, ctx, ev, ResolveConflictDispatchDecision,
+		func(d ConflictDispatchDecision) bool { return d.ShouldPublish },
+		func(st *PRState) error {
+			_, err := s.commitConflictPublished(ctx, st, ev)
+			return err
+		})
+}
+
+// runVerdict is the decide-commit-execute core of the merged verdict
+// handlers: it loads the PR, resolves the verdict, and when fires reports
+// the verdict applies, commits it, then runs the carried facts and syncs the
+// projection. Malformed events resolve the zero verdict.
+func runVerdict[D any](s *PRObjectService, ctx restate.ObjectContext, ev PREvent, resolve func(*PRState, PREvent) (D, error), fires func(D) bool, commit func(*PRState) error) (D, error) {
+	var zero D
+	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return zero, nil
+	}
+	st, err := s.loadOrCreatePRState(ctx, ev)
+	if err != nil {
+		return zero, err
+	}
+	dec, err := resolve(st, ev)
+	if err != nil || !fires(dec) {
+		return dec, err
+	}
+	if err := commit(st); err != nil {
+		return dec, err
+	}
+	s.runFacts(ctx, st, ev.EffectsOwner, ev.Facts)
+	s.afterCommit(ctx, st, ev.EffectsOwner)
+	return dec, nil
+}
+
+// commitConflictPublished records the published conflict SHA and the
+// conflict row status, and persists them on apply.
+func (s *PRObjectService) commitConflictPublished(ctx restate.ObjectContext, st *PRState, ev PREvent) (ConflictPublishedOutcome, error) {
+	out, err := RecordConflictPublished(st, ev)
+	if err != nil || out.Disposition != DispositionApply {
+		return out, err
+	}
+	st.ApplyRegistryConflict()
+	restate.Set(ctx, s.stateKey, st)
+	return out, nil
+}
+
+// HandleConflictDetected is the legacy shared verdict read, kept registered
+// as a thin delegate of the HandleConflict decision until r1 so in-flight
+// authoritative-legacy calls keep working. It records nothing.
 func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext, ev PREvent) (ConflictDispatchDecision, error) {
 	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
@@ -288,10 +350,9 @@ func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext
 	return ResolveConflictDispatchDecision(st, ev)
 }
 
-// HandleConflictPublished records one confirmed conflict publish for the
-// event head SHA. The ack is idempotent and the commit point for the
-// dispatch; an ack failure surfaces so redelivery re-resolves and
-// republishes instead of losing the signal.
+// HandleConflictPublished is the legacy publish ack, kept registered as a
+// thin delegate of the HandleConflict commit until r1. It is idempotent and
+// commits the same keys HandleConflict does.
 func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev PREvent) (ConflictPublishedOutcome, error) {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return ConflictPublishedOutcome{}, nil
@@ -300,22 +361,45 @@ func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev 
 	if err != nil {
 		return ConflictPublishedOutcome{}, err
 	}
-	out, recErr := RecordConflictPublished(st, ev)
-	if recErr != nil {
-		return out, recErr
+	out, err := s.commitConflictPublished(ctx, st, ev)
+	if err != nil || out.Disposition != DispositionApply {
+		return out, err
 	}
-	if out.Disposition == DispositionApply {
-		st.ApplyRegistryConflict()
-		restate.Set(ctx, s.stateKey, st)
-		s.afterCommit(ctx, st, ev.EffectsOwner)
-	}
+	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return out, nil
 }
 
-// HandleCIRecovery resolves whether the PR is CI-failed for the event head
-// SHA from the Restate-owned failure slots. The resolve is a pure read and
-// records nothing, so it never disturbs the failure state a later success
-// event clears.
+// HandleCIRecovered is the merged CI-recovery verdict: when the Restate
+// failure slots say the PR is CI-failed for the event head, it clears the
+// recovered check (and the failed-CI SHA once no failed check remains),
+// reopens the ci_failed row, commits, then publishes (restate) or records
+// (legacy) the recovery facts the event carries. A PR that is not CI-failed
+// commits and publishes nothing.
+func (s *PRObjectService) HandleCIRecovered(ctx restate.ObjectContext, ev PREvent) (CIRecoveryDecision, error) {
+	return runVerdict(s, ctx, ev, ResolveCIRecovery,
+		func(d CIRecoveryDecision) bool { return d.CIFailed },
+		func(st *PRState) error {
+			applyCIRecovered(st, ev)
+			restate.Set(ctx, s.stateKey, st)
+			return nil
+		})
+}
+
+// applyCIRecovered clears the recovered check and, once no failed check
+// remains on the head, the failed-CI SHA, and reopens the ci_failed row.
+func applyCIRecovered(st *PRState, ev PREvent) {
+	if strings.TrimSpace(ev.CheckName) != "" {
+		st.ClearFailedCheckRun(ev.HeadSHA, ev.CheckName)
+	}
+	if !st.HasActiveFailedCheckRuns(ev.HeadSHA) {
+		st.ClearFailedCISHA()
+	}
+	st.ApplyRegistryRecovered(RegistryStatusCIFailed)
+}
+
+// HandleCIRecovery is the legacy shared CI-failed read, kept registered as a
+// thin delegate of the HandleCIRecovered decision until r1. It records
+// nothing.
 func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectSharedContext, ev PREvent) (CIRecoveryDecision, error) {
 	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
@@ -346,6 +430,7 @@ func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) er
 func (s *PRObjectService) HandleClosed(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearFailedCISHA()
+		st.DisarmDeployFailure()
 		st.MarkTerminal(TerminalClosed)
 		st.ApplyRegistryClosed()
 	})
@@ -398,11 +483,13 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	prevHead := st.HeadSHA
 	st.HeadSHA = strings.TrimSpace(ev.HeadSHA)
 	st.ApplyRegistrySync(prevHead, st.HeadSHA)
+	st.DisarmDeployFailure()
 	st.ApplyIdentity(ev.Branch, ev.Title)
 	restate.Set(ctx, s.stateKey, st)
 	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
 		sendPRIndex(ctx, st, ev, lifecycle)
 	}
+	s.runFacts(ctx, st, ev.EffectsOwner, ev.Facts)
 	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return nil
 }
@@ -412,6 +499,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 // (AcknowledgeDeployFailedPublished). Merged PRs apply it.
 func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		st.DisarmDeployFailure()
 		if ev.Acknowledged {
 			st.AckDeployFailedPublished()
 			return
@@ -440,10 +528,41 @@ func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREven
 	})
 }
 
-// HandleDeployDispatched resolves the deploy_success publish verdict without
-// recording anything, so a publish failure leaves the next invocation
-// returning ShouldPublish again. The verdict is the sole authority for the
-// synapse publish; only HandleDeploySuccessPublished completes the dispatch.
+// HandleDeploySuccess is the merged deploy_success verdict: one exclusive
+// invocation resolves the publish decision from the deploy_dispatch key and
+// both dedup slots, commits them plus the deployed row status, then
+// publishes (effects_owner=restate) or records as intended (legacy) the
+// deploy_success facts the event carries. Legacy-owned events commit the
+// same keys and skip only the publish.
+func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREvent) (DeployDispatchDecision, error) {
+	return runVerdict(s, ctx, ev, ResolveDeployDispatchDecision,
+		func(d DeployDispatchDecision) bool { return d.ShouldPublish },
+		func(st *PRState) error {
+			_, err := s.commitDeploySuccess(ctx, st, ev)
+			return err
+		})
+}
+
+// commitDeploySuccess records the deploy_dispatch key, both dedup slots and
+// the deployed row status, disarms any pending deploy-failure deadline, and
+// persists them on apply. A first record indexes the PR as deployed.
+func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRState, ev PREvent) (DeployPublishedOutcome, error) {
+	out, err := RecordDeployPublished(st, ev)
+	if err != nil || out.Disposition != DispositionApply {
+		return out, err
+	}
+	st.AckDeploySuccess()
+	st.DisarmDeployFailure()
+	restate.Set(ctx, s.stateKey, st)
+	if !out.Deduped {
+		sendPRIndex(ctx, st, ev, IndexDeployed)
+	}
+	return out, nil
+}
+
+// HandleDeployDispatched is the legacy shared verdict read, kept registered
+// as a thin delegate of the HandleDeploySuccess decision until r1. It
+// records nothing.
 func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext, ev PREvent) (DeployDispatchDecision, error) {
 	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
@@ -452,10 +571,9 @@ func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext
 	return ResolveDeployDispatchDecision(st, ev)
 }
 
-// HandleDeploySuccessPublished records one confirmed deploy_success publish:
-// the dispatch key plus both dedup slots. The ack is idempotent and the
-// commit point for the dispatch; an ack failure surfaces so redelivery
-// re-resolves and republishes instead of losing the signal.
+// HandleDeploySuccessPublished is the legacy publish ack, kept registered as
+// a thin delegate of the HandleDeploySuccess commit until r1. It is
+// idempotent and commits the same keys HandleDeploySuccess does.
 func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext, ev PREvent) (DeployPublishedOutcome, error) {
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return DeployPublishedOutcome{}, nil
@@ -464,18 +582,11 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 	if err != nil {
 		return DeployPublishedOutcome{}, err
 	}
-	out, recErr := RecordDeployPublished(st, ev)
-	if recErr != nil {
-		return out, recErr
+	out, err := s.commitDeploySuccess(ctx, st, ev)
+	if err != nil || out.Disposition != DispositionApply {
+		return out, err
 	}
-	if out.Disposition == DispositionApply {
-		st.AckDeploySuccess()
-		restate.Set(ctx, s.stateKey, st)
-		if !out.Deduped {
-			sendPRIndex(ctx, st, ev, IndexDeployed)
-		}
-		s.afterCommit(ctx, st, ev.EffectsOwner)
-	}
+	s.afterCommit(ctx, st, ev.EffectsOwner)
 	return out, nil
 }
 
@@ -487,6 +598,7 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 // index update so kustomization status fans out to this PR.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
+		st.DisarmDeployFailure()
 		st.TransitionDeploying(ev.Jobs)
 		st.RecordKustomizationRequestSet(ev.KustomizationRequests)
 		st.RecordKustomizationRequests()

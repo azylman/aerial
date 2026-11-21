@@ -161,11 +161,17 @@ const (
 )
 
 func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt DeployEvent, eventName, status string) error {
+	return s.publishPRLifecycleEvent(ctx, s.deployLifecycleFact(ctx, evt, eventName, status))
+}
+
+// deployLifecycleFact renders the lifecycle fact for one deploy webhook
+// outcome. Success events without a job name default to git-sync.
+func (s *RouterServer) deployLifecycleFact(ctx context.Context, evt DeployEvent, eventName, status string) pubsub.PRLifecycleEvent {
 	jobName := evt.JobName
 	if (eventName == eventDeploySuccess || eventName == eventSyncSuccess) && jobName == "" {
 		jobName = jobGitSync
 	}
-	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	return pubsub.PRLifecycleEvent{
 		Event:        eventName,
 		Repo:         evt.Repo,
 		PRNumber:     evt.PRNumber,
@@ -177,7 +183,7 @@ func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt Depl
 		RolloutState: s.loadPRRolloutState(ctx, evt.Repo, evt.PRNumber),
 		Quiet:        s.isDependabotPRNumber(ctx, evt.Repo, evt.PRNumber),
 		OccurredAt:   time.Now().UTC(),
-	})
+	}
 }
 
 // recordFailedCheckRunDetailed reports granular per-check failure state.

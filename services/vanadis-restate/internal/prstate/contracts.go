@@ -306,6 +306,11 @@ type PREvent struct {
 	// this event (collaborator DMs today). PRObject executes them for
 	// effects_owner=restate and records them as intended otherwise.
 	EriEffects []EriEffect `json:"eri_effects,omitempty"`
+	// Facts are the rendered aerial.pr.> lifecycle facts synapse resolved
+	// for this event. Verdict handlers and the deploy-failure deadline
+	// publish them for effects_owner=restate once their decision commits,
+	// and record them as intended otherwise.
+	Facts []pubsub.PRLifecycleEvent `json:"facts,omitempty"`
 }
 
 // EriEffect is one rendered eri-bound effect. Synapse renders it from
@@ -348,6 +353,13 @@ const (
 	PRHandlerBuildMetadata       = "HandleBuildMetadata"
 	PRHandlerSynchronized        = "HandleSynchronized"
 	PRHandlerCheckStatus         = "HandleCheckStatus"
+	// PRHandlerConflict and the handlers below are the merged
+	// decide-commit-execute verdicts and the deploy-failure deadline pair.
+	PRHandlerConflict              = "HandleConflict"
+	PRHandlerDeploySuccess         = "HandleDeploySuccess"
+	PRHandlerCIRecovered           = "HandleCIRecovered"
+	PRHandlerDeployAttemptFailed   = "HandleDeployAttemptFailed"
+	PRHandlerDeployFailureDeadline = "HandleDeployFailureDeadline"
 )
 
 // RepoObject handler names PRObject and RepoObject itself target with

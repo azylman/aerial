@@ -414,25 +414,14 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 	// must not be vetoed by re-reading the deployed projection: the flip
 	// just recorded above always reads back as deployed. Publish errors
 	// return before pending is cleared so the watcher retries.
-	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber); err != nil {
+	fact := s.watchDeploySuccessFact(ctx, pr, name, targetID)
+	if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber, fact); err != nil {
 		return err
 	}
 	if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
 		return err
 	}
-	if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        eventDeploySuccess,
-		Repo:         pr.Repo,
-		PRNumber:     pr.PRNumber,
-		HeadSHA:      pr.HeadSHA,
-		MergeSHA:     pr.MergeSHA,
-		TargetID:     targetID,
-		Status:       statusDeployed,
-		JobName:      name,
-		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
-		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
-		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
+	if err := s.publishWatchDeploySuccess(ctx, fact); err != nil {
 		return err
 	}
 	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
@@ -446,6 +435,34 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		}
 	}
 	return nil
+}
+
+// watchDeploySuccessFact renders the deploy_success fact for one
+// completed Kustomization request.
+func (s *RouterServer) watchDeploySuccessFact(ctx context.Context, pr DeployingPR, name, targetID string) pubsub.PRLifecycleEvent {
+	return pubsub.PRLifecycleEvent{
+		Event:        eventDeploySuccess,
+		Repo:         pr.Repo,
+		PRNumber:     pr.PRNumber,
+		HeadSHA:      pr.HeadSHA,
+		MergeSHA:     pr.MergeSHA,
+		TargetID:     targetID,
+		Status:       statusDeployed,
+		JobName:      name,
+		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+		OccurredAt:   time.Now().UTC(),
+	}
+}
+
+// publishWatchDeploySuccess publishes the watcher deploy_success fact on the
+// legacy pipeline; a restate-owned event skips it because the routed
+// HandleDeploySuccess carries the fact for PRObject to publish.
+func (s *RouterServer) publishWatchDeploySuccess(ctx context.Context, fact pubsub.PRLifecycleEvent) error {
+	if restateOwnsEffects(ctx) {
+		return nil
+	}
+	return s.publishLegacyFact(ctx, fact)
 }
 
 // completeKustomizationRequestAuthoritative publishes one deploy_success
@@ -463,6 +480,20 @@ func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Con
 			targetID = resolved
 		}
 	}
+	fact := s.watchDeploySuccessFact(ctx, pr, name, targetID)
+	if restateOwnsEffects(ctx) {
+		// PRObject decides, commits, and publishes the carried fact.
+		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
+			return err
+		}
+		if err := s.routeDeployDispatched(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber, fact); err != nil {
+			return err
+		}
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
+			return err
+		}
+		return s.syncDeployedProjection(ctx, pr, name)
+	}
 	decision, err := s.resolveDeployDispatch(ctx, pr.Repo, name, pr.HeadSHA, commitSHA, pr.PRNumber)
 	if err != nil {
 		return err
@@ -471,19 +502,7 @@ func (s *RouterServer) completeKustomizationRequestAuthoritative(ctx context.Con
 		if err := s.routeRolloutProgress(ctx, rolloutEvent(pr, name, nil, []string{name})); err != nil {
 			return err
 		}
-		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        eventDeploySuccess,
-			Repo:         pr.Repo,
-			PRNumber:     pr.PRNumber,
-			HeadSHA:      pr.HeadSHA,
-			MergeSHA:     pr.MergeSHA,
-			TargetID:     targetID,
-			Status:       statusDeployed,
-			JobName:      name,
-			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
-			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
-			OccurredAt:   time.Now().UTC(),
-		}); err != nil {
+		if err := s.publishLegacyFact(ctx, fact); err != nil {
 			return err
 		}
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {

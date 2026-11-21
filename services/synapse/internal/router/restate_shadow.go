@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -293,13 +294,15 @@ func (s *RouterServer) shadowConflictResolved(ctx context.Context, res *Resolved
 // shadow send carries the job name so the Restate effect key stays scoped.
 // Head and merge SHAs ride in their own fields: the deployed commit is the
 // merge SHA, and comparing it against the projected head SHA would record a
-// false divergence on every normal deploy where head != merge.
-func (s *RouterServer) shadowDeployDispatched(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int) {
+// false divergence on every normal deploy where head != merge. It targets
+// the merged HandleDeploySuccess verdict, so the legacy-owned dispatch
+// commits its keys and records the carried facts as intended.
+func (s *RouterServer) shadowDeployDispatched(ctx context.Context, repo, jobName, headSHA, mergeSHA string, prNumber int, facts []pubsub.PRLifecycleEvent) {
 	if prNumber <= 0 || (strings.TrimSpace(headSHA) == "" && strings.TrimSpace(mergeSHA) == "") {
 		return
 	}
-	s.shadowPREvent(ctx, "HandleDeployDispatched", restateclient.PREvent{
-		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName,
+	s.shadowPREvent(ctx, "HandleDeploySuccess", restateclient.PREvent{
+		Repo: repo, PRNumber: prNumber, HeadSHA: headSHA, MergeSHA: mergeSHA, JobName: jobName, Facts: facts,
 	})
 }
 

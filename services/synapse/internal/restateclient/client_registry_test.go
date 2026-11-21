@@ -12,7 +12,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -156,6 +158,10 @@ func TestIdempotencyPayload(t *testing.T) {
 	retried.KustomizationRequests = req("flux-system", "2026-11-20T00:05:00Z")
 	otherNS := base
 	otherNS.KustomizationRequests = req("apps", "2026-11-20T00:00:00Z")
+	fact := func(at time.Time, status string) PREvent {
+		return PREvent{Repo: "azylman/aerial", PRNumber: 7, Facts: []pubsub.PRLifecycleEvent{{Event: "conflict", HeadSHA: "h1", Status: status, OccurredAt: at}}}
+	}
+	t0 := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name     string
 		a, b     any
@@ -165,6 +171,8 @@ func TestIdempotencyPayload(t *testing.T) {
 		{name: "different namespace does not dedup", a: base, b: otherNS, wantSame: false},
 		{name: "repo events digest as sent", a: RepoEvent{Repo: "azylman/aerial", MainSHA: "a"}, b: RepoEvent{Repo: "azylman/aerial", MainSHA: "b"}, wantSame: false},
 		{name: "events without requests digest as sent", a: PREvent{Repo: "azylman/aerial", PRNumber: 7}, b: PREvent{Repo: "azylman/aerial", PRNumber: 7}, wantSame: true},
+		{name: "fact retry with new occurred_at dedups", a: fact(t0, "conflict"), b: fact(t0.Add(time.Minute), "conflict"), wantSame: true},
+		{name: "different fact body does not dedup", a: fact(t0, "conflict"), b: fact(t0, "open"), wantSame: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
