@@ -79,16 +79,8 @@ func isRetryableIngressStatus(code int) bool {
 	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
 }
 
-func nakBackoffDelay(delivered uint64) time.Duration {
-	if delivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(delivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
-
 func settleFailedDelivery(ctx context.Context, msg pubsub.Message) {
-	delay := nakBackoffDelay(msg.NumDelivered())
+	delay := pubsub.NakBackoff(msg.NumDelivered(), 16*time.Second)
 	if err := msg.NakWithDelay(delay); err != nil {
 		slog.ErrorContext(ctx, "[vanadis-nats] error naking message", "delay", delay, "error", err)
 	}
