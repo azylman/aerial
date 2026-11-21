@@ -293,7 +293,6 @@ type threadSessionOpCase struct {
 	threadID         string
 	enqueueReq       queue.ThreadEnqueueRequest
 	cancelReq        queue.CancelTurnRequest
-	rotateReq        queue.RotateSessionRequest
 	serverResp       string
 	statusCode       int
 	transportError   bool
@@ -367,12 +366,6 @@ func runThreadSessionOperationCase(t *testing.T, tc threadSessionOpCase) {
 		if err == nil {
 			assert.Equal(t, tc.wantStatus, resp.Status)
 		}
-	case "rotate":
-		resp, e := client.RotateThreadSession(context.Background(), tc.threadID, tc.rotateReq)
-		err = e
-		if err == nil {
-			assert.Equal(t, tc.wantStatus, resp.Status)
-		}
 	}
 
 	mu.Lock()
@@ -430,16 +423,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 			statusCode:  http.StatusOK,
 			wantStatus:  "ok",
 			wantPathSub: "/ThreadSession/th-103/CancelTurn",
-		},
-		{
-			name:        "rotate session returns new session id",
-			op:          "rotate",
-			threadID:    "th-104",
-			rotateReq:   queue.RotateSessionRequest{Topic: "new task"},
-			serverResp:  `{"status":"ok","new_session_id":"sess-new-123"}`,
-			statusCode:  http.StatusOK,
-			wantStatus:  "ok",
-			wantPathSub: "/ThreadSession/th-104/RotateSession",
 		},
 		{
 			name:         "server returns 500 error",
@@ -905,15 +888,6 @@ func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
 			wantSubstr:  `"status":"ok"`,
 		},
 		{
-			name:        "rotate application command",
-			body:        `{"id":"int-2","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"name":"rotate"}}`,
-			statusCode:  http.StatusOK,
-			serverResp:  `{"status":"ok"}`,
-			wantCode:    http.StatusOK,
-			wantPathSub: "/ThreadSession/123456789012345678/RotateSession",
-			wantSubstr:  `"status":"ok"`,
-		},
-		{
 			name:        "stop_turn message component",
 			body:        `{"id":"int-3","type":3,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"custom_id":"stop_turn:msg-1"}}`,
 			statusCode:  http.StatusOK,
@@ -1144,7 +1118,6 @@ func TestHandleInteractionViaRestate_NilAndUnhandledInteractions(t *testing.T) {
 		{name: "unhandled command name", nilClient: false, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "unknown"}}},
 		{name: "unhandled component custom id", nilClient: false, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionMessageComponent, Data: discordgo.MessageComponentInteractionData{CustomID: "ignore_me"}}},
 		{name: "interrupt command with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "interrupt"}}},
-		{name: "rotate command with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "rotate"}}},
 		{name: "stop_turn component with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionMessageComponent, Data: discordgo.MessageComponentInteractionData{CustomID: "stop_turn:msg-1"}}},
 	}
 

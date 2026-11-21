@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -247,62 +246,11 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	return noScheduleAction
 }
 
-func (r *Router) handleRotate(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Flags: discordgo.MessageFlagsEphemeral,
-		},
-	}); err != nil {
-		log.Printf("[Interactions] Failed to defer /rotate response: %v", err)
-		return
-	}
-
-	bare := getBoolOption(data.Options, "bare", false)
-	topic := getStringOption(data.Options, "topic", "")
-	targetThreadID := i.ChannelID
-
-	newSessionID := uuid.New().String()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	if r.deps.Store != nil {
-		if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, newSessionID); err != nil {
-			log.Printf("[Interactions] Warning: RotateSessionID failed in DB for %s: %v", targetThreadID, err)
-		}
-	}
-
-	r.closeThreadProcesses(targetThreadID, "rotate")
-
-	msg := fmt.Sprintf("🔄 Session rotated for <#%s>. Fresh context initialized (`%s`).", targetThreadID, newSessionID[:8])
-	if bare {
-		msg = fmt.Sprintf("🧹 Bare session wipe complete for <#%s>. Context reset with zero history (`%s`).", targetThreadID, newSessionID[:8])
-	}
-	if topic != "" {
-		msg += fmt.Sprintf(" Initial topic focus: %q.", topic)
-	}
-
-	msg = delivery.RedactOutbound(msg)
-	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &msg,
-	}); err != nil {
-		log.Printf("[Interactions] Failed to edit /rotate response: %v", err)
-	}
-}
-
-func (r *Router) closeThreadProcesses(threadID, reason string) {
-	if pool := r.getPool(); pool != nil {
-		pool.CloseThreadProcesses(threadID, reason)
-	}
-}
-
 func (r *Router) drainThreadPendingMessages(ctx context.Context, targetThreadID string) {
 	queue.DrainThreadPendingMessages(ctx, r.deps.Store, targetThreadID, queue.InterruptedByOperatorReason)
 }
 
-func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
-	drainQueue := getBoolOption(data.Options, "drain_queue", true)
-	reset := getBoolOption(data.Options, "reset", false)
+func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, _ discordgo.ApplicationCommandInteractionData) {
 	targetThreadID := i.ChannelID
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -310,26 +258,13 @@ func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *d
 
 	pool := r.getPool()
 	if pool != nil {
-		pool.InterruptThread(ctx, targetThreadID, drainQueue, reset)
+		pool.InterruptThread(ctx, targetThreadID, true, false)
 	}
 	if pool == nil || pool.Store() == nil {
-		if drainQueue {
-			r.drainThreadPendingMessages(ctx, targetThreadID)
-		}
-		if reset && r.deps.Store != nil {
-			if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, uuid.New().String()); err != nil {
-				log.Printf("[Interactions] Warning: failed to rotate session ID on interrupt: %v", err)
-			}
-		}
+		r.drainThreadPendingMessages(ctx, targetThreadID)
 	}
 
-	reply := fmt.Sprintf("🛑 Interrupted active turn execution for <#%s>. Process group terminated.", targetThreadID)
-	if drainQueue {
-		reply += " Pending message backlog purged."
-	}
-	if reset {
-		reply += " Session rotated."
-	}
+	reply := fmt.Sprintf("🛑 Interrupted active turn execution for <#%s>. Process group terminated. Pending message backlog purged.", targetThreadID)
 
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,

@@ -209,14 +209,6 @@ func (c *RestateIngressClient) CancelThreadTurn(ctx context.Context, threadID st
 	return resp, err
 }
 
-// RotateThreadSession rotates session context for a thread.
-func (c *RestateIngressClient) RotateThreadSession(ctx context.Context, threadID string, req queue.RotateSessionRequest) (queue.RotateSessionResponse, error) {
-	var resp queue.RotateSessionResponse
-	svcName := queue.ThreadSessionServiceName(c.agentName)
-	err := c.postJSON(ctx, svcName, threadID, "RotateSession", req, &resp)
-	return resp, err
-}
-
 // EnqueueDispatch enqueues a dispatch request into DispatchSession via Restate Ingress.
 func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey string, req eriwire.BrainDispatchRequest, idempotencyKey ...string) (eriwire.DispatchEnqueueResponse, error) {
 	var resp eriwire.DispatchEnqueueResponse
@@ -250,7 +242,6 @@ func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, r
 		Model:        strings.TrimSpace(req.Model),
 		Effort:       strings.TrimSpace(req.Effort),
 		SkipIfActive: req.SkipIfActive,
-		IsPrompt:     true,
 	}
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
 	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
@@ -300,18 +291,11 @@ func handleInteractionViaRestate(ctx context.Context, client *RestateIngressClie
 	switch interaction.Type {
 	case discordgo.InteractionApplicationCommand:
 		cmd := interaction.ApplicationCommandData()
-		switch cmd.Name {
-		case "interrupt":
+		if cmd.Name == "interrupt" {
 			if _, err := client.CancelThreadTurn(ctx, interaction.ChannelID, queue.CancelTurnRequest{
 				Reason: "cancelled by operator via /interrupt",
 			}); err != nil {
 				log.Printf("[Restate] Failed to cancel thread turn: %v", err)
-				return true, err
-			}
-			return true, nil
-		case "rotate":
-			if _, err := client.RotateThreadSession(ctx, interaction.ChannelID, queue.RotateSessionRequest{}); err != nil {
-				log.Printf("[Restate] Failed to rotate thread session: %v", err)
 				return true, err
 			}
 			return true, nil
