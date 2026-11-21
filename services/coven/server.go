@@ -119,32 +119,6 @@ func (s *Server) registerTools() {
 	})
 }
 
-func (s *Server) wrapAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.authEnabled() {
-			s.auth.Middleware("/health", "/metrics", "/debug/coverage/flush")(next).ServeHTTP(w, r)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func writeAuthError(w http.ResponseWriter, err error) {
-	if valErr, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, valErr.Error()), http.StatusBadRequest)
-		return
-	}
-	if unauthErr, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, unauthErr.Error()), http.StatusUnauthorized)
-		return
-	}
-	if forbErr, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, forbErr.Error()), http.StatusForbidden)
-		return
-	}
-	http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-}
-
 // Routes constructs the HTTP router.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
@@ -154,7 +128,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/admin/extract", s.handleAdminExtract)
 
 	if strings.EqualFold(s.role, "extractor") {
-		return s.wrapAuth(mux)
+		return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(mux)
 	}
 
 	mux.HandleFunc("/facts", s.handleFacts)
@@ -166,7 +140,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/sse", mcpBridge)
 	mux.Handle("/", mcpBridge)
 
-	return s.wrapAuth(mux)
+	return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(mux)
 }
 
 func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +159,7 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	if s.authEnabled() {
 		caller, _ := k8sauth.CallerFromContext(r.Context())
 		if err := s.auth.Authorize(r.Context(), caller, "memories", "get", ""); err != nil {
-			writeAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 	}
@@ -230,7 +204,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	if s.authEnabled() {
 		caller, _ := k8sauth.CallerFromContext(r.Context())
 		if err := s.auth.Authorize(r.Context(), caller, "memories", "get", ""); err != nil {
-			writeAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 	}
@@ -273,7 +247,7 @@ func (s *Server) handleConsolidate(w http.ResponseWriter, r *http.Request) {
 	if s.authEnabled() {
 		caller, _ := k8sauth.CallerFromContext(r.Context())
 		if err := s.auth.Authorize(r.Context(), caller, "memories", "update", ""); err != nil {
-			writeAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 	}
@@ -333,7 +307,7 @@ func (s *Server) handleAdminExtract(w http.ResponseWriter, r *http.Request) {
 	if s.authEnabled() {
 		caller, _ := k8sauth.CallerFromContext(r.Context())
 		if err := s.auth.Authorize(r.Context(), caller, "memories", "update", ""); err != nil {
-			writeAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 	}

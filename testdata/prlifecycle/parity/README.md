@@ -46,6 +46,23 @@ Both tests assert the same `effects` multiset and the same final `rows`.
   `deploy_failed` fact.
 - Deploy-phase events carry the main branch, which never replaces the PR
   branch on the row.
+- The restate-owned edge sends the open-PR auto-update cascade trigger
+  (`RepoObject.HandleAutoUpdate`) itself only for triggers it can judge
+  without state: a main push, a CI failure on a known PR, and a gate or
+  RoboRev success. A recovered check_run success instead carries the policy
+  on `HandleCIRecovered` (`auto_update`). PRObject forwards the trigger only
+  when the recovery applies, because only PRObject knows the PR was
+  CI-failed.
+- `HandleSynchronized` resolves a stored conflict itself. The restate-owned
+  edge cannot know the row was in conflict, so it never sends legacy's
+  follow-up `HandleConflictResolved`.
+- Every send the restate-owned edge makes appears in `restate`, including
+  state-only ones such as `HandleCheckPassed` and the `HandlePushBySHA`
+  envelope for a push with no resolved PR. The synapse
+  `TestRestateOwnedLifecycleEdge` test drives each golden through the real
+  accept points with `restate_authoritative` on. It asserts that the
+  owned sends match this stream handler for handler, and that synapse
+  makes no pr_registry call and performs no effect.
 
 ## Shadow goldens (`../shadow/`)
 
