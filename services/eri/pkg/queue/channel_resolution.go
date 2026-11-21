@@ -12,6 +12,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -86,21 +87,8 @@ func GetCachedChannel(channelID string) (ChannelSnapshot, bool) {
 	return snap, ok
 }
 
-// IsNumericSnowflake returns true if id != "" and contains only ASCII digits [0-9].
-func IsNumericSnowflake(id string) bool {
-	if id == "" {
-		return false
-	}
-	for i := range len(id) {
-		if id[i] < '0' || id[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func fetchAndCacheRESTChannel(s *discordgo.Session, channelID string) (ChannelSnapshot, bool) {
-	if s.Token == "" || !IsNumericSnowflake(channelID) {
+	if s.Token == "" || !discordutil.IsSnowflake(channelID) {
 		return ChannelSnapshot{}, false
 	}
 	res, err, _ := restSingleFlight.Do(channelID, func() (any, error) { return s.Channel(channelID) })
@@ -506,7 +494,7 @@ func (p *WorkerPool) redirectChannelIfNoBuildUpdatesWithSession(sess *discordgo.
 	if sysChan == "" {
 		return channelID
 	}
-	if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && IsNumericSnowflake(sysChanID) {
+	if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && discordutil.IsSnowflake(sysChanID) {
 		return sysChanID
 	}
 	return channelID
