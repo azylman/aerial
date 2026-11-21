@@ -83,7 +83,7 @@ func authRoundTripper(authOk, sarOk bool) *staticAuthRoundTripper {
 	}
 }
 
-func TestServer_WriteAuthAndStoreErrors(t *testing.T) {
+func TestWriteStoreErr(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
