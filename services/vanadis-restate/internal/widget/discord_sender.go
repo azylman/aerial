@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 	"gopkg.in/yaml.v3"
@@ -1088,6 +1089,159 @@ func formatWidgetFooterText(req ericlient.StatusWidgetRequest, now time.Time) st
 	return fmt.Sprintf("*Updated <t:%d:R>*", now.Unix())
 }
 
+// Discord Components V2 per-message limits: total components (nested ones
+// included) and total TextDisplay characters.
+const (
+	maxWidgetComponents = 40
+	maxWidgetTextRunes  = 4000
+)
+
+// widgetRow is one rendered chunk row tagged with its widget lifecycle stage.
+type widgetRow struct {
+	stage     int
+	component discordgo.MessageComponent
+}
+
+// widgetStagePriority lists the stages in the order rows keep their place when
+// the card overflows: in-progress (incl. failed) first, then done, then pending.
+var widgetStagePriority = [...]int{widgetStageInProgress, widgetStageDone, widgetStagePending}
+
+// widgetComponentCount counts c and every nested component, as Discord does.
+func widgetComponentCount(c discordgo.MessageComponent) int {
+	switch v := c.(type) {
+	case *discordgo.Section:
+		n := 1
+		for _, child := range v.Components {
+			n += widgetComponentCount(child)
+		}
+		if v.Accessory != nil {
+			n++
+		}
+		return n
+	default:
+		return 1
+	}
+}
+
+// widgetTextRunes totals the TextDisplay content runes in comps, including Section text.
+func widgetTextRunes(comps []discordgo.MessageComponent) int {
+	n := 0
+	for _, c := range comps {
+		switch v := c.(type) {
+		case *discordgo.TextDisplay:
+			n += utf8.RuneCountInString(v.Content)
+		case *discordgo.Section:
+			n += widgetTextRunes(v.Components)
+		}
+	}
+	return n
+}
+
+// widgetFoldText is the single line that replaces rows folded out of a stage.
+func widgetFoldText(stage, n int) string {
+	switch stage {
+	case widgetStageInProgress:
+		return fmt.Sprintf("🔨 *+%d more active chunks*", n)
+	case widgetStageDone:
+		return fmt.Sprintf("✅ *+%d more completed chunks*", n)
+	default:
+		return fmt.Sprintf("⏳ *+%d more pending chunks*", n)
+	}
+}
+
+// assembleWidgetRows renders the kept rows in order; each stage with folded rows
+// gets its fold line at the position of that stage's last row.
+func assembleWidgetRows(rows []widgetRow, keep []bool) []discordgo.MessageComponent {
+	var dropped [widgetStagePending + 1]int
+	last := map[int]int{}
+	for i, r := range rows {
+		last[r.stage] = i
+		if !keep[i] {
+			dropped[r.stage]++
+		}
+	}
+	out := make([]discordgo.MessageComponent, 0, len(rows))
+	for i, r := range rows {
+		if keep[i] {
+			out = append(out, r.component)
+		}
+		if last[r.stage] == i && dropped[r.stage] > 0 {
+			out = append(out, &discordgo.TextDisplay{Content: widgetFoldText(r.stage, dropped[r.stage])})
+		}
+	}
+	return out
+}
+
+// fitWidgetRows returns the chunk rows that fit beside fixedComponents and
+// fixedRunes within maxWidgetComponents and maxWidgetTextRunes. Rows that fit
+// already are returned unchanged. Otherwise rows are kept by stage priority in
+// plan order, and each stage's overflow folds into one summary line.
+func fitWidgetRows(rows []widgetRow, fixedComponents, fixedRunes int) []discordgo.MessageComponent {
+	all := make([]discordgo.MessageComponent, 0, len(rows))
+	total := fixedComponents
+	for _, r := range rows {
+		all = append(all, r.component)
+		total += widgetComponentCount(r.component)
+	}
+	if total <= maxWidgetComponents && fixedRunes+widgetTextRunes(all) <= maxWidgetTextRunes {
+		return all
+	}
+
+	byStage := map[int][]int{}
+	for i, r := range rows {
+		byStage[r.stage] = append(byStage[r.stage], i)
+	}
+	keep := make([]bool, len(rows))
+	remaining := maxWidgetComponents - fixedComponents
+	for p, stage := range widgetStagePriority {
+		// Every later non-empty stage can always fall back to one fold line.
+		reserve := 0
+		for _, later := range widgetStagePriority[p+1:] {
+			if len(byStage[later]) > 0 {
+				reserve++
+			}
+		}
+		idxs := byStage[stage]
+		kept := 0
+		for k, i := range idxs {
+			more := 0
+			if k < len(idxs)-1 {
+				more = 1
+			}
+			cost := widgetComponentCount(rows[i].component)
+			if remaining-cost < more+reserve {
+				break
+			}
+			keep[i] = true
+			remaining -= cost
+			kept++
+		}
+		if kept < len(idxs) {
+			remaining--
+		}
+	}
+
+	out := assembleWidgetRows(rows, keep)
+	for fixedRunes+widgetTextRunes(out) > maxWidgetTextRunes && dropLastWidgetRow(rows, keep) {
+		out = assembleWidgetRows(rows, keep)
+	}
+	return out
+}
+
+// dropLastWidgetRow unkeeps the last kept row of the lowest-priority stage that
+// still has one, reporting whether any row was dropped.
+func dropLastWidgetRow(rows []widgetRow, keep []bool) bool {
+	for p := len(widgetStagePriority) - 1; p >= 0; p-- {
+		for i := len(rows) - 1; i >= 0; i-- {
+			if keep[i] && rows[i].stage == widgetStagePriority[p] {
+				keep[i] = false
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // BuildStatusWidgetComponents constructs a Components V2 Container message component.
 func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
 	// Evict stale active step entries for terminal chunks or completed widgets.
@@ -1114,8 +1268,8 @@ func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Tim
 		})
 	}
 
-	// 40-Component Ceiling Guard
-	// If len(req.Chunks) > 10, collapse older completed/merged chunks into a single summary TextDisplay.
+	// Fold older done chunks into one summary line, then fit the remaining rows
+	// within Discord's per-message component and text limits.
 	chunks, summaryText := collapseCompletedWidgetChunks(req.Chunks)
 	if summaryText != "" {
 		containerComponents = append(containerComponents, &discordgo.TextDisplay{
@@ -1123,16 +1277,19 @@ func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Tim
 		})
 	}
 
-	// Chunk rows
+	rows := make([]widgetRow, 0, len(chunks))
 	for _, c := range chunks {
-		containerComponents = append(containerComponents, buildWidgetChunkComponent(c))
+		rows = append(rows, widgetRow{stage: widgetChunkStage(c.Status), component: buildWidgetChunkComponent(c)})
 	}
 
-	// Footer TextDisplay
-	footerText := formatWidgetFooterText(req, now)
-	containerComponents = append(containerComponents, &discordgo.TextDisplay{
-		Content: footerText,
-	})
+	footer := &discordgo.TextDisplay{
+		Content: formatWidgetFooterText(req, now),
+	}
+	// Container + header/banner/summary + footer.
+	fixedComponents := 1 + len(containerComponents) + 1
+	fixedRunes := widgetTextRunes(containerComponents) + utf8.RuneCountInString(footer.Content)
+	containerComponents = append(containerComponents, fitWidgetRows(rows, fixedComponents, fixedRunes)...)
+	containerComponents = append(containerComponents, footer)
 
 	container := &discordgo.Container{
 		AccentColor: &color,
