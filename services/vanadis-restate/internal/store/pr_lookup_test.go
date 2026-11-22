@@ -23,9 +23,9 @@ func TestPostgresVanadisStore_LookupsAndAppend(t *testing.T) {
 		wantRoute BuildRoute
 	}{
 		{name: "lookup pr chunk not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup pr chunk success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantRoute: BuildRoute{BuildID: "b1", RunnerAgent: "aerial"}},
+		{name: "lookup pr chunk success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantRoute: BuildRoute{BuildID: "b1"}},
 		{name: "lookup chunk build id not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup chunk build id success", db: dbScript{row: valuesRow("b1")}, wantRoute: BuildRoute{BuildID: "b1", RunnerAgent: "aerial"}},
+		{name: "lookup chunk build id success", db: dbScript{row: valuesRow("b1")}, wantRoute: BuildRoute{BuildID: "b1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,8 +151,8 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}
-			if route.BuildID != tc.wantBuild || cID != tc.wantChunk || route.RunnerAgent != "aerial" {
-				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%+v, %q), want (%q, %q, aerial)", route, cID, tc.wantBuild, tc.wantChunk)
+			if route.BuildID != tc.wantBuild || cID != tc.wantChunk {
+				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%+v, %q), want (%q, %q)", route, cID, tc.wantBuild, tc.wantChunk)
 			}
 		})
 	}

@@ -119,9 +119,6 @@ type AttachChunkPRRequest struct {
 	Quiet    bool   `json:"quiet,omitempty"`
 	// Agent is the caller agent that owns a new standalone build.
 	Agent string `json:"agent,omitempty"`
-	// RunnerAgent is the agent of the Build object executing the attach. The
-	// Build object overwrites it with its own agent; requests never set it.
-	RunnerAgent string `json:"runner_agent,omitempty"`
 }
 
 type CreateChunkInput struct {
@@ -242,9 +239,6 @@ func ScanBuild(s rowScanner) (model.VanadisBuild, error) {
 	if err == nil && strings.TrimSpace(b.Agent) == "" {
 		b.Agent = defaultAgent
 	}
-	if err == nil {
-		b.RunnerAgent = defaultAgent
-	}
 	return b, err
 }
 
@@ -257,11 +251,9 @@ func NormalizeRunnerAgent(runner string) string {
 	return defaultAgent
 }
 
-// BuildRoute is the Restate routing key for one build: its ID and the agent
-// whose vanadis-restate runner executes it.
+// BuildRoute is the Restate routing key for one build: its ID.
 type BuildRoute struct {
-	BuildID     string `json:"build_id"`
-	RunnerAgent string `json:"runner_agent"`
+	BuildID string `json:"build_id"`
 }
 
 // ApplyRawChunkCIChecks folds raw CI check JSON into derived chunk fields.

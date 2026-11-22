@@ -30,9 +30,6 @@ func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildReq
 		RecordReconcileError(labelReconcileBuild, err)
 		return ReconcileBuildResult{}, err
 	}
-	if err := b.guardRunner(ctx, labelReconcileBuild); err != nil {
-		return ReconcileBuildResult{}, err
-	}
 	rt := b.getRuntime(ctx)
 	res, err := b.executeObjectTransitionTick(rt, labelReconcileBuild, nil, req.DeferralSeq)
 	if err != nil || strings.TrimSpace(req.Reason) != ReconcileReasonWidgetSync || res.Status != statusFailed || b.executor == nil {
@@ -55,9 +52,6 @@ func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest
 	if b == nil || b.store == nil {
 		err := restate.TerminalErrorf("store not configured")
 		RecordReconcileError(labelMutateBuild, err)
-		return ReconcileBuildResult{}, err
-	}
-	if err := b.guardRunner(ctx, labelMutateBuild); err != nil {
 		return ReconcileBuildResult{}, err
 	}
 	rt := b.getRuntime(ctx)

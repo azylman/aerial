@@ -98,9 +98,8 @@ func (s *Store) MarkActionRepairDeployed(ctx context.Context, chunkID string, ro
 // SweptChunk identifies one cross-build swept chunk and the foreign build
 // that owns it.
 type SweptChunk struct {
-	ChunkID     string
-	BuildID     string
-	RunnerAgent string
+	ChunkID string
+	BuildID string
 }
 
 // buildPushJobRegex mirrors the widget Build-and-Push check-name parser so
@@ -283,24 +282,16 @@ func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deployi
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
 	}
-	for _, sw := range withSweptRunners(CrossBuildDeploymentSweepIDs(s.gitHubOwner, deploying, candidates)) {
+	for _, sw := range CrossBuildDeploymentSweepIDs(s.gitHubOwner, deploying, candidates) {
 		if err := s.CompletePRDeployment(ctx, sw.ChunkID, nil); err != nil {
 			if errors.Is(err, ErrPRTransitionSkipped) {
 				continue
 			}
-			return swept, withSweptRunners(recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates)), err
+			return swept, recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates), err
 		}
 		swept = append(swept, sw)
 	}
-	return swept, withSweptRunners(recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates)), nil
-}
-
-// withSweptRunners stamps each swept chunk with the default runner agent.
-func withSweptRunners(chunks []SweptChunk) []SweptChunk {
-	for i := range chunks {
-		chunks[i].RunnerAgent = defaultAgent
-	}
-	return chunks
+	return swept, recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates), nil
 }
 
 // recoveredCrossBuildChunks re-derives already-completed chunks matching

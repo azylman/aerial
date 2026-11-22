@@ -377,7 +377,6 @@ CREATE INDEX IF NOT EXISTS idx_production_coverage_service ON production_code_co
 CREATE TABLE IF NOT EXISTS vanadis_builds (
     id TEXT PRIMARY KEY,
     agent TEXT NOT NULL DEFAULT 'aerial',
-    runner_agent TEXT NOT NULL DEFAULT 'aerial',
     thread_id TEXT NOT NULL,
     tier INTEGER NOT NULL DEFAULT 2,
     title TEXT NOT NULL DEFAULT '',
@@ -393,7 +392,6 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_status ON vanadis_builds (status);
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_thread_id ON vanadis_builds (thread_id);
 CREATE INDEX IF NOT EXISTS idx_vanadis_builds_agent_status ON vanadis_builds(agent, status);
-CREATE INDEX IF NOT EXISTS idx_vanadis_builds_runner_agent_status ON vanadis_builds(runner_agent, status);
 
 -- Vanadis Chunks Table
 CREATE TABLE IF NOT EXISTS vanadis_chunks (

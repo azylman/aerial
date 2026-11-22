@@ -40,10 +40,6 @@ func (b *BuildObject) UpdateActiveStep(ctx restate.ObjectSharedContext, req Upda
 		return AckResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	if err := b.guardRunner(ctx, "UpdateActiveStep"); err != nil {
-		return AckResponse{}, err
-	}
-
 	stepText := strings.TrimSpace(req.ActiveStep)
 	if stepText == "" {
 		stepText = strings.TrimSpace(req.Step)

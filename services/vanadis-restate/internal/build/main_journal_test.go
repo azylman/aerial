@@ -30,10 +30,6 @@ func observeJournalCallback(t *testing.T, mc *mocks.MockContext, want error, cod
 	t.Helper()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
 		res, err := fn(mockRunContext{Context: context.Background()})
-		if _, isGuard := res.(runnerGuardResult); isGuard {
-			assert.NoError(t, err)
-			return runMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
-		}
 		if code != 0 {
 			var terminal restate.TerminalError
 			require.ErrorAs(t, err, &terminal)
@@ -537,7 +533,7 @@ func makeOutcomeJournalContext(t *testing.T, journal map[string]any, commands *[
 func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 	t.Parallel()
 	transition := reconcileStepOutput{BuildStatus: "running", LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: model.VanadisBuild{ID: "b1", Status: "running"}}}
-	prefix := []string{"run runner-guard", "run handle-dispatch-outcome-postgres"}
+	prefix := []string{"run handle-dispatch-outcome-postgres"}
 	tests := []struct {
 		name    string
 		status  string
@@ -558,7 +554,6 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 			t.Parallel()
 			var commands []string
 			journal := map[string]any{
-				labelRunnerGuard:                   runnerGuardResult{},
 				"handle-dispatch-outcome-postgres": tc.applied,
 				"handle-nopr-turn-outcome":         tc.noPR,
 				labelReconcileAfterDispatch:        transition,
@@ -587,15 +582,14 @@ func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
 		outcome prEventOutcome
 		want    []string
 	}{
-		{name: "deploy success reconciles", outcome: prEventOutcome{Applied: true}, want: []string{"run runner-guard", "run handle-pr-event-postgres", "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
-		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}}, want: []string{"run runner-guard", "run handle-pr-event-postgres", `send {"reason":"widget_sync"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+		{name: "deploy success reconciles", outcome: prEventOutcome{Applied: true}, want: []string{"run handle-pr-event-postgres", "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.BuildRoute{{BuildID: "b2"}}}, want: []string{"run handle-pr-event-postgres", `send {"reason":"widget_sync"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var commands []string
 			journal := map[string]any{
-				labelRunnerGuard:           runnerGuardResult{},
 				"handle-pr-event-postgres": tc.outcome,
 				labelReconcileAfterPREvent: transition,
 			}

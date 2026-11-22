@@ -218,7 +218,6 @@ type objectRuntime interface {
 	ScheduleDeferredReconcile(delay time.Duration, seq int)
 	InvocationID() string
 	SendReconcile(service, buildID, reason string)
-	RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error)
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
 }
 
@@ -290,15 +289,6 @@ func (r restateObjectRuntime) InvocationID() string {
 // SendReconcile sends a one-way Reconcile to another build's Build object.
 func (r restateObjectRuntime) SendReconcile(service, buildID, reason string) {
 	_ = restate.ObjectSend(r.ctx, service, buildID, "Reconcile").Send(ReconcileBuildRequest{Reason: reason})
-}
-
-// RunRunnerGuard journals the keyed build's runner lookup.
-func (r restateObjectRuntime) RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error) {
-	return restate.Run(r.ctx, func(rc restate.RunContext) (runnerGuardResult, error) {
-		return runInSpan(rc, spanPrefix+labelRunnerGuard, func(trc restate.RunContext) (runnerGuardResult, error) {
-			return fn(trc)
-		})
-	}, restate.WithName(labelRunnerGuard))
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
@@ -492,14 +482,13 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	}
 	agent := strings.TrimSpace(req.Agent)
 	if agent == "" {
-		agent = b.runnerAgent()
+		agent = "aerial"
 	} else {
 		agent = store.NormalizeRunnerAgent(agent)
 	}
 	build := model.VanadisBuild{
 		ID:            buildID,
 		Agent:         agent,
-		RunnerAgent:   b.runnerAgent(),
 		ThreadID:      threadID,
 		Tier:          req.Tier,
 		Title:         title,
@@ -535,9 +524,6 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req store.UpdateBui
 	if b.store == nil {
 		return model.VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
 	}
-	if err := b.guardRunner(ctx, labelUpdateBuild); err != nil {
-		return model.VanadisBuild{}, err
-	}
 	res, err := RunJournaled(ctx, labelUpdateBuild, "update-build-postgres", func(rc restate.RunContext) (model.VanadisBuild, error) {
 		updated, err := b.store.UpdateBuild(rc, buildID, req)
 		if err != nil {
@@ -572,9 +558,6 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 	if b.store == nil {
 		rt.ClearState()
 		return model.VanadisBuild{ID: buildID, Status: statusCancelled}, nil
-	}
-	if err := b.guardRunner(ctx, labelCancel); err != nil {
-		return model.VanadisBuild{}, err
 	}
 
 	res, err := RunJournaled(ctx, labelCancel, "cancel-build-postgres", func(rc restate.RunContext) (model.VanadisBuild, error) {
@@ -625,9 +608,6 @@ func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRe
 	if b.store == nil {
 		return nil, nil
 	}
-	if err := b.guardRunner(ctx, labelAppendChunks); err != nil {
-		return nil, err
-	}
 	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks)
 }
 
@@ -655,9 +635,6 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req store.UpdateChu
 	}
 	if b.store == nil {
 		return model.VanadisChunk{}, nil
-	}
-	if err := b.guardRunner(ctx, labelUpdateChunk); err != nil {
-		return model.VanadisChunk{}, err
 	}
 	updated, err := RunJournaled(ctx, labelUpdateChunk, "update-chunk-postgres", func(rc restate.RunContext) (model.VanadisChunk, error) {
 		c, err := b.store.UpdateChunk(rc, buildID, chunkRef, req)
@@ -687,9 +664,6 @@ func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequ
 	}
 	if b.store == nil {
 		return nil
-	}
-	if err := b.guardRunner(ctx, labelRemoveChunk); err != nil {
-		return err
 	}
 	rt := b.getRuntime(ctx)
 	return b.executeChunkRemoval(ctx, rt, buildID, targetRef)
@@ -739,9 +713,6 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 	}
 	if b.store == nil {
 		return model.FailChunkResponse{ChunkID: chunkID, Failed: true}, nil
-	}
-	if err := b.guardRunner(ctx, labelFailChunk); err != nil {
-		return model.FailChunkResponse{}, err
 	}
 
 	res, err := RunJournaled(ctx, labelFailChunk, "fail-chunk-postgres", func(rc restate.RunContext) (model.FailChunkResponse, error) {
@@ -809,12 +780,6 @@ func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req store.AttachChunkP
 	if st == nil {
 		return model.AttachChunkPRResponse{Status: "attached", BuildID: restate.Key(ctx), ChunkID: req.ChunkID}, nil
 	}
-	if err := b.guardRunner(ctx, labelAttachPR); err != nil {
-		return model.AttachChunkPRResponse{}, err
-	}
-	// A standalone build created here runs on this object, never on a
-	// runner named by the request.
-	req.RunnerAgent = b.runnerAgent()
 	return b.executePRAttachment(ctx, req)
 }
 

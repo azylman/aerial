@@ -168,13 +168,13 @@ func (s *VanadisServer) authorizeBuildMutation(w http.ResponseWriter, r *http.Re
 	return build, true
 }
 
-// mutateBuildObject calls a handler on the Build object of the build's runner.
+// mutateBuildObject calls a handler on the Build object.
 func (s *VanadisServer) mutateBuildObject(ctx context.Context, build *VanadisBuild, handler string, req, out any) error {
-	return s.callRestateIngress(ctx, s.restateObjectPath(build.RunnerAgent, build.ID, handler), req, out)
+	return s.callRestateIngress(ctx, s.restateObjectPath("", build.ID, handler), req, out)
 }
 
 func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBuild, req UpdateActiveStepRequest) error {
-	path := s.restateObjectPath(build.RunnerAgent, build.ID, "UpdateActiveStep") + "/send"
+	path := s.restateObjectPath("", build.ID, "UpdateActiveStep") + "/send"
 	return s.callRestateIngress(ctx, path, req, nil)
 }
 

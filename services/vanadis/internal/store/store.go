@@ -61,7 +61,6 @@ func ScanBuild(s RowScanner) (model.VanadisBuild, error) {
 	if err == nil && strings.TrimSpace(b.Agent) == "" {
 		b.Agent = "aerial"
 	}
-	b.RunnerAgent = "aerial"
 	return b, err
 }
 

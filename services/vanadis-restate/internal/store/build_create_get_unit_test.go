@@ -94,8 +94,8 @@ func TestSameBuildCreationCases(t *testing.T) {
 	withQuiet.Quiet = false
 	trimmed := base
 	trimmed.ID = "  b1  "
-	defaultRunner := base
-	defaultRunner.RunnerAgent = " Aerial "
+	defaultAgent := base
+	defaultAgent.Agent = " Aerial "
 	badMode := chunk("c1", "T", "bogus")
 	renamed := chunk("c9", "T", "pr")
 	changed := chunk("c1", "Changed", "pr")
@@ -113,7 +113,7 @@ func TestSameBuildCreationCases(t *testing.T) {
 		{name: "different objective", a: base, ac: good, b: withObjective, bc: good},
 		{name: "different title", a: base, ac: good, b: withTitle, bc: good},
 		{name: "different quiet", a: base, ac: good, b: withQuiet, bc: good},
-		{name: "empty and default runner equal", a: base, ac: good, b: defaultRunner, bc: good, want: true},
+		{name: "empty and default agent equal", a: base, ac: good, b: defaultAgent, bc: good, want: true},
 		{name: "different count", a: base, ac: good, b: base, bc: append(append([]model.VanadisChunk{}, good...), chunk("c2", "T", "pr"))},
 		{name: "changed chunk", a: base, ac: good, b: base, bc: []model.VanadisChunk{changed}},
 		{name: "renamed chunk", a: base, ac: good, b: base, bc: []model.VanadisChunk{renamed}},

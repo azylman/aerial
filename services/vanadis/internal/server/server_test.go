@@ -280,7 +280,7 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 		t.Fatalf("seed conflict build: %v", err)
 	}
 	runnerBuild := mkBuild("b-runner-alpha", "1555999", "Runner", "obj", "running")
-	runnerBuild.Agent, runnerBuild.RunnerAgent = "agent-alpha", "agent-alpha"
+	runnerBuild.Agent = "agent-alpha"
 	if err := memStore.CreateBuild(context.Background(), runnerBuild, nil); err != nil {
 		t.Fatalf("seed runner build: %v", err)
 	}

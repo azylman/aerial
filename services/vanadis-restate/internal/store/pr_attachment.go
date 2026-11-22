@@ -171,17 +171,16 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 	threadID := model.NormalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
 	build := model.VanadisBuild{
-		ID:          buildID,
-		Agent:       NormalizeRunnerAgent(req.Agent),
-		RunnerAgent: defaultAgent,
-		ThreadID:    threadID,
-		Tier:        0,
-		Title:       title,
-		Objective:   title,
-		Status:      statusRunning,
-		Quiet:       req.Quiet,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:        buildID,
+		Agent:     NormalizeRunnerAgent(req.Agent),
+		ThreadID:  threadID,
+		Tier:      0,
+		Title:     title,
+		Objective: title,
+		Status:    statusRunning,
+		Quiet:     req.Quiet,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	chunk := model.VanadisChunk{
 		ID:           chunkID,

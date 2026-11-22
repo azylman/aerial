@@ -9,7 +9,6 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -18,37 +17,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-func TestBuildObject_GuardRunner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		ownAgent      string
-		key           string
-		guardErr      error
-		wantGuardStep bool
-		wantErr       bool
-	}{
-		{name: "non-empty key executes journaled runner guard", key: "b1", wantGuardStep: true},
-		{name: "empty key skips runner guard", key: "", wantGuardStep: false},
-		{name: "runner guard error surfaces", key: "b1", guardErr: errors.New("guard fail"), wantGuardStep: true, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rt := newFakeObjectRuntime(tc.key)
-			rt.runnerGuardErr = tc.guardErr
-			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt })
-			err := bo.guardRunner(nil, "test")
-			if tc.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Equal(t, tc.wantGuardStep, rt.runnerGuardCalled)
-		})
-	}
-}
 
 // createCaptureStore records the build Create persists.
 type createCaptureStore struct {
@@ -71,37 +39,6 @@ func (s *createCaptureStore) GetBuild(_ context.Context, id string) (*model.Vana
 	return nil, nil, store.ErrBuildNotFound
 }
 
-func TestBuildObject_CreateRecordsOwnRunner(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		ownAgent   string
-		reqAgent   string
-		wantAgent  string
-		wantRunner string
-	}{
-		{name: "default object runs unowned build", wantAgent: "aerial", wantRunner: "aerial"},
-		{name: "default object runs default-owned build", reqAgent: "aerial", wantAgent: "aerial", wantRunner: "aerial"},
-		{name: "default object runs sibling-owned build", reqAgent: "agent-beta", wantAgent: "agent-beta", wantRunner: "aerial"},
-		{name: "sibling object runs its own build", ownAgent: "Agent-Alpha", reqAgent: "agent-alpha", wantAgent: "agent-alpha", wantRunner: "agent-alpha"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st := &createCaptureStore{}
-			rt := newFakeObjectRuntime("b1")
-			rt.runStepErr = errors.New("stop after persist")
-			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
-			req := CreateBuildRequest{Agent: tc.reqAgent, ThreadID: "t1", Objective: "o", Chunks: []store.CreateChunkInput{{ID: "c1", Title: "c", Mode: "action", Instructions: "i", DependsOn: []string{}}}}
-			_, _ = bo.Create(makeObjectMockContext(t, "b1"), req)
-			assert.Equal(t, tc.wantAgent, st.created.Agent)
-			assert.Equal(t, tc.wantRunner, st.created.RunnerAgent)
-			require.NotNil(t, rt.state)
-			assert.Equal(t, tc.wantRunner, rt.state.Build.RunnerAgent)
-		})
-	}
-}
-
 func TestBuildObject_CreateAcceptsAllOwners(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -110,7 +47,7 @@ func TestBuildObject_CreateAcceptsAllOwners(t *testing.T) {
 		reqAgent  string
 		wantAgent string
 	}{
-		{name: "sibling object accepts unowned build", ownAgent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "sibling object accepts unowned build", ownAgent: "agent-alpha", wantAgent: "aerial"},
 		{name: "sibling object accepts default-owned build", ownAgent: "agent-alpha", reqAgent: "aerial", wantAgent: "aerial"},
 		{name: "sibling object accepts other sibling build", ownAgent: "agent-alpha", reqAgent: "agent-beta", wantAgent: "agent-beta"},
 	}
@@ -142,7 +79,7 @@ func TestWithBuildOwner(t *testing.T) {
 	}{
 		{name: "nil build keeps context agent", ctxAgent: "aerial", wantAgent: "aerial"},
 		{name: "unowned build keeps context agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: " "}, wantAgent: "aerial"},
-		{name: "owner overrides runner agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: "agent-alpha", RunnerAgent: "aerial"}, wantAgent: "agent-alpha"},
+		{name: "owner overrides context agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: "agent-alpha"}, wantAgent: "agent-alpha"},
 		{name: "owner set on bare context", build: &model.VanadisBuild{Agent: "agent-beta"}, wantAgent: "agent-beta"},
 	}
 	for _, tc := range tests {
@@ -165,7 +102,7 @@ type removalStore struct {
 }
 
 func (s *removalStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return &model.VanadisBuild{ID: buildID, Agent: s.owner, RunnerAgent: "aerial"}, nil, nil
+	return &model.VanadisBuild{ID: buildID, Agent: s.owner}, nil, nil
 }
 
 func (*removalStore) RemoveChunk(_ context.Context, buildID, chunkRef string) (*model.VanadisChunk, []model.VanadisChunk, error) {
@@ -209,9 +146,9 @@ func TestBuildObject_CrossBuildReconcileSends(t *testing.T) {
 		wantSent []sentReconcile
 	}{
 		{name: "no sweep sends nothing"},
-		{name: "default runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
-		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
-		{name: "one send per build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}, {ChunkID: "f2", BuildID: "b2", RunnerAgent: "agent-alpha"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}, {Service: "Build", BuildID: "b3", Reason: "widget_sync"}}},
+		{name: "default runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
+		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
+		{name: "one send per build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}, {Service: "Build", BuildID: "b3", Reason: "widget_sync"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,18 +171,12 @@ func TestBuildObject_CrossBuildReconcileSends(t *testing.T) {
 func TestRestateObjectRuntime_RunnerOperations(t *testing.T) {
 	t.Parallel()
 	mc := mocks.NewMockContext(t)
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Once()
 	mClient := mocks.NewMockClient(t)
 	mInv := mocks.NewMockInvocation(t)
 	mc.EXPECT().Object("Build", "b2", "Reconcile").Return(mClient).Once()
 	mClient.EXPECT().Send(ReconcileBuildRequest{Reason: ReconcileReasonWidgetSync}).Return(mInv).Once()
 	rt := restateObjectRuntime{ctx: restate.WithMockContext(mc)}
-	sendCrossBuildReconciles(rt, []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}})
-	got, err := rt.RunRunnerGuard(func(context.Context) (runnerGuardResult, error) {
-		return runnerGuardResult{Found: true, RunnerAgent: "agent-alpha"}, nil
-	})
-	require.NoError(t, err)
-	assert.Equal(t, runnerGuardResult{Found: true, RunnerAgent: "agent-alpha"}, got)
+	sendCrossBuildReconciles(rt, []store.BuildRoute{{BuildID: "b2"}})
 }
 
 func TestRecordCrossBuildReconcile(t *testing.T) {
@@ -258,8 +189,7 @@ func TestRecordCrossBuildReconcile(t *testing.T) {
 	}{
 		{name: "no collector drops", routes: []store.BuildRoute{{BuildID: "b2"}}},
 		{name: "blank build ignored", collector: true, routes: []store.BuildRoute{{BuildID: " "}}},
-		{name: "runner normalized", collector: true, routes: []store.BuildRoute{{BuildID: "b2", RunnerAgent: " Agent-Alpha "}}, want: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}}},
-		{name: "deduplicated by build", collector: true, routes: []store.BuildRoute{{BuildID: "b2"}, {BuildID: "b3", RunnerAgent: "agent-alpha"}, {BuildID: "b2", RunnerAgent: "agent-beta"}}, want: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}, {BuildID: "b3", RunnerAgent: "agent-alpha"}}},
+		{name: "deduplicated by build", collector: true, routes: []store.BuildRoute{{BuildID: "b2"}, {BuildID: "b3"}, {BuildID: "b2"}}, want: []store.BuildRoute{{BuildID: "b2"}, {BuildID: "b3"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -280,7 +210,6 @@ func TestRecordCrossBuildReconcile(t *testing.T) {
 func TestBuildObjectRunnerIdentity(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "Build", NewBuildObject("", nil).ServiceName())
-	assert.Equal(t, "aerial", (*BuildObject)(nil).runnerAgent())
 }
 
 // TestBuildObject_ReconcileWidgetSyncFailedBuild covers the explicit widget
@@ -335,20 +264,17 @@ func (s *attachRunnerSpyStore) AttachChunkPR(_ context.Context, req store.Attach
 	return "b1", "b1-chunk-1", "th-1", nil
 }
 
-// TestBuildObject_AttachPRStampsOwnRunner proves a standalone build created
-// by AttachPR runs on the executing Build object, never on a runner named by
-// the request.
-func TestBuildObject_AttachPRStampsOwnRunner(t *testing.T) {
+// TestBuildObject_AttachPRPreservesOwner proves a standalone build created
+// by AttachPR preserves the agent owner from the request.
+func TestBuildObject_AttachPRPreservesOwner(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		ownAgent   string
-		reqRunner  string
-		wantRunner string
+		name      string
+		reqAgent  string
+		wantAgent string
 	}{
-		{name: "default object stamps default runner", wantRunner: "aerial"},
-		{name: "sibling object stamps itself", ownAgent: "agent-alpha", wantRunner: "agent-alpha"},
-		{name: "forged runner is overwritten", ownAgent: "agent-alpha", reqRunner: "agent-beta", wantRunner: "agent-alpha"},
+		{name: "default agent preserved", reqAgent: "aerial", wantAgent: "aerial"},
+		{name: "sibling agent preserved", reqAgent: "agent-alpha", wantAgent: "agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -356,10 +282,9 @@ func TestBuildObject_AttachPRStampsOwnRunner(t *testing.T) {
 			spy := &attachRunnerSpyStore{}
 			rt := newFakeObjectRuntime("b1")
 			rt.runStepErr = errors.New("stop after attach")
-			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, nil)
-			_, _ = bo.AttachPR(makeObjectMockContext(t, "b1"), store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: "agent-alpha", RunnerAgent: tc.reqRunner})
-			assert.Equal(t, tc.wantRunner, spy.attached.RunnerAgent)
-			assert.Equal(t, "agent-alpha", spy.attached.Agent)
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, nil)
+			_, _ = bo.AttachPR(makeObjectMockContext(t, "b1"), store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: tc.reqAgent})
+			assert.Equal(t, tc.wantAgent, spy.attached.Agent)
 		})
 	}
 }
