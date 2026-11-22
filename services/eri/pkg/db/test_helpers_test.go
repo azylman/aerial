@@ -58,6 +58,17 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, c1(s.AcquireLeaderLock(ctx)), "AcquireLeaderLock")
 	requireErr(t, c1(s.CancelPendingDispatches(ctx, "d1", "b1", "r")), "CancelPendingDispatches")
 	requireErr(t, c1(s.GetPendingOrProcessingDispatches(ctx, 10)), "GetPendingOrProcessingDispatches")
+	requireErr(t, c1(s.ListPendingMessageIDsForThread(ctx, "t")), "ListPendingMessageIDsForThread")
+	requireErr(t, c1(s.GetMessagesByID(ctx, []string{"id"})), "GetMessagesByID")
+	requireErr(t, c1(s.FailMessagesIfActive(ctx, []string{"id"}, "r")), "FailMessagesIfActive")
+	requireErr(t, c1(s.FailMessagesIfPending(ctx, []string{"id"}, "r")), "FailMessagesIfPending")
+	requireErr(t, c1(s.RequeueProcessingMessages(ctx, []string{"id"}, "r")), "RequeueProcessingMessages")
+	requireErr(t, c1(s.BeginMessageAttempt(ctx, "id", 1)), "BeginMessageAttempt")
+	requireErr(t, c1(s.ListPendingDispatchIDsForSession(ctx, "k")), "ListPendingDispatchIDsForSession")
+	requireErr(t, c1(s.FailDispatchesIfActive(ctx, []string{"id"}, "r")), "FailDispatchesIfActive")
+	requireErr(t, c1(s.FailDispatchesIfPending(ctx, []string{"id"}, "r")), "FailDispatchesIfPending")
+	requireErr(t, c1(s.BeginDispatchAttempt(ctx, "id", 1)), "BeginDispatchAttempt")
+	requireErr(t, c1(s.ListActiveDispatchSessionKeys(ctx, "d", "b")), "ListActiveDispatchSessionKeys")
 }
 
 func newTestTranscriptStore(t testing.TB, stack string) *SQLTranscriptStore {
