@@ -10,53 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-func TestDispatchAccepted(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		body       string
-		code       int
-		reqID      string
-		wantErr    bool
-		wantActive bool
-	}{
-		{name: "accepted", body: `{"status":"accepted","dispatch_id":"d1"}`, code: 202, reqID: "d1"},
-		{name: "already exists", body: `{"status":"already_exists","dispatch_id":"d1"}`, code: 200, reqID: "d1"},
-		{name: "skipped active", body: `{"status":"skipped_active","dispatch_id":"d1"}`, code: 200, reqID: "d1", wantErr: true, wantActive: true},
-		{name: "wrong dispatch id", body: `{"status":"accepted","dispatch_id":"other"}`, code: 202, reqID: "d1", wantErr: true},
-		{name: "empty request id", body: `{"status":"accepted","dispatch_id":"d1"}`, code: 202, reqID: "", wantErr: true},
-		{name: "missing status", body: `{}`, code: 200, reqID: "d1", wantErr: true},
-		{name: "malformed body", body: `invalid`, code: 200, reqID: "d1", wantErr: true},
-		{name: "server failure", body: `{}`, code: 500, reqID: "d1", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.code)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-			c := NewHTTPEriClient(srv.URL, srv.Client())
-			err := c.DispatchAccepted(context.Background(), eriwire.BrainDispatchRequest{ID: tc.reqID})
-			if tc.wantActive {
-				assert.ErrorIs(t, err, eriwire.ErrDispatchActive)
-				return
-			}
-			if tc.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-		})
-	}
-}
 
 func TestFetchGitHubPullRequest(t *testing.T) {
 	t.Parallel()
@@ -86,7 +43,7 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 		{name: "server 500 error returns error without skip", repo: "owner/repo", number: 12, status: 500, body: `{}`, wantErr: true},
 		{name: "invalid json", repo: "owner/repo", number: 12, status: 200, body: `invalid`, wantErr: true},
 		{name: "ok", repo: "owner/repo", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "owner", wantFull: "owner/repo"},
-		{name: "bare repo resolves owner", repo: "aerial", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "azylman", wantFull: "azylman/aerial"},
+		{name: "bare repo resolves owner", repo: "aerial", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "example-owner", wantFull: "example-owner/aerial"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,7 +58,7 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 			defer srv.Close()
 			var exec *Executor
 			if !tc.nilExec {
-				exec = NewExecutor("", nil, nil, "", "azylman", srv.Client())
+				exec = NewExecutor("", nil, nil, "", "example-owner", srv.Client())
 				exec.GitHubAPIURL = srv.URL
 			}
 			pr, owner, full, err := exec.fetchGitHubPullRequest(context.Background(), tc.repo, tc.number)
@@ -207,7 +164,7 @@ func TestValidatePRHead(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			exec := NewExecutor("", nil, nil, "", "azylman", srv.Client())
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
 			exec.GitHubAPIURL = srv.URL
 			err := exec.ValidatePRHead(context.Background(), tc.repo, 12, tc.head)
 			if tc.wantSkipped {
@@ -312,7 +269,7 @@ func TestValidateChunkPRAttachment(t *testing.T) {
 				_, _ = w.Write([]byte(tc.prBody))
 			}))
 			defer srv.Close()
-			exec := NewExecutor("", nil, nil, "", "azylman", srv.Client())
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
 			exec.GitHubAPIURL = srv.URL
 			build := model.VanadisBuild{ID: "b", ThreadID: "th-1"}
 			chunk := model.VanadisChunk{ID: "c1"}

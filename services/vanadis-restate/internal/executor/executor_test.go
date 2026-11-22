@@ -3,41 +3,23 @@ package executor
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/githubapitest"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req eriwire.BrainDispatchRequest) error
-	cancelFn   func(ctx context.Context, chunkID string) error
-	promptFn   func(ctx context.Context, threadID, prompt string) error
-	widgetFn   func(ctx context.Context, req StatusWidgetRequest) (string, error)
-	messageFn  func(ctx context.Context, channelID, content string) error
-
-	lastDispatch *eriwire.BrainDispatchRequest
-	lastCancel   string
-	lastThreadID string
-	lastPrompt   string
-	lastWidget   *StatusWidgetRequest
-	lastMsgChan  string
-	lastMsgCont  string
-}
-
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
-	return m.Dispatch(ctx, req)
-}
+var errDelegation = errors.New("eri unavailable")
 
 type mockStoreForLaunch struct {
 	store.VanadisStore
@@ -46,51 +28,19 @@ type mockStoreForLaunch struct {
 	reserved   []string
 }
 
+func (m *mockStoreForLaunch) ReserveChunkForLaunch(_ context.Context, chunkID string) error {
+	m.reserved = append(m.reserved, chunkID)
+	return m.reserveErr
+}
+
 type mockBusExecutor struct {
 	pubsub.Bus
 
 	lastSubj string
 }
 
-func (m *mockEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
-	m.lastDispatch = &req
-	if m.dispatchFn != nil {
-		return m.dispatchFn(ctx, req)
-	}
-	return nil
-}
-
-func (m *mockEriClient) CancelDispatch(ctx context.Context, chunkID string) error {
-	m.lastCancel = chunkID
-	if m.cancelFn != nil {
-		return m.cancelFn(ctx, chunkID)
-	}
-	return nil
-}
-
-func (m *mockEriClient) Prompt(ctx context.Context, threadID, prompt string) error {
-	m.lastThreadID = threadID
-	m.lastPrompt = prompt
-	if m.promptFn != nil {
-		return m.promptFn(ctx, threadID, prompt)
-	}
-	return nil
-}
-
-func (m *mockEriClient) Widget(ctx context.Context, req StatusWidgetRequest) (string, error) {
-	m.lastWidget = &req
-	if m.widgetFn != nil {
-		return m.widgetFn(ctx, req)
-	}
-	return "msg-123", nil
-}
-
-func (m *mockEriClient) Message(ctx context.Context, channelID, content string) error {
-	m.lastMsgChan = channelID
-	m.lastMsgCont = content
-	if m.messageFn != nil {
-		return m.messageFn(ctx, channelID, content)
-	}
+func (m *mockBusExecutor) Publish(_ context.Context, subject, _ string, _ any) error {
+	m.lastSubj = subject
 	return nil
 }
 
@@ -104,60 +54,201 @@ func (m *mockWidgetStore) UpdateBuildStatusMessageID(_ context.Context, _, _ str
 	return m.updateErr
 }
 
-func TestExecutor_PromptAndDispatch(t *testing.T) {
+func TestNewExecutor(t *testing.T) {
 	t.Parallel()
-	eri := &mockEriClient{}
-	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor(t.TempDir(), eri, bus, "test-token", "azylman", nil)
+	tests := []struct {
+		name, shareRoot string
+		deployUIURL     []string
+		wantShare       string
+		wantDeploy      string
+	}{
+		{"defaults", "", nil, "/share", ""},
+		{"explicit share root and deploy ui", "/custom-share", []string{"https://flux.example.com"}, "/custom-share", "https://flux.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			exec := NewExecutor(tc.shareRoot, nil, nil, "tok", "example-owner", nil, tc.deployUIURL...)
+			assert.Equal(t, tc.wantShare, exec.shareRoot)
+			assert.Equal(t, tc.wantDeploy, exec.deployUIURL)
+		})
+	}
+}
 
-	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
+// TestExecutorEriDelegation drives every thin eri delegation method with the
+// same arguments (remediation first, so the silent wake is the recorded last
+// dispatch); a nil eri row exercises the no-client guards.
+func TestExecutorEriDelegation(t *testing.T) {
+	t.Parallel()
+	silent := &eriwire.BrainDispatchRequest{
+		ID: "vanadis-deploy-fail-c1-94f73a41fd9c6e67", Source: "vanadis-restate", SessionID: "vanadis-c1", TargetID: "th1",
+		VanadisChunkID: "c1", Prompt: "silent wake", Effort: "medium", SkipIfActive: true,
+	}
+	recorded := eritest.Client{LastCancel: "c1", LastThreadID: "th1", LastPrompt: "wake", LastDispatch: silent, LastMsgChan: "ch1", LastMsgCont: "msg"}
+	failing := eritest.Client{CancelErr: errDelegation, PromptErr: errDelegation, DispatchErr: errDelegation, MessageErr: errDelegation}
+	failingRecorded := failing
+	failingRecorded.LastCancel, failingRecorded.LastThreadID, failingRecorded.LastPrompt = "c1", "th1", "wake"
+	failingRecorded.LastDispatch, failingRecorded.LastMsgChan, failingRecorded.LastMsgCont = silent, "ch1", "msg"
+	tests := []struct {
+		name     string
+		eri      *eritest.Client
+		wantErrs []string
+		want     eritest.Client
+	}{
+		{"nil eri skips notifications and rejects remediation", nil, []string{"executor or eri client is nil", "", "", "", ""}, eritest.Client{}},
+		{"fake records every call", &eritest.Client{}, []string{"", "", "", "", ""}, recorded},
+		{"eri errors propagate", &failing, []string{"eri unavailable", "eri unavailable", "eri unavailable", "eri unavailable", "eri unavailable"}, failingRecorded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var client EriClient
+			var eri eritest.Client
+			if tc.eri != nil {
+				eri = *tc.eri
+				client = &eri
+			}
+			exec := NewExecutor("", client, nil, "", "example-owner", nil)
+			ctx := context.Background()
+			remediation := eriwire.BrainDispatchRequest{ID: "d1", Source: "test"}
+			remediationErr := exec.DispatchChunkRemediation(ctx, remediation)
+			if tc.eri != nil {
+				assert.Equal(t, &remediation, eri.LastDispatch)
+			}
+			errs := []error{
+				remediationErr,
+				exec.CancelChunkDispatch(ctx, "c1"),
+				exec.DispatchWakePrompt(ctx, "th1", "wake"),
+				exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "silent wake", ""),
+				exec.DispatchDirectMessage(ctx, "ch1", "msg"),
+			}
+			got := make([]string, len(errs))
+			for i, err := range errs {
+				if err != nil {
+					got[i] = err.Error()
+				}
+			}
+			assert.Equal(t, tc.wantErrs, got)
+			assert.Equal(t, tc.want, eri)
+		})
+	}
+}
+
+func TestExecutorFormatChunkPrompt(t *testing.T) {
+	t.Parallel()
+	build := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
 	chunks := []model.VanadisChunk{
 		{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do step 1", Effort: "high"},
 		{ID: "c2", Title: "Chunk 2", Repo: "aerial", Instructions: "Do step 2", Mode: chunkModeAction},
+		{ID: "c3", Title: "Chunk 3", Mode: "pr", Repo: "aerial", TargetFiles: []string{"main.go"}, TargetSymbols: []string{"MySpecialSym"}},
 	}
+	tests := []struct {
+		name     string
+		idx      int
+		want     string
+		wantErr  string
+		wantNots []string
+	}{
+		{name: "pr chunk", idx: 0, want: "Chunk 1", wantNots: []string{"Target Symbol Spans:"}},
+		{name: "action chunk", idx: 1, want: "Chunk 2"},
+		{name: "target symbols render spans from share root", idx: 2, want: "Target Symbol Spans:"},
+		{name: "out of bounds index", idx: 9, wantErr: "active chunk index 9 out of range [0, 3)"},
+	}
+	shareRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(shareRoot, "aerial"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shareRoot, "aerial", "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644))
+	exec := NewExecutor(shareRoot, &eritest.Client{}, nil, "", "example-owner", nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := exec.FormatChunkPrompt(build, chunks, tc.idx)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Contains(t, got, tc.want)
+			for _, not := range tc.wantNots {
+				assert.NotContains(t, got, not)
+			}
+		})
+	}
+}
 
-	prompt1, err := exec.FormatChunkPrompt(b, chunks, 0)
-	if err != nil || !strings.Contains(prompt1, "Chunk 1") {
-		t.Fatalf("FormatChunkPrompt 0 failed: %v, prompt: %s", err, prompt1)
+func TestExecutorPublishExternalEvent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		bus      pubsub.Bus
+		wantErr  string
+		wantSubj string
+	}{
+		{"nil bus publishes nothing", nil, "", ""},
+		{"publishes to source event subject", &mockBusExecutor{}, "", "aerial.events.source.type"},
+		{"publish error propagates", &pubsubtest.FaultBus{PublishErr: errDelegation}, "eri unavailable", ""},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewExecutor("", nil, tc.bus, "", "example-owner", nil).PublishExternalEvent(context.Background(), "source", "type", []string{"t1"}, "ctx")
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			if rec, ok := tc.bus.(*mockBusExecutor); ok {
+				assert.Equal(t, tc.wantSubj, rec.lastSubj)
+			}
+		})
+	}
+}
 
-	prompt2, err := exec.FormatChunkPrompt(b, chunks, 1)
-	if err != nil || !strings.Contains(prompt2, "Chunk 2") {
-		t.Fatalf("FormatChunkPrompt 1 failed: %v, prompt: %s", err, prompt2)
+// TestExecutorResolveCIFailureDetailsChecked covers the coordinator's
+// delegation to cilog; cilog's own tables own the log and RoboRev parsing.
+func TestExecutorResolveCIFailureDetailsChecked(t *testing.T) {
+	t.Parallel()
+	const jobURL = "https://github.com/o/r/actions/runs/1/job/42"
+	routes := map[string][]githubapitest.Response{"GET /repos/example-owner/aerial/actions/jobs/42/logs": {{Body: "--- FAIL: TestDelegated (0.01s)\n"}}}
+	tests := []struct {
+		name         string
+		nilExec      bool
+		noHTTPClient bool
+		want         string
+		wantPaths    []string
+	}{
+		{name: "nil executor returns details", nilExec: true, want: "failure", wantPaths: []string{}},
+		{name: "missing http client returns details", noHTTPClient: true, want: "failure", wantPaths: []string{}},
+		{name: "job log fetched through coordinator", want: "FAIL: TestDelegated", wantPaths: []string{"/repos/example-owner/aerial/actions/jobs/42/logs"}},
 	}
-
-	// Test chunk out of bounds
-	if _, err := exec.FormatChunkPrompt(b, chunks, 9); err == nil {
-		t.Error("expected error on out of bounds chunk index, got nil")
-	}
-
-	st := &mockStoreForLaunch{}
-	if err := exec.ExecuteLaunchChunk(context.Background(), st, b, chunks, 0, "[NOTICE]\n"); err != nil {
-		t.Fatalf("ExecuteLaunchChunk failed: %v", err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.VanadisChunkID != "c1" || eri.lastDispatch.VanadisBuildID != "b1" {
-		t.Errorf("lastDispatch chunkID / buildID = %+v, want chunkID c1, buildID b1", eri.lastDispatch)
-	}
-
-	if err := exec.CancelChunkDispatch(context.Background(), "c1"); err != nil || eri.lastCancel != "c1" {
-		t.Errorf("CancelChunkDispatch failed: %v", err)
-	}
-	if err := exec.DispatchWakePrompt(context.Background(), "th-1", "wake"); err != nil || eri.lastPrompt != "wake" {
-		t.Errorf("DispatchWakePrompt failed: %v", err)
-	}
-	if err := exec.DispatchDirectMessage(context.Background(), "ch-1", "msg"); err != nil || eri.lastMsgCont != "msg" {
-		t.Errorf("DispatchDirectMessage failed: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := githubapitest.New(t, routes)
+			exec := NewExecutor("", nil, nil, "token", "example-owner", api.Client())
+			exec.GitHubAPIURL = api.URL()
+			if tc.noHTTPClient {
+				exec.HTTPClient = nil
+			}
+			if tc.nilExec {
+				exec = nil
+			}
+			got, err := exec.ResolveCIFailureDetailsChecked(context.Background(), "aerial", 0, "unit", "abc", jobURL, "failure")
+			require.NoError(t, err)
+			assert.Contains(t, got, tc.want)
+			requests := api.Requests()
+			paths := make([]string, 0, len(requests))
+			for _, req := range requests {
+				paths = append(paths, req.Path)
+			}
+			assert.Equal(t, tc.wantPaths, paths)
+		})
 	}
 }
 
 func TestExecutor_SyncBuildWidget(t *testing.T) {
 	t.Parallel()
-	eri := &mockEriClient{
-		widgetFn: func(ctx context.Context, req StatusWidgetRequest) (string, error) {
-			return "widget-msg-456", nil
-		},
-	}
-	exec := NewExecutor("", eri, nil, "", "azylman", nil)
+	eri := &eritest.Client{WidgetID: "widget-msg-456"}
+	exec := NewExecutor("", eri, nil, "", "example-owner", nil)
 	st := &mockWidgetStore{}
 
 	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
@@ -167,8 +258,8 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 	if err != nil || msgID != "widget-msg-456" {
 		t.Fatalf("SyncBuildWidget msgID = %q err = %v", msgID, err)
 	}
-	if eri.lastWidget == nil || eri.lastWidget.Banner != "Notice!" {
-		t.Errorf("expected banner 'Notice!', got %v", eri.lastWidget)
+	if eri.LastWidget == nil || eri.LastWidget.Banner != "Notice!" {
+		t.Errorf("expected banner 'Notice!', got %v", eri.LastWidget)
 	}
 
 	// nil executor or eri client
@@ -177,12 +268,7 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 	}
 
 	// eri client error
-	eriErr := &mockEriClient{
-		widgetFn: func(ctx context.Context, req StatusWidgetRequest) (string, error) {
-			return "", errors.New("eri widget failure")
-		},
-	}
-	execErr := NewExecutor("", eriErr, nil, "", "azylman", nil)
+	execErr := NewExecutor("", &eritest.Client{WidgetErr: errors.New("eri widget failure")}, nil, "", "example-owner", nil)
 	if _, err := execErr.SyncBuildWidget(context.Background(), st, b, chunks, ""); err == nil {
 		t.Error("expected error on eri failure")
 	}
@@ -192,76 +278,17 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 	_, _ = exec.SyncBuildWidget(context.Background(), storeUpdateErr, b, chunks, "")
 }
 
-func TestExecutor_PublishExternalEvent(t *testing.T) {
-	t.Parallel()
-	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", nil, bus, "", "azylman", nil)
-
-	ctx := context.Background()
-	if err := exec.PublishExternalEvent(ctx, "vanadis_build", "completed", []string{"b1"}, "all green"); err != nil {
-		t.Fatalf("PublishExternalEvent failed: %v", err)
-	}
-}
-
-func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
-	t.Parallel()
-	execNil := NewExecutor("", nil, nil, "", "azylman", nil)
-	ctx := context.Background()
-	if err := execNil.CancelChunkDispatch(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchSilentWakePrompt(ctx, "th1", "c1", "prompt", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchChunkRemediation(ctx, eriwire.BrainDispatchRequest{}); err == nil {
-		t.Error("expected error from nil eri client on DispatchChunkRemediation")
-	}
-
-	eri := &mockEriClient{}
-	exec := NewExecutor("", eri, nil, "", "azylman", nil)
-	if err := exec.CancelChunkDispatch(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastCancel != "c1" {
-		t.Errorf("lastCancel = %q, want c1", eri.lastCancel)
-	}
-	if err := exec.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastPrompt != "prompt" {
-		t.Errorf("lastPrompt = %q, want prompt", eri.lastPrompt)
-	}
-	if err := exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "silent wake", ""); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.Prompt != "silent wake" || eri.lastDispatch.TargetID != "th1" || eri.lastDispatch.SessionID != "vanadis-c1" || eri.lastDispatch.VanadisChunkID != "c1" || !eri.lastDispatch.SkipIfActive || eri.lastDispatch.ID == "" {
-		t.Errorf("silent dispatch = %+v, want silent dispatch to th1 for c1", eri.lastDispatch)
-	}
-	if err := exec.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastMsgCont != "msg" {
-		t.Errorf("lastMsgCont = %q, want msg", eri.lastMsgCont)
-	}
-}
-
 func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) {
 	t.Parallel()
-	eri := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", "azylman", nil)
+	eri := &eritest.Client{}
+	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", "example-owner", nil)
 	ctx := context.Background()
 	dispatch := func(occurrence string) string {
 		t.Helper()
 		if err := exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "Deployment failed", occurrence); err != nil {
 			t.Fatal(err)
 		}
-		return eri.lastDispatch.ID
+		return eri.LastDispatch.ID
 	}
 	first := dispatch("2026-11-19T00:00:00Z")
 	if redelivered := dispatch("2026-11-19T00:00:00Z"); redelivered != first {
@@ -274,153 +301,43 @@ func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) 
 
 func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-
-	// nil executor or eri client
-	if err := (*Executor)(nil).ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
-		t.Error("expected error for nil executor")
+	chunk := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
+	tests := []struct {
+		name         string
+		nilExec      bool
+		store        *mockStoreForLaunch
+		chunks       []model.VanadisChunk
+		idx          int
+		wantErr      string
+		wantDispatch bool
+	}{
+		{name: "nil executor", nilExec: true, wantErr: "executor or eri client is nil"},
+		{name: "no chunks", wantErr: "chunk index 0 out of bounds"},
+		{name: "negative index", chunks: chunk, idx: -1, wantErr: "chunk index -1 out of bounds"},
+		{name: "index past end", chunks: chunk, idx: 2, wantErr: "chunk index 2 out of bounds"},
+		{name: "reserve error only warns", store: &mockStoreForLaunch{reserveErr: errors.New("database locked")}, chunks: chunk, wantDispatch: true},
+		{name: "nil store dispatches without reservation", chunks: chunk, wantDispatch: true},
 	}
-
-	exec := NewExecutor("", &mockEriClient{}, nil, "", "azylman", nil)
-
-	// out of bounds
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
-		t.Error("expected error for out of bounds chunk")
-	}
-
-	// activeIdx out of bounds
-	chunks := []model.VanadisChunk{{ID: "c1"}}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, -1, ""); err == nil {
-		t.Error("expected error for negative activeIdx")
-	}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, 2, ""); err == nil {
-		t.Error("expected error for out of range activeIdx")
-	}
-
-	// store reserve error branch
-	mockStore := &mockStoreForLaunch{reserveErr: errors.New("database locked")}
-	execWithStore := NewExecutor("", &mockEriClient{}, nil, "", "azylman", nil)
-	chunksForLaunch := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
-	if err := execWithStore.ExecuteLaunchChunk(ctx, mockStore, model.VanadisBuild{ID: "b1"}, chunksForLaunch, 0, ""); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// TargetSymbols span rendering in FormatChunkPrompt
-	tmpShare := t.TempDir()
-	aerialDir := filepath.Join(tmpShare, "aerial")
-	_ = os.MkdirAll(aerialDir, 0o755)
-	_ = os.WriteFile(filepath.Join(aerialDir, "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644)
-	execShare := NewExecutor(tmpShare, &mockEriClient{}, nil, "", "azylman", nil)
-	promptWithSpans, err := execShare.FormatChunkPrompt(model.VanadisBuild{ID: "b1"}, []model.VanadisChunk{{
-		ID:            "c1",
-		Title:         "Chunk 1",
-		Mode:          "pr",
-		Repo:          "aerial",
-		TargetFiles:   []string{"main.go"},
-		TargetSymbols: []string{"MySpecialSym"},
-	}}, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(promptWithSpans, "Target Symbol Spans:") {
-		t.Errorf("expected Target Symbol Spans in prompt, got:\n%s", promptWithSpans)
-	}
-
-	// PublishExternalEvent
-	mockB := &mockBusExecutor{}
-	execBus := NewExecutor("", nil, mockB, "", "azylman", nil)
-	if err := execBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if mockB.lastSubj != "aerial.events.source.type" {
-		t.Errorf("lastSubj = %q, want aerial.events.source.type", mockB.lastSubj)
-	}
-}
-
-func (m *mockStoreForLaunch) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
-	m.reserved = append(m.reserved, chunkID)
-	return m.reserveErr
-}
-
-func (m *mockBusExecutor) Publish(ctx context.Context, subject, msgID string, data any) error {
-	m.lastSubj = subject
-	return nil
-}
-
-func TestExecutorCoordinatorBranches(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// Nil-executor CI delegation falls back to details.
-	if got, err := (*Executor)(nil).ResolveCIFailureDetailsChecked(ctx, "aerial", 1, "unit", "sha", "", "details"); got != "details" || err != nil {
-		t.Errorf("nil ResolveCIFailureDetailsChecked = (%q, %v), want (details, nil)", got, err)
-	}
-
-	// Coordinator with deploy UI URL and explicit share root.
-	eri := &mockEriClient{}
-	exec := NewExecutor("/custom-share", eri, nil, "tok", "azylman", nil, "https://flux.example.com")
-	if exec.shareRoot != "/custom-share" || exec.deployUIURL != "https://flux.example.com" {
-		t.Errorf("unexpected executor config: %+v", exec)
-	}
-
-	// Successful remediation dispatch records the request.
-	req := eriwire.BrainDispatchRequest{ID: "d1", Source: "test"}
-	if err := exec.DispatchChunkRemediation(ctx, req); err != nil {
-		t.Fatalf("DispatchChunkRemediation failed: %v", err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.ID != "d1" {
-		t.Errorf("lastDispatch = %+v, want d1", eri.lastDispatch)
-	}
-
-	// Nil store skips reservation and dispatches directly.
-	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, 0, ""); err != nil {
-		t.Fatalf("ExecuteLaunchChunk with nil store failed: %v", err)
-	}
-
-	// Nil bus publishes nothing and reports no error.
-	execNoBus := NewExecutor("", nil, nil, "", "azylman", nil)
-	if err := execNoBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
-		t.Fatalf("PublishExternalEvent with nil bus failed: %v", err)
-	}
-
-	// Hand-constructed executor without an HTTP client resolves to details, not a fetch.
-	bare := &Executor{gitHubToken: "t"}
-	if got, err := bare.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "sha", "", "details"); got != "details" || err != nil {
-		t.Errorf("bare executor details = (%q, %v), want (details, nil)", got, err)
-	}
-}
-
-func TestExecutorCILogDelegation(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Header.Get("Authorization") != "Bearer token" || r.Header.Get("Accept") != "application/vnd.github+json":
-			w.WriteHeader(http.StatusUnauthorized)
-		case strings.Contains(r.URL.Path, "/comments"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case strings.Contains(r.URL.Path, "/logs"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("--- FAIL: TestDelegated (0.01s)\n"))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	exec := NewExecutor("", nil, nil, "token", "azylman", srv.Client())
-	exec.GitHubAPIURL = srv.URL
-
-	// Log fetch success delegates through the coordinator.
-	got, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure")
-	if err != nil || !strings.Contains(got, "FAIL: TestDelegated") {
-		t.Errorf("delegated checked = (%q, %v), want FAIL log", got, err)
-	}
-	// RoboRev errors propagate through the checked path.
-	if _, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev", "abc123", "", "failure"); err == nil {
-		t.Error("expected delegated error for 500 comments, got nil")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &eritest.Client{}
+			exec := NewExecutor("", eri, nil, "", "example-owner", nil)
+			if tc.nilExec {
+				exec = nil
+			}
+			var st store.VanadisStore
+			if tc.store != nil {
+				st = tc.store
+			}
+			err := exec.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b1"}, tc.chunks, tc.idx, "")
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantDispatch, eri.LastDispatch != nil)
+		})
 	}
 }
 
@@ -445,17 +362,18 @@ func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dispatchErr := tc.dispatchErr
-			eri := &mockEriClient{dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return dispatchErr }}
+			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
 			st := &mockStoreForLaunch{reserveErr: tc.reserveErr}
-			executor := NewExecutor(t.TempDir(), eri, nil, "", "azylman", nil)
+			executor := NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil)
 			err := executor.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", Status: "pending", StallNudges: tc.nudges}}, 0, "")
 			if tc.wantErr != nil {
 				assert.ErrorIs(t, err, tc.wantErr)
 			} else {
 				assert.NoError(t, err)
 			}
-			require.NotNil(t, eri.lastDispatch)
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, "c", eri.LastDispatch.VanadisChunkID)
+			assert.Equal(t, "b", eri.LastDispatch.VanadisBuildID)
 			assert.Equal(t, tc.wantReserved, st.reserved)
 		})
 	}
