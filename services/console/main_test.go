@@ -34,13 +34,13 @@ func TestMain_Execution(t *testing.T) {
 			name:       "load config failure exits",
 			cfgErr:     errConfig,
 			wantExit:   true,
-			wantErrSub: "failed to load config",
+			wantErrSub: "Fatal configuration error",
 		},
 		{
 			name:       "run console failure exits",
 			runErr:     errRun,
 			wantExit:   true,
-			wantErrSub: "console failed",
+			wantErrSub: "Server failure",
 		},
 		{
 			name:     "successful startup and run",
