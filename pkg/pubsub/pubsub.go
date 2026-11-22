@@ -42,18 +42,14 @@ const (
 // Subject prefixes and well-known subjects.
 const (
 	SubjectAerialDispatchPrefix    = "aerial.dispatch."
-	SubjectAerialEventsPrefix      = "aerial.events."
 	SubjectAerialTurnPrefix        = "aerial.turn."
 	SubjectAerialPRPrefix          = "aerial.pr."
-	SubjectAerialJobsPrefix        = "aerial.jobs."
 	SubjectAerialCoalescedPrefix   = "aerial.coalesced."
 	SubjectAerialTranscriptsPrefix = "aerial.transcripts."
 	SubjectTranscriptsStepsPrefix  = "aerial.transcripts.steps."
-	SubjectTranscriptsIndexed      = "aerial.turn.transcripts_indexed"
 	SubjectAerialTurnCompleted     = "aerial.turn.completed"
 	SubjectCovenExtractPrefix      = "aerial.coalesced.coven_extract."
 	SubjectBuildWidgetSyncPrefix   = "aerial.coalesced.widget_sync.build."
-	SubjectBuildWidgetSyncWildcard = SubjectBuildWidgetSyncPrefix + "*"
 	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
 	SubjectProsperaVoicemailJob    = "aerial.jobs.prospera.voicemail"
 	SubjectProsperaSMSJob          = "aerial.jobs.prospera.sms"
@@ -62,10 +58,8 @@ const (
 
 // Well-known headers.
 const (
-	HeaderMsgID       = "Nats-Msg-Id"
-	HeaderSnoozeSeq   = "Nats-Snooze-Seq"
-	HeaderTraceparent = "traceparent"
-	HeaderTracestate  = "tracestate"
+	HeaderMsgID     = "Nats-Msg-Id"
+	HeaderSnoozeSeq = "Nats-Snooze-Seq"
 )
 
 // Bus defines the core event bus and work-queue contract across Aerial.
@@ -462,10 +456,6 @@ func NewJetStreamBusFromConn(nc *nats.Conn) (*JetStreamBus, error) {
 		return nil, fmt.Errorf("jetstream context: %w", err)
 	}
 	return &JetStreamBus{nc: nc, js: js, heartbeatInterval: 10 * time.Second}, nil
-}
-
-func newJetStreamBusWithContext(nc *nats.Conn, js nats.JetStreamContext) *JetStreamBus {
-	return &JetStreamBus{nc: nc, js: js, heartbeatInterval: 1 * time.Millisecond}
 }
 
 // Publish publishes a message with W3C trace injection and deduplication MsgID.

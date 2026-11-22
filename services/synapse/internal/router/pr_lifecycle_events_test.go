@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/synapse/internal/alerts"
 )
 
 const lifecycleTargetID = "123456789012345678"
@@ -82,28 +81,6 @@ func TestPublishPRLifecycleEvent(t *testing.T) {
 				t.Fatalf("publishPRLifecycleEvent() err = %v", err)
 			}
 			assertPREvents(t, bus, tc.want)
-		})
-	}
-}
-
-func TestSanitizeSubjectToken(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		token string
-		want  string
-	}{
-		{name: "blank token becomes unknown", token: "  ", want: "unknown"},
-		{name: "separators replaced with underscores", token: "foo/bar:baz", want: "foo_bar_baz"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := alerts.SanitizeSubjectToken(tc.token); got != tc.want {
-				t.Errorf("sanitizeSubjectToken(%q) = %q, want %q", tc.token, got, tc.want)
-			}
 		})
 	}
 }

@@ -35,24 +35,6 @@ type ResolvedGitHubEvent struct {
 	Conclusion string `json:"conclusion,omitempty"`
 }
 
-// SanitizeSubjectToken cleans a subject token so it only contains alphanumerics, hyphens, and underscores.
-func SanitizeSubjectToken(token string) string {
-	token = strings.TrimSpace(token)
-	var sb strings.Builder
-	for _, r := range token {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune('_')
-		}
-	}
-	clean := sb.String()
-	if clean == "" {
-		return "unknown"
-	}
-	return clean
-}
-
 // FireEventTriggers evaluates incoming event triggers and logs any evaluation error.
 func FireEventTriggers(ctx context.Context, bus pubsub.Bus, source string, targets []string, eventType, contextHeader string) {
 	if bus == nil || len(targets) == 0 {
@@ -86,8 +68,8 @@ func EvaluateEventTriggers(ctx context.Context, bus pubsub.Bus, source, eventTyp
 		ContextHeader: contextHeader,
 		OccurredAt:    time.Now().UTC(),
 	}
-	cleanSource := SanitizeSubjectToken(source)
-	cleanEventType := SanitizeSubjectToken(eventType)
+	cleanSource := pubsub.SanitizeSubjectToken(source)
+	cleanEventType := pubsub.SanitizeSubjectToken(eventType)
 	subject := fmt.Sprintf("aerial.events.%s.%s", cleanSource, cleanEventType)
 	msgID := fmt.Sprintf("event:%s:%s:%s", cleanSource, cleanEventType, ev.EventID)
 	return bus.Publish(ctx, subject, msgID, ev)

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 )
 
 type recordedRequest struct {
@@ -142,10 +143,10 @@ func TestSendPREvent(t *testing.T) {
 		{name: "bad pr number sends nothing", handler: "HandleClosed", event: prwire.PREvent{Event: "closed", Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "pr_number is required", wantRequests: 0},
 		{name: "unconfigured endpoint sends nothing", baseURL: "unconfigured", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
 		{name: "refused endpoint surfaces error", baseURL: "http://127.0.0.1:1", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
-		{name: "malformed endpoint surfaces error", baseURL: "http://restate bad", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "create restate request", wantRequests: 0},
-		{name: "server error surfaces status", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, wantErr: "status 500", wantRequests: 1},
-		{name: "truncated success body surfaces drain error", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, truncate: true, wantErr: "drain restate response", wantRequests: 1},
-		{name: "unreadable error body omits body", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, truncate: true, wantErr: "returned status 500", wantRequests: 1},
+		{name: "malformed endpoint surfaces error", baseURL: "http://restate bad", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
+		{name: "server error surfaces status", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, wantErr: "returned HTTP 500", wantRequests: 1},
+		{name: "truncated success body surfaces read error", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, truncate: true, wantErr: "restate ingress request failed", wantRequests: 1},
+		{name: "unreadable error body surfaces read error", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, truncate: true, wantErr: "restate ingress request failed", wantRequests: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,11 +313,11 @@ func TestIsTerminal(t *testing.T) {
 	}{
 		{name: "nil is not terminal", err: nil, want: false},
 		{name: "invalid event is terminal", err: fmt.Errorf("%w: repo is required", ErrInvalidEvent), want: true},
-		{name: "bad request is terminal", err: &StatusError{Code: 400}, want: true},
-		{name: "wrapped not found is terminal", err: fmt.Errorf("send: %w", &StatusError{Code: 404, Body: "no service"}), want: true},
-		{name: "request timeout retries", err: &StatusError{Code: 408}, want: false},
-		{name: "too many requests retries", err: &StatusError{Code: 429}, want: false},
-		{name: "server error retries", err: &StatusError{Code: 503}, want: false},
+		{name: "bad request is terminal", err: &restateingress.HTTPError{Status: 400}, want: true},
+		{name: "wrapped not found is terminal", err: fmt.Errorf("send: %w", &restateingress.HTTPError{Status: 404, Body: "no service"}), want: true},
+		{name: "request timeout retries", err: &restateingress.HTTPError{Status: 408}, want: false},
+		{name: "too many requests retries", err: &restateingress.HTTPError{Status: 429}, want: false},
+		{name: "server error retries", err: &restateingress.HTTPError{Status: 503}, want: false},
 		{name: "transport error retries", err: errors.New("restate ingress request failed: dial tcp: refused"), want: false},
 	}
 	for _, tc := range tests {

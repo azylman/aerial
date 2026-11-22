@@ -79,24 +79,9 @@ const (
 const (
 	maxDeliverRestate         uint64 = 45
 	maxRestateBackoff                = time.Minute
+	maxNakBackoff                    = 16 * time.Second
 	restateTerminalDropReason        = "restate_terminal"
 )
-
-func restateBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 6)
-	return min(time.Duration(1<<shift)*time.Second, maxRestateBackoff)
-}
-
-func nakBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
 
 func termJobIfExhausted(ctx context.Context, msg pubsub.Message, maxDeliver uint64, jobName string) bool {
 	if msg.NumDelivered() >= maxDeliver {
@@ -120,7 +105,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	}
 	if err := process(args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error processing job", "job", jobName, "error", err)
-		delay := nakBackoffDelay(msg.NumDelivered())
+		delay := pubsub.NakBackoff(msg.NumDelivered(), maxNakBackoff)
 		switch restateFailed, terminal := restateSendFailure(err); {
 		case terminal:
 			RecordJobDropped(queueDefault, jobName+"_webhook", restateTerminalDropReason)
@@ -131,7 +116,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 			return nil
 		case restateFailed:
 			maxDeliver = maxDeliverRestate
-			delay = restateBackoffDelay(msg.NumDelivered())
+			delay = pubsub.NakBackoff(msg.NumDelivered(), maxRestateBackoff)
 		}
 		if termJobIfExhausted(ctx, msg, maxDeliver, jobName) {
 			RecordJobDropped(queueDefault, jobName+"_webhook", "max_retries_exhausted")

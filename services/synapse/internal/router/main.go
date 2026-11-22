@@ -177,23 +177,6 @@ func (s *RouterServer) isKnownBot(botID string) bool {
 	return false
 }
 
-func writeK8sAuthError(w http.ResponseWriter, err error) {
-	if valErr, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
-		httpkit.WriteJSON(w, valErr.StatusCode(), map[string]string{fieldError: valErr.Error()})
-		return
-	}
-	if unauthErr, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
-		httpkit.WriteJSON(w, unauthErr.StatusCode(), map[string]string{fieldError: unauthErr.Error()})
-		return
-	}
-	if forbErr, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
-		httpkit.WriteJSON(w, forbErr.StatusCode(), map[string]string{fieldError: forbErr.Error()})
-		return
-	}
-	slog.Error("k8sauth internal error", "err", err)
-	httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "internal error"})
-}
-
 // Config returns the current configuration snapshot, implementing discord.IngressServer.
 func (s *RouterServer) Config() *config.Config {
 	if s == nil || s.cfgSrc == nil {

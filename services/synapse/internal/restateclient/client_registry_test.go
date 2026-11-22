@@ -80,7 +80,7 @@ func TestClientRegister(t *testing.T) {
 		want         prwire.RegisterResponse
 	}{
 		{name: "register round-trips", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", FallbackTargetID: "123456789012345678", EnforceOwner: true, ExpectedOwner: "aerial"}, status: 200, body: okBody, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register", wantBodySub: `"expected_owner":"aerial"`, want: prwire.RegisterResponse{TargetID: "123456789012345678", Agent: "aerial", Status: "open"}},
-		{name: "owner mismatch is terminal", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 409, body: "owner", wantErrSub: "status 409", wantTerminal: true, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
+		{name: "owner mismatch is terminal", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 409, body: "owner", wantErrSub: "HTTP 409", wantTerminal: true, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
 		{name: "undecodable body surfaces", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 200, body: "nope{", wantErrSub: "decode restate response", wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
 		{name: "missing pr rejected without request", req: prwire.RegisterRequest{Repo: "aerial"}, status: 200, body: okBody, wantErrSub: "required", wantTerminal: true},
 		{name: "unconfigured fails closed", unconfigured: true, req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, wantErrSub: "not configured"},
@@ -123,7 +123,7 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 	}{
 		{name: "lifecycle round-trips", repo: "aerial", pr: 7, status: 200, body: lifecycleBody, wantCalls: 1, want: prwire.BuildLifecycle{Found: true, Status: "merged", HeadSHA: "h1", MergeSHA: "m1", Started: true, HasBuildMetadata: true, BuildMetadata: &prwire.BuildMetadata{Version: 1, Kind: "final", Repository: "azylman/aerial", RunID: 9, SourceSHA: "m1"}}},
 		{name: "unknown pr is zero", repo: "aerial", pr: 7, status: 200, body: `{"found":false,"status":"","head_sha":"","merge_sha":"","started":false,"has_build_metadata":false}`, wantCalls: 1},
-		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
+		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "HTTP 500", wantCalls: 1},
 		{name: "empty repo rejected without request", pr: 7, wantErrSub: "required"},
 		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", pr: 7, wantErrSub: "not configured"},
 	}
@@ -167,7 +167,7 @@ func TestClientRetryReadiness(t *testing.T) {
 	}{
 		{name: "accepted decision round-trips", repo: "aerial", pr: 7, status: 200, body: `{"status":202,"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t1"}},"effect_key":"k"}`, wantCalls: 1, wantStatus: 202, wantRequests: 1},
 		{name: "conflict decision round-trips", repo: "aerial", pr: 7, status: 200, body: `{"status":409}`, wantCalls: 1, wantStatus: 409},
-		{name: "owner fence surfaces as a terminal error", repo: "aerial", pr: 7, status: 409, body: "owner", wantErrSub: "status 409", wantCalls: 1},
+		{name: "owner fence surfaces as a terminal error", repo: "aerial", pr: 7, status: 409, body: "owner", wantErrSub: "HTTP 409", wantCalls: 1},
 		{name: "zero pr rejected without request", repo: "aerial", wantErrSub: "required"},
 		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", pr: 7, wantErrSub: "not configured"},
 	}
@@ -278,7 +278,7 @@ func TestClientSendSHAEvent(t *testing.T) {
 		{name: "unroutable pr handler rejected without request", handler: "HandleCheckRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckStatus"}, wantErrSub: "not routable", wantTerminal: true},
 		{name: "zero sha rejected without request", handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: "0000000", Handler: "HandleMerged"}, wantErrSub: "sha is required", wantTerminal: true},
 		{name: "empty repo rejected without request", handler: "HandlePushBySHA", ev: prwire.SHAEvent{SHA: sha, Handler: "HandleMerged"}, wantErrSub: "repo is required", wantTerminal: true},
-		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "status 500", wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleWorkflowRunBySHA/send"},
+		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "HTTP 500", wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleWorkflowRunBySHA/send"},
 		{name: "unconfigured fails closed", unconfigured: true, handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "not configured"},
 	}
 	for _, tc := range tests {
@@ -322,7 +322,7 @@ func TestClientResolvePRBySHA(t *testing.T) {
 	}{
 		{name: "indexed sha resolves", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":7,"branch":"feat","found":true}`, wantCalls: 1, want: prwire.ResolveSHAResponse{PRNumber: 7, Branch: "feat", Found: true}},
 		{name: "unknown sha is zero", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":0,"branch":"","found":false}`, wantCalls: 1},
-		{name: "ingress 500 surfaces", repo: "aerial", sha: "abc", status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
+		{name: "ingress 500 surfaces", repo: "aerial", sha: "abc", status: 500, body: "boom", wantErrSub: "HTTP 500", wantCalls: 1},
 		{name: "empty sha rejected without request", repo: "aerial", wantErrSub: "required"},
 		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", sha: "abc", wantErrSub: "not configured"},
 	}
@@ -366,7 +366,7 @@ func TestClientGetDeployView(t *testing.T) {
 				KustomizationRequests: map[string]prwire.KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t1"}}, DeployedKustomizations: []string{"core"}, HasExpectedDeployJobs: true,
 			},
 		},
-		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
+		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "HTTP 500", wantCalls: 1},
 		{name: "missing pr rejected without request", repo: "aerial", wantErrSub: "required"},
 		{name: "unconfigured fails closed", unconfigured: true, repo: "aerial", pr: 7, wantErrSub: "not configured"},
 	}

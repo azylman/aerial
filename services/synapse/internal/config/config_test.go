@@ -629,6 +629,8 @@ k8s_auth:
 			wantK8sAuthEnabled: true,
 			wantAPIServerURL:   "https://k8s.local",
 		},
+		{name: "invalid K8S_AUTH_ENABLED keeps yaml value", yaml: "default_owner: true\nk8s_auth_enabled: true\nk8s_auth:\n  api_server_url: \"https://k8s.local\"\n", env: map[string]string{"DISCORD_TOKEN": "aerial-token", "K8S_AUTH_ENABLED": "yes"}, wantBots: map[string]BotConfig{"aerial": {TokenEnv: "DISCORD_TOKEN", DiscordToken: "aerial-token", EriURL: "http://127.0.0.1:8088", DefaultOwner: true}}, wantDefaultOwner: "aerial", wantK8sAuthEnabled: true, wantAPIServerURL: "https://k8s.local"},
+		{name: "K8S_AUTH_ENABLED false overrides yaml true", yaml: "default_owner: true\nk8s_auth_enabled: true\n", env: map[string]string{"DISCORD_TOKEN": "aerial-token", "K8S_AUTH_ENABLED": "false"}, wantBots: map[string]BotConfig{"aerial": {TokenEnv: "DISCORD_TOKEN", DiscordToken: "aerial-token", EriURL: "http://127.0.0.1:8088", DefaultOwner: true}}, wantDefaultOwner: "aerial", wantK8sAuthEnabled: false},
 		{
 			name: "multi-bot with empty key and implicit aerial default owner",
 			yaml: `bot_id: "nonexistent"

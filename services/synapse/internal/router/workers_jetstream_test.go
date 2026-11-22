@@ -202,27 +202,6 @@ func TestPublishJetStreamJob(t *testing.T) {
 	}
 }
 
-func TestNakBackoffDelay(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		numDelivered uint64
-		want         time.Duration
-	}{
-		{0, 1 * time.Second},
-		{1, 1 * time.Second},
-		{2, 2 * time.Second},
-		{3, 4 * time.Second},
-		{4, 8 * time.Second},
-		{5, 16 * time.Second},
-		{10, 16 * time.Second},
-	}
-	for _, tc := range cases {
-		if got := nakBackoffDelay(tc.numDelivered); got != tc.want {
-			t.Errorf("nakBackoffDelay(%d) = %v, want %v", tc.numDelivered, got, tc.want)
-		}
-	}
-}
-
 type jetstreamHandlerCase struct {
 	name         string
 	handlerType  string

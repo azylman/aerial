@@ -2,11 +2,9 @@ package router
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,52 +251,6 @@ func TestHandlePRRegister_K8sAuth(t *testing.T) {
 			if tc.wantAgent != "" {
 				if !strings.Contains(rec.Body.String(), `"agent":"`+tc.wantAgent+`"`) {
 					t.Errorf("body = %s, want agent %q", rec.Body.String(), tc.wantAgent)
-				}
-			}
-		})
-	}
-}
-
-func TestWriteK8sAuthError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-	}{
-		{
-			name:       "validation error",
-			err:        &k8sauth.ValidationError{Message: "bad"},
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "unauthorized error",
-			err:        &k8sauth.UnauthorizedError{Message: "unauth"},
-			wantStatus: http.StatusUnauthorized,
-		},
-		{
-			name:       "forbidden error",
-			err:        &k8sauth.ForbiddenError{Message: "denied"},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "generic error",
-			err:        errors.New("generic"),
-			wantStatus: http.StatusInternalServerError,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := httptest.NewRecorder()
-			writeK8sAuthError(rec, tc.err)
-			if rec.Code != tc.wantStatus {
-				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-			if tc.wantStatus == http.StatusInternalServerError {
-				if !strings.Contains(rec.Body.String(), `"error":"internal error"`) {
-					t.Errorf("body = %s, want error: internal error", rec.Body.String())
 				}
 			}
 		})

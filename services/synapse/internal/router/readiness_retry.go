@@ -8,9 +8,10 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +45,7 @@ func (s *RouterServer) handleRetryPRReadiness(w http.ResponseWriter, r *http.Req
 	case s.k8sAuthEnabled():
 		resolved, err := s.authenticatePRRequest(ctx, r, req.Agent, req.BotID)
 		if err != nil {
-			writeK8sAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 		targetAgent = resolved
@@ -77,7 +78,7 @@ func (s *RouterServer) retryReadinessRestate(ctx context.Context, w http.Respons
 	if err != nil {
 		metrics.RecordRestateSend("RetryReadiness", "error")
 		status := 503
-		if serr, ok := errors.AsType[*restateclient.StatusError](err); ok && serr.Code == http.StatusConflict {
+		if serr, ok := errors.AsType[*restateingress.HTTPError](err); ok && serr.Status == http.StatusConflict {
 			status = http.StatusConflict
 		}
 		slog.WarnContext(ctx, "[synapse] [restate] readiness retry failed", "repo", repo, "pr", prNumber, "status", status, "error", err)
