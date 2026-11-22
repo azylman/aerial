@@ -2,13 +2,10 @@ package bridge
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,897 +14,338 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
+	"github.com/azylman/aerial/pkg/restateingresstest"
 	"github.com/azylman/aerial/services/vanadis-nats/internal/config"
 )
 
-type testMsg struct {
-	data      []byte
-	subject   string
-	header    nats.Header
-	delivered uint64
-	acked     atomic.Bool
-	naked     atomic.Bool
-	nakDelay  time.Duration
-	nakErr    error
-	termed    atomic.Bool
-	termErr   error
-}
+// consumerBus records each ConsumeQueue binding as "subject durable" and
+// fails the subjects listed in consumeErrs; everything else goes to FaultBus.
+type consumerBus struct {
+	pubsubtest.FaultBus
 
-func (m *testMsg) Data() []byte { return m.data }
-
-func (m *testMsg) Subject() string { return m.subject }
-
-func (m *testMsg) Header() nats.Header {
-	if m.header == nil {
-		m.header = nats.Header{}
-	}
-	return m.header
-}
-
-func (m *testMsg) NumDelivered() uint64 { return m.delivered }
-
-func (m *testMsg) Ack() error {
-	m.acked.Store(true)
-	return nil
-}
-
-func (m *testMsg) NakWithDelay(d time.Duration) error {
-	m.naked.Store(true)
-	m.nakDelay = d
-	return m.nakErr
-}
-
-func (m *testMsg) Term() error {
-	m.termed.Store(true)
-	return m.termErr
-}
-
-func (*testMsg) Snooze(time.Duration) error { return nil }
-
-func (*testMsg) InProgress() error { return nil }
-
-type testBus struct {
-	ensureErr   error
 	consumeErrs map[string]error
-	subscribed  map[string]bool
-	mu          sync.Mutex
-	closed      bool
+	queues      []string
 }
 
-func (*testBus) Publish(context.Context, string, string, any) error { return nil }
-
-func (*testBus) Subscribe(context.Context, string, string, pubsub.Handler) (pubsub.Subscription, error) {
-	return nil, nil
+func newConsumerBus(t *testing.T, ensureErr error, consumeErrs map[string]error) *consumerBus {
+	t.Helper()
+	mem := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = mem.Close() })
+	return &consumerBus{Bus: mem, EnsureErr: ensureErr, consumeErrs: consumeErrs}
 }
 
-func (b *testBus) ConsumeQueue(_ context.Context, subject, queue string, _ pubsub.Handler) (pubsub.Subscription, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.consumeErrs != nil {
-		if err, ok := b.consumeErrs[subject]; ok && err != nil {
-			return nil, err
-		}
+func (b *consumerBus) ConsumeQueue(ctx context.Context, subject, queue string, h pubsub.Handler) (pubsub.Subscription, error) {
+	if err := b.consumeErrs[subject]; err != nil {
+		return nil, err
 	}
-	if b.subscribed == nil {
-		b.subscribed = make(map[string]bool)
-	}
-	b.subscribed[subject+":"+queue] = true
-	return &testSub{}, nil
+	b.queues = append(b.queues, subject+" "+queue)
+	return b.FaultBus.ConsumeQueue(ctx, subject, queue, h)
 }
-
-func (b *testBus) EnsureCoreStreams(context.Context) error { return b.ensureErr }
-
-func (b *testBus) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.closed = true
-	return nil
-}
-
-type testSub struct{}
-
-func (*testSub) Unsubscribe() error { return nil }
 
 func TestNATSBridge_StartConsumers(t *testing.T) {
 	t.Parallel()
 
+	const dispatch, pr = "aerial.dispatch.* vanadis-dispatch", "aerial.pr.> vanadis-pr-events"
+	const widget = "aerial.coalesced.widget_sync.> vanadis-widget"
+	errBoom := errors.New("boom")
 	tests := []struct {
 		name       string
 		bus        pubsub.Bus
-		wantErrMsg string
+		wantErr    string
+		wantQueues []string
 	}{
+		{name: "nil bus returns error", bus: nil, wantErr: "pubsub bus is nil"},
+		{name: "ensure core streams error", bus: newConsumerBus(t, errBoom, nil), wantErr: "ensure core streams: boom"},
 		{
-			name:       "nil bus returns error",
-			bus:        nil,
-			wantErrMsg: "pubsub bus is nil",
+			name:    "consume queue dispatch error",
+			bus:     newConsumerBus(t, nil, map[string]error{"aerial.dispatch.*": errBoom}),
+			wantErr: "subscribe vanadis-dispatch queue: boom",
 		},
 		{
-			name:       "ensure core streams error",
-			bus:        &testBus{ensureErr: errors.New("stream err")},
-			wantErrMsg: "ensure core streams",
-		},
-		{
-			name:       "consume queue dispatch error",
-			bus:        &testBus{consumeErrs: map[string]error{"aerial.dispatch.*": errors.New("dispatch queue err")}},
-			wantErrMsg: "subscribe vanadis-dispatch queue",
-		},
-		{
-			name:       "consume queue pr-events error",
-			bus:        &testBus{consumeErrs: map[string]error{"aerial.pr.>": errors.New("pr queue err")}},
-			wantErrMsg: "subscribe vanadis-pr-events queue",
+			name:    "consume queue pr-events error",
+			bus:     newConsumerBus(t, nil, map[string]error{"aerial.pr.>": errBoom}),
+			wantErr: "subscribe vanadis-pr-events queue: boom", wantQueues: []string{dispatch},
 		},
 		{
 			name:       "consume queue widget-events error",
-			bus:        &testBus{consumeErrs: map[string]error{"aerial.coalesced.widget_sync.>": errors.New("widget queue err")}},
-			wantErrMsg: "subscribe vanadis-widget queue",
+			bus:        newConsumerBus(t, nil, map[string]error{"aerial.coalesced.widget_sync.>": errBoom}),
+			wantErr:    "subscribe vanadis-widget queue: boom",
+			wantQueues: []string{dispatch, pr},
 		},
-		{
-			name:       "successful consumers registration",
-			bus:        &testBus{},
-			wantErrMsg: "",
-		},
+		{name: "successful consumers registration", bus: newConsumerBus(t, nil, nil), wantQueues: []string{dispatch, pr, widget}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			bridge := NewNATSBridge(config.Config{}, tc.bus, nil)
-			err := bridge.StartConsumers(context.Background())
-			if tc.wantErrMsg == "" {
+			err := NewNATSBridge(config.Config{}, tc.bus, nil).StartConsumers(t.Context())
+			if tc.wantErr == "" {
 				require.NoError(t, err)
-				tb, ok := tc.bus.(*testBus)
-				if ok {
-					tb.mu.Lock()
-					assert.True(t, tb.subscribed["aerial.dispatch.*:vanadis-dispatch"])
-					assert.True(t, tb.subscribed["aerial.pr.>:vanadis-pr-events"])
-					assert.True(t, tb.subscribed["aerial.coalesced.widget_sync.>:vanadis-widget"])
-					tb.mu.Unlock()
-				}
 			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrMsg)
+				require.EqualError(t, err, tc.wantErr)
+			}
+			if cb, ok := tc.bus.(*consumerBus); ok {
+				assert.Equal(t, tc.wantQueues, cb.queues)
 			}
 		})
 	}
 }
 
-type prTestCase struct {
-	name          string
-	msgData       string
-	msgHeader     nats.Header
-	delivered     uint64
-	serverStatus  int
-	closeServer   bool
-	overrideURL   string
-	termErr       error
-	wantErr       bool
-	wantNaked     bool
-	wantTermed    bool
-	wantNakDelay  time.Duration
-	wantRequests  int
-	wantKey       string
-	wantRepo      string
-	wantEventName string
-	wantPRNumber  int
+// ingressCase drives one handler against a recording Restate ingress.
+// url "" targets the fake ingress; wantPath "" means no request is expected.
+// wantCalls lists the message settlement calls (pubsubtest.Message.Calls).
+type ingressCase struct {
+	name      string
+	data      string
+	header    nats.Header
+	delivered uint64
+	status    int
+	url       string
+	termErr   error
+	wantErr   string
+	wantCalls []string
+	wantPath  string
+	wantKey   string
+	wantBody  string
 }
 
-func runPRTestCase(t *testing.T, tc prTestCase) {
+type ingressHandler func(*NATSBridge, context.Context, pubsub.Message) error
+
+func runIngressCase(t *testing.T, handle ingressHandler, tc ingressCase) {
 	t.Helper()
-	var reqCount int
-	var capturedKey string
-	var capturedPath string
-	var capturedEvent pubsub.PRLifecycleEvent
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqCount++
-		capturedKey = r.Header.Get("Idempotency-Key")
-		capturedPath = r.URL.Path
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedEvent)
-
-		if tc.serverStatus != 0 {
-			w.WriteHeader(tc.serverStatus)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer ts.Close()
-
-	serverURL := ts.URL
-	if tc.overrideURL != "" {
-		serverURL = tc.overrideURL
-	} else if tc.closeServer {
-		ts.Close()
+	ingress := restateingresstest.New(t)
+	ingress.Routes = map[string]restateingresstest.Response{tc.wantPath: {Status: tc.status}}
+	url := tc.url
+	if url == "" {
+		url = ingress.URL()
 	}
+	b := NewNATSBridge(config.Config{RestateIngressURL: url}, nil, ingress.Client())
+	msg := &pubsubtest.Message{Payload: []byte(tc.data), Hdr: tc.header, Delivered: tc.delivered, TermErr: tc.termErr}
 
-	bridge := NewNATSBridge(config.Config{RestateIngressURL: serverURL}, &testBus{}, ts.Client())
-
-	msg := &testMsg{
-		data:      []byte(tc.msgData),
-		subject:   "aerial.pr.opened",
-		header:    tc.msgHeader,
-		delivered: tc.delivered,
-		termErr:   tc.termErr,
-	}
-
-	err := bridge.HandlePRLifecycleEvent(context.Background(), msg)
-	if tc.wantErr {
-		require.Error(t, err)
-	} else {
+	err := handle(b, t.Context(), msg)
+	if tc.wantErr == "" {
 		require.NoError(t, err)
+	} else {
+		require.ErrorContains(t, err, tc.wantErr)
 	}
+	assert.Equal(t, tc.wantCalls, msg.Calls())
 
-	assert.Equal(t, tc.wantRequests, reqCount)
-
-	assert.Equal(t, tc.wantNaked, msg.naked.Load())
-	assert.Equal(t, tc.wantTermed, msg.termed.Load())
-	if tc.wantNakDelay > 0 {
-		assert.Equal(t, tc.wantNakDelay, msg.nakDelay)
+	calls := ingress.Calls()
+	require.NoError(t, ingress.Err())
+	if tc.wantPath == "" {
+		assert.Empty(t, calls)
+		return
 	}
-
-	if tc.wantRequests > 0 {
-		assert.Equal(t, "/BuildRouter/RoutePREvent/send", capturedPath)
-		if tc.wantKey != "" {
-			assert.Equal(t, tc.wantKey, capturedKey)
-		}
-		if tc.wantRepo != "" {
-			assert.Equal(t, tc.wantRepo, capturedEvent.Repo)
-		}
-		if tc.wantEventName != "" {
-			assert.Equal(t, tc.wantEventName, capturedEvent.Event)
-		}
-		if tc.wantPRNumber > 0 {
-			assert.Equal(t, tc.wantPRNumber, capturedEvent.PRNumber)
-		}
-	}
+	require.Len(t, calls, 1)
+	assert.Equal(t, http.MethodPost, calls[0].Method)
+	assert.Equal(t, tc.wantPath, calls[0].Path)
+	assert.Equal(t, tc.wantKey, calls[0].IdempotencyKey)
+	assert.JSONEq(t, tc.wantBody, string(calls[0].Body))
 }
 
-func TestHandlePRLifecycleEvent_Validation(t *testing.T) {
-	t.Parallel()
-
-	tests := []prTestCase{
-		{
-			name:         "malformed json returns nil",
-			msgData:      "{not-json",
-			wantRequests: 0,
-			wantErr:      false,
-		},
-		{
-			name:         "empty repo returns nil",
-			msgData:      `{"event":"opened","repo":"","pr_number":10}`,
-			wantRequests: 0,
-			wantErr:      false,
-		},
-		{
-			name:         "zero pr_number returns nil",
-			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":0}`,
-			wantRequests: 0,
-			wantErr:      false,
-		},
-		{
-			name:          "restate 202 accepted",
-			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			serverStatus:  http.StatusAccepted,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "opened",
-			wantPRNumber:  10,
-			wantErr:       false,
-		},
-		{
-			name:          "restate 400 terminal ack",
-			msgData:       `{"event":"synchronize","repo":"azylman/aerial","pr_number":10}`,
-			serverStatus:  http.StatusBadRequest,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "synchronize",
-			wantPRNumber:  10,
-			wantErr:       false,
-			wantTermed:    true,
-		},
-		{
-			name:          "restate 404 terminal ack",
-			msgData:       `{"event":"check_updated","repo":"azylman/aerial","pr_number":10}`,
-			serverStatus:  http.StatusNotFound,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "check_updated",
-			wantPRNumber:  10,
-			wantErr:       false,
-			wantTermed:    true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runPRTestCase(t, tc)
-		})
-	}
-}
-
-func TestHandlePRLifecycleEvent_ErrorsAndRetries(t *testing.T) {
-	t.Parallel()
-
-	tests := []prTestCase{
-		{
-			name:          "restate 500 attempt 1 naks with 1s",
-			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:     1,
-			serverStatus:  http.StatusInternalServerError,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "opened",
-			wantPRNumber:  10,
-			wantErr:       true,
-			wantNaked:     true,
-			wantNakDelay:  1 * time.Second,
-		},
-		{
-			name:          "restate 500 attempt 2 naks with 2s",
-			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:     2,
-			serverStatus:  http.StatusInternalServerError,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "opened",
-			wantPRNumber:  10,
-			wantErr:       true,
-			wantNaked:     true,
-			wantNakDelay:  2 * time.Second,
-		},
-		{
-			name:          "restate 500 attempt 3 naks with 4s",
-			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:     3,
-			serverStatus:  http.StatusInternalServerError,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "opened",
-			wantPRNumber:  10,
-			wantErr:       true,
-			wantNaked:     true,
-			wantNakDelay:  4 * time.Second,
-		},
-		{
-			name:          "restate 429 attempt 3 naks with 4s",
-			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:     3,
-			serverStatus:  http.StatusTooManyRequests,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "opened",
-			wantPRNumber:  10,
-			wantErr:       true,
-			wantNaked:     true,
-			wantNakDelay:  4 * time.Second,
-		},
-		{
-			name:         "transport error naks with delay",
-			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:    1,
-			closeServer:  true,
-			wantRequests: 0,
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
-		},
-		{
-			name:         "transport error attempt 3 naks with 4s",
-			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:    3,
-			closeServer:  true,
-			wantRequests: 0,
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 4 * time.Second,
-		},
-		{
-			name:         "request creation error on invalid url",
-			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:    1,
-			overrideURL:  "://invalid-url\x7f",
-			wantRequests: 0,
-			wantErr:      true,
-			wantTermed:   true,
-		},
-		{
-			name:         "request creation error with term failure still returns error",
-			msgData:      `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			delivered:    1,
-			overrideURL:  "://invalid-url\x7f",
-			termErr:      errors.New("term failed"),
-			wantRequests: 0,
-			wantErr:      true,
-			wantTermed:   true,
-		},
-		{
-			name:          "custom MsgID header used as idempotency key",
-			msgData:       `{"event":"opened","repo":"azylman/aerial","pr_number":10}`,
-			msgHeader:     nats.Header{pubsub.HeaderMsgID: []string{"custom-pr-id-123"}},
-			serverStatus:  http.StatusOK,
-			wantRequests:  1,
-			wantRepo:      "azylman/aerial",
-			wantEventName: "opened",
-			wantPRNumber:  10,
-			wantKey:       "custom-pr-id-123",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runPRTestCase(t, tc)
-		})
-	}
-}
-
-type dispatchTestCase struct {
-	name           string
-	msgData        string
-	msgHeader      nats.Header
-	delivered      uint64
-	serverStatus   int
-	closeServer    bool
-	wantErr        bool
-	wantNaked      bool
-	wantTermed     bool
-	wantNakDelay   time.Duration
-	wantRequests   int
-	wantKey        string
-	wantDispatchID string
-	wantChunkID    string
-	wantStatus     string
-}
-
-func runDispatchTestCase(t *testing.T, tc dispatchTestCase) {
+// closedIngressURL returns the URL of a started-then-closed server, so a POST
+// to it fails at the transport layer.
+func closedIngressURL(t *testing.T) string {
 	t.Helper()
-	var reqCount int
-	var capturedKey string
-	var capturedPath string
-	var capturedEvent pubsub.DispatchOutcomeEvent
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqCount++
-		capturedKey = r.Header.Get("Idempotency-Key")
-		capturedPath = r.URL.Path
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedEvent)
-
-		if tc.serverStatus != 0 {
-			w.WriteHeader(tc.serverStatus)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer ts.Close()
-
-	serverURL := ts.URL
-	if tc.closeServer {
-		ts.Close()
-	}
-
-	bridge := NewNATSBridge(config.Config{RestateIngressURL: serverURL}, &testBus{}, ts.Client())
-
-	msg := &testMsg{
-		data:      []byte(tc.msgData),
-		subject:   "aerial.dispatch.completed",
-		header:    tc.msgHeader,
-		delivered: tc.delivered,
-	}
-
-	err := bridge.HandleDispatchOutcomeEvent(context.Background(), msg)
-	if tc.wantErr {
-		require.Error(t, err)
-	} else {
-		require.NoError(t, err)
-	}
-
-	assert.Equal(t, tc.wantRequests, reqCount)
-
-	assert.Equal(t, tc.wantNaked, msg.naked.Load())
-	assert.Equal(t, tc.wantTermed, msg.termed.Load())
-	if tc.wantNakDelay > 0 {
-		assert.Equal(t, tc.wantNakDelay, msg.nakDelay)
-	}
-
-	if tc.wantRequests > 0 {
-		assert.Equal(t, "/BuildRouter/RouteDispatchOutcome/send", capturedPath)
-		if tc.wantKey != "" {
-			assert.Equal(t, tc.wantKey, capturedKey)
-		}
-		if tc.wantDispatchID != "" {
-			assert.Equal(t, tc.wantDispatchID, capturedEvent.DispatchID)
-		}
-		if tc.wantChunkID != "" {
-			assert.Equal(t, tc.wantChunkID, capturedEvent.VanadisChunkID)
-		}
-		if tc.wantStatus != "" {
-			assert.Equal(t, tc.wantStatus, capturedEvent.Status)
-		}
-	}
+	ts := httptest.NewServer(http.NotFoundHandler())
+	ts.Close()
+	return ts.URL
 }
 
-func TestHandleDispatchOutcomeEvent_Filtering(t *testing.T) {
+func msgIDHeader(v string) nats.Header { return nats.Header{pubsub.HeaderMsgID: []string{v}} }
+
+func prBody(event string, n int) string {
+	return fmt.Sprintf(`{"event":%q,"repo":"example/repo","pr_number":%d,"occurred_at":"0001-01-01T00:00:00Z"}`, event, n)
+}
+
+func dispatchBody(id, chunk, status string) string {
+	return fmt.Sprintf(`{"dispatch_id":%q,"source":"","vanadis_chunk_id":%q,"status":%q,`+
+		`"started_at":"0001-01-01T00:00:00Z","completed_at":"0001-01-01T00:00:00Z","duration_ms":0}`, id, chunk, status)
+}
+
+const badIngressURL = "://invalid-url\x7f"
+
+func TestHandlePRLifecycleEvent(t *testing.T) {
 	t.Parallel()
 
-	tests := []dispatchTestCase{
+	const path, opened = "/BuildRouter/RoutePREvent/send", `{"event":"opened","repo":"example/repo","pr_number":10}`
+	const key = "pr:example/repo:10:opened::"
+	closed := closedIngressURL(t)
+	errTerm := errors.New("term failed")
+	tests := []ingressCase{
+		{name: "malformed json returns nil", data: "{not-json"},
+		{name: "empty repo returns nil", data: `{"event":"opened","repo":"","pr_number":10}`},
+		{name: "zero pr_number returns nil", data: `{"event":"opened","repo":"example/repo","pr_number":0}`},
 		{
-			name:         "malformed json returns nil",
-			msgData:      "{bad-json",
-			wantRequests: 0,
-			wantErr:      false,
+			name: "202 accepted forwards trimmed lowercase event",
+			data: `{"event":" OPENED ","repo":" example/repo ","pr_number":10}`, status: http.StatusAccepted,
+			wantPath: path, wantKey: key, wantBody: prBody("opened", 10),
 		},
 		{
-			name:         "healthcheck-ping ignored",
-			msgData:      `{"dispatch_id":"healthcheck-ping","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			wantRequests: 0,
-			wantErr:      false,
+			name: "400 terms",
+			data: `{"event":"synchronize","repo":"example/repo","pr_number":10}`, status: http.StatusBadRequest,
+			wantCalls: []string{"term"}, wantPath: path, wantKey: "pr:example/repo:10:synchronize::", wantBody: prBody("synchronize", 10),
 		},
 		{
-			name:         "empty vanadis_chunk_id ignored",
-			msgData:      `{"dispatch_id":"disp-1","vanadis_chunk_id":"","status":"completed"}`,
-			wantRequests: 0,
-			wantErr:      false,
+			name: "404 terms",
+			data: `{"event":"check_updated","repo":"example/repo","pr_number":10}`, status: http.StatusNotFound,
+			wantCalls: []string{"term"}, wantPath: path, wantKey: "pr:example/repo:10:check_updated::", wantBody: prBody("check_updated", 10),
 		},
 		{
-			name:         "unhandled status ignored",
-			msgData:      `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"running"}`,
-			wantRequests: 0,
-			wantErr:      false,
+			name: "400 with term failure still returns nil",
+			data: opened, status: http.StatusBadRequest, termErr: errTerm,
+			wantCalls: []string{"term"}, wantPath: path, wantKey: key, wantBody: prBody("opened", 10),
 		},
 		{
-			name:           "completed status forwards to restate",
-			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			serverStatus:   http.StatusOK,
-			wantRequests:   1,
-			wantDispatchID: "disp-1",
-			wantChunkID:    "chk-1",
-			wantStatus:     "completed",
-			wantErr:        false,
-			wantKey:        "dispatch:disp-1:chk-1:completed",
+			name: "500 naks with backoff",
+			data: opened, delivered: 2, status: http.StatusInternalServerError,
+			wantErr: "restate ingress error (status 500)", wantCalls: []string{"nak 2s"}, wantPath: path, wantKey: key,
+			wantBody: prBody("opened", 10),
 		},
 		{
-			name:           "failed status forwards to restate",
-			msgData:        `{"dispatch_id":"disp-2","vanadis_chunk_id":"chk-2","status":"failed"}`,
-			serverStatus:   http.StatusOK,
-			wantRequests:   1,
-			wantDispatchID: "disp-2",
-			wantChunkID:    "chk-2",
-			wantStatus:     "failed",
-			wantErr:        false,
-			wantKey:        "dispatch:disp-2:chk-2:failed",
+			name: "transport error naks with backoff",
+			data: opened, delivered: 3, url: closed,
+			wantErr: "post to restate ingress " + closed + path, wantCalls: []string{"nak 4s"},
+		},
+		{name: "request creation error terms", data: opened, url: badIngressURL, wantErr: "create request to ", wantCalls: []string{"term"}},
+		{
+			name: "request creation error with term failure still returns error",
+			data: opened, url: badIngressURL, termErr: errTerm,
+			wantErr: "create request to ", wantCalls: []string{"term"},
 		},
 		{
-			name:           "timeout status forwards to restate",
-			msgData:        `{"dispatch_id":"disp-3","vanadis_chunk_id":"chk-3","status":"timeout"}`,
-			serverStatus:   http.StatusOK,
-			wantRequests:   1,
-			wantDispatchID: "disp-3",
-			wantChunkID:    "chk-3",
-			wantStatus:     "timeout",
-			wantErr:        false,
-			wantKey:        "dispatch:disp-3:chk-3:timeout",
-		},
-		{
-			name:           "crashed status forwards to restate",
-			msgData:        `{"dispatch_id":"disp-4","vanadis_chunk_id":"chk-4","status":"crashed"}`,
-			serverStatus:   http.StatusOK,
-			wantRequests:   1,
-			wantDispatchID: "disp-4",
-			wantChunkID:    "chk-4",
-			wantStatus:     "crashed",
-			wantErr:        false,
-			wantKey:        "dispatch:disp-4:chk-4:crashed",
+			name: "MsgID header is the idempotency key",
+			data: opened, header: msgIDHeader("custom-pr-id-123"),
+			wantPath: path, wantKey: "custom-pr-id-123", wantBody: prBody("opened", 10),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runDispatchTestCase(t, tc)
+			runIngressCase(t, (*NATSBridge).HandlePRLifecycleEvent, tc)
 		})
 	}
 }
 
-func TestHandleDispatchOutcomeEvent_Errors(t *testing.T) {
+func TestHandleDispatchOutcomeEvent(t *testing.T) {
 	t.Parallel()
 
-	tests := []dispatchTestCase{
+	const path, completed = "/BuildRouter/RouteDispatchOutcome/send", `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`
+	const key = "dispatch:disp-1:chk-1:completed"
+	closed := closedIngressURL(t)
+	tests := []ingressCase{
+		{name: "malformed json returns nil", data: "{bad-json"},
+		{name: "healthcheck-ping ignored", data: `{"dispatch_id":"healthcheck-ping","vanadis_chunk_id":"chk-1","status":"completed"}`},
+		{name: "empty vanadis_chunk_id ignored", data: `{"dispatch_id":"disp-1","vanadis_chunk_id":"","status":"completed"}`},
+		{name: "unhandled status ignored", data: `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"running"}`},
+		{name: "completed forwards", data: completed, wantPath: path, wantKey: key, wantBody: dispatchBody("disp-1", "chk-1", "completed")},
 		{
-			name:           "restate 400 terminal ack",
-			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			serverStatus:   http.StatusBadRequest,
-			wantRequests:   1,
-			wantDispatchID: "disp-1",
-			wantChunkID:    "chk-1",
-			wantStatus:     "completed",
-			wantErr:        false,
-			wantTermed:     true,
+			name:     "failed forwards",
+			data:     `{"dispatch_id":"disp-2","vanadis_chunk_id":"chk-2","status":"failed"}`,
+			wantPath: path, wantKey: "dispatch:disp-2:chk-2:failed", wantBody: dispatchBody("disp-2", "chk-2", "failed"),
 		},
 		{
-			name:           "restate 500 attempt 1 naks with delay",
-			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			delivered:      1,
-			serverStatus:   http.StatusInternalServerError,
-			wantRequests:   1,
-			wantDispatchID: "disp-1",
-			wantChunkID:    "chk-1",
-			wantStatus:     "completed",
-			wantErr:        true,
-			wantNaked:      true,
-			wantNakDelay:   1 * time.Second,
+			name:     "timeout forwards",
+			data:     `{"dispatch_id":"disp-3","vanadis_chunk_id":"chk-3","status":"timeout"}`,
+			wantPath: path, wantKey: "dispatch:disp-3:chk-3:timeout", wantBody: dispatchBody("disp-3", "chk-3", "timeout"),
 		},
 		{
-			name:           "restate 500 attempt 3 naks with 4s",
-			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			delivered:      3,
-			serverStatus:   http.StatusInternalServerError,
-			wantRequests:   1,
-			wantDispatchID: "disp-1",
-			wantChunkID:    "chk-1",
-			wantStatus:     "completed",
-			wantErr:        true,
-			wantNaked:      true,
-			wantNakDelay:   4 * time.Second,
+			name:     "crashed forwards trimmed lowercase status",
+			data:     `{"dispatch_id":" disp-4 ","vanadis_chunk_id":" chk-4 ","status":" CRASHED "}`,
+			wantPath: path, wantKey: "dispatch:disp-4:chk-4:crashed", wantBody: dispatchBody("disp-4", "chk-4", "crashed"),
 		},
 		{
-			name:           "restate 429 attempt 3 naks with 4s",
-			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			delivered:      3,
-			serverStatus:   http.StatusTooManyRequests,
-			wantRequests:   1,
-			wantDispatchID: "disp-1",
-			wantChunkID:    "chk-1",
-			wantStatus:     "completed",
-			wantErr:        true,
-			wantNaked:      true,
-			wantNakDelay:   4 * time.Second,
+			name: "400 terms",
+			data: completed, status: http.StatusBadRequest,
+			wantCalls: []string{"term"}, wantPath: path, wantKey: key, wantBody: dispatchBody("disp-1", "chk-1", "completed"),
 		},
 		{
-			name:         "transport error attempt 3 naks with 4s",
-			msgData:      `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			delivered:    3,
-			closeServer:  true,
-			wantRequests: 0,
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 4 * time.Second,
+			name: "429 naks with backoff",
+			data: completed, delivered: 3, status: http.StatusTooManyRequests,
+			wantErr: "restate ingress error (status 429)", wantCalls: []string{"nak 4s"}, wantPath: path, wantKey: key,
+			wantBody: dispatchBody("disp-1", "chk-1", "completed"),
 		},
 		{
-			name:         "transport error naks with delay",
-			msgData:      `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			delivered:    1,
-			closeServer:  true,
-			wantRequests: 0,
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
+			name: "transport error naks with backoff",
+			data: completed, delivered: 1, url: closed,
+			wantErr: "post to restate ingress " + closed + path, wantCalls: []string{"nak 1s"},
 		},
 		{
-			name:           "custom MsgID header takes precedence",
-			msgData:        `{"dispatch_id":"disp-1","vanadis_chunk_id":"chk-1","status":"completed"}`,
-			msgHeader:      nats.Header{pubsub.HeaderMsgID: []string{"custom-dispatch-key"}},
-			serverStatus:   http.StatusOK,
-			wantRequests:   1,
-			wantDispatchID: "disp-1",
-			wantChunkID:    "chk-1",
-			wantStatus:     "completed",
-			wantKey:        "custom-dispatch-key",
+			name: "MsgID header takes precedence",
+			data: completed, header: msgIDHeader("custom-dispatch-key"),
+			wantPath: path, wantKey: "custom-dispatch-key", wantBody: dispatchBody("disp-1", "chk-1", "completed"),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runDispatchTestCase(t, tc)
+			runIngressCase(t, (*NATSBridge).HandleDispatchOutcomeEvent, tc)
 		})
-	}
-}
-
-type widgetSyncTestCase struct {
-	name         string
-	msgData      string
-	msgHeader    nats.Header
-	delivered    uint64
-	serverStatus int
-	wantErr      bool
-	wantNaked    bool
-	wantNakDelay time.Duration
-	wantRequests int
-	wantKey      string
-	wantPath     string
-	wantBuildID  string
-	wantPREvent  pubsub.PRLifecycleEvent
-}
-
-func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
-	t.Helper()
-	var reqCount int
-	var capturedKey string
-	var capturedPath string
-	var capturedBody []byte
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqCount++
-		capturedKey = r.Header.Get("Idempotency-Key")
-		capturedPath = r.URL.EscapedPath()
-		capturedBody, _ = io.ReadAll(r.Body)
-
-		if tc.serverStatus != 0 {
-			w.WriteHeader(tc.serverStatus)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer ts.Close()
-
-	bridge := NewNATSBridge(config.Config{RestateIngressURL: ts.URL}, &testBus{}, ts.Client())
-
-	msg := &testMsg{
-		data:      []byte(tc.msgData),
-		subject:   "aerial.coalesced.widget_sync.build.b-1",
-		header:    tc.msgHeader,
-		delivered: tc.delivered,
-	}
-
-	err := bridge.HandleWidgetSyncEvent(context.Background(), msg)
-	if tc.wantErr {
-		require.Error(t, err)
-	} else {
-		require.NoError(t, err)
-	}
-
-	assert.Equal(t, tc.wantRequests, reqCount)
-	assert.Equal(t, tc.wantNaked, msg.naked.Load())
-	if tc.wantNakDelay > 0 {
-		assert.Equal(t, tc.wantNakDelay, msg.nakDelay)
-	}
-
-	if tc.wantRequests > 0 {
-		assert.Equal(t, tc.wantPath, capturedPath)
-		if tc.wantKey != "" {
-			assert.Equal(t, tc.wantKey, capturedKey)
-		}
-		if tc.wantBuildID != "" {
-			var id string
-			require.NoError(t, json.Unmarshal(capturedBody, &id))
-			assert.Equal(t, tc.wantBuildID, id)
-		}
-		if tc.wantPREvent.Repo != "" {
-			var pe pubsub.PRLifecycleEvent
-			require.NoError(t, json.Unmarshal(capturedBody, &pe))
-			assert.Equal(t, tc.wantPREvent.Event, pe.Event)
-			assert.Equal(t, tc.wantPREvent.Repo, pe.Repo)
-			assert.Equal(t, tc.wantPREvent.PRNumber, pe.PRNumber)
-		}
 	}
 }
 
 func TestHandleWidgetSyncEvent(t *testing.T) {
 	t.Parallel()
 
-	tests := []widgetSyncTestCase{
+	const buildPath, prPath = "/BuildRouter/RouteBuildReconcile/send", "/BuildRouter/RoutePREvent/send"
+	const prArgs = `{"repo":"example/repo","pr_number":42}`
+	closed := closedIngressURL(t)
+	tests := []ingressCase{
+		{name: "malformed json returns nil", data: "{not-valid-json"},
+		{name: "empty args returns nil", data: `{}`},
+		{name: "repo without positive pr_number returns nil", data: `{"repo":"example/repo","pr_number":0}`},
+		{name: "pr_number without repo returns nil", data: `{"repo":"","pr_number":42}`},
 		{
-			name:         "malformed json returns nil",
-			msgData:      "{not-valid-json",
-			wantRequests: 0,
-			wantErr:      false,
+			name:     "build_id routes to reconcile with fallback key",
+			data:     `{"build_id":" build-987 "}`,
+			wantPath: buildPath, wantKey: "widget:build:build-987", wantBody: `"build-987"`,
 		},
 		{
-			name:         "empty args returns nil",
-			msgData:      `{}`,
-			wantRequests: 0,
-			wantErr:      false,
+			name:     "special characters in build_id are preserved in body and key",
+			data:     `{"build_id":"build/987#special"}`,
+			wantPath: buildPath, wantKey: "widget:build:build/987#special", wantBody: `"build/987#special"`,
 		},
 		{
-			name:         "build_id routing to Reconcile send with fallback key",
-			msgData:      `{"build_id":"build-987"}`,
-			serverStatus: http.StatusOK,
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
-			wantKey:      "widget:build:build-987",
-			wantBuildID:  "build-987",
-			wantErr:      false,
+			name: "build_id with MsgID header precedence",
+			data: `{"build_id":"build-987"}`, header: msgIDHeader("custom-build-msgid"),
+			wantPath: buildPath, wantKey: "custom-build-msgid", wantBody: `"build-987"`,
 		},
 		{
-			name:         "special characters in build_id are preserved in body and key",
-			msgData:      `{"build_id":"build/987#special"}`,
-			serverStatus: http.StatusOK,
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
-			wantKey:      "widget:build:build/987#special",
-			wantBuildID:  "build/987#special",
-			wantErr:      false,
+			name:     "build_id with Idempotency-Key header precedence",
+			data:     `{"build_id":"build-987"}`,
+			header:   nats.Header{"Idempotency-Key": []string{"custom-build-idem"}},
+			wantPath: buildPath, wantKey: "custom-build-idem", wantBody: `"build-987"`,
 		},
 		{
-			name:         "build_id routing with HeaderMsgID precedence",
-			msgData:      `{"build_id":"build-987"}`,
-			msgHeader:    nats.Header{pubsub.HeaderMsgID: []string{"custom-build-msgid"}},
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
-			wantKey:      "custom-build-msgid",
-			wantBuildID:  "build-987",
-			wantErr:      false,
+			name:     "repo and pr_number route to RoutePREvent with fallback key",
+			data:     prArgs,
+			wantPath: prPath, wantKey: "widget:pr:example/repo:42", wantBody: prBody("widget_sync", 42),
 		},
 		{
-			name:         "build_id routing with Idempotency-Key header precedence",
-			msgData:      `{"build_id":"build-987"}`,
-			msgHeader:    nats.Header{"Idempotency-Key": []string{"custom-build-idem"}},
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
-			wantKey:      "custom-build-idem",
-			wantBuildID:  "build-987",
-			wantErr:      false,
+			name: "repo and pr_number with MsgID header precedence",
+			data: prArgs, header: msgIDHeader("custom-pr-msgid"),
+			wantPath: prPath, wantKey: "custom-pr-msgid", wantBody: prBody("widget_sync", 42),
 		},
 		{
-			name:         "repo and pr_number routing to RoutePREvent send with fallback key",
-			msgData:      `{"repo":"azylman/aerial","pr_number":42}`,
-			serverStatus: http.StatusOK,
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RoutePREvent/send",
-			wantKey:      "widget:pr:azylman/aerial:42",
-			wantPREvent: pubsub.PRLifecycleEvent{
-				Event:    "widget_sync",
-				Repo:     "azylman/aerial",
-				PRNumber: 42,
-			},
-			wantErr: false,
+			name: "500 naks with backoff",
+			data: prArgs, delivered: 2, status: http.StatusInternalServerError,
+			wantErr: "restate ingress error (status 500)", wantCalls: []string{"nak 2s"}, wantPath: prPath, wantKey: "widget:pr:example/repo:42",
+			wantBody: prBody("widget_sync", 42),
 		},
 		{
-			name:         "repo and pr_number routing with HeaderMsgID precedence",
-			msgData:      `{"repo":"azylman/aerial","pr_number":42}`,
-			msgHeader:    nats.Header{pubsub.HeaderMsgID: []string{"custom-pr-msgid"}},
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RoutePREvent/send",
-			wantKey:      "custom-pr-msgid",
-			wantPREvent: pubsub.PRLifecycleEvent{
-				Event:    "widget_sync",
-				Repo:     "azylman/aerial",
-				PRNumber: 42,
-			},
-			wantErr: false,
-		},
-		{
-			name:         "repo without positive pr_number returns nil",
-			msgData:      `{"repo":"azylman/aerial","pr_number":0}`,
-			wantRequests: 0,
-			wantErr:      false,
-		},
-		{
-			name:         "pr_number without repo returns nil",
-			msgData:      `{"repo":"","pr_number":42}`,
-			wantRequests: 0,
-			wantErr:      false,
-		},
-		{
-			name:         "restate 500 attempt 1 naks with delay",
-			msgData:      `{"build_id":"build-err"}`,
-			delivered:    1,
-			serverStatus: http.StatusInternalServerError,
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RouteBuildReconcile/send",
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
-		},
-		{
-			name:         "repo and pr_number restate 500 attempt 2 naks with delay",
-			msgData:      `{"repo":"azylman/aerial","pr_number":42}`,
-			delivered:    2,
-			serverStatus: http.StatusInternalServerError,
-			wantRequests: 1,
-			wantPath:     "/BuildRouter/RoutePREvent/send",
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 2 * time.Second,
+			name: "transport error naks with backoff",
+			data: `{"build_id":"build-err"}`, delivered: 1, url: closed,
+			wantErr: "post to restate ingress " + closed + buildPath, wantCalls: []string{"nak 1s"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runWidgetSyncTestCase(t, tc)
+			runIngressCase(t, (*NATSBridge).HandleWidgetSyncEvent, tc)
 		})
 	}
 }
@@ -924,103 +362,100 @@ func TestSettleFailedDelivery_Direct(t *testing.T) {
 		wantNakDelay time.Duration
 	}{
 		{
-			name:         "delivered 1 with nak error logs warning",
-			delivered:    1,
-			nakErr:       errors.New("nak network err"),
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
+			name:      "delivered 1 with nak error logs warning",
+			delivered: 1, nakErr: errors.New("nak network err"),
+			wantNaked: true, wantNakDelay: 1 * time.Second,
 		},
-		{
-			name:         "delivered 3 naks with 4s backoff",
-			delivered:    3,
-			wantNaked:    true,
-			wantNakDelay: 4 * time.Second,
-		},
-		{
-			name:         "delivered 5 naks with 16s backoff",
-			delivered:    5,
-			wantNaked:    true,
-			wantNakDelay: 16 * time.Second,
-		},
+		{name: "delivered 3 naks with 4s backoff", delivered: 3, wantNaked: true, wantNakDelay: 4 * time.Second},
+		{name: "delivered 5 naks with 16s backoff", delivered: 5, wantNaked: true, wantNakDelay: 16 * time.Second},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msg := &testMsg{
-				delivered: tc.delivered,
-				nakErr:    tc.nakErr,
-			}
+			msg := &pubsubtest.Message{Delivered: tc.delivered, NakErr: tc.nakErr}
 			settleFailedDelivery(context.Background(), msg)
-			assert.Equal(t, tc.wantNaked, msg.naked.Load())
-			assert.Equal(t, tc.wantTermed, msg.termed.Load())
+			delay, naked := msg.NakDelay()
+			assert.Equal(t, tc.wantNaked, naked)
+			assert.Equal(t, tc.wantTermed, msg.Termed())
 			if tc.wantNakDelay > 0 {
-				assert.Equal(t, tc.wantNakDelay, msg.nakDelay)
+				assert.Equal(t, tc.wantNakDelay, delay)
 			}
 		})
 	}
 }
 
-func TestIdempotencyKeys(t *testing.T) {
+func keyMsg(hdr nats.Header) *pubsubtest.Message { return &pubsubtest.Message{Hdr: hdr} }
+
+var bothKeyHeaders = nats.Header{pubsub.HeaderMsgID: []string{"msg-id-1"}, "Idempotency-Key": []string{"idem-1"}}
+
+func TestPRIdempotencyKey(t *testing.T) {
 	t.Parallel()
 
+	ev := pubsub.PRLifecycleEvent{Repo: "example/repo", PRNumber: 42, Event: "opened", HeadSHA: "abc", CheckName: "ci"}
+	evAt := ev
+	evAt.OccurredAt = time.Unix(100, 200)
 	tests := []struct {
-		name       string
-		isPR       bool
-		headerKey  string
-		headerVal  string
-		prEvent    pubsub.PRLifecycleEvent
-		dispEvent  pubsub.DispatchOutcomeEvent
-		wantResult string
+		name string
+		msg  pubsub.Message
+		ev   pubsub.PRLifecycleEvent
+		want string
 	}{
-		{
-			name:       "pr with Idempotency-Key header",
-			isPR:       true,
-			headerKey:  "Idempotency-Key",
-			headerVal:  "idem-456",
-			wantResult: "idem-456",
-		},
-		{
-			name:       "pr zero occurred_at fallback",
-			isPR:       true,
-			prEvent:    pubsub.PRLifecycleEvent{Repo: "azylman/aerial", PRNumber: 42, Event: "opened", HeadSHA: "abc", CheckName: "ci"},
-			wantResult: "pr:azylman/aerial:42:opened:abc:ci",
-		},
-		{
-			name:       "pr non-zero occurred_at fallback",
-			isPR:       true,
-			prEvent:    pubsub.PRLifecycleEvent{Repo: "azylman/aerial", PRNumber: 42, Event: "opened", HeadSHA: "abc", CheckName: "ci", OccurredAt: time.Unix(100, 200)},
-			wantResult: "pr:azylman/aerial:42:opened:abc:ci:100000000200",
-		},
-		{
-			name:       "dispatch with Idempotency-Key header",
-			isPR:       false,
-			headerKey:  "Idempotency-Key",
-			headerVal:  "disp-idem-456",
-			wantResult: "disp-idem-456",
-		},
+		{"Idempotency-Key header", keyMsg(nats.Header{"Idempotency-Key": []string{"idem-456"}}), ev, "idem-456"},
+		{"MsgID beats Idempotency-Key", keyMsg(bothKeyHeaders), ev, "msg-id-1"},
+		{"nil message zero occurred_at fallback", nil, ev, "pr:example/repo:42:opened:abc:ci"},
+		{"blank header non-zero occurred_at fallback", keyMsg(msgIDHeader(" ")), evAt, "pr:example/repo:42:opened:abc:ci:100000000200"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var msg *testMsg
-			if tc.headerKey != "" {
-				msg = &testMsg{
-					header: nats.Header{tc.headerKey: []string{tc.headerVal}},
-				}
-			}
-			var subMsg pubsub.Message
-			if msg != nil {
-				subMsg = msg
-			}
-			if tc.isPR {
-				got := prIdempotencyKey(subMsg, tc.prEvent)
-				assert.Equal(t, tc.wantResult, got)
-			} else {
-				got := dispatchIdempotencyKey(subMsg, tc.dispEvent)
-				assert.Equal(t, tc.wantResult, got)
-			}
+			assert.Equal(t, tc.want, prIdempotencyKey(tc.msg, tc.ev))
+		})
+	}
+}
+
+func TestDispatchIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	ev := pubsub.DispatchOutcomeEvent{DispatchID: "disp-1", VanadisChunkID: "chk-1", Status: "failed"}
+	tests := []struct {
+		name string
+		msg  pubsub.Message
+		ev   pubsub.DispatchOutcomeEvent
+		want string
+	}{
+		{"Idempotency-Key header", keyMsg(nats.Header{"Idempotency-Key": []string{"disp-idem-456"}}), ev, "disp-idem-456"},
+		{"MsgID beats Idempotency-Key", keyMsg(bothKeyHeaders), ev, "msg-id-1"},
+		{"nil message fallback", nil, ev, "dispatch:disp-1:chk-1:failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, dispatchIdempotencyKey(tc.msg, tc.ev))
+		})
+	}
+}
+
+func TestWidgetSyncIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		msg  pubsub.Message
+		args pubsub.WidgetSyncJobArgs
+		want string
+	}{
+		{"MsgID beats Idempotency-Key", keyMsg(bothKeyHeaders), pubsub.WidgetSyncJobArgs{BuildID: "b-1"}, "msg-id-1"},
+		{"nil message build fallback", nil, pubsub.WidgetSyncJobArgs{BuildID: " b-1 ", Repo: "example/repo", PRNumber: 7}, "widget:build:b-1"},
+		{"blank build_id pr fallback", keyMsg(nil), pubsub.WidgetSyncJobArgs{BuildID: " ", Repo: " repo ", PRNumber: 7}, "widget:pr:repo:7"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, widgetSyncIdempotencyKey(tc.msg, tc.args))
 		})
 	}
 }
