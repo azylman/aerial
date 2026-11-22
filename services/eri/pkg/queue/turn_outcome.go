@@ -110,7 +110,7 @@ func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail,
 	if attempt >= maxAttempts {
 		return false
 	}
-	backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
+	backoff := retryBackoff(attempt, te.pool.cfg.BackoffBase)
 	if te.statusUpdater != nil {
 		if isRateLimitError(errDetail) {
 			te.statusUpdater.SetCapacityBackoff(backoff)
@@ -387,10 +387,11 @@ func (te *turnExecution) isQuotaRetry() bool {
 
 func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt int) bool {
 	te.incrementTurnRetries(errDetail)
-	delay := calculateCapacityBackoff(attempt, resetDur)
-	if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
-		delay = te.pool.cfg.RetryDelayOverride
+	var override time.Duration
+	if te.pool != nil {
+		override = te.pool.cfg.RetryDelayOverride
 	}
+	delay := capacityRetryDelay(attempt, resetDur, override)
 	if te.statusUpdater != nil {
 		te.statusUpdater.SetCapacityBackoff(delay)
 	}
@@ -541,6 +542,20 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 			}
 		},
 	})
+}
+
+// retryBackoff is the wait before retrying a transient failure of attempt: attempt * base.
+func retryBackoff(attempt int, base time.Duration) time.Duration {
+	return time.Duration(attempt) * base
+}
+
+// capacityRetryDelay is the wait before retrying a capacity blip of attempt; a positive
+// override (tests) replaces the progressive backoff.
+func capacityRetryDelay(attempt int, resetDur, override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	return calculateCapacityBackoff(attempt, resetDur)
 }
 
 // calculateCapacityBackoff computes progressive capacity backoff:

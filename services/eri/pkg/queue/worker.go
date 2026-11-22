@@ -376,11 +376,35 @@ func (te *turnExecution) handleBurstPanic(r any) {
 }
 
 func (te *turnExecution) acquirePoolAndLease() bool {
-	// 1. Resolve active execution pool (primary vs medium vs low effort)
-	activePool, poolKey, poolErr := te.resolveExecutionPool()
+	poolErr, leaseErr := te.acquireTurnLease()
 	if poolErr != nil {
 		te.failBurst(poolErr)
 		return false
+	}
+	if te.isInterrupted() {
+		te.finalizeInterruptedTurn(te.pool.GetRuntimeConfig())
+		return false
+	}
+	if leaseErr != nil {
+		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
+		return false
+	}
+	return true
+}
+
+// errTurnLeaseInterrupted reports a lease taken after the turn was interrupted (and released again).
+var errTurnLeaseInterrupted = errors.New("queue: turn interrupted while acquiring the session lease")
+
+// acquireTurnLease resolves the execution pool and takes the session lease onto te without writing
+// any row: poolErr reports pool resolution failures, leaseErr lease failures (a lease obtained after
+// the turn was interrupted is released and reported as errTurnLeaseInterrupted).
+//
+//nolint:contextcheck,nolintlint // pool resolution logs on the turn context, as acquirePoolAndLease always did.
+func (te *turnExecution) acquireTurnLease() (poolErr, leaseErr error) {
+	// 1. Resolve active execution pool (primary vs medium vs low effort)
+	activePool, poolKey, err := te.resolveExecutionPool()
+	if err != nil {
+		return err, nil
 	}
 	te.activeSessionMu.Lock()
 	te.activePool = activePool
@@ -388,8 +412,7 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 	te.activeSessionMu.Unlock()
 
 	if activePool == nil {
-		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
-		return false
+		return fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID), nil
 	}
 
 	// 2. Acquire exclusive session lease before prompt construction
@@ -408,12 +431,10 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 		if lease != nil {
 			logInterruptWarning("release interrupted lease", lease.Release())
 		}
-		if te.isInterrupted() {
-			te.finalizeInterruptedTurn(te.pool.GetRuntimeConfig())
-			return false
+		if leaseErr == nil {
+			leaseErr = errTurnLeaseInterrupted
 		}
-		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
-		return false
+		return nil, leaseErr
 	}
 	te.activeSessionMu.Lock()
 	te.lease = lease
@@ -430,7 +451,7 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 	if currSess != "" && isCold && !isEphem {
 		te.saveSessionID(te.turnCtxValue(), te.threadID, currSess)
 	}
-	return true
+	return nil, nil
 }
 
 // publishTurnCompleted publishes a pubsub.TurnCompletedEvent to aerial.turn.completed on AERIAL_EVENTS.
@@ -1003,10 +1024,21 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 }
 
 func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, currentTimeout int) (runner.TurnOutcome, *runner.TurnResult, string, error) {
-	// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
-	runCtx, runCancel := context.WithTimeout(te.turnCtxValue(), time.Duration(currentTimeout+1)*time.Minute)
+	runCtx, runCancel := context.WithTimeout(te.turnCtxValue(), attemptRunTimeout(currentTimeout))
 	defer runCancel()
+	return te.executeLeaseAttemptCtx(runCtx, currentModel, promptToSend)
+}
 
+// attemptRunTimeout pads the Go context by +1 minute relative to the runner watchdog ceiling so
+// the runner watchdog always fires cleanly.
+func attemptRunTimeout(timeoutMinutes int) time.Duration {
+	return time.Duration(timeoutMinutes+1) * time.Minute
+}
+
+// executeLeaseAttemptCtx runs one lease execution under runCtx.
+//
+//nolint:contextcheck,nolintlint // pool resolution logs on the turn context, as executeLeaseAttempt always did.
+func (te *turnExecution) executeLeaseAttemptCtx(runCtx context.Context, currentModel, promptToSend string) (runner.TurnOutcome, *runner.TurnResult, string, error) {
 	activePool := te.activePool
 	if activePool == nil {
 		if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
@@ -1295,14 +1327,15 @@ const (
 )
 
 func (te *turnExecution) handleAttemptFailureCheck(errDetail, stderr, currentModel, burstEffort string, isTransient, isSessionCorruption bool, attempt, maxAttempts int, currentAgyBin, currentAPIKey string) attemptFailureAction {
-	if runner.IsQuotaPause(errDetail, stderr) {
+	kind := classifyFailure(errDetail, stderr, isTransient, isSessionCorruption)
+	if kind == failureQuotaPause || kind == failureCapacityBlip {
 		if te.handleQuotaPause(errDetail, stderr, currentModel, burstEffort, attempt, maxAttempts) {
 			return actionContinue
 		}
 		return actionStop
 	}
 
-	isWatchdog := isWatchdogTimeoutError(errDetail, stderr)
+	isWatchdog := kind == failureWatchdog
 	errCat := classifyRunnerErrorCategory(isWatchdog, isTransient, isSessionCorruption)
 	metrics.RecordRunnerError(errCat, currentModel)
 
