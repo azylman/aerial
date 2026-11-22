@@ -13,11 +13,10 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/k8sauthtest"
+	"github.com/azylman/aerial/pkg/pgtest"
 )
 
 // serverRequestCase is the shared row shape for the Routes and handleMCP tests:
@@ -29,20 +28,25 @@ type serverRequestCase struct {
 	headers    map[string]string
 	body       io.Reader
 	counterErr error
-	storeFail  string
+	sabotage   string
 	wantStatus int
 	wantSubstr string
 }
 
-// newServerFixture builds a Server over an in-memory store seeded with one fact
-// and restores the httpkit coverage-flush hooks when the test ends.
-func newServerFixture(t *testing.T) (*TestMemStore, *Server) {
+// newServerFixture builds a Server over a real store seeded with one fact
+// (id 1 "Server fact test", dim 0), applies sabotage, and restores the httpkit
+// coverage-flush hooks when the test ends.
+func newServerFixture(t *testing.T, sabotage string) *Server {
 	t.Helper()
 	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta })
 
-	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
+	db := newTestDB(t)
+	store := NewSQLStore(db)
+	if _, err := store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	execSQL(t, db, sabotage)
 	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler, func(_ context.Context, threadID string) error {
 		if threadID == "th-busy" {
@@ -53,17 +57,13 @@ func newServerFixture(t *testing.T) (*TestMemStore, *Server) {
 		}
 		return nil
 	})
-	return store, server
+	return server
 }
 
-func assertServerRequest(t *testing.T, handler http.Handler, store *TestMemStore, tc serverRequestCase) {
+func assertServerRequest(t *testing.T, handler http.Handler, tc serverRequestCase) {
 	t.Helper()
 	httpkit.WriteCountersDirFn = func(string) error { return tc.counterErr }
 	httpkit.WriteMetaDirFn = func(string) error { return tc.counterErr }
-	if tc.storeFail != "" {
-		store.SetFail(tc.storeFail, errors.New("store err"))
-		defer store.SetFail("", nil)
-	}
 
 	req := httptest.NewRequest(tc.method, tc.path, tc.body)
 	for k, v := range tc.headers {
@@ -81,9 +81,6 @@ func assertServerRequest(t *testing.T, handler http.Handler, store *TestMemStore
 }
 
 func TestServer_Routes(t *testing.T) {
-	store, server := newServerFixture(t)
-	routes := server.Routes()
-
 	tests := []serverRequestCase{
 		{name: "Health", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
 		{name: "CoverageFlush", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
@@ -97,39 +94,40 @@ func TestServer_Routes(t *testing.T) {
 		{name: "AdminExtractLockBusy", method: http.MethodPost, path: "/admin/extract?thread_id=th-busy", wantStatus: http.StatusConflict},
 		{name: "AdminExtractError", method: http.MethodPost, path: "/admin/extract?thread_id=th-err", wantStatus: http.StatusInternalServerError},
 		{name: "FactsJSON", method: http.MethodGet, path: "/facts?limit=10&offset=0", wantStatus: http.StatusOK, wantSubstr: `"facts"`},
-		{name: "FactsStoreError", method: http.MethodGet, path: "/facts", storeFail: "GetFactsPaginated", wantStatus: http.StatusInternalServerError},
+		{name: "FactsStoreError", method: http.MethodGet, path: "/facts", sabotage: sabotageFacts, wantStatus: http.StatusInternalServerError},
 		{name: "FactsMethodNotAllowed", method: http.MethodPost, path: "/facts", wantStatus: http.StatusMethodNotAllowed},
 		{name: "ContextJSON", method: http.MethodGet, path: "/context?q=test&limit=5", wantStatus: http.StatusOK, wantSubstr: `"context"`},
 		{name: "ContextPlaintext", method: http.MethodGet, path: "/context?q=test&limit=5", headers: map[string]string{"Accept": "text/plain"}, wantStatus: http.StatusOK, wantSubstr: "<retrieved_memory>"},
 		{name: "ContextMethodNotAllowed", method: http.MethodPost, path: "/context", wantStatus: http.StatusMethodNotAllowed},
 		{name: "ConsolidateOK", method: http.MethodPost, path: "/consolidate", wantStatus: http.StatusOK, wantSubstr: `"consolidated":0`},
-		{name: "ConsolidateStoreError", method: http.MethodPost, path: "/consolidate", storeFail: "GetAllFactsWithEmbeddings", wantStatus: http.StatusInternalServerError},
+		{name: "ConsolidateStoreError", method: http.MethodPost, path: "/consolidate", sabotage: sabotageFacts, wantStatus: http.StatusInternalServerError},
 		{name: "ConsolidateMethodNotAllowed", method: http.MethodGet, path: "/consolidate", wantStatus: http.StatusMethodNotAllowed},
 		{name: "MCPRoute", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Memory MCP Server"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assertServerRequest(t, routes, store, tc)
+			assertServerRequest(t, newServerFixture(t, tc.sabotage).Routes(), tc)
 		})
 	}
+}
 
-	t.Run("AdminExtractDefaultHandlerExtraction", func(t *testing.T) {
-		memStore := newTestMemStore()
-		handler := NewToolHandler(&Config{}, memStore, &MockOllamaClient{embedding: testEmbedding(1.0)})
-		srv := NewServer(handler)
-		req := httptest.NewRequest(http.MethodPost, "/admin/extract?thread_id=th-empty", http.NoBody)
-		rec := httptest.NewRecorder()
-		srv.Routes().ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
-		}
-	})
+// TestServer_AdminExtractDefaultHandler runs the default extractFn (the real
+// extraction pipeline) for a thread with no turns: nothing to extract, 200.
+func TestServer_AdminExtractDefaultHandler(t *testing.T) {
+	t.Parallel()
+	handler := NewToolHandler(&Config{}, newTestStore(t), &MockOllamaClient{embedding: testEmbedding(1.0)})
+	srv := NewServer(handler)
+	req := httptest.NewRequest(http.MethodPost, "/admin/extract?thread_id=th-empty", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
 }
 
 func TestServer_Routes_ExtractorRole(t *testing.T) {
-	store := newTestMemStore()
-	handler := NewToolHandler(&Config{Role: "extractor"}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
+	handler := NewToolHandler(&Config{Role: "extractor"}, newTestStore(t), &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler, func(_ context.Context, _ string) error {
 		return nil
 	})
@@ -148,7 +146,7 @@ func TestServer_Routes_ExtractorRole(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assertServerRequest(t, routes, store, tc)
+			assertServerRequest(t, routes, tc)
 		})
 	}
 }
@@ -159,9 +157,6 @@ func mcpToolCallBody(id int, name, args string) io.Reader {
 }
 
 func TestServer_HandleMCP(t *testing.T) {
-	store, server := newServerFixture(t)
-	handler := http.HandlerFunc(server.handleMCP)
-
 	tests := []serverRequestCase{
 		{name: "MCPGetProbe", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Memory MCP Server"},
 		{name: "MCPMethodNotAllowed", method: http.MethodPut, path: "/mcp", wantStatus: http.StatusMethodNotAllowed},
@@ -174,7 +169,7 @@ func TestServer_HandleMCP(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assertServerRequest(t, handler, store, tc)
+			assertServerRequest(t, http.HandlerFunc(newServerFixture(t, tc.sabotage).handleMCP), tc)
 		})
 	}
 }
@@ -189,34 +184,30 @@ func TestServer_PanicOnNilHandler(t *testing.T) {
 }
 
 func TestFactTime_Scan(t *testing.T) {
-	now := time.Now().UTC()
-	var nilTimePtr *time.Time
+	t.Parallel()
+	pdt := time.FixedZone("PDT", -7*3600)
 
 	tests := []struct {
 		name      string
 		input     any
+		wantTime  time.Time
 		wantValid bool
 		wantErr   bool
 	}{
-		{"NilInput", nil, false, false},
-		{"NilTimePointer", nilTimePtr, false, false},
-		{"ValidTimePointer", &now, true, false},
-		{"ValidTimeValue", now, true, false},
-		{"ValidRFC3339String", "2026-10-21T09:43:01Z", true, false},
-		{"ValidSpaceString", "2026-10-21 09:00:00", true, false},
-		{"EmptyString", "  ", false, false},
-		{"InvalidDateString", "not-a-timestamp", false, true},
+		{name: "NullColumn", input: nil},
+		{name: "TimestamptzNormalizedToUTC", input: time.Date(2026, 10, 21, 2, 43, 1, 0, pdt), wantTime: time.Date(2026, 10, 21, 9, 43, 1, 0, time.UTC), wantValid: true},
+		{name: "NonTimeValueRejected", input: "2026-10-21T09:43:01Z", wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var ft FactTime
-			err := ft.Scan(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FactTime.Scan() err = %v, wantErr = %v", err, tc.wantErr)
+			t.Parallel()
+			ft := FactTime{Time: time.Unix(1, 0), Valid: true}
+			if err := ft.Scan(tc.input); (err != nil) != tc.wantErr {
+				t.Fatalf("FactTime.Scan() err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && ft.Valid != tc.wantValid {
-				t.Errorf("ft.Valid = %v, want %v", ft.Valid, tc.wantValid)
+			if ft.Valid != tc.wantValid || !ft.Time.Equal(tc.wantTime) || (tc.wantValid && ft.Time.Location() != time.UTC) {
+				t.Errorf("FactTime.Scan() = %+v, want {Time:%v Valid:%v}", ft, tc.wantTime, tc.wantValid)
 			}
 		})
 	}
@@ -235,8 +226,8 @@ func TestEscapeSQLLikeAndHelpers(t *testing.T) {
 }
 
 func TestOpenDB(t *testing.T) {
-	addr := startMockPostgres(t)
-	validDSN := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
+	t.Parallel()
+	validDSN := pgtest.NewDSN(t)
 
 	tests := []struct {
 		name    string
@@ -244,12 +235,13 @@ func TestOpenDB(t *testing.T) {
 		wantErr bool
 	}{
 		{"NilConfig", nil, true},
-		{"UnsupportedScheme", &Config{DatabaseURL: "mysql://mock_user@" + addr + "/mock_db"}, true},
-		{"ValidMockPostgres", &Config{DatabaseURL: validDSN}, false},
+		{"UnsupportedScheme", &Config{DatabaseURL: "mysql://mock_user@127.0.0.1:1/mock_db"}, true},
+		{"ValidPostgres", &Config{DatabaseURL: validDSN}, false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db, err := OpenDB(t.Context(), tc.cfg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("OpenDB() err = %v, wantErr = %v", err, tc.wantErr)
@@ -332,8 +324,7 @@ ollama:
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {
-	addr := startMockPostgres(t)
-	validDSN := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
+	validDSN := pgtest.NewDSN(t)
 
 	tests := []struct {
 		name    string
@@ -351,7 +342,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "CleanLifecycleWithMockPostgres",
+			name:    "CleanLifecycleWithPostgres",
 			cfg:     &Config{Port: "0", DatabaseURL: validDSN},
 			wantErr: false,
 		},
@@ -507,9 +498,12 @@ func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
 }
 
 func TestServer_Metrics_Table(t *testing.T) {
-	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "Metric fact 1", testEmbedding(1.0))
-	_, _ = store.InsertFact(context.Background(), "Metric fact 2", testEmbedding(1.0))
+	store := newTestStore(t)
+	for _, text := range []string{"Metric fact 1", "Metric fact 2"} {
+		if _, err := store.InsertFact(context.Background(), text, testEmbedding(1.0)); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
 	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler)
 	nilStoreServer := &Server{handler: &ToolHandler{}}
@@ -606,13 +600,15 @@ func serverAuthDenied(reason string) *k8sauthtest.RoundTripper {
 	return &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview(serverAuthUser), SARBody: k8sauthtest.SAR(false, reason)}
 }
 
-func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) (*TestMemStore, *Server) {
+func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) *Server {
 	t.Helper()
 	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta })
 
-	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
+	store := newTestStore(t)
+	if _, err := store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	handler := NewToolHandler(&Config{Stack: DefaultStack, Auth: authCfg}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler, func(_ context.Context, threadID string) error {
 		if threadID == "th-busy" {
@@ -623,7 +619,7 @@ func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) (*TestMemSto
 		}
 		return nil
 	})
-	return store, server
+	return server
 }
 
 type authEndpointTestCase struct {
@@ -645,7 +641,7 @@ func runAuthEndpointTests(t *testing.T, trDefault *k8sauthtest.RoundTripper, tes
 			if tc.rt != nil {
 				rt = tc.rt
 			}
-			_, server := newServerFixtureWithAuth(t, k8sauthtest.Config(t, rt))
+			server := newServerFixtureWithAuth(t, k8sauthtest.Config(t, rt))
 			req := httptest.NewRequest(tc.method, tc.path, tc.body)
 			for k, v := range tc.header {
 				req.Header.Set(k, v)
@@ -823,7 +819,7 @@ func TestServer_Auth_MCPTools(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, server := newServerFixtureWithAuth(t, k8sauthtest.Config(t, tc.rt))
+			server := newServerFixtureWithAuth(t, k8sauthtest.Config(t, tc.rt))
 			body := mcpToolCallBody(1, tc.toolName, tc.toolArgs)
 			req := httptest.NewRequest(http.MethodPost, "/mcp", body)
 			req.Header.Set("Authorization", "Bearer valid-token")
