@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
@@ -208,6 +209,39 @@ func TestChunkFailureLine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, chunkFailureLine(tc.chunk))
+		})
+	}
+}
+
+func TestPublishChunkFailed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		faultErr    error
+		chunk       model.VanadisChunk
+		wantTargets []string
+	}{
+		{name: "success publishes failed chunk event", chunk: model.VanadisChunk{ID: "c1", Banner: "banner"}, wantTargets: []string{"c1"}},
+		{name: "bus error logged without panic", faultErr: errors.New("bus fail"), chunk: model.VanadisChunk{ID: "c2"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingChunkBus{}
+			var bus pubsub.Bus = rec
+			if tc.faultErr != nil {
+				bus = &pubsubtest.FaultBus{Bus: rec, PublishErr: tc.faultErr}
+			}
+			exec := executor.NewExecutor("", nil, bus, "token", "azylman", nil)
+			bo := NewBuildObject("", nil).WithAuthority(nil, exec)
+			bo.publishChunkFailed(context.Background(), tc.chunk)
+			var gotTargets []string
+			for _, ev := range rec.events {
+				if ev.Source == "vanadis_chunk" && ev.EventType == "failed" {
+					gotTargets = append(gotTargets, ev.Targets...)
+				}
+			}
+			assert.Equal(t, tc.wantTargets, gotTargets)
 		})
 	}
 }

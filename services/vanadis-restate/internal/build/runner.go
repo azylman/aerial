@@ -2,9 +2,6 @@ package build
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"net/http"
 	"strings"
 
 	restate "github.com/restatedev/sdk-go"
@@ -22,10 +19,6 @@ const ReconcileReasonWidgetSync = "widget_sync"
 
 const labelRunnerGuard = "runner-guard"
 
-// ErrForeignRunner means a Build object was asked to act on a build that a
-// different agent's vanadis-restate runner executes.
-var ErrForeignRunner = fmt.Errorf("%w: build is executed by another runner", store.ErrBuildConflict)
-
 // runnerAgent is the normalized agent whose builds this object executes.
 func (b *BuildObject) runnerAgent() string {
 	if b == nil {
@@ -34,23 +27,17 @@ func (b *BuildObject) runnerAgent() string {
 	return store.NormalizeRunnerAgent(b.agentName)
 }
 
-// RunsBuild reports whether a Build object of ownAgent executes builds
-// recorded with runnerAgent. Empty and the default agent compare equal.
-func RunsBuild(ownAgent, runnerAgent string) bool {
-	return buildplan.BuildServiceName(store.NormalizeRunnerAgent(ownAgent)) == buildplan.BuildServiceName(store.NormalizeRunnerAgent(runnerAgent))
-}
-
 // runnerGuardResult is the journaled runner lookup for the keyed build.
 type runnerGuardResult struct {
 	Found       bool   `json:"found"`
 	RunnerAgent string `json:"runner_agent,omitempty"`
 }
 
-// guardRunner refuses, with a terminal 409 and no side effects, to act on a
-// build whose runner_agent belongs to a different Build service. Unknown
-// builds pass through so handlers keep their existing not-found behavior.
+// guardRunner keeps calling rt.RunRunnerGuard (restate.WithName("runner-guard"))
+// so the journal entry index does not shift mid-rollout, but returns
+// runnerGuardResult{Found: true, RunnerAgent: "aerial"}, nil without querying Postgres.
 func (b *BuildObject) guardRunner(ctx restate.ObjectSharedContext, handlerLabel string) error {
-	if b == nil || b.store == nil {
+	if b == nil {
 		return nil
 	}
 	if b.runtimeFactory != nil {
@@ -63,70 +50,20 @@ func (b *BuildObject) guardRunner(ctx restate.ObjectSharedContext, handlerLabel 
 		if buildID == "" {
 			return nil
 		}
-		res, err := rt.RunRunnerGuard(func(rc context.Context) (runnerGuardResult, error) {
-			res, err := b.lookupRunner(rc, buildID)
-			if err != nil {
-				RecordReconcileError(handlerLabel, err)
-			}
-			return res, ToTerminalErr(err)
+		_, err := rt.RunRunnerGuard(func(rc context.Context) (runnerGuardResult, error) {
+			return runnerGuardResult{Found: true, RunnerAgent: "aerial"}, nil
 		})
-		if err != nil {
-			return err
-		}
-		return b.checkRunner(handlerLabel, buildID, res)
+		return err
 	}
 
 	buildID := strings.TrimSpace(restate.Key(ctx))
 	if buildID == "" {
 		return nil
 	}
-	res, err := RunJournaled(ctx, handlerLabel, labelRunnerGuard, func(rc restate.RunContext) (runnerGuardResult, error) {
-		res, err := b.lookupRunner(rc, buildID)
-		if err != nil {
-			RecordReconcileError(handlerLabel, err)
-		}
-		return res, ToTerminalErr(err)
+	_, err := RunJournaled(ctx, handlerLabel, labelRunnerGuard, func(rc restate.RunContext) (runnerGuardResult, error) {
+		return runnerGuardResult{Found: true, RunnerAgent: "aerial"}, nil
 	})
-	if err != nil {
-		return err
-	}
-	return b.checkRunner(handlerLabel, buildID, res)
-}
-
-func (b *BuildObject) lookupRunner(ctx context.Context, buildID string) (runnerGuardResult, error) {
-	bld, _, err := b.store.GetBuild(ctx, buildID)
-	if errors.Is(err, store.ErrBuildNotFound) {
-		return runnerGuardResult{}, nil
-	}
-	if err != nil {
-		return runnerGuardResult{}, err
-	}
-	if bld == nil {
-		return runnerGuardResult{}, nil
-	}
-	return runnerGuardResult{Found: true, RunnerAgent: store.NormalizeRunnerAgent(bld.RunnerAgent)}, nil
-}
-
-func (b *BuildObject) checkRunner(handlerLabel, buildID string, res runnerGuardResult) error {
-	if !res.Found || RunsBuild(b.runnerAgent(), res.RunnerAgent) {
-		return nil
-	}
-	err := fmt.Errorf("%w: build %s runs on %s, not %s", ErrForeignRunner, buildID, buildplan.BuildServiceName(res.RunnerAgent), b.ServiceName())
-	RecordReconcileError(handlerLabel, err)
-	return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusConflict))
-}
-
-// checkCreateOwner refuses, with a terminal 400, to create a build whose
-// owner agent belongs to a different Build service. The canonical default
-// runner accepts builds for any owner; legacy sibling runners only accept
-// builds owned by their own agent.
-func (b *BuildObject) checkCreateOwner(agent string) error {
-	if RunsBuild(b.runnerAgent(), "") || RunsBuild(b.runnerAgent(), agent) {
-		return nil
-	}
-	err := fmt.Errorf("%w: build owned by %q belongs on %s, not %s", store.ErrInvalidBuildInput, strings.TrimSpace(agent), buildplan.BuildServiceName(store.NormalizeRunnerAgent(agent)), b.ServiceName())
-	RecordReconcileError(labelCreate, err)
-	return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
+	return err
 }
 
 // withBuildOwner scopes ctx to the build owner's agent so eri calls for the

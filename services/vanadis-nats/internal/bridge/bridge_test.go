@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-nats/internal/config"
 )
@@ -1048,31 +1047,6 @@ func TestIsRetryableIngressStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, isRetryableIngressStatus(tc.code))
-		})
-	}
-}
-
-func TestBuildServiceName_Derivation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name           string
-		agent          string
-		wantRouter     string
-		wantRouterPath string
-	}{
-		{name: "empty defaults to legacy", agent: "", wantRouter: "BuildRouter", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantRouter: "BuildRouter", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantRouterPath: "/BuildRouter-agent-alpha/RoutePREvent/send"},
-		{name: "unsafe chars route to default", agent: "Foo Bar", wantRouter: "BuildRouter", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
-		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantRouter: "BuildRouter-agent-beta", wantRouterPath: "/BuildRouter-agent-beta/RoutePREvent/send"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantRouter, buildplan.BuildRouterServiceName(tc.agent))
-			bridge := NewNATSBridge(config.Config{AgentName: tc.agent}, nil, nil)
-			assert.Equal(t, tc.wantRouterPath, bridge.restateRouterSendPath("RoutePREvent"))
 		})
 	}
 }

@@ -33,7 +33,7 @@ const (
 )
 
 // BuildColumns is the canonical build-row select list.
-const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at, COALESCE(NULLIF(runner_agent, ''), 'aerial')`
+const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
 
 // PgxQueryExecer abstracts the pgx query surface used by the store.
 type PgxQueryExecer interface {
@@ -238,12 +238,12 @@ func ScanBuild(s rowScanner) (model.VanadisBuild, error) {
 		return model.VanadisBuild{}, errors.New("row scanner is nil")
 	}
 	var b model.VanadisBuild
-	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt, &b.RunnerAgent)
+	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
 	if err == nil && strings.TrimSpace(b.Agent) == "" {
 		b.Agent = defaultAgent
 	}
 	if err == nil {
-		b.RunnerAgent = NormalizeRunnerAgent(b.RunnerAgent)
+		b.RunnerAgent = defaultAgent
 	}
 	return b, err
 }

@@ -468,9 +468,6 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		RecordReconcileError(labelCreate, err)
 		return model.VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
-	if err := b.checkCreateOwner(req.Agent); err != nil {
-		return model.VanadisBuild{}, err
-	}
 
 	now, err := RunJournaled(ctx, labelCreate, "create-build-clock", func(rc restate.RunContext) (time.Time, error) {
 		return time.Now().UTC(), nil

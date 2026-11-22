@@ -44,7 +44,7 @@ func TestServerDelegateEdges(t *testing.T) {
 		{name: "nil server leaves gauges unchanged", target: "build-metrics", storeKind: "nil-server", want: `vanadis_builds_active{queue_state="running"} 7`},
 		{name: "nil store leaves gauges unchanged", target: "build-metrics", storeKind: "nil-store", want: `vanadis_builds_active{queue_state="running"} 7`},
 		{name: "store error leaves gauges unchanged", target: "build-metrics", storeKind: "list-error", want: `vanadis_builds_active{queue_state="running"} 7`},
-		{name: "restate object path follows the build runner, not server config", target: "restate-client", want: "/Build-agent-alpha/b1/Create"},
+		{name: "restate object path follows the canonical Build service", target: "restate-client", want: "/Build/b1/Create"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
