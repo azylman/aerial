@@ -35,6 +35,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
+	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -136,8 +137,9 @@ func LoadConfigFromEnv() Config {
 // rollback adapters), so no revision is ever the last deployment of a service and a flip or
 // rollback never strands in-flight invocations. ThreadSession/DispatchSession keep 1h
 // timeouts in both modes because timeouts are service-wide and an old revision drains long
-// legacy RunTurn invocations under the same names.
-func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string) []restate.ServiceDefinition {
+// legacy RunTurn invocations under the same names. The LLM service runs on llmFn (the
+// ephemeral summarizer pool) and is bound in every mode.
+func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string, llmFn runner.LLMFunc) []restate.ServiceDefinition {
 	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
 	var thread, dispatch, sessionManager any
 	if mode == config.TurnQueueCoordinator {
@@ -156,14 +158,15 @@ func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string) []res
 		restate.Reflect(queue.NewVoiceSessionObject(pool, agentName), hour...),
 		restate.Reflect(sessionManager, hour...),
 		queue.ReflectTurnRunner(queue.NewTurnRunnerService(pool, agentName)),
+		restate.Reflect(llmcall.NewService(llmFn, agentName), hour...),
 	}
 }
 
 // NewEriRestateServer binds the Eri services for mode (config.TurnQueueLegacy or
-// config.TurnQueueCoordinator) and returns a Restate server handler.
-func NewEriRestateServer(pool *queue.WorkerPool, agentName, mode string) *server.Restate {
+// config.TurnQueueCoordinator) plus the LLM service on llmFn and returns a Restate server handler.
+func NewEriRestateServer(pool *queue.WorkerPool, agentName, mode string, llmFn runner.LLMFunc) *server.Restate {
 	srv := server.NewRestate()
-	for _, def := range eriRestateDefinitions(pool, agentName, mode) {
+	for _, def := range eriRestateDefinitions(pool, agentName, mode, llmFn) {
 		srv = srv.Bind(def)
 	}
 	return srv
@@ -201,6 +204,7 @@ func serviceTimeoutPatches(agent string) []serviceTimeoutPatch {
 			InactivityTimeout: formatRestateDuration(runnerOpts.InactivityTimeout),
 			AbortTimeout:      formatRestateDuration(runnerOpts.AbortTimeout),
 		}},
+		{service: llmcall.ServiceName(agent), body: hour},
 	}
 }
 
@@ -249,7 +253,7 @@ func wrapDiscoveryTimeoutReconciler(next http.Handler, triggerFn func()) http.Ha
 }
 
 // ReconcileRestateServiceTimeouts sets per-service timeouts on Eri services via the Restate admin
-// API (TurnRunner 75m/1h, the others 1h/1h). It never sets a retry policy.
+// API (TurnRunner 75m/1h, the others including LLM 1h/1h). It never sets a retry policy.
 func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent string, httpClient ...*http.Client) error {
 	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
 	if adminURL == "" {
@@ -691,7 +695,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		bootstrap.WithProvisioner(ctx, provisioner),
 		bootstrap.WithDirtyPools(pools.ephemeralPool, workerPool)))
 
-	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName, turnQueueMode)
+	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName, turnQueueMode, llmFn)
 	restateHandler, err := restateSrv.Handler()
 	if err != nil {
 		return fmt.Errorf("create restate handler: %w", err)

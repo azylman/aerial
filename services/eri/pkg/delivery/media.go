@@ -55,7 +55,7 @@ var (
 )
 
 // ErrInvalidInternalAttachment signals that an internal attachment request specifies an invalid URL,
-// disallowed redirect target, or malformed filename.
+// disallowed redirect target, or malformed filename, or that the upstream answered with a 4xx status.
 var ErrInvalidInternalAttachment = errors.New("invalid internal attachment")
 
 func isInternalAerialHTTPURL(rawURL string) bool {
@@ -635,6 +635,10 @@ func ResolveAndFetchInternalAttachment(ctx context.Context, rawURL, filename str
 		_ = resp.Body.Close()
 	}()
 
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		// A 4xx answer is deterministic for this URL; retrying cannot fix it.
+		return nil, fmt.Errorf("%w: unexpected http status %d", ErrInvalidInternalAttachment, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected http status %d", resp.StatusCode)
 	}

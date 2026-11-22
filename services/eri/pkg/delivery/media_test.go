@@ -678,6 +678,8 @@ type resolveFetchInternalImageCase struct {
 	filename        string
 	wantErr         bool
 	wantErrSentinel error
+	// wantNotSentinel requires the error not to wrap ErrInvalidInternalAttachment (retryable).
+	wantNotSentinel bool
 	wantFilename    string
 	wantContentType string
 }
@@ -691,6 +693,9 @@ func runResolveFetchInternalImageCase(t *testing.T, tc resolveFetchInternalImage
 		}
 		if tc.wantErrSentinel != nil && !errors.Is(err, tc.wantErrSentinel) {
 			t.Errorf("expected error to wrap %v, got %v", tc.wantErrSentinel, err)
+		}
+		if tc.wantNotSentinel && errors.Is(err, ErrInvalidInternalAttachment) {
+			t.Errorf("expected retryable error, got invalid attachment: %v", err)
 		}
 		return
 	}
@@ -727,6 +732,8 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 			http.Redirect(w, r, "http://external.example.com/pic.png", http.StatusFound)
 		case "/media/redirect-allowed":
 			http.Redirect(w, r, "/media/pic.png", http.StatusFound)
+		case "/media/unavailable.png":
+			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
 			http.NotFound(w, r)
 		}
@@ -770,9 +777,10 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 			wantErrSentinel: ErrInvalidInternalAttachment,
 		},
 		{
-			name:    "internal .aerial host with connection refused",
-			rawURL:  "http://vision.aerial:59999/nonexistent.jpg",
-			wantErr: true,
+			name:            "internal .aerial host with connection refused stays retryable",
+			rawURL:          "http://vision.aerial:59999/nonexistent.jpg",
+			wantErr:         true,
+			wantNotSentinel: true,
 		},
 		{
 			name:            "valid image with inferred filename",
@@ -819,6 +827,8 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 			wantErr:         true,
 			wantErrSentinel: ErrInvalidInternalAttachment,
 		},
+		{name: "upstream 404 is an invalid attachment", rawURL: server.URL + "/media/missing.png", wantErr: true, wantErrSentinel: ErrInvalidInternalAttachment},
+		{name: "upstream 503 stays retryable", rawURL: server.URL + "/media/unavailable.png", wantErr: true, wantNotSentinel: true},
 		{
 			name:            "allowed redirect target",
 			rawURL:          server.URL + "/media/redirect-allowed",
