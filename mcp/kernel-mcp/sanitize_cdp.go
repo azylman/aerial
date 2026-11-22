@@ -94,8 +94,9 @@ func RewriteWSUrl(rawWS, host, port string) string {
 }
 
 // ResolveCDPHost resolves a hostname, returning IPv4 addresses first.
-// Literal IPv4s, "localhost", and "::1" pass through directly.
-func ResolveCDPHost(ctx context.Context, host string) string {
+// Literal IPv4s, "localhost", and "::1" pass through directly; other names go
+// through lookup (production passes net.DefaultResolver.LookupHost).
+func ResolveCDPHost(ctx context.Context, host string, lookup func(context.Context, string) ([]string, error)) string {
 	h := strings.TrimSpace(host)
 	if h == "" {
 		return "127.0.0.1"
@@ -107,8 +108,7 @@ func ResolveCDPHost(ctx context.Context, host string) string {
 		return h
 	}
 
-	var resolver net.Resolver
-	addrs, err := resolver.LookupHost(ctx, h)
+	addrs, err := lookup(ctx, h)
 	if err != nil || len(addrs) == 0 {
 		return h
 	}
