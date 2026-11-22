@@ -87,29 +87,6 @@ func TestBuildMetadataValidationCases(t *testing.T) {
 	}
 }
 
-func TestParseStoredBuildMetadata(t *testing.T) {
-	t.Parallel()
-	raw, err := os.ReadFile("../../testdata/build-metadata-v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	progressRaw := strings.Replace(string(raw), `"kind":"manifest"`, `"kind":"progress"`, 1)
-
-	// Direct parse rejects progress wire kind
-	if _, parseErr := ParseBuildMetadata([]byte(progressRaw)); parseErr == nil {
-		t.Fatal("expected ParseBuildMetadata to reject progress wire kind")
-	}
-
-	// ParseStoredBuildMetadata accepts progress snapshot
-	m, err := ParseStoredBuildMetadata([]byte(progressRaw))
-	if err != nil {
-		t.Fatalf("unexpected error parsing stored progress metadata: %v", err)
-	}
-	if m.Kind != prwire.BuildMetadataProgress {
-		t.Fatalf("got kind %q, want %q", m.Kind, prwire.BuildMetadataProgress)
-	}
-}
-
 func TestValidWorkflowPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

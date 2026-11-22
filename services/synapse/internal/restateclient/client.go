@@ -30,6 +30,7 @@ import (
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -179,8 +180,8 @@ func NewClient(baseURL, prService, repoService string, httpClient *http.Client) 
 	}
 	return &Client{
 		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		prService:   model.FirstNonEmpty(strings.TrimSpace(prService), prwire.PRObjectServiceName),
-		repoService: model.FirstNonEmpty(strings.TrimSpace(repoService), prwire.RepoObjectServiceName),
+		prService:   strutil.FirstNonEmpty(strings.TrimSpace(prService), prwire.PRObjectServiceName),
+		repoService: strutil.FirstNonEmpty(strings.TrimSpace(repoService), prwire.RepoObjectServiceName),
 		httpClient:  tracing.Client(httpClient),
 	}
 }

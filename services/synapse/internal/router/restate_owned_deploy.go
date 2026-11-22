@@ -10,6 +10,9 @@ import (
 
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 // Deploy path: the deploy-side twin of restate_owned_github.go. For a
@@ -52,7 +55,7 @@ func (s *RouterServer) ownedDeployView(ctx context.Context, repo string, prNumbe
 	}
 	view, err := c.GetDeployView(ctx, repo, prNumber)
 	if err != nil {
-		return prwire.DeployView{}, fmt.Errorf("restate deploy view %s#%d: %w", normalizeRepo(repo), prNumber, err)
+		return prwire.DeployView{}, fmt.Errorf("restate deploy view %s#%d: %w", model.NormalizeRepo(repo), prNumber, err)
 	}
 	return view, nil
 }
@@ -127,7 +130,7 @@ func (s *RouterServer) sendOwnedRolloutProgress(ctx context.Context, pr Deployin
 		return err
 	}
 	return s.sendOwnedPR(ctx, prwire.PRHandlerDeploySuccess, prwire.PREvent{
-		Repo: pr.Repo, PRNumber: pr.PRNumber, HeadSHA: pr.HeadSHA, MergeSHA: firstNonEmpty(pr.MergeSHA, pr.HeadSHA), JobName: name,
+		Repo: pr.Repo, PRNumber: pr.PRNumber, HeadSHA: pr.HeadSHA, MergeSHA: strutil.FirstNonEmpty(pr.MergeSHA, pr.HeadSHA), JobName: name,
 		Facts: facts(ownedRolloutFact(pr, name, eventDeploySuccess, statusDeployed)),
 	})
 }
@@ -220,7 +223,7 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 // webhooks) is sent to PRObject before the caller forwards its event.
 func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) (int, string) {
 	sha = strings.TrimSpace(sha)
-	if normalizeRepo(repo) == "" || sha == "" || prwire.IsZeroSHA(sha) {
+	if model.NormalizeRepo(repo) == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return 0, ""
 	}
 	if c, err := s.restateClient(); err == nil {
@@ -253,7 +256,7 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 			return &evt, restateFailure(ctx, "GetDeployView", err)
 		}
 		view = v
-		evt.TargetID = firstNonEmpty(evt.TargetID, view.TargetID)
+		evt.TargetID = strutil.FirstNonEmpty(evt.TargetID, view.TargetID)
 	}
 	if evt.TargetID == "" && (evt.Event == eventDeployFailed || evt.Event == eventDeployRollback || evt.Event == eventSyncFailed) {
 		evt.TargetID = strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
@@ -275,7 +278,7 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 		slog.InfoContext(ctx, "[synapse] [deploy] skipping deploy_started (waiting for image build)", "job", evt.JobName, "repo", evt.Repo, "pr", evt.PRNumber)
 		return &evt, nil
 	}
-	expected := dedupeTrimmedStrings(evt.ExpectedJobs)
+	expected := model.DedupeTrimmedStrings(evt.ExpectedJobs)
 	syncHasExpected, deferred, err := s.ownedSyncExpected(ctx, evt, view, expected)
 	if deferred || err != nil {
 		return &evt, err
@@ -355,8 +358,8 @@ func (s *RouterServer) ownedDeployEventWatcherOwnership(ctx context.Context, evt
 // no reconcile requests, and whose final build metadata is missing or still
 // selects images. A failed lifecycle read waits.
 func (s *RouterServer) ownedWaitingForImageBuild(ctx context.Context, repo string, prNumber int, view prwire.DeployView) bool {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 || metadataWorkflowPath(repo) == "" {
+	repo = model.NormalizeRepo(repo)
+	if repo == "" || prNumber <= 0 || buildmeta.MetadataWorkflowPath(repo) == "" {
 		return false
 	}
 	c, err := s.restateClient()
@@ -567,7 +570,7 @@ func (s *RouterServer) ownedCompleteNoDeploy(ctx context.Context, repo, headSHA 
 	if view.HasExpectedDeployJobs {
 		return nil
 	}
-	branch = firstNonEmpty(view.Branch, branch)
+	branch = strutil.FirstNonEmpty(view.Branch, branch)
 	view.Branch = branch
 	if deferred, err := s.ownedDeferPRToWatcher(ctx, repo, prNum, view); deferred || err != nil {
 		return err

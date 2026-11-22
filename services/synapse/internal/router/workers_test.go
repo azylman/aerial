@@ -12,6 +12,9 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/azylman/aerial/services/synapse/internal/kube"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 type defaultOutboundDispatcherCase struct {
@@ -456,7 +459,7 @@ func runDefaultOutboundDispatcherCase(ctx context.Context, t *testing.T, tc defa
 
 	var beforeRetry float64
 	if tc.wantRetryRecorded {
-		beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(QueueDefault, "brain_http_dispatch", "brain_http_retry"))
+		beforeRetry = testutil.ToFloat64(metrics.JobRetriesTotal.WithLabelValues(QueueDefault, "brain_http_dispatch", "brain_http_retry"))
 	}
 
 	workload, err := executeDispatcherCall(testCtx, disp, tc, &attempts)
@@ -471,7 +474,7 @@ func runDefaultOutboundDispatcherCase(ctx context.Context, t *testing.T, tc defa
 		t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
 	}
 	if tc.wantRetryRecorded {
-		afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(QueueDefault, "brain_http_dispatch", "brain_http_retry"))
+		afterRetry := testutil.ToFloat64(metrics.JobRetriesTotal.WithLabelValues(QueueDefault, "brain_http_dispatch", "brain_http_retry"))
 		if afterRetry <= beforeRetry {
 			t.Errorf("expected brain_http_retry to increment, before=%v after=%v", beforeRetry, afterRetry)
 		}
@@ -605,7 +608,7 @@ func TestResolveImageTag(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tagKey, imageName, workload := resolveImageTag(tc.repo, tc.imageRef)
+			tagKey, imageName, workload := kube.ResolveImageTag(tc.repo, tc.imageRef)
 			if tagKey != tc.wantTagKey {
 				t.Errorf("tagKey = %q, want %q", tagKey, tc.wantTagKey)
 			}

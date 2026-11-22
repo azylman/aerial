@@ -1,8 +1,6 @@
 package router
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestRouterServerNilConfigGuards(t *testing.T) {
 	t.Parallel()
@@ -34,13 +32,5 @@ func TestRouterServerNilConfigGuards(t *testing.T) {
 	}
 	if ch, mention, ok := liveSrv.lookupCollaboratorCIAlert("mirrormere", "user"); !ok || ch != "123" || mention != "@user" {
 		t.Fatalf("unexpected lookup: %q, %q, %v", ch, mention, ok)
-	}
-}
-
-func TestConfigFromEnvForwarding(t *testing.T) {
-	_ = LoadConfigFromEnv()
-	_, _ = loadConfigFromEnvStrict()
-	if !synapseRestartRequired(nil, nil) {
-		t.Fatal("expected restart required for nil configs")
 	}
 }

@@ -7,6 +7,9 @@ import (
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/azylman/aerial/services/synapse/internal/kube"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 type mockOutboundDispatcher struct {
@@ -74,7 +77,7 @@ func (m *mockOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageR
 	if m.promoteErr != nil {
 		return "", m.promoteErr
 	}
-	_, _, workload := resolveImageTag(req.Repo, req.Image)
+	_, _, workload := kube.ResolveImageTag(req.Repo, req.Image)
 	return workload, nil
 }
 
@@ -86,7 +89,7 @@ func (m *mockOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context,
 	if m.repoDiscoverErr != nil {
 		return nil, m.repoDiscoverErr
 	}
-	return m.repoKustomizations[normalizeRepo(repo)], nil
+	return m.repoKustomizations[model.NormalizeRepo(repo)], nil
 }
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {

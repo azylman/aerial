@@ -51,15 +51,6 @@ func ValidWorkflowPath(path string) bool {
 
 // ParseBuildMetadata validates structure only. It never authorizes promotion.
 func ParseBuildMetadata(raw []byte) (prwire.BuildMetadata, error) {
-	return parseBuildMetadata(raw, false)
-}
-
-// ParseStoredBuildMetadata additionally accepts normalized progress snapshots.
-func ParseStoredBuildMetadata(raw []byte) (prwire.BuildMetadata, error) {
-	return parseBuildMetadata(raw, true)
-}
-
-func parseBuildMetadata(raw []byte, stored bool) (prwire.BuildMetadata, error) {
 	var m prwire.BuildMetadata
 	if len(raw) == 0 || len(raw) > 65536 {
 		return m, fmt.Errorf("invalid metadata size")
@@ -75,7 +66,7 @@ func parseBuildMetadata(raw []byte, stored bool) (prwire.BuildMetadata, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return m, fmt.Errorf("trailing metadata")
 	}
-	if !validBuildMetadataIdentity(m) || (!stored && m.Kind == prwire.BuildMetadataProgress) {
+	if !validBuildMetadataIdentity(m) || m.Kind == prwire.BuildMetadataProgress {
 		return m, fmt.Errorf("invalid metadata identity")
 	}
 	if err := validateBuildMetadataResults(m); err != nil {

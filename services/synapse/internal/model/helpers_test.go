@@ -111,18 +111,8 @@ func TestIs4xxClientError(t *testing.T) {
 	}
 }
 
-func TestFirstNonEmptyAndRandomNonce(t *testing.T) {
+func TestRandomNonce(t *testing.T) {
 	t.Parallel()
-	if got := FirstNonEmpty("", "  ", "first", "second"); got != "  " {
-		t.Fatalf("FirstNonEmpty got %q, want '  '", got)
-	}
-	if got := FirstNonEmpty("", "", "value"); got != "value" {
-		t.Fatalf("FirstNonEmpty got %q, want 'value'", got)
-	}
-	if got := FirstNonEmpty(); got != "" {
-		t.Fatalf("FirstNonEmpty() got %q, want ''", got)
-	}
-
 	n1 := RandomNonce()
 	n2 := RandomNonce()
 	if n1 == "" || n2 == "" || n1 == n2 {
@@ -143,8 +133,8 @@ func TestPromptFormattingAndTruncation(t *testing.T) {
 	}
 
 	longStr := strings.Repeat("x", 2000)
-	truncated := TruncatePromptRunes(longStr, 100)
-	if !strings.HasSuffix(truncated, "... (truncated)") || len([]rune(truncated)) != 115 {
+	truncated := TruncatePromptDetails(longStr)
+	if !strings.HasSuffix(truncated, "... (truncated)") || len([]rune(truncated)) != 1515 {
 		t.Fatalf("unexpected truncation result: %s", truncated)
 	}
 

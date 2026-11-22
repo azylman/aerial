@@ -27,7 +27,7 @@ type prSelfRegistration struct {
 // target is not a valid snowflake.
 func newSelfRegistration(targetID, title, agent string) (prSelfRegistration, bool) {
 	targetID = model.NormalizeDiscordTargetID(targetID)
-	if !isValidDiscordSnowflake(targetID) {
+	if !model.IsValidDiscordSnowflake(targetID) {
 		return prSelfRegistration{}, false
 	}
 	return prSelfRegistration{
@@ -40,7 +40,7 @@ func newSelfRegistration(targetID, title, agent string) (prSelfRegistration, boo
 // systemChannelTarget is the configured system channel as a target, or ""
 // when it is not a valid snowflake.
 func (s *RouterServer) systemChannelTarget() string {
-	if sys := model.NormalizeDiscordTargetID(s.currentConfig().SystemChannelID); isValidDiscordSnowflake(sys) {
+	if sys := model.NormalizeDiscordTargetID(s.currentConfig().SystemChannelID); model.IsValidDiscordSnowflake(sys) {
 		return sys
 	}
 	return ""
@@ -73,7 +73,7 @@ func (s *RouterServer) metadataSelfRegistration(res *ResolvedGitHubEvent, pr Git
 		return prSelfRegistration{}, false
 	}
 	targetID := meta.TargetID
-	if IsHeadlessSessionKey(targetID) {
+	if model.IsHeadlessSessionKey(targetID) {
 		targetID = s.systemChannelTarget()
 	}
 	return newSelfRegistration(targetID, pr.Title, meta.OwningAgent())

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -133,7 +134,7 @@ func SanitizeDetailsForPrompt(details string, maxRunes int) string {
 		maxRunes = 2000
 	}
 	cleaned := strings.TrimSpace(ansiEscapeRegex.ReplaceAllString(details, ""))
-	return model.TruncatePromptRunes(cleaned, maxRunes)
+	return strutil.TruncateRunes(cleaned, maxRunes)
 }
 
 // FormatCheckFailurePrompt formats a prompt describing a check failure for remediation.

@@ -22,6 +22,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/alerts"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
@@ -282,12 +283,12 @@ func (s *RouterServer) consumerStatsQuerier() ConsumerStatsQuerier {
 
 func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if q := s.consumerStatsQuerier(); q != nil {
-		if err := collectJetStreamQueueMetrics(r.Context(), q, s.discordRouting()); err != nil {
+		if err := metrics.CollectJetStreamQueueMetrics(r.Context(), q, s.discordRouting()); err != nil {
 			slog.ErrorContext(r.Context(), "[synapse] [metrics] error collecting jetstream queue metrics", "error", err)
 		}
 	}
 	if s != nil && s.gatewayLatencyFn != nil {
-		setDiscordGatewayLatency(s.gatewayLatencyFn().Seconds())
+		metrics.SetDiscordGatewayLatency(s.gatewayLatencyFn().Seconds())
 	}
 	if s != nil && s.cfgSrc != nil {
 		if cfg := s.cfgSrc.Current(); cfg != nil {
@@ -329,7 +330,7 @@ func (*RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 	if evt.CommitSHA == "" || evt.JobName == "" {
-		return randomNonce()
+		return model.RandomNonce()
 	}
 	if originPrefix != "" {
 		return fmt.Sprintf("%s:%s:%s:%s:%s", originPrefix, evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
@@ -340,7 +341,7 @@ func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *http.Request, evt DeployEvent, originPrefix string) {
 	// The deploy path resolves the PR from RepoObject and the image wait
 	// from PRObject when the job runs; nothing is enriched at accept time.
-	logPrefix := firstNonEmpty(originPrefix, "deploy")
+	logPrefix := strutil.FirstNonEmpty(originPrefix, "deploy")
 	idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 	if s.bus != nil {
 		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
@@ -371,11 +372,11 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 
 func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 	clean := strings.TrimSpace(targetID)
-	if isValidDiscordSnowflake(clean) {
+	if model.IsValidDiscordSnowflake(clean) {
 		return true
 	}
 	sys := strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
-	return sys != "" && clean == sys && isValidDiscordChannel(clean)
+	return sys != "" && clean == sys && model.IsValidDiscordChannel(clean)
 }
 
 type alertPromptOpts struct {
@@ -431,7 +432,7 @@ func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt Deploy
 	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
 		return &evt, nil
 	}
-	prefix := formatDirectMessagePrefix(evt.PRNumber, evt.Repo)
+	prefix := model.FormatDirectMessagePrefix(evt.PRNumber, evt.Repo)
 	switch evt.Event {
 	case eventDeployStarted:
 		return &evt, s.publishPRLifecycleEvent(ctx, ownedDeployFact(evt, eventDeployStarted, statusDeploying, ""))
@@ -452,13 +453,13 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 	if err := s.publishPRLifecycleEvent(ctx, ownedDeployFact(evt, eventDeployFailed, eventDeployFailed, "")); err != nil {
 		return fmt.Errorf("publish deploy lifecycle event: %w", err)
 	}
-	targetID := firstNonEmpty(evt.TargetID, s.currentConfig().SystemChannelID)
+	targetID := strutil.FirstNonEmpty(evt.TargetID, s.currentConfig().SystemChannelID)
 	actionDesc, fixDesc := "Deployment failed", "deployment failure"
 	if evt.Event == eventDeployRollback {
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
 	}
 	dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
-	prompt := formatErrorDetailsBlock(
+	prompt := model.FormatErrorDetailsBlock(
 		fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 		evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
 	)
@@ -471,7 +472,7 @@ func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEve
 	}
 	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
 	dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
-	prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
+	prompt := model.FormatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt)
 }
 
@@ -513,10 +514,10 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if alertPayloadRepo(alert) == "" {
+	if flux.AlertPayloadRepo(alert) == "" {
 		alert.Repo = s.resolveFluxAlertSourceRepo(r.Context(), alert)
 	}
-	deployEvt, ok := translateFluxAlertToDeployEvent(alert)
+	deployEvt, ok := flux.TranslateFluxAlertToDeployEvent(alert)
 	if !ok {
 		slog.InfoContext(r.Context(), "[synapse] [flux] ignoring unhandled flux alert", "kind", alert.InvolvedObject.Kind, "name", alert.InvolvedObject.Name, "reason", alert.Reason, "severity", alert.Severity)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
@@ -554,7 +555,7 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	}
 	source := strings.ToLower(strings.TrimSpace(req.Source))
 	eventType := strings.ToLower(strings.TrimSpace(req.EventType))
-	targets := dedupeTrimmedStrings(append([]string{req.Target}, req.Targets...))
+	targets := model.DedupeTrimmedStrings(append([]string{req.Target}, req.Targets...))
 	if source == "" || eventType == "" || len(targets) == 0 {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "missing required fields"})
 		return
@@ -626,8 +627,8 @@ func (s *RouterServer) handleAlertsWebhook(w http.ResponseWriter, r *http.Reques
 	dispatchedCount := 0
 	now := time.Now().UTC()
 	for _, alert := range alertsList {
-		fp := vmAlertFingerprint(alert.Labels)
-		if isVMAlertResolved(alert, now) {
+		fp := alerts.VMAlertFingerprint(alert.Labels)
+		if alerts.IsVMAlertResolved(alert, now) {
 			s.alertTracker.ClearFiring(fp)
 			continue
 		}
@@ -648,7 +649,7 @@ func (s *RouterServer) handleAlertsWebhook(w http.ResponseWriter, r *http.Reques
 		if !s.alertTracker.MarkFiring(fp) {
 			continue
 		}
-		msg := formatVMAlertMessage(alert)
+		msg := alerts.FormatVMAlertMessage(alert)
 		if err := s.dispatcher.DispatchDirectMessage(r.Context(), DirectMessageRequest{ChannelID: channelID, Content: msg}); err != nil {
 			s.alertTracker.ClearFiring(fp)
 			slog.ErrorContext(r.Context(), "[synapse] [alerts] error dispatching alert", "fingerprint", fp, "error", err)
@@ -664,35 +665,13 @@ func (s *RouterServer) handleAlertsWebhook(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func normalizeJobArgs(args any) any {
-	switch a := args.(type) {
-	case *GitHubWebhookArgs:
-		if a != nil {
-			return *a
-		}
-	case *DeployWebhookArgs:
-		if a != nil {
-			return *a
-		}
-	case *DiscordIngressArgs:
-		if a != nil {
-			return *a
-		}
-	case *DiscordInteractionArgs:
-		if a != nil {
-			return *a
-		}
-	}
-	return args
-}
-
 func resolveJobQueueAndKind(args any) (string, string) {
-	switch a := normalizeJobArgs(args).(type) {
+	switch a := metrics.NormalizeJobArgs(args).(type) {
 	case DeployWebhookArgs:
-		return queueDefault, "deploy_webhook"
+		return metrics.QueueDefault, "deploy_webhook"
 	case *DeployWebhookArgs:
 		if a != nil {
-			return queueDefault, "deploy_webhook"
+			return metrics.QueueDefault, "deploy_webhook"
 		}
 	}
 	return metrics.ResolveJobQueueAndKind(args)
@@ -702,22 +681,22 @@ func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error 
 	if s == nil || s.bus == nil {
 		return errors.New("event bus not configured")
 	}
-	subject, msgID := resolveJetStreamJobCoords(args, s.discordRouting())
+	subject, msgID := metrics.ResolveJetStreamJobCoords(args, s.discordRouting())
 	if subject == "" {
 		return fmt.Errorf("unsupported job args type %T", args)
 	}
 	queue, kind := resolveJobQueueAndKind(args)
 	if err := s.bus.Publish(ctx, subject, msgID, args); err != nil {
-		recordJobEnqueued(queue, kind, "error")
+		metrics.RecordJobEnqueued(queue, kind, "error")
 		return err
 	}
-	recordJobEnqueued(queue, kind, "enqueued")
+	metrics.RecordJobEnqueued(queue, kind, "enqueued")
 	return nil
 }
 
 // RunServer runs the HTTP server with graceful shutdown and optional ready callback.
 // Fields bound at startup (listener, Discord session, dispatcher)
-// are read once from the initial snapshot; synapseRestartRequired guards them.
+// are read once from the initial snapshot; config.RestartRequired guards them.
 func RunServer(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config], onReady func(addr string)) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

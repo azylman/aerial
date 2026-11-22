@@ -45,7 +45,7 @@ func (s *RouterServer) publishPRLifecycleEvent(ctx context.Context, ev pubsub.PR
 	if s == nil || s.bus == nil {
 		return nil
 	}
-	ev.Repo = normalizeRepo(ev.Repo)
+	ev.Repo = model.NormalizeRepo(ev.Repo)
 	if ev.OccurredAt.IsZero() {
 		ev.OccurredAt = time.Now().UTC()
 	}
@@ -120,8 +120,8 @@ func ParseAerialPRMetadata(body string) AerialPRMetadata {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(before)), &trailer); err != nil {
 		return AerialPRMetadata{}
 	}
-	targetID := NormalizeDiscordTargetID(trailer.TargetID)
-	if !IsValidDiscordSnowflake(targetID) && !IsHeadlessSessionKey(targetID) {
+	targetID := model.NormalizeDiscordTargetID(trailer.TargetID)
+	if !model.IsValidDiscordSnowflake(targetID) && !model.IsHeadlessSessionKey(targetID) {
 		targetID = ""
 	}
 	return AerialPRMetadata{
@@ -354,7 +354,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 	res = &ResolvedGitHubEvent{Event: event, Delivery: delivery}
 	// Triggers are only evaluated after successful processing to prevent destructive trigger claiming during transient errors/JetStream retries.
 	defer func() {
-		if err == nil && (res == nil || res.Event != ghEventCheckRun || !isBuildMetadataCheck(res.CheckName)) {
+		if err == nil && (res == nil || res.Event != ghEventCheckRun || !model.IsBuildMetadataCheck(res.CheckName)) {
 			s.evaluateGitHubEventTriggers(ctx, res, body)
 		}
 	}()

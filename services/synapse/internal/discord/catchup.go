@@ -10,8 +10,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 const discordCatchUpStaleTTL = 30 * time.Minute
@@ -197,7 +197,7 @@ func CatchUpChannelMessagesForAgent(ctx context.Context, dg *discordgo.Session, 
 			continue
 		}
 		if m.GuildID == "" {
-			m.GuildID = model.FirstNonEmpty(ch.GuildID, guildID)
+			m.GuildID = strutil.FirstNonEmpty(ch.GuildID, guildID)
 		}
 		if m.ReferencedMessage != nil && m.ReferencedMessage.GuildID == "" {
 			m.ReferencedMessage.GuildID = m.GuildID

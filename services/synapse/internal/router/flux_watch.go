@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -209,18 +210,18 @@ func (s *RouterServer) loadKustomizationRollout(ctx context.Context, obs kustomi
 
 // gateKustomizationRequest completes an applied Kustomization request once the PR's change is live:
 // when the Kustomization's source is the PR's repo, Flux must have applied the merge commit or a
-// descendant of it, and every workload the change reached must have rolled out (prRolloutStatus, with
+// descendant of it, and every workload the change reached must have rolled out (flux.PRRolloutStatus, with
 // the merge commit time as the change cutoff). It fails the PR when a rollout failed and otherwise
 // leaves it pending for the watchers and the periodic recheck to re-evaluate.
 func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr DeployingPR, obs kustomizationObservation, state kustomizationRolloutState) error {
 	name := obs.Ref.Name
-	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
+	commitSHA := strutil.FirstNonEmpty(pr.MergeSHA, pr.HeadSHA)
 	if commitSHA == "" {
 		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting on kustomization: no merge commit recorded", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber)
 		return nil
 	}
-	if state.SourceRepo != "" && strings.EqualFold(normalizeRepo(state.SourceRepo), normalizeRepo(pr.Repo)) {
-		applied := cleanRevisionSHA(obs.LastAppliedRevision)
+	if state.SourceRepo != "" && strings.EqualFold(model.NormalizeRepo(state.SourceRepo), model.NormalizeRepo(pr.Repo)) {
+		applied := flux.CleanRevisionSHA(obs.LastAppliedRevision)
 		live, err := s.revisionIncludes(ctx, pr.Repo, applied, commitSHA)
 		if err != nil {
 			return fmt.Errorf("check applied revision of %s for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
@@ -235,7 +236,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		return fmt.Errorf("resolve merge time of %s#%d: %w", pr.Repo, pr.PRNumber, err)
 	}
 	in := prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()}
-	done, failed, reason := prRolloutStatus(in)
+	done, failed, reason := flux.PRRolloutStatus(in)
 	if failed {
 		return s.failKustomizationRollout(ctx, pr, name, reason)
 	}
@@ -254,7 +255,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.
 func (s *RouterServer) commitTime(ctx context.Context, repo, sha string) (time.Time, error) {
-	repo = normalizeRepo(repo)
+	repo = model.NormalizeRepo(repo)
 	key := repo + "@" + sha
 	if at, ok := s.gitHistory.CommitTime(key); ok {
 		return at, nil
@@ -283,7 +284,7 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 	if revision == commit {
 		return true, nil
 	}
-	repo = normalizeRepo(repo)
+	repo = model.NormalizeRepo(repo)
 	key := repo + "@" + commit + "..." + revision
 	if verdict, ok := s.gitHistory.IncludesVerdict(key); ok {
 		return verdict, nil
@@ -304,7 +305,7 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 // reports it once. A send error leaves the PR deploying, so the watcher's re-list retries it.
 func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr DeployingPR, name, reason string) error {
 	// PRObject applies deploy_failed and publishes the carried fact.
-	evt := DeployEvent{Repo: pr.Repo, PRNumber: pr.PRNumber, JobName: name, CommitSHA: firstNonEmpty(pr.MergeSHA, pr.HeadSHA), TargetID: pr.TargetID, Details: reason}
+	evt := DeployEvent{Repo: pr.Repo, PRNumber: pr.PRNumber, JobName: name, CommitSHA: strutil.FirstNonEmpty(pr.MergeSHA, pr.HeadSHA), TargetID: pr.TargetID, Details: reason}
 	if err := s.sendOwnedDeployFailed(ctx, evt, pr.Branch); err != nil {
 		return fmt.Errorf("report %s failure for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
 	}

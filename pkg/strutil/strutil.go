@@ -13,3 +13,13 @@ func FirstNonEmpty(vals ...string) string {
 	}
 	return ""
 }
+
+// TruncateRunes returns s unchanged when it has at most maxRunes runes;
+// otherwise it returns the first maxRunes runes followed by "... (truncated)".
+func TruncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "... (truncated)"
+}

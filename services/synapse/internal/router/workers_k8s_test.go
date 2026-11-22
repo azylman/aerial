@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 type mockConsumerStatsQuerier struct {
@@ -73,17 +75,17 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 			if !tc.nilQuerier {
 				q = &mockConsumerStatsQuerier{stats: tc.stats, err: tc.querierErr}
 			}
-			err := collectJetStreamQueueMetrics(ctx, q, discordRoutingFor(nil))
+			err := metrics.CollectJetStreamQueueMetrics(ctx, q, discordRoutingFor(nil))
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("collectJetStreamQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("metrics.CollectJetStreamQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
 			}
 			if tc.wantDepthQueue != "" {
-				gotDepth := testutil.ToFloat64(QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
+				gotDepth := testutil.ToFloat64(metrics.QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
 				if gotDepth != tc.wantDepthVal {
-					t.Errorf("QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
+					t.Errorf("metrics.QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
 				}
 			}
 		})
