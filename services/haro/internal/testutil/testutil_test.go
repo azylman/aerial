@@ -95,25 +95,25 @@ func TestOpenSQLiteTestDB(t *testing.T) {
 	tests := []struct {
 		name      string
 		dsn       string
+		mkdir     bool
 		wantErr   string
 		wantTable bool
 	}{
-		{"memory ok", ":memory:", "", true},
-		{"sqlite prefix stripped", "sqlite://:memory:", "", true},
-		{"file ok", fileDB, "", true},
-		{"query pragma path ok", fileDB + "?cache=shared", "", true},
-		{"mkdir error", "/proc/haro-test/x.db", "failed to create db directory", false},
-		{"directory path fails pragmas", tmpDir + "/asdir", "failed to execute PRAGMAs", false},
+		{name: "memory ok", dsn: ":memory:", wantTable: true},
+		{name: "sqlite prefix stripped", dsn: "sqlite://:memory:", wantTable: true},
+		{name: "file ok", dsn: fileDB, wantTable: true},
+		{name: "query pragma path ok", dsn: fileDB + "?cache=shared", wantTable: true},
+		{name: "mkdir error", dsn: "/proc/haro-test/x.db", wantErr: "failed to create db directory"},
+		{name: "directory path fails pragmas", dsn: tmpDir + "/asdir", mkdir: true, wantErr: "failed to execute PRAGMAs"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dsn := tc.dsn
-			if tc.name == "directory path fails pragmas" {
-				if err := os.MkdirAll(dsn, 0o755); err != nil {
+			if tc.mkdir {
+				if err := os.MkdirAll(tc.dsn, 0o755); err != nil {
 					t.Fatalf("MkdirAll err = %v", err)
 				}
 			}
-			db, err := OpenSQLiteTestDB(dsn)
+			db, err := OpenSQLiteTestDB(tc.dsn)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("OpenSQLiteTestDB err = %v, want %q", err, tc.wantErr)

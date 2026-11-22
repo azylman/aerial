@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 )
 
 func indexedTestEvent(t *testing.T, stack, threadID string) []byte {
@@ -128,12 +129,7 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			if tc.dataFromHelper {
 				data = indexedTestEvent(t, tc.eventStack, tc.eventThread)
 			}
-			msg := &mockPubsubMsg{
-				data:      data,
-				delivered: tc.delivered,
-				termErr:   tc.termErr,
-				nakErr:    tc.nakErr,
-			}
+			msg := &pubsubtest.Message{Payload: data, Delivered: tc.delivered, TermErr: tc.termErr, NakErr: tc.nakErr}
 			calls := 0
 			retErr := tc.extractErr
 			extract := func(_ context.Context, _, _ string) error {
@@ -144,14 +140,15 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleTranscriptsIndexed() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if msg.termed != tc.wantTermed {
-				t.Errorf("termed = %v, want %v", msg.termed, tc.wantTermed)
+			if msg.Termed() != tc.wantTermed {
+				t.Errorf("termed = %v, want %v", msg.Termed(), tc.wantTermed)
 			}
-			if msg.naked != tc.wantNaked {
-				t.Errorf("naked = %v, want %v", msg.naked, tc.wantNaked)
+			nakDelay, naked := msg.NakDelay()
+			if naked != tc.wantNaked {
+				t.Errorf("naked = %v, want %v", naked, tc.wantNaked)
 			}
-			if tc.wantNaked && msg.nakDelay != tc.wantNakDelay {
-				t.Errorf("nakDelay = %v, want %v", msg.nakDelay, tc.wantNakDelay)
+			if tc.wantNaked && nakDelay != tc.wantNakDelay {
+				t.Errorf("nakDelay = %v, want %v", nakDelay, tc.wantNakDelay)
 			}
 			if calls != tc.wantCalls {
 				t.Errorf("extract calls = %d, want %d", calls, tc.wantCalls)
@@ -229,7 +226,7 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal error: %v", err)
 			}
-			msg := &mockPubsubMsg{data: data}
+			msg := &pubsubtest.Message{Payload: data}
 
 			err = handler(context.Background(), msg)
 			if err != nil {
@@ -380,7 +377,7 @@ func TestNewTranscriptsIndexedHandler_RoleAll(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal error: %v", err)
 			}
-			msg := &mockPubsubMsg{data: data}
+			msg := &pubsubtest.Message{Payload: data}
 
 			err = handler(context.Background(), msg)
 			if err != nil {

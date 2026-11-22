@@ -14,12 +14,8 @@ import (
 	"github.com/azylman/aerial/pkg/pgutil"
 )
 
-var (
-	// ErrFactNotFound indicates that the requested fact does not exist in the store.
-	ErrFactNotFound = errors.New("fact not found")
-
-	sqliteTestInitHook func(string) (*sql.DB, error)
-)
+// ErrFactNotFound indicates that the requested fact does not exist in the store.
+var ErrFactNotFound = errors.New("fact not found")
 
 const (
 	DefaultDenseWeight    = 0.70
@@ -672,9 +668,6 @@ func OpenDB(ctx context.Context, cfg *Config) (*sql.DB, error) {
 }
 
 func openDB(ctx context.Context, connStr string) (*sql.DB, error) {
-	if sqliteTestInitHook != nil {
-		return sqliteTestInitHook(connStr)
-	}
 	// Startup ignores cancellation; RunApp's lifecycle handles shutdown right after startup.
 	return pgutil.OpenSQL(context.WithoutCancel(ctx), connStr, pgutil.SQLOptions{})
 }

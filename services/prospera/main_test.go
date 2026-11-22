@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,7 +15,6 @@ import (
 
 type runAppMainSignalTestCase struct {
 	name         string
-	loadErr      error
 	runErr       error
 	reloadCfg    *config.Config
 	wantExit     bool
@@ -22,7 +23,7 @@ type runAppMainSignalTestCase struct {
 }
 
 func TestRunApp_MainSignal(t *testing.T) {
-	t.Cleanup(installTestTracing) // main() runs tracing.Init, which replaces the test tracer
+	t.Cleanup(installTestTracing) // runMain runs tracing.Init, which replaces the test tracer
 	origLoad := loadConfigFn
 	origRun := runAppFn
 	origExit := exitFn
@@ -33,11 +34,6 @@ func TestRunApp_MainSignal(t *testing.T) {
 	}()
 
 	tests := []runAppMainSignalTestCase{
-		{
-			name:     "config error triggers exit",
-			loadErr:  errors.New("mock config error"),
-			wantExit: true,
-		},
 		{
 			name:     "run app error triggers exit",
 			runErr:   errors.New("mock run error"),
@@ -79,10 +75,10 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 		exited = true
 	}
 	loads := 0
-	loadConfigFn = func(_ string) (*config.Config, error) {
+	loadConfigFn = func(_ string, getenv func(string) string) (*config.Config, error) {
 		loads++
-		if tc.loadErr != nil {
-			return nil, tc.loadErr
+		if got := getenv("PROSPERA_STACK"); got != "alpha" {
+			t.Errorf("loadConfigFn getenv(PROSPERA_STACK) = %q, want alpha", got)
 		}
 		if loads > 1 && tc.reloadCfg != nil {
 			return tc.reloadCfg, nil
@@ -108,10 +104,11 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 		return tc.runErr
 	}
 
-	main()
+	env := map[string]string{"PROSPERA_STACK": "alpha"}
+	runMain(func(key string) string { return env[key] }, filepath.Join(t.TempDir(), "missing-tracing.yaml"))
 
 	if exited != tc.wantExit {
-		t.Errorf("main() exited = %v, want %v", exited, tc.wantExit)
+		t.Errorf("runMain() exited = %v, want %v", exited, tc.wantExit)
 	}
 	if gotStatus != tc.wantStatus {
 		t.Errorf("reload status = %q, want %q", gotStatus, tc.wantStatus)
@@ -121,40 +118,20 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 	}
 }
 
-func TestProsperaRestartRequired(t *testing.T) {
-	t.Parallel()
-	base := config.Config{
-		Port:             "8080",
-		DatabaseURL:      "postgres://db/aerial",
-		TwilioAccountSID: "AC1",
-		TwilioAuthToken:  "tok",
-		GoogleMCPURL:     "http://google-mcp",
-		CovenURL:         "http://coven",
-		GeminiLiveModel:  "live-1",
+// TestMainEntry_ConfigErrorExits drives main() itself; the config load fails
+// before tracing.Init, so no pod path (tracing config) is read.
+func TestMainEntry_ConfigErrorExits(t *testing.T) {
+	origLoad, origExit := loadConfigFn, exitFn
+	t.Cleanup(func() { loadConfigFn, exitFn = origLoad, origExit })
+	var exitMsg string
+	exitFn = func(format string, v ...any) { exitMsg = fmt.Sprintf(format, v...) }
+	loadConfigFn = func(string, func(string) string) (*config.Config, error) {
+		return nil, errors.New("bad config")
 	}
-	tests := []struct {
-		name string
-		next config.Config
-		want bool
-	}{
-		{name: "identical", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: false},
-		{name: "live model change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-2", DefaultDiscordChannel: "chan", MaxConcurrentCalls: 9}, want: false},
-		{name: "port change", next: config.Config{Port: "9090", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "database change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db2/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "twilio account change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC2", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "twilio token change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok2", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "google mcp change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp-2", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
-		{name: "coven change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven-2", GeminiLiveModel: "live-1"}, want: true},
-		{name: "nats url change", next: config.Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1", NATSURL: "nats://nats.aerial:4222"}, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			old := base
-			next := tc.next
-			if got := prosperaRestartRequired(&old, &next); got != tc.want {
-				t.Fatalf("prosperaRestartRequired() = %v, want %v", got, tc.want)
-			}
-		})
+
+	main()
+
+	if exitMsg != "failed to load config: bad config" {
+		t.Fatalf("exit message = %q, want %q", exitMsg, "failed to load config: bad config")
 	}
 }

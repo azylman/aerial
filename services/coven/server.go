@@ -265,35 +265,6 @@ func (s *Server) handleConsolidate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/health" {
-		s.handleHealth(w, r)
-		return
-	}
-	if r.URL.Path == "/debug/coverage/flush" {
-		httpkit.HandleCoverageFlush("coven")(w, r)
-		return
-	}
-	if r.URL.Path == "/metrics" {
-		s.handleMetrics(w, r)
-		return
-	}
-	if r.URL.Path == "/admin/extract" {
-		s.handleAdminExtract(w, r)
-		return
-	}
-	if r.URL.Path == "/facts" {
-		s.handleFacts(w, r)
-		return
-	}
-	if r.URL.Path == "/context" {
-		s.handleContext(w, r)
-		return
-	}
-	if r.URL.Path == "/consolidate" {
-		s.handleConsolidate(w, r)
-		return
-	}
-
 	httpkit.ServeMCPStream(w, r, s.streamHandler, "Aerial Memory MCP Server (Streamable HTTP) Ready\n", "memory_memory_", "memory_")
 }
 

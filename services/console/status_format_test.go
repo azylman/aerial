@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 var (
@@ -87,80 +86,42 @@ func mkLabeledCont(state string, labels map[string]string) DockerContainerJSON {
 }
 
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
-	tests := []upstreamURLTestCase{
+	const facts = "http://brain:8080/facts"
+	tests := []struct {
+		name       string
+		baseURL    string
+		query      url.Values
+		wantURL    string
+		wantLimit  int
+		wantOffset int
+		wantErr    bool
+	}{
 		{name: "empty base URL errors", baseURL: "", query: url.Values{}, wantErr: true},
 		{name: "control characters in base URL error", baseURL: "http://brain:\x7f8080", query: url.Values{}, wantErr: true},
 		{name: "invalid url parse input error", baseURL: "http://[::1]:namedport", query: url.Values{}, wantErr: true},
-		{name: "trailing slash normalized", baseURL: "http://brain:8080/", query: url.Values{}, omitQuery: []string{"limit", "offset", "category", "q"}},
-		{name: "nil query handled cleanly", baseURL: "http://brain:8080", query: nil},
-		{name: "positive limit and offset forwarded", baseURL: "http://brain:8080", query: url.Values{"limit": {"25"}, "offset": {"10"}}, wantLimit: 25, wantOffset: 10, wantQuery: map[string]string{"limit": "25", "offset": "10"}},
-		{name: "zero or negative limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"0"}, "offset": {"0"}}, omitQuery: []string{"limit", "offset"}},
-		{name: "negative or invalid limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"-5"}, "offset": {"invalid"}}, omitQuery: []string{"limit", "offset"}},
-		{name: "q trimmed and forwarded while category is ignored", baseURL: "http://brain:8080", query: url.Values{"category": {"  system  "}, "q": {"  docker deploy  "}}, wantQuery: map[string]string{"q": "docker deploy"}, omitQuery: []string{"category"}},
-		{name: "empty category and q omitted", baseURL: "http://brain:8080", query: url.Values{"category": {"   "}, "q": {"   "}}, omitQuery: []string{"category", "q"}},
-		{name: "long ASCII q clamped to 64 runes", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("a", 100)}}, wantQuery: map[string]string{"q": strings.Repeat("a", 64)}},
-		{name: "multibyte unicode kanji clamped to 64 runes without UTF-8 corruption", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("電", 70)}}, wantQuery: map[string]string{"q": strings.Repeat("電", 64)}},
-		{name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}}, wantQuery: map[string]string{"agent": "agent-alpha"}},
-		{name: "agent all omitted", baseURL: "http://brain:8080", query: url.Values{"agent": {"all"}}, omitQuery: []string{"agent"}},
+		{name: "trailing slash normalized", baseURL: "http://brain:8080/", query: url.Values{}, wantURL: facts},
+		{name: "nil query handled cleanly", baseURL: "http://brain:8080", query: nil, wantURL: facts},
+		{name: "positive limit and offset forwarded", baseURL: "http://brain:8080", query: url.Values{"limit": {"25"}, "offset": {"10"}}, wantURL: facts + "?limit=25&offset=10", wantLimit: 25, wantOffset: 10},
+		{name: "zero or negative limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"0"}, "offset": {"0"}}, wantURL: facts},
+		{name: "negative or invalid limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"-5"}, "offset": {"invalid"}}, wantURL: facts},
+		{name: "q trimmed and forwarded while category is ignored", baseURL: "http://brain:8080", query: url.Values{"category": {"  system  "}, "q": {"  docker deploy  "}}, wantURL: facts + "?q=docker+deploy"},
+		{name: "empty category and q omitted", baseURL: "http://brain:8080", query: url.Values{"category": {"   "}, "q": {"   "}}, wantURL: facts},
+		{name: "long ASCII q clamped to 64 runes", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("a", 100)}}, wantURL: facts + "?q=" + strings.Repeat("a", 64)},
+		{name: "multibyte unicode kanji clamped to 64 runes without UTF-8 corruption", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("電", 70)}}, wantURL: facts + "?q=" + strings.Repeat("%E9%9B%BB", 64)},
+		{name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}}, wantURL: facts + "?agent=agent-alpha"},
+		{name: "agent all omitted", baseURL: "http://brain:8080", query: url.Values{"agent": {"all"}}, wantURL: facts},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runBuildFactsUpstreamURLCase(t, tt)
-		})
-	}
-}
-
-type upstreamURLTestCase struct {
-	name       string
-	baseURL    string
-	query      url.Values
-	wantLimit  int
-	wantOffset int
-	wantErr    bool
-	wantQuery  map[string]string
-	omitQuery  []string
-}
-
-func runBuildFactsUpstreamURLCase(t *testing.T, tt upstreamURLTestCase) {
-	t.Helper()
-	gotURL, gotLimit, gotOffset, err := BuildFactsUpstreamURL(tt.baseURL, tt.query)
-	if (err != nil) != tt.wantErr {
-		t.Fatalf("BuildFactsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
-	}
-	if tt.wantErr {
-		return
-	}
-	if gotLimit != tt.wantLimit {
-		t.Errorf("BuildFactsUpstreamURL() gotLimit = %v, want %v", gotLimit, tt.wantLimit)
-	}
-	if gotOffset != tt.wantOffset {
-		t.Errorf("BuildFactsUpstreamURL() gotOffset = %v, want %v", gotOffset, tt.wantOffset)
-	}
-
-	parsed, err := url.Parse(gotURL)
-	if err != nil {
-		t.Fatalf("failed to parse returned URL: %v", err)
-	}
-	if strings.Contains(parsed.Path, "//") {
-		t.Errorf("expected normalized path without double slashes, got %q", parsed.Path)
-	}
-
-	q := parsed.Query()
-	for k, v := range tt.wantQuery {
-		if got := q.Get(k); got != v {
-			t.Errorf("query param %q = %q, want %q", k, got, v)
-		}
-		if k == "q" {
-			if runeLen := utf8.RuneCountInString(q.Get(k)); runeLen > 64 {
-				t.Errorf("query param q has rune length %d, want <= 64", runeLen)
+			gotURL, gotLimit, gotOffset, err := BuildFactsUpstreamURL(tt.baseURL, tt.query)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildFactsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
 			}
-		}
-	}
-	for _, k := range tt.omitQuery {
-		if q.Has(k) {
-			t.Errorf("expected query param %q to be omitted, got %q", k, q.Get(k))
-		}
+			if gotURL != tt.wantURL || gotLimit != tt.wantLimit || gotOffset != tt.wantOffset {
+				t.Errorf("BuildFactsUpstreamURL() = (%q, %d, %d), want (%q, %d, %d)", gotURL, gotLimit, gotOffset, tt.wantURL, tt.wantLimit, tt.wantOffset)
+			}
+		})
 	}
 }
 
@@ -195,104 +156,86 @@ func TestBuildSchedulesUpstreamURL_TableDriven(t *testing.T) {
 }
 
 func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
-	tests := []upstreamURLTestCase{
+	const runs = "http://brain:8080/schedules/runs"
+	tests := []struct {
+		name       string
+		baseURL    string
+		query      url.Values
+		wantURL    string
+		wantLimit  int
+		wantOffset int
+		wantErr    bool
+	}{
 		{name: "empty base URL returns error", baseURL: "", wantErr: true},
 		{name: "control characters in URL return error", baseURL: "http://brain:\x7f8080", wantErr: true},
 		{name: "invalid url parse input error", baseURL: "http://[::1]:namedport", wantErr: true},
-		{name: "defaults applied when query is empty", baseURL: "http://brain:8080/", query: url.Values{}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
-		{name: "nil query receives defaults", baseURL: "http://brain:8080", query: nil, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
-		{name: "valid limit and offset within boundaries", baseURL: "http://brain:8080", query: url.Values{"limit": {"100"}, "offset": {"20"}, "schedule_id": {"  cron-test  "}, "status": {"  success  "}}, wantLimit: 100, wantOffset: 20, wantQuery: map[string]string{"limit": "100", "offset": "20", "schedule_id": "cron-test", "status": "success"}},
-		{name: "limit > 100 falls back to default 50", baseURL: "http://brain:8080", query: url.Values{"limit": {"150"}, "offset": {"-5"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
-		{name: "invalid non-integer limit and offset fall back to defaults", baseURL: "http://brain:8080", query: url.Values{"limit": {"abc"}, "offset": {"xyz"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
-		{name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}, "limit": {"10"}, "offset": {"0"}}, wantLimit: 10, wantQuery: map[string]string{"agent": "agent-alpha", "limit": "10"}},
+		{name: "defaults applied when query is empty", baseURL: "http://brain:8080/", query: url.Values{}, wantURL: runs + "?limit=50&offset=0", wantLimit: 50},
+		{name: "nil query receives defaults", baseURL: "http://brain:8080", query: nil, wantURL: runs + "?limit=50&offset=0", wantLimit: 50},
+		{
+			name: "valid limit and offset within boundaries", baseURL: "http://brain:8080",
+			query:   url.Values{"limit": {"100"}, "offset": {"20"}, "schedule_id": {"  cron-test  "}, "status": {"  success  "}},
+			wantURL: runs + "?limit=100&offset=20&schedule_id=cron-test&status=success", wantLimit: 100, wantOffset: 20,
+		},
+		{name: "limit > 100 falls back to default 50", baseURL: "http://brain:8080", query: url.Values{"limit": {"150"}, "offset": {"-5"}}, wantURL: runs + "?limit=50&offset=0", wantLimit: 50},
+		{name: "invalid non-integer limit and offset fall back to defaults", baseURL: "http://brain:8080", query: url.Values{"limit": {"abc"}, "offset": {"xyz"}}, wantURL: runs + "?limit=50&offset=0", wantLimit: 50},
+		{
+			name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}, "limit": {"10"}, "offset": {"0"}},
+			wantURL: runs + "?agent=agent-alpha&limit=10&offset=0", wantLimit: 10,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runBuildScheduleRunsCase(t, tt)
+			gotURL, gotLimit, gotOffset, err := BuildScheduleRunsUpstreamURL(tt.baseURL, tt.query)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildScheduleRunsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if gotURL != tt.wantURL || gotLimit != tt.wantLimit || gotOffset != tt.wantOffset {
+				t.Errorf("BuildScheduleRunsUpstreamURL() = (%q, %d, %d), want (%q, %d, %d)", gotURL, gotLimit, gotOffset, tt.wantURL, tt.wantLimit, tt.wantOffset)
+			}
 		})
-	}
-}
-
-func runBuildScheduleRunsCase(t *testing.T, tt upstreamURLTestCase) {
-	t.Helper()
-	gotURL, gotLimit, gotOffset, err := BuildScheduleRunsUpstreamURL(tt.baseURL, tt.query)
-	if (err != nil) != tt.wantErr {
-		t.Fatalf("BuildScheduleRunsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
-	}
-	if tt.wantErr {
-		return
-	}
-	if gotLimit != tt.wantLimit {
-		t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
-	}
-	if gotOffset != tt.wantOffset {
-		t.Errorf("gotOffset = %d, want %d", gotOffset, tt.wantOffset)
-	}
-
-	parsed, err := url.Parse(gotURL)
-	if err != nil {
-		t.Fatalf("failed to parse returned URL: %v", err)
-	}
-	if strings.Contains(parsed.Path, "//") {
-		t.Errorf("path contains double slashes: %q", parsed.Path)
-	}
-
-	q := parsed.Query()
-	for k, v := range tt.wantQuery {
-		if got := q.Get(k); got != v {
-			t.Errorf("query param %q = %q, want %q", k, got, v)
-		}
 	}
 }
 
 func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
-	tests := []upstreamURLTestCase{
+	const builds = "http://vanadis.aerial/builds"
+	tests := []struct {
+		name      string
+		baseURL   string
+		query     url.Values
+		wantURL   string
+		wantLimit int
+		wantErr   bool
+	}{
 		{name: "empty base URL returns error", baseURL: "", wantErr: true},
 		{name: "control characters in URL return error", baseURL: "http://vanadis:\x7f8080", wantErr: true},
-		{name: "defaults applied when query is empty", baseURL: "http://vanadis.aerial/", query: url.Values{}, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
-		{name: "nil query receives default limit 50", baseURL: "http://vanadis.aerial", query: nil, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
-		{name: "valid limit and query params within boundaries", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"25"}, "status": {"  running  "}, "queue_state": {"  running  "}}, wantLimit: 25, wantQuery: map[string]string{"limit": "25", "status": "running", "queue_state": "running"}},
-		{name: "limit > 100 clamped to 100", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"200"}}, wantLimit: 100, wantQuery: map[string]string{"limit": "100"}},
-		{name: "limit < 1 clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"0"}}, wantLimit: 1, wantQuery: map[string]string{"limit": "1"}},
-		{name: "negative limit clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"-10"}}, wantLimit: 1, wantQuery: map[string]string{"limit": "1"}},
-		{name: "invalid non-integer limit falls back to default 50", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"invalid"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
-		{name: "agent forwarded", baseURL: "http://vanadis:4025", query: url.Values{"agent": {"agent-alpha"}, "limit": {"10"}}, wantLimit: 10, wantQuery: map[string]string{"agent": "agent-alpha", "limit": "10"}},
+		{name: "defaults applied when query is empty", baseURL: "http://vanadis.aerial/", query: url.Values{}, wantURL: builds + "?limit=50", wantLimit: 50},
+		{name: "nil query receives default limit 50", baseURL: "http://vanadis.aerial", query: nil, wantURL: builds + "?limit=50", wantLimit: 50},
+		{
+			name: "valid limit and query params within boundaries", baseURL: "http://vanadis.aerial",
+			query:   url.Values{"limit": {"25"}, "status": {"  running  "}, "queue_state": {"  running  "}},
+			wantURL: builds + "?limit=25&queue_state=running&status=running", wantLimit: 25,
+		},
+		{name: "limit > 100 clamped to 100", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"200"}}, wantURL: builds + "?limit=100", wantLimit: 100},
+		{name: "limit < 1 clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"0"}}, wantURL: builds + "?limit=1", wantLimit: 1},
+		{name: "negative limit clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"-10"}}, wantURL: builds + "?limit=1", wantLimit: 1},
+		{name: "invalid non-integer limit falls back to default 50", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"invalid"}}, wantURL: builds + "?limit=50", wantLimit: 50},
+		{
+			name: "agent forwarded", baseURL: "http://vanadis:4025", query: url.Values{"agent": {"agent-alpha"}, "limit": {"10"}},
+			wantURL: "http://vanadis:4025/builds?agent=agent-alpha&limit=10", wantLimit: 10,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runBuildVanadisBuildsCase(t, tt)
+			gotURL, gotLimit, err := BuildVanadisBuildsUpstreamURL(tt.baseURL, tt.query)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BuildVanadisBuildsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if gotURL != tt.wantURL || gotLimit != tt.wantLimit {
+				t.Errorf("BuildVanadisBuildsUpstreamURL() = (%q, %d), want (%q, %d)", gotURL, gotLimit, tt.wantURL, tt.wantLimit)
+			}
 		})
-	}
-}
-
-func runBuildVanadisBuildsCase(t *testing.T, tt upstreamURLTestCase) {
-	t.Helper()
-	gotURL, gotLimit, err := BuildVanadisBuildsUpstreamURL(tt.baseURL, tt.query)
-	if (err != nil) != tt.wantErr {
-		t.Fatalf("BuildVanadisBuildsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
-	}
-	if tt.wantErr {
-		return
-	}
-	if gotLimit != tt.wantLimit {
-		t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
-	}
-
-	parsed, err := url.Parse(gotURL)
-	if err != nil {
-		t.Fatalf("failed to parse returned URL: %v", err)
-	}
-	if !strings.HasSuffix(parsed.Path, "/builds") {
-		t.Errorf("path does not end with /builds: %q", parsed.Path)
-	}
-
-	q := parsed.Query()
-	for k, v := range tt.wantQuery {
-		if got := q.Get(k); got != v {
-			t.Errorf("query param %q = %q, want %q", k, got, v)
-		}
 	}
 }
 

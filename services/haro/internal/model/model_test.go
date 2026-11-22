@@ -14,36 +14,11 @@ func TestPureHelpers_IsScheduleStale(t *testing.T) {
 		maxOverdue  time.Duration
 		wantStale   bool
 	}{
-		{
-			name:        "not stale within maxOverdue",
-			scheduledAt: now.Add(-1 * time.Hour),
-			maxOverdue:  24 * time.Hour,
-			wantStale:   false,
-		},
-		{
-			name:        "stale when overdue by more than maxOverdue",
-			scheduledAt: now.Add(-25 * time.Hour),
-			maxOverdue:  24 * time.Hour,
-			wantStale:   true,
-		},
-		{
-			name:        "zero maxOverdue never reports stale",
-			scheduledAt: now.Add(-48 * time.Hour),
-			maxOverdue:  0,
-			wantStale:   false,
-		},
-		{
-			name:        "negative maxOverdue never reports stale",
-			scheduledAt: now.Add(-48 * time.Hour),
-			maxOverdue:  -1 * time.Hour,
-			wantStale:   false,
-		},
-		{
-			name:        "future scheduledAt is not stale",
-			scheduledAt: now.Add(1 * time.Hour),
-			maxOverdue:  24 * time.Hour,
-			wantStale:   false,
-		},
+		{name: "not stale within maxOverdue", scheduledAt: now.Add(-1 * time.Hour), maxOverdue: 24 * time.Hour, wantStale: false},
+		{name: "stale when overdue by more than maxOverdue", scheduledAt: now.Add(-25 * time.Hour), maxOverdue: 24 * time.Hour, wantStale: true},
+		{name: "zero maxOverdue never reports stale", scheduledAt: now.Add(-48 * time.Hour), maxOverdue: 0, wantStale: false},
+		{name: "negative maxOverdue never reports stale", scheduledAt: now.Add(-48 * time.Hour), maxOverdue: -1 * time.Hour, wantStale: false},
+		{name: "future scheduledAt is not stale", scheduledAt: now.Add(1 * time.Hour), maxOverdue: 24 * time.Hour, wantStale: false},
 	}
 
 	for _, tc := range tests {
@@ -64,36 +39,11 @@ func TestPureHelpers_ShouldPruneRuns(t *testing.T) {
 		interval    time.Duration
 		shouldPrune bool
 	}{
-		{
-			name:        "zero lastPrune triggers prune",
-			lastPrune:   time.Time{},
-			interval:    24 * time.Hour,
-			shouldPrune: true,
-		},
-		{
-			name:        "interval elapsed triggers prune",
-			lastPrune:   now.Add(-25 * time.Hour),
-			interval:    24 * time.Hour,
-			shouldPrune: true,
-		},
-		{
-			name:        "exact interval triggers prune",
-			lastPrune:   now.Add(-24 * time.Hour),
-			interval:    24 * time.Hour,
-			shouldPrune: true,
-		},
-		{
-			name:        "less than interval does not trigger prune",
-			lastPrune:   now.Add(-12 * time.Hour),
-			interval:    24 * time.Hour,
-			shouldPrune: false,
-		},
-		{
-			name:        "zero or negative interval does not trigger prune",
-			lastPrune:   now.Add(-48 * time.Hour),
-			interval:    0,
-			shouldPrune: false,
-		},
+		{name: "zero lastPrune triggers prune", lastPrune: time.Time{}, interval: 24 * time.Hour, shouldPrune: true},
+		{name: "interval elapsed triggers prune", lastPrune: now.Add(-25 * time.Hour), interval: 24 * time.Hour, shouldPrune: true},
+		{name: "exact interval triggers prune", lastPrune: now.Add(-24 * time.Hour), interval: 24 * time.Hour, shouldPrune: true},
+		{name: "less than interval does not trigger prune", lastPrune: now.Add(-12 * time.Hour), interval: 24 * time.Hour, shouldPrune: false},
+		{name: "zero or negative interval does not trigger prune", lastPrune: now.Add(-48 * time.Hour), interval: 0, shouldPrune: false},
 	}
 
 	for _, tc := range tests {

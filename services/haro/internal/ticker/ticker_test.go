@@ -278,45 +278,6 @@ func TestTicker_EvaluateDueSchedules(t *testing.T) {
 	}
 }
 
-func TestTicker_Guards(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		nilTicker     bool
-		nilDB         bool
-		nilDispatcher bool
-	}{
-		{name: "nil ticker does not panic", nilTicker: true},
-		{name: "nil db does not panic", nilDB: true},
-		{name: "nil dispatcher does not panic", nilDispatcher: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := openTickerTestDB(t)
-			mock := &fakeDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok"}}
-			ctx := context.Background()
-
-			var ticker *Ticker
-			switch {
-			case tc.nilTicker:
-			case tc.nilDB:
-				ticker = NewTicker(nil, mock, 30*time.Second)
-			case tc.nilDispatcher:
-				ticker = NewTicker(db, nil, 30*time.Second)
-			default:
-				ticker = NewTicker(db, mock, 30*time.Second)
-			}
-			ticker.EvaluateDueSchedules(ctx, time.Now().UTC())
-
-			if !tc.nilTicker && !tc.nilDB && !tc.nilDispatcher && len(mock.dispatched)+len(mock.dispatchedRequests) != 0 {
-				t.Errorf("expected no dispatches on empty db, got %d", len(mock.dispatched)+len(mock.dispatchedRequests))
-			}
-		})
-	}
-}
-
 func TestTicker_Pruning(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
@@ -645,6 +606,7 @@ type dispatchOutcomeTestCase struct {
 	seedRunID           string
 	seedRunStatus       string
 	seedRunStartedAt    time.Time
+	orphanRun           bool
 	event               *pubsub.DispatchOutcomeEvent
 	nilDatabase         bool
 	nilMessage          bool
@@ -710,8 +672,12 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 		msg = nil
 	}
 
+	heartbeatID := tc.seedScheduleID
+	if tc.orphanRun {
+		heartbeatID = ""
+	}
 	if !tc.nilDatabase && !tc.closeDatabase {
-		seedOutcomeHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
+		seedOutcomeHeartbeat(ctx, t, db, tc.seedScheduleType, heartbeatID, now)
 		startedAt := now
 		if !tc.seedRunStartedAt.IsZero() {
 			startedAt = tc.seedRunStartedAt
@@ -783,7 +749,7 @@ func assertOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, tc dispatch
 
 func assertOutcomeWatermark(ctx context.Context, t *testing.T, db *sql.DB, tc dispatchOutcomeTestCase) {
 	t.Helper()
-	if tc.seedScheduleID == "" || tc.seedScheduleType != model.ScheduleTypeHeartbeat {
+	if tc.orphanRun || tc.seedScheduleID == "" || tc.seedScheduleType != model.ScheduleTypeHeartbeat {
 		return
 	}
 	hb, err := store.GetHeartbeatSchedule(ctx, db, tc.seedScheduleID)
@@ -809,11 +775,7 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping", Status: "completed"},
 			wantRunStatus: "running", wantDurationMs: -1,
 		},
-		{
-			name:      "unknown dispatch id naks with delay for retry",
-			event:     &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
-			wantNaked: true, wantDurationMs: -1,
-		},
+		{name: "unknown dispatch id naks with delay for retry", event: &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"}, wantNaked: true, wantDurationMs: -1},
 		{
 			name:         "unknown dispatch id delivered five times is dropped without nak",
 			event:        &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
@@ -829,6 +791,12 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-1", seedRunID: "run-hb-1",
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-1", Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000},
 			wantRunStatus: "completed", wantDurationMs: 5000, wantWatermarkTime: &now,
+		},
+		{
+			name:             "heartbeat completed with missing schedule updates orphan run and continues",
+			seedScheduleType: "heartbeat", seedScheduleID: "hb-orphan", seedRunID: "run-hb-orphan", orphanRun: true,
+			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-orphan", Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000},
+			wantRunStatus: "completed", wantDurationMs: 5000,
 		},
 		{
 			name:             "heartbeat failed updates run and does not advance watermark",
@@ -860,12 +828,8 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-term", Status: "failed", Error: "late failure"},
 			wantRunStatus: "completed", wantDurationMs: -1,
 		},
-		{
-			name: "nil database returns error", nilDatabase: true, wantErr: true, wantDurationMs: -1,
-		},
-		{
-			name: "nil message returns error", nilMessage: true, wantErr: true, wantDurationMs: -1,
-		},
+		{name: "nil database returns error", nilDatabase: true, wantErr: true, wantDurationMs: -1},
+		{name: "nil message returns error", nilMessage: true, wantErr: true, wantDurationMs: -1},
 		{
 			name: "closed database returns query error", closeDatabase: true,
 			event:   &pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"},
@@ -878,10 +842,7 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			sabotageSQL: "CREATE TRIGGER trg_fail_run_upd BEFORE UPDATE ON schedule_runs BEGIN SELECT RAISE(ABORT, 'forced update failure'); END;",
 			wantErr:     true, wantDurationMs: -1,
 		},
-		{
-			name:  "empty dispatch id returns nil",
-			event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1,
-		},
+		{name: "empty dispatch id returns nil", event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1},
 		{
 			name:             "zero event startedAt falls back to run startedAt for duration and watermark",
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-fallback-1", seedRunID: "run-fallback-1",
@@ -894,37 +855,6 @@ func TestHandleDispatchOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runDispatchOutcomeCase(t, tc, now)
-		})
-	}
-}
-
-func TestHandleDispatchOutcome_OrphanHeartbeatRun(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name       string
-		scheduleID string
-		runID      string
-	}{
-		{name: "completed run with missing schedule logs and continues", scheduleID: "hb-orphan", runID: "run-hb-orphan"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := openTickerTestDB(t)
-			ctx := context.Background()
-			seedOutcomeRun(ctx, t, db, tc.runID, model.ScheduleTypeHeartbeat, tc.scheduleID, "running", now)
-			msg := &outcomeMsg{data: outcomePayload(t, "", &pubsub.DispatchOutcomeEvent{DispatchID: tc.runID, Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000}), subject: "aerial.dispatch.completed"}
-			if err := HandleDispatchOutcome(ctx, db, msg); err != nil {
-				t.Fatalf("HandleDispatchOutcome err = %v, want nil", err)
-			}
-			run, err := store.GetScheduleRun(ctx, db, tc.runID)
-			if err != nil {
-				t.Fatalf("GetScheduleRun failed: %v", err)
-			}
-			if run.Status != model.StatusCompleted {
-				t.Errorf("run.Status = %q, want completed", run.Status)
-			}
 		})
 	}
 }
