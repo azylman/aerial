@@ -600,7 +600,7 @@ func TestExtractSkillFromTarget(t *testing.T) {
 		wantOk       bool
 	}{
 		{"", "", false},
-		{"/share/aerial/pkg/runner/pure.go", "", false},
+		{"/share/aerial/pkg/runner/env_format.go", "", false},
 		{"SKILL.md", "", false},
 		{"/foo/skills/SKILL.md", "", false},
 		{"no-skill-here", "", false},
