@@ -7,6 +7,8 @@ import (
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
 // TurnRunner is the stateless Restate service that runs one turn of a coordinator key as
@@ -21,11 +23,18 @@ import (
 // once. A terminal error at any await ends the turn through stop-turn (code 409, a Restate cancel)
 // or fail-turn (anything else); both are idempotent, because a crash re-runs them on replay.
 
+// TurnHoldTimeout bounds every Restate service whose invocation stays open across a whole turn
+// attempt (TurnRunner, and the legacy ThreadSession/DispatchSession RunTurn that execute a burst
+// inside one Run step). Service options are fixed at registration, so it derives from
+// config.MaxTurnTimeoutMinutes, never the live turn_timeout_minutes: the largest allowed cap,
+// plus the attempt context's +1 minute pad, plus a 14 minute margin.
+const TurnHoldTimeout = time.Duration(config.MaxTurnTimeoutMinutes+1+14) * time.Minute
+
 // Turn runner timeouts. No retry policy is declared: the server default applies, which pauses an
 // invocation once exhausted and never kills it.
 const (
-	TurnRunnerInactivityTimeout = 75 * time.Minute
-	TurnRunnerAbortTimeout      = time.Hour
+	TurnRunnerInactivityTimeout = TurnHoldTimeout
+	TurnRunnerAbortTimeout      = TurnHoldTimeout
 )
 
 // turnSteps is the narrow set of WorkerPool step functions the TurnRunner journals.

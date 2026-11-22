@@ -38,7 +38,6 @@ import (
 const (
 	DefaultMaxQuotaPauseDBBytes = session.DefaultMaxQuotaPauseDBBytes
 	DefaultMaxSessionIdleTime   = 24 * time.Hour
-	DefaultTimeoutMinutes       = 60
 	DefaultMaxRestarts          = 3
 	ContinuationPromptTemplate  = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 	MaxYieldTrapAutoResumes     = 2
@@ -87,7 +86,7 @@ type WorkerPoolConfig struct {
 	Store                                                                        db.Store
 	DiscordSession                                                               *discordgo.Session
 	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt       string
-	TimeoutMinutes, MaxAttempts                                                  int
+	MaxAttempts                                                                  int
 	BackoffBase, IdleTimeout, RetryDelayOverride                                 time.Duration
 	SessionManager                                                               *session.Manager
 	Pools                                                                        map[PoolKey]runner.AgentPool
@@ -365,9 +364,6 @@ func resolveDefaultAppConfig(appCfg *config.Config, cfg WorkerPoolConfig) (*conf
 
 // applyWorkerPoolTimingDefaults applies default timeouts, retry limits, and intervals to WorkerPoolConfig.
 func applyWorkerPoolTimingDefaults(cfg *WorkerPoolConfig) {
-	if cfg.TimeoutMinutes <= 0 {
-		cfg.TimeoutMinutes = DefaultTimeoutMinutes
-	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 3
 	}

@@ -7,19 +7,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestConfigData_UnmarshalTurnQueue(t *testing.T) {
+func TestConfigData_UnmarshalTurnSettings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		yaml          string
-		wantTurnQueue string
-		errContains   string
+		name            string
+		yaml            string
+		wantTurnQueue   string
+		wantTurnTimeout int
+		errContains     string
 	}{
-		{name: "absent key", yaml: "model: m\n", wantTurnQueue: ""},
-		{name: "blank value", yaml: "turn_queue: \"\"\n", wantTurnQueue: ""},
-		{name: "legacy", yaml: "turn_queue: legacy\n", wantTurnQueue: "legacy"},
-		{name: "coordinator", yaml: "turn_queue: coordinator\n", wantTurnQueue: "coordinator"},
-		{name: "whitespace trimmed", yaml: "turn_queue: \" coordinator \"\n", wantTurnQueue: "coordinator"},
+		{name: "absent key", yaml: "model: m\n", wantTurnQueue: "", wantTurnTimeout: 120},
+		{name: "blank value", yaml: "turn_queue: \"\"\n", wantTurnQueue: "", wantTurnTimeout: 120},
+		{name: "legacy", yaml: "turn_queue: legacy\n", wantTurnQueue: "legacy", wantTurnTimeout: 120},
+		{name: "coordinator", yaml: "turn_queue: coordinator\n", wantTurnQueue: "coordinator", wantTurnTimeout: 120},
+		{name: "whitespace trimmed", yaml: "turn_queue: \" coordinator \"\n", wantTurnQueue: "coordinator", wantTurnTimeout: 120},
+		{name: "turn timeout zero defaults to 120", yaml: "turn_timeout_minutes: 0\n", wantTurnTimeout: 120},
+		{name: "turn timeout configured 90", yaml: "turn_timeout_minutes: 90\n", wantTurnTimeout: 90},
+		{name: "turn timeout max 240 accepted", yaml: "turn_timeout_minutes: 240\n", wantTurnTimeout: 240},
+		{name: "turn timeout negative rejected", yaml: "turn_timeout_minutes: -5\n", errContains: "invalid turn_timeout_minutes -5"},
+		{name: "turn timeout over max rejected", yaml: "turn_timeout_minutes: 241\n", errContains: "invalid turn_timeout_minutes 241"},
 		{name: "unknown value rejected", yaml: "turn_queue: restate\n", errContains: `invalid turn_queue "restate"`},
 		{name: "wrong case rejected", yaml: "turn_queue: Coordinator\n", errContains: `invalid turn_queue "Coordinator"`},
 	}
@@ -39,6 +45,9 @@ func TestConfigData_UnmarshalTurnQueue(t *testing.T) {
 			}
 			if cfg.TurnQueue != tc.wantTurnQueue {
 				t.Fatalf("cfg.TurnQueue = %q, want %q", cfg.TurnQueue, tc.wantTurnQueue)
+			}
+			if got := cfg.TurnTimeout(); got != tc.wantTurnTimeout {
+				t.Fatalf("cfg.TurnTimeout() = %d, want %d", got, tc.wantTurnTimeout)
 			}
 		})
 	}

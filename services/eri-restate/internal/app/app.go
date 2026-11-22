@@ -135,12 +135,14 @@ func LoadConfigFromEnv() Config {
 // eriRestateDefinitions returns the services an eri-restate revision binds in mode. Both modes
 // bind the same services with the same handler names and kinds (the legacy objects carry
 // rollback adapters), so no revision is ever the last deployment of a service and a flip or
-// rollback never strands in-flight invocations. ThreadSession/DispatchSession keep 1h
-// timeouts in both modes because timeouts are service-wide and an old revision drains long
-// legacy RunTurn invocations under the same names. The LLM service runs on llmFn (the
-// ephemeral summarizer pool) and is bound in every mode.
+// rollback never strands in-flight invocations. ThreadSession/DispatchSession take
+// queue.TurnHoldTimeout in both modes because timeouts are service-wide and the legacy RunTurn
+// executes a whole turn inside one Run step under the same names; an old revision drains those
+// invocations after a flip. Voice, session-manager and LLM handlers never hold a turn and keep
+// 1h. The LLM service runs on llmFn (the ephemeral summarizer pool) and is bound in every mode.
 func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string, llmFn runner.LLMFunc) []restate.ServiceDefinition {
 	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
+	turnHold := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(queue.TurnHoldTimeout), restate.WithAbortTimeout(queue.TurnHoldTimeout)}
 	var thread, dispatch, sessionManager any
 	if mode == config.TurnQueueCoordinator {
 		store := pool.Store()
@@ -153,8 +155,8 @@ func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string, llmFn
 		sessionManager = queue.NewSessionManagerService(pool, agentName)
 	}
 	return []restate.ServiceDefinition{
-		restate.Reflect(thread, hour...),
-		restate.Reflect(dispatch, hour...),
+		restate.Reflect(thread, turnHold...),
+		restate.Reflect(dispatch, turnHold...),
 		restate.Reflect(queue.NewVoiceSessionObject(pool, agentName), hour...),
 		restate.Reflect(sessionManager, hour...),
 		queue.ReflectTurnRunner(queue.NewTurnRunnerService(pool, agentName)),
@@ -195,10 +197,11 @@ type serviceTimeoutPatch struct {
 // serviceTimeoutPatches lists the per-service timeout PATCH bodies for agent.
 func serviceTimeoutPatches(agent string) []serviceTimeoutPatch {
 	hour := serviceTimeouts{InactivityTimeout: formatRestateDuration(time.Hour), AbortTimeout: formatRestateDuration(time.Hour)}
+	turnHold := serviceTimeouts{InactivityTimeout: formatRestateDuration(queue.TurnHoldTimeout), AbortTimeout: formatRestateDuration(queue.TurnHoldTimeout)}
 	runnerOpts := queue.TurnRunnerReflectOptions()
 	return []serviceTimeoutPatch{
-		{service: queue.ThreadSessionServiceName(agent), body: hour},
-		{service: queue.DispatchSessionServiceName(agent), body: hour},
+		{service: queue.ThreadSessionServiceName(agent), body: turnHold},
+		{service: queue.DispatchSessionServiceName(agent), body: turnHold},
 		{service: queue.VoiceSessionServiceName(agent), body: hour},
 		{service: queue.TurnRunnerServiceName(agent), body: serviceTimeouts{
 			InactivityTimeout: formatRestateDuration(runnerOpts.InactivityTimeout),

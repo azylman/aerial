@@ -144,7 +144,7 @@ func brainHandler(mux http.Handler) http.Handler {
 	return tracing.Middleware("eri", metricsMiddleware(mux))
 }
 
-func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, asyncErrCh ...<-chan error) error {
+func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, turnTimeoutMinutes int, asyncErrCh ...<-chan error) error {
 	srv := &http.Server{
 		Handler:           brainHandler(mux),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -156,7 +156,7 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Aerial Brain listening on %s (model=%s, timeout=%dm)", ln.Addr().String(), model, queue.DefaultTimeoutMinutes)
+		log.Printf("Aerial Brain listening on %s (model=%s, turn_timeout=%dm)", ln.Addr().String(), model, turnTimeoutMinutes)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
@@ -306,7 +306,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	return serveBrainHTTP(ctx, ln, mux, cur.Model)
+	return serveBrainHTTP(ctx, ln, mux, cur.Model, cur.TurnTimeout())
 }
 
 // setupTracing installs the global tracer provider and propagator from the config at path
