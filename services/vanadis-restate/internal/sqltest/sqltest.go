@@ -134,11 +134,11 @@ type Values []any
 func ValuesRow(vals ...any) Values { return Values(vals) }
 
 // Scan implements pgx.Row.
-func (v Values) Scan(dest ...any) error { return ScanValues(dest, v...) }
+func (v Values) Scan(dest ...any) error { return scanValues(dest, v...) }
 
-// ScanValues assigns vals to the pointer destinations in order. Nil values
+// scanValues assigns vals to the pointer destinations in order. Nil values
 // leave their destination untouched; extra destinations are ignored.
-func ScanValues(dest []any, vals ...any) error {
+func scanValues(dest []any, vals ...any) error {
 	if len(vals) > len(dest) {
 		return fmt.Errorf("scan: %d values for %d destinations", len(vals), len(dest))
 	}
@@ -172,15 +172,15 @@ func (r *Row) Scan(dest ...any) error {
 	case r.Build == nil:
 		return nil
 	case len(dest) == 1:
-		return ScanValues(dest, r.Build.Status)
+		return scanValues(dest, r.Build.Status)
 	}
-	return FillBuildDest(*r.Build, dest)
+	return fillBuildDest(*r.Build, dest)
 }
 
-// FillBuildDest scans b into the 7-column summary or 12-column build shape.
-func FillBuildDest(b model.VanadisBuild, dest []any) error {
+// fillBuildDest scans b into the 7-column summary or 12-column build shape.
+func fillBuildDest(b model.VanadisBuild, dest []any) error {
 	if len(dest) == 7 {
-		return ScanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
+		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
 	}
 	if len(dest) != 12 {
 		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
@@ -189,7 +189,7 @@ func FillBuildDest(b model.VanadisBuild, dest []any) error {
 	if agent == "" {
 		agent = "aerial"
 	}
-	return ScanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
+	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
 }
 
 // BuildRow is a 12-column build row with the given id and status.
@@ -223,10 +223,10 @@ func AttachRoutes(mode string, exists, cancelled bool) []Route {
 	}
 }
 
-// RecoveryChecks renders the chunk's ci_checks JSON: CIChecks plus any set
+// recoveryChecks renders the chunk's ci_checks JSON: CIChecks plus any set
 // _head_sha/_merge_sha markers; without CIChecks, both markers, or
 // {"lint":"passed"} when neither SHA is set.
-func RecoveryChecks(c model.VanadisChunk) []byte {
+func recoveryChecks(c model.VanadisChunk) []byte {
 	if len(c.CIChecks) > 0 {
 		checks := maps.Clone(c.CIChecks)
 		if c.HeadSHA != "" {
@@ -300,22 +300,22 @@ func (r *Rows) Scan(dest ...any) error {
 	switch len(dest) {
 	case 2, 3:
 		if ok {
-			return ScanValues(dest, c.BuildID, c.ID)
+			return scanValues(dest, c.BuildID, c.ID)
 		}
 	case 10:
 		if ok {
-			return ScanValues(dest, c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, c.StartedAt, c.CompletedAt, c.UpdatedAt)
+			return scanValues(dest, c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, c.StartedAt, c.CompletedAt, c.UpdatedAt)
 		}
 	case 12:
 		if len(r.Builds) > 0 && r.idx > 0 && r.idx <= len(r.Builds) {
-			return FillBuildDest(r.Builds[r.idx-1], dest)
+			return fillBuildDest(r.Builds[r.idx-1], dest)
 		}
 		if ok {
-			return FillBuildDest(model.VanadisBuild{ID: c.BuildID, Title: c.Title}, dest)
+			return fillBuildDest(model.VanadisBuild{ID: c.BuildID, Title: c.Title}, dest)
 		}
 	case 18:
 		if ok {
-			return ScanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, nullTime(c.StartedAt), nullTime(c.CompletedAt), c.CreatedAt, c.UpdatedAt)
+			return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, nullTime(c.StartedAt), nullTime(c.CompletedAt), c.CreatedAt, c.UpdatedAt)
 		}
 	case 25, 26:
 		return scanFull(dest, c, ok)
@@ -325,13 +325,13 @@ func (r *Rows) Scan(dest ...any) error {
 
 func scanFull(dest []any, c model.VanadisChunk, ok bool) error {
 	if !ok {
-		return ScanValues(dest, "c1", "b1", 0, "pr", "aerial", "c1", "inst", []string{}, []string{}, "medium", []string{}, "pending", 0, 0, []string{}, 0, []byte("{}"), []byte("{}"), "", "", "", sql.NullTime{}, sql.NullTime{}, time.Now(), time.Now())
+		return scanValues(dest, "c1", "b1", 0, "pr", "aerial", "c1", "inst", []string{}, []string{}, "medium", []string{}, "pending", 0, 0, []string{}, 0, []byte("{}"), []byte("{}"), "", "", "", sql.NullTime{}, sql.NullTime{}, time.Now(), time.Now())
 	}
 	rollout := []byte(`{"expected_jobs":["eri"]}`)
 	if c.RolloutState != nil {
 		rollout = marshal(c.RolloutState)
 	}
-	return ScanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, RecoveryChecks(c), rollout, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, nullTime(c.StartedAt), nullTime(c.CompletedAt), c.CreatedAt, c.UpdatedAt)
+	return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, recoveryChecks(c), rollout, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, nullTime(c.StartedAt), nullTime(c.CompletedAt), c.CreatedAt, c.UpdatedAt)
 }
 
 // Tx is a pgx.Tx whose statements go to the Fn fields (defaults succeed).

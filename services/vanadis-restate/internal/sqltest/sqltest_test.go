@@ -307,8 +307,8 @@ func TestFillBuildDest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dest := buildDest12()
-			if err := FillBuildDest(tc.build, dest); err != nil || !reflect.DeepEqual(deref(dest), tc.want) {
-				t.Errorf("FillBuildDest = %#v, %v; want %#v", deref(dest), err, tc.want)
+			if err := fillBuildDest(tc.build, dest); err != nil || !reflect.DeepEqual(deref(dest), tc.want) {
+				t.Errorf("fillBuildDest = %#v, %v; want %#v", deref(dest), err, tc.want)
 			}
 		})
 	}
@@ -368,8 +368,8 @@ func TestRecoveryChecks(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := string(RecoveryChecks(tc.chunk)); got != tc.want {
-				t.Errorf("RecoveryChecks = %s, want %s", got, tc.want)
+			if got := string(recoveryChecks(tc.chunk)); got != tc.want {
+				t.Errorf("recoveryChecks = %s, want %s", got, tc.want)
 			}
 		})
 	}

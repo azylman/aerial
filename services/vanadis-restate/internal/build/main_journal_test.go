@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -155,7 +156,7 @@ func TestCreateBuildJournalCallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dbErr := fmt.Errorf("database: %w", &pgconn.PgError{Code: tc.code, ConstraintName: tc.constraint, Detail: "private database details"})
-			st, _ := (dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: dbErr}).open()
+			st, _ := open(dbScript{FailExec: "INSERT INTO vanadis_chunks", ExecErr: dbErr})
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			mc := mocks.NewMockContext(t)
 			want := dbErr
@@ -180,15 +181,15 @@ func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 		db   dbScript
 		want error
 	}{
-		{"acknowledgement lost", dbScript{commitErr: lostAck}, lostAck},
-		{"committed request replay", dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &build}, chunks: chunks}, nil},
+		{"acknowledgement lost", dbScript{CommitErr: lostAck}, lostAck},
+		{"committed request replay", dbScript{ExecTag: "INSERT 0 0", BuildRow: &sqltest.Row{Build: &build}, Chunks: chunks}, nil},
 	}
 	// The second database fixture represents the durable state after the first
 	// commit succeeded at PostgreSQL but its response failed at the connection.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			accepted, err := bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
 			assert.ErrorIs(t, err, tc.want)
@@ -200,7 +201,7 @@ func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 // creationTransaction models atomic visibility at the database boundary:
 // inserts remain private until Commit and disappear on Rollback.
 type creationTransaction struct {
-	mockTx
+	sqltest.Tx
 
 	pending []string
 	durable []string
@@ -240,7 +241,7 @@ func TestCreateBuildConflictAtomicity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tx := &creationTransaction{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
-			st := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
+			st := store.New(sqltest.DB{BeginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "example-owner")
 			err := st.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
 			require.ErrorIs(t, err, store.ErrBuildConflict)
 			assert.Empty(t, tx.durable)
@@ -348,7 +349,7 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 			req := CreateBuildRequest{ID: tc.buildID, ThreadID: "th1", Objective: "Obj", Chunks: inputs}
 			openCapture := func() *captureCreateStore {
 				b := model.VanadisBuild{ID: tc.buildID, ThreadID: "th1", Objective: "Obj", Status: "running"}
-				st, _ := dbScript{buildRow: &mockRow{b: &b}}.open()
+				st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}})
 				return &captureCreateStore{VanadisStore: st}
 			}
 			journal := &createJournal{}
@@ -560,7 +561,7 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 				labelReconcileAfterNoPRFail:        transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "azylman", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
 			err := bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", DispatchID: "vanadis-c1-turn-0", Status: tc.status})
 			require.NoError(t, err)
 			assert.Equal(t, append(append([]string{}, prefix...), tc.want...), commands)
@@ -594,7 +595,7 @@ func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
 				labelReconcileAfterPREvent: transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "azylman", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
 			err := bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 9, Event: "deploy_success"})
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, commands)
