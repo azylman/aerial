@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,6 +200,119 @@ func TestUpdateActiveStep(t *testing.T) {
 				assert.LessOrEqual(t, remainingTimeout, 3*time.Second)
 				assert.Positive(t, remainingTimeout)
 			}
+		})
+	}
+}
+
+func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		buildID     string
+		chunk1      string
+		step1       string
+		chunk2      string
+		step2       string
+		expectCalls int
+	}{
+		{
+			name:        "concurrent active step updates coalesce with trailing sync",
+			buildID:     "b-coalesce",
+			chunk1:      "chunk-c1",
+			step1:       "⚡ Compiling...",
+			chunk2:      "chunk-c2",
+			step2:       "⚡ Running tests...",
+			expectCalls: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bld := &model.VanadisBuild{
+				ID:        tc.buildID,
+				ThreadID:  "th-1",
+				Title:     "Coalesce Build",
+				Status:    "running",
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}
+			chunks := []model.VanadisChunk{
+				{ID: tc.chunk1, BuildID: tc.buildID, Title: "Chunk 1", Status: "running"},
+				{ID: tc.chunk2, BuildID: tc.buildID, Title: "Chunk 2", Status: "running"},
+			}
+			st := &mockActiveStepStore{
+				build:  bld,
+				chunks: chunks,
+			}
+
+			var (
+				mu           sync.Mutex
+				callCount    int
+				lastWidget   *executor.StatusWidgetRequest
+				firstCall    = make(chan struct{})
+				releaseFirst = make(chan struct{})
+			)
+
+			eri := &mockEriClient{
+				widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
+					mu.Lock()
+					callCount++
+					currentCall := callCount
+					reqCopy := req
+					lastWidget = &reqCopy
+					mu.Unlock()
+
+					if currentCall == 1 {
+						close(firstCall)
+						<-releaseFirst
+					}
+					return "msg-123", nil
+				},
+			}
+			exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+
+			mc1 := mocks.NewMockContext(t)
+			mc1.EXPECT().Key().Return(tc.buildID)
+			observeJournalCallback(t, mc1, nil, 0)
+
+			mc2 := mocks.NewMockContext(t)
+			mc2.EXPECT().Key().Return(tc.buildID)
+			observeJournalCallback(t, mc2, nil, 0)
+
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				resp1, err1 := bo.UpdateActiveStep(restate.WithMockContext(mc1), UpdateActiveStepRequest{
+					ChunkID:    tc.chunk1,
+					ActiveStep: tc.step1,
+				})
+				assert.NoError(t, err1)
+				assert.Equal(t, AckResponse{Status: "ok"}, resp1)
+			})
+
+			<-firstCall
+			resp2, err2 := bo.UpdateActiveStep(restate.WithMockContext(mc2), UpdateActiveStepRequest{
+				ChunkID:    tc.chunk2,
+				ActiveStep: tc.step2,
+			})
+			assert.NoError(t, err2)
+			assert.Equal(t, AckResponse{Status: "ok"}, resp2)
+
+			close(releaseFirst)
+			wg.Wait()
+
+			mu.Lock()
+			finalCalls := callCount
+			finalWidget := lastWidget
+			mu.Unlock()
+
+			assert.Equal(t, tc.expectCalls, finalCalls)
+			require.NotNil(t, finalWidget)
+			assertSyncedWidgetStep(t, &mockEriClient{LastWidget: finalWidget}, tc.chunk1, tc.step1)
+			assertSyncedWidgetStep(t, &mockEriClient{LastWidget: finalWidget}, tc.chunk2, tc.step2)
 		})
 	}
 }
