@@ -50,6 +50,10 @@ func factKey(kind, head, job string) EffectKey {
 	return EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, Kind: kind, JobName: job}
 }
 
+func checkFactKey(kind, head, state, check string) EffectKey {
+	return EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, Kind: kind, JobName: state, CheckName: check}
+}
+
 // factCall is one recorded FactPublisher publish.
 type factCall struct {
 	msgID string
@@ -109,6 +113,8 @@ func TestPlanFacts(t *testing.T) {
 	t.Parallel()
 	fired := effectPR()
 	fired.MarkEffectDispatched(factKey("pr_fact_conflict", "h1", ""))
+	pendingCheckFired := effectPR()
+	pendingCheckFired.MarkEffectDispatched(checkFactKey("pr_fact_check_updated", "h1", "pending", "lint"))
 	tests := []struct {
 		name  string
 		state *PRState
@@ -136,6 +142,18 @@ func TestPlanFacts(t *testing.T) {
 			want: []PlannedFact{{Fact: pinned(conflictFact()), Key: factKey("pr_fact_conflict", "h1", ""), Agent: "agent-alpha"}},
 		},
 		{name: "already fired key is skipped", state: fired, facts: []pubsub.PRLifecycleEvent{conflictFact()}},
+		{
+			name: "check_updated passed fact fires after pending fact for same check", state: pendingCheckFired,
+			facts: []pubsub.PRLifecycleEvent{
+				{Event: "check_updated", HeadSHA: "h1", CheckName: "lint", CheckState: "pending"},
+				{Event: "check_updated", HeadSHA: "h1", CheckName: "lint", CheckState: "passed"},
+			},
+			want: []PlannedFact{{
+				Fact:  pinned(pubsub.PRLifecycleEvent{Event: "check_updated", HeadSHA: "h1", CheckName: "lint", CheckState: "passed"}),
+				Key:   checkFactKey("pr_fact_check_updated", "h1", "passed", "lint"),
+				Agent: "agent-alpha",
+			}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
