@@ -45,24 +45,28 @@ func covenConfigSwap(base string, oldNew ...string) string {
 // covenConfigFields renders every asserted Config field (and derived accessor) by name.
 func covenConfigFields(cfg *Config) map[string]string {
 	return map[string]string{
-		"Port":              cfg.Port,
-		"DatabaseURL":       cfg.DatabaseURL,
-		"EriURL":            cfg.EriURL,
-		"EriLLMURL":         cfg.EriLLMURL,
-		"PRRegisterURL":     cfg.PRRegisterURL,
-		"CustomSkillsDir":   cfg.CustomSkillsDir,
-		"RulesDir":          cfg.RulesDir,
-		"GitHubPAT":         cfg.GitHubPAT,
-		"ConfigRepoOwner":   cfg.ConfigRepoOwner,
-		"ConfigRepoName":    cfg.ConfigRepoName,
-		"SystemChannelID":   cfg.SystemChannelID,
-		"Role":              cfg.Role,
-		"TranscriptsURL":    cfg.TranscriptsURL,
-		"LLMEffort":         cfg.LLMEffort,
-		"EffectiveStack":    cfg.EffectiveStack(),
-		"ExtractTimeout":    cfg.ExtractTimeout().String(),
-		"ExtractBatchLimit": strconv.Itoa(cfg.ExtractBatchLimit()),
-		"Auth.Enabled":      strconv.FormatBool(cfg.Auth.Enabled),
+		"Port":                cfg.Port,
+		"RestatePort":         cfg.RestatePort,
+		"RestateIngressURL":   cfg.RestateIngressURL,
+		"RestateAdminURL":     cfg.RestateAdminURL,
+		"RestateAdvertiseURL": cfg.RestateAdvertiseURL,
+		"DatabaseURL":         cfg.DatabaseURL,
+		"EriURL":              cfg.EriURL,
+		"EriLLMURL":           cfg.EriLLMURL,
+		"PRRegisterURL":       cfg.PRRegisterURL,
+		"CustomSkillsDir":     cfg.CustomSkillsDir,
+		"RulesDir":            cfg.RulesDir,
+		"GitHubPAT":           cfg.GitHubPAT,
+		"ConfigRepoOwner":     cfg.ConfigRepoOwner,
+		"ConfigRepoName":      cfg.ConfigRepoName,
+		"SystemChannelID":     cfg.SystemChannelID,
+		"Role":                cfg.Role,
+		"TranscriptsURL":      cfg.TranscriptsURL,
+		"LLMEffort":           cfg.LLMEffort,
+		"EffectiveStack":      cfg.EffectiveStack(),
+		"ExtractTimeout":      cfg.ExtractTimeout().String(),
+		"ExtractBatchLimit":   strconv.Itoa(cfg.ExtractBatchLimit()),
+		"Auth.Enabled":        strconv.FormatBool(cfg.Auth.Enabled),
 	}
 }
 
@@ -119,13 +123,45 @@ var covenLoadConfigCases = []struct {
 		yaml:  covenDarkBaseConfig,
 		dbArg: covenTestDSN,
 		want: map[string]string{
-			"EffectiveStack":    "aerial",
-			"Role":              "",
-			"TranscriptsURL":    "http://transcripts.aerial",
-			"LLMEffort":         "",
-			"ExtractTimeout":    "2m0s",
-			"ExtractBatchLimit": "50",
-			"Auth.Enabled":      "false",
+			"EffectiveStack":      "aerial",
+			"Role":                "",
+			"TranscriptsURL":      "http://transcripts.aerial",
+			"LLMEffort":           "",
+			"ExtractTimeout":      "2m0s",
+			"ExtractBatchLimit":   "50",
+			"Auth.Enabled":        "false",
+			"RestatePort":         "9080",
+			"RestateIngressURL":   "http://restate.aerial:8080",
+			"RestateAdminURL":     "http://restate.aerial:9070",
+			"RestateAdvertiseURL": "http://coven.default.svc.cluster.local:9080",
+		},
+	},
+	{
+		name:  "restate config loads from yaml without env",
+		yaml:  covenDarkBaseConfig + "restate_port: '9081'\nrestate_ingress_url: 'http://yaml.restate:8080'\nrestate_admin_url: 'http://yaml.restate:9070'\nrestate_advertise_url: 'http://yaml.coven:9080'\n",
+		dbArg: covenTestDSN,
+		want: map[string]string{
+			"RestatePort":         "9081",
+			"RestateIngressURL":   "http://yaml.restate:8080",
+			"RestateAdminURL":     "http://yaml.restate:9070",
+			"RestateAdvertiseURL": "http://yaml.coven:9080",
+		},
+	},
+	{
+		name:  "restate config loads from yaml and env overrides",
+		yaml:  covenDarkBaseConfig + "restate_port: '9081'\nrestate_ingress_url: 'http://yaml.restate:8080'\nrestate_admin_url: 'http://yaml.restate:9070'\nrestate_advertise_url: 'http://yaml.coven:9080'\n",
+		dbArg: covenTestDSN,
+		env: map[string]string{
+			"RESTATE_PORT":          "9082",
+			"RESTATE_INGRESS_URL":   "http://env.restate:8080",
+			"RESTATE_ADMIN_URL":     "http://env.restate:9070",
+			"RESTATE_ADVERTISE_URL": "http://env.coven:9080",
+		},
+		want: map[string]string{
+			"RestatePort":         "9082",
+			"RestateIngressURL":   "http://env.restate:8080",
+			"RestateAdminURL":     "http://env.restate:9070",
+			"RestateAdvertiseURL": "http://env.coven:9080",
 		},
 	},
 	{
@@ -532,6 +568,30 @@ func TestScopedThreadKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ScopedThreadKey(tc.stack, tc.threadID); got != tc.want {
 				t.Errorf("ScopedThreadKey(%q, %q) = %q, want %q", tc.stack, tc.threadID, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseScopedThreadKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		key        string
+		wantAgent  string
+		wantThread string
+	}{
+		{name: "standard scoped key", key: "agent/th-123", wantAgent: "agent", wantThread: "th-123"},
+		{name: "unscoped thread key", key: "th-456", wantAgent: "aerial", wantThread: "th-456"},
+		{name: "empty key", key: "", wantAgent: "aerial", wantThread: ""},
+		{name: "multi slash key", key: "aerial/dev/th-789", wantAgent: "aerial", wantThread: "dev/th-789"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotAgent, gotThread := ParseScopedThreadKey(tc.key)
+			if gotAgent != tc.wantAgent || gotThread != tc.wantThread {
+				t.Fatalf("ParseScopedThreadKey(%q) = (%q, %q), want (%q, %q)", tc.key, gotAgent, gotThread, tc.wantAgent, tc.wantThread)
 			}
 		})
 	}
