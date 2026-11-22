@@ -3,14 +3,15 @@ package pubsub
 import (
 	"context"
 	"errors"
-	"fmt"
-	"reflect"
+	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unsafe"
 
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 type mockJetStream struct {
@@ -18,90 +19,15 @@ type mockJetStream struct {
 
 	mu              sync.Mutex
 	publishErr      error
-	subscribeErr    error
 	streamInfoErr   error
 	addStreamErr    error
 	updateStreamErr error
 	consumerInfoErr error
-	addConsumerErr  error
 	existingStreams map[string]*nats.StreamInfo
 	// consumers holds server-side consumer state keyed by stream/name.
-	consumers map[string]*nats.ConsumerInfo
-	// racingConsumer is installed by AddConsumer just before it reports a lost
-	// creation race, modelling another pod creating the consumer first.
-	racingConsumer   *nats.ConsumerInfo
-	addedConsumers   []nats.ConsumerConfig
-	deletedConsumers []string
-	subscriptions    []recordedSub
-	publishedMsgs    []*nats.Msg
-	onPublish        func(msg *nats.Msg)
-}
-
-// recordedSub captures how the bus asked the library to subscribe.
-type recordedSub struct {
-	queue     string
-	bound     bool
-	stream    string
-	consumer  string
-	durable   string
-	manualAck bool
-}
-
-// decodeSubOpts applies nats.SubOpt values to a scratch nats.subOpts via
-// reflection so tests can assert the bind target without a live server. It is
-// coupled to nats.go internals, so any layout change surfaces as a descriptive
-// error from the mock instead of a reflection panic.
-func decodeSubOpts(queue string, opts []nats.SubOpt) (recordedSub, error) {
-	got := recordedSub{queue: queue}
-	var so reflect.Value
-	cfg := &nats.ConsumerConfig{}
-	field := func(name string, kind reflect.Kind) (reflect.Value, error) {
-		f := so.FieldByName(name)
-		if !f.IsValid() || f.Kind() != kind {
-			return reflect.Value{}, fmt.Errorf("decodeSubOpts: nats.go subOpts.%s missing or not %s; update the test decoder for this nats.go version", name, kind)
-		}
-		return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem(), nil
-	}
-	for _, opt := range opts {
-		fn := reflect.ValueOf(opt)
-		if fn.Kind() != reflect.Func {
-			continue // value options such as AckWait carry no bind target
-		}
-		ft := fn.Type()
-		if ft.NumIn() != 1 || ft.In(0).Kind() != reflect.Pointer || ft.In(0).Elem().Kind() != reflect.Struct {
-			return got, fmt.Errorf("decodeSubOpts: unexpected nats.SubOpt func type %s", ft)
-		}
-		if !so.IsValid() {
-			so = reflect.New(ft.In(0).Elem()).Elem()
-			cfgField, err := field("cfg", reflect.Pointer)
-			if err != nil {
-				return got, err
-			}
-			cfgField.Set(reflect.ValueOf(cfg))
-		}
-		fn.Call([]reflect.Value{so.Addr()})
-	}
-	if !so.IsValid() {
-		return got, nil
-	}
-	fields := []struct {
-		name string
-		kind reflect.Kind
-	}{{"bound", reflect.Bool}, {"stream", reflect.String}, {"consumer", reflect.String}, {"mack", reflect.Bool}}
-	vals := make(map[string]reflect.Value, len(fields))
-	for _, f := range fields {
-		v, err := field(f.name, f.kind)
-		if err != nil {
-			return got, err
-		}
-		vals[f.name] = v
-	}
-	got.bound = vals["bound"].Bool()
-	got.stream = vals["stream"].String()
-	got.consumer = vals["consumer"].String()
-	got.durable = cfg.Durable
-	got.manualAck = vals["mack"].Bool()
-	return got, nil
+	consumers     map[string]*nats.ConsumerInfo
+	publishedMsgs []*nats.Msg
+	onPublish     func(msg *nats.Msg)
 }
 
 func consumerKey(stream, name string) string { return stream + "/" + name }
@@ -117,68 +43,6 @@ func (m *mockJetStream) PublishMsg(msg *nats.Msg, opts ...nats.PubOpt) (*nats.Pu
 		m.onPublish(msg)
 	}
 	return &nats.PubAck{Stream: "TEST", Sequence: uint64(len(m.publishedMsgs))}, nil
-}
-
-func (m *mockJetStream) Subscribe(subj string, cb nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
-	return m.QueueSubscribe(subj, "", cb, opts...)
-}
-
-func (m *mockJetStream) QueueSubscribe(subj, queue string, cb nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.subscribeErr != nil {
-		return nil, m.subscribeErr
-	}
-	rec, err := decodeSubOpts(queue, opts)
-	if err != nil {
-		return nil, err
-	}
-	m.subscriptions = append(m.subscriptions, rec)
-	if cb != nil {
-		cb(&nats.Msg{Subject: subj, Data: []byte("test")})
-	}
-	return &nats.Subscription{}, nil
-}
-
-func (m *mockJetStream) StreamNameBySubject(subj string, opts ...nats.JSOpt) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for name, info := range m.existingStreams {
-		for _, pattern := range info.Config.Subjects {
-			if matchSubject(pattern, subj) {
-				return name, nil
-			}
-		}
-	}
-	return "", nats.ErrNoMatchingStream
-}
-
-func (m *mockJetStream) AddConsumer(stream string, cfg *nats.ConsumerConfig, opts ...nats.JSOpt) (*nats.ConsumerInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.consumers == nil {
-		m.consumers = make(map[string]*nats.ConsumerInfo)
-	}
-	if m.racingConsumer != nil {
-		m.consumers[consumerKey(stream, m.racingConsumer.Name)] = m.racingConsumer
-		m.racingConsumer = nil
-		return nil, nats.ErrConsumerNameAlreadyInUse
-	}
-	if m.addConsumerErr != nil {
-		return nil, m.addConsumerErr
-	}
-	m.addedConsumers = append(m.addedConsumers, *cfg)
-	info := &nats.ConsumerInfo{Stream: stream, Name: cfg.Durable, Config: *cfg}
-	m.consumers[consumerKey(stream, cfg.Durable)] = info
-	return info, nil
-}
-
-func (m *mockJetStream) DeleteConsumer(stream, consumer string, opts ...nats.JSOpt) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deletedConsumers = append(m.deletedConsumers, consumerKey(stream, consumer))
-	delete(m.consumers, consumerKey(stream, consumer))
-	return nil
 }
 
 func (m *mockJetStream) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
@@ -233,189 +97,727 @@ func (m *mockJetStream) ConsumerInfo(stream, consumer string, opts ...nats.JSOpt
 	return nil, nats.ErrConsumerNotFound
 }
 
+// brokerDeadline bounds every wait on broker state in these tests. Recovery
+// waits include up to two backoff steps (1s + 2s).
+const brokerDeadline = 30 * time.Second
+
+// startJetStreamServer starts an in-process JetStream server with its store in
+// t.TempDir() and returns a connection to it; both close on cleanup.
+func startJetStreamServer(t *testing.T) *nats.Conn {
+	t.Helper()
+	srv, err := server.NewServer(&server.Options{
+		Host:      "127.0.0.1",
+		Port:      server.RANDOM_PORT,
+		JetStream: true,
+		StoreDir:  t.TempDir(),
+		NoLog:     true,
+		NoSigs:    true,
+	})
+	if err != nil {
+		t.Fatalf("new nats server: %v", err)
+	}
+	srv.Start()
+	t.Cleanup(srv.Shutdown)
+	if !srv.ReadyForConnections(brokerDeadline) {
+		t.Fatal("nats server not ready")
+	}
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	return nc
+}
+
+// newServerBus returns a bus on a fresh embedded server with the core streams.
+func newServerBus(t *testing.T) *JetStreamBus {
+	t.Helper()
+	bus, err := NewJetStreamBusFromConn(startJetStreamServer(t))
+	if err != nil {
+		t.Fatalf("NewJetStreamBusFromConn: %v", err)
+	}
+	// Detect a consumer that vanished under a busy handler within 1s.
+	bus.pullHeartbeat = 500 * time.Millisecond
+	if err := bus.EnsureCoreStreams(t.Context()); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+	return bus
+}
+
+// awaitCond polls cond on a ticker until it holds or brokerDeadline passes.
+func awaitCond(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.NewTimer(brokerDeadline)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for !cond() {
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %s", what)
+		case <-ticker.C:
+		}
+	}
+}
+
+// awaitConsumer polls ConsumerInfo until cond holds and returns that info.
+func awaitConsumer(t *testing.T, bus *JetStreamBus, stream, durable string, cond func(*nats.ConsumerInfo) bool) *nats.ConsumerInfo {
+	t.Helper()
+	var last *nats.ConsumerInfo
+	awaitCond(t, "consumer "+stream+"/"+durable, func() bool {
+		info, err := bus.js.ConsumerInfo(stream, durable)
+		if err != nil {
+			return false
+		}
+		last = info
+		return cond(info)
+	})
+	return last
+}
+
+// handledMsg is what a test handler saw for one delivery.
+type handledMsg struct {
+	data      string
+	delivered uint64
+}
+
+// recordingHandler sends every delivery to the returned channel. A delivery
+// whose data equals blockOn waits for release first.
+func recordingHandler(blockOn string, release <-chan struct{}) (Handler, <-chan handledMsg) {
+	ch := make(chan handledMsg, 32)
+	return func(ctx context.Context, msg Message) error {
+		if string(msg.Data()) == blockOn {
+			<-release
+		}
+		ch <- handledMsg{string(msg.Data()), msg.NumDelivered()}
+		return nil
+	}, ch
+}
+
+// receive returns the next n deliveries or fails after brokerDeadline.
+func receive(t *testing.T, ch <-chan handledMsg, n int) []handledMsg {
+	t.Helper()
+	deadline := time.NewTimer(brokerDeadline)
+	defer deadline.Stop()
+	got := make([]handledMsg, 0, n)
+	for len(got) < n {
+		select {
+		case m := <-ch:
+			got = append(got, m)
+		case <-deadline.C:
+			t.Fatalf("received %v, want %d deliveries", got, n)
+		}
+	}
+	return got
+}
+
+// assertNoMore fails if another delivery is already waiting.
+func assertNoMore(t *testing.T, ch <-chan handledMsg) {
+	t.Helper()
+	select {
+	case m := <-ch:
+		t.Errorf("unexpected extra delivery %+v", m)
+	default:
+	}
+}
+
+func publishAll(t *testing.T, bus *JetStreamBus, subject string, data ...string) {
+	t.Helper()
+	for _, d := range data {
+		if err := bus.Publish(t.Context(), subject, subject+"/"+d, d); err != nil {
+			t.Fatalf("publish %s: %v", d, err)
+		}
+	}
+}
+
+func subscribe(t *testing.T, bus *JetStreamBus, subject, durable string, handler Handler) {
+	t.Helper()
+	sub, err := bus.Subscribe(t.Context(), subject, durable, handler)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+}
+
+func TestJetStreamBus_NoClientBuffering(t *testing.T) {
+	t.Parallel()
+	bus := newServerBus(t)
+	release := make(chan struct{})
+	handler, handled := recordingHandler("m1", release)
+	sub, err := bus.ConsumeQueue(t.Context(), "aerial.jobs.buffer", "buffer-workers", handler)
+	if err != nil {
+		t.Fatalf("ConsumeQueue: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	publishAll(t, bus, "aerial.jobs.buffer", "m1", "m2", "m3")
+
+	info := awaitConsumer(t, bus, StreamAerialJobs, "buffer-workers", func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending >= 1 })
+	if info.NumAckPending != 1 || info.NumPending != 2 || info.NumWaiting != 0 {
+		t.Errorf("while busy: ack pending %d, pending %d, waiting %d; want 1, 2, 0", info.NumAckPending, info.NumPending, info.NumWaiting)
+	}
+	close(release)
+	got := receive(t, handled, 3)
+	awaitConsumer(t, bus, StreamAerialJobs, "buffer-workers", func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending == 0 && ci.NumPending == 0 })
+	assertNoMore(t, handled)
+	want := []handledMsg{{"m1", 1}, {"m2", 1}, {"m3", 1}}
+	if !equalHandled(got, want) {
+		t.Errorf("handled %v, want %v", got, want)
+	}
+}
+
+func equalHandled(got, want []handledMsg) bool {
+	count := func(ms []handledMsg) map[handledMsg]int {
+		c := map[handledMsg]int{}
+		for _, m := range ms {
+			c[m]++
+		}
+		return c
+	}
+	return maps.Equal(count(got), count(want))
+}
+
 type busSubscribeFunc func(b *JetStreamBus, ctx context.Context, subject, name string, handler Handler) (Subscription, error)
 
 func TestJetStreamBus_SubscribeAndConsumeQueueBindDurables(t *testing.T) {
 	t.Parallel()
 
+	serverBus := newServerBus(t)
+	bareBus := newJetStreamBusWithContext(nil, &mockJetStream{})
 	tests := []struct {
-		name         string
-		subscribe    busSubscribeFunc
-		subject      string
-		durable      string
-		subscribeErr error
-		wantErr      bool
-		wantSubs     []recordedSub
-		wantAdded    int
+		name       string
+		bus        *JetStreamBus
+		subscribe  busSubscribeFunc
+		subject    string
+		durable    string
+		wantErr    string
+		wantStream string
 	}{
-		{
-			"durable subscribe binds deliver group", (*JetStreamBus).Subscribe, "aerial.events.haro", "haro-events", nil, false,
-			[]recordedSub{{queue: "haro-events", bound: true, stream: "AERIAL_EVENTS", consumer: "haro-events", manualAck: true}},
-			1,
-		},
-		{
-			"consume queue binds deliver group", (*JetStreamBus).ConsumeQueue, "aerial.jobs.vanadis.chunk", "vanadis-chunk", nil, false,
-			[]recordedSub{{queue: "vanadis-chunk", bound: true, stream: "AERIAL_JOBS", consumer: "vanadis-chunk", manualAck: true}},
-			1,
-		},
-		{
-			"empty durable subscribe stays ephemeral", (*JetStreamBus).Subscribe, "aerial.events.>", "", nil, false,
-			[]recordedSub{{manualAck: true}},
-			0,
-		},
-		{"empty queue rejected", (*JetStreamBus).ConsumeQueue, "aerial.jobs.>", "", nil, true, nil, 0},
-		{"unresolvable stream fails before subscribing", (*JetStreamBus).Subscribe, "unknown.subject", "dur", nil, true, nil, 0},
-		{"durable subscribe error", (*JetStreamBus).Subscribe, "aerial.events.>", "dur", errors.New("sub failed"), true, nil, 1},
-		{"queue subscribe error", (*JetStreamBus).ConsumeQueue, "aerial.jobs.>", "q", errors.New("sub failed"), true, nil, 1},
-		{"ephemeral subscribe error", (*JetStreamBus).Subscribe, "aerial.events.>", "", errors.New("sub failed"), true, nil, 0},
+		{"durable subscribe creates pull consumer", serverBus, (*JetStreamBus).Subscribe, "aerial.events.haro", "haro-events", "", StreamAerialEvents},
+		{"consume queue creates pull consumer", serverBus, (*JetStreamBus).ConsumeQueue, "aerial.jobs.vanadis.chunk", "vanadis-chunk", "", StreamAerialJobs},
+		{"empty durable rejected", serverBus, (*JetStreamBus).Subscribe, "aerial.events.>", "", "durable name required", ""},
+		{"empty queue rejected", serverBus, (*JetStreamBus).ConsumeQueue, "aerial.jobs.>", "", "queue name is required", ""},
+		{"unresolvable stream fails", serverBus, (*JetStreamBus).Subscribe, "unknown.subject", "dur", "resolve stream for unknown.subject", ""},
+		{"bus without a connection fails", bareBus, (*JetStreamBus).Subscribe, "aerial.events.haro", "dur", "jetstream handle is nil", ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mjs := &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)}
-			bus := newJetStreamBusWithContext(nil, mjs)
-			if err := bus.EnsureCoreStreams(context.Background()); err != nil {
-				t.Fatalf("EnsureCoreStreams: %v", err)
-			}
-			mjs.subscribeErr = tc.subscribeErr
-
-			sub, err := tc.subscribe(bus, context.Background(), tc.subject, tc.durable, func(ctx context.Context, msg Message) error { return nil })
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
+			sub, err := tc.subscribe(tc.bus, t.Context(), tc.subject, tc.durable, func(context.Context, Message) error { return nil })
 			if sub != nil {
-				_ = sub.Unsubscribe()
+				t.Cleanup(func() { _ = sub.Unsubscribe() })
 			}
-			if !reflect.DeepEqual(mjs.subscriptions, tc.wantSubs) {
-				t.Errorf("subscriptions = %+v, want %+v", mjs.subscriptions, tc.wantSubs)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
 			}
-			if len(mjs.addedConsumers) != tc.wantAdded {
-				t.Errorf("added consumers = %d, want %d", len(mjs.addedConsumers), tc.wantAdded)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
 			}
-			if len(mjs.deletedConsumers) != 0 {
-				t.Errorf("deleted consumers = %v, want none", mjs.deletedConsumers)
+			info, err := tc.bus.js.ConsumerInfo(tc.wantStream, tc.durable)
+			if err != nil {
+				t.Fatalf("ConsumerInfo: %v", err)
+			}
+			cfg := info.Config
+			if cfg.DeliverSubject != "" || cfg.DeliverGroup != "" || cfg.FilterSubject != tc.subject ||
+				cfg.AckPolicy != nats.AckExplicitPolicy || cfg.AckWait != 30*time.Second || cfg.DeliverPolicy != nats.DeliverAllPolicy {
+				t.Errorf("consumer config = %+v, want pull filtering %q with explicit 30s acks delivering all", cfg, tc.subject)
 			}
 		})
 	}
+}
+
+// faultyJetStream hands out faultyStreams so tests can stage what other pods
+// do between the bus's own consumer API calls on a real server.
+type faultyJetStream struct {
+	jetstream.JetStream
+
+	racer     *jetstream.ConsumerConfig
+	deleteErr error
+}
+
+func (f faultyJetStream) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
+	s, err := f.JetStream.Stream(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return &faultyStream{Stream: s, racer: f.racer, deleteErr: f.deleteErr}, nil
+}
+
+// faultyStream creates racer just before the first CreateConsumer, as a pod
+// winning the creation race would, and fails DeleteConsumer with deleteErr.
+type faultyStream struct {
+	jetstream.Stream
+
+	racer     *jetstream.ConsumerConfig
+	deleteErr error
+}
+
+func (f *faultyStream) CreateConsumer(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+	if f.racer != nil {
+		racer := *f.racer
+		f.racer = nil
+		if _, err := f.Stream.CreateConsumer(ctx, racer); err != nil {
+			return nil, err
+		}
+	}
+	return f.Stream.CreateConsumer(ctx, cfg)
+}
+
+func (f *faultyStream) DeleteConsumer(ctx context.Context, name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	return f.Stream.DeleteConsumer(ctx, name)
 }
 
 func TestJetStreamBus_EnsureDurableConsumer(t *testing.T) {
 	t.Parallel()
 
 	const subj = "aerial.events.haro"
-	pushInfo := func(filter, group string, ackFloor uint64) *nats.ConsumerInfo {
-		return &nats.ConsumerInfo{
-			Stream:   "AERIAL_EVENTS",
-			Name:     "haro-events",
-			Config:   nats.ConsumerConfig{Durable: "haro-events", FilterSubject: filter, DeliverGroup: group, DeliverSubject: "_INBOX.legacy"},
-			AckFloor: nats.SequenceInfo{Stream: ackFloor},
-		}
-	}
-	fresh := nats.ConsumerConfig{
-		Durable:        "haro-events",
-		FilterSubject:  "aerial.events.haro",
-		AckPolicy:      nats.AckExplicitPolicy,
-		AckWait:        30 * time.Second,
-		DeliverPolicy:  nats.DeliverAllPolicy,
-		DeliverGroup:   "haro-events",
-		DeliverSubject: "_DELIVER.AERIAL_EVENTS.haro-events",
-	}
-	resumeAt := func(seq uint64) nats.ConsumerConfig {
-		cfg := fresh
-		cfg.DeliverPolicy = nats.DeliverByStartSequencePolicy
-		cfg.OptStartSeq = seq
-		return cfg
-	}
-
 	tests := []struct {
-		name            string
-		subject         string
-		existing        *nats.ConsumerInfo
-		racing          *nats.ConsumerInfo
-		consumerInfoErr error
-		addConsumerErr  error
-		wantStream      string
-		wantErr         bool
-		wantAdded       []nats.ConsumerConfig
-		wantDeleted     []string
+		name       string
+		subject    string
+		durable    string
+		existing   *nats.ConsumerConfig
+		racer      *jetstream.ConsumerConfig
+		deleteErr  error
+		wantErr    string
+		wantFilter string
+		wantPolicy nats.DeliverPolicy
+		wantStart  uint64
 	}{
+		{name: "missing consumer created delivering all", subject: subj, durable: "haro-events", wantFilter: subj, wantPolicy: nats.DeliverAllPolicy},
 		{
-			"missing consumer created with deterministic deliver subject", subj, nil, nil, nil, nil, "AERIAL_EVENTS", false,
-			[]nats.ConsumerConfig{fresh},
-			nil,
+			name: "compatible pull consumer bound unchanged", subject: subj, durable: "haro-events",
+			existing:   &nats.ConsumerConfig{Durable: "haro-events", FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, DeliverPolicy: nats.DeliverByStartSequencePolicy, OptStartSeq: 3},
+			wantFilter: subj, wantPolicy: nats.DeliverByStartSequencePolicy, wantStart: 3,
 		},
 		{
-			"compatible consumer bound unchanged", subj, pushInfo(subj, "haro-events", 41), nil, nil, nil, "AERIAL_EVENTS", false,
-			nil, nil,
+			name: "push consumer with deliver group recreated as pull after ack floor", subject: subj, durable: "haro-events",
+			existing:   &nats.ConsumerConfig{Durable: "haro-events", FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, DeliverSubject: "_DELIVER.AERIAL_EVENTS.haro-events", DeliverGroup: "haro-events", DeliverPolicy: nats.DeliverByStartSequencePolicy, OptStartSeq: 4},
+			wantFilter: subj, wantPolicy: nats.DeliverByStartSequencePolicy, wantStart: 4,
 		},
 		{
-			"legacy consumer without group recreated after ack floor", subj, pushInfo(subj, "", 41), nil, nil, nil, "AERIAL_EVENTS", false,
-			[]nats.ConsumerConfig{resumeAt(42)},
-			[]string{"AERIAL_EVENTS/haro-events"},
+			name: "legacy push consumer without group recreated as pull after ack floor", subject: subj, durable: "haro-events",
+			existing:   &nats.ConsumerConfig{Durable: "haro-events", FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, DeliverSubject: "_INBOX.legacy", DeliverPolicy: nats.DeliverByStartSequencePolicy, OptStartSeq: 2},
+			wantFilter: subj, wantPolicy: nats.DeliverByStartSequencePolicy, wantStart: 2,
 		},
 		{
-			"different group recreated", subj, pushInfo(subj, "other", 0), nil, nil, nil, "AERIAL_EVENTS", false,
-			[]nats.ConsumerConfig{resumeAt(1)},
-			[]string{"AERIAL_EVENTS/haro-events"},
+			name: "pull consumer with another filter recreated after ack floor", subject: subj, durable: "haro-events",
+			existing:   &nats.ConsumerConfig{Durable: "haro-events", FilterSubject: "aerial.events.other", AckPolicy: nats.AckExplicitPolicy, DeliverPolicy: nats.DeliverByStartSequencePolicy, OptStartSeq: 5},
+			wantFilter: subj, wantPolicy: nats.DeliverByStartSequencePolicy, wantStart: 5,
 		},
 		{
-			"filter mismatch recreated", subj, pushInfo("aerial.events.other", "haro-events", 9), nil, nil, nil, "AERIAL_EVENTS", false,
-			[]nats.ConsumerConfig{resumeAt(10)},
-			[]string{"AERIAL_EVENTS/haro-events"},
+			name: "create race with compatible winner binds the winner", subject: subj, durable: "haro-events",
+			racer:      &jetstream.ConsumerConfig{Durable: "haro-events", FilterSubject: subj, AckPolicy: jetstream.AckExplicitPolicy, DeliverPolicy: jetstream.DeliverByStartSequencePolicy, OptStartSeq: 2},
+			wantFilter: subj, wantPolicy: nats.DeliverByStartSequencePolicy, wantStart: 2,
 		},
 		{
-			"create race with compatible winner succeeds", subj, nil, pushInfo(subj, "haro-events", 0), nil, nil, "AERIAL_EVENTS", false,
-			nil, nil,
+			name: "create race with incompatible winner fails and leaves it", subject: subj, durable: "haro-events",
+			racer:      &jetstream.ConsumerConfig{Durable: "haro-events", FilterSubject: "aerial.events.other", AckPolicy: jetstream.AckExplicitPolicy},
+			wantErr:    "concurrently created with an incompatible config",
+			wantFilter: "aerial.events.other", wantPolicy: nats.DeliverAllPolicy,
 		},
 		{
-			"create race with incompatible winner fails", subj, nil, pushInfo(subj, "", 0), nil, nil, "", true,
-			nil, nil,
+			name: "failed delete of an incompatible consumer leaves it", subject: subj, durable: "haro-events",
+			existing:   &nats.ConsumerConfig{Durable: "haro-events", FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, DeliverSubject: "_INBOX.legacy"},
+			deleteErr:  errors.New("delete refused"),
+			wantErr:    "delete incompatible consumer AERIAL_EVENTS/haro-events: delete refused",
+			wantFilter: subj, wantPolicy: nats.DeliverAllPolicy,
 		},
+		{name: "stream lookup failure", subject: "unknown.subject", durable: "haro-events", wantErr: "resolve stream for unknown.subject"},
+		{name: "invalid durable name fails the consumer read", subject: subj, durable: "bad.name", wantErr: "consumer info AERIAL_EVENTS/bad.name"},
 		{
-			"stream lookup failure", "unknown.subject", nil, nil, nil, nil, "", true,
-			nil, nil,
-		},
-		{
-			"consumer info failure", subj, nil, nil, errors.New("timeout"), nil, "", true,
-			nil, nil,
-		},
-		{
-			"add consumer failure", subj, nil, nil, nil, errors.New("insufficient resources"), "", true,
-			nil, nil,
+			name: "work queue overlap fails creation", subject: "aerial.jobs.overlap", durable: "overlap-workers",
+			existing: &nats.ConsumerConfig{Durable: "other-workers", FilterSubject: "aerial.jobs.>", AckPolicy: nats.AckExplicitPolicy},
+			wantErr:  "add consumer AERIAL_JOBS/overlap-workers",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mjs := &mockJetStream{
-				existingStreams: map[string]*nats.StreamInfo{
-					"AERIAL_EVENTS": {Config: nats.StreamConfig{Name: "AERIAL_EVENTS", Subjects: []string{"aerial.events.>"}}},
-				},
-				consumers:       map[string]*nats.ConsumerInfo{},
-				racingConsumer:  tc.racing,
-				consumerInfoErr: tc.consumerInfoErr,
-				addConsumerErr:  tc.addConsumerErr,
-			}
-			if tc.existing != nil {
-				mjs.consumers["AERIAL_EVENTS/haro-events"] = tc.existing
-			}
-			bus := newJetStreamBusWithContext(nil, mjs)
+			bus := newServerBus(t)
+			publishAll(t, bus, subj, "a", "b", "c", "d", "e")
+			seedConsumer(t, bus, tc.existing)
+			bus.jet = faultyJetStream{JetStream: bus.jet, racer: tc.racer, deleteErr: tc.deleteErr}
 
-			stream, err := bus.ensureDurableConsumer(context.Background(), tc.subject, "haro-events")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			stream, cons, err := bus.ensureDurableConsumer(t.Context(), tc.subject, tc.durable)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				if stream != nil || cons != nil {
+					t.Errorf("stream, consumer = %v, %v on error, want nil", stream, cons)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			} else if got := cons.CachedInfo().Stream; got != StreamAerialEvents {
+				t.Errorf("consumer stream = %q, want %q", got, StreamAerialEvents)
 			}
-			if stream != tc.wantStream {
-				t.Errorf("stream = %q, want %q", stream, tc.wantStream)
+			if tc.wantFilter == "" {
+				return
 			}
-			if !reflect.DeepEqual(mjs.addedConsumers, tc.wantAdded) {
-				t.Errorf("added = %+v, want %+v", mjs.addedConsumers, tc.wantAdded)
+			wantDeliver := ""
+			if tc.existing != nil && tc.deleteErr != nil {
+				wantDeliver = tc.existing.DeliverSubject
 			}
-			if !reflect.DeepEqual(mjs.deletedConsumers, tc.wantDeleted) {
-				t.Errorf("deleted = %v, want %v", mjs.deletedConsumers, tc.wantDeleted)
+			assertConsumerConfig(t, bus, tc.durable, nats.ConsumerConfig{
+				DeliverSubject: wantDeliver, FilterSubject: tc.wantFilter, DeliverPolicy: tc.wantPolicy, OptStartSeq: tc.wantStart,
+			})
+		})
+	}
+}
+
+// seedConsumer creates cfg on the stream its filter belongs to; nil is a no-op.
+func seedConsumer(t *testing.T, bus *JetStreamBus, cfg *nats.ConsumerConfig) {
+	t.Helper()
+	if cfg == nil {
+		return
+	}
+	stream, err := bus.js.StreamNameBySubject(cfg.FilterSubject)
+	if err != nil {
+		t.Fatalf("seed stream: %v", err)
+	}
+	if _, err := bus.js.AddConsumer(stream, cfg); err != nil {
+		t.Fatalf("seed consumer: %v", err)
+	}
+}
+
+// assertConsumerConfig checks the deliver subject, filter, deliver policy and
+// start sequence of durable on AERIAL_EVENTS against want.
+func assertConsumerConfig(t *testing.T, bus *JetStreamBus, durable string, want nats.ConsumerConfig) {
+	t.Helper()
+	info, err := bus.js.ConsumerInfo(StreamAerialEvents, durable)
+	if err != nil {
+		t.Fatalf("ConsumerInfo: %v", err)
+	}
+	got := info.Config
+	if got.DeliverSubject != want.DeliverSubject || got.FilterSubject != want.FilterSubject || got.DeliverPolicy != want.DeliverPolicy || got.OptStartSeq != want.OptStartSeq {
+		t.Errorf("consumer = deliver %q filter %q policy %v start %d; want deliver %q filter %q policy %v start %d",
+			got.DeliverSubject, got.FilterSubject, got.DeliverPolicy, got.OptStartSeq, want.DeliverSubject, want.FilterSubject, want.DeliverPolicy, want.OptStartSeq)
+	}
+}
+
+func TestJetStreamBus_PushToPullMigration(t *testing.T) {
+	t.Parallel()
+	const subj, durable = "aerial.events.migrate", "migrate"
+	bus := newServerBus(t)
+	publishAll(t, bus, subj, "m1", "m2", "m3", "m4", "m5")
+
+	// An earlier release's push consumer acked m1 and m2 and left m3 unacked.
+	if _, err := bus.js.AddConsumer(StreamAerialEvents, &nats.ConsumerConfig{
+		Durable: durable, FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, AckWait: 30 * time.Second,
+		DeliverPolicy: nats.DeliverAllPolicy, DeliverSubject: "_DELIVER.AERIAL_EVENTS.migrate", DeliverGroup: durable, MaxAckPending: 3,
+	}); err != nil {
+		t.Fatalf("add push consumer: %v", err)
+	}
+	legacy, err := bus.nc.QueueSubscribeSync("_DELIVER.AERIAL_EVENTS.migrate", durable)
+	if err != nil {
+		t.Fatalf("legacy subscribe: %v", err)
+	}
+	for i := range 3 {
+		m, err := legacy.NextMsg(brokerDeadline)
+		if err != nil {
+			t.Fatalf("legacy delivery %d: %v", i, err)
+		}
+		if i < 2 {
+			if err := m.AckSync(); err != nil {
+				t.Fatalf("legacy ack: %v", err)
+			}
+		}
+	}
+	if err := legacy.Unsubscribe(); err != nil {
+		t.Fatalf("legacy unsubscribe: %v", err)
+	}
+	awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 2 })
+
+	handler, handled := recordingHandler("", nil)
+	subscribe(t, bus, subj, durable, handler)
+	got := receive(t, handled, 3)
+	info := awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool {
+		return ci.NumAckPending == 0 && ci.NumPending == 0 && ci.AckFloor.Stream == 5
+	})
+	assertNoMore(t, handled)
+	if want := []handledMsg{{"m3", 1}, {"m4", 1}, {"m5", 1}}; !equalHandled(got, want) {
+		t.Errorf("handled %v, want %v", got, want)
+	}
+	if info.Config.DeliverSubject != "" || info.Config.OptStartSeq != 3 {
+		t.Errorf("migrated consumer deliver subject %q start %d, want pull starting at 3", info.Config.DeliverSubject, info.Config.OptStartSeq)
+	}
+}
+
+func TestJetStreamBus_RecoverConsumerDeletedWhilePullWaits(t *testing.T) {
+	t.Parallel()
+	const subj, durable = "aerial.events.recover.wait", "recover-wait"
+	bus := newServerBus(t)
+	handler, handled := recordingHandler("", nil)
+	subscribe(t, bus, subj, durable, handler)
+	publishAll(t, bus, subj, "m1")
+	if got := receive(t, handled, 1); got[0] != (handledMsg{"m1", 1}) {
+		t.Fatalf("first delivery %+v, want m1", got[0])
+	}
+	awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 1 && ci.NumWaiting == 1 })
+
+	if err := bus.js.DeleteConsumer(StreamAerialEvents, durable); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	publishAll(t, bus, subj, "m2")
+	if got := receive(t, handled, 1); got[0] != (handledMsg{"m2", 1}) {
+		t.Errorf("after recovery got %+v, want m2 delivered once", got[0])
+	}
+	info := awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 2 })
+	assertNoMore(t, handled)
+	if info.Config.DeliverSubject != "" || info.Config.OptStartSeq != 2 {
+		t.Errorf("recreated consumer deliver subject %q start %d, want pull starting at 2", info.Config.DeliverSubject, info.Config.OptStartSeq)
+	}
+	publishAll(t, bus, subj, "m3")
+	if got := receive(t, handled, 1); got[0] != (handledMsg{"m3", 1}) {
+		t.Errorf("after resume got %+v, want m3", got[0])
+	}
+}
+
+func TestJetStreamBus_RecoverConsumerDeletedWhileHandlerBusy(t *testing.T) {
+	t.Parallel()
+	const subj, durable = "aerial.events.recover.busy", "recover-busy"
+	bus := newServerBus(t)
+	release := make(chan struct{})
+	handler, handled := recordingHandler("m1", release)
+	subscribe(t, bus, subj, durable, handler)
+	publishAll(t, bus, subj, "m1")
+	awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending == 1 })
+
+	if err := bus.js.DeleteConsumer(StreamAerialEvents, durable); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	publishAll(t, bus, subj, "m2")
+	close(release)
+	got := receive(t, handled, 2)
+	if want := []handledMsg{{"m1", 1}, {"m2", 1}}; !equalHandled(got, want) {
+		t.Errorf("handled %v, want %v", got, want)
+	}
+	info := awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 2 })
+	assertNoMore(t, handled)
+	if info.Config.DeliverSubject != "" || info.Config.OptStartSeq != 2 {
+		t.Errorf("recreated consumer deliver subject %q start %d, want pull starting at 2", info.Config.DeliverSubject, info.Config.OptStartSeq)
+	}
+}
+
+func TestJetStreamBus_RecoverLeavesPushConsumerAlone(t *testing.T) {
+	t.Parallel()
+	const subj, durable = "aerial.events.recover.push", "recover-push"
+	bus := newServerBus(t)
+	handler, handled := recordingHandler("", nil)
+	subscribe(t, bus, subj, durable, handler)
+	publishAll(t, bus, subj, "m1")
+	receive(t, handled, 1)
+	awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 1 && ci.NumWaiting == 1 })
+
+	// A reverted pod replaces the durable with its push consumer.
+	if err := bus.js.DeleteConsumer(StreamAerialEvents, durable); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	push, err := bus.js.AddConsumer(StreamAerialEvents, &nats.ConsumerConfig{
+		Durable: durable, FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy,
+		DeliverSubject: "_DELIVER.AERIAL_EVENTS.recover-push", DeliverGroup: durable,
+	})
+	if err != nil {
+		t.Fatalf("add push consumer: %v", err)
+	}
+	awaitCond(t, "Healthy() to report the blocked durable", func() bool { return bus.Healthy() != nil })
+	if healthErr := bus.Healthy(); !strings.Contains(healthErr.Error(), durable) {
+		t.Errorf("Healthy() = %v, want it to name %s", healthErr, durable)
+	}
+	info, err := bus.js.ConsumerInfo(StreamAerialEvents, durable)
+	if err != nil || info.Config.DeliverSubject == "" || !info.Created.Equal(push.Created) {
+		t.Fatalf("push consumer after recovery probe = %+v, %v; want the untouched push consumer", info, err)
+	}
+
+	// Once the push consumer goes away the subscription converges back.
+	if err := bus.js.DeleteConsumer(StreamAerialEvents, durable); err != nil {
+		t.Fatalf("delete push consumer: %v", err)
+	}
+	publishAll(t, bus, subj, "m2")
+	if got := receive(t, handled, 1); got[0] != (handledMsg{"m2", 1}) {
+		t.Errorf("after convergence got %+v, want m2", got[0])
+	}
+	awaitCond(t, "Healthy() to recover", func() bool { return bus.Healthy() == nil })
+	assertNoMore(t, handled)
+}
+
+func TestJetStreamBus_SettlementAgainstServer(t *testing.T) {
+	t.Parallel()
+	const subj = "aerial.jobs.settle"
+	bus := newServerBus(t)
+	type delivery struct {
+		data      string
+		delivered uint64
+		snoozeSeq string
+	}
+	handled := make(chan delivery, 32)
+	handler := func(ctx context.Context, msg Message) error {
+		data, snoozeSeq := string(msg.Data()), msg.Header().Get(HeaderSnoozeSeq)
+		handled <- delivery{data, msg.NumDelivered(), snoozeSeq}
+		switch {
+		case data == "ack":
+			return msg.Ack()
+		case data == "nak" && msg.NumDelivered() == 1:
+			return msg.NakWithDelay(10 * time.Millisecond)
+		case data == "term":
+			return msg.Term()
+		case data == "progress":
+			if err := msg.InProgress(); err != nil {
+				return err
+			}
+			return msg.Ack()
+		case data == "snooze" && snoozeSeq == "":
+			return msg.Snooze(0)
+		}
+		return nil
+	}
+	sub, err := bus.ConsumeQueue(t.Context(), subj, "settle-workers", handler)
+	if err != nil {
+		t.Fatalf("ConsumeQueue: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	publishAll(t, bus, subj, "ack", "nak", "term", "progress", "snooze")
+
+	deadline := time.NewTimer(brokerDeadline)
+	defer deadline.Stop()
+	got := map[delivery]int{}
+	for range 7 {
+		select {
+		case d := <-handled:
+			got[d]++
+		case <-deadline.C:
+			t.Fatalf("handled %v, want 7 deliveries", got)
+		}
+	}
+	awaitConsumer(t, bus, StreamAerialJobs, "settle-workers", func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending == 0 && ci.NumPending == 0 })
+	awaitCond(t, "work queue to drain", func() bool {
+		si, err := bus.js.StreamInfo(StreamAerialJobs)
+		return err == nil && si.State.Msgs == 0
+	})
+	select {
+	case d := <-handled:
+		t.Errorf("unexpected extra delivery %+v", d)
+	default:
+	}
+	want := map[delivery]int{
+		{"ack", 1, ""}: 1, {"nak", 1, ""}: 1, {"nak", 2, ""}: 1, {"term", 1, ""}: 1,
+		{"progress", 1, ""}: 1, {"snooze", 1, ""}: 1, {"snooze", 1, "1"}: 1,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("deliveries %v, want %v", got, want)
+	}
+}
+
+func TestResumeCursor(t *testing.T) {
+	t.Parallel()
+
+	type settlement struct {
+		seq   uint64
+		naked bool
+	}
+	tests := []struct {
+		name      string
+		initial   uint64
+		settles   []settlement
+		wantStart uint64
+	}{
+		{"nothing settled resumes at ack floor + 1", 7, nil, 7},
+		{"acks advance past the highest sequence", 1, []settlement{{1, false}, {2, false}, {3, false}}, 4},
+		{"out of order acks keep the highest", 1, []settlement{{3, false}, {2, false}}, 4},
+		{"a nak pins the start at its sequence", 1, []settlement{{1, false}, {2, true}, {3, false}}, 2},
+		{"a naked message settled later releases the pin", 1, []settlement{{2, true}, {3, false}, {2, false}}, 4},
+		{"the lowest of several naks wins", 1, []settlement{{5, true}, {3, true}, {6, false}}, 3},
+		{"settlements below the initial cursor do not rewind it", 10, []settlement{{4, false}}, 10},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newResumeCursor(tc.initial)
+			for _, st := range tc.settles {
+				c.settle(st.seq, st.naked)
+			}
+			if got := c.start(); got != tc.wantStart {
+				t.Errorf("start() = %d, want %d", got, tc.wantStart)
 			}
 		})
+	}
+}
+
+func TestIsConsumerExists(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"consumer exists", jetstream.ErrConsumerExists, true},
+		{"name already in use", jetstream.ErrConsumerNameAlreadyInUse, true},
+		{"already exists api code", &jetstream.APIError{ErrorCode: jetstream.JSErrCodeConsumerAlreadyExists}, true},
+		{"name exists api code", &jetstream.APIError{ErrorCode: jetstream.JSErrCodeConsumerNameExists}, true},
+		{"not found", jetstream.ErrConsumerNotFound, false},
+		{"other error", errors.New("boom"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isConsumerExists(tc.err); got != tc.want {
+				t.Errorf("isConsumerExists(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestJetStreamBus_UnsubscribeStopsBlockedRecovery(t *testing.T) {
+	t.Parallel()
+	const subj, durable = "aerial.events.recover.stop", "recover-stop"
+	bus := newServerBus(t)
+	sub, subErr := bus.Subscribe(t.Context(), subj, durable, func(context.Context, Message) error { return nil })
+	if subErr != nil {
+		t.Fatalf("Subscribe: %v", subErr)
+	}
+	awaitConsumer(t, bus, StreamAerialEvents, durable, func(ci *nats.ConsumerInfo) bool { return ci.NumWaiting == 1 })
+	if err := bus.js.DeleteConsumer(StreamAerialEvents, durable); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	if _, err := bus.js.AddConsumer(StreamAerialEvents, &nats.ConsumerConfig{
+		Durable: durable, FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, DeliverSubject: "_DELIVER.AERIAL_EVENTS.recover-stop",
+	}); err != nil {
+		t.Fatalf("add push consumer: %v", err)
+	}
+	awaitCond(t, "Healthy() to report the blocked durable", func() bool { return bus.Healthy() != nil })
+
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("second Unsubscribe: %v", err)
+	}
+	js, ok := sub.(*jsSubscription)
+	if !ok {
+		t.Fatalf("subscription type %T, want *jsSubscription", sub)
+	}
+	done := js.done
+	awaitCond(t, "the recovery loop to exit", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	if err := bus.Healthy(); err != nil {
+		t.Errorf("Healthy() after Unsubscribe = %v, want nil", err)
+	}
+	info, err := bus.js.ConsumerInfo(StreamAerialEvents, durable)
+	if err != nil || info.Config.DeliverSubject == "" {
+		t.Errorf("push consumer after Unsubscribe = %+v, %v; want it untouched", info, err)
 	}
 }
