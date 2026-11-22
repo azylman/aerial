@@ -296,9 +296,29 @@ func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
 	}
 }
 
-func (te *turnExecution) runPreTurnHook() bool {
+// preTurnAction is the outcome of the pre_turn hook decision.
+type preTurnAction int
+
+const (
+	preTurnProceed preTurnAction = iota
+	preTurnAbort
+	preTurnReschedule
+)
+
+// preTurnDecision is what the pre_turn hook asked for. evaluatePreTurnHook only calls the hook;
+// callers apply the decision (legacy: abortBurst / rescheduleBurst; TurnRunner prep: journaled rows).
+type preTurnDecision struct {
+	action          preTurnAction
+	abortReason     string
+	delaySeconds    int
+	injectedContext string
+	metadata        map[string]any
+}
+
+// evaluatePreTurnHook calls the pre_turn hook and returns its decision without touching rows or te.
+func (te *turnExecution) evaluatePreTurnHook() preTurnDecision {
 	if te == nil || te.policy.Hooks.PreTurn == nil {
-		return true
+		return preTurnDecision{action: preTurnProceed}
 	}
 	preReq := buildPreTurnRequest(te)
 	dispatcher, poolCtx := te.resolveWebhookDispatcher()
@@ -309,31 +329,54 @@ func (te *turnExecution) runPreTurnHook() bool {
 	}
 	span.End()
 	if err != nil {
-		action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
-		switch action {
+		switch te.policy.Hooks.PreTurn.GetOnTimeout("drop") {
 		case "drop":
-			te.abortBurst("pre_turn_timeout_drop")
-			return false
+			return preTurnDecision{action: preTurnAbort, abortReason: "pre_turn_timeout_drop"}
 		case "retry":
-			te.rescheduleBurst(5)
-			return false
+			return preTurnDecision{action: preTurnReschedule, delaySeconds: 5}
 		}
-		return true
+		return preTurnDecision{action: preTurnProceed}
 	}
 	if preResp == nil {
-		return true
+		return preTurnDecision{action: preTurnProceed}
 	}
 	if !preResp.Allow {
 		if preResp.Action == "retry" {
-			te.rescheduleBurst(preResp.RetryAfterSeconds)
-			return false
+			return preTurnDecision{action: preTurnReschedule, delaySeconds: preResp.RetryAfterSeconds}
 		}
-		te.abortBurst("pre_turn_rejected: " + preResp.Reason)
-		return false
+		return preTurnDecision{action: preTurnAbort, abortReason: "pre_turn_rejected: " + preResp.Reason}
 	}
+	d := preTurnDecision{action: preTurnProceed, metadata: preResp.Metadata}
 	if strings.TrimSpace(preResp.InjectedContext) != "" {
-		te.injectedHookContext = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(preResp.InjectedContext))
+		d.injectedContext = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(preResp.InjectedContext))
 	}
-	te.hookMetadata = preResp.Metadata
+	return d
+}
+
+// applyPreTurnContext stores a proceed decision's injected context and metadata on te.
+func (te *turnExecution) applyPreTurnContext(d preTurnDecision) {
+	if d.injectedContext != "" {
+		te.injectedHookContext = d.injectedContext
+	}
+	if d.metadata != nil {
+		te.hookMetadata = d.metadata
+	}
+}
+
+func (te *turnExecution) runPreTurnHook() bool {
+	if te == nil {
+		return true
+	}
+	d := te.evaluatePreTurnHook()
+	switch d.action {
+	case preTurnAbort:
+		te.abortBurst(d.abortReason)
+		return false
+	case preTurnReschedule:
+		te.rescheduleBurst(d.delaySeconds)
+		return false
+	case preTurnProceed:
+	}
+	te.applyPreTurnContext(d)
 	return true
 }
