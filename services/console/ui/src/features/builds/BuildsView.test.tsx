@@ -2,52 +2,25 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BuildDetailAPIResponse, BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
-import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useConsoleStore } from '../../store/store';
 import { BuildDagGraph, BuildDetailPanel } from './BuildDetail';
 import BuildsView from './BuildsView';
+import { Shortcuts, text } from '../../test/dom';
+import { type FetchMock, json, pending, stubFetch } from '../../test/fetch';
+import { at, build, chunk } from '../../test/fixtures';
 
-/** An instant at local wall-clock time on 2026-11-08, so card times read the same in any TZ. */
-const local = (h: number, m: number): string => new Date(2026, 10, 8, h, m).toISOString();
-const NOW = Date.parse(local(12, 0));
-const ZERO = '0001-01-01T00:00:00Z';
-
-const chunk = (id: string, index: number, status: string, extra: Partial<VanadisChunkDTO> = {}): VanadisChunkDTO => ({
-  id,
-  build_id: 'b',
-  chunk_index: index,
-  title: `Chunk ${id}`,
-  status,
-  started_at: ZERO,
-  completed_at: ZERO,
-  created_at: local(10, 0),
-  updated_at: local(10, 0),
-  ...extra,
-});
-
-const build = (id: string, status: string, title: string, chunks: readonly VanadisChunkDTO[], extra: Partial<VanadisBuildDTO> = {}): VanadisBuildDTO => ({
-  id,
-  thread_id: 't',
-  tier: 2,
-  title,
-  objective: `Ship ${title.toLowerCase()}`,
-  status,
-  created_at: local(10, 0),
-  updated_at: local(10, 30),
-  chunks,
-  ...extra,
-});
+const NOW = Date.parse(at(12, 0));
 
 // b-run started 11:10 (running 50m); b-done ran 9:10-9:28 the same day; b-q has not started.
 const RUN = build('b-run', 'running', 'Kiosk refresh', [
-  chunk('r1', 0, 'merged', { started_at: local(11, 10), completed_at: local(11, 20), pr_number: 41, repo: 'acme/kiosk' }),
-  chunk('r2', 1, 'in_progress', { started_at: local(11, 20) }),
+  chunk('r1', 0, 'merged', { started_at: at(11, 10), completed_at: at(11, 20), pr_number: 41, repo: 'acme/kiosk' }),
+  chunk('r2', 1, 'in_progress', { started_at: at(11, 20) }),
 ]);
 const QUEUED = build('b-q', 'queued', 'Synapse hooks', [chunk('q1', 0, 'pending')]);
 const DONE = build('b-done', 'completed', 'Docs pass', [
-  chunk('d1', 0, 'merged', { started_at: local(9, 10), completed_at: local(9, 28) }),
+  chunk('d1', 0, 'merged', { started_at: at(9, 10), completed_at: at(9, 28) }),
 ]);
-const FAILED = build('b-fail', 'failed', 'Kiosk widgets', [chunk('f1', 0, 'failed', { started_at: local(8, 0), completed_at: local(8, 5) })]);
+const FAILED = build('b-fail', 'failed', 'Kiosk widgets', [chunk('f1', 0, 'failed', { started_at: at(8, 0), completed_at: at(8, 5) })]);
 const BUILDS = [RUN, QUEUED, DONE, FAILED];
 
 const payload = (builds: readonly VanadisBuildDTO[] = BUILDS, extra: Partial<BuildsAPIResponse> = {}): BuildsAPIResponse => ({
@@ -60,15 +33,11 @@ const payload = (builds: readonly VanadisBuildDTO[] = BUILDS, extra: Partial<Bui
   ...extra,
 });
 
-const fetchMock = vi.fn<(url: string) => Promise<Response>>();
-const pending = (): Promise<Response> => new Promise(() => undefined);
-const json = (body: unknown, status = 200): Promise<Response> => Promise.resolve(new Response(JSON.stringify(body), { status }));
+let fetchMock: FetchMock;
 
 beforeEach(() => {
   useConsoleStore.setState(useConsoleStore.getInitialState(), true);
-  fetchMock.mockReset();
-  fetchMock.mockImplementation(pending);
-  vi.stubGlobal('fetch', fetchMock);
+  fetchMock = stubFetch();
   vi.useFakeTimers({ now: NOW, toFake: ['Date', 'setInterval', 'clearInterval'] });
 });
 afterEach(() => {
@@ -79,16 +48,10 @@ afterEach(() => {
 
 const seed = (data: BuildsAPIResponse): void => act(() => useConsoleStore.getState().setBuilds(data));
 const titles = (): string[] => [...document.querySelectorAll('.build-title')].map((el) => el.textContent ?? '');
-const text = (selector: string): string => (document.querySelector(selector)?.textContent ?? '').replace(/\s+/g, ' ').trim();
 const card = (id: string): HTMLElement => document.querySelector(`[data-build-id="${id}"]`) as HTMLElement;
 const pill = (label: string): HTMLElement =>
   within(screen.getByRole('toolbar', { name: 'Build Queue Filter Pills' })).getByRole('button', { name: new RegExp(`^${label} `) });
 const search = (): HTMLInputElement => screen.getByRole('textbox', { name: 'Search builds' });
-
-function Shortcuts() {
-  useKeyboardShortcuts('builds');
-  return null;
-}
 
 describe('BuildsView lifecycle', () => {
   it.each([
@@ -155,7 +118,7 @@ describe('BuildsView filters', () => {
     seed(payload());
     render(
       <>
-        <Shortcuts />
+        <Shortcuts tab="builds" />
         <BuildsView />
       </>,
     );
@@ -174,7 +137,7 @@ describe('BuildsView filters', () => {
 
 describe('BuildsView data', () => {
   it('polls the queue every 5s while mounted and stops on unmount', async () => {
-    fetchMock.mockImplementation(() => json(payload()));
+    fetchMock.mockImplementation(() => json(200, payload()));
     const { unmount } = render(<BuildsView />);
     await act(async () => {
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -191,10 +154,10 @@ describe('BuildsView data', () => {
   it('SYNC BUILDS refetches now and records failures', async () => {
     // The mount poll settles first: a click while it is in flight joins it instead.
     seed(payload([QUEUED]));
-    fetchMock.mockImplementation(() => json(payload([QUEUED, DONE])));
+    fetchMock.mockImplementation(() => json(200, payload([QUEUED, DONE])));
     render(<BuildsView />);
     await act(() => vi.waitFor(() => expect(titles()).toEqual(['Synapse hooks', 'Docs pass'])));
-    fetchMock.mockImplementation(() => json({ error: 'vanadis down' }, 502));
+    fetchMock.mockImplementation(() => json(502, { error: 'vanadis down' }));
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /SYNC BUILDS/ }));
       await vi.waitFor(() => expect(useConsoleStore.getState().builds.list.error).toBe('vanadis down'));
@@ -332,7 +295,7 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
 
     await act(async () => {
       resolveDetail?.(
-        await json({
+        await json(200, {
           status: 'ok',
           build: chunkless,
           chunks: [chunk('c1', 0, 'pending', { title: 'First chunk' })],
@@ -351,7 +314,7 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/builds/b-race') {
         detailCalls++;
-        return json({
+        return json(200, {
           status: 'ok',
           build: build('b-race', 'running', 'Race Build', []),
           chunks: [chunk('r1', 0, 'running', { title: 'First chunk' })],
@@ -398,7 +361,7 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/builds/b-term') {
         detailCalls++;
-        return json({
+        return json(200, {
           status: 'ok',
           build: build('b-term', 'completed', 'Finished Build', []),
           chunks: [chunk('t1', 0, 'merged', { title: 'Done chunk' })],
@@ -456,7 +419,7 @@ describe('BuildCard expands inline DAG and opens chunk detail overlay', () => {
     fetchMock.mockImplementation((url: string) => {
       fetchCalls.push(url);
       if (url === '/api/builds/b-reexpand') {
-        return json({
+        return json(200, {
           status: 'ok',
           build: build('b-reexpand', 'queued', 'Reexpand Build', []),
           chunks: [chunk('e1', 0, 'pending')],
@@ -531,7 +494,7 @@ const renderDetail = (id: string, chunkId?: string) =>
 describe('BuildDetailPanel', () => {
   it('renders the queue entry at once, then the fetched detail', async () => {
     seed(payload());
-    fetchMock.mockImplementation(() => json(detailPayload()));
+    fetchMock.mockImplementation(() => json(200, detailPayload()));
     renderDetail('b-run');
     expect(screen.getByText('Kiosk refresh')).toBeTruthy();
     await act(async () => {
@@ -567,7 +530,7 @@ describe('BuildDetailPanel', () => {
 
   it('polls while open, keeps an expanded chunk open across polls and stops on close', async () => {
     seed(payload());
-    fetchMock.mockImplementation(() => json(detailPayload()));
+    fetchMock.mockImplementation(() => json(200, detailPayload()));
     const { unmount } = renderDetail('b-run', 'r1');
     await act(async () => {
       await vi.waitFor(() => expect(screen.getByText('Kiosk refresh (live)')).toBeTruthy());
@@ -587,7 +550,7 @@ describe('BuildDetailPanel', () => {
     { name: 'loading', fetchResult: 'pending', want: 'LOADING BUILD TELEMETRY // b-x...' },
     { name: 'failed', fetchResult: 'error', want: 'FAILED TO LOAD BUILD DETAILS' },
   ])('without a queue entry: $name', async ({ fetchResult, want }) => {
-    if (fetchResult === 'error') fetchMock.mockImplementation(() => json({ error: 'no such build' }, 404));
+    if (fetchResult === 'error') fetchMock.mockImplementation(() => json(404, { error: 'no such build' }));
     renderDetail('b-x');
     await act(async () => {
       await vi.waitFor(() => expect(screen.getByText(want)).toBeTruthy());
@@ -598,7 +561,7 @@ describe('BuildDetailPanel', () => {
   it('renders the no-chunks state and falls back to defaults for a sparse build', async () => {
     const sparse = { ...DETAIL_BUILD, id: 'b-s', title: '', objective: '', tier: 0 };
     delete (sparse as { shared_context?: unknown }).shared_context;
-    fetchMock.mockImplementation(() => json(detailPayload(sparse, [])));
+    fetchMock.mockImplementation(() => json(200, detailPayload(sparse, [])));
     renderDetail('b-s');
     await act(async () => {
       await vi.waitFor(() => expect(screen.getByText('NO CHUNKS REGISTERED')).toBeTruthy());

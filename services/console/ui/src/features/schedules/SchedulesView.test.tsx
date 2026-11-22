@@ -1,72 +1,23 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  CronSchedule,
-  OneShotSchedule,
-  ScheduleRun,
-  ScheduleRunsAPIResponse,
-  SchedulesAPIResponse,
-} from '../../api/types';
+import type { CronSchedule, OneShotSchedule, ScheduleRun, ScheduleRunsAPIResponse, SchedulesAPIResponse } from '../../api/types';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useConsoleStore } from '../../store/store';
 import { recordServerTime } from './clock';
 import { CountdownBadge } from './Countdown';
 import { syncScheduleRuns, syncSchedules } from './data';
 import SchedulesView from './SchedulesView';
+import { type FetchMock, json, pending, stubFetch } from '../../test/fetch';
+import { at, cron, once, run } from '../../test/fixtures';
+import { iconRenders } from '../../test/icon';
 
 // Every Icon render is recorded by name, which pins down exactly which components re-rendered:
 // countdown leaves render only the `timer` glyph for the fixtures below, cards render the
 // alarm/calendar/clipboard/target glyphs and run cards their status glyphs.
-const iconRenders = vi.hoisted((): string[] => []);
-vi.mock('../../components/Icon', () => ({
-  Icon: ({ name }: { name: string }) => {
-    iconRenders.push(name);
-    return <svg data-icon={name} />;
-  },
-}));
+vi.mock('../../components/Icon', () => import('../../test/icon'));
 
-// Wall-clock fixtures are built from local-time components so expectations hold in any TZ.
-const at = (h: number, mi: number, sec = 0): string => new Date(2026, 10, 8, h, mi, sec).toISOString();
 const NOW = Date.parse(at(12, 0));
-
-const cron = (id: string, over: Partial<CronSchedule> = {}): CronSchedule => ({
-  id,
-  target_id: `2000${id}`,
-  channel_id: `3000${id}`,
-  title_prefix: `Routine ${id}`,
-  cron_expr: '0 9 * * *',
-  cron_description: 'Every day at 9:00 AM',
-  prompt: `Run routine ${id}`,
-  timezone: 'UTC',
-  next_run_at: at(12, 10),
-  enabled: true,
-  created_at: '2026-11-01T00:00:00Z',
-  ...over,
-});
-
-const once = (id: string, over: Partial<OneShotSchedule> = {}): OneShotSchedule => ({
-  id,
-  thread_id: `4000000000${id.length}`,
-  prompt: `Reminder ${id}`,
-  run_at: at(12, 30),
-  created_at: at(0, 0),
-  ...over,
-});
-
-const run = (id: string, over: Partial<ScheduleRun> = {}): ScheduleRun => ({
-  id,
-  schedule_id: 'cron-a',
-  schedule_type: 'cron',
-  title: `Run ${id}`,
-  target_id: '200',
-  thread_id: '600000000000000000',
-  prompt: `Prompt ${id}`,
-  status: 'completed',
-  started_at: at(11, 0),
-  duration_ms: 25564,
-  ...over,
-});
 
 const CRONS: readonly CronSchedule[] = [
   cron('cron-a', { title_prefix: 'Morning standup digest' }),
@@ -124,17 +75,12 @@ const seed = (s: SchedulesAPIResponse | null, r: ScheduleRunsAPIResponse | null)
     if (r !== null) useConsoleStore.getState().setScheduleRuns(r);
   });
 
-const fetchMock = vi.fn<(url: string) => Promise<Response>>();
-const pending = (): Promise<Response> => new Promise(() => undefined);
-const json = (status: number, body: unknown): Promise<Response> =>
-  Promise.resolve(new Response(JSON.stringify(body), { status }));
+let fetchMock: FetchMock;
 
 beforeEach(() => {
   useConsoleStore.setState(useConsoleStore.getInitialState(), true);
   iconRenders.length = 0;
-  fetchMock.mockReset();
-  fetchMock.mockImplementation(pending);
-  vi.stubGlobal('fetch', fetchMock);
+  fetchMock = stubFetch();
   vi.useFakeTimers({ now: NOW, toFake: ['setInterval', 'clearInterval', 'Date'] });
 });
 afterEach(() => {

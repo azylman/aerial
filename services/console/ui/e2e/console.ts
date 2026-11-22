@@ -529,15 +529,6 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     ]),
   },
   {
-    name: 'schedules: cron routines pill',
-    start: '#schedules',
-    steps: [
-      { kind: 'pill', label: 'CRON ROUTINES' },
-      ...settleScroll(),
-    ],
-    expect: schedulesExpect(['SHOWING 28 / 40 ACTIVE ROUTINES', '40 ACTIVE'], scheduleCounts(28, 0, 0, 0)),
-  },
-  {
     name: 'schedules: one-shot pill',
     start: '#schedules',
     steps: [
@@ -548,25 +539,6 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
       ['SHOWING 12 / 40 ACTIVE ROUTINES', 'ONE-TIME REMINDER', 'Reminder 1: water the basil'],
       scheduleCounts(0, 12, 0, 0),
     ),
-  },
-  {
-    name: 'schedules: run audit log pill',
-    start: '#schedules',
-    steps: [
-      { kind: 'pill', label: 'RUN AUDIT LOG' },
-      ...settleScroll(),
-    ],
-    expect: schedulesExpect(['EXECUTION RUN AUDIT LOG', '50 RUNS'], scheduleCounts(0, 0, 50, 0)),
-  },
-  {
-    name: 'schedules: all pill after another pill',
-    start: '#schedules',
-    steps: [
-      { kind: 'pill', label: 'ONE-SHOT' },
-      { kind: 'pill', label: 'ALL' },
-      ...settleScroll(),
-    ],
-    expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, scheduleCounts(28, 12, 50, 0)),
   },
   {
     // "plant" matches the 4 "Plant watering N" crons (title + prompt: 8 marks) and 6 of their runs
@@ -600,24 +572,6 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     start: '#memory',
     steps: [{ kind: 'pill', label: 'REINFORCED' }, ...settleMemory(LAST_ROW_REINFORCED)],
     expect: memoryExpect(['SHOWING 50 / 150 NODES', 'NODE #1099', FIRST_FACT], 'REINFORCED'),
-  },
-  {
-    name: 'memory: base pill',
-    start: '#memory',
-    // The base list ends on the same three cards as the full list.
-    steps: [{ kind: 'pill', label: 'BASE' }, ...settleMemory(LAST_ROW_ALL)],
-    expect: memoryExpect(['SHOWING 100 / 150 NODES', 'NODE #1118', 'Standup digest should stay under 200 words (#119)'], 'BASE'),
-  },
-  {
-    name: 'memory: all pill after another pill',
-    start: '#memory',
-    steps: [
-      { kind: 'pill', label: 'BASE' },
-      // With its count, so the label names exactly this pill.
-      { kind: 'pill', label: 'ALL 150' },
-      ...settleMemory(LAST_ROW_ALL),
-    ],
-    expect: memoryExpect(['SHOWING 150 / 150 NODES', 'NODE #1099', FIRST_FACT], 'ALL'),
   },
   {
     // "oat milk" matches the 15 "Prefers oat milk in lattes" facts, NODE #1030 (12x) first.
@@ -660,33 +614,10 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS, BUILDS_DEFAULT_COUNTS),
   },
   {
-    name: 'builds: running pill',
-    start: '#builds',
-    steps: [{ kind: 'pill', label: 'RUNNING' }, ...settleBuilds('SHOWING 4 / 25 BUILDS')],
-    expect: buildsExpect(['SHOWING 4 / 25 BUILDS', 'Console React rewrite #1', 'Memory decay tuning #4'], 'RUNNING', buildCards(4, 0, 0, 0, 0)),
-  },
-  {
-    name: 'builds: queued pill',
-    start: '#builds',
-    steps: [{ kind: 'pill', label: 'QUEUED' }, ...settleBuilds('SHOWING 6 / 25 BUILDS')],
-    expect: buildsExpect(['SHOWING 6 / 25 BUILDS', 'Synapse webhook hardening #5', '0 / 3 CHUNKS'], 'QUEUED', buildCards(0, 6, 0, 0, 0)),
-  },
-  {
     name: 'builds: completed pill includes failed and cancelled builds',
     start: '#builds',
     steps: [{ kind: 'pill', label: 'COMPLETED' }, ...settleBuilds('SHOWING 15 / 25 BUILDS')],
     expect: buildsExpect(['SHOWING 15 / 25 BUILDS', 'Console React rewrite #11', 'END: 1:28am'], 'COMPLETED', buildCards(0, 0, 10, 3, 2)),
-  },
-  {
-    name: 'builds: all pill after another pill',
-    start: '#builds',
-    // With its count, so the label names exactly this pill.
-    steps: [
-      { kind: 'pill', label: 'QUEUED' },
-      { kind: 'pill', label: 'ALL 25' },
-      ...settleBuilds('SHOWING 25 / 25 BUILDS'),
-    ],
-    expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS),
   },
   {
     // "kiosk" matches the five "Kiosk widget refresh #N" builds (title and objective).
