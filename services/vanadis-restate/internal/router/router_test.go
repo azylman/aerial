@@ -3,17 +3,9 @@ package router
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
-	"reflect"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
@@ -23,75 +15,9 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-type mockRunContext struct {
-	context.Context
-}
-
-func (mockRunContext) Log() *slog.Logger         { return slog.Default() }
-func (mockRunContext) Request() *restate.Request { return nil }
-
-func runMockRunContext(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
-	res, err := fn(mockRunContext{Context: context.Background()})
-	if err != nil {
-		return restate.TerminalErrorf("%v", err)
-	}
-	if output != nil && res != nil {
-		outVal := reflect.ValueOf(output)
-		resVal := reflect.ValueOf(res)
-		if outVal.Kind() == reflect.Pointer && !outVal.IsNil() && outVal.Elem().Type() == resVal.Type() {
-			outVal.Elem().Set(resVal)
-		}
-	}
-	return nil
-}
-
-type metadataMutationStore struct {
-	store.VanadisStore
-
-	err error
-}
-
-func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req store.UpdateBuildRequest) (*model.VanadisBuild, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return &model.VanadisBuild{ID: id, Title: req.Title}, nil
-}
-
-func (s *metadataMutationStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
-	return store.BuildRoute{}, s.err
-}
-
-func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (store.BuildRoute, string, error) {
-	return store.BuildRoute{}, "", s.err
-}
-
-func observeJournalCallback(t *testing.T, mc *mocks.MockContext, want error, code restate.Code) {
-	t.Helper()
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
-		res, err := fn(mockRunContext{Context: context.Background()})
-		if code != 0 {
-			var terminal restate.TerminalError
-			require.ErrorAs(t, err, &terminal)
-			assert.Equal(t, code, terminal.Code())
-		} else {
-			assert.False(t, restate.IsTerminalError(err))
-		}
-		switch {
-		case want != nil && code != 0:
-			assert.EqualError(t, err, want.Error())
-		case want != nil:
-			assert.ErrorIs(t, err, want)
-		default:
-			assert.NoError(t, err)
-		}
-		// Only adapt after observing the raw callback error above.
-		return runMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
-	})
-}
 
 func TestRouterJournalLookupErrors(t *testing.T) {
 	t.Parallel()
@@ -110,17 +36,17 @@ func TestRouterJournalLookupErrors(t *testing.T) {
 			t.Parallel()
 			inv := &mockInvoker{}
 			router := &BuildRouterService{
-				store:          &metadataMutationStore{err: tc.storageErr},
+				store:          &restatetest.MetadataMutationStore{Err: tc.storageErr},
 				invokerFactory: func(restate.Context) BuildObjectInvoker { return inv },
 			}
 			prContext := mocks.NewMockContext(t)
-			observeJournalCallback(t, prContext, tc.callbackErr, 0)
+			restatetest.ObserveJournalCallback(t, prContext, tc.callbackErr, 0)
 			prErr := router.RoutePREvent(restate.WithMockContext(prContext), pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1})
 			dispatchContext := mocks.NewMockContext(t)
-			observeJournalCallback(t, dispatchContext, tc.callbackErr, 0)
+			restatetest.ObserveJournalCallback(t, dispatchContext, tc.callbackErr, 0)
 			dispatchErr := router.RouteDispatchOutcome(restate.WithMockContext(dispatchContext), pubsub.DispatchOutcomeEvent{VanadisChunkID: "chunk"})
 			attachContext := mocks.NewMockContext(t)
-			observeJournalCallback(t, attachContext, tc.callbackErr, 0)
+			restatetest.ObserveJournalCallback(t, attachContext, tc.callbackErr, 0)
 			_, attachErr := router.RouteAttachPR(restate.WithMockContext(attachContext), store.AttachChunkPRRequest{ChunkID: "chunk", Repo: "owner/repo", PRNumber: 1})
 			if tc.callbackErr == nil {
 				assert.NoError(t, prErr)
@@ -183,32 +109,6 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 	}
 }
 
-func routerTestMetricsMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	return mux
-}
-
-func routerErrorMetricValue(t *testing.T, metric, handler string) float64 {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	routerTestMetricsMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
-	prefix := fmt.Sprintf(`%s{handler=%q} `, metric, handler)
-	for line := range strings.SplitSeq(rec.Body.String(), "\n") {
-		if valStr, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
-			val, err := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
-			require.NoError(t, err)
-			return val
-		}
-	}
-	return 0
-}
-
-func routerReconcileErrorsCount(t *testing.T, handler string) float64 {
-	t.Helper()
-	return routerErrorMetricValue(t, "vanadis_restate_reconcile_errors_total", handler)
-}
-
 type mockInvoker struct {
 	lastPRBuildID        string
 	lastDispatchBuildID  string
@@ -248,7 +148,7 @@ func makeRouterMockContext(t *testing.T) restate.Context {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
 	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe() // slog handlers look up the span context.
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Maybe()
+	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(restatetest.RunMockRunContext).Maybe()
 	mClient := mocks.NewMockClient(t)
 	mInv := mocks.NewMockInvocation(t)
 	mc.EXPECT().Object(mock.Anything, mock.Anything, mock.Anything).Return(mClient).Maybe()
@@ -334,11 +234,11 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
 			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
-			before := routerReconcileErrorsCount(t, "RoutePREvent")
+			before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RoutePREvent")
 			err := router.RoutePREvent(makeRouterMockContext(t), tc.ev)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			assert.Equal(t, tc.wantBuildID, inv.lastPRBuildID)
-			assert.Equal(t, before+tc.wantMetric, routerReconcileErrorsCount(t, "RoutePREvent"))
+			assert.Equal(t, before+tc.wantMetric, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RoutePREvent"))
 		})
 	}
 }
@@ -367,11 +267,11 @@ func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
 			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
-			before := routerReconcileErrorsCount(t, "RouteDispatchOutcome")
+			before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RouteDispatchOutcome")
 			err := router.RouteDispatchOutcome(makeRouterMockContext(t), pubsub.DispatchOutcomeEvent{VanadisChunkID: tc.chunkID})
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			assert.Equal(t, tc.wantBuildID, inv.lastDispatchBuildID)
-			assert.Equal(t, before+tc.wantMetric, routerReconcileErrorsCount(t, "RouteDispatchOutcome"))
+			assert.Equal(t, before+tc.wantMetric, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RouteDispatchOutcome"))
 		})
 	}
 }
@@ -459,14 +359,14 @@ func TestBuildRouterService_RouteFailChunk(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
 			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
-			before := routerReconcileErrorsCount(t, "RouteFailChunk")
+			before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RouteFailChunk")
 			res, err := router.RouteFailChunk(makeRouterMockContext(t), tc.req)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			assert.Equal(t, tc.wantBuildID, res.BuildID)
 			assert.Equal(t, !tc.wantErr, res.Failed)
 			assert.Equal(t, tc.wantBuildID, inv.lastFailBuildID)
 			assert.Equal(t, tc.wantDispatchID, inv.lastFailDispatchID)
-			assert.Equal(t, before+tc.wantMetric, routerReconcileErrorsCount(t, "RouteFailChunk"))
+			assert.Equal(t, before+tc.wantMetric, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RouteFailChunk"))
 		})
 	}
 }

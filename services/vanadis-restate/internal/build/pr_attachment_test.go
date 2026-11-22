@@ -16,6 +16,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -60,7 +61,7 @@ func TestExecutePRAttachment(t *testing.T) {
 			mc := mocks.NewMockContext(t)
 			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
 				beforeCalls := attachStepWidgetCalls.Load()
-				res, err := fn(mockRunContext{Context: context.Background()})
+				res, err := fn(restatetest.MockRunContext{Context: context.Background()})
 				if tc.wantErr {
 					require.Error(t, err)
 					assert.Contains(t, err.Error(), tc.wantMessage)

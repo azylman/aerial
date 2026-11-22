@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +21,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -786,50 +785,19 @@ func TestRunTransitionStep_InStepRetry(t *testing.T) {
 	st := lifecycleStore(t, active, "", model.VanadisChunk{ID: "c1", Mode: "action", Status: "pending", Title: "Chunk 1"})
 	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
 	rt := &retryingObjectRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-active")}
-	before := reconcileErrorsCount(t, "reconcile-retry-test")
+	before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "reconcile-retry-test")
 	res, err := bo.executeObjectTransition(rt, "reconcile-retry-test", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "running", res.Status)
-	assert.Equal(t, before+1, reconcileErrorsCount(t, "reconcile-retry-test"))
+	assert.Equal(t, before+1, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "reconcile-retry-test"))
 	assert.Contains(t, banners, "⚠️ Reconcile backing off (reconcile-retry-test): transient dispatch failure")
 	assert.Equal(t, map[string]string{"c1": "running"}, chunkStatuses(t, st, "b-active"))
-}
-
-func buildTestMetricsMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	return mux
-}
-
-func errorMetricValue(t *testing.T, metric, handler string) float64 {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	buildTestMetricsMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
-	prefix := fmt.Sprintf(`%s{handler=%q} `, metric, handler)
-	for line := range strings.SplitSeq(rec.Body.String(), "\n") {
-		if valStr, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
-			val, err := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
-			require.NoError(t, err)
-			return val
-		}
-	}
-	return 0
-}
-
-func reconcileErrorsCount(t *testing.T, handler string) float64 {
-	t.Helper()
-	return errorMetricValue(t, "vanadis_restate_reconcile_errors_total", handler)
-}
-
-func clientErrorsCount(t *testing.T, handler string) float64 {
-	t.Helper()
-	return errorMetricValue(t, "vanadis_restate_client_errors_total", handler)
 }
 
 func TestReconcileErrorsMetric(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	buildTestMetricsMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	restatetest.MetricsMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	metricsBody := rec.Body.String()
 	for _, label := range reconcileErrorHandlerLabels {
 		assert.Contains(t, metricsBody, fmt.Sprintf(`vanadis_restate_reconcile_errors_total{handler=%q} `, label))
@@ -859,13 +827,13 @@ func TestReconcileErrorsMetric(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			beforeClient := clientErrorsCount(t, tc.handler)
-			beforeServer := reconcileErrorsCount(t, tc.handler)
+			beforeClient := restatetest.MetricValue(t, "vanadis_restate_client_errors_total", tc.handler)
+			beforeServer := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", tc.handler)
 
 			RecordReconcileError(tc.handler, tc.err)
 
-			assert.Equal(t, beforeClient+tc.wantClientInc, clientErrorsCount(t, tc.handler))
-			assert.Equal(t, beforeServer+tc.wantServerInc, reconcileErrorsCount(t, tc.handler))
+			assert.Equal(t, beforeClient+tc.wantClientInc, restatetest.MetricValue(t, "vanadis_restate_client_errors_total", tc.handler))
+			assert.Equal(t, beforeServer+tc.wantServerInc, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", tc.handler))
 		})
 	}
 }
