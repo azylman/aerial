@@ -175,7 +175,6 @@ type VanadisStore interface {
 	RetryActionChunk(ctx context.Context, req RetryActionChunkRequest) (*RetryActionChunkResult, error)
 	CreateBuild(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error
 	GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error)
-	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
 	ReserveChunkForLaunch(ctx context.Context, chunkID string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error

@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -667,7 +668,7 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 					prompts = append(prompts, prompt)
 					return nil
 				},
-				dispatchFn: func(context.Context, executor.BrainDispatchRequest) error { return tc.dispatchErr },
+				dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr },
 				widgetFn:   func(context.Context, executor.StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
 			}
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
@@ -844,7 +845,7 @@ func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
 			st, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: chunks, execTag: "UPDATE 1"}.open()
 			eri := &mockEriClient{}
 			if tc.dispatchError {
-				eri.dispatchFn = func(context.Context, executor.BrainDispatchRequest) error { return errors.New("rejected") }
+				eri.dispatchFn = func(context.Context, eriwire.BrainDispatchRequest) error { return errors.New("rejected") }
 			}
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, tc.prior, false)
@@ -892,7 +893,7 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 				chunks = append(chunks, model.VanadisChunk{ID: "pending-sibling", Mode: "pr", Repo: "aerial", Status: "pending"})
 			}
 			var dispatched []string
-			eri := &mockEriClient{dispatchFn: func(_ context.Context, req executor.BrainDispatchRequest) error {
+			eri := &mockEriClient{dispatchFn: func(_ context.Context, req eriwire.BrainDispatchRequest) error {
 				dispatched = append(dispatched, req.ID)
 				return nil
 			}}
@@ -975,17 +976,17 @@ func TestClassifyLaunchErrors(t *testing.T) {
 		wantError, wantDeferred bool
 	}{
 		{"no failures", nil, false, false},
-		{"active dispatch", []error{executor.ErrDispatchActive}, true, true},
-		{"several active dispatches", []error{executor.ErrDispatchActive, executor.ErrDispatchActive}, true, true},
+		{"active dispatch", []error{eriwire.ErrDispatchActive}, true, true},
+		{"several active dispatches", []error{eriwire.ErrDispatchActive, eriwire.ErrDispatchActive}, true, true},
 		{"transport failure", []error{errors.New("unavailable")}, true, false},
-		{"mixed failures", []error{executor.ErrDispatchActive, errors.New("unavailable")}, true, false},
+		{"mixed failures", []error{eriwire.ErrDispatchActive, errors.New("unavailable")}, true, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			err := classifyLaunchErrors(tc.failures)
 			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, tc.wantDeferred, errors.Is(err, executor.ErrDispatchActive))
+			assert.Equal(t, tc.wantDeferred, errors.Is(err, eriwire.ErrDispatchActive))
 		})
 	}
 }
@@ -1041,7 +1042,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	attempts := 0
 	var retryBanners []string
 	eriRetry := &mockEriClient{
-		dispatchFn: func(context.Context, executor.BrainDispatchRequest) error {
+		dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error {
 			attempts++
 			if attempts == 1 {
 				return errors.New("transient dispatch failure")
@@ -1282,7 +1283,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		var req executor.BrainDispatchRequest
+		var req eriwire.BrainDispatchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -1308,7 +1309,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 	launched := map[string]bool{}
 	_, _, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
-	assert.ErrorIs(t, err, executor.ErrDispatchActive)
+	assert.ErrorIs(t, err, eriwire.ErrDispatchActive)
 	assert.False(t, launched["dispatch:vanadis-retry-turn-1"])
 	assert.True(t, launched["sibling"])
 	select {

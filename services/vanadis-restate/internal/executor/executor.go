@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/cilog"
@@ -38,15 +39,12 @@ type (
 	HTTPEriClient            = ericlient.HTTPEriClient
 	RestateEriClient         = ericlient.RestateEriClient
 	StatusWidgetDeliverer    = ericlient.StatusWidgetDeliverer
-	BrainDispatchRequest     = ericlient.BrainDispatchRequest
 	StatusWidgetChunk        = ericlient.StatusWidgetChunk
 	StatusWidgetRequest      = ericlient.StatusWidgetRequest
 	SyncChunkPRWidgetRequest = ericlient.SyncChunkPRWidgetRequest
 )
 
 var (
-	ErrDispatchActive = ericlient.ErrDispatchActive
-
 	NewHTTPEriClient    = ericlient.NewHTTPEriClient
 	NewRestateEriClient = ericlient.NewRestateEriClient
 
@@ -137,7 +135,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 	if agent == "" {
 		agent = "aerial"
 	}
-	req := BrainDispatchRequest{
+	req := eriwire.BrainDispatchRequest{
 		ID:             model.ActionDispatchID(chunk),
 		Agent:          agent,
 		Source:         "vanadis-restate",
@@ -196,7 +194,7 @@ func ConflictRemediationDispatchID(chunkID, headSHA string) string {
 }
 
 // DispatchChunkRemediation delegates to Eri's POST /dispatch endpoint for PR failure remediation.
-func (e *Executor) DispatchChunkRemediation(ctx context.Context, req BrainDispatchRequest) error {
+func (e *Executor) DispatchChunkRemediation(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	if e == nil || e.EriClient == nil {
 		return errors.New("executor or eri client is nil")
 	}
@@ -230,7 +228,7 @@ func (e *Executor) DispatchSilentWakePrompt(ctx context.Context, threadID, chunk
 	}
 	cleanChunk := strings.TrimSpace(chunkID)
 	sum := sha256.Sum256([]byte(strings.TrimSpace(threadID) + "\x00" + cleanChunk + "\x00" + strings.TrimSpace(wakePrompt) + "\x00" + strings.TrimSpace(occurrence)))
-	return e.EriClient.Dispatch(ctx, BrainDispatchRequest{
+	return e.EriClient.Dispatch(ctx, eriwire.BrainDispatchRequest{
 		ID:             "vanadis-deploy-fail-" + cleanChunk + "-" + hex.EncodeToString(sum[:8]),
 		Agent:          ericlient.AgentFromContext(ctx),
 		Source:         "vanadis-restate",

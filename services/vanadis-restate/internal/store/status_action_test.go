@@ -64,13 +64,6 @@ func TestPostgresVanadisStore_StatusUpdates(t *testing.T) {
 		wantErr   bool
 		wantErrIs error
 	}{
-		{name: "chunk status nil db", action: "chunk", id: "c1", val: "running", db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "chunk status empty id", action: "chunk", id: "", val: "running", wantErr: true},
-		{name: "chunk status empty val", action: "chunk", id: "c1", val: "", wantErr: true},
-		{name: "chunk status not found", action: "chunk", id: "c1", val: "running", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
-		{name: "chunk status db error", action: "chunk", id: "c1", val: "running", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("db error")}, wantErr: true},
-		{name: "chunk status success", action: "chunk", id: "c1", val: "running", db: dbScript{execTag: "UPDATE 1"}},
-
 		{name: "build status nil db", action: "build", id: "b1", val: "running", db: dbScript{bare: nilDB}, wantErr: true},
 		{name: "build status empty id", action: "build", id: "", val: "running", wantErr: true},
 		{name: "build status not found", action: "build", id: "b1", val: "running", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrBuildNotFound},
@@ -94,8 +87,6 @@ func TestPostgresVanadisStore_StatusUpdates(t *testing.T) {
 			var err error
 			ctx := context.Background()
 			switch tc.action {
-			case "chunk":
-				err = st.UpdateChunkStatus(ctx, tc.id, tc.val)
 			case "build":
 				err = st.UpdateBuildStatus(ctx, tc.id, tc.val)
 			case "msg":
