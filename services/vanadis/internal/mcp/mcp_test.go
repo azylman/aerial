@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -953,6 +954,7 @@ func TestRetryActionIntake(t *testing.T) {
 		buildStatus               string
 		generation                int
 		prNumber                  int
+		wantDispatch              string
 		noIngress                 bool
 		disabled                  bool
 	}{
@@ -969,7 +971,7 @@ func TestRetryActionIntake(t *testing.T) {
 		{name: "cancelled replay", buildStatus: "cancelled", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
 		{name: "older replay", buildStatus: "failed", generation: 2, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
 		{name: "attached PR retained acceptance", buildStatus: "failed", generation: 1, prNumber: 123, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
-		{name: "attached PR new retry rejected", buildStatus: "failed", generation: 1, prNumber: 123, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-1","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-2","accepted":true}`, wantStatus: 409},
+		{name: "attached PR new retry accepted", buildStatus: "failed", generation: 1, prNumber: 123, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-1","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-2","accepted":true}`, wantStatus: 200, wantDispatch: "vanadis-c1-turn-2"},
 		{name: "missing ingress", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, noIngress: true, wantStatus: 503},
 		{name: "disabled ingress", disabled: true, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, noIngress: false, wantStatus: 503},
 		{name: "missing identity", body: `{"build_id":"b1","chunk_id":"c1","reason":"retry"}`, wantStatus: 400},
@@ -1016,7 +1018,8 @@ func TestRetryActionIntake(t *testing.T) {
 				t.Fatal("correction not forwarded")
 			}
 			var result RetryActionChunkResult
-			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || !result.Accepted || result.DispatchID != "vanadis-c1-turn-1" {
+			wantDispatch := cmp.Or(tc.wantDispatch, "vanadis-c1-turn-1")
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || !result.Accepted || result.DispatchID != wantDispatch {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
 		})

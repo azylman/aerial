@@ -18,13 +18,14 @@ import (
 // Frozen lifecycle vocabulary mirrored from internal/build/requests.go so wire
 // values (statuses, event names) stay byte-identical across the extraction.
 const (
-	prEventOpened  = "opened"
-	statusRunning  = "running"
-	statusCoding   = "coding"
-	statusMerged   = "merged"
-	statusFailed   = "failed"
-	statusConflict = "conflict"
-	statusCIFailed = "ci_failed"
+	prEventOpened      = "opened"
+	statusRunning      = "running"
+	statusCoding       = "coding"
+	statusMerged       = "merged"
+	statusFailed       = "failed"
+	statusConflict     = "conflict"
+	statusCIFailed     = "ci_failed"
+	statusDeployFailed = "deploy_failed"
 
 	chunkModeAction = "action"
 	effortMedium    = "medium"
@@ -306,6 +307,13 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(chunk.MergeSHA) != "" {
+		return ErrPRTransitionSkipped
+	}
+	switch strings.TrimSpace(chunk.Status) {
+	case statusMerged, "synced", "deploying", "deployed", statusDeployFailed, "completed", "failed", "cancelled":
+		return ErrPRTransitionSkipped
+	}
 	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
 		return ErrPRTransitionSkipped
 	}
@@ -415,7 +423,7 @@ func (f *Flow) HandleClosedPREvent(ctx context.Context, chunkID string, ev pubsu
 func (f *Flow) HandleDeployFailureEvent(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
 	banner := executor.FormatDeployFailureBanner(ev)
 	if f.Store != nil {
-		if err := f.Store.UpdateChunkBannerAndStatus(ctx, chunkID, "deploy_failed", banner); err != nil {
+		if err := f.Store.UpdateChunkBannerAndStatus(ctx, chunkID, statusDeployFailed, banner); err != nil {
 			return err
 		}
 	}
@@ -444,28 +452,44 @@ func (f *Flow) HandlePREventType(ctx context.Context, buildID, chunkID, event st
 	case "conflict":
 		return f.HandleConflictEvent(ctx, buildID, chunkID, ev)
 	case "merged":
-		if f.Store != nil {
-			if err := f.Store.UpdatePRLifecycleStatus(ctx, chunkID, "merged"); err != nil {
-				return err
-			}
-		}
-		if err := f.RecordPRMergeRevision(ctx, chunkID, ev.HeadSHA, ev.MergeSHA); err != nil {
-			return err
-		}
-		if f.Exec != nil {
-			if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
-			}
-			if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
-			}
-		}
+		return f.handleMergedPREvent(ctx, buildID, chunkID, ev)
 	case "closed", "closed_unmerged":
 		return f.HandleClosedPREvent(ctx, chunkID, ev)
 	case "deploy_failed", "sync_failed":
 		return f.HandleDeployFailureEvent(ctx, buildID, chunkID, ev)
 	}
 	return nil
+}
+
+func (f *Flow) handleMergedPREvent(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
+	if f.Store != nil {
+		if err := f.Store.UpdatePRLifecycleStatus(ctx, chunkID, statusMerged); err != nil {
+			return err
+		}
+	}
+	if err := f.RecordPRMergeRevision(ctx, chunkID, ev.HeadSHA, ev.MergeSHA); err != nil {
+		return err
+	}
+	if f.Exec == nil {
+		return nil
+	}
+	if !f.isActionChunk(ctx, buildID, chunkID) {
+		if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
+		}
+	}
+	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_chunk", statusMerged, []string{chunkID}, ""); pErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
+	}
+	return nil
+}
+
+func (f *Flow) isActionChunk(ctx context.Context, buildID, chunkID string) bool {
+	if f == nil || f.Store == nil {
+		return false
+	}
+	_, chunk, err := f.LookupBuildChunk(ctx, buildID, chunkID)
+	return err == nil && chunk.Mode == chunkModeAction
 }
 
 // LocateOrAttachPRChunk resolves the event to its chunk, attaching an
@@ -618,7 +642,7 @@ var ActionResumeFailureReason = fmt.Sprintf("RESUMABLE: action turn ended withou
 // while a repair PR it submitted moves toward deployment.
 var actionRepairPRStatuses = map[string]bool{
 	"pr_opened": true, statusCIFailed: true, statusConflict: true, statusMerged: true,
-	"synced": true, "deploying": true, "deployed": true, "deploy_failed": true,
+	"synced": true, "deploying": true, "deployed": true, statusDeployFailed: true,
 }
 
 // NoPRFailureReason is the failure reason recorded when a PR chunk turn ends
@@ -641,7 +665,7 @@ func NoPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) No
 	if chunk.Mode == chunkModeAction {
 		return actionTurnAction(chunk, buildStatus, dispatchID)
 	}
-	if chunk.PRNumber != 0 || buildStatus != statusRunning {
+	if chunk.PRNumber != 0 || (buildStatus != statusRunning && buildStatus != statusFailed) {
 		return NoPRActionNone
 	}
 	if chunk.Status != statusRunning && chunk.Status != statusCoding {
@@ -657,7 +681,7 @@ func NoPRTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) No
 }
 
 func actionTurnAction(chunk model.VanadisChunk, buildStatus, dispatchID string) NoPRAction {
-	if buildStatus != statusRunning {
+	if buildStatus != statusRunning && buildStatus != statusFailed {
 		return NoPRActionNone
 	}
 	if chunk.Status != statusRunning && (chunk.PRNumber == 0 || !actionRepairPRStatuses[chunk.Status]) {
