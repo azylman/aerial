@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-
-	_ "modernc.org/sqlite"
+	"time"
 )
 
 func TestExtractLoadedSkillsFromCalls(t *testing.T) {
@@ -206,225 +207,259 @@ func TestEvaluateProceduralCandidateAdmission(t *testing.T) {
 	}
 }
 
-type sqlStoreProceduralCandidatesCase struct {
-	name        string
-	action      string
-	nilDB       bool
-	cand        ProceduralCandidate
-	ids         []int64
-	prNum       int
-	queryErr    error
-	execErr     error
-	rowSQL      string
-	rowsSQL     string
-	wantErr     bool
-	wantCount   int
-	wantID      int64
-	wantNoQuery bool
-}
-
-func runSQLStoreProceduralCandidatesCase(t *testing.T, tc sqlStoreProceduralCandidatesCase, dbMem *sql.DB) {
+// proceduralRows renders every procedural_candidates row in id order.
+func proceduralRows(t testing.TB, db DBTX) []string {
 	t.Helper()
-	var capturedQuery string
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:         dbMem,
-			queryErr:      tc.queryErr,
-			execErr:       tc.execErr,
-			rowSQL:        tc.rowSQL,
-			rowsSQL:       tc.rowsSQL,
-			capturedQuery: &capturedQuery,
-		})
-	}
-
-	ctx := context.Background()
-	switch tc.action {
-	case "insert":
-		id, err := store.InsertProceduralCandidate(ctx, tc.cand)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("InsertProceduralCandidate() err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if tc.wantID > 0 && id != tc.wantID {
-			t.Errorf("InsertProceduralCandidate() id = %d, want %d", id, tc.wantID)
-		}
-	case "get_pending":
-		cands, err := store.GetPendingProceduralCandidates(ctx)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("GetPendingProceduralCandidates() err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if len(cands) != tc.wantCount {
-			t.Errorf("GetPendingProceduralCandidates() count = %d, want %d", len(cands), tc.wantCount)
-		}
-	default:
-		runSQLStoreProceduralStatusAction(t, store, tc, capturedQuery)
-	}
+	return queryStrings(t, db, `SELECT id || '|' || agent || '|' || thread_id || '|' || domain || '|' || loaded_skill || '|' || trigger_pattern || '|' ||
+	steps_json::text || '|' || avoid_json::text || '|' || status || '|' || COALESCE(pr_number::text, '') FROM procedural_candidates ORDER BY id`)
 }
 
-func runSQLStoreProceduralStatusAction(t *testing.T, store *SQLStore, tc sqlStoreProceduralCandidatesCase, capturedQuery string) {
+// seedProceduralCandidates inserts candidates through the production
+// InsertProceduralCandidate, replacing a missing embedding with a one-hot
+// vector at dimension 100+i (orthogonal to every fixture embedding; the real
+// column rejects empty vectors and zero vectors break cosine distance).
+func seedProceduralCandidates(t testing.TB, store *SQLStore, cands []ProceduralCandidate) []int64 {
 	t.Helper()
-	ctx := context.Background()
-	switch tc.action {
-	case "mark_consolidated":
-		err := store.MarkProceduralCandidatesConsolidated(ctx, tc.ids, tc.prNum)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v, wantErr = %v", err, tc.wantErr)
+	ids := make([]int64, 0, len(cands))
+	for i, cand := range cands {
+		if len(cand.Embedding) == 0 {
+			cand.Embedding = testEmbeddingAt(100+i, 1.0)
 		}
-	case "mark_skipped":
-		err := store.MarkProceduralCandidatesSkipped(ctx, tc.ids)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("MarkProceduralCandidatesSkipped() err = %v, wantErr = %v", err, tc.wantErr)
+		id, err := store.InsertProceduralCandidate(context.Background(), cand)
+		if err != nil {
+			t.Fatalf("seed procedural candidate %q: %v", cand.Trigger, err)
 		}
+		ids = append(ids, id)
 	}
-	if tc.wantNoQuery && capturedQuery != "" {
-		t.Errorf("expected no query for empty IDs, got: %s", capturedQuery)
-	}
+	return ids
 }
 
-func TestSQLStore_ProceduralCandidates(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-
-	tests := []sqlStoreProceduralCandidatesCase{
+func TestSQLStore_InsertProceduralCandidate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilDB    bool
+		sabotage string
+		cand     ProceduralCandidate
+		wantErr  bool
+		wantID   int64
+		wantRows []string
+	}{
+		{name: "NilDB", nilDB: true, cand: ProceduralCandidate{Trigger: "valid trigger"}, wantErr: true},
+		{name: "EmptyTrigger", cand: ProceduralCandidate{Trigger: "   ", Embedding: testEmbedding(0.5)}, wantErr: true},
+		{name: "InsertError", sabotage: sabotageProceduralInsert, cand: ProceduralCandidate{Trigger: "valid trigger", Embedding: testEmbedding(0.5)}, wantErr: true},
 		{
-			name:    "InsertNilDB",
-			action:  "insert",
-			nilDB:   true,
-			cand:    ProceduralCandidate{Trigger: "valid trigger"},
-			wantErr: true,
-		},
-		{
-			name:    "InsertEmptyTrigger",
-			action:  "insert",
-			cand:    ProceduralCandidate{Trigger: "   "},
-			wantErr: true,
-		},
-		{
-			name:     "InsertQueryError",
-			action:   "insert",
-			cand:     ProceduralCandidate{Trigger: "valid trigger"},
-			queryErr: errors.New("insert failed"),
-			wantErr:  true,
-		},
-		{
-			name:   "InsertSuccessWithPR",
-			action: "insert",
+			name: "SuccessWithPR",
 			cand: ProceduralCandidate{
 				ThreadID:    "t-100",
-				Domain:      "discord",
+				Domain:      "common",
 				LoadedSkill: "ha-operations",
-				Trigger:     "turn on porch light when motion detected",
+				Trigger:     "  turn on porch light when motion detected  ",
 				Steps:       []string{"call ha_search", "call ha_call_write_tool"},
 				Avoid:       []string{"avoid loop"},
 				Embedding:   testEmbedding(0.5),
-				Status:      "pending",
+				Status:      "consolidated",
 				PRNumber:    42,
+				Agent:       "agent-beta",
 			},
-			rowSQL:  "SELECT 101",
-			wantID:  101,
-			wantErr: false,
+			wantID:   1,
+			wantRows: []string{`1|agent-beta|t-100|common|ha-operations|turn on porch light when motion detected|["call ha_search", "call ha_call_write_tool"]|["avoid loop"]|consolidated|42`},
 		},
 		{
-			name:   "InsertSuccessDefaults",
-			action: "insert",
-			cand: ProceduralCandidate{
-				Trigger:   "valid trigger pattern",
-				Embedding: testEmbedding(0.1),
-			},
-			rowSQL:  "SELECT 102",
-			wantID:  102,
-			wantErr: false,
-		},
-		{
-			name:    "GetPendingNilDB",
-			action:  "get_pending",
-			nilDB:   true,
-			wantErr: true,
-		},
-		{
-			name:     "GetPendingQueryError",
-			action:   "get_pending",
-			queryErr: errors.New("select failed"),
-			wantErr:  true,
-		},
-		{
-			name:    "GetPendingScanError",
-			action:  "get_pending",
-			rowsSQL: "SELECT 'bad_row'",
-			wantErr: true,
-		},
-		{
-			name:   "GetPendingSuccessParsing",
-			action: "get_pending",
-			rowsSQL: "SELECT 1, 't-1', 'discord', 'ha-operations', 'motion detected', '[\"step 1\"]', '[\"avoid 1\"]', '[0.1,0.2]', 'pending', 0, '2026-10-01 12:00:00', 'aerial' " +
-				"UNION ALL SELECT 2, 't-2', 'discord', '', 'unloaded skill trigger', '', '', '[0.3,0.4]', 'pending', 5, '2026-10-01 13:00:00', 'agent-beta'",
-			wantErr:   false,
-			wantCount: 2,
-		},
-		{
-			name:    "MarkConsolidatedNilDB",
-			action:  "mark_consolidated",
-			nilDB:   true,
-			ids:     []int64{1},
-			prNum:   10,
-			wantErr: true,
-		},
-		{
-			name:        "MarkConsolidatedEmptyIDs",
-			action:      "mark_consolidated",
-			ids:         nil,
-			prNum:       10,
-			wantErr:     false,
-			wantNoQuery: true,
-		},
-		{
-			name:    "MarkConsolidatedExecError",
-			action:  "mark_consolidated",
-			ids:     []int64{1, 2},
-			prNum:   10,
-			execErr: errors.New("update failed"),
-			wantErr: true,
-		},
-		{
-			name:    "MarkConsolidatedSuccess",
-			action:  "mark_consolidated",
-			ids:     []int64{1, 2},
-			prNum:   10,
-			wantErr: false,
-		},
-		{
-			name:    "MarkSkippedNilDB",
-			action:  "mark_skipped",
-			nilDB:   true,
-			ids:     []int64{1},
-			wantErr: true,
-		},
-		{
-			name:        "MarkSkippedEmptyIDs",
-			action:      "mark_skipped",
-			ids:         nil,
-			wantErr:     false,
-			wantNoQuery: true,
-		},
-		{
-			name:    "MarkSkippedExecError",
-			action:  "mark_skipped",
-			ids:     []int64{3},
-			execErr: errors.New("update failed"),
-			wantErr: true,
-		},
-		{
-			name:    "MarkSkippedSuccess",
-			action:  "mark_skipped",
-			ids:     []int64{3, 4},
-			wantErr: false,
+			name:     "SuccessDefaults",
+			cand:     ProceduralCandidate{Trigger: "valid trigger pattern", Embedding: testEmbedding(0.1)},
+			wantID:   1,
+			wantRows: []string{`1|aerial||discord||valid trigger pattern|[]|[]|pending|`},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSQLStoreProceduralCandidatesCase(t, tc, dbMem)
+			t.Parallel()
+			if tc.nilDB {
+				if _, err := (&SQLStore{}).InsertProceduralCandidate(context.Background(), tc.cand); err == nil {
+					t.Fatal("InsertProceduralCandidate() on nil DB succeeded, want error")
+				}
+				return
+			}
+			store := newTestStore(t)
+			execSQL(t, store.DB(), tc.sabotage)
+			id, err := store.InsertProceduralCandidate(context.Background(), tc.cand)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("InsertProceduralCandidate() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if id != tc.wantID {
+				t.Errorf("InsertProceduralCandidate() id = %d, want %d", id, tc.wantID)
+			}
+			if got := proceduralRows(t, store.DB()); !equalStrings(got, tc.wantRows) {
+				t.Errorf("rows = %q, want %q", got, tc.wantRows)
+			}
+		})
+	}
+}
+
+func TestSQLStore_GetPendingProceduralCandidates(t *testing.T) {
+	t.Parallel()
+	fixture := []ProceduralCandidate{
+		{ThreadID: "t-1", LoadedSkill: "ha-operations", Trigger: "motion detected", Steps: []string{"step 1"}, Avoid: []string{"avoid 1"}, Embedding: testEmbeddingAt(0, 0.5)},
+		{ThreadID: "t-2", Trigger: "already skipped", Status: "skipped", Embedding: testEmbeddingAt(1, 0.5)},
+		{ThreadID: "t-3", Trigger: "unloaded skill trigger", Embedding: testEmbeddingAt(2, 0.5), Agent: "agent-beta", PRNumber: 5},
+		{ThreadID: "t-4", Domain: "common", Trigger: "malformed json", Embedding: testEmbeddingAt(3, 0.5)},
+	}
+	// Row 1 is newest, so created_at ASC, id ASC yields 3, 4, 1; row 4 carries
+	// JSON objects (not arrays) and row 3 NULL avoid, both decoded as [].
+	const ordering = `UPDATE procedural_candidates SET created_at = CASE id WHEN 1 THEN '2026-10-01T13:00:00Z'::timestamptz ELSE '2026-10-01T12:00:00Z'::timestamptz END;
+UPDATE procedural_candidates SET steps_json = '{"a": 1}', avoid_json = '{"b": 2}' WHERE id = 4;
+ALTER TABLE procedural_candidates ALTER COLUMN avoid_json DROP NOT NULL; UPDATE procedural_candidates SET avoid_json = NULL WHERE id = 3`
+	const bulk = `INSERT INTO procedural_candidates (trigger_pattern, embedding) SELECT 'bulk ' || g, array_fill(1::real, ARRAY[384])::vector FROM generate_series(1, 101) g`
+	const nullThread = `ALTER TABLE procedural_candidates ALTER COLUMN thread_id DROP NOT NULL; UPDATE procedural_candidates SET thread_id = NULL`
+
+	tests := []struct {
+		name      string
+		nilDB     bool
+		cands     []ProceduralCandidate
+		sql       string
+		wantErr   bool
+		wantCount int
+		want      []string
+	}{
+		{name: "NilDB", nilDB: true, wantErr: true},
+		{name: "QueryError", sql: sabotageProcedural, wantErr: true},
+		{name: "ScanError", cands: fixture[:1], sql: nullThread, wantErr: true},
+		{name: "Empty"},
+		{
+			name:      "OnlyPendingOrderedWithParsedJSON",
+			cands:     fixture,
+			sql:       ordering,
+			wantCount: 3,
+			want: []string{
+				`3|agent-beta|t-3|discord||unloaded skill trigger|[]|[]|0.5@2|pending|5|2026-10-01T12:00:00Z`,
+				`4|aerial|t-4|common||malformed json|[]|[]|0.5@3|pending|0|2026-10-01T12:00:00Z`,
+				`1|aerial|t-1|discord|ha-operations|motion detected|["step 1"]|["avoid 1"]|0.5@0|pending|0|2026-10-01T13:00:00Z`,
+			},
+		},
+		{name: "LimitedTo100", sql: bulk, wantCount: 100},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &SQLStore{}
+			if !tc.nilDB {
+				store = newTestStore(t)
+				seedProceduralCandidates(t, store, tc.cands)
+				execSQL(t, store.DB(), tc.sql)
+			}
+			cands, err := store.GetPendingProceduralCandidates(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetPendingProceduralCandidates() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if len(cands) != tc.wantCount {
+				t.Fatalf("GetPendingProceduralCandidates() count = %d, want %d", len(cands), tc.wantCount)
+			}
+			if tc.want == nil {
+				return
+			}
+			var got []string
+			for _, c := range cands {
+				dim := slices.IndexFunc(c.Embedding, func(v float32) bool { return v != 0 })
+				got = append(got, fmt.Sprintf("%d|%s|%s|%s|%s|%s|%q|%q|%g@%d|%s|%d|%s", c.ID, c.Agent, c.ThreadID, c.Domain, c.LoadedSkill, c.Trigger,
+					c.Steps, c.Avoid, c.Embedding[dim], dim, c.Status, c.PRNumber, c.CreatedAt.UTC().Format(time.RFC3339)))
+			}
+			if !equalStrings(got, tc.want) {
+				t.Errorf("GetPendingProceduralCandidates() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// statusFixture is three pending candidates (ids 1, 2, 3).
+var statusFixture = []ProceduralCandidate{
+	{Trigger: "first trigger pattern"},
+	{Trigger: "second trigger pattern"},
+	{Trigger: "third trigger pattern"},
+}
+
+func procStatusRows(t testing.TB, db DBTX) []string {
+	t.Helper()
+	return queryStrings(t, db, `SELECT id || ':' || status || ':' || COALESCE(pr_number::text, '-') FROM procedural_candidates ORDER BY id`)
+}
+
+func TestSQLStore_MarkProceduralCandidatesConsolidated(t *testing.T) {
+	t.Parallel()
+	pending := []string{"1:pending:-", "2:pending:-", "3:pending:-"}
+	tests := []struct {
+		name     string
+		nilDB    bool
+		sabotage string
+		ids      []int64
+		prNum    int
+		wantErr  bool
+		want     []string
+	}{
+		{name: "NilDB", nilDB: true, ids: []int64{1}, prNum: 10, wantErr: true},
+		{name: "EmptyIDsNoOp", prNum: 10, want: pending},
+		{name: "ExecError", sabotage: sabotageProceduralUpdate, ids: []int64{1, 2}, prNum: 10, wantErr: true, want: pending},
+		{name: "Success", ids: []int64{1, 2}, prNum: 10, want: []string{"1:consolidated:10", "2:consolidated:10", "3:pending:-"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilDB {
+				if err := (&SQLStore{}).MarkProceduralCandidatesConsolidated(context.Background(), tc.ids, tc.prNum); err == nil {
+					t.Fatal("MarkProceduralCandidatesConsolidated() on nil DB succeeded, want error")
+				}
+				return
+			}
+			store := newTestStore(t)
+			seedProceduralCandidates(t, store, statusFixture)
+			execSQL(t, store.DB(), tc.sabotage)
+			err := store.MarkProceduralCandidatesConsolidated(context.Background(), tc.ids, tc.prNum)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if got := procStatusRows(t, store.DB()); !equalStrings(got, tc.want) {
+				t.Errorf("rows = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSQLStore_MarkProceduralCandidatesSkipped(t *testing.T) {
+	t.Parallel()
+	pending := []string{"1:pending:-", "2:pending:-", "3:pending:-"}
+	tests := []struct {
+		name     string
+		nilDB    bool
+		sabotage string
+		ids      []int64
+		wantErr  bool
+		want     []string
+	}{
+		{name: "NilDB", nilDB: true, ids: []int64{1}, wantErr: true},
+		{name: "EmptyIDsNoOp", want: pending},
+		{name: "ExecError", sabotage: sabotageProceduralUpdate, ids: []int64{3}, wantErr: true, want: pending},
+		{name: "Success", ids: []int64{2, 3}, want: []string{"1:pending:-", "2:skipped:-", "3:skipped:-"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilDB {
+				if err := (&SQLStore{}).MarkProceduralCandidatesSkipped(context.Background(), tc.ids); err == nil {
+					t.Fatal("MarkProceduralCandidatesSkipped() on nil DB succeeded, want error")
+				}
+				return
+			}
+			store := newTestStore(t)
+			seedProceduralCandidates(t, store, statusFixture)
+			execSQL(t, store.DB(), tc.sabotage)
+			err := store.MarkProceduralCandidatesSkipped(context.Background(), tc.ids)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("MarkProceduralCandidatesSkipped() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if got := procStatusRows(t, store.DB()); !equalStrings(got, tc.want) {
+				t.Errorf("rows = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }
@@ -455,15 +490,14 @@ func TestFormatProceduralCandidateEmbeddingText(t *testing.T) {
 type processThreadFactsProceduralCase struct {
 	name                 string
 	llmResp              string
-	storeFailOp          string
-	storeFailErr         error
+	sabotage             string
 	ollamaErr            error
 	preexistingCandidate *ProceduralCandidate
 	trajectoryCalls      []string
-	wantCandidateCount   int
+	wantCandidates       []string
 	wantPromptContains   string
 	wantEmbeddedText     string
-	wantWatermark        bool
+	wantWatermark        string
 	wantErr              bool
 }
 
@@ -486,33 +520,28 @@ func processThreadFactsProceduralCases() []processThreadFactsProceduralCase {
 			name: "SuccessAdmitCandidate",
 			llmResp: proceduralResp(`{"domain": "discord", "loaded_skill": "ha-operations", "trigger": "turning on bedroom light when dark",
 				"steps": ["check sensor", "call ha_write_tool"], "avoid": ["avoid loop"]}`),
-			wantCandidateCount: 1,
-			wantEmbeddedText:   "Steps: check sensor; call ha_write_tool\nAvoid: avoid loop",
-			wantWatermark:      true,
+			wantCandidates:   []string{`1|aerial|th-proc|discord|ha-operations|turning on bedroom light when dark|["check sensor", "call ha_write_tool"]|["avoid loop"]|pending|`},
+			wantEmbeddedText: "Steps: check sensor; call ha_write_tool\nAvoid: avoid loop",
+			wantWatermark:    "1",
 		},
-		{
-			name:          "RejectCandidateAdmissionEmptyTrigger",
-			llmResp:       proceduralResp(`{"trigger": "   ", "steps": ["step 1"]}`),
-			wantWatermark: true,
-		},
-		{
-			name:          "RejectCandidateAdmissionEphemeralTelemetry",
-			llmResp:       proceduralResp(`{"trigger": "deploying PR #999 to production", "steps": ["step 1"]}`),
-			wantWatermark: true,
-		},
+		{name: "RejectCandidateAdmissionEmptyTrigger", llmResp: proceduralResp(`{"trigger": "   ", "steps": ["step 1"]}`), wantWatermark: "1"},
+		{name: "RejectCandidateAdmissionEphemeralTelemetry", llmResp: proceduralResp(`{"trigger": "deploying PR #999 to production", "steps": ["step 1"]}`), wantWatermark: "1"},
 		{
 			name:                 "SkipNearDuplicateSameLoadedSkill",
 			preexistingCandidate: pendingProcCand("ha-operations"),
 			llmResp:              proceduralResp(bedroomLight),
-			wantCandidateCount:   1,
-			wantWatermark:        true,
+			wantCandidates:       []string{`1|aerial||discord|ha-operations|turning on bedroom light when dark|[]|[]|pending|`},
+			wantWatermark:        "1",
 		},
 		{
 			name:                 "DifferentLoadedSkillAdmitted",
 			preexistingCandidate: pendingProcCand("other-skill"),
 			llmResp:              proceduralResp(bedroomLight),
-			wantCandidateCount:   2,
-			wantWatermark:        true,
+			wantCandidates: []string{
+				`1|aerial||discord|other-skill|turning on bedroom light when dark|[]|[]|pending|`,
+				`2|aerial|th-proc|discord|ha-operations|turning on bedroom light when dark|["step 1"]|[]|pending|`,
+			},
+			wantWatermark: "1",
 		},
 		{
 			name: "CapAtThreeCandidates",
@@ -523,83 +552,38 @@ func processThreadFactsProceduralCases() []processThreadFactsProceduralCase {
 				`{"loaded_skill": "skill-4", "trigger": "procedural task step number 4", "steps": ["s4"]}`,
 				`{"loaded_skill": "skill-5", "trigger": "procedural task step number 5", "steps": ["s5"]}`,
 			),
-			wantCandidateCount: 3,
-			wantWatermark:      true,
+			wantCandidates: []string{
+				`1|aerial|th-proc|discord|skill-1|procedural task step number 1|["s1"]|[]|pending|`,
+				`2|aerial|th-proc|discord|skill-2|procedural task step number 2|["s2"]|[]|pending|`,
+				`3|aerial|th-proc|discord|skill-3|procedural task step number 3|["s3"]|[]|pending|`,
+			},
+			wantWatermark: "1",
 		},
-		{
-			name:      "EmbeddingFailureContinues",
-			ollamaErr: errors.New("ollama down"),
-			llmResp:   proceduralResp(validTask),
-			wantErr:   true,
-		},
-		{
-			name:               "StoreGetPendingErrorContinues",
-			storeFailOp:        "GetPendingProceduralCandidates",
-			storeFailErr:       errors.New("db read failure"),
-			llmResp:            proceduralResp(validTask),
-			wantCandidateCount: 0,
-			wantErr:            true,
-		},
-		{
-			name:         "StoreInsertErrorContinues",
-			storeFailOp:  "InsertProceduralCandidate",
-			storeFailErr: errors.New("db insert failure"),
-			llmResp:      proceduralResp(validTask),
-			wantErr:      true,
-		},
+		{name: "EmbeddingFailureFails", ollamaErr: errors.New("ollama down"), llmResp: proceduralResp(validTask), wantWatermark: "0", wantErr: true},
+		// The candidates table is gone, so its rows are not asserted.
+		{name: "StoreGetPendingErrorFails", sabotage: sabotageProcedural, llmResp: proceduralResp(validTask), wantWatermark: "0", wantErr: true},
+		{name: "StoreInsertErrorFails", sabotage: sabotageProceduralInsert, llmResp: proceduralResp(validTask), wantWatermark: "0", wantErr: true},
 		{
 			name:               "LoadedSkillsInPrompt",
 			trajectoryCalls:    []string{"read_file(...) [SKILL_LOADED: ha-operations]"},
 			llmResp:            `{"facts": []}`,
-			wantPromptContains: "LOADED SKILLS IN TURN:\n- ha-operations",
-			wantWatermark:      true,
+			wantPromptContains: "LOADED SKILLS IN TURN:\n- ha-operations\n",
+			wantWatermark:      "1",
 		},
-	}
-}
-
-func setupProcessThreadFactsProceduralStore(tc processThreadFactsProceduralCase) *TestMemStore {
-	mem := newTestMemStore()
-	mem.unextractedTurns["th-proc"] = []Message{
-		{ID: "m1", RowID: 1, Content: "user prompt", Status: "PENDING"},
-	}
-	if len(tc.trajectoryCalls) > 0 {
-		mem.threadToolCalls["th-proc"] = tc.trajectoryCalls
-	}
-	if tc.preexistingCandidate != nil {
-		_, _ = mem.InsertProceduralCandidate(context.Background(), *tc.preexistingCandidate)
-	}
-	if tc.storeFailOp != "" {
-		mem.SetFail(tc.storeFailOp, tc.storeFailErr)
-	}
-	return mem
-}
-
-func assertProcessThreadFactsProceduralResults(t *testing.T, tc processThreadFactsProceduralCase, mem *TestMemStore, capturedPrompt, lastText string) {
-	t.Helper()
-	if tc.wantPromptContains != "" && !strings.Contains(capturedPrompt, tc.wantPromptContains) {
-		t.Errorf("prompt missing %q:\n%s", tc.wantPromptContains, capturedPrompt)
-	}
-	if len(mem.proceduralCandidates) != tc.wantCandidateCount {
-		t.Errorf("candidate count = %d, want %d", len(mem.proceduralCandidates), tc.wantCandidateCount)
-	}
-	if tc.wantEmbeddedText != "" && lastText != tc.wantEmbeddedText {
-		t.Errorf("embedded text = %q, want %q", lastText, tc.wantEmbeddedText)
-	}
-	if tc.wantWatermark {
-		if mem.watermarks["th-proc"] != 1 {
-			t.Errorf("watermark = %d, want 1", mem.watermarks["th-proc"])
-		}
-	} else {
-		if wm, ok := mem.watermarks["th-proc"]; ok && wm != 0 {
-			t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
-		}
 	}
 }
 
 func runProcessThreadFactsProceduralCase(t *testing.T, tc processThreadFactsProceduralCase) {
 	t.Helper()
 	ctx := context.Background()
-	mem := setupProcessThreadFactsProceduralStore(tc)
+	store := newTestStore(t)
+	db := store.DB()
+	seedTurns(t, db, adminTurn("th-proc", 1, "user prompt", "ok"))
+	store.SetIndexerClient(newIndexerServer(t, http.StatusOK, nil, tc.trajectoryCalls))
+	if tc.preexistingCandidate != nil {
+		seedProceduralCandidates(t, store, []ProceduralCandidate{*tc.preexistingCandidate})
+	}
+	execSQL(t, db, tc.sabotage)
 	client := &MockOllamaClient{
 		embedding: testEmbedding(1.0),
 		err:       tc.ollamaErr,
@@ -611,17 +595,31 @@ func runProcessThreadFactsProceduralCase(t *testing.T, tc processThreadFactsProc
 		return tc.llmResp, nil
 	}
 
-	err := processThreadFacts(ctx, mem, client, llm, "th-proc")
+	err := processThreadFacts(ctx, store, client, llm, "th-proc")
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
 	}
-	assertProcessThreadFactsProceduralResults(t, tc, mem, capturedPrompt, client.lastText)
+	if tc.wantPromptContains != "" && !strings.Contains(capturedPrompt, tc.wantPromptContains) {
+		t.Errorf("prompt missing %q:\n%s", tc.wantPromptContains, capturedPrompt)
+	}
+	if tc.wantEmbeddedText != "" && client.lastText != tc.wantEmbeddedText {
+		t.Errorf("embedded text = %q, want %q", client.lastText, tc.wantEmbeddedText)
+	}
+	if tc.sabotage != sabotageProcedural {
+		if got := proceduralRows(t, db); !equalStrings(got, tc.wantCandidates) {
+			t.Errorf("procedural candidates = %q, want %q", got, tc.wantCandidates)
+		}
+	}
+	if got := watermarkRow(t, db, "th-proc"); got != tc.wantWatermark {
+		t.Errorf("watermark = %s, want %s", got, tc.wantWatermark)
+	}
 }
 
 func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
-	tests := processThreadFactsProceduralCases()
-	for _, tc := range tests {
+	t.Parallel()
+	for _, tc := range processThreadFactsProceduralCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			runProcessThreadFactsProceduralCase(t, tc)
 		})
 	}
