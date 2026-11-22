@@ -15,69 +15,15 @@ func TestPGStringSlice_Scan_TableDriven(t *testing.T) {
 		wantSlice []string
 		wantErr   bool
 	}{
-		{
-			name:      "nil input",
-			destNil:   false,
-			input:     nil,
-			wantSlice: []string{},
-			wantErr:   false,
-		},
-		{
-			name:      "empty array string",
-			destNil:   false,
-			input:     "{}",
-			wantSlice: []string{},
-			wantErr:   false,
-		},
-		{
-			name:      "null string",
-			destNil:   false,
-			input:     "NULL",
-			wantSlice: []string{},
-			wantErr:   false,
-		},
-		{
-			name:      "bytes slice valid array",
-			destNil:   false,
-			input:     []byte(`{"foo","bar"}`),
-			wantSlice: []string{"foo", "bar"},
-			wantErr:   false,
-		},
-		{
-			name:      "native string slice pass through",
-			destNil:   false,
-			input:     []string{"alpha", "beta"},
-			wantSlice: []string{"alpha", "beta"},
-			wantErr:   false,
-		},
-		{
-			name:      "dest nil scan success",
-			destNil:   true,
-			input:     `{"only","test"}`,
-			wantSlice: nil,
-			wantErr:   false,
-		},
-		{
-			name:      "unsupported integer type",
-			destNil:   false,
-			input:     12345,
-			wantSlice: nil,
-			wantErr:   true,
-		},
-		{
-			name:      "malformed missing brackets",
-			destNil:   false,
-			input:     "raw_string_without_braces",
-			wantSlice: nil,
-			wantErr:   true,
-		},
-		{
-			name:      "unclosed quote error",
-			destNil:   false,
-			input:     `{"unclosed}`,
-			wantSlice: nil,
-			wantErr:   true,
-		},
+		{name: "nil input", input: nil, wantSlice: []string{}},
+		{name: "empty array string", input: "{}", wantSlice: []string{}},
+		{name: "null string", input: "NULL", wantSlice: []string{}},
+		{name: "bytes slice valid array", input: []byte(`{"foo","bar"}`), wantSlice: []string{"foo", "bar"}},
+		{name: "native string slice pass through", input: []string{"alpha", "beta"}, wantSlice: []string{"alpha", "beta"}},
+		{name: "dest nil scan success", destNil: true, input: `{"only","test"}`},
+		{name: "unsupported integer type", input: 12345, wantErr: true},
+		{name: "malformed missing brackets", input: "raw_string_without_braces", wantErr: true},
+		{name: "unclosed quote error", input: `{"unclosed}`, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -113,31 +59,11 @@ func TestFormatPGTextArray_TableDriven(t *testing.T) {
 		input    []string
 		expected string
 	}{
-		{
-			name:     "empty slice",
-			input:    []string{},
-			expected: "{}",
-		},
-		{
-			name:     "nil slice",
-			input:    nil,
-			expected: "{}",
-		},
-		{
-			name:     "single element",
-			input:    []string{"single"},
-			expected: `{"single"}`,
-		},
-		{
-			name:     "multiple elements",
-			input:    []string{"apple", "banana"},
-			expected: `{"apple","banana"}`,
-		},
-		{
-			name:     "escaping quotes and backslashes",
-			input:    []string{`say "hello"`, `path\to\file`},
-			expected: `{"say \"hello\"","path\\to\\file"}`,
-		},
+		{"empty slice", []string{}, "{}"},
+		{"nil slice", nil, "{}"},
+		{"single element", []string{"single"}, `{"single"}`},
+		{"multiple elements", []string{"apple", "banana"}, `{"apple","banana"}`},
+		{"escaping quotes and backslashes", []string{`say "hello"`, `path\to\file`}, `{"say \"hello\"","path\\to\\file"}`},
 	}
 
 	for _, tc := range tests {
@@ -161,48 +87,13 @@ func TestParsePGTextArray_TableDriven(t *testing.T) {
 		expected  []string
 		expectErr bool
 	}{
-		{
-			name:      "already string slice",
-			input:     []string{"first", "second"},
-			expected:  []string{"first", "second"},
-			expectErr: false,
-		},
-		{
-			name:      "empty brackets string",
-			input:     "{}",
-			expected:  []string{},
-			expectErr: false,
-		},
-		{
-			name:      "whitespace only string",
-			input:     "   ",
-			expected:  []string{},
-			expectErr: false,
-		},
-		{
-			name:      "empty brackets bytes",
-			input:     []byte("{}"),
-			expected:  []string{},
-			expectErr: false,
-		},
-		{
-			name:      "escaped quotes and backslashes in content",
-			input:     `{"say \"hi\"","path\\file"}`,
-			expected:  []string{`say "hi"`, `path\file`},
-			expectErr: false,
-		},
-		{
-			name:      "single item without quotes",
-			input:     "{hello}",
-			expected:  []string{"hello"},
-			expectErr: false,
-		},
-		{
-			name:      "trailing backslash escape error",
-			input:     `{"escaped\`,
-			expected:  nil,
-			expectErr: true,
-		},
+		{"already string slice", []string{"first", "second"}, []string{"first", "second"}, false},
+		{"empty brackets string", "{}", []string{}, false},
+		{"whitespace only string", "   ", []string{}, false},
+		{"empty brackets bytes", []byte("{}"), []string{}, false},
+		{"escaped quotes and backslashes in content", `{"say \"hi\"","path\\file"}`, []string{`say "hi"`, `path\file`}, false},
+		{"single item without quotes", "{hello}", []string{"hello"}, false},
+		{"trailing backslash escape error", `{"escaped\`, nil, true},
 	}
 
 	for _, tc := range tests {

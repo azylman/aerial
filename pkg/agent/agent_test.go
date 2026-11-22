@@ -11,7 +11,7 @@ func TestClean(t *testing.T) {
 	}{
 		{name: "empty", input: "", want: ""},
 		{name: "whitespace only", input: "   ", want: ""},
-		{name: "mixed case trimmed", input: "  Miorine ", want: "miorine"},
+		{name: "mixed case trimmed", input: "  Alpha ", want: "alpha"},
 		{name: "unsafe chars kept", input: "Foo Bar", want: "foo bar"},
 	}
 	for _, tc := range tests {
@@ -34,7 +34,7 @@ func TestNormalize(t *testing.T) {
 		{name: "empty stays empty", input: "", want: ""},
 		{name: "whitespace stays empty", input: " \t ", want: ""},
 		{name: "default", input: "aerial", want: "aerial"},
-		{name: "mixed case lowercases", input: " MiOrine ", want: "miorine"},
+		{name: "mixed case lowercases", input: " AlPha ", want: "alpha"},
 		{name: "digits dash underscore", input: "agent_2-b", want: "agent_2-b"},
 		{name: "space falls back to default", input: "Foo Bar", want: "aerial"},
 		{name: "slash falls back to default", input: "a/b", want: "aerial"},
@@ -61,7 +61,7 @@ func TestScopedServiceName(t *testing.T) {
 		{name: "empty agent", base: "ThreadSession", agent: "", want: "ThreadSession"},
 		{name: "default agent", base: "ThreadSession", agent: "aerial", want: "ThreadSession"},
 		{name: "default agent mixed case", base: "DispatchSession", agent: " Aerial ", want: "DispatchSession"},
-		{name: "named agent", base: "DispatchSession", agent: "Miorine", want: "DispatchSession-miorine"},
+		{name: "named agent", base: "DispatchSession", agent: "Beta", want: "DispatchSession-beta"},
 		{name: "unsafe agent routes to default", base: "ThreadSession", agent: "bad name", want: "ThreadSession"},
 	}
 	for _, tc := range tests {

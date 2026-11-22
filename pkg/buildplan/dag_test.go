@@ -7,12 +7,42 @@ import (
 	"testing"
 )
 
+// dagChunk builds a chunk for DAG tests; a nil deps leaves DependsOn unset.
+func dagChunk(id, mode, repo string, deps []string, files ...string) VanadisChunk {
+	return VanadisChunk{ID: id, Mode: mode, Repo: repo, DependsOn: deps, TargetFiles: files}
+}
+
+// pr builds a PR chunk; deps nil means depends_on was omitted.
+func pr(id, repo string, deps []string, files ...string) VanadisChunk {
+	return dagChunk(id, "pr", repo, deps, files...)
+}
+
+// action builds a repo-less action chunk with an explicit (possibly empty) depends_on.
+func action(id string, deps ...string) VanadisChunk {
+	return dagChunk(id, "action", "", dagDeps(deps...))
+}
+
+// dagDeps returns an explicit, non-nil depends_on list.
+func dagDeps(ids ...string) []string {
+	if ids == nil {
+		return []string{}
+	}
+	return ids
+}
+
+// dagChunks lists the chunks of one DAG row.
+func dagChunks(cs ...VanadisChunk) []VanadisChunk { return cs }
+
+func withStatus(c VanadisChunk, status string) VanadisChunk {
+	c.Status = status
+	return c
+}
+
 type dagTestCase struct {
 	name       string
-	chunks     []VanadisChunk
-	wantErr    bool
 	wantSubstr string
 	wantDeps   [][]string
+	chunks     []VanadisChunk
 }
 
 func runDAGTestCases(t *testing.T, tests []dagTestCase) {
@@ -21,12 +51,9 @@ func runDAGTestCases(t *testing.T, tests []dagTestCase) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := NormalizeAndValidateBuildDAG(tc.chunks)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+			if tc.wantSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err = %v, want error containing %q", err, tc.wantSubstr)
 				}
 				return
 			}
@@ -47,226 +74,98 @@ func runDAGTestCases(t *testing.T, tests []dagTestCase) {
 
 func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 	t.Parallel()
+	none := dagDeps
 	tests := []dagTestCase{
+		{name: "empty_chunks"},
+		{"single_chunk_missing_depends_on_rejected", "must explicitly specify depends_on", nil, dagChunks(pr("c1", "aerial", nil))},
+		{"empty_chunk_id_rejected", "id cannot be empty", nil, dagChunks(pr("", "aerial", nil))},
+		{"duplicate_chunk_id_rejected", "duplicate chunk id", nil, dagChunks(pr("c1", "aerial", nil), pr("c1", "aerial", nil))},
+		{"empty_dependency_reference_rejected", "empty dependency reference", nil, dagChunks(pr("c1", "aerial", none("   ")))},
 		{
-			name:   "empty_chunks",
-			chunks: nil,
+			"duplicate_dependency_deduplicated", "",
+			[][]string{nil, {"c1"}},
+			dagChunks(pr("c1", "aerial", none()), pr("c2", "aerial", none("c1", "c1"))),
 		},
 		{
-			name: "single_chunk_missing_depends_on_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial"},
-			},
-			wantErr:    true,
-			wantSubstr: "must explicitly specify depends_on",
+			"multi_chunk_missing_depends_on_rejected", "must explicitly specify depends_on", nil,
+			dagChunks(pr("c1", "aerial", none()), pr("c2", "aerial", nil)),
+		},
+		{"index_string_normalization", "", [][]string{nil, {"c1"}}, dagChunks(pr("c1", "aerial", none()), pr("c2", "aerial", none("0")))},
+		{"self_dependency_rejected", "cannot depend on itself", nil, dagChunks(pr("c1", "aerial", none("c1")))},
+		{"self_dependency_by_index_rejected", "cannot depend on itself", nil, dagChunks(pr("c1", "aerial", none("0")))},
+		{"unknown_dependency_rejected", "references unknown dependency", nil, dagChunks(pr("c1", "aerial", none("missing")))},
+		{"forward_edge", "", [][]string{{"c2"}, {}}, dagChunks(pr("c1", "aerial", none("1")), pr("c2", "aerial", none()))},
+		{
+			"forward_transitive_chain", "",
+			[][]string{{"c3"}, {}, {"c2"}},
+			dagChunks(pr("c1", "aerial", none("c3")), pr("c2", "aerial", none()), pr("c3", "aerial", none("c2"))),
 		},
 		{
-			name: "empty_chunk_id_rejected",
-			chunks: []VanadisChunk{
-				{ID: "", Mode: "pr", Repo: "aerial"},
-			},
-			wantErr:    true,
-			wantSubstr: "id cannot be empty",
+			"disconnected_nodes_with_forward_edge", "",
+			[][]string{{"c3"}, {}, {}},
+			dagChunks(pr("c1", "aerial", none("c3"), "a.go"), pr("c2", "aerial", none(), "b.go"), pr("c3", "aerial", none(), "a.go")),
 		},
-		{
-			name: "duplicate_chunk_id_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial"},
-				{ID: "c1", Mode: "pr", Repo: "aerial"},
-			},
-			wantErr:    true,
-			wantSubstr: "duplicate chunk id",
-		},
-		{
-			name: "empty_dependency_reference_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"   "}},
-			},
-			wantErr:    true,
-			wantSubstr: "empty dependency reference",
-		},
-		{
-			name: "duplicate_dependency_deduplicated",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1", "c1"}},
-			},
-			wantDeps: [][]string{nil, {"c1"}},
-		},
-		{
-			name: "multi_chunk_missing_depends_on_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-				{ID: "c2", Mode: "pr", Repo: "aerial"},
-			},
-			wantErr:    true,
-			wantSubstr: "must explicitly specify depends_on",
-		},
-		{
-			name: "index_string_normalization",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"0"}},
-			},
-			wantDeps: [][]string{nil, {"c1"}},
-		},
-		{
-			name: "self_dependency_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}},
-			},
-			wantErr:    true,
-			wantSubstr: "cannot depend on itself",
-		},
-		{
-			name: "self_dependency_by_index_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"0"}},
-			},
-			wantErr:    true,
-			wantSubstr: "cannot depend on itself",
-		},
-		{
-			name: "unknown_dependency_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"missing"}},
-			},
-			wantErr:    true,
-			wantSubstr: "references unknown dependency",
-		},
-		{
-			name: "forward_edge",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"1"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-			},
-			wantDeps: [][]string{{"c2"}, {}},
-		},
-		{
-			name: "forward_transitive_chain",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c3"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-				{ID: "c3", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}},
-			},
-			wantDeps: [][]string{{"c3"}, {}, {"c2"}},
-		},
-		{
-			name: "disconnected_nodes_with_forward_edge",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c3"}, TargetFiles: []string{"a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
-				{ID: "c3", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-			},
-			wantDeps: [][]string{{"c3"}, {}, {}},
-		},
-		{
-			name: "cycle_detected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}},
-			},
-			wantErr:    true,
-			wantSubstr: "cycle detected",
-		},
+		{"cycle_detected", "cycle detected", nil, dagChunks(pr("c1", "aerial", none("c2")), pr("c2", "aerial", none("c1")))},
 	}
 	runDAGTestCases(t, tests)
 }
 
 func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 	t.Parallel()
+	none := dagDeps
 	tests := []dagTestCase{
 		{
-			name: "concurrent_same_repo_pr_empty_target_files_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-			},
-			wantErr:    true,
-			wantSubstr: "must specify target_files",
+			"concurrent_same_repo_pr_empty_target_files_rejected", "must specify target_files", nil,
+			dagChunks(pr("c1", "aerial", none()), pr("c2", "aerial", none())),
 		},
 		{
-			name: "concurrent_same_repo_pr_overlapping_files_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go", "pkg/b.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/b.go", "pkg/c.go"}},
-			},
-			wantErr:    true,
-			wantSubstr: "overlapping target_files",
+			"concurrent_same_repo_pr_overlapping_files_rejected", "overlapping target_files", nil,
+			dagChunks(pr("c1", "aerial", none(), "pkg/a.go", "pkg/b.go"), pr("c2", "aerial", none(), "pkg/b.go", "pkg/c.go")),
 		},
 		{
-			name: "concurrent_same_repo_pr_disjoint_files_ok",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/b.go"}},
-			},
-			wantDeps: [][]string{nil, nil},
+			"concurrent_same_repo_pr_disjoint_files_ok", "",
+			[][]string{nil, nil},
+			dagChunks(pr("c1", "aerial", none(), "pkg/a.go"), pr("c2", "aerial", none(), "pkg/b.go")),
 		},
 		{
-			name: "dependent_same_repo_pr_can_overlap_files",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/a.go"}},
-			},
-			wantDeps: [][]string{nil, {"c1"}},
+			"dependent_same_repo_pr_can_overlap_files", "",
+			[][]string{nil, {"c1"}},
+			dagChunks(pr("c1", "aerial", none(), "pkg/a.go"), pr("c2", "aerial", none("c1"), "pkg/a.go")),
 		},
 		{
-			name: "concurrent_different_repos_can_overlap_files",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial-config", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
-			},
-			wantDeps: [][]string{nil, nil},
+			"concurrent_different_repos_can_overlap_files", "",
+			[][]string{nil, nil},
+			dagChunks(pr("c1", "aerial", none(), "config.yaml"), pr("c2", "aerial-config", none(), "config.yaml")),
 		},
 		{
-			name: "concurrent_mixed_modes_skip_disjoint_check",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
-				{ID: "c2", Mode: "action", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
-			},
-			wantDeps: [][]string{nil, nil},
+			"concurrent_mixed_modes_skip_disjoint_check", "",
+			[][]string{nil, nil},
+			dagChunks(pr("c1", "aerial", none(), "pkg/a.go"), dagChunk("c2", "action", "aerial", none(), "pkg/a.go")),
 		},
 		{
-			name: "terminal_chunks_skipped_in_disjoint_check",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
-				{ID: "c3", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
-			},
-			wantDeps: [][]string{nil, nil, nil},
+			"terminal_chunks_skipped_in_disjoint_check", "",
+			[][]string{nil, nil, nil},
+			dagChunks(withStatus(pr("c1", "aerial", none(), "config.yaml"), "merged"),
+				withStatus(pr("c2", "aerial", none(), "config.yaml"), "pending"), withStatus(pr("c3", "aerial", none(), "config.yaml"), "merged")),
 		},
 		{
-			name: "invalid_first_mode_skips_disjoint_check",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "bogus", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-			},
-			wantDeps: [][]string{nil, nil},
+			"invalid_first_mode_skips_disjoint_check", "",
+			[][]string{nil, nil},
+			dagChunks(dagChunk("c1", "bogus", "aerial", none(), "a.go"), pr("c2", "aerial", none(), "a.go")),
 		},
 		{
-			name: "invalid_second_mode_skips_disjoint_check",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-				{ID: "c2", Mode: "bogus", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-			},
-			wantDeps: [][]string{nil, nil},
+			"invalid_second_mode_skips_disjoint_check", "",
+			[][]string{nil, nil},
+			dagChunks(pr("c1", "aerial", none(), "a.go"), dagChunk("c2", "bogus", "aerial", none(), "a.go")),
 		},
 		{
-			name: "earlier_chunk_depending_on_later_can_overlap_files",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}, TargetFiles: []string{"a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-			},
-			wantDeps: [][]string{{"c2"}, nil},
+			"earlier_chunk_depending_on_later_can_overlap_files", "",
+			[][]string{{"c2"}, nil},
+			dagChunks(pr("c1", "aerial", none("c2"), "a.go"), pr("c2", "aerial", none(), "a.go")),
 		},
 		{
-			name: "concurrent_second_chunk_missing_target_files_rejected",
-			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
-			},
-			wantErr:    true,
-			wantSubstr: `concurrent PR chunk "c2" on repo "aerial" must specify target_files`,
+			"concurrent_second_chunk_missing_target_files_rejected", `concurrent PR chunk "c2" on repo "aerial" must specify target_files`, nil,
+			dagChunks(pr("c1", "aerial", none(), "a.go"), pr("c2", "aerial", none())),
 		},
 	}
 	runDAGTestCases(t, tests)
@@ -309,106 +208,36 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 		DependsOn:    []string{},
 	}
 
+	titled := func(c VanadisChunk) VanadisChunk { c.Title, c.Instructions = "t", "i"; return c }
 	tests := []struct {
 		name       string
 		buildID    string
-		threadID   string
-		objective  string
 		chunks     []VanadisChunk
-		wantErr    bool
 		wantSubstr string
 	}{
+		{"empty build id", "", dagChunks(validChunk), "build id, thread_id, and objective cannot be empty"},
+		{"empty chunk fields", "b1", dagChunks(VanadisChunk{}), "id, title, and instructions cannot be empty"},
+		{"invalid chunk id characters", "b1", dagChunks(titled(VanadisChunk{ID: "invalid/id!"})), "must be 1..120 characters"},
+		{"mismatched build id", "b1", dagChunks(titled(VanadisChunk{ID: "c1", BuildID: "b2"})), "does not match build id"},
+		{"invalid effort", "b1", dagChunks(titled(VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Effort: "gigantic"})), "invalid chunk effort"},
 		{
-			name:       "empty build id",
-			buildID:    "",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{validChunk},
-			wantErr:    true,
-			wantSubstr: "build id, thread_id, and objective cannot be empty",
+			"action mode with repo rejected", "b1", dagChunks(titled(dagChunk("c1", "action", "non-empty-repo", nil))),
+			"action chunk must have empty repo",
 		},
+		{"invalid mode rejected", "b1", dagChunks(titled(dagChunk("c1", "bogus", "", dagDeps()))), "bogus"},
 		{
-			name:       "empty chunk fields",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "", Title: "", Instructions: ""}},
-			wantErr:    true,
-			wantSubstr: "id, title, and instructions cannot be empty",
+			"invalid dag rejected", "b1", dagChunks(titled(action("c1", "c2")), titled(action("c2", "c1"))),
+			"invalid vanadis build input: cycle detected in chunk dependencies",
 		},
-		{
-			name:       "invalid chunk id characters",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "invalid/id!", Title: "Title", Instructions: "Inst"}},
-			wantErr:    true,
-			wantSubstr: "must be 1..120 characters",
-		},
-		{
-			name:       "mismatched build id",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", BuildID: "b2", Title: "Title", Instructions: "Inst"}},
-			wantErr:    true,
-			wantSubstr: "does not match build id",
-		},
-		{
-			name:       "invalid effort",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", Title: "Title", Instructions: "Inst", Mode: "pr", Repo: "aerial", Effort: "gigantic"}},
-			wantErr:    true,
-			wantSubstr: "invalid chunk effort",
-		},
-		{
-			name:       "action mode with repo rejected",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Mode: "action", Repo: "non-empty-repo"}},
-			wantErr:    true,
-			wantSubstr: "action chunk must have empty repo",
-		},
-		{
-			name:       "invalid mode rejected",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Mode: "bogus", DependsOn: []string{}}},
-			wantErr:    true,
-			wantSubstr: "bogus",
-		},
-		{
-			name:       "invalid dag rejected",
-			buildID:    "b1",
-			threadID:   "th1",
-			objective:  "obj",
-			chunks:     []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Mode: "action", DependsOn: []string{"c2"}}, {ID: "c2", Title: "t", Instructions: "i", Mode: "action", DependsOn: []string{"c1"}}},
-			wantErr:    true,
-			wantSubstr: "invalid vanadis build input: cycle detected in chunk dependencies",
-		},
-		{
-			name:      "valid build inputs",
-			buildID:   "b1",
-			threadID:  "th1",
-			objective: "obj",
-			chunks:    []VanadisChunk{validChunk},
-			wantErr:   false,
-		},
+		{"valid build inputs", "b1", dagChunks(validChunk), ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := ValidateCreateBuildInputs(tc.buildID, tc.threadID, tc.objective, tc.chunks)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantSubstr)
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+			err := ValidateCreateBuildInputs(tc.buildID, "th1", "obj", tc.chunks)
+			if tc.wantSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err = %v, want error containing %q", err, tc.wantSubstr)
 				}
 				return
 			}
@@ -483,13 +312,8 @@ func TestBuildTransitiveClosure(t *testing.T) {
 	}{
 		{name: "empty", chunks: nil, wantReach: [][]bool{}},
 		{
-			name: "chain plus isolated node",
-			chunks: []VanadisChunk{
-				{ID: "a", DependsOn: []string{"b"}},
-				{ID: "b", DependsOn: []string{"c"}},
-				{ID: "c", DependsOn: []string{}},
-				{ID: "d", DependsOn: []string{}},
-			},
+			name:   "chain plus isolated node",
+			chunks: dagChunks(action("a", "b"), action("b", "c"), action("c"), action("d")),
 			wantReach: [][]bool{
 				{false, false, false, false},
 				{true, false, false, false},
@@ -529,34 +353,16 @@ func TestValidateUpdateChunkDAG(t *testing.T) {
 		wantDeps   []string
 	}{
 		{
-			name: "cycle rejected",
-			existing: []VanadisChunk{
-				{ID: "c1", Mode: "action", DependsOn: []string{}},
-				{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
-			},
-			updatedIdx: 0,
-			updated:    VanadisChunk{ID: "c1", Mode: "action", DependsOn: []string{"c2"}},
+			name: "cycle rejected", existing: dagChunks(action("c1"), action("c2", "c1")), updatedIdx: 0, updated: action("c1", "c2"),
 			wantSubstr: "invalid vanadis build input: invalid vanadis build input: cycle detected",
 		},
 		{
-			name: "overlapping files rejected",
-			existing: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
-			},
-			updatedIdx: 1,
-			updated:    VanadisChunk{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-			wantSubstr: "overlapping target_files",
+			name: "overlapping files rejected", existing: dagChunks(pr("c1", "aerial", dagDeps(), "a.go"), pr("c2", "aerial", dagDeps(), "b.go")),
+			updatedIdx: 1, updated: pr("c2", "aerial", dagDeps(), "a.go"), wantSubstr: "overlapping target_files",
 		},
 		{
-			name: "index dependency normalized",
-			existing: []VanadisChunk{
-				{ID: "c1", Mode: "action", DependsOn: []string{}},
-				{ID: "c3", Mode: "action", DependsOn: []string{"c1"}},
-			},
-			updatedIdx: 1,
-			updated:    VanadisChunk{ID: "c3", Title: "Updated C3", Mode: "action", DependsOn: []string{"0", "c1"}},
-			wantDeps:   []string{"c1"},
+			name: "index dependency normalized", existing: dagChunks(action("c1"), action("c3", "c1")), updatedIdx: 1, updated: action("c3", "0", "c1"),
+			wantDeps: []string{"c1"},
 		},
 	}
 	for _, tc := range tests {
@@ -589,21 +395,11 @@ func TestValidateAppendChunksDAG(t *testing.T) {
 		wantDeps   [][]string
 	}{
 		{
-			name:     "cycle rejected",
-			existing: []VanadisChunk{{ID: "c1", Mode: "action", DependsOn: []string{}}},
-			appended: []VanadisChunk{
-				{ID: "c2", Mode: "action", DependsOn: []string{"c3"}},
-				{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
-			},
+			name: "cycle rejected", existing: dagChunks(action("c1")), appended: dagChunks(action("c2", "c3"), action("c3", "c2")),
 			wantSubstr: "cycle detected",
 		},
 		{
-			name:     "sequential chain normalized",
-			existing: []VanadisChunk{{ID: "c1", Mode: "action", DependsOn: []string{}}},
-			appended: []VanadisChunk{
-				{ID: "c2", Mode: "action", DependsOn: []string{"0"}},
-				{ID: "c3", Mode: "action", DependsOn: []string{"c2", "c2"}},
-			},
+			name: "sequential chain normalized", existing: dagChunks(action("c1")), appended: dagChunks(action("c2", "0"), action("c3", "c2", "c2")),
 			wantDeps: [][]string{{"c1"}, {"c2"}},
 		},
 	}
@@ -642,35 +438,20 @@ func TestRelinkDependenciesAfterRemoval(t *testing.T) {
 		wantDeps    [][]string
 	}{
 		{
-			name: "dependent inherits removed deps",
-			remaining: []VanadisChunk{
-				{ID: "c1", DependsOn: []string{}},
-				{ID: "c3", DependsOn: []string{"c2"}},
-			},
-			removedID:   "c2",
-			removedDeps: []string{"c1"},
-			wantDeps:    [][]string{{}, {"c1"}},
+			name: "dependent inherits removed deps", remaining: dagChunks(action("c1"), action("c3", "c2")), removedID: "c2",
+			removedDeps: []string{"c1"}, wantDeps: [][]string{{}, {"c1"}},
 		},
 		{
-			name:        "self dependency dropped",
-			remaining:   []VanadisChunk{{ID: "c2", DependsOn: []string{"c1"}}},
-			removedID:   "c1",
-			removedDeps: []string{"c2"},
-			wantDeps:    [][]string{{}},
+			name: "self dependency dropped", remaining: dagChunks(action("c2", "c1")), removedID: "c1", removedDeps: []string{"c2"},
+			wantDeps: [][]string{{}},
 		},
 		{
-			name:        "duplicates collapsed in order",
-			remaining:   []VanadisChunk{{ID: "c3", DependsOn: []string{"c2", "c1", "c1"}}},
-			removedID:   "c2",
-			removedDeps: []string{"c0"},
-			wantDeps:    [][]string{{"c0", "c1"}},
+			name: "duplicates collapsed in order", remaining: dagChunks(action("c3", "c2", "c1", "c1")), removedID: "c2", removedDeps: []string{"c0"},
+			wantDeps: [][]string{{"c0", "c1"}},
 		},
 		{
-			name:        "unrelated chunk untouched",
-			remaining:   []VanadisChunk{{ID: "c3", DependsOn: []string{"c1", "c1"}}},
-			removedID:   "c2",
-			removedDeps: []string{"c0"},
-			wantDeps:    [][]string{{"c1", "c1"}},
+			name: "unrelated chunk untouched", remaining: dagChunks(action("c3", "c1", "c1")), removedID: "c2", removedDeps: []string{"c0"},
+			wantDeps: [][]string{{"c1", "c1"}},
 		},
 	}
 	for _, tc := range tests {
