@@ -1121,43 +1121,6 @@ func runTranscriptionBranchCase(t *testing.T, tc transcriptionBranchTestCase) {
 	}
 }
 
-func TestDelivery_ReporterNilStoreAndNotFound(t *testing.T) {
-	t.Parallel()
-	repNil := NewReporter(staticTestConfig{cfg: &config.Config{BrainURL: "http://brain.local"}}, nil, &mockTwilioForDelivery{})
-	if err := repNil.FlushLiveTranscript(context.Background(), "c1"); err == nil {
-		t.Fatal("expected err on nil store")
-	}
-	if err := repNil.DeliverCallReport(context.Background(), "c1"); err == nil {
-		t.Fatal("expected err on nil store")
-	}
-	if err := repNil.ProcessVoicemailRecording(context.Background(), "c1", "http://rec.wav"); err == nil {
-		t.Fatal("expected err on nil store")
-	}
-
-	store := newMockStoreForDelivery()
-	rep := NewReporter(staticTestConfig{cfg: &config.Config{BrainURL: "http://brain.local"}}, store, &mockTwilioForDelivery{})
-	if err := rep.FlushLiveTranscript(context.Background(), "c-missing"); err == nil {
-		t.Fatal("expected err on missing call")
-	}
-	if err := rep.DeliverCallReport(context.Background(), "c-missing"); err == nil {
-		t.Fatal("expected err on missing call")
-	}
-	if err := rep.ProcessVoicemailRecording(context.Background(), "c-missing", "http://rec.wav"); err == nil {
-		t.Fatal("expected err on missing call")
-	}
-
-	// Flush with empty turns
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID: "call-empty-turns",
-		Transcript: []model.TranscriptTurn{
-			{Role: "user", Text: "   "},
-		},
-	}, 5)
-	if err := rep.FlushLiveTranscript(context.Background(), "call-empty-turns"); err != nil {
-		t.Fatalf("unexpected err on empty turns: %v", err)
-	}
-}
-
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {

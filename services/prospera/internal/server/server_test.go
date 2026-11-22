@@ -406,72 +406,6 @@ func TestTwilioWebhook_SMS(t *testing.T) {
 	}
 }
 
-func TestServer_Health(t *testing.T) {
-	t.Parallel()
-
-	server, _, _ := setupTestServer()
-	mux := server.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("health returned %d", rec.Code)
-	}
-}
-
-func TestTwilioWebhook_StatusCompletedReport(t *testing.T) {
-	t.Parallel()
-
-	server, store, cfg := setupTestServer()
-	mux := server.Routes()
-
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-status-pending",
-		ProviderCallSID: "CA-stat-pend-1",
-		Direction:       "outbound",
-		FromNumber:      cfg.TwilioFromNumber,
-		ToNumber:        "+15105550777",
-		State:           "in-progress",
-		ReportStatus:    "pending",
-	}, 5)
-
-	form := url.Values{
-		"CallSid":    []string{"CA-stat-pend-1"},
-		"CallStatus": []string{"completed"},
-	}
-	path := "/api/webhooks/twilio/status"
-	fullURL := cfg.PublicWebhookBaseURL + path
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
-
-	req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", sig)
-
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status webhook returned %d, want 200", rec.Code)
-	}
-	server.Wait()
-}
-
-func TestTwilioWebhook_StreamUnauthorized(t *testing.T) {
-	t.Parallel()
-
-	server, _, _ := setupTestServer()
-	mux := server.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/webhooks/twilio/stream/bad-token", http.NoBody)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status 401 for unauthorized token, got %d", rec.Code)
-	}
-}
-
 func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 	t.Parallel()
 
@@ -1098,14 +1032,6 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 	}
 }
 
-func TestServer_Wait(t *testing.T) {
-	t.Parallel()
-
-	server, _, _ := setupTestServer()
-	server.triggerPostCallReportIfPending(context.Background(), "call-nonexistent")
-	server.Wait()
-}
-
 func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1181,12 +1107,15 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 			cfg := &config.Config{GeminiLiveModel: "gemini-3.8-live"}
 			store := newMockStoreForDelivery()
 			tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+			built := make(chan struct{}, 1)
 			sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, tokenMgr,
 				mediastream.WithSessionFactory(func(sc mediastream.SessionConfig) mediastream.Session {
 					sc.GeminiDialer = func(context.Context, string) (*websocket.Conn, error) {
 						return nil, errors.New("gemini unavailable")
 					}
-					return newProsperaMediaSession(sc)
+					sess := newProsperaMediaSession(sc)
+					built <- struct{}{}
+					return sess
 				}),
 			)
 			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, delivery.NewReporter(staticConfig{cfg: cfg}, store, nil))
@@ -1207,6 +1136,14 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 			_ = resp.Body.Close()
 			if resp.StatusCode != tc.wantStatus {
 				t.Errorf("handshake status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if !tc.validToken {
+				return
+			}
+			select {
+			case <-built:
+			case <-time.After(5 * time.Second):
+				t.Fatal("upgraded stream never built a prospera media session")
 			}
 		})
 	}

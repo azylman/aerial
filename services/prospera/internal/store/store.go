@@ -66,11 +66,6 @@ func NewPGStore(db *sql.DB) *PGStore {
 	return &PGStore{db: db, isSQLite: isSQLite}
 }
 
-// IsSQLite reports whether the underlying database is SQLite.
-func (s *PGStore) IsSQLite() bool {
-	return s.isSQLite
-}
-
 // OpenDB opens a database connection from a connection string: sqlite://,
 // file: and :memory: URLs open SQLite, everything else goes through
 // pgutil.OpenSQL (postgres:// or postgresql:// only, pinged at open).
