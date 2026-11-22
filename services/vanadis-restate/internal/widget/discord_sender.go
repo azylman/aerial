@@ -146,35 +146,24 @@ func normalizeRunnerAgent(agent string) string {
 // DISCORD_TOKEN (or DISCORD_BOT_TOKEN) under the runner's own normalized agent unless an explicit
 // entry exists. environ uses os.Environ's KEY=VALUE form; the caller owns reading the process env.
 func discoverAgentTokens(runnerAgent string, environ []string) map[string]string {
-	tokens := make(map[string]string)
+	tokens := discordutil.AgentTokensFromEnv(environ)
+	owner := normalizeRunnerAgent(runnerAgent)
+	if _, ok := tokens[owner]; ok {
+		return tokens
+	}
 	plain := make(map[string]string)
 	for _, env := range environ {
 		key, rawVal, ok := strings.Cut(env, "=")
-		if !ok {
-			continue
-		}
-		val := strings.TrimSpace(rawVal)
-		if val == "" {
-			continue
-		}
-		if key == "DISCORD_TOKEN" || key == "DISCORD_BOT_TOKEN" {
-			plain[key] = val
-			continue
-		}
-		if rawAgent, ok := strings.CutPrefix(key, "DISCORD_TOKEN_"); ok {
-			agent := strings.ToLower(strings.ReplaceAll(rawAgent, "_", "-"))
-			if agent != "" {
-				tokens[agent] = val
+		if ok && (key == "DISCORD_TOKEN" || key == "DISCORD_BOT_TOKEN") {
+			if val := strings.TrimSpace(rawVal); val != "" {
+				plain[key] = val
 			}
 		}
 	}
-	owner := normalizeRunnerAgent(runnerAgent)
-	if _, ok := tokens[owner]; !ok {
-		if t := plain["DISCORD_TOKEN"]; t != "" {
-			tokens[owner] = t
-		} else if t := plain["DISCORD_BOT_TOKEN"]; t != "" {
-			tokens[owner] = t
-		}
+	if t := plain["DISCORD_TOKEN"]; t != "" {
+		tokens[owner] = t
+	} else if t := plain["DISCORD_BOT_TOKEN"]; t != "" {
+		tokens[owner] = t
 	}
 	return tokens
 }

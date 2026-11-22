@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/githubapi"
 )
 
 func TestIsRoboRevCheck(t *testing.T) {
@@ -264,101 +266,76 @@ func TestVerifySignature(t *testing.T) {
 	}
 }
 
-func TestClient_RequestsAndSuccess(t *testing.T) {
+func TestClientGetJSON(t *testing.T) {
 	t.Parallel()
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		if r.URL.Path != "/ok" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("X-Seen-Auth", r.Header.Get("Authorization"))
 		_, _ = w.Write([]byte(`{"id":123,"body":"hello"}`))
 	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token123")
-	var comment GitHubIssueComment
-	err := client.GetJSON(context.Background(), "/ok", 1<<20, &comment)
-	if err != nil || comment.ID != 123 {
-		t.Fatalf("expected successful GetJSON, got (%v, %+v)", err, comment)
+	t.Cleanup(srv.Close)
+	tests := []struct {
+		name       string
+		client     *Client
+		path       string
+		wantID     int64
+		wantStatus int
+		wantErrSub string
+	}{
+		{name: "bound URL and http client decode", client: NewClient(srv.Client(), srv.URL, ""), path: "/ok", wantID: 123},
+		{name: "nil http client falls back to default client", client: NewClient(nil, srv.URL, "tok"), path: "/ok", wantID: 123},
+		{name: "non-200 surfaces githubapi status error", client: NewClient(srv.Client(), srv.URL, ""), path: "/missing", wantStatus: http.StatusNotFound},
+		{name: "invalid API URL fails request creation", client: NewClient(srv.Client(), "http://bad host", ""), path: "/ok", wantErrSub: "create github api request"},
 	}
-
-	// maxBytes <= 0 defaults to 10MB
-	errDef := client.GetJSON(context.Background(), "/ok", 0, &comment)
-	if errDef != nil {
-		t.Errorf("expected maxBytes <= 0 to default safely: %v", errDef)
-	}
-
-	// Nil client handling
-	var nilClient *Client
-	nilReq, errNilReq := nilClient.NewRequest(context.Background(), http.MethodGet, "/path", nil)
-	if errNilReq != nil || nilReq.URL.Host != "api.github.com" {
-		t.Errorf("expected nilClient.NewRequest to fall back to default api.github.com: (%v, %v)", nilReq, errNilReq)
-	}
-
-	// Client with nil HTTPClient falls back to http.DefaultClient
-	fallbackClient := NewClient(nil, srv.URL, "token")
-	errFallback := fallbackClient.GetJSON(context.Background(), "/ok", 1<<20, &comment)
-	if errFallback != nil {
-		t.Errorf("expected fallback to default http client: %v", errFallback)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var comment GitHubIssueComment
+			err := tc.client.GetJSON(context.Background(), tc.path, 1<<20, &comment)
+			switch {
+			case tc.wantStatus != 0:
+				statusErr, ok := errors.AsType[*githubapi.StatusError](err)
+				if !ok || statusErr.StatusCode != tc.wantStatus {
+					t.Fatalf("err = %v, want StatusError %d", err, tc.wantStatus)
+				}
+			case tc.wantErrSub != "":
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErrSub)
+				}
+			default:
+				if err != nil || comment.ID != tc.wantID {
+					t.Fatalf("GetJSON = (%v, %+v), want id %d", err, comment, tc.wantID)
+				}
+			}
+		})
 	}
 }
 
-func TestClient_ErrorsAndEdgeCases(t *testing.T) {
+func TestClientNewRequest(t *testing.T) {
 	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/malformed":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{not valid json`))
-		case "/404":
-			w.WriteHeader(http.StatusNotFound)
-		case "/403":
-			w.Header().Set("X-Ratelimit-Remaining", "0")
-			w.WriteHeader(http.StatusForbidden)
-		case "/500":
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token123")
-	var comment GitHubIssueComment
-
-	// Network error on closed server
-	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	closedURL := closedSrv.URL
-	badClient := NewClient(closedSrv.Client(), closedURL, "tok")
-	closedSrv.Close()
-	if errNet := badClient.GetJSON(context.Background(), "/anything", 1<<20, &comment); errNet == nil {
-		t.Errorf("expected network error on closed server")
+	tests := []struct {
+		name     string
+		client   *Client
+		wantURL  string
+		wantAuth string
+	}{
+		{name: "nil client uses public API", client: nil, wantURL: "https://api.github.com/path"},
+		{name: "configured client binds URL and token", client: NewClient(nil, "http://gh.local/", "tok"), wantURL: "http://gh.local/path", wantAuth: "Bearer tok"},
 	}
-
-	errMal := client.GetJSON(context.Background(), "/malformed", 1<<20, &comment)
-	if errMal == nil || !strings.Contains(errMal.Error(), "unmarshal") {
-		t.Errorf("expected unmarshal error for malformed json, got %v", errMal)
-	}
-
-	err404 := client.GetJSON(context.Background(), "/404", 1<<20, &comment)
-	var notFound *StatusError
-	if !errors.As(err404, &notFound) || notFound.StatusCode != http.StatusNotFound {
-		t.Errorf("expected StatusError 404, got %v", err404)
-	}
-
-	err403 := client.GetJSON(context.Background(), "/403", 1<<20, &comment)
-	var statusErr *StatusError
-	if !errors.As(err403, &statusErr) || statusErr.StatusCode != http.StatusForbidden {
-		t.Errorf("expected StatusError 403, got %v", err403)
-	}
-
-	err500 := client.GetJSON(context.Background(), "/500", 1<<20, &comment)
-	if err500 == nil || !strings.Contains(err500.Error(), "status 500") {
-		t.Errorf("expected status 500 error, got %v", err500)
-	}
-
-	// NewRequest with invalid method
-	_, errBadMethod := NewRequest(context.Background(), "", "", "INVALID METHOD \x7f", "/path", nil)
-	if errBadMethod == nil {
-		t.Errorf("expected error for invalid HTTP method")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, err := tc.client.NewRequest(context.Background(), http.MethodGet, "/path", nil)
+			if err != nil {
+				t.Fatalf("NewRequest error = %v", err)
+			}
+			if req.URL.String() != tc.wantURL || req.Header.Get("Authorization") != tc.wantAuth {
+				t.Errorf("NewRequest = (%q, %q), want (%q, %q)", req.URL.String(), req.Header.Get("Authorization"), tc.wantURL, tc.wantAuth)
+			}
+		})
 	}
 }
 

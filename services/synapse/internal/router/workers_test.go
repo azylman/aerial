@@ -24,7 +24,6 @@ type defaultOutboundDispatcherCase struct {
 	failCount          int
 	maxRetries         int
 	cancelDuringRetry  bool
-	nilSubClient       bool
 	wantRetryRecorded  bool
 	wantErr            bool
 	wantSubstr         string
@@ -223,20 +222,6 @@ func defaultOutboundDispatcherKubeAndDiscordCases() []defaultOutboundDispatcherC
 			cancelDuringRetry: true,
 			failCount:         5,
 			wantErr:           true,
-		},
-		{
-			name:         "DispatchDiscordMessage nil discordMsgClient uses httpClient",
-			callType:     "discord_message",
-			statusCode:   http.StatusOK,
-			responseBody: `{"status":"processed","message_id":"12345"}`,
-			nilSubClient: true,
-		},
-		{
-			name:         "DispatchDiscordInteraction nil discordInteractionClient uses httpClient",
-			callType:     "discord_interaction",
-			statusCode:   http.StatusOK,
-			responseBody: `{"status":"ok"}`,
-			nilSubClient: true,
 		},
 		{
 			name:         "PromoteImageTag via kubeAPIServer and flux receiver success",
@@ -452,10 +437,6 @@ func runDefaultOutboundDispatcherCase(ctx context.Context, t *testing.T, tc defa
 
 	disp := NewDefaultOutboundDispatcher(ts.URL, nil)
 	configureDispatcherURLs(disp, ts.URL, tc.callType)
-	if tc.nilSubClient {
-		disp.discordMsgClient = nil
-		disp.discordInteractionClient = nil
-	}
 	delay := 1 * time.Millisecond
 	if tc.cancelDuringRetry {
 		delay = 30 * time.Millisecond

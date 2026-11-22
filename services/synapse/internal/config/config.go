@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -402,10 +403,7 @@ const (
 func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, defaultOwner bool) map[string]BotConfig {
 	bots := make(map[string]BotConfig)
 	if len(fileCfg.Bots) == 0 {
-		tokenEnv := "DISCORD_TOKEN"
-		if botID != defaultAgentName && botID != "" {
-			tokenEnv = "DISCORD_TOKEN_" + strings.ToUpper(botID)
-		}
+		tokenEnv := discordutil.TokenEnvKey(botID)
 		discordToken := strings.TrimSpace(os.Getenv(tokenEnv))
 		if discordToken == "" {
 			discordToken = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
@@ -428,11 +426,7 @@ func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, de
 		}
 		tokenEnv := strings.TrimSpace(bot.TokenEnv)
 		if tokenEnv == "" {
-			if agent == defaultAgentName {
-				tokenEnv = "DISCORD_TOKEN"
-			} else {
-				tokenEnv = "DISCORD_TOKEN_" + strings.ToUpper(agent)
-			}
+			tokenEnv = discordutil.TokenEnvKey(agent)
 		}
 		bot.TokenEnv = tokenEnv
 		bot.DiscordToken = strings.TrimSpace(os.Getenv(tokenEnv))

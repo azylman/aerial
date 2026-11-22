@@ -565,7 +565,7 @@ func TestLoadConfig_MultiBot(t *testing.T) {
 `,
 			env: map[string]string{
 				"CUSTOM_DISCORD_TOKEN":      "tok-aerial",
-				"DISCORD_TOKEN_AGENT-ALPHA": "tok-agent-alpha",
+				"DISCORD_TOKEN_AGENT_ALPHA": "tok-agent-alpha",
 			},
 			wantBots: map[string]BotConfig{
 				"aerial": {
@@ -576,7 +576,7 @@ func TestLoadConfig_MultiBot(t *testing.T) {
 					DefaultOwner:    true,
 				},
 				"agent-alpha": {
-					TokenEnv:        "DISCORD_TOKEN_AGENT-ALPHA",
+					TokenEnv:        "DISCORD_TOKEN_AGENT_ALPHA",
 					DiscordToken:    "tok-agent-alpha",
 					EriURL:          "http://eri-agent-alpha:8088",
 					SystemChannelID: "",
@@ -593,11 +593,11 @@ eri_url: "http://eri-agent-beta:8088"
 system_channel_id: "333444"
 `,
 			env: map[string]string{
-				"DISCORD_TOKEN_AGENT-BETA": "tok-agent-beta",
+				"DISCORD_TOKEN_AGENT_BETA": "tok-agent-beta",
 			},
 			wantBots: map[string]BotConfig{
 				"agent-beta": {
-					TokenEnv:        "DISCORD_TOKEN_AGENT-BETA",
+					TokenEnv:        "DISCORD_TOKEN_AGENT_BETA",
 					DiscordToken:    "tok-agent-beta",
 					EriURL:          "http://eri-agent-beta:8088",
 					SystemChannelID: "333444",

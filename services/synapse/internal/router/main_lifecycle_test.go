@@ -103,7 +103,7 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			if tc.queueStatsErr {
 				mockQ.err = errors.New("simulated queue query error")
 			}
-			srv.SetQueueStats(mockQ)
+			srv.queueStats = mockQ
 			srv.SetGatewayLatencyFn(func() time.Duration {
 				return 42 * time.Millisecond
 			})
@@ -143,7 +143,7 @@ func TestConsumerStatsQuerier(t *testing.T) {
 		t.Errorf("expected bus stats querier when bus implements consumerStatsQuerier")
 	}
 	mockQ := &mockConsumerStatsQuerier{}
-	srv.SetQueueStats(mockQ)
+	srv.queueStats = mockQ
 	if srv.consumerStatsQuerier() != mockQ {
 		t.Errorf("expected queueStats override")
 	}
