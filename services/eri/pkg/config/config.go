@@ -362,6 +362,29 @@ type ConfigData struct {
 	NATSURL                   string                   `yaml:"nats_url"                               json:"nats_url"`
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
 	PushScan                  PushScanConfig           `yaml:"push_scan,omitempty"                    json:"push_scan,omitempty"`
+	// TurnQueue is only cross-checked by eri-restate against its pod annotation, which alone
+	// selects the bound handler set ("" or "legacy" -> legacy, "coordinator" -> coordinator).
+	TurnQueue string `yaml:"turn_queue,omitempty" json:"turn_queue,omitempty"`
+}
+
+// Turn queue modes selected by eri-restate's pod annotation and cross-checked against
+// ConfigData.TurnQueue.
+const (
+	TurnQueueLegacy      = "legacy"
+	TurnQueueCoordinator = "coordinator"
+)
+
+// ParseTurnQueueMode normalizes a turn queue mode: blank or "legacy" is legacy, "coordinator"
+// is coordinator (surrounding whitespace ignored), anything else is an error.
+func ParseTurnQueueMode(v string) (string, error) {
+	switch strings.TrimSpace(v) {
+	case "", TurnQueueLegacy:
+		return TurnQueueLegacy, nil
+	case TurnQueueCoordinator:
+		return TurnQueueCoordinator, nil
+	default:
+		return "", fmt.Errorf("invalid turn_queue %q: want %q or %q", strings.TrimSpace(v), TurnQueueLegacy, TurnQueueCoordinator)
+	}
 }
 
 // PushScanConfig tunes the GitHub egress proxy secret scan.
@@ -523,6 +546,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		NATSURL                   string                   `yaml:"nats_url"`
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
 		PushScan                  PushScanConfig           `yaml:"push_scan"`
+		TurnQueue                 string                   `yaml:"turn_queue"`
 	}
 
 	var raw rawConfigHelper
@@ -558,6 +582,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
 	}
 	c.PushScan = PushScanConfig{RegexAllowlist: cloneStringSlice(raw.PushScan.RegexAllowlist)}
+	if _, err := ParseTurnQueueMode(raw.TurnQueue); err != nil {
+		return err
+	}
+	c.TurnQueue = strings.TrimSpace(raw.TurnQueue)
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
