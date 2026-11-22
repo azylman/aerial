@@ -45,19 +45,21 @@ const SourceAmbient = "AMBIENT"
 
 // Transcript vocabulary shared by the session scanners.
 const (
-	stepTypeUserInput      = "USER_INPUT"
-	blockTypeToolResult    = "tool_result"
-	transcriptFileName     = "transcript.jsonl"
-	transcriptFullFileName = "transcript_full.jsonl"
-	runtimeDiscord         = "discord"
-	runtimeVoice           = "voice"
-	runtimeEphemeral       = "ephemeral"
-	roleUser               = "user"
-	roleAssistant          = "assistant"
-	entryTypeError         = "error"
-	entryTypeMessage       = "message"
-	entryTypeResponseItem  = "response_item"
-	entryTypeEventMsg      = "event_msg"
+	stepTypeUserInput       = "USER_INPUT"
+	stepTypePlannerResponse = "PLANNER_RESPONSE"
+	stepTypeSystemMessage   = "SYSTEM_MESSAGE"
+	blockTypeToolResult     = "tool_result"
+	transcriptFileName      = "transcript.jsonl"
+	transcriptFullFileName  = "transcript_full.jsonl"
+	runtimeDiscord          = "discord"
+	runtimeVoice            = "voice"
+	runtimeEphemeral        = "ephemeral"
+	roleUser                = "user"
+	roleAssistant           = "assistant"
+	entryTypeError          = "error"
+	entryTypeMessage        = "message"
+	entryTypeResponseItem   = "response_item"
+	entryTypeEventMsg       = "event_msg"
 )
 
 // Manager manages session directories, transcripts, and activity tracking
@@ -693,7 +695,7 @@ func scanLinesForResponse(ctx context.Context, lines []string, since time.Time) 
 			break
 		}
 
-		if step.Type != "PLANNER_RESPONSE" {
+		if step.Type != stepTypePlannerResponse {
 			continue
 		}
 

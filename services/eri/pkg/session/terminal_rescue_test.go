@@ -133,6 +133,38 @@ func TestExtractTerminalTurnResponse(t *testing.T) {
 			useDefault: true,
 			wantResp:   "Default quiescence output",
 		},
+		{
+			name:          "pending background task without SYSTEM_MESSAGE",
+			convID:        "s-term-pending-bg-task",
+			transcript:    fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"test\",\"created_at\":%q}\n{\"type\":\"GENERIC\",\"content\":\"Tool is running as a background task with task id: task-1\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Running command\",\"created_at\":%q,\"tool_calls\":[]}\n", tPast40.Format(time.RFC3339Nano), tPast30.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano)),
+			since:         tPast40,
+			minQuiescence: 15 * time.Second,
+			wantResp:      "",
+		},
+		{
+			name:          "completed background task followed by SYSTEM_MESSAGE and terminal PLANNER_RESPONSE",
+			convID:        "s-term-completed-bg-task",
+			transcript:    fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"test\",\"created_at\":%q}\n{\"type\":\"GENERIC\",\"content\":\"Tool is running as a background task with task id: task-1\",\"created_at\":%q}\n{\"type\":\"SYSTEM_MESSAGE\",\"content\":\"Task completed\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Verification complete\",\"created_at\":%q,\"tool_calls\":[]}\n", tPast40.Format(time.RFC3339Nano), tPast30.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano)),
+			since:         tPast40,
+			minQuiescence: 15 * time.Second,
+			wantResp:      "Verification complete",
+		},
+		{
+			name:          "pending background task cleared by server restart SYSTEM_MESSAGE",
+			convID:        "s-term-bg-task-restart",
+			transcript:    fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"test\",\"created_at\":%q}\n{\"type\":\"GENERIC\",\"content\":\"Tool is running as a background task with task id: task-1\",\"created_at\":%q}\n{\"type\":\"SYSTEM_MESSAGE\",\"content\":\"All your subagents and background tasks have been stopped due to server restart\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Recovered from restart\",\"created_at\":%q,\"tool_calls\":[]}\n", tPast40.Format(time.RFC3339Nano), tPast30.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano)),
+			since:         tPast40,
+			minQuiescence: 15 * time.Second,
+			wantResp:      "Recovered from restart",
+		},
+		{
+			name:          "PLANNER_RESPONSE echoing background task marker does not increment pending",
+			convID:        "s-term-planner-echo-bg-marker",
+			transcript:    fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"status\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Tool is running as a background task with task id: 123\",\"created_at\":%q,\"tool_calls\":[]}\n", tPast40.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano)),
+			since:         tPast40,
+			minQuiescence: 15 * time.Second,
+			wantResp:      "Tool is running as a background task with task id: 123",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
