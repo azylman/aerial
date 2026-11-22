@@ -705,7 +705,7 @@ func TestRepoObjectService_Handlers(t *testing.T) {
 	held := repoSeed{held: []SHAEvent{heldCheck("m9")}}
 	svc := NewRepoObjectService()
 	pushMc, pushRec := repoMock(t, repoSeed{mains: []string{"main1"}, index: openPR})
-	dupMc, dupRec := repoMock(t, repoSeed{mains: []string{"main1"}})
+	dupMc, dupRec := repoMock(t, repoSeed{mains: []string{"main1"}, fannedOut: "main1"})
 	badPushMc, badPushRec := bareRepoMock(t)
 	errPushMc := newStateErrorMock(t)
 	fanMc, fanRec := repoMock(t, repoSeed{mains: []string{"main1"}, index: openPR})
@@ -746,7 +746,7 @@ func TestRepoObjectService_Handlers(t *testing.T) {
 		{name: "kustomization status without repo fails terminally", got: svc.HandleKustomizationStatus(restate.WithMockContext(badKustMc), RepoEvent{HeadSHA: "dep1"}), rec: badKustRec, wantErr: true, wantTerminal: true},
 		{name: "pr index of a held sha schedules delayed replay", got: svc.HandlePRIndex(restate.WithMockContext(idxMc), idxMerged(101, "h1", "m9")), rec: idxRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldReplay", input: HeldReplayRequest{SHA: "m9"}, delayed: true}}},
 		{name: "pr index without pr number fails terminally", got: svc.HandlePRIndex(restate.WithMockContext(badIdxMc), idxActive(0, "h1", "", 0)), rec: badIdxRec, wantErr: true, wantTerminal: true},
-		{name: "check run hit forwards to probject", got: svc.HandleCheckRunBySHA(restate.WithMockContext(hitMc), heldCheck("abc123")), rec: hitRec, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
+		{name: "check run hit forwards to probject", got: svc.HandleCheckRunBySHA(restate.WithMockContext(hitMc), heldCheck("abc123")), rec: hitRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
 		{name: "workflow run miss holds with delayed expiry", got: svc.HandleWorkflowRunBySHA(restate.WithMockContext(missMc), heldCheck("abc123")), rec: missRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 1}, delayed: true}}},
 		{name: "push hit forwards merged", got: svc.HandlePushBySHA(restate.WithMockContext(pushHitMc), SHAEvent{Repo: "azylman/aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}), rec: pushHitRec, wantSends: []sentCall{prObjectSend(101, "HandleMerged", PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"})}},
 		{name: "image ready miss at capacity evicts and holds", got: svc.HandleImageReadyBySHA(restate.WithMockContext(fullMc), SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: prwire.PRHandlerRolloutProgress}), rec: fullRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 65}, delayed: true}}},
