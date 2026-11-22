@@ -174,9 +174,9 @@ func orderWidgetChunks(chunks []model.VanadisChunk) []model.VanadisChunk {
 // BuildStatusWidgetChunk formats a single chunk for the Discord tracker widget.
 func BuildStatusWidgetChunk(c model.VanadisChunk, deployUIURL ...string) ericlient.StatusWidgetChunk {
 	baseURL := strutil.FirstNonEmpty(deployUIURL...)
-	// Action chunks have no repository; only PR chunks fall back to the default repo.
+	// Action chunks have no repository unless a repair PR is attached; PR chunks default to aerial.
 	chunkRepo := ""
-	if c.Mode != chunkModeAction {
+	if c.Mode != chunkModeAction || c.PRNumber > 0 {
 		chunkRepo = strutil.FirstNonEmpty(c.Repo, "aerial")
 	}
 	chunkStatus := NormalizeWidgetStatus(c.Status)
