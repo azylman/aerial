@@ -56,8 +56,7 @@ type Config struct {
 	// GitHub App inputs; all empty keeps every GitHub REST call on
 	// GitHubToken exactly as before. The private key is env; the IDs are
 	// read from ServiceConfigPath (vanadis_restate.github_app_id /
-	// github_app_installation_id) at startup, falling back to the
-	// GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID env when unset.
+	// github_app_installation_id) at startup; there is no env fallback.
 	GitHubAppID             string
 	GitHubAppInstallationID string
 	GitHubAppPrivateKey     string
@@ -117,24 +116,22 @@ func LoadConfig(getenv func(string) string) Config {
 	configPath := strings.TrimSpace(strutil.FirstNonEmpty(getenv("CONFIG_PATH"), DefaultConfigPath))
 
 	return Config{
-		RestatePort:             restatePort,
-		HealthPort:              healthPort,
-		VanadisURL:              vanadisURL,
-		PostgresURL:             pgURL,
-		EriURL:                  eriURL,
-		RestateIngressURL:       restateIngressURL,
-		NATSURL:                 natsURL,
-		GitHubToken:             ghToken,
-		GitHubAppID:             strings.TrimSpace(getenv("GITHUB_APP_ID")),
-		GitHubAppInstallationID: strings.TrimSpace(getenv("GITHUB_APP_INSTALLATION_ID")),
-		GitHubAppPrivateKey:     strings.TrimSpace(getenv("GITHUB_APP_PRIVATE_KEY")),
-		ServiceConfigPath:       DefaultServiceConfigPath,
-		DiscordToken:            discordToken,
-		ShareRoot:               shareRoot,
-		AgentName:               agentName,
-		ConfigPath:              configPath,
-		KubeAPIServer:           prstate.InClusterAPIServer(getenv("KUBERNETES_SERVICE_HOST"), getenv("KUBERNETES_SERVICE_PORT")),
-		FluxReceiverURL:         strings.TrimSpace(getenv("FLUX_RECEIVER_URL")),
+		RestatePort:         restatePort,
+		HealthPort:          healthPort,
+		VanadisURL:          vanadisURL,
+		PostgresURL:         pgURL,
+		EriURL:              eriURL,
+		RestateIngressURL:   restateIngressURL,
+		NATSURL:             natsURL,
+		GitHubToken:         ghToken,
+		GitHubAppPrivateKey: strings.TrimSpace(getenv("GITHUB_APP_PRIVATE_KEY")),
+		ServiceConfigPath:   DefaultServiceConfigPath,
+		DiscordToken:        discordToken,
+		ShareRoot:           shareRoot,
+		AgentName:           agentName,
+		ConfigPath:          configPath,
+		KubeAPIServer:       prstate.InClusterAPIServer(getenv("KUBERNETES_SERVICE_HOST"), getenv("KUBERNETES_SERVICE_PORT")),
+		FluxReceiverURL:     strings.TrimSpace(getenv("FLUX_RECEIVER_URL")),
 	}
 }
 
