@@ -606,7 +606,7 @@ func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
 		want    []string
 	}{
 		{name: "deploy success reconciles", outcome: prEventOutcome{Applied: true}, want: []string{"run handle-pr-event-postgres", "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
-		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.BuildRoute{{BuildID: "b2"}}}, want: []string{"run handle-pr-event-postgres", `send {"reason":"widget_sync"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.SweptChunk{{ChunkID: "c1", BuildID: "b2"}}}, want: []string{"run handle-pr-event-postgres", `send {"action":"chunk_deploy_success","chunk_id":"c1"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

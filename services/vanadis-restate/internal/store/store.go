@@ -194,7 +194,7 @@ type VanadisStore interface {
 	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string, headSHA ...string) (int, error)
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	MarkActionRepairDeployed(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
-	SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) (swept, recovered []SweptChunk, err error)
+	SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) ([]SweptChunk, error)
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
 }
