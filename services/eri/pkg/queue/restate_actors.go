@@ -45,19 +45,6 @@ func SessionManagerServiceName(name string) string {
 	return agent.ScopedServiceName("SessionManager", name)
 }
 
-// CancelThreadControlRequest defines the request to cancel a thread from the unkeyed session manager.
-type CancelThreadControlRequest struct {
-	ThreadID string `json:"thread_id"`
-	Reason   string `json:"reason,omitempty"`
-}
-
-// RotateThreadControlRequest defines the request to rotate a thread from the unkeyed session manager.
-type RotateThreadControlRequest struct {
-	ThreadID string `json:"thread_id"`
-	Bare     bool   `json:"bare,omitempty"`
-	Topic    string `json:"topic,omitempty"`
-}
-
 // CancelDispatchControlRequest defines the request to cancel dispatches from the unkeyed session manager.
 type CancelDispatchControlRequest struct {
 	SessionKey string `json:"session_key,omitempty"`
@@ -111,8 +98,6 @@ type ThreadEnqueueRequest struct {
 	Model        string      `json:"model,omitempty"`
 	Effort       string      `json:"effort,omitempty"`
 	SkipIfActive bool        `json:"skip_if_active,omitempty"`
-	IsPrompt     bool        `json:"is_prompt,omitempty"`
-	Trigger      string      `json:"trigger,omitempty"`
 }
 
 // ThreadEnqueueResponse defines the response after enqueuing a thread message.
@@ -144,18 +129,6 @@ type CancelTurnResponse struct {
 	Status              string `json:"status"`
 	CancelledCount      int    `json:"cancelled_count"`
 	CancelledActiveTurn bool   `json:"cancelled_active_turn"`
-}
-
-// RotateSessionRequest defines the session rotation request.
-type RotateSessionRequest struct {
-	Bare  bool   `json:"bare,omitempty"`
-	Topic string `json:"topic,omitempty"`
-}
-
-// RotateSessionResponse defines the session rotation response.
-type RotateSessionResponse struct {
-	Status       string `json:"status"`
-	NewSessionID string `json:"new_session_id"`
 }
 
 // ThreadSessionObject implements the Restate Virtual Object keyed by thread_id.
@@ -331,19 +304,13 @@ func (t *ThreadSessionObject) Enqueue(ctx restate.ObjectSharedContext, req Threa
 
 	// 3. Fire one-way RunTurn notification to serialize burst execution.
 	svcName := t.ServiceName()
-	_ = restate.ObjectSend(ctx, svcName, insertRes.ThreadID, "RunTurn").Send(ThreadTurnRequest{Trigger: req.Trigger})
+	_ = restate.ObjectSend(ctx, svcName, insertRes.ThreadID, "RunTurn").Send(ThreadTurnRequest{})
 
 	return ThreadEnqueueResponse{
 		Status:    eriwire.StatusAccepted,
 		ThreadID:  insertRes.ThreadID,
 		MessageID: insertRes.MessageID,
 	}, nil
-}
-
-// EnqueuePrompt is an alias delegating to Enqueue for prompt callers.
-func (t *ThreadSessionObject) EnqueuePrompt(ctx restate.ObjectSharedContext, req ThreadEnqueueRequest) (ThreadEnqueueResponse, error) {
-	req.IsPrompt = true
-	return t.Enqueue(ctx, req)
 }
 
 const maxCoalescedBurstMessages = 5
@@ -462,22 +429,6 @@ func cancelPendingMessagesInStore(ctx context.Context, pool *WorkerPool, threadI
 	return cancelledCount, nil
 }
 
-type rotateSessionResult struct {
-	Rotated      bool   `json:"rotated"`
-	NewSessionID string `json:"new_session_id"`
-}
-
-func rotateSessionInStore(pool *WorkerPool, ctx restate.RunContext, threadID, newSessionID, caller string) (rotateSessionResult, error) {
-	if pool == nil || pool.cfg.Store == nil {
-		return rotateSessionResult{Rotated: false, NewSessionID: newSessionID}, nil
-	}
-	if rErr := pool.cfg.Store.RotateSessionID(ctx, threadID, newSessionID); rErr != nil {
-		log.Printf("[%s] Warning rotating session in DB for %s: %v", caller, threadID, rErr)
-		return rotateSessionResult{}, rErr
-	}
-	return rotateSessionResult{Rotated: true, NewSessionID: newSessionID}, nil
-}
-
 // CancelTurn cancels pending messages, records active invocation cancellation, and terminates daemon processes.
 func (t *ThreadSessionObject) CancelTurn(ctx restate.ObjectSharedContext, req CancelTurnRequest) (CancelTurnResponse, error) {
 	threadID := restate.Key(ctx)
@@ -519,59 +470,6 @@ func (t *ThreadSessionObject) CancelTurn(ctx restate.ObjectSharedContext, req Ca
 		CancelledCount:      res.CancelledCount,
 		CancelledActiveTurn: cancelledActive,
 	}, nil
-}
-
-func performThreadSessionRotate(ctx restate.Context, pool *WorkerPool, threadID, activeInvID, caller string) (RotateSessionResponse, error) {
-	if activeInvID != "" {
-		restate.CancelInvocation(ctx, activeInvID)
-	}
-
-	var newSessionID string
-	if ctx != nil && ctx.Request() != nil && strings.TrimSpace(ctx.Request().ID) != "" {
-		newSessionID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("aerial:rotate:"+threadID+":"+strings.TrimSpace(ctx.Request().ID))).String()
-	} else {
-		newSessionID = uuid.New().String()
-	}
-
-	if pool != nil && pool.cfg.Store != nil {
-		res, err := restate.Run(ctx, func(rc restate.RunContext) (rotateSessionResult, error) {
-			sid := newSessionID
-			if sid == "" {
-				sid = uuid.New().String()
-			}
-			out, rErr := rotateSessionInStore(pool, rc, threadID, sid, caller)
-			if rErr != nil {
-				return rotateSessionResult{}, rErr
-			}
-			out.NewSessionID = sid
-			return out, nil
-		}, restate.WithName("rotate-thread-session"))
-		if err != nil {
-			return RotateSessionResponse{}, err
-		}
-		if res.NewSessionID != "" {
-			newSessionID = res.NewSessionID
-		}
-	}
-
-	if pool != nil {
-		pool.CloseThreadProcesses(threadID, "rotate")
-	}
-
-	return RotateSessionResponse{
-		Status:       "ok",
-		NewSessionID: newSessionID,
-	}, nil
-}
-
-// RotateSession cancels active turns, terminates daemons, and rotates the Postgres session record.
-func (t *ThreadSessionObject) RotateSession(ctx restate.ObjectSharedContext, req RotateSessionRequest) (RotateSessionResponse, error) {
-	threadID := restate.Key(ctx)
-	activeInvID, _ := restate.Get[string](ctx, "active_invocation_id")
-	if activeInvID == "" {
-		activeInvID = getActiveInvocation(threadID)
-	}
-	return performThreadSessionRotate(ctx, t.pool, threadID, activeInvID, "ThreadSession")
 }
 
 // DispatchTurnResult defines the execution outcome of dispatch draining.
@@ -1275,59 +1173,6 @@ func (s *SessionManagerService) ServiceName() string {
 		return SessionManagerServiceName("")
 	}
 	return SessionManagerServiceName(s.agentName)
-}
-
-// CancelThread preempts running thread turns and cancels pending messages without waiting on Virtual Object key locks.
-func (s *SessionManagerService) CancelThread(ctx restate.Context, req CancelThreadControlRequest) (CancelTurnResponse, error) {
-	threadID := strings.TrimSpace(req.ThreadID)
-	if threadID == "" {
-		return CancelTurnResponse{}, restate.ToTerminalError(errors.New("thread_id is required"), restate.WithErrorCode(400))
-	}
-	reason := strings.TrimSpace(req.Reason)
-	if reason == "" {
-		reason = "cancelled by operator"
-	}
-
-	type cancelMessagesResult struct {
-		CancelledCount int `json:"cancelled_count"`
-	}
-	res, rErr := restate.Run(ctx, func(rc restate.RunContext) (cancelMessagesResult, error) {
-		count, err := cancelPendingMessagesInStore(rc, s.pool, threadID, reason)
-		if err != nil {
-			return cancelMessagesResult{}, err
-		}
-		return cancelMessagesResult{CancelledCount: count}, nil
-	}, restate.WithName("cancel-pending-thread-messages"))
-	if rErr != nil {
-		return CancelTurnResponse{}, rErr
-	}
-
-	activeInvID := getActiveInvocation(threadID)
-	cancelledActive := false
-	if activeInvID != "" {
-		restate.CancelInvocation(ctx, activeInvID)
-		cancelledActive = true
-	}
-
-	if s.pool != nil {
-		s.pool.CloseThreadProcesses(threadID, reason)
-	}
-
-	return CancelTurnResponse{
-		Status:              "ok",
-		CancelledCount:      res.CancelledCount,
-		CancelledActiveTurn: cancelledActive,
-	}, nil
-}
-
-// RotateThread preempts running turns, rotates the session record, and terminates daemons without waiting on Virtual Object key locks.
-func (s *SessionManagerService) RotateThread(ctx restate.Context, req RotateThreadControlRequest) (RotateSessionResponse, error) {
-	threadID := strings.TrimSpace(req.ThreadID)
-	if threadID == "" {
-		return RotateSessionResponse{}, restate.ToTerminalError(errors.New("thread_id is required"), restate.WithErrorCode(400))
-	}
-	activeInvID := getActiveInvocation(threadID)
-	return performThreadSessionRotate(ctx, s.pool, threadID, activeInvID, "SessionManager")
 }
 
 // CancelDispatch preempts in-flight dispatches and cancels pending DB records without waiting on Virtual Object key locks.

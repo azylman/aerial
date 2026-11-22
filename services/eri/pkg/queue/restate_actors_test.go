@@ -89,7 +89,6 @@ type threadEnqueueTestCase struct {
 	sysActive      bool
 	wantStatus     string
 	wantInsert     bool
-	isAliasCall    bool
 	wantErrorSub   string
 	wantTerminal   bool
 }
@@ -148,11 +147,7 @@ func runThreadSessionEnqueueCase(t *testing.T, tc threadEnqueueTestCase) {
 
 	var resp ThreadEnqueueResponse
 	var err error
-	if tc.isAliasCall {
-		resp, err = obj.EnqueuePrompt(sharedCtx, tc.req)
-	} else {
-		resp, err = obj.Enqueue(sharedCtx, tc.req)
-	}
+	resp, err = obj.Enqueue(sharedCtx, tc.req)
 
 	if tc.wantErrorSub != "" {
 		require.Error(t, err)
@@ -210,14 +205,6 @@ func TestThreadSessionObject_Enqueue(t *testing.T) {
 			req:          ThreadEnqueueRequest{Prompt: "no thread or channel"},
 			wantErrorSub: "thread_id or channel_id is required",
 			wantTerminal: true,
-		},
-		{
-			name:        "alias enqueue prompt accepted",
-			threadID:    "th-300",
-			req:         ThreadEnqueueRequest{Prompt: "alias prompt"},
-			wantStatus:  "accepted",
-			wantInsert:  true,
-			isAliasCall: true,
 		},
 		{
 			name:        "skip if active when invocation state active",
@@ -385,81 +372,6 @@ func TestThreadSessionObject_CancelTurn(t *testing.T) {
 						assert.Equal(t, db.StatusFailed, m.Status)
 					}
 				}
-			}
-		})
-	}
-}
-
-func TestThreadSessionObject_RotateSession(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		threadID     string
-		activeInvID  string
-		req          RotateSessionRequest
-		storeFail    bool
-		nilPool      bool
-		wantErrorSub string
-	}{
-		{
-			name:        "rotate session with active invocation",
-			threadID:    "th-rotate-1",
-			activeInvID: "inv-active-rot",
-			req:         RotateSessionRequest{Topic: "refactor"},
-		},
-		{
-			name:        "rotate bare session",
-			threadID:    "th-rotate-2",
-			activeInvID: "",
-			req:         RotateSessionRequest{Bare: true},
-		},
-		{
-			name:         "rotate session handles db store failure returning non-terminal error",
-			threadID:     "th-rotate-3",
-			activeInvID:  "",
-			req:          RotateSessionRequest{},
-			storeFail:    true,
-			wantErrorSub: "db rotate err",
-		},
-		{
-			name:        "rotate session with nil pool",
-			threadID:    "th-rotate-4",
-			activeInvID: "",
-			req:         RotateSessionRequest{},
-			nilPool:     true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := dbtest.NewFakeStore()
-			if tc.storeFail {
-				store.FailNext("RotateSessionID", errors.New("db rotate err"))
-			}
-
-			var pool *WorkerPool
-			if !tc.nilPool {
-				pool = NewWorkerPool(WorkerPoolConfig{Store: store})
-			}
-			obj := NewThreadSessionObject(pool, "aerial")
-
-			mc, _ := setupActorMockContext(t, tc.threadID, tc.activeInvID)
-			resp, err := obj.RotateSession(restate.WithMockContext(mc), tc.req)
-			if tc.wantErrorSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrorSub)
-				assert.Equal(t, restate.Code(500), restate.AsTerminalError(err).Code(), "expected non-terminal retriable error")
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, "ok", resp.Status)
-			assert.NotEmpty(t, resp.NewSessionID)
-
-			if !tc.nilPool && !tc.storeFail {
-				currentSess, _ := store.GetSessionID(context.Background(), tc.threadID)
-				assert.Equal(t, resp.NewSessionID, currentSess)
 			}
 		})
 	}
