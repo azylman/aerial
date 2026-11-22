@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +35,27 @@ const (
 
 // LLMClientFunc defines the interface function for sending prompts to an LLM.
 type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
+
+type llmKeyCtx struct{}
+
+// withLLMKey attaches an Idempotency-Key identity to ctx for the next LLM call.
+func withLLMKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, llmKeyCtx{}, key)
+}
+
+func llmKeyFrom(ctx context.Context) string {
+	key, ok := ctx.Value(llmKeyCtx{}).(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(key)
+}
+
+// hash16 returns the first 16 hex chars of sha256(s) for bounded key parts.
+func hash16(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:16]
+}
 
 var extractionMutex sync.Mutex
 
@@ -89,6 +112,9 @@ func HTTPBrainLLMClient(brainLLMURL string, httpClient *http.Client) LLMClientFu
 			return "", fmt.Errorf("failed to create brain LLM request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if key := llmKeyFrom(ctx); key != "" {
+			req.Header.Set("Idempotency-Key", key)
+		}
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -706,7 +732,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 			break
 		}
 
-		nextBatch, retry, batchErr := executeTurnBatch(ctx, store, client, llmFunc, trimmed, targetAgent, turns, maxRowID, lockDB)
+		nextBatch, retry, batchErr := executeTurnBatch(withLLMKey(ctx, fmt.Sprintf("coven:extract:%s:%s:%d", targetAgent, trimmed, lastWatermark)), store, client, llmFunc, trimmed, targetAgent, turns, maxRowID, lockDB)
 		if batchErr != nil {
 			return batchErr
 		}
@@ -862,7 +888,13 @@ func reconcileTier3Candidate(ctx context.Context, store Store, llmFunc LLMClient
 	}
 
 	reconcilePrompt := buildCandidateReconcilePrompt(item, neighbors)
-	resp, err := llmFunc(ctx, reconcilePrompt)
+	reconcileAgent := ""
+	if len(agent) > 0 {
+		reconcileAgent = strings.TrimSpace(agent[0])
+	}
+	// Candidates have no row ID yet, so the identity is the candidate text hash.
+	reconcileCtx := withLLMKey(ctx, "coven:reconcile:"+reconcileAgent+":"+hash16(item.FactText))
+	resp, err := llmFunc(reconcileCtx, reconcilePrompt)
 	if err != nil {
 		slog.WarnContext(ctx, "[Memory] tier 3 reconciliation LLM error", "error", err)
 		if _, err = store.InsertFact(ctx, item.FactText, emb, agent...); err != nil {
@@ -1257,7 +1289,8 @@ func insertAndReinforceConsolidatedFact(ctx context.Context, store Store, client
 
 func consolidateSingleFactClique(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, clique []ScoredFactWithEmbedding) (consolidated bool, cliqueFailed bool) {
 	prompt := buildConsolidationPrompt(clique)
-	resp, err := llmFunc(ctx, prompt)
+	// Consolidation runs across all agents, so the agent segment is "all".
+	resp, err := llmFunc(withLLMKey(ctx, "coven:consolidate:all:"+hash16(cliqueSignature(clique))), prompt)
 	if err != nil {
 		log.Printf("[Memory] Warning: Fact consolidation LLM synthesis failed for cluster: %v", err)
 		return false, true

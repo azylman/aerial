@@ -726,3 +726,45 @@ func TestProcessThreadFacts_FetchDeadlineHalving(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPBrainLLMClientIdempotencyKeyHeader(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"key sent", "coven:extract:aerial:t1:42", "coven:extract:aerial:t1:42"},
+		{"blank key omits header", "  ", ""},
+		{"no key omits header", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Idempotency-Key")
+				_, _ = w.Write([]byte(`{"response":"ok"}`))
+			}))
+			defer srv.Close()
+			ctx := context.Background()
+			if tc.key != "" {
+				ctx = withLLMKey(ctx, tc.key)
+			}
+			if _, err := HTTPBrainLLMClient(srv.URL, nil)(ctx, "p"); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Idempotency-Key = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHash16(t *testing.T) {
+	t.Parallel()
+	// sha256("abc") = ba7816bf8f01cfea...
+	if got := hash16("abc"); got != "ba7816bf8f01cfea" {
+		t.Errorf("hash16(abc) = %q", got)
+	}
+}

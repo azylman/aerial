@@ -17,6 +17,21 @@ import (
 // llmEffortLow pins summarizer completions to eri's cheapest effort tier.
 const llmEffortLow = "low"
 
+type llmKeyCtx struct{}
+
+// withLLMKey attaches an Idempotency-Key identity to ctx for the next Complete call.
+func withLLMKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, llmKeyCtx{}, key)
+}
+
+func llmKeyFrom(ctx context.Context) string {
+	key, ok := ctx.Value(llmKeyCtx{}).(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(key)
+}
+
 // LLMClient generates a summary completion for a prompt.
 type LLMClient interface {
 	Complete(ctx context.Context, prompt string) (string, error)
@@ -67,6 +82,9 @@ func (c *httpLLMClient) Complete(ctx context.Context, prompt string) (string, er
 		return "", fmt.Errorf("create transcripts llm request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if key := llmKeyFrom(ctx); key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("transcripts llm request failed: %w", err)
