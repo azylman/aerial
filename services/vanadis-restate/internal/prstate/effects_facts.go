@@ -161,6 +161,12 @@ func (s *PRObjectService) runFacts(ctx restate.ObjectContext, st *PRState, facts
 		if strings.TrimSpace(p.Fact.TargetID) == "" {
 			p.Fact.TargetID = st.TargetID
 		}
+		if prBranch(p.Fact.Branch) == "" && strings.TrimSpace(st.Branch) != "" {
+			p.Fact.Branch = st.Branch
+		}
+		if strings.TrimSpace(p.Fact.Title) == "" && strings.TrimSpace(st.Title) != "" {
+			p.Fact.Title = st.Title
+		}
 		p.Fact = withRolloutState(st, p.Fact)
 		if !s.publishFact(ctx, p) {
 			s.scheduleFactRetry(ctx, FactEffectRetry{Fact: p.Fact, Generation: p.Key.GateGeneration})
