@@ -172,11 +172,13 @@ func testRunCases() []testRunCase {
 	base := testRunBaseCases()
 	clones := testRunCloneCases()
 	targets := testRunTargetCases()
+	roots := testRunRootFileCases()
 	configs := testRunConfigCases()
-	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets)+len(configs))
+	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets)+len(roots)+len(configs))
 	all = append(all, base...)
 	all = append(all, clones...)
 	all = append(all, targets...)
+	all = append(all, roots...)
 	all = append(all, configs...)
 	return all
 }
@@ -408,7 +410,7 @@ type SmallB struct {
 	}
 }
 
-func testRunTargetCases() []testRunCase {
+func testRunRootFileCases() []testRunCase {
 	return []testRunCase{
 		{
 			name: "root package exceeding file limit fails check without baseline",
@@ -442,6 +444,24 @@ func testRunTargetCases() []testRunCase {
 			wantCode:              0,
 			wantOut:               "wrote baseline",
 		},
+		{
+			name: "decomposed services with <= 3 root files and internal subpackages omitted from baseline",
+			files: map[string]string{
+				"services/decomposed/main.go":                   "package main\n",
+				"services/decomposed/main_test.go":              "package main\n",
+				"services/decomposed/goleak_test.go":            "package main\n",
+				"services/decomposed/internal/server/server.go": "package server\n",
+			},
+			customArgs:            []string{"-update"},
+			wantBaselineRootFiles: map[string]int{},
+			wantCode:              0,
+			wantOut:               "wrote baseline",
+		},
+	}
+}
+
+func testRunTargetCases() []testRunCase {
+	return []testRunCase{
 		{
 			name: "banned grab-bag filenames rejected in check mode",
 			files: map[string]string{

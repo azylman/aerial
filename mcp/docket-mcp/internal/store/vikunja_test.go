@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -10,8 +10,11 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/azylman/aerial/mcp/docket-mcp/internal/config"
 )
 
 func setTestToken(c *VikunjaClient, token string) {
@@ -89,7 +92,7 @@ func newVikunjaFakeClient(t *testing.T, routes map[string][]vikunjaResp, token, 
 	if url == "" {
 		url = ts.URL
 	}
-	cfg := &Config{VikunjaURL: url, VikunjaUsername: "user", VikunjaPassword: "pass", DefaultProjectID: projectID}
+	cfg := &config.Config{VikunjaURL: url, VikunjaUsername: "user", VikunjaPassword: "pass", DefaultProjectID: projectID}
 	client := NewVikunjaClient(cfg, ts.Client())
 	setTestToken(client, token)
 	return client, fake
@@ -121,6 +124,19 @@ const (
 var vikunjaFail = []vikunjaResp{{status: http.StatusInternalServerError, body: vikunjaErrBody}}
 
 func vikunjaOK(body string) []vikunjaResp { return []vikunjaResp{{body: body}} }
+
+func assertErrString(t *testing.T, err error, wantErr string) {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("error = %v, want substring %q", err, wantErr)
+	}
+}
 
 func TestVikunjaClient_Authenticate(t *testing.T) {
 	t.Parallel()
@@ -224,7 +240,7 @@ func TestVikunjaClient_GetDefaultProject_Concurrent(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	cfg := &Config{
+	cfg := &config.Config{
 		VikunjaURL:       ts.URL,
 		DefaultProjectID: 0,
 	}
@@ -273,9 +289,9 @@ func (s pagedTasksServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.ignorePage {
 		page = 1
 	}
-	tasks := []VikunjaTask{}
+	tasks := []config.VikunjaTask{}
 	for id := (page-1)*perPage + 1; id <= min(page*perPage, s.total); id++ {
-		tasks = append(tasks, VikunjaTask{ID: int64(id), Title: "Task"})
+		tasks = append(tasks, config.VikunjaTask{ID: int64(id), Title: "Task"})
 	}
 	_ = json.NewEncoder(w).Encode(tasks)
 }
@@ -302,7 +318,7 @@ func TestVikunjaClient_ListProjectTasks(t *testing.T) {
 			t.Parallel()
 			ts := httptest.NewServer(tc.server)
 			t.Cleanup(ts.Close)
-			client := NewVikunjaClient(&Config{VikunjaURL: ts.URL}, ts.Client())
+			client := NewVikunjaClient(&config.Config{VikunjaURL: ts.URL}, ts.Client())
 			setTestToken(client, "dummy")
 
 			tasks, err := client.ListProjectTasks(context.Background(), 1)
@@ -326,10 +342,10 @@ func TestVikunjaClient_CreateTask(t *testing.T) {
 	tests := []struct {
 		name    string
 		resp    []vikunjaResp
-		want    *VikunjaTask
+		want    *config.VikunjaTask
 		wantErr string
 	}{
-		{"created", vikunjaOK(`{"id":10,"title":"Created"}`), &VikunjaTask{ID: 10, Title: "Created"}, ""},
+		{"created", vikunjaOK(`{"id":10,"title":"Created"}`), &config.VikunjaTask{ID: 10, Title: "Created"}, ""},
 		{"server error", vikunjaFail, nil, vikunjaErr500},
 	}
 
@@ -353,10 +369,10 @@ func TestVikunjaClient_GetTask(t *testing.T) {
 	tests := []struct {
 		name    string
 		resp    []vikunjaResp
-		want    *VikunjaTask
+		want    *config.VikunjaTask
 		wantErr string
 	}{
-		{"fetched", vikunjaOK(`{"id":10,"title":"Fetched"}`), &VikunjaTask{ID: 10, Title: "Fetched"}, ""},
+		{"fetched", vikunjaOK(`{"id":10,"title":"Fetched"}`), &config.VikunjaTask{ID: 10, Title: "Fetched"}, ""},
 		{"server error", vikunjaFail, nil, vikunjaErr500},
 	}
 
@@ -381,10 +397,10 @@ func TestVikunjaClient_UpdateTask(t *testing.T) {
 	tests := []struct {
 		name    string
 		resp    []vikunjaResp
-		want    *VikunjaTask
+		want    *config.VikunjaTask
 		wantErr string
 	}{
-		{"updated", vikunjaOK(`{"id":10,"title":"Updated"}`), &VikunjaTask{ID: 10, Title: "Updated"}, ""},
+		{"updated", vikunjaOK(`{"id":10,"title":"Updated"}`), &config.VikunjaTask{ID: 10, Title: "Updated"}, ""},
 		{"server error", vikunjaFail, nil, vikunjaErr500},
 	}
 
@@ -392,7 +408,7 @@ func TestVikunjaClient_UpdateTask(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{route: tc.resp}, "dummy", "", 0)
-			got, err := client.UpdateTask(context.Background(), &VikunjaTask{ID: 10, Title: "Updated"})
+			got, err := client.UpdateTask(context.Background(), &config.VikunjaTask{ID: 10, Title: "Updated"})
 			assertErrString(t, err, tc.wantErr)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("UpdateTask = %+v, want %+v", got, tc.want)
@@ -463,10 +479,10 @@ func TestVikunjaClient_ListComments(t *testing.T) {
 	tests := []struct {
 		name    string
 		resp    []vikunjaResp
-		want    []VikunjaComment
+		want    []config.VikunjaComment
 		wantErr string
 	}{
-		{"listed", vikunjaOK(`[{"id":1,"comment":"Hello"}]`), []VikunjaComment{{ID: 1, Comment: "Hello"}}, ""},
+		{"listed", vikunjaOK(`[{"id":1,"comment":"Hello"}]`), []config.VikunjaComment{{ID: 1, Comment: "Hello"}}, ""},
 		{"server error", vikunjaFail, nil, vikunjaErr500},
 	}
 
@@ -520,7 +536,7 @@ func TestVikunjaClient_AuthAndRetry(t *testing.T) {
 		token     string
 		url       string
 		routes    map[string][]vikunjaResp
-		want      *VikunjaTask
+		want      *config.VikunjaTask
 		wantErr   string
 		wantCalls []string
 	}{
@@ -528,12 +544,12 @@ func TestVikunjaClient_AuthAndRetry(t *testing.T) {
 		{
 			name:   "empty token bootstraps login",
 			routes: map[string][]vikunjaResp{vikunjaLogin: refreshed, vikunjaGetTask: task},
-			want:   &VikunjaTask{ID: 10, Title: "Success"}, wantCalls: []string{vikunjaLogin, vikunjaGetTask},
+			want:   &config.VikunjaTask{ID: 10, Title: "Success"}, wantCalls: []string{vikunjaLogin, vikunjaGetTask},
 		},
 		{
 			name: "401 unauthorized refreshes token and retries", token: "stale-token",
 			routes: map[string][]vikunjaResp{vikunjaLogin: refreshed, vikunjaGetTask: {expired, task[0]}},
-			want:   &VikunjaTask{ID: 10, Title: "Success"}, wantCalls: []string{vikunjaGetTask, vikunjaLogin, vikunjaGetTask},
+			want:   &config.VikunjaTask{ID: 10, Title: "Success"}, wantCalls: []string{vikunjaGetTask, vikunjaLogin, vikunjaGetTask},
 		},
 		{
 			name: "401 reauth fails returns error", token: "stale-token",
