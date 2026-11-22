@@ -414,11 +414,7 @@ func otelLogProxyTurnCases() []otelLogProxyTestCase {
 
 func otelLogProxyErrorCases() []otelLogProxyTestCase {
 	return []otelLogProxyTestCase{
-		{
-			name:        "invalid json returns 400",
-			requestJSON: `{not-valid-json`,
-			wantStatus:  http.StatusBadRequest,
-		},
+		{name: "invalid json returns 400", requestJSON: `{not-valid-json`, wantStatus: http.StatusBadRequest},
 		{
 			name:        "invalid gzip returns 400",
 			requestJSON: `not gzip bytes`,

@@ -79,10 +79,7 @@ func TestEvaluateEgress(t *testing.T) {
 			args: json.RawMessage(`not json ` + egressPlainSecret),
 			want: []EgressViolation{{Category: "InfisicalSecret", Sample: "eg***3k"}},
 		},
-		{
-			name: "blocklisted empty arguments", secret: egressPlainSecret, blocked: true,
-			want: []EgressViolation{},
-		},
+		{name: "blocklisted empty arguments", secret: egressPlainSecret, blocked: true, want: []EgressViolation{}},
 		{
 			name: "non-blocklisted destination with a hit is not scanned", secret: egressPlainSecret,
 			args: json.RawMessage(`{"body":"` + egressPlainSecret + ` ` + testPAT + `"}`),

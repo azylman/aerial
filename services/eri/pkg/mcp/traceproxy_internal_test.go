@@ -52,26 +52,10 @@ func TestTraceProxy_ShouldInjectBearer(t *testing.T) {
 		nilURL       bool
 		want         bool
 	}{
-		{
-			name:   "nil url returns false",
-			nilURL: true,
-			want:   false,
-		},
-		{
-			name:   "empty hostname returns false",
-			rawURL: "http:///path",
-			want:   false,
-		},
-		{
-			name:   "default config allows cluster internal host",
-			rawURL: "http://coven.aerial/mcp",
-			want:   true,
-		},
-		{
-			name:   "default config rejects external host",
-			rawURL: "https://mcp.cloudflare.com/mcp",
-			want:   false,
-		},
+		{name: "nil url returns false", nilURL: true, want: false},
+		{name: "empty hostname returns false", rawURL: "http:///path", want: false},
+		{name: "default config allows cluster internal host", rawURL: "http://coven.aerial/mcp", want: true},
+		{name: "default config rejects external host", rawURL: "https://mcp.cloudflare.com/mcp", want: false},
 		{
 			name:         "custom allowed host matches exact",
 			allowedHosts: []string{"custom-upstream.internal"},

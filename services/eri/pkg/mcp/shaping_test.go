@@ -188,12 +188,7 @@ func TestInjectInstructions(t *testing.T) {
 			rawResp:      `[{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}]`,
 			wantInst:     "Batch rule",
 		},
-		{
-			name:         "malformed json returns error",
-			instructions: "Rule",
-			rawResp:      `{bad`,
-			wantErr:      true,
-		},
+		{name: "malformed json returns error", instructions: "Rule", rawResp: `{bad`, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -275,14 +270,7 @@ func applyFilterTransformCases() []applyFilterTestCase {
 			wantRaw:  `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"count\":1}"}]}}`,
 			wantText: `{"count":1}`,
 		},
-		{
-			name:     "empty response returns empty",
-			jqQuery:  ".",
-			rawReq:   "",
-			rawResp:  "",
-			wantRaw:  "",
-			wantText: "",
-		},
+		{name: "empty response returns empty", jqQuery: ".", rawReq: "", rawResp: "", wantRaw: "", wantText: ""},
 		{
 			name:     "compacts JSON and transforms text with jq",
 			jqQuery:  ".items[] | {name: .name, size: .size}",
@@ -362,13 +350,7 @@ func applyFilterTransformCases() []applyFilterTestCase {
 
 func applyFilterEdgeCases() []applyFilterTestCase {
 	return []applyFilterTestCase{
-		{
-			name:    "invalid response JSON returns error",
-			jqQuery: ".count",
-			rawReq:  `{}`,
-			rawResp: `{invalid`,
-			wantErr: true,
-		},
+		{name: "invalid response JSON returns error", jqQuery: ".count", rawReq: `{}`, rawResp: `{invalid`, wantErr: true},
 		{
 			name:    "filter returning empty fails open",
 			jqQuery: "empty",
@@ -390,27 +372,9 @@ func applyFilterEdgeCases() []applyFilterTestCase {
 			rawResp: `[{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"count\":1}"}]}}]`,
 			wantErr: true,
 		},
-		{
-			name:    "batch malformed json returns error",
-			jqQuery: ".",
-			rawReq:  `{}`,
-			rawResp: `[{bad`,
-			wantErr: true,
-		},
-		{
-			name:    "batch item not a map returns error",
-			jqQuery: ".",
-			rawReq:  `{}`,
-			rawResp: `["item"]`,
-			wantErr: true,
-		},
-		{
-			name:    "top level scalar returns error",
-			jqQuery: ".",
-			rawReq:  `{}`,
-			rawResp: `"scalar"`,
-			wantErr: true,
-		},
+		{name: "batch malformed json returns error", jqQuery: ".", rawReq: `{}`, rawResp: `[{bad`, wantErr: true},
+		{name: "batch item not a map returns error", jqQuery: ".", rawReq: `{}`, rawResp: `["item"]`, wantErr: true},
+		{name: "top level scalar returns error", jqQuery: ".", rawReq: `{}`, rawResp: `"scalar"`, wantErr: true},
 		{
 			name:     "content item not map left untouched",
 			jqQuery:  ".",
@@ -631,27 +595,9 @@ func TestBuildJSONRPCErrorResponse(t *testing.T) {
 		msg     string
 		wantSub string
 	}{
-		{
-			name:    "numeric id",
-			reqID:   42,
-			code:    -32601,
-			msg:     "disabled",
-			wantSub: `"id":42`,
-		},
-		{
-			name:    "string id",
-			reqID:   "req-1",
-			code:    -32601,
-			msg:     "disabled",
-			wantSub: `"id":"req-1"`,
-		},
-		{
-			name:    "unmarshalable id falls back to null id",
-			reqID:   math.NaN(),
-			code:    -32601,
-			msg:     "disabled",
-			wantSub: `"id":null`,
-		},
+		{name: "numeric id", reqID: 42, code: -32601, msg: "disabled", wantSub: `"id":42`},
+		{name: "string id", reqID: "req-1", code: -32601, msg: "disabled", wantSub: `"id":"req-1"`},
+		{name: "unmarshalable id falls back to null id", reqID: math.NaN(), code: -32601, msg: "disabled", wantSub: `"id":null`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

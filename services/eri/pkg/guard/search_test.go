@@ -180,6 +180,11 @@ func checkSearchExtendedCases() []searchTestCase {
 		{"pipe inside quotes allowed", "run_command", `grep -m 10 "a | b" file.txt`, "", false, "", ""},
 		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false, "", ""},
 		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true, "", ""},
+		{"semicolon pipeline with bad find denied", "run_command", `echo 1; find / -maxdepth 1`, "", true, "", ""},
+		{"pipe into unconstrained find denied", "run_command", `echo . | find . -name '*.go'`, "", true, "", ""},
+		{"maxdepth inside single quotes denied", "run_command", `find . -name '-maxdepth 1'`, "", true, "", ""},
+		{"maxdepth inside double quotes denied", "run_command", `find . -name "x -maxdepth 1"`, "", true, "", ""},
+		{"maxdepth after escaped space denied", "run_command", `find . -name x\ -maxdepth`, "", true, "", ""},
 		{"docker exec find without maxdepth denied", "run_command", `docker exec cc72895f4852 find /app -name "*live-session*"`, "", true, "", ""},
 		{"docker exec find with maxdepth allowed", "run_command", `docker exec -i -u root -w /app cc72895f4852 find /app -maxdepth 2 -name "*.js"`, "", false, "", ""},
 		{"docker exec recursive grep without limit denied", "run_command", `docker exec cc72895f4852 grep -rn "setupCanvas" /app`, "", true, "", ""},
@@ -525,74 +530,6 @@ func TestPsqlGuard(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runPsqlGuardCase(t, tc)
-		})
-	}
-}
-
-func TestSearchParsers(t *testing.T) {
-	t.Parallel()
-
-	pipelineTests := []struct {
-		name  string
-		input string
-		want  []string
-	}{
-		{"empty", "", nil},
-		{"simple single", "echo 1", []string{"echo 1"}},
-		{"semicolon", "echo 1; echo 2", []string{"echo 1", "echo 2"}},
-		{"and operator", "echo 1 && echo 2", []string{"echo 1", "echo 2"}},
-		{"or operator", "echo 1 || echo 2", []string{"echo 1", "echo 2"}},
-		{"pipe operator", "echo 1 | grep 1", []string{"echo 1", "grep 1"}},
-		{"quoted pipe", `echo "1 | 2"`, []string{`echo "1 | 2"`}},
-		{"escaped quotes", `echo \"hello\"`, []string{`echo \"hello\"`}},
-	}
-	for _, tc := range pipelineTests {
-		t.Run("pipeline_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := splitPipeline(tc.input)
-			if len(got) != len(tc.want) {
-				t.Fatalf("splitPipeline(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-		})
-	}
-
-	tokenTests := []struct {
-		name  string
-		input string
-		want  int
-	}{
-		{"empty", "", 0},
-		{"simple tokens", "find . -maxdepth 1", 4},
-		{"single quotes", "grep 'a b c' file", 3},
-		{"double quotes", `grep "hello world" file`, 3},
-		{"escaped space", `grep hello\ world file`, 3},
-	}
-	for _, tc := range tokenTests {
-		t.Run("tokens_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := tokenizeQuoteAware(tc.input)
-			if len(got) != tc.want {
-				t.Fatalf("tokenizeQuoteAware(%q) length = %d, want %d", tc.input, len(got), tc.want)
-			}
-		})
-	}
-
-	argTests := []struct {
-		name     string
-		rawJSON  string
-		wantFile string
-		wantCmd  string
-	}{
-		{"object format", `{"TargetFile": "/share/aerial", "CommandLine": "find ."}`, "/share/aerial", "find ."},
-		{"string format", `"{\"CommandLine\": \"grep foo\"}"`, "", "grep foo"},
-	}
-	for _, tc := range argTests {
-		t.Run("args_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			args := ParseArgs([]byte(tc.rawJSON))
-			if args.FilePath() != tc.wantFile || args.CommandLine != tc.wantCmd {
-				t.Fatalf("ParseArgs(%q) = %+v, want file=%q cmd=%q", tc.rawJSON, args, tc.wantFile, tc.wantCmd)
-			}
 		})
 	}
 }

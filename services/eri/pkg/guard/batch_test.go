@@ -78,8 +78,9 @@ func runCheckBatchStepCase(t *testing.T, tc checkBatchTestCase, now time.Time) {
 	}
 }
 
-func testBatchFaultInjectionAndConcurrency(t *testing.T, now time.Time) {
-	t.Helper()
+func TestCheckBatchWithDir_RecoversCorruptState(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
 	dir := t.TempDir()
 	convID := "corrupted-session"
 	statePath := filepath.Join(dir, fmt.Sprintf("state-%s.json", sanitizeID(convID)))
@@ -90,20 +91,19 @@ func testBatchFaultInjectionAndConcurrency(t *testing.T, now time.Time) {
 	if dec.Decision != DecisionAllow {
 		t.Fatalf("expected allow after corrupt state recovery, got: %v", dec)
 	}
+}
 
+func TestCheckBatchWithDir_Concurrent(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	dir := t.TempDir()
 	var wg sync.WaitGroup
-	concurrentSession := "concurrent-session"
 	for i := range 10 {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			p := Payload{
-				ConversationID: concurrentSession,
-				StepIdx:        idx + 1,
-				ToolCall:       ToolCall{Name: "view_file"},
-			}
-			d := CheckBatchWithDir(p, ToolArgs{TargetFile: fmt.Sprintf("/tmp/concurrent_%d.go", idx)}, dir, now, mapEnv(nil))
-			if d == nil {
+			p := Payload{ConversationID: "concurrent-session", StepIdx: idx + 1, ToolCall: ToolCall{Name: "view_file"}}
+			if d := CheckBatchWithDir(p, ToolArgs{TargetFile: fmt.Sprintf("/tmp/concurrent_%d.go", idx)}, dir, now, mapEnv(nil)); d == nil {
 				t.Errorf("got nil decision in concurrent call")
 			}
 		}(i)
@@ -111,34 +111,43 @@ func testBatchFaultInjectionAndConcurrency(t *testing.T, now time.Time) {
 	wg.Wait()
 }
 
-func testBatchLimitsAndDirectoryOverrides(t *testing.T, now time.Time) {
-	t.Helper()
-	truncDir := t.TempDir()
-	truncSession := "trunc-session"
+func TestCheckBatchWithDir_TruncatesRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	dir := t.TempDir()
+	const session = "trunc-session"
 	for i := range 35 {
-		p := Payload{
-			ConversationID: truncSession,
-			StepIdx:        i + 1,
-			ToolCall:       ToolCall{Name: "run_command"},
-		}
-		d := CheckBatchWithDir(p, ToolArgs{CommandLine: fmt.Sprintf("echo rec-%d && true", i)}, truncDir, now, mapEnv(nil))
-		if d.Decision != DecisionAllow {
+		p := Payload{ConversationID: session, StepIdx: i + 1, ToolCall: ToolCall{Name: "run_command"}}
+		if d := CheckBatchWithDir(p, ToolArgs{CommandLine: fmt.Sprintf("echo rec-%d && true", i)}, dir, now, mapEnv(nil)); d.Decision != DecisionAllow {
 			t.Fatalf("call %d expected allow, got %v", i, d)
 		}
 	}
-	st := loadState(truncDir, truncSession, now)
-	if len(st.Records) > DefaultMaxRecords {
+	if st := loadState(dir, session, now); len(st.Records) > DefaultMaxRecords {
 		t.Fatalf("records length = %d, want <= %d", len(st.Records), DefaultMaxRecords)
 	}
+}
 
-	dFail := CheckBatchWithDir(Payload{ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/a.go"}, "/dev/null/impossible", now, mapEnv(nil))
-	if dFail.Decision != DecisionAllow {
-		t.Fatalf("expected allow on uncreatable dir, got %v", dFail)
+func TestCheckBatchWithDir_Directories(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		dir     string // "" uses a fresh temp dir
+		payload Payload
+	}{
+		{name: "uncreatable dir fails open", dir: "/dev/null/impossible", payload: Payload{ToolCall: ToolCall{Name: "view_file"}}},
+		{name: "fresh custom dir", payload: Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}},
 	}
-
-	dDefault := CheckBatchWithDir(Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/fresh.txt"}, t.TempDir(), now, mapEnv(nil))
-	if dDefault == nil || dDefault.Decision != DecisionAllow {
-		t.Fatalf("expected allow from CheckBatchWithDir, got %v", dDefault)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := tc.dir
+			if dir == "" {
+				dir = t.TempDir()
+			}
+			if d := CheckBatchWithDir(tc.payload, ToolArgs{TargetFile: "/tmp/fresh.txt"}, dir, time.Now(), mapEnv(nil)); d == nil || d.Decision != DecisionAllow {
+				t.Fatalf("CheckBatchWithDir(%q) = %v, want allow", dir, d)
+			}
+		})
 	}
 }
 
@@ -209,8 +218,9 @@ func TestNormalizeBatchTargetEnv(t *testing.T) {
 	}
 }
 
-func testBatchGCAndPreInvocation(t *testing.T, now time.Time) {
-	t.Helper()
+func TestPruneStateFiles(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
 	gcDir := t.TempDir()
 	oldFile := filepath.Join(gcDir, "state-old-session.json")
 	newFile := filepath.Join(gcDir, "state-new-session.json")
@@ -239,7 +249,11 @@ func testBatchGCAndPreInvocation(t *testing.T, now time.Time) {
 		t.Fatalf("expected new file to remain")
 	}
 	opportunisticGC(gcDir, now)
+}
 
+func TestCheckBatchWithDir_InvocationGrouping(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
 	invDir := t.TempDir()
 	_ = RecordPreInvocationWithDir(Payload{ConversationID: "inv-s", InvocationNum: 1}, invDir, now)
 	for i := range 4 {
@@ -337,10 +351,6 @@ func TestCheckBatch(t *testing.T) {
 			runCheckBatchStepCase(t, tc, now)
 		})
 	}
-
-	testBatchFaultInjectionAndConcurrency(t, now)
-	testBatchLimitsAndDirectoryOverrides(t, now)
-	testBatchGCAndPreInvocation(t, now)
 }
 
 func checkBatchUnscopedAndStripVerbose(t *testing.T) {

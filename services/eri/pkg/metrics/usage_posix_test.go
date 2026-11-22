@@ -18,12 +18,7 @@ func TestUsageSysProcAttr(t *testing.T) {
 		wantUID        uint32
 		wantGID        uint32
 	}{
-		{
-			name:           "non-root euid keeps setpgid without credential",
-			euid:           1000,
-			wantSetpgid:    true,
-			wantCredential: false,
-		},
+		{name: "non-root euid keeps setpgid without credential", euid: 1000, wantSetpgid: true, wantCredential: false},
 		{
 			name:           "root euid sets setpgid and unprivileged credential",
 			euid:           0,
