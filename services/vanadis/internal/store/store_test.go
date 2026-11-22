@@ -294,6 +294,11 @@ var (
 	nilDB       = &bareStore{store: &PostgresVanadisStore{}}
 )
 
+type execCall struct {
+	query string
+	args  []any
+}
+
 type dbScript struct {
 	bare         *bareStore
 	buildVals    []any
@@ -307,6 +312,7 @@ type dbScript struct {
 	chunkScanErr error
 	chunkRowsErr error
 	execErr      error
+	recordedExec *[]execCall
 }
 
 func (s dbScript) open() *PostgresVanadisStore {
@@ -331,7 +337,10 @@ func (s dbScript) open() *PostgresVanadisStore {
 		}
 		return &mockRows{items: s.chunks, scanErr: s.chunkScanErr, rowsErr: s.chunkRowsErr}, nil
 	}
-	exec := func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+		if s.recordedExec != nil {
+			*s.recordedExec = append(*s.recordedExec, execCall{query: query, args: args})
+		}
 		if s.execErr != nil {
 			return pgconn.CommandTag{}, s.execErr
 		}
@@ -616,6 +625,17 @@ type preRecordChunkPRCase struct {
 	execErr    error
 	wantErr    bool
 	wantSubstr string
+	wantExecs  int
+}
+
+func assertPreRecordExec(t *testing.T, call execCall, prNumber int, chunkID, repo string) {
+	t.Helper()
+	if !strings.Contains(call.query, "UPDATE vanadis_chunks") {
+		t.Errorf("exec query %q missing UPDATE vanadis_chunks", call.query)
+	}
+	if len(call.args) != 3 || call.args[0] != prNumber || call.args[1] != strings.TrimSpace(chunkID) || call.args[2] != strings.TrimSpace(repo) {
+		t.Errorf("exec args = %v, want [%v %v %v]", call.args, prNumber, strings.TrimSpace(chunkID), strings.TrimSpace(repo))
+	}
 }
 
 func TestPreRecordChunkPR(t *testing.T) {
@@ -626,13 +646,14 @@ func TestPreRecordChunkPR(t *testing.T) {
 		{name: "empty chunk id no-op", chunkID: "   ", repo: "aerial", prNumber: 42},
 		{name: "nonpositive pr number no-op", chunkID: "c1", repo: "aerial", prNumber: 0},
 		{name: "negative pr number no-op", chunkID: "c1", repo: "aerial", prNumber: -5},
-		{name: "exec error propagates", chunkID: "c1", repo: "aerial", prNumber: 42, execErr: errors.New("exec down"), wantErr: true, wantSubstr: "prerecord chunk pr c1 (#42)"},
-		{name: "success executes update", chunkID: "c1", repo: "aerial", prNumber: 42},
+		{name: "exec error propagates", chunkID: "c1", repo: "aerial", prNumber: 42, execErr: errors.New("exec down"), wantErr: true, wantSubstr: "prerecord chunk pr c1 (#42)", wantExecs: 1},
+		{name: "success executes update", chunkID: "c1", repo: "aerial", prNumber: 42, wantExecs: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := dbScript{bare: tc.bare, execErr: tc.execErr}.open()
+			var calls []execCall
+			s := dbScript{bare: tc.bare, execErr: tc.execErr, recordedExec: &calls}.open()
 			err := s.PreRecordChunkPR(context.Background(), tc.chunkID, tc.repo, tc.prNumber)
 			if tc.wantErr {
 				if err == nil {
@@ -641,10 +662,14 @@ func TestPreRecordChunkPR(t *testing.T) {
 				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
 					t.Fatalf("err %q does not contain %q", err.Error(), tc.wantSubstr)
 				}
-				return
-			}
-			if err != nil {
+			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(calls) != tc.wantExecs {
+				t.Fatalf("exec calls = %d, want %d", len(calls), tc.wantExecs)
+			}
+			if tc.wantExecs > 0 {
+				assertPreRecordExec(t, calls[0], tc.prNumber, tc.chunkID, tc.repo)
 			}
 		})
 	}

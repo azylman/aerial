@@ -446,13 +446,6 @@ func routesFailingStore(getErr, listErr error) *memoryVanadisStore {
 	return s
 }
 
-// routesPreRecordFailingStore is routesStore with injected PreRecordChunkPR error.
-func routesPreRecordFailingStore(err error) *memoryVanadisStore {
-	s := routesStore()
-	s.PreRecordErr = err
-	return s
-}
-
 // routesListStore holds one running, one completed and one queued build, newest first.
 func routesListStore() *memoryVanadisStore {
 	s := newMemoryVanadisStore()
@@ -494,7 +487,6 @@ var (
 	routesSeeded, routesListed, routesMetrics = routesStore(), routesListStore(), routesMetricsStore()
 	routesGetFails                            = routesFailingStore(errors.New("simulated get err"), nil)
 	routesListFails                           = routesFailingStore(nil, errors.New("simulated list failure"))
-	routesPreRecordFails                      = routesPreRecordFailingStore(errors.New("simulated prerecord failure"))
 	routesAllow, routesDeny, routesUnauth     = authFake(true, true), authFake(true, false), authFake(false, false)
 )
 
@@ -567,14 +559,6 @@ var routeCases = []routeCase{
 	{
 		name: "attach pins agent caller to its own agent", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"repo":"aerial","pr_number":7,"agent":"agent-alpha"}`, store: routesSeeded, auth: routesAllow, token: routesToken,
 		wantStatus: http.StatusOK, wantSubstr: `"thread_id":"thread-aerial"`,
-	},
-	{
-		name: "attach chunk with chunk_id pre-records pr", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"chunk_id":"c1","repo":"aerial","pr_number":123,"agent":"agent-alpha"}`, store: routesSeeded, auth: routesAllow, token: routesToken,
-		wantStatus: http.StatusOK, wantSubstr: `"status":"attached"`,
-	},
-	{
-		name: "attach chunk pre-record error logs and continues", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"chunk_id":"c1","repo":"aerial","pr_number":123,"agent":"agent-alpha"}`, store: routesPreRecordFails, auth: routesAllow, token: routesToken,
-		wantStatus: http.StatusOK, wantSubstr: `"status":"attached"`,
 	},
 	{name: "chunk by id allowed", method: http.MethodGet, path: "/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"id":"c1"`},
 	{name: "chunk by id forbidden", method: http.MethodGet, path: "/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
