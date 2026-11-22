@@ -5,15 +5,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -55,20 +58,164 @@ func WithAppConfig(cfg *config.Config) AppOption {
 func TestNewEriRestateServer(t *testing.T) {
 	t.Parallel()
 
-	srv := NewEriRestateServer(nil, "aerial")
-	require.NotNil(t, srv)
-	h, err := srv.Handler()
-	require.NoError(t, err)
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "legacy", mode: "legacy"},
+		{name: "coordinator", mode: "coordinator"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewEriRestateServer(nil, "aerial", tc.mode)
+			require.NotNil(t, srv)
+			h, err := srv.Handler()
+			require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
-	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "ThreadSession")
-	assert.Contains(t, rec.Body.String(), "DispatchSession")
-	assert.Contains(t, rec.Body.String(), "VoiceSession")
-	assert.Contains(t, rec.Body.String(), "SessionManager")
+			req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
+			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code)
+			for _, svc := range []string{`"ThreadSession"`, `"DispatchSession"`, `"VoiceSession"`, `"SessionManager"`, `"TurnRunner"`} {
+				assert.Contains(t, rec.Body.String(), svc)
+			}
+		})
+	}
+}
+
+// boundHandlers maps "<service> <service type>" to each handler name and kind of defs.
+func boundHandlers(defs []restate.ServiceDefinition) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, def := range defs {
+		handlers := map[string]string{}
+		for name, h := range def.Handlers() {
+			kind := "-"
+			if ht := h.HandlerType(); ht != nil {
+				kind = fmt.Sprint(*ht)
+			}
+			handlers[name] = kind
+		}
+		out[def.Name()+" "+fmt.Sprint(def.Type())] = handlers
+	}
+	return out
+}
+
+func TestEriRestateDefinitions(t *testing.T) {
+	t.Parallel()
+
+	// Both modes must bind exactly this set, so a flip or rollback never drops a service or
+	// changes a handler's name or kind on a deployment with in-flight invocations.
+	want := func(suffix string) map[string]map[string]string {
+		return map[string]map[string]string{
+			"ThreadSession" + suffix + " VIRTUAL_OBJECT": {
+				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Kick": "EXCLUSIVE",
+				"CancelTurn": "SHARED", "ClearPending": "EXCLUSIVE", "Status": "SHARED", "AdoptPending": "SHARED",
+				"RunTurn": "EXCLUSIVE",
+			},
+			"DispatchSession" + suffix + " VIRTUAL_OBJECT": {
+				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Cancel": "SHARED",
+				"ClearPending": "EXCLUSIVE", "Status": "SHARED", "AdoptPending": "SHARED", "RunTurn": "EXCLUSIVE",
+			},
+			"VoiceSession" + suffix + " VIRTUAL_OBJECT": {"Ask": "EXCLUSIVE"},
+			"SessionManager" + suffix + " SERVICE":      {"CancelDispatch": "-"},
+			"TurnRunner" + suffix + " SERVICE":          {"RunBurst": "-", "RunDispatch": "-"},
+		}
+	}
+
+	tests := []struct {
+		name  string
+		agent string
+		mode  string
+		want  map[string]map[string]string
+	}{
+		{name: "aerial legacy", agent: "aerial", mode: "legacy", want: want("")},
+		{name: "aerial coordinator", agent: "aerial", mode: "coordinator", want: want("")},
+		{name: "miorine legacy", agent: "miorine", mode: "legacy", want: want("-miorine")},
+		{name: "miorine coordinator", agent: "miorine", mode: "coordinator", want: want("-miorine")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, boundHandlers(eriRestateDefinitions(nil, tc.agent, tc.mode)))
+		})
+	}
+}
+
+func TestResolveTurnQueueMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		fileValue    string
+		filePresent  bool
+		configValue  string
+		wantMode     string
+		wantMismatch bool
+		wantErr      string
+	}{
+		{name: "file absent is legacy", wantMode: "legacy"},
+		{name: "file absent ignores config coordinator", configValue: "coordinator", wantMode: "legacy", wantMismatch: true},
+		{name: "empty file is legacy", filePresent: true, wantMode: "legacy"},
+		{name: "legacy", fileValue: "legacy", filePresent: true, configValue: "legacy", wantMode: "legacy"},
+		{name: "coordinator", fileValue: "coordinator", filePresent: true, configValue: "coordinator", wantMode: "coordinator"},
+		{name: "whitespace and newline trimmed", fileValue: " coordinator\n", filePresent: true, configValue: "coordinator", wantMode: "coordinator"},
+		{name: "unknown value fails", fileValue: "restate", filePresent: true, wantErr: `invalid turn_queue "restate"`},
+		{name: "annotation coordinator config legacy", fileValue: "coordinator", filePresent: true, configValue: "legacy", wantMode: "coordinator", wantMismatch: true},
+		{name: "annotation legacy config coordinator (old-revision restart)", fileValue: "legacy", filePresent: true, configValue: "coordinator", wantMode: "legacy", wantMismatch: true},
+		{name: "blank config matches legacy", fileValue: "legacy", filePresent: true, configValue: "", wantMode: "legacy"},
+		{name: "invalid config is only a mismatch", fileValue: "coordinator", filePresent: true, configValue: "bogus", wantMode: "coordinator", wantMismatch: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mode, mismatch, err := ResolveTurnQueueMode(tc.fileValue, tc.filePresent, tc.configValue)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMode, mode)
+			assert.Equal(t, tc.wantMismatch, mismatch)
+		})
+	}
+}
+
+func TestReadTurnQueueModeFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	present := filepath.Join(dir, "turn-queue")
+	require.NoError(t, os.WriteFile(present, []byte("coordinator"), 0o600))
+
+	tests := []struct {
+		name        string
+		path        string
+		wantValue   string
+		wantPresent bool
+		wantErr     string
+	}{
+		{name: "blank path is absent", path: ""},
+		{name: "missing file is absent", path: filepath.Join(dir, "missing")},
+		{name: "present file", path: present, wantValue: "coordinator", wantPresent: true},
+		{name: "unreadable path fails", path: dir, wantErr: "read turn queue mode file"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			value, ok, err := readTurnQueueModeFile(tc.path)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantValue, value)
+			assert.Equal(t, tc.wantPresent, ok)
+		})
+	}
 }
 
 func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
@@ -89,7 +236,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	h2cProtocols.SetHTTP1(true)
 	h2cProtocols.SetUnencryptedHTTP2(true)
 
-	srv := NewEriRestateServer(nil, "aerial")
+	srv := NewEriRestateServer(nil, "aerial", "legacy")
 	rawHandler, err := srv.Handler()
 	require.NoError(t, err)
 
@@ -126,7 +273,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return reconcileCount >= 3 // 3 services reconciled
+		return reconcileCount >= 4 // 4 services reconciled
 	}, 3*time.Second, 50*time.Millisecond)
 }
 
@@ -148,6 +295,7 @@ type timeoutReconcileCase struct {
 	wantErrorSub   string
 	wantCallCount  int
 	wantPaths      []string
+	wantBodies     []string
 }
 
 func runTimeoutReconcileCase(t *testing.T, tc timeoutReconcileCase) {
@@ -197,16 +345,12 @@ func runTimeoutReconcileCase(t *testing.T, tc timeoutReconcileCase) {
 	if len(tc.wantPaths) > 0 {
 		assert.Equal(t, tc.wantPaths, recordedPaths)
 	}
+	assert.Equal(t, tc.wantBodies, recordedBodies)
 	for i := range recordedPaths {
 		assert.Equal(t, http.MethodPatch, recordedMethods[i])
-		var p struct {
-			InactivityTimeout string `json:"inactivity_timeout"`
-			AbortTimeout      string `json:"abort_timeout"`
-		}
-		uErr := json.Unmarshal([]byte(recordedBodies[i]), &p)
-		require.NoError(t, uErr)
-		assert.Equal(t, "1h", p.InactivityTimeout)
-		assert.Equal(t, "1h", p.AbortTimeout)
+		var p map[string]any
+		require.NoError(t, json.Unmarshal([]byte(recordedBodies[i]), &p))
+		assert.NotContains(t, p, "retry_policy")
 	}
 }
 
@@ -215,15 +359,22 @@ func TestReconcileRestateServiceTimeouts(t *testing.T) {
 
 	tests := []timeoutReconcileCase{
 		{
-			name:          "successful timeout reconciliation for all 3 services",
+			name:          "successful timeout reconciliation for all 4 services",
 			agent:         "aerial",
 			statusCode:    http.StatusOK,
 			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 3,
+			wantCallCount: 4,
 			wantPaths: []string{
 				"/services/ThreadSession",
 				"/services/DispatchSession",
 				"/services/VoiceSession",
+				"/services/TurnRunner",
+			},
+			wantBodies: []string{
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"75m","abort_timeout":"1h"}`,
 			},
 		},
 		{
@@ -231,11 +382,18 @@ func TestReconcileRestateServiceTimeouts(t *testing.T) {
 			agent:         "agent-alpha",
 			statusCode:    http.StatusOK,
 			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 3,
+			wantCallCount: 4,
 			wantPaths: []string{
 				"/services/ThreadSession-agent-alpha",
 				"/services/DispatchSession-agent-alpha",
 				"/services/VoiceSession-agent-alpha",
+				"/services/TurnRunner-agent-alpha",
+			},
+			wantBodies: []string{
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"75m","abort_timeout":"1h"}`,
 			},
 		},
 		{
@@ -281,6 +439,7 @@ func runConfigEnvCase(t *testing.T, tc configEnvCase) {
 	assert.Equal(t, tc.wantHealthPort, cfg.HealthPort)
 	assert.Equal(t, tc.wantAdminURL, cfg.AdminURL)
 	assert.Equal(t, tc.wantAgentName, cfg.AgentName)
+	assert.Equal(t, "/etc/aerial/podinfo/turn-queue", cfg.TurnQueueModeFile)
 }
 
 func TestLoadConfigFromEnv(t *testing.T) {
@@ -976,5 +1135,32 @@ func TestStartDiscoveryTimeoutReconciler_ContextCanceledDuringRetry(t *testing.T
 	case <-trigger.Done():
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for trigger.Done()")
+	}
+}
+
+func TestRunApp_TurnQueueModeFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	bogus := filepath.Join(dir, "turn-queue")
+	require.NoError(t, os.WriteFile(bogus, []byte("restate\n"), 0o600))
+
+	tests := []struct {
+		name    string
+		file    string
+		wantErr string
+	}{
+		{name: "unknown annotation value", file: bogus, wantErr: `pod annotation aerial.dev/turn-queue: invalid turn_queue "restate"`},
+		{name: "unreadable annotation file", file: dir, wantErr: "read turn queue mode file"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			appCfg := config.NewFromData(&config.ConfigData{DataDir: t.TempDir(), GeminiHomeDir: t.TempDir()})
+			cfg := Config{RestatePort: "0", HealthPort: "0", AgentName: "aerial-test", TurnQueueModeFile: tc.file}
+			err := RunApp(t.Context(), cfg, WithStore(dbtest.NewFakeStore(), nil), WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
 	}
 }

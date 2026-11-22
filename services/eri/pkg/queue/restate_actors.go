@@ -1183,3 +1183,118 @@ func (s *SessionManagerService) CancelDispatch(ctx restate.Context, req CancelDi
 	}
 	return cancelDispatchSession(ctx, s.pool, strings.TrimSpace(req.SessionKey), strings.TrimSpace(req.DispatchID), buildID, strings.TrimSpace(req.Reason), "", "SessionManager")
 }
+
+// Rollback adapters. They give the legacy ThreadSession / DispatchSession objects the same handler
+// names and kinds as the coordinators (ThreadCoordinator / DispatchCoordinator), so a revision in
+// either queue mode binds an identical handler set and a flip or rollback never strands a Restate
+// deployment. After a coordinator -> legacy rollback, coordinator-era messages still arrive (a
+// runner's OnTurnDone, a delayed Kick for rescheduled IDs that are PENDING in the DB, a
+// ClearPending from a cancel) and coordinator state keys may linger, so every adapter defers to
+// the legacy RunTurn loop, which claims the key's PENDING rows from the DB. The adapters cannot
+// stop that loop from resetting rows a still-running TurnRunner owns, nor can legacy CancelTurn
+// cancel a runner: the turn-queue ROLLBACK PROCEDURE (coordinator -> legacy)
+// waits up to 20 minutes for zero running TurnRunner invocations before the rollback merges and
+// then cancels any that remain.
+
+// clearCoordinatorState drops the coordinator-era "pending" and "active" keys, so a later
+// SkipIfActive is answered from live rows rather than stranded coordinator state.
+func clearCoordinatorState(ctx restate.ObjectContext) {
+	restate.Clear(ctx, StateKeyPending)
+	restate.Clear(ctx, StateKeyActive)
+}
+
+// legacyStatus reports the legacy active invocation as the active turn.
+func legacyStatus(ctx restate.ObjectSharedContext) (CoordinatorStatus, error) {
+	invID, err := restate.Get[string](ctx, "active_invocation_id")
+	if err != nil {
+		return CoordinatorStatus{}, err
+	}
+	if invID == "" {
+		return CoordinatorStatus{}, nil
+	}
+	return CoordinatorStatus{Active: &ActiveTurn{TurnID: invID}}, nil
+}
+
+func (t *ThreadSessionObject) sendRunTurn(ctx restate.ObjectSharedContext) {
+	restate.ObjectSend(ctx, t.ServiceName(), restate.Key(ctx), HandlerRunTurn).Send(ThreadTurnRequest{})
+}
+
+// Append is the rollback adapter for the coordinator's Append: it wakes the legacy RunTurn loop.
+func (t *ThreadSessionObject) Append(ctx restate.ObjectContext, _ AppendRequest) error {
+	t.sendRunTurn(ctx)
+	return nil
+}
+
+// OnTurnDone is the rollback adapter for a runner's report: it clears coordinator state and
+// wakes the legacy RunTurn loop.
+func (t *ThreadSessionObject) OnTurnDone(ctx restate.ObjectContext, _ TurnDoneRequest) error {
+	clearCoordinatorState(ctx)
+	t.sendRunTurn(ctx)
+	return nil
+}
+
+// Kick is the rollback adapter for a delayed reschedule kick: it clears coordinator state and
+// wakes the legacy RunTurn loop.
+func (t *ThreadSessionObject) Kick(ctx restate.ObjectContext, _ KickRequest) error {
+	clearCoordinatorState(ctx)
+	t.sendRunTurn(ctx)
+	return nil
+}
+
+// ClearPending is the rollback adapter for a coordinator cancel: it clears coordinator state and
+// wakes the legacy RunTurn loop.
+func (t *ThreadSessionObject) ClearPending(ctx restate.ObjectContext, _ ClearPendingRequest) error {
+	clearCoordinatorState(ctx)
+	t.sendRunTurn(ctx)
+	return nil
+}
+
+// AdoptPending is the rollback adapter for the coordinator's AdoptPending: it wakes the legacy
+// RunTurn loop, which claims the key's PENDING rows.
+func (t *ThreadSessionObject) AdoptPending(ctx restate.ObjectSharedContext, _ AdoptPendingRequest) error {
+	t.sendRunTurn(ctx)
+	return nil
+}
+
+// Status reports the legacy active invocation as Active.TurnID.
+func (*ThreadSessionObject) Status(ctx restate.ObjectSharedContext) (CoordinatorStatus, error) {
+	return legacyStatus(ctx)
+}
+
+func (d *DispatchSessionObject) sendRunTurn(ctx restate.ObjectSharedContext) {
+	restate.ObjectSend(ctx, d.ServiceName(), restate.Key(ctx), HandlerRunTurn).Send(eriwire.BrainDispatchRequest{})
+}
+
+// Append is the rollback adapter for the coordinator's Append: it wakes the legacy RunTurn loop.
+func (d *DispatchSessionObject) Append(ctx restate.ObjectContext, _ AppendRequest) error {
+	d.sendRunTurn(ctx)
+	return nil
+}
+
+// OnTurnDone is the rollback adapter for a runner's report: it clears coordinator state and
+// wakes the legacy RunTurn loop.
+func (d *DispatchSessionObject) OnTurnDone(ctx restate.ObjectContext, _ TurnDoneRequest) error {
+	clearCoordinatorState(ctx)
+	d.sendRunTurn(ctx)
+	return nil
+}
+
+// ClearPending is the rollback adapter for a coordinator cancel: it clears coordinator state and
+// wakes the legacy RunTurn loop.
+func (d *DispatchSessionObject) ClearPending(ctx restate.ObjectContext, _ ClearPendingRequest) error {
+	clearCoordinatorState(ctx)
+	d.sendRunTurn(ctx)
+	return nil
+}
+
+// AdoptPending is the rollback adapter for the coordinator's AdoptPending: it wakes the legacy
+// RunTurn loop, which claims the key's PENDING rows.
+func (d *DispatchSessionObject) AdoptPending(ctx restate.ObjectSharedContext, _ AdoptPendingRequest) error {
+	d.sendRunTurn(ctx)
+	return nil
+}
+
+// Status reports the legacy active invocation as Active.TurnID.
+func (*DispatchSessionObject) Status(ctx restate.ObjectSharedContext) (CoordinatorStatus, error) {
+	return legacyStatus(ctx)
+}

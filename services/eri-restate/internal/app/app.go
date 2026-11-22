@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -48,6 +49,52 @@ type Config struct {
 	AdminURL    string
 	PostgresURL string
 	AgentName   string
+	// TurnQueueModeFile is the downward-API file carrying the pod's aerial.dev/turn-queue
+	// annotation; blank or missing means legacy.
+	TurnQueueModeFile string
+}
+
+// TurnQueueModeFile is where the eri-restate RestateDeployment mounts the pod template's
+// aerial.dev/turn-queue annotation (downwardAPI volume "podinfo", item "turn-queue"). A pod's
+// annotations never change after creation, so every pod keeps the queue mode of the revision
+// that created it across container restarts, drains and rollbacks.
+const TurnQueueModeFile = "/etc/aerial/podinfo/turn-queue"
+
+// ResolveTurnQueueMode picks the handler set from the pod annotation file: absent or blank ->
+// legacy, "legacy" / "coordinator" -> that mode, anything else -> error (startup fails, so the
+// new revision never becomes ready and the old one keeps serving). configValue (config.yaml
+// turn_queue) is only cross-checked: mismatch reports a disagreement and never changes the mode.
+func ResolveTurnQueueMode(fileValue string, filePresent bool, configValue string) (mode string, mismatch bool, err error) {
+	mode = config.TurnQueueLegacy
+	if filePresent {
+		mode, err = config.ParseTurnQueueMode(fileValue)
+		if err != nil {
+			return "", false, fmt.Errorf("pod annotation aerial.dev/turn-queue: %w", err)
+		}
+	}
+	// configValue was validated when config.yaml loaded; an unparseable value still only
+	// counts as a mismatch, never as a startup error.
+	cfgMode, cfgErr := config.ParseTurnQueueMode(configValue)
+	if cfgErr != nil {
+		return mode, true, nil //nolint:nilerr // config is cross-checked only; mode comes from the annotation.
+	}
+	return mode, cfgMode != mode, nil
+}
+
+// readTurnQueueModeFile reads the annotation file; a blank path or a missing file is absent,
+// any other read error is returned.
+func readTurnQueueModeFile(path string) (value string, present bool, err error) {
+	if strings.TrimSpace(path) == "" {
+		return "", false, nil
+	}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read turn queue mode file %s: %w", path, err)
+	}
+	return string(b), true, nil
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -79,24 +126,83 @@ func LoadConfigFromEnv() Config {
 		AdminURL:    adminURL,
 		PostgresURL: pgURL,
 		AgentName:   agentName,
+		// A code constant, not an env var: the mount path is fixed by the manifest.
+		TurnQueueModeFile: TurnQueueModeFile,
 	}
 }
 
-// NewEriRestateServer binds the Eri Virtual Objects and returns a Restate server handler.
-func NewEriRestateServer(pool *queue.WorkerPool, agentName string) *server.Restate {
-	threadSession := queue.NewThreadSessionObject(pool, agentName)
-	dispatchSession := queue.NewDispatchSessionObject(pool, agentName)
-	voiceSession := queue.NewVoiceSessionObject(pool, agentName)
-	sessionManager := queue.NewSessionManagerService(pool, agentName)
-
-	return server.NewRestate().
-		Bind(restate.Reflect(threadSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
-		Bind(restate.Reflect(dispatchSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
-		Bind(restate.Reflect(voiceSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
-		Bind(restate.Reflect(sessionManager, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)))
+// eriRestateDefinitions returns the services an eri-restate revision binds in mode. Both modes
+// bind the same services with the same handler names and kinds (the legacy objects carry
+// rollback adapters), so no revision is ever the last deployment of a service and a flip or
+// rollback never strands in-flight invocations. ThreadSession/DispatchSession keep 1h
+// timeouts in both modes because timeouts are service-wide and an old revision drains long
+// legacy RunTurn invocations under the same names.
+func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string) []restate.ServiceDefinition {
+	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
+	var thread, dispatch, sessionManager any
+	if mode == config.TurnQueueCoordinator {
+		store := pool.Store()
+		thread = queue.NewThreadCoordinator(store, pool, agentName)
+		dispatch = queue.NewDispatchCoordinator(store, agentName)
+		sessionManager = queue.NewDispatchCancelRouter(store, agentName)
+	} else {
+		thread = queue.NewThreadSessionObject(pool, agentName)
+		dispatch = queue.NewDispatchSessionObject(pool, agentName)
+		sessionManager = queue.NewSessionManagerService(pool, agentName)
+	}
+	return []restate.ServiceDefinition{
+		restate.Reflect(thread, hour...),
+		restate.Reflect(dispatch, hour...),
+		restate.Reflect(queue.NewVoiceSessionObject(pool, agentName), hour...),
+		restate.Reflect(sessionManager, hour...),
+		queue.ReflectTurnRunner(queue.NewTurnRunnerService(pool, agentName)),
+	}
 }
 
-var defaultTimeoutPayload = []byte(`{"inactivity_timeout":"1h","abort_timeout":"1h"}`)
+// NewEriRestateServer binds the Eri services for mode (config.TurnQueueLegacy or
+// config.TurnQueueCoordinator) and returns a Restate server handler.
+func NewEriRestateServer(pool *queue.WorkerPool, agentName, mode string) *server.Restate {
+	srv := server.NewRestate()
+	for _, def := range eriRestateDefinitions(pool, agentName, mode) {
+		srv = srv.Bind(def)
+	}
+	return srv
+}
+
+// serviceTimeouts is the admin PATCH body for one service. It deliberately has no retry policy
+// field: every Eri service runs under the Restate server's default retry policy.
+type serviceTimeouts struct {
+	InactivityTimeout string `json:"inactivity_timeout"`
+	AbortTimeout      string `json:"abort_timeout"`
+}
+
+// formatRestateDuration renders d as a humantime string ("1h", "75m").
+func formatRestateDuration(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", d/time.Hour)
+	}
+	return fmt.Sprintf("%dm", d/time.Minute)
+}
+
+type serviceTimeoutPatch struct {
+	service string
+	body    serviceTimeouts
+}
+
+// serviceTimeoutPatches lists the per-service timeout PATCH bodies for agent.
+func serviceTimeoutPatches(agent string) []serviceTimeoutPatch {
+	hour := serviceTimeouts{InactivityTimeout: formatRestateDuration(time.Hour), AbortTimeout: formatRestateDuration(time.Hour)}
+	runnerOpts := queue.TurnRunnerReflectOptions()
+	return []serviceTimeoutPatch{
+		{service: queue.ThreadSessionServiceName(agent), body: hour},
+		{service: queue.DispatchSessionServiceName(agent), body: hour},
+		{service: queue.VoiceSessionServiceName(agent), body: hour},
+		{service: queue.TurnRunnerServiceName(agent), body: serviceTimeouts{
+			InactivityTimeout: formatRestateDuration(runnerOpts.InactivityTimeout),
+			AbortTimeout:      formatRestateDuration(runnerOpts.AbortTimeout),
+		}},
+	}
+}
 
 func startDiscoveryTimeoutReconciler(
 	ctx context.Context,
@@ -142,7 +248,8 @@ func wrapDiscoveryTimeoutReconciler(next http.Handler, triggerFn func()) http.Ha
 	})
 }
 
-// ReconcileRestateServiceTimeouts sets 1h timeouts on Eri services via the Restate admin API.
+// ReconcileRestateServiceTimeouts sets per-service timeouts on Eri services via the Restate admin
+// API (TurnRunner 75m/1h, the others 1h/1h). It never sets a retry policy.
 func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent string, httpClient ...*http.Client) error {
 	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
 	if adminURL == "" {
@@ -154,15 +261,14 @@ func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent
 		client = httpClient[0]
 	}
 
-	services := []string{
-		queue.ThreadSessionServiceName(agent),
-		queue.DispatchSessionServiceName(agent),
-		queue.VoiceSessionServiceName(agent),
-	}
-
-	for _, svc := range services {
+	for _, patch := range serviceTimeoutPatches(agent) {
+		svc := patch.service
+		payload, mErr := json.Marshal(patch.body)
+		if mErr != nil {
+			return fmt.Errorf("encode timeout payload for %s: %w", svc, mErr)
+		}
 		reqURL := fmt.Sprintf("%s/services/%s", adminURL, url.PathEscape(svc))
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(defaultTimeoutPayload))
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(payload))
 		if reqErr != nil {
 			return fmt.Errorf("create timeout reconcile request for %s: %w", svc, reqErr)
 		}
@@ -496,6 +602,20 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	}
 	config.RegisterConfigTokens(appCfg)
 
+	// The handler set is chosen once, from this pod's own annotation. Hot reloads and config
+	// changes never rebind: git-sync updates config.yaml under a running old revision, and
+	// rebinding (or a container restart reading the new value) would attach the other handler
+	// set to a deployment whose in-flight invocations were journaled under this one (RT0016).
+	modeValue, modePresent, modeErr := readTurnQueueModeFile(cfg.TurnQueueModeFile)
+	if modeErr != nil {
+		return modeErr
+	}
+	turnQueueMode, modeMismatch, modeErr := ResolveTurnQueueMode(modeValue, modePresent, cur.TurnQueue)
+	if modeErr != nil {
+		return modeErr
+	}
+	log.Printf("[eri-restate] turn_queue=%s source=annotation config_turn_queue=%s mismatch=%t", turnQueueMode, cur.TurnQueue, modeMismatch)
+
 	store := appOpts.store
 	txStore := appOpts.txStore
 	if store == nil {
@@ -571,7 +691,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		bootstrap.WithProvisioner(ctx, provisioner),
 		bootstrap.WithDirtyPools(pools.ephemeralPool, workerPool)))
 
-	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName)
+	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName, turnQueueMode)
 	restateHandler, err := restateSrv.Handler()
 	if err != nil {
 		return fmt.Errorf("create restate handler: %w", err)
