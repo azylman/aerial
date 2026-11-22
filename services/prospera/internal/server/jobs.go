@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
@@ -91,11 +90,7 @@ func (s *Server) HandleReportJob(ctx context.Context, msg pubsub.Message) error 
 	if cfg != nil && strings.TrimSpace(cfg.RestateIngressURL) != "" {
 		endpoint := fmt.Sprintf("%s/ProsperaReport/%s/DeliverReport/send", strings.TrimRight(cfg.RestateIngressURL, "/"), callID)
 		idempotencyKey := "prospera:report:" + callID
-		client := s.httpClient
-		if client == nil {
-			client = http.DefaultClient
-		}
-		_, ingressErr := restateingress.Post(ctx, client, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: callID}, 1024)
+		_, ingressErr := restateingress.Post(ctx, s.httpClient, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: callID}, 1024)
 		if ingressErr == nil {
 			return nil
 		}

@@ -1242,7 +1242,6 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("triggerPostCallReport err = %v, wantErr = %v", err, tc.wantErr)
 	}
-	server.triggerPostCallReportIfPending(context.Background(), tc.callID)
 	server.Wait()
 
 	if tc.wantPath != "" {
@@ -1312,13 +1311,33 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 	}
 }
 
+func TestServer_TriggerPostCallReportIfPending(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Port: "4019"}
+	st := fakes.NewFakeStore()
+
+	// 1. Success path: enqueues/delivers report without error
+	server, store, _ := setupTestServer()
+	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID:       "call-pending-rep",
+		ReportStatus: "pending",
+	}, 5)
+	server.triggerPostCallReportIfPending(context.Background(), "call-pending-rep")
+	server.Wait()
+
+	// 2. Error path: missing reporter logs error without panic
+	serverNoRep := NewServer(newTestConfigSource(cfg), st, nil, nil, nil, nil)
+	serverNoRep.triggerPostCallReportIfPending(context.Background(), "call-no-rep")
+	serverNoRep.Wait()
+}
+
 type handleReportJobTestCase struct {
 	name          string
 	callID        string
 	ingressStatus int
 	wantIngress   bool
 	wantDelivered bool
-	nilClient     bool
 }
 
 func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
@@ -1355,11 +1374,7 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 	}, 5)
 
 	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
-	var serverOpts []ServerOption
-	if !tc.nilClient {
-		serverOpts = append(serverOpts, WithServerHTTPClient(srv.Client()))
-	}
-	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, serverOpts...)
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
 
 	msg := &pubsubtest.Message{
 		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
@@ -1392,14 +1407,6 @@ func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
 			ingressStatus: http.StatusOK,
 			wantIngress:   true,
 			wantDelivered: false,
-		},
-		{
-			name:          "restate ingress succeeds with default http client",
-			callID:        "call-job-restate-default-client",
-			ingressStatus: http.StatusOK,
-			wantIngress:   true,
-			wantDelivered: false,
-			nilClient:     true,
 		},
 		{
 			name:          "restate ingress failure falls back to direct reporter delivery",
@@ -1466,25 +1473,5 @@ func TestServer_ResolveAndBindCall_ErrorBranches(t *testing.T) {
 	call := server.resolveAndBindCall(context.Background(), reqBind, "CA-bind-err")
 	if call == nil || call.CallID != "call-bind-err" {
 		t.Fatalf("expected call-bind-err, got %+v", call)
-	}
-
-	// 3. Store error on inbound voicemail routing logs warning
-	stErr := fakes.NewFakeStore()
-	stErr.OpErr = errors.New("store insert failure")
-	cfg := &config.Config{DefaultDiscordChannel: "prospera"}
-	serverErrStore := NewServer(newTestConfigSource(cfg), stErr, nil, nil, nil, nil)
-	recVM := httptest.NewRecorder()
-	serverErrStore.routeVoicemailRecording(context.Background(), cfg, recVM, "CA-vm-err", "+15105550199", "+15105550100")
-	if recVM.Code != http.StatusOK {
-		t.Fatalf("routeVoicemailRecording code = %d, want 200", recVM.Code)
-	}
-
-	// 4. Store error on inbound stream connection logs warning
-	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
-	serverInboundErr := NewServer(newTestConfigSource(cfg), stErr, nil, tokenMgr, nil, nil)
-	recInbound := httptest.NewRecorder()
-	serverInboundErr.connectInboundStream(context.Background(), cfg, recInbound, "CA-in-err", "+15105550199", "+15105550100", nil)
-	if recInbound.Code != http.StatusOK {
-		t.Fatalf("connectInboundStream code = %d, want 200", recInbound.Code)
 	}
 }

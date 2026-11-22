@@ -307,11 +307,7 @@ func (s *Server) triggerPostCallReport(ctx context.Context, callID string) error
 	if cfg != nil && strings.TrimSpace(cfg.RestateIngressURL) != "" {
 		endpoint := fmt.Sprintf("%s/ProsperaReport/%s/DeliverReport/send", strings.TrimRight(cfg.RestateIngressURL, "/"), cleanID)
 		idempotencyKey := "prospera:report:" + cleanID
-		client := s.httpClient
-		if client == nil {
-			client = http.DefaultClient
-		}
-		_, err := restateingress.Post(ctx, client, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: cleanID}, 1024)
+		_, err := restateingress.Post(ctx, s.httpClient, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: cleanID}, 1024)
 		if err == nil {
 			return nil
 		}
