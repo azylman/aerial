@@ -2,13 +2,13 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauthtest"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -36,37 +37,18 @@ type JSONRPCResponse struct {
 	} `json:"error,omitempty"`
 }
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
 type mockErrReader struct{}
 
 func (*mockErrReader) Read([]byte) (int, error) { return 0, errors.New("simulated read error") }
 
-func setupTestPostgresTables(t *testing.T, db *sql.DB) {
-	t.Helper()
-	schema := `
-	CREATE TABLE IF NOT EXISTS vanadis_builds (
-		id TEXT PRIMARY KEY,
-		status TEXT NOT NULL DEFAULT 'running'
-	);
-	CREATE TABLE IF NOT EXISTS vanadis_chunks (
-		id TEXT PRIMARY KEY,
-		build_id TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending'
-	);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("failed to setup test postgres tables: %v", err)
-	}
-}
-
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: config.DefaultTimezone, Port: "8080"}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	return server, httptest.NewServer(server.Routes())
 }
@@ -81,11 +63,7 @@ func TestNewServer_NilHandlerPanics(t *testing.T) {
 }
 
 func TestNewServer_BrainURLDispatcherConstruction(t *testing.T) {
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := testutil.NewDB(t)
 	sWithURL := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:", EriURL: "http://eri:8080"}, db))
 	if sWithURL.dispatcher == nil {
 		t.Error("expected non-nil dispatcher when EriURL is configured")
@@ -257,11 +235,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		})
 	}
 
-	closedMCPDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedMCPDB.Close()
+	closedMCPDB := testutil.NewClosedDB(t)
 	closedTS := httptest.NewServer(NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedMCPDB)).Routes())
 	defer closedTS.Close()
 	runServerRPCCase(t, closedTS, serverRPCTestCase{"list_schedules closed db", `{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"list_schedules","arguments":{}}}`, true, false})
@@ -326,18 +300,13 @@ func TestHandleSchedules_Table(t *testing.T) {
 		Timezone:    config.DefaultTimezone,
 		Port:        "8080",
 	}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
 
 	ctx := context.Background()
-	err = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:          "cron-1",
 		TargetID:    "123456789012345678",
 		TitlePrefix: "Cron Token: [REDACTED]",
@@ -407,11 +376,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		DurationMs:   200,
 	})
 
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	tests := []handleSchedulesTestCase{
@@ -484,12 +449,7 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 		Timezone:    config.DefaultTimezone,
 		Port:        "8080",
 	}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
@@ -518,11 +478,7 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 		})
 	}
 
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	tests := []handleScheduleRunsTestCase{
@@ -666,12 +622,7 @@ func setupTestServerWithAuth(t *testing.T, rt *k8sauthtest.RoundTripper) (*Serve
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 
 	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: config.DefaultTimezone, Port: "8080", Auth: k8sauthtest.Config(t, rt)}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	return server, httptest.NewServer(server.Routes())
 }

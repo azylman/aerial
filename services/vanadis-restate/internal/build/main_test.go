@@ -33,7 +33,7 @@ type fakeObjectRuntime struct {
 	stepsRun           []string
 	cleared            bool
 	reconcileScheduled bool
-	reconcilesSent     []sentReconcile
+	reconcilesSent     []sentCrossBuildDeploySuccess
 	invocationID       string
 	deferredSends      []deferredSend
 }
@@ -44,11 +44,11 @@ type deferredSend struct {
 	Seq   int
 }
 
-// sentReconcile records one cross-build Reconcile send.
-type sentReconcile struct {
+// sentCrossBuildDeploySuccess records one cross-build Mutate(chunk_deploy_success) send.
+type sentCrossBuildDeploySuccess struct {
 	Service string
 	BuildID string
-	Reason  string
+	ChunkID string
 }
 
 func newFakeObjectRuntime(key string) *fakeObjectRuntime {
@@ -452,8 +452,8 @@ func (f *fakeObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq i
 
 func (f *fakeObjectRuntime) InvocationID() string { return f.invocationID }
 
-func (f *fakeObjectRuntime) SendReconcile(service, buildID, reason string) {
-	f.reconcilesSent = append(f.reconcilesSent, sentReconcile{Service: service, BuildID: buildID, Reason: reason})
+func (f *fakeObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chunkID string) {
+	f.reconcilesSent = append(f.reconcilesSent, sentCrossBuildDeploySuccess{Service: service, BuildID: buildID, ChunkID: chunkID})
 }
 
 func TestBuildObject_NilStoreBranches(t *testing.T) {

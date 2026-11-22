@@ -136,19 +136,19 @@ func TestBuildObject_ChunkRemovalCancelsOnOwnerSessions(t *testing.T) {
 
 // TestBuildObject_CrossBuildReconcileSends drives a deploy_success mutation
 // through the object transition and asserts every swept foreign build gets a
-// one-way widget_sync Reconcile on its own runner's Build service.
+// one-way Mutate(chunk_deploy_success) on its own runner's Build service.
 func TestBuildObject_CrossBuildReconcileSends(t *testing.T) {
 	t.Parallel()
 	mergeLater := time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name     string
 		swept    []store.SweptChunk
-		wantSent []sentReconcile
+		wantSent []sentCrossBuildDeploySuccess
 	}{
 		{name: "no sweep sends nothing"},
-		{name: "default runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
-		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
-		{name: "one send per build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}, {Service: "Build", BuildID: "b3", Reason: "widget_sync"}}},
+		{name: "default runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentCrossBuildDeploySuccess{{Service: "Build", BuildID: "b2", ChunkID: "f1"}}},
+		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentCrossBuildDeploySuccess{{Service: "Build", BuildID: "b2", ChunkID: "f1"}}},
+		{name: "one send per swept chunk", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentCrossBuildDeploySuccess{{Service: "Build", BuildID: "b2", ChunkID: "f1"}, {Service: "Build", BuildID: "b2", ChunkID: "f2"}, {Service: "Build", BuildID: "b3", ChunkID: "g1"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,10 +173,10 @@ func TestRestateObjectRuntime_RunnerOperations(t *testing.T) {
 	mc := mocks.NewMockContext(t)
 	mClient := mocks.NewMockClient(t)
 	mInv := mocks.NewMockInvocation(t)
-	mc.EXPECT().Object("Build", "b2", "Reconcile").Return(mClient).Once()
-	mClient.EXPECT().Send(ReconcileBuildRequest{Reason: ReconcileReasonWidgetSync}).Return(mInv).Once()
+	mc.EXPECT().Object("Build", "b2", "Mutate").Return(mClient).Once()
+	mClient.EXPECT().Send(BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "f1"}).Return(mInv).Once()
 	rt := restateObjectRuntime{ctx: restate.WithMockContext(mc)}
-	sendCrossBuildReconciles(rt, []store.BuildRoute{{BuildID: "b2"}})
+	sendCrossBuildReconciles(rt, []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}})
 }
 
 func TestRecordCrossBuildReconcile(t *testing.T) {
@@ -184,12 +184,13 @@ func TestRecordCrossBuildReconcile(t *testing.T) {
 	tests := []struct {
 		name      string
 		collector bool
-		routes    []store.BuildRoute
-		want      []store.BuildRoute
+		targets   []store.SweptChunk
+		want      []store.SweptChunk
 	}{
-		{name: "no collector drops", routes: []store.BuildRoute{{BuildID: "b2"}}},
-		{name: "blank build ignored", collector: true, routes: []store.BuildRoute{{BuildID: " "}}},
-		{name: "deduplicated by build", collector: true, routes: []store.BuildRoute{{BuildID: "b2"}, {BuildID: "b3"}, {BuildID: "b2"}}, want: []store.BuildRoute{{BuildID: "b2"}, {BuildID: "b3"}}},
+		{name: "no collector drops", targets: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}},
+		{name: "blank build ignored", collector: true, targets: []store.SweptChunk{{ChunkID: "f1", BuildID: " "}}},
+		{name: "blank chunk ignored", collector: true, targets: []store.SweptChunk{{ChunkID: " ", BuildID: "b2"}}},
+		{name: "deduplicated by build and chunk", collector: true, targets: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b3"}, {ChunkID: "f1", BuildID: "b2"}}, want: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b3"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,8 +200,8 @@ func TestRecordCrossBuildReconcile(t *testing.T) {
 			if tc.collector {
 				ctx, collector = withCrossBuildReconciles(ctx)
 			}
-			for _, route := range tc.routes {
-				recordCrossBuildReconcile(ctx, route)
+			for _, target := range tc.targets {
+				recordCrossBuildReconcile(ctx, target)
 			}
 			assert.Equal(t, tc.want, collector.list())
 		})
