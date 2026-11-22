@@ -1256,10 +1256,10 @@ func TestServerInstructions(t *testing.T) {
 
 func TestSetupProsperaBus(t *testing.T) {
 	tests := []struct {
-		name       string
-		natsURL    string
-		busFactory func(context.Context, string) (pubsub.Bus, error)
-		wantNil    bool
+		name    string
+		natsURL string
+		busMode string
+		wantNil bool
 	}{
 		{
 			name:    "empty url returns nil",
@@ -1269,33 +1269,25 @@ func TestSetupProsperaBus(t *testing.T) {
 		{
 			name:    "bus factory error returns nil",
 			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return nil, errors.New("connection failed")
-			},
+			busMode: "dial_err",
 			wantNil: true,
 		},
 		{
 			name:    "successful bus sets event bus and consumers",
 			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return pubsub.NewMemoryBus(), nil
-			},
+			busMode: "memory",
 			wantNil: false,
 		},
 		{
 			name:    "consumer start failure logs and returns bus",
 			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
-			},
+			busMode: "fail_consumer",
 			wantNil: false,
 		},
 		{
 			name:    "ensure streams failure logs and returns bus",
 			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return &failEnsureStreamsBus{Bus: pubsub.NewMemoryBus()}, nil
-			},
+			busMode: "fail_streams",
 			wantNil: false,
 		},
 	}
@@ -1304,8 +1296,27 @@ func TestSetupProsperaBus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			origBusFn := newProsperaBusFn
 			defer func() { newProsperaBusFn = origBusFn }()
-			if tc.busFactory != nil {
-				newProsperaBusFn = tc.busFactory
+			switch tc.busMode {
+			case "":
+				// keep default newProsperaBusFn
+			case "dial_err":
+				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
+					return nil, errors.New("connection failed")
+				}
+			case "memory":
+				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
+					return pubsub.NewMemoryBus(), nil
+				}
+			case "fail_consumer":
+				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
+					return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
+				}
+			case "fail_streams":
+				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
+					return &failEnsureStreamsBus{Bus: pubsub.NewMemoryBus()}, nil
+				}
+			default:
+				t.Fatalf("unknown busMode %q", tc.busMode)
 			}
 
 			server, _, _ := setupTestServer()

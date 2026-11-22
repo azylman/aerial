@@ -882,31 +882,41 @@ func TestArchiveCoverage(t *testing.T) {
 	tests := []struct {
 		name          string
 		invalidTmpDir bool
-		writeMeta     func(string) error
-		writeCounters func(string) error
+		hasMeta       bool
+		metaFile      string
+		metaErr       error
+		hasCounters   bool
+		countersFile  string
+		countersErr   error
 		wantErr       string
 		wantFiles     []string
 	}{
 		{
-			name:          "archives meta and counters files",
-			writeMeta:     writeCoverageFile("covmeta.1", nil),
-			writeCounters: writeCoverageFile("covcounters.1", nil),
-			wantFiles:     []string{"covcounters.1", "covmeta.1"},
+			name:         "archives meta and counters files",
+			hasMeta:      true,
+			metaFile:     "covmeta.1",
+			hasCounters:  true,
+			countersFile: "covcounters.1",
+			wantFiles:    []string{"covcounters.1", "covmeta.1"},
 		},
 		{
 			name:      "nil writers produce empty archive",
 			wantFiles: nil,
 		},
 		{
-			name:          "meta error is tolerated",
-			writeMeta:     writeCoverageFile("covmeta.1", errors.New("meta failure")),
-			writeCounters: writeCoverageFile("covcounters.1", nil),
-			wantFiles:     []string{"covcounters.1", "covmeta.1"},
+			name:         "meta error is tolerated",
+			hasMeta:      true,
+			metaFile:     "covmeta.1",
+			metaErr:      errors.New("meta failure"),
+			hasCounters:  true,
+			countersFile: "covcounters.1",
+			wantFiles:    []string{"covcounters.1", "covmeta.1"},
 		},
 		{
-			name:          "counters error is returned",
-			writeCounters: writeCoverageFile("", errors.New("counters write failed")),
-			wantErr:       "counters write failed",
+			name:        "counters error is returned",
+			hasCounters: true,
+			countersErr: errors.New("counters write failed"),
+			wantErr:     "counters write failed",
 		},
 		{
 			name:          "mkdirtemp error is returned",
@@ -921,8 +931,16 @@ func TestArchiveCoverage(t *testing.T) {
 				t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "nonexistent", "subdir"))
 			}
 
+			var writeMeta, writeCounters func(string) error
+			if tc.hasMeta {
+				writeMeta = writeCoverageFile(tc.metaFile, tc.metaErr)
+			}
+			if tc.hasCounters {
+				writeCounters = writeCoverageFile(tc.countersFile, tc.countersErr)
+			}
+
 			var buf bytes.Buffer
-			err := ArchiveCoverage(&buf, tc.writeMeta, tc.writeCounters)
+			err := ArchiveCoverage(&buf, writeMeta, writeCounters)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("ArchiveCoverage error = %v, want substring %q", err, tc.wantErr)
