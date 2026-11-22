@@ -399,6 +399,95 @@ func TestDelivererDeliverStatusWidget(t *testing.T) {
 	}
 }
 
+func TestDelivererDeliverStatusWidget_ReplacedMessageIDTracking(t *testing.T) {
+	t.Parallel()
+	buried := msgs(1, 20*time.Minute, 0)
+	tests := []struct {
+		name         string
+		firstReq     ericlient.StatusWidgetRequest
+		secondReq    ericlient.StatusWidgetRequest
+		firstSender  *mockWidgetSender
+		secondSender *mockWidgetSender
+		wantFirstID  string
+		wantSecondID string
+		wantEditID   string
+	}{
+		{
+			name: "sunk message forwards stale id to new id on subsequent call",
+			firstReq: ericlient.StatusWidgetRequest{
+				ID: "b-sink", ChannelID: "chan-1", MessageID: "old-sunk", Title: "Build 1",
+			},
+			secondReq: ericlient.StatusWidgetRequest{
+				ID: "b-sink", ChannelID: "chan-1", MessageID: "old-sunk", Title: "Build 1",
+			},
+			firstSender: &mockWidgetSender{
+				msgs:    buried,
+				sendMsg: &discordgo.Message{ID: "new-sunk-msg", ChannelID: "chan-1"},
+			},
+			secondSender: &mockWidgetSender{
+				editMsg: &discordgo.Message{ID: "new-sunk-msg", ChannelID: "chan-1"},
+			},
+			wantFirstID:  "new-sunk-msg",
+			wantSecondID: "new-sunk-msg",
+			wantEditID:   "new-sunk-msg",
+		},
+		{
+			name: "404 recovered message forwards stale id on subsequent call",
+			firstReq: ericlient.StatusWidgetRequest{
+				ID: "b-404", ChannelID: "chan-1", MessageID: "old-404", Title: "Build 1",
+			},
+			secondReq: ericlient.StatusWidgetRequest{
+				ID: "b-404", ChannelID: "chan-1", MessageID: "old-404", Title: "Build 1",
+			},
+			firstSender: &mockWidgetSender{
+				editErr: &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}},
+				sendMsg: &discordgo.Message{ID: "new-404-msg", ChannelID: "chan-1"},
+			},
+			secondSender: &mockWidgetSender{
+				editMsg: &discordgo.Message{ID: "new-404-msg", ChannelID: "chan-1"},
+			},
+			wantFirstID:  "new-404-msg",
+			wantSecondID: "new-404-msg",
+			wantEditID:   "new-404-msg",
+		},
+		{
+			name: "build id forwards empty message id to newly created message",
+			firstReq: ericlient.StatusWidgetRequest{
+				ID: "b-new", ChannelID: "chan-1", MessageID: "", Title: "Build 1",
+			},
+			secondReq: ericlient.StatusWidgetRequest{
+				ID: "b-new", ChannelID: "chan-1", MessageID: "", Title: "Build 1",
+			},
+			firstSender: &mockWidgetSender{
+				sendMsg: &discordgo.Message{ID: "created-build-msg", ChannelID: "chan-1"},
+			},
+			secondSender: &mockWidgetSender{
+				editMsg: &discordgo.Message{ID: "created-build-msg", ChannelID: "chan-1"},
+			},
+			wantFirstID:  "created-build-msg",
+			wantSecondID: "created-build-msg",
+			wantEditID:   "created-build-msg",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := newSenderDeliverer(tc.firstSender, "")
+			id1, err1 := d.DeliverStatusWidget(context.Background(), tc.firstReq)
+			require.NoError(t, err1)
+			assert.Equal(t, tc.wantFirstID, id1)
+
+			d.agentSenders[defaultAgent] = tc.secondSender
+			id2, err2 := d.DeliverStatusWidget(context.Background(), tc.secondReq)
+			require.NoError(t, err2)
+			assert.Equal(t, tc.wantSecondID, id2)
+			require.NotNil(t, tc.secondSender.lastEditData)
+			assert.Equal(t, tc.wantEditID, tc.secondSender.lastEditData.ID)
+		})
+	}
+}
+
 func TestDeliverDirectMessageWithAgent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
