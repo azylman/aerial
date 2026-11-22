@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	restate "github.com/restatedev/sdk-go"
 
@@ -62,12 +63,15 @@ func (b *BuildObject) UpdateActiveStep(ctx restate.ObjectSharedContext, req Upda
 			if errors.Is(gErr, store.ErrBuildNotFound) {
 				return false, nil
 			}
-			return false, gErr
+			slog.WarnContext(rc, "[vanadis-restate] get build warning on active step update", "build_id", buildID, "chunk_id", chunkID, "error", gErr)
+			return true, nil
 		}
 		if bld == nil || bld.Quiet {
 			return true, nil
 		}
-		if sErr := b.syncActiveStepWidget(rc, *bld, chunks); sErr != nil {
+		stepCtx, cancel := context.WithTimeout(rc, 3*time.Second)
+		defer cancel()
+		if sErr := b.syncActiveStepWidget(stepCtx, *bld, chunks); sErr != nil {
 			slog.WarnContext(rc, "[vanadis-restate] sync widget warning on active step update", "build_id", buildID, "chunk_id", chunkID, "error", sErr)
 		}
 		return true, nil
