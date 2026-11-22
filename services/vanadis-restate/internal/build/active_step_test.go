@@ -110,11 +110,11 @@ func TestUpdateActiveStep(t *testing.T) {
 			expectStep:  "",
 		},
 		{
-			name:         "store get error propagates terminal error",
-			buildID:      "b-active",
-			req:          UpdateActiveStepRequest{ChunkID: "chunk-err", ActiveStep: "⚡ Compiling..."},
-			storeGetErr:  errors.New("db connection failure"),
-			expectErrSub: "db connection failure",
+			name:        "store get error logs warning, returns ok, and preserves active step in registry",
+			buildID:     "b-active",
+			req:         UpdateActiveStepRequest{ChunkID: "chunk-err", ActiveStep: "⚡ Compiling..."},
+			storeGetErr: errors.New("db connection failure"),
+			expectStep:  "⚡ Compiling...",
 		},
 		{
 			name:        "quiet build skips widget delivery",
@@ -148,8 +148,14 @@ func TestUpdateActiveStep(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var widgetTimedOut bool
+			var remainingTimeout time.Duration
 			eri := &mockEriClient{
-				widgetFn: func(_ context.Context, _ executor.StatusWidgetRequest) (string, error) {
+				widgetFn: func(ctx context.Context, _ executor.StatusWidgetRequest) (string, error) {
+					if deadline, ok := ctx.Deadline(); ok {
+						widgetTimedOut = true
+						remainingTimeout = time.Until(deadline)
+					}
 					return "msg-123", tc.widgetErr
 				},
 			}
@@ -170,12 +176,7 @@ func TestUpdateActiveStep(t *testing.T) {
 			mc := mocks.NewMockContext(t)
 			if tc.req.ChunkID != "" {
 				mc.EXPECT().Key().Return(tc.buildID)
-
-				var journalErr error
-				if tc.storeGetErr != nil && !errors.Is(tc.storeGetErr, store.ErrBuildNotFound) {
-					journalErr = tc.storeGetErr
-				}
-				observeJournalCallback(t, mc, journalErr, tc.expectCode)
+				observeJournalCallback(t, mc, nil, tc.expectCode)
 			}
 
 			resp, err := bo.UpdateActiveStep(restate.WithMockContext(mc), tc.req)
@@ -194,6 +195,9 @@ func TestUpdateActiveStep(t *testing.T) {
 			}
 			if tc.expectWidget {
 				assertSyncedWidgetStep(t, eri, tc.req.ChunkID, tc.expectStep)
+				assert.True(t, widgetTimedOut, "expected bounded context timeout on widget sync")
+				assert.LessOrEqual(t, remainingTimeout, 3*time.Second)
+				assert.Positive(t, remainingTimeout)
 			}
 		})
 	}

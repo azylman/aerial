@@ -188,9 +188,11 @@ func TestRunApp(t *testing.T) {
 // assembly test decodes: service names with their handler names.
 type discoveryManifest struct {
 	Services []struct {
-		Name     string `json:"name"`
-		Ty       string `json:"ty"`
-		Handlers []struct {
+		Name              string `json:"name"`
+		Ty                string `json:"ty"`
+		InactivityTimeout int    `json:"inactivityTimeout"`
+		AbortTimeout      int    `json:"abortTimeout"`
+		Handlers          []struct {
 			Name string `json:"name"`
 		} `json:"handlers"`
 	} `json:"services"`
@@ -218,17 +220,22 @@ var (
 func TestBindRestateServices(t *testing.T) {
 	t.Parallel()
 	prState := map[string][]string{"PRObject": bindPRObjectHandlers, "RepoObject": bindRepoObjectHandlers}
+	expectedTimeouts := map[string][2]int{
+		"Build":       {45000, 15000},
+		"BuildRouter": {45000, 15000},
+	}
 	tests := []struct {
 		name         string
 		agent        string
 		nilDeps      bool
 		wantServices []string
 		wantPRState  map[string][]string
+		wantTimeouts map[string][2]int
 	}{
-		{name: "empty agent owns pr state", agent: "", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState},
-		{name: "aerial agent owns pr state", agent: "aerial", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState},
-		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState},
-		{name: "sibling agent never binds pr state", agent: "agent-alpha", nilDeps: true, wantServices: []string{"Build", "BuildRouter"}, wantPRState: map[string][]string{}},
+		{name: "empty agent owns pr state", agent: "", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState, wantTimeouts: expectedTimeouts},
+		{name: "aerial agent owns pr state", agent: "aerial", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState, wantTimeouts: expectedTimeouts},
+		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState, wantTimeouts: expectedTimeouts},
+		{name: "sibling agent never binds pr state", agent: "agent-alpha", nilDeps: true, wantServices: []string{"Build", "BuildRouter"}, wantPRState: map[string][]string{}, wantTimeouts: expectedTimeouts},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,7 +252,7 @@ func TestBindRestateServices(t *testing.T) {
 			handler, err := srv.Handler()
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
-			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
+			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
 			rec := httptest.NewRecorder()
 			handler(rec, req)
 			require.Equal(t, http.StatusOK, rec.Code)
@@ -255,8 +262,12 @@ func TestBindRestateServices(t *testing.T) {
 			services := make([]string, 0, len(manifest.Services))
 			handlers := map[string][]string{}
 			gotPRState := map[string][]string{}
+			inactivityTimeouts := map[string]int{}
+			abortTimeouts := map[string]int{}
 			for _, svc := range manifest.Services {
 				services = append(services, svc.Name)
+				inactivityTimeouts[svc.Name] = svc.InactivityTimeout
+				abortTimeouts[svc.Name] = svc.AbortTimeout
 				for _, h := range svc.Handlers {
 					handlers[svc.Name] = append(handlers[svc.Name], h.Name)
 				}
@@ -270,6 +281,10 @@ func TestBindRestateServices(t *testing.T) {
 			assert.Equal(t, tc.wantServices, services)
 			assert.Subset(t, handlers["Build"], []string{"CompleteChunk", "FailChunk"})
 			assert.Equal(t, tc.wantPRState, gotPRState)
+			for svc, timeouts := range tc.wantTimeouts {
+				assert.Equal(t, timeouts[0], inactivityTimeouts[svc], "service %s inactivityTimeout", svc)
+				assert.Equal(t, timeouts[1], abortTimeouts[svc], "service %s abortTimeout", svc)
+			}
 		})
 	}
 }
