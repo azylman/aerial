@@ -246,34 +246,54 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	return noScheduleAction
 }
 
-func (r *Router) drainThreadPendingMessages(ctx context.Context, targetThreadID string) {
-	queue.DrainThreadPendingMessages(ctx, r.deps.Store, targetThreadID, queue.InterruptedByOperatorReason)
-}
-
 func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, _ discordgo.ApplicationCommandInteractionData) {
 	targetThreadID := i.ChannelID
+
+	// Defer first: Discord's 3s window is shorter than a Restate round-trip can take.
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral,
+		},
+	}); err != nil {
+		log.Printf("[Interactions] Failed to defer /interrupt: %v", err)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	pool := r.getPool()
-	if pool != nil {
-		pool.InterruptThread(ctx, targetThreadID, true, false)
+	reply := r.cancelThreadTurn(ctx, targetThreadID)
+	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &reply}); err != nil {
+		log.Printf("[Interactions] Failed to edit /interrupt response: %v", err)
 	}
-	if pool == nil || pool.Store() == nil {
-		r.drainThreadPendingMessages(ctx, targetThreadID)
+}
+
+func (r *Router) cancelThreadTurn(ctx context.Context, threadID string) string {
+	if r.deps.TurnCancellerProvider == nil {
+		return "interrupt unavailable"
 	}
+	canceller := r.deps.TurnCancellerProvider()
+	if canceller == nil {
+		return "interrupt unavailable"
+	}
+	resp, err := canceller.CancelThreadTurn(ctx, threadID, queue.CancelTurnRequest{Reason: "cancelled by operator via /interrupt"})
+	if err != nil {
+		return fmt.Sprintf("Interrupt failed: %v", err)
+	}
+	return formatInterruptReply(threadID, resp)
+}
 
-	reply := fmt.Sprintf("🛑 Interrupted active turn execution for <#%s>. Process group terminated. Pending message backlog purged.", targetThreadID)
-
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: reply,
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	}); err != nil {
-		log.Printf("[Interactions] Failed to respond to /interrupt: %v", err)
+func formatInterruptReply(threadID string, resp queue.CancelTurnResponse) string {
+	switch {
+	case resp.CancelledActiveTurn && resp.CancelledCount > 0:
+		return fmt.Sprintf("🛑 Interrupted the active turn in <#%s> and dropped %d queued messages", threadID, resp.CancelledCount)
+	case resp.CancelledActiveTurn:
+		return fmt.Sprintf("🛑 Interrupted the active turn in <#%s>", threadID)
+	case resp.CancelledCount > 0:
+		return fmt.Sprintf("No active turn in <#%s>; dropped %d queued messages.", threadID, resp.CancelledCount)
+	default:
+		return fmt.Sprintf("Nothing was running in <#%s>.", threadID)
 	}
 }
 
