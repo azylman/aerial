@@ -381,3 +381,78 @@ func TestRepoState_ExpireHeld(t *testing.T) {
 		})
 	}
 }
+
+type updatedForMainCase struct {
+	name         string
+	nilState     bool
+	seedPRs      []int
+	markPR       int
+	clearPR      int
+	newMainSHA   string
+	reMainSHA    string
+	idxEvent     *PRIndexEvent
+	checkPR      int
+	wantUpdated  bool
+	wantMapIsNil bool
+}
+
+func seedUpdatedForMainRepo(nilState bool, reMainSHA string, seedPRs []int) *RepoState {
+	if nilState {
+		return nil
+	}
+	st := NewRepoState("azylman/aerial")
+	if reMainSHA != "" {
+		st.RecordMainPushSHA(reMainSHA)
+	}
+	for _, pr := range seedPRs {
+		st.MarkPRUpdatedForMain(pr)
+	}
+	return st
+}
+
+func applyUpdatedForMainStep(st *RepoState, tc updatedForMainCase) {
+	if tc.markPR != 0 {
+		st.MarkPRUpdatedForMain(tc.markPR)
+	}
+	if tc.clearPR != 0 {
+		st.ClearPRUpdatedForMain(tc.clearPR)
+	}
+	if tc.newMainSHA != "" {
+		st.RecordMainPushSHA(tc.newMainSHA)
+	}
+	if tc.reMainSHA != "" {
+		st.RecordMainPushSHA(tc.reMainSHA)
+	}
+	if tc.idxEvent != nil {
+		st.ApplyPRIndex(*tc.idxEvent)
+	}
+}
+
+func TestRepoState_UpdatedForMain(t *testing.T) {
+	t.Parallel()
+	tests := []updatedForMainCase{
+		{name: "nil state operations are safe", nilState: true, markPR: 1, checkPR: 1, wantUpdated: false, wantMapIsNil: true},
+		{name: "zero or negative pr number is no-op", markPR: 0, checkPR: 0, wantUpdated: false, wantMapIsNil: true},
+		{name: "marking pr records updated for main", markPR: 101, checkPR: 101, wantUpdated: true, wantMapIsNil: false},
+		{name: "different pr is not marked", markPR: 101, checkPR: 102, wantUpdated: false, wantMapIsNil: false},
+		{name: "clearing only pr resets map to nil", seedPRs: []int{101}, clearPR: 101, checkPR: 101, wantUpdated: false, wantMapIsNil: true},
+		{name: "clearing one pr retains other prs", seedPRs: []int{101, 102}, clearPR: 101, checkPR: 102, wantUpdated: true, wantMapIsNil: false},
+		{name: "new main push sha clears updated for main", seedPRs: []int{101}, newMainSHA: "m2", checkPR: 101, wantUpdated: false, wantMapIsNil: true},
+		{name: "duplicate main push sha keeps updated for main", seedPRs: []int{101}, reMainSHA: "m1", checkPR: 101, wantUpdated: true, wantMapIsNil: false},
+		{name: "merged index lifecycle clears pr", seedPRs: []int{101}, idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexMerged}, checkPR: 101, wantUpdated: false, wantMapIsNil: true},
+		{name: "closed index lifecycle clears pr", seedPRs: []int{101}, idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Lifecycle: IndexClosed}, checkPR: 101, wantUpdated: false, wantMapIsNil: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := seedUpdatedForMainRepo(tc.nilState, tc.reMainSHA, tc.seedPRs)
+			applyUpdatedForMainStep(st, tc)
+			if got := st.WasPRUpdatedForMain(tc.checkPR); got != tc.wantUpdated {
+				t.Fatalf("WasPRUpdatedForMain(%d) = %v, want %v", tc.checkPR, got, tc.wantUpdated)
+			}
+			if st != nil && (st.UpdatedForMain == nil) != tc.wantMapIsNil {
+				t.Fatalf("st.UpdatedForMain == nil is %v, want %v", st.UpdatedForMain == nil, tc.wantMapIsNil)
+			}
+		})
+	}
+}

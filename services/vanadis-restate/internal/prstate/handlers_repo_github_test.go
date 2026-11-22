@@ -360,3 +360,140 @@ func TestRepoStateRepoEffectRing(t *testing.T) {
 		})
 	}
 }
+
+func openGitHubDirtyPR(n int, author, sha string) GitHubPR {
+	pr := openGitHubPR(n, author, sha)
+	pr.MergeableState = "dirty"
+	return pr
+}
+
+type fencingSeed struct {
+	mainSHA       string
+	updatedPRs    []int
+	indexPRs      []PRIndexEvent
+	fannedOutMain string
+}
+
+func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
+	t.Parallel()
+	defaultPolicy := &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true}
+	pr1 := openGitHubPR(1, "bot", "h1")
+	pr2 := openGitHubPR(2, "bot", "h2")
+	prsTwo := []GitHubPR{pr1, pr2}
+
+	tests := []struct {
+		name          string
+		seed          fencingSeed
+		routeFailure  string
+		autoUpdateEV  RepoEvent
+		mainPushAfter bool
+		gh            *fakeGitHub
+		wantUpdates   []BranchUpdate
+		wantFencedPR1 bool
+		wantFencedPR2 bool
+		wantSent      []sentPR
+	}{
+		{
+			name:          "fenced pr1 prevents pr2 auto update while checks pending",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 2, HeadSHA: "h2", CheckName: "ci-gate", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantFencedPR1: true,
+		},
+		{
+			name:          "main push advances sha and clears fence so pr2 is updated",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", MainSHA: "m2", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+		},
+		{
+			name:          "check failure by pr number clears fence and updates pr2",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 1, HeadSHA: "h1", CheckName: "", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+		},
+		{
+			name:          "check failure by head sha clears fence and updates pr2",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}, indexPRs: []PRIndexEvent{idxActive(1, "h1", "feat-1", 0)}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 0, HeadSHA: "h1", CheckName: "", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+		},
+		{
+			name:          "route by sha check failure clears fence before auto update",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}, indexPRs: []PRIndexEvent{idxActive(1, "h1", "feat-1", 0)}},
+			routeFailure:  "h1",
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 2, HeadSHA: "h2", CheckName: "ci-gate", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+			wantSent:      []sentPR{{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 1, Branch: "feat-1", HeadSHA: "h1"}}},
+		},
+		{
+			name:          "dirty mergeable state clears fence and updates pr2",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 2, HeadSHA: "h2", CheckName: "ci-gate", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: []GitHubPR{openGitHubDirtyPR(1, "bot", "h1"), pr2}, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+		},
+		{
+			name:          "auto update records main sha first and push still fans out",
+			seed:          fencingSeed{mainSHA: "m1", fannedOutMain: "m1", indexPRs: []PRIndexEvent{idxActive(1, "h1", "", 0), idxActive(2, "h2", "", 0)}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", MainSHA: "m2", AutoUpdate: defaultPolicy},
+			mainPushAfter: true,
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+			wantSent:      []sentPR{mainAdvanced(1), mainAdvanced(2)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := NewMemRepoStore()
+			st := NewRepoState("azylman/aerial")
+			if tc.seed.mainSHA != "" {
+				st.RecordMainPushSHA(tc.seed.mainSHA)
+			}
+			for _, pr := range tc.seed.updatedPRs {
+				st.MarkPRUpdatedForMain(pr)
+			}
+			for _, ev := range tc.seed.indexPRs {
+				st.ApplyPRIndex(ev)
+			}
+			st.FannedOutMainSHA = tc.seed.fannedOutMain
+			store.SaveRepo(st)
+
+			prs := &fakePRSender{}
+			h := testRepoHandlers(t, store, prs, nil).WithGitHub(tc.gh)
+
+			if tc.routeFailure != "" {
+				routeEv := SHAEvent{Repo: "azylman/aerial", SHA: tc.routeFailure, Handler: prwire.PRHandlerCheckFailed, Event: PREvent{Event: "check_failed"}}
+				_, rerr := h.RouteBySHA(context.Background(), SHAKindCheckRun, routeEv)
+				require.NoError(t, rerr)
+			}
+
+			out, err := h.HandleAutoUpdate(context.Background(), tc.autoUpdateEV)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantUpdates, out.Updates)
+
+			if tc.mainPushAfter {
+				perr := h.HandleMainPush(context.Background(), RepoEvent{Repo: "azylman/aerial", MainSHA: tc.autoUpdateEV.MainSHA})
+				require.NoError(t, perr)
+			}
+
+			require.Equal(t, tc.wantSent, prs.calls)
+
+			finalST, lerr := store.LoadRepo("azylman/aerial")
+			require.NoError(t, lerr)
+			require.Equal(t, tc.wantFencedPR1, finalST.WasPRUpdatedForMain(1), "PR 1 fence")
+			require.Equal(t, tc.wantFencedPR2, finalST.WasPRUpdatedForMain(2), "PR 2 fence")
+		})
+	}
+}
