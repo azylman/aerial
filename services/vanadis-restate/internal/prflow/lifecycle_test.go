@@ -332,6 +332,16 @@ func TestFlow_HandlePREventType(t *testing.T) {
 		{name: "conflict on deployed chunk skipped", event: "conflict", ev: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, chunk: &model.VanadisChunk{Status: "deployed"}, wantErr: lifecycleSkipped},
 		{name: "conflict on chunk with merge_sha skipped", event: "conflict", ev: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, chunk: &model.VanadisChunk{MergeSHA: "merged-sha"}, wantErr: lifecycleSkipped},
 
+		{name: "ci_failed on merged chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "merged"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on deployed chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "deployed"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on synced chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "synced"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on deploying chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "deploying"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on deploy_failed chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "deploy_failed"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on completed chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "completed"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on cancelled chunk skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{Status: "cancelled"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on chunk with merge_sha skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), chunk: &model.VanadisChunk{MergeSHA: "merged-sha"}, wantBanners: []string{lifecycleCIBanner}, wantErr: lifecycleSkipped},
+		{name: "ci_failed on superseded head skipped", event: "ci_failed", ev: ciFailEv("unit-tests", "superseded-sha"), chunk: &model.VanadisChunk{HeadSHA: "current-sha"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantErr: lifecycleSkipped},
+
 		{name: "merged cancels chunk dispatch and resets check state", event: "merged", ev: merged, wantLifecycle: "merged", wantResets: []string{"c1:head-sha:merge-sha"}, wantCancel: "c1"},
 		{name: "merged action chunk preserves chunk dispatch", event: "merged", ev: merged, chunk: &model.VanadisChunk{Mode: "action"}, wantLifecycle: "merged", wantResets: []string{"c1:head-sha:merge-sha"}},
 		{name: "merged swallows cancel and publish errors", event: "merged", ev: pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: "merge"}, notifyErr: errors.New("notify unavailable"), wantLifecycle: "merged", wantResets: []string{"c1:head:merge"}, wantCancel: "c1"},
