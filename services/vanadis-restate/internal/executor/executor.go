@@ -74,6 +74,7 @@ type Executor struct {
 
 	buildLocks      sync.Map
 	buildMessageIDs sync.Map
+	activeSteps     sync.Map
 }
 
 // NewExecutor creates a new Executor instance. gitHubOwner qualifies bare
@@ -328,6 +329,58 @@ func (e *Executor) resolveLatestMessageID(buildID, msgID string) string {
 	return curr
 }
 
+// SetActiveSteps updates the in-memory active steps map for a build.
+func (e *Executor) SetActiveSteps(buildID string, steps map[string]string) {
+	if e == nil || strings.TrimSpace(buildID) == "" {
+		return
+	}
+	allEmpty := true
+	clean := make(map[string]string, len(steps))
+	for k, v := range steps {
+		kClean := strings.TrimSpace(k)
+		vClean := strings.TrimSpace(v)
+		if kClean != "" && vClean != "" {
+			clean[kClean] = vClean
+			allEmpty = false
+		}
+	}
+	if allEmpty {
+		e.activeSteps.Delete(buildID)
+		return
+	}
+	e.activeSteps.Store(buildID, clean)
+}
+
+// ClearActiveSteps removes any stored active steps for a build.
+func (e *Executor) ClearActiveSteps(buildID string) {
+	if e == nil || strings.TrimSpace(buildID) == "" {
+		return
+	}
+	e.activeSteps.Delete(buildID)
+}
+
+// OverlayActiveSteps overlays running chunks with live in-memory active steps if not already populated.
+func (e *Executor) OverlayActiveSteps(buildID string, chunks []model.VanadisChunk) {
+	if e == nil || strings.TrimSpace(buildID) == "" || len(chunks) == 0 {
+		return
+	}
+	val, ok := e.activeSteps.Load(buildID)
+	if !ok || val == nil {
+		return
+	}
+	steps, ok := val.(map[string]string)
+	if !ok || len(steps) == 0 {
+		return
+	}
+	for i := range chunks {
+		if chunks[i].ActiveStep == "" {
+			if s, exists := steps[chunks[i].ID]; exists && s != "" {
+				chunks[i].ActiveStep = s
+			}
+		}
+	}
+}
+
 // SyncBuildWidget formats the Discord tracker widget and dispatches it directly to Eri via POST /discord/widget.
 // It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>. A newly
 // posted message is stored only by compare-and-swap against
@@ -347,6 +400,11 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, b
 		if latest := e.resolveLatestMessageID(build.ID, build.StatusMessageID); latest != "" && latest != build.StatusMessageID {
 			build.StatusMessageID = latest
 		}
+	}
+	if model.IsTerminalBuildStatus(build.Status) {
+		e.ClearActiveSteps(build.ID)
+	} else {
+		e.OverlayActiveSteps(build.ID, chunks)
 	}
 	widgetReq := widget.BuildSyncWidgetRequest(build, chunks, e.deployUIURL)
 	if notice != "" {

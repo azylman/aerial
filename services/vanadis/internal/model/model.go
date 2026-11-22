@@ -140,9 +140,11 @@ type CreateBuildRequest struct {
 
 // UpdateActiveStepRequest carries the target chunk and active step description.
 type UpdateActiveStepRequest struct {
-	ChunkID    string `json:"chunk_id"`
-	ActiveStep string `json:"active_step,omitempty"`
-	Step       string `json:"step,omitempty"`
+	ChunkID     string            `json:"chunk_id,omitempty"`
+	ActiveStep  string            `json:"active_step,omitempty"`
+	Step        string            `json:"step,omitempty"`
+	ClearAll    bool              `json:"clear_all,omitempty"`
+	ActiveSteps map[string]string `json:"active_steps,omitempty"`
 }
 
 // ParseCreateBuildChunks validates raw chunk inputs and normalizes the build DAG.

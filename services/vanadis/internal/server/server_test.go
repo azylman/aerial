@@ -2,10 +2,8 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -723,18 +721,11 @@ func TestServerIngressIdempotencyKeys(t *testing.T) {
 			wantKey: "attach-pr:c1:aerial:42",
 		},
 		{
-			name:    "active step sets content-addressed key",
+			name:    "active step does not set idempotency key for latest-write streaming",
 			method:  http.MethodPost,
 			path:    "/chunks/active-step",
 			body:    `{"chunk_id":"c1","active_step":"running tests"}`,
-			wantKey: fmt.Sprintf("active-step:b1:c1:%x", sha256.Sum256([]byte("running tests"))),
-		},
-		{
-			name:    "active step with step fallback sets key",
-			method:  http.MethodPost,
-			path:    "/chunks/active-step",
-			body:    `{"chunk_id":"c1","step":"compiling code"}`,
-			wantKey: fmt.Sprintf("active-step:b1:c1:%x", sha256.Sum256([]byte("compiling code"))),
+			wantKey: "",
 		},
 	}
 	for _, tc := range tests {

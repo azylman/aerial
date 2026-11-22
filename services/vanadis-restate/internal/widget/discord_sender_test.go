@@ -38,13 +38,6 @@ type mockWidgetSender struct {
 	lastDeleteChannel string
 }
 
-func clearAllChunkActiveStepsForTest() {
-	chunkActiveStepsMu.Lock()
-	defer chunkActiveStepsMu.Unlock()
-	chunkActiveSteps = make(map[string]string)
-	chunkActiveOrder = nil
-}
-
 func extractTestComponentsText(components []discordgo.MessageComponent) string {
 	var lines []string
 	for _, comp := range components {
@@ -671,90 +664,6 @@ func TestAccentColorAndStatusBadgeTable(t *testing.T) {
 			assert.Equal(t, tc.expectIcon, statusBadge(tc.status))
 		})
 	}
-}
-
-func TestActiveStepRegistryOwnedRules(t *testing.T) {
-	clearAllChunkActiveStepsForTest()
-	t.Cleanup(clearAllChunkActiveStepsForTest)
-
-	tests := []struct {
-		name       string
-		setupStep  string
-		setStep    string
-		expectStep string
-	}{
-		{
-			name:       "trimmed text is stored",
-			setStep:    "  ⚡ Compiling...  ",
-			expectStep: "⚡ Compiling...",
-		},
-		{
-			name:       "empty string deletes existing entry",
-			setupStep:  "⚡ Running",
-			setStep:    "",
-			expectStep: "",
-		},
-		{
-			name:       "whitespace only string deletes existing entry",
-			setupStep:  "⚡ Running",
-			setStep:    "   \t\n  ",
-			expectStep: "",
-		},
-		{
-			name:       "missing chunk returns empty",
-			expectStep: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			chunkID := "chunk-" + tc.name
-			if tc.setupStep != "" {
-				SetChunkActiveStep(chunkID, tc.setupStep)
-			}
-			if tc.setStep != "" || tc.setupStep != "" {
-				SetChunkActiveStep(chunkID, tc.setStep)
-			}
-			assert.Equal(t, tc.expectStep, GetChunkActiveStep(chunkID))
-		})
-	}
-}
-
-func TestActiveStepRegistryBounding(t *testing.T) {
-	clearAllChunkActiveStepsForTest()
-	t.Cleanup(clearAllChunkActiveStepsForTest)
-
-	for i := range MaxChunkActiveSteps + 20 {
-		SetChunkActiveStep(fmt.Sprintf("bounded-chunk-%04d", i), fmt.Sprintf("step-%d", i))
-	}
-
-	chunkActiveStepsMu.RLock()
-	total := len(chunkActiveSteps)
-	orderTotal := len(chunkActiveOrder)
-	chunkActiveStepsMu.RUnlock()
-
-	assert.Equal(t, MaxChunkActiveSteps, total)
-	assert.Equal(t, MaxChunkActiveSteps, orderTotal)
-
-	// Oldest chunks should be evicted
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-0000"))
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-0010"))
-
-	// Latest chunks should exist
-	assert.Equal(t, fmt.Sprintf("step-%d", MaxChunkActiveSteps+19), GetChunkActiveStep(fmt.Sprintf("bounded-chunk-%04d", MaxChunkActiveSteps+19)))
-
-	// Clearing removes from both map and order slice
-	SetChunkActiveStep("bounded-chunk-to-clear", "some-step")
-	ClearChunkActiveStep("bounded-chunk-to-clear")
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-to-clear"))
-
-	SetChunkActiveStep("bounded-chunk-empty", "some-step")
-	SetChunkActiveStep("bounded-chunk-empty", "")
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-empty"))
-
-	chunkActiveStepsMu.RLock()
-	assert.Equal(t, len(chunkActiveSteps), len(chunkActiveOrder))
-	chunkActiveStepsMu.RUnlock()
 }
 
 func TestFormatChunkRuntimeSuffix(t *testing.T) {
