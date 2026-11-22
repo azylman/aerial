@@ -182,7 +182,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 // state exactly once with no external effects.
 func TestPRObjectService_DarkHandlers(t *testing.T) {
 	t.Parallel()
-	ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Event: "check_failed"}
+	ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Event: "check_failed"}
 	prMc01, prRec01 := newStateMock[*PRState](t, nil)
 	prMc02, prRec02 := newStateMock[*PRState](t, nil)
 	prMc03, prRec03 := newStateMock[*PRState](t, nil)
@@ -261,7 +261,7 @@ func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 	}{
 		{
 			name:           "non-roborev check failure",
-			ev:             PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
+			ev:             PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
 			wantSet:        true,
 			wantFailedCI:   "abc123",
 			wantNonRoboRev: "abc123",
@@ -269,14 +269,14 @@ func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 		},
 		{
 			name:           "roborev check failure",
-			ev:             PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "roborev"},
+			ev:             PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "roborev"},
 			wantSet:        true,
 			wantFailedCI:   "abc123",
 			wantRoboActive: true,
 		},
 		{
 			name:         "empty check name records failed ci sha only",
-			ev:           PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"},
+			ev:           PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"},
 			wantSet:      true,
 			wantFailedCI: "abc123",
 		},
@@ -298,7 +298,7 @@ func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 				if rec.saved.NonRoboRevSHA != tc.wantNonRoboRev {
 					t.Fatalf("NonRoboRevSHA = %q, want %q", rec.saved.NonRoboRevSHA, tc.wantNonRoboRev)
 				}
-				if tc.wantActiveFail && !rec.saved.Checks.ActiveFailed[CanonicalFailedCheckKey(tc.ev.CheckName)] {
+				if tc.wantActiveFail && !rec.saved.Checks.ActiveFailed[prwire.CanonicalFailedCheckKey(tc.ev.CheckName)] {
 					t.Fatalf("ActiveFailed[%s] = false, want true", tc.ev.CheckName)
 				}
 				if tc.wantRoboActive != rec.saved.Checks.RoboRevActiveFailed {
@@ -312,12 +312,12 @@ func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 // TestPRObjectService_HandleCheckPassed tests granular check pass transitions.
 func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 	t.Parallel()
-	priorState := NewPRState("aerial", 101)
+	priorState := NewPRState("azylman/aerial", 101)
 	priorState.RecordFailedCheckRunDetailed("abc123", "ci/lint")
 	priorState.RecordNonRoboRevFailedSHA("abc123")
 	priorState.RecordFailedCISHA("abc123")
 
-	priorMultiState := NewPRState("aerial", 101)
+	priorMultiState := NewPRState("azylman/aerial", 101)
 	priorMultiState.RecordFailedCheckRunDetailed("abc123", "ci/lint")
 	priorMultiState.RecordFailedCheckRunDetailed("abc123", "ci/unit")
 	priorMultiState.RecordNonRoboRevFailedSHA("abc123")
@@ -334,13 +334,13 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 		{
 			name:     "clears last active failure and clears failed ci sha",
 			existing: priorState,
-			ev:       PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
+			ev:       PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
 			wantSet:  true,
 		},
 		{
 			name:           "clears one failure but retains ci sha while other failure active",
 			existing:       priorMultiState,
-			ev:             PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
+			ev:             PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
 			wantSet:        true,
 			wantFailedCI:   "abc123",
 			wantNonRoboRev: "abc123",
@@ -374,13 +374,13 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 // and K/V failures surface without persisting.
 func TestPRObjectService_DarkDispositions(t *testing.T) {
 	t.Parallel()
-	terminalState := NewPRState("aerial", 101)
+	terminalState := NewPRState("azylman/aerial", 101)
 	terminalState.HeadSHA = "aaa111"
 	terminalState.Terminal = TerminalMerged
-	reopenedState := NewPRState("aerial", 101)
+	reopenedState := NewPRState("azylman/aerial", 101)
 	reopenedState.HeadSHA = "aaa111"
 	reopenedState.Terminal = TerminalMerged
-	staleState := NewPRState("aerial", 101)
+	staleState := NewPRState("azylman/aerial", 101)
 	staleState.HeadSHA = "aaa111"
 	tests := []struct {
 		name       string
@@ -391,15 +391,15 @@ func TestPRObjectService_DarkDispositions(t *testing.T) {
 		wantSet    bool
 		wantErr    bool
 	}{
-		{name: "fresh state applies", existing: nil, ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: true},
-		{name: "stale sha drops", existing: staleState, ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "bbb222"}, wantSet: false},
-		{name: "terminal absorbs same epoch", existing: terminalState, ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "aaa111"}, wantSet: false},
-		{name: "reopen epoch applies", existing: reopenedState, ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "aaa111", ReopenEpoch: 1}, wantSet: true},
-		{name: "zero sha event applies on empty state", existing: nil, ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "0000000"}, wantSet: true},
-		{name: "state load error surfaces", failGet: true, ev: PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: false, wantErr: true},
+		{name: "fresh state applies", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: true},
+		{name: "stale sha drops", existing: staleState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "bbb222"}, wantSet: false},
+		{name: "terminal absorbs same epoch", existing: terminalState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111"}, wantSet: false},
+		{name: "reopen epoch applies", existing: reopenedState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111", ReopenEpoch: 1}, wantSet: true},
+		{name: "zero sha event applies on empty state", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "0000000"}, wantSet: true},
+		{name: "state load error surfaces", failGet: true, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: false, wantErr: true},
 		{name: "empty repo drops before kv", existing: nil, ev: PREvent{Repo: "", PRNumber: 101, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
-		{name: "zero pr number drops before kv", existing: nil, ev: PREvent{Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
-		{name: "negative pr number drops before kv", existing: nil, ev: PREvent{Repo: "aerial", PRNumber: -1, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
+		{name: "zero pr number drops before kv", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: 0, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
+		{name: "negative pr number drops before kv", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: -1, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,9 +433,9 @@ func TestPRObjectService_DarkDispositions(t *testing.T) {
 // states absorb, and the resolve never persists. K/V failures surface.
 func TestPRObjectService_ConflictResolve(t *testing.T) {
 	t.Parallel()
-	recordedState := NewPRState("aerial", 101)
+	recordedState := NewPRState("azylman/aerial", 101)
 	recordedState.MarkConflictPublished("abc123")
-	terminalState := NewPRState("aerial", 101)
+	terminalState := NewPRState("azylman/aerial", 101)
 	terminalState.MarkTerminal(TerminalMerged)
 	tests := []struct {
 		name              string
@@ -462,7 +462,7 @@ func TestPRObjectService_ConflictResolve(t *testing.T) {
 			} else {
 				mc, rec = newStateMock(t, tc.existing)
 			}
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "conflict_detected"}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "conflict_detected"}
 			got, err := NewPRObjectService().HandleConflictDetected(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("HandleConflictDetected err = nil, want kv error")
@@ -486,11 +486,11 @@ func TestPRObjectService_ConflictResolve(t *testing.T) {
 // surface.
 func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 	t.Parallel()
-	recordedSame := NewPRState("aerial", 101)
+	recordedSame := NewPRState("azylman/aerial", 101)
 	recordedSame.MarkConflictPublished("abc123")
-	recordedNew := NewPRState("aerial", 101)
+	recordedNew := NewPRState("azylman/aerial", 101)
 	recordedNew.MarkConflictPublished("abc123")
-	terminalState := NewPRState("aerial", 101)
+	terminalState := NewPRState("azylman/aerial", 101)
 	terminalState.MarkTerminal(TerminalMerged)
 	tests := []struct {
 		name          string
@@ -506,13 +506,13 @@ func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 		wantErr       bool
 		wantPublished string
 	}{
-		{name: "fresh publish records and persists", repo: "aerial", pr: 101, evHead: "abc123", wantRecorded: true, wantSet: true, wantPublished: "abc123"},
-		{name: "recorded publish re-acks idempotent", repo: "aerial", pr: 101, existing: recordedSame, evHead: "abc123", wantRecorded: true, wantDeduped: true, wantSet: true, wantPublished: "abc123"},
-		{name: "new sha overwrites and persists", repo: "aerial", pr: 101, existing: recordedNew, evHead: "def456", wantRecorded: true, wantSet: true, wantPublished: "def456"},
-		{name: "terminal absorbs without persisting", repo: "aerial", pr: 101, existing: terminalState, evHead: "abc123"},
-		{name: "state load error surfaces", repo: "aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
+		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, evHead: "abc123", wantRecorded: true, wantSet: true, wantPublished: "abc123"},
+		{name: "recorded publish re-acks idempotent", repo: "azylman/aerial", pr: 101, existing: recordedSame, evHead: "abc123", wantRecorded: true, wantDeduped: true, wantSet: true, wantPublished: "abc123"},
+		{name: "new sha overwrites and persists", repo: "azylman/aerial", pr: 101, existing: recordedNew, evHead: "def456", wantRecorded: true, wantSet: true, wantPublished: "def456"},
+		{name: "terminal absorbs without persisting", repo: "azylman/aerial", pr: 101, existing: terminalState, evHead: "abc123"},
+		{name: "state load error surfaces", repo: "azylman/aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
 		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "zero pr drops before kv", repo: "aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
+		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -551,7 +551,7 @@ func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 // TestPRObjectService_DeployDispatched pins the deploy_success publish verdict wiring.
 func TestPRObjectService_DeployDispatched(t *testing.T) {
 	t.Parallel()
-	dispatchedState := NewPRState("aerial", 101)
+	dispatchedState := NewPRState("azylman/aerial", 101)
 	dispatchedKey := dispatchedState.EffectKeyFor(prwire.EffectDeployDispatch, "abc123", "deploy-job", "")
 	dispatchedState.MarkEffectDispatched(dispatchedKey)
 	dispatchedState.RecordDeployedPR()
@@ -579,7 +579,7 @@ func TestPRObjectService_DeployDispatched(t *testing.T) {
 			} else {
 				mc, _ = newStateMock(t, tc.existing)
 			}
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, JobName: "deploy-job", Event: "deploy_dispatched"}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, JobName: "deploy-job", Event: "deploy_dispatched"}
 			got, err := NewPRObjectService().HandleDeployDispatched(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("HandleDeployDispatched err = nil, want kv error")
@@ -597,7 +597,7 @@ func TestPRObjectService_DeployDispatched(t *testing.T) {
 // TestPRObjectService_DeploySuccessPublishedAck pins the deploy_success ack recording and input guards.
 func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 	t.Parallel()
-	terminalState := NewPRState("aerial", 101)
+	terminalState := NewPRState("azylman/aerial", 101)
 	terminalState.MarkTerminal(TerminalClosed)
 
 	tests := []struct {
@@ -612,12 +612,12 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 		wantSet      bool
 		wantErr      bool
 	}{
-		{name: "fresh publish records and persists", repo: "aerial", pr: 101, existing: svcRow("abc123", "", RegistryStatusOpen, TerminalNone), evHead: "abc123", wantRecorded: true, wantSet: true},
-		{name: "untracked pr drops without persisting", repo: "aerial", pr: 101, evHead: "abc123", wantSet: false},
+		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, existing: svcRow("abc123", "", RegistryStatusOpen, TerminalNone), evHead: "abc123", wantRecorded: true, wantSet: true},
+		{name: "untracked pr drops without persisting", repo: "azylman/aerial", pr: 101, evHead: "abc123", wantSet: false},
 		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "zero pr drops before kv", repo: "aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "closed terminal absorbs without persisting", repo: "aerial", pr: 101, existing: terminalState, evHead: "abc123", wantSet: false},
-		{name: "state load error surfaces", repo: "aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
+		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
+		{name: "closed terminal absorbs without persisting", repo: "azylman/aerial", pr: 101, existing: terminalState, evHead: "abc123", wantSet: false},
+		{name: "state load error surfaces", repo: "azylman/aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -656,7 +656,7 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 // persists. K/V failures surface.
 func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 	t.Parallel()
-	failedState := NewPRState("aerial", 101)
+	failedState := NewPRState("azylman/aerial", 101)
 	failedState.RecordFailedCISHA("abc123")
 	tests := []struct {
 		name       string
@@ -681,7 +681,7 @@ func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 			} else {
 				mc, rec = newStateMock(t, tc.existing)
 			}
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "check_success"}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "check_success"}
 			got, err := NewPRObjectService().HandleCIRecovery(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("HandleCIRecovery err = nil, want kv error")
@@ -719,7 +719,7 @@ func TestPRObjectService_OwnerPreserved(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock[*PRState](t, tc.existing)
-			ev := PREvent{Repo: "aerial", PRNumber: 7, HeadSHA: "abc123", Agent: tc.evAgent, Event: "check_failed"}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "abc123", Agent: tc.evAgent, Event: "check_failed"}
 			require.NoError(t, NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), ev))
 			require.True(t, rec.setCalled)
 			assert.Equal(t, tc.wantAgent, rec.saved.Agent)
@@ -736,7 +736,7 @@ func rolloutIndexSend(seq uint64, active bool) sentCall {
 }
 
 func prObjectSend(pr int, method string, ev PREvent) sentCall {
-	return sentCall{service: "PRObject", key: PRObjectKey("aerial", pr), method: method, input: ev}
+	return sentCall{service: "PRObject", key: prwire.PRObjectKey("azylman/aerial", pr), method: method, input: ev}
 }
 
 func assertSends(t *testing.T, got, want []sentCall) {
@@ -779,27 +779,27 @@ func TestPRObjectService_IndexSends(t *testing.T) {
 	closedAgain.Terminal = TerminalClosed
 	closedKustMc, closedKustRec := newStateMock(t, closedAgain)
 	svc := NewPRObjectService()
-	_, mergedDeployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(mergedDeployMc), PREvent{Repo: "aerial", PRNumber: 101, JobName: "eri", MergeSHA: "m1"})
-	_, deployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(deployMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri", MergeSHA: "m1"})
-	_, dedupErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(dedupMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri"})
+	_, mergedDeployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(mergedDeployMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, JobName: "eri", MergeSHA: "m1"})
+	_, deployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(deployMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri", MergeSHA: "m1"})
+	_, dedupErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(dedupMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri"})
 	tests := []struct {
 		name      string
 		got       error
 		sends     *sendCapture
 		wantSends []sentCall
 	}{
-		{name: "first head touch indexes active", got: svc.HandleCheckFailed(restate.WithMockContext(firstMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Branch: " feat-a ", CheckName: "ci"}), sends: firstRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", Lifecycle: IndexActive})}},
-		{name: "same head sends nothing", got: svc.HandleCheckPassed(restate.WithMockContext(sameMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}), sends: sameRec.sends},
-		{name: "stale head sends nothing", got: svc.HandleCheckFailed(restate.WithMockContext(staleMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "def456"}), sends: staleRec.sends},
-		{name: "merge indexes merge sha", got: svc.HandleMerged(restate.WithMockContext(mergedMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1"}), sends: mergedRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexMerged})}},
-		{name: "close indexes closed without merge sha", got: svc.HandleClosed(restate.WithMockContext(closedMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1"}), sends: closedRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Lifecycle: IndexClosed})}},
-		{name: "reopen indexes the new epoch", got: svc.HandleReopened(restate.WithMockContext(reopenMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: 1}), sends: reopenRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: 1, Lifecycle: IndexActive})}},
-		{name: "kustomization request indexes deploying", got: svc.HandleKustomizationRequested(restate.WithMockContext(kustMc), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "abc123"}), sends: kustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "abc123", Generation: 1, Lifecycle: IndexDeploying})}},
+		{name: "first head touch indexes active", got: svc.HandleCheckFailed(restate.WithMockContext(firstMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Branch: " feat-a ", CheckName: "ci"}), sends: firstRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", Lifecycle: IndexActive})}},
+		{name: "same head sends nothing", got: svc.HandleCheckPassed(restate.WithMockContext(sameMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}), sends: sameRec.sends},
+		{name: "stale head sends nothing", got: svc.HandleCheckFailed(restate.WithMockContext(staleMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "def456"}), sends: staleRec.sends},
+		{name: "merge indexes merge sha", got: svc.HandleMerged(restate.WithMockContext(mergedMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1"}), sends: mergedRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexMerged})}},
+		{name: "close indexes closed without merge sha", got: svc.HandleClosed(restate.WithMockContext(closedMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1"}), sends: closedRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Lifecycle: IndexClosed})}},
+		{name: "reopen indexes the new epoch", got: svc.HandleReopened(restate.WithMockContext(reopenMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: 1}), sends: reopenRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: 1, Lifecycle: IndexActive})}},
+		{name: "kustomization request indexes deploying", got: svc.HandleKustomizationRequested(restate.WithMockContext(kustMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "abc123"}), sends: kustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "abc123", Generation: 1, Lifecycle: IndexDeploying})}},
 		{name: "recorded deploy success indexes deployed", got: deployErr, sends: deployRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexDeployed})}},
 		{name: "deduped deploy success sends nothing", got: dedupErr, sends: dedupRec.sends},
-		{name: "merged kustomization request indexes deploying with stored merge sha", got: svc.HandleKustomizationRequested(restate.WithMockContext(mergedKustMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Jobs: []string{"eri"}}), sends: mergedKustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", MergeSHA: "m1", Generation: 1, Lifecycle: IndexDeploying})}},
+		{name: "merged kustomization request indexes deploying with stored merge sha", got: svc.HandleKustomizationRequested(restate.WithMockContext(mergedKustMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Jobs: []string{"eri"}}), sends: mergedKustRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", MergeSHA: "m1", Generation: 1, Lifecycle: IndexDeploying})}},
 		{name: "merged recorded deploy success indexes deployed", got: mergedDeployErr, sends: mergedDeployRec.sends, wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", MergeSHA: "m1", Lifecycle: IndexDeployed})}},
-		{name: "closed kustomization request sends nothing", got: svc.HandleKustomizationRequested(restate.WithMockContext(closedKustMc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}), sends: closedKustRec.sends},
+		{name: "closed kustomization request sends nothing", got: svc.HandleKustomizationRequested(restate.WithMockContext(closedKustMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}), sends: closedKustRec.sends},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -827,7 +827,7 @@ func TestPRObjectService_HandleMainAdvanced(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.existing)
-			require.NoError(t, NewPRObjectService().HandleMainAdvanced(restate.WithMockContext(mc), PREvent{Event: "main_advanced", Repo: "aerial", PRNumber: 101}))
+			require.NoError(t, NewPRObjectService().HandleMainAdvanced(restate.WithMockContext(mc), PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101}))
 			require.Equal(t, tc.wantSet, rec.setCalled)
 			if tc.wantSet {
 				assert.Equal(t, tc.wantUpdated, rec.saved.UpdatedForMain)
@@ -897,21 +897,21 @@ func TestRepoObjectService_Handlers(t *testing.T) {
 		wantSet      bool
 		wantSends    []sentCall
 	}{
-		{name: "main push fans out to open prs", got: svc.HandleMainPush(restate.WithMockContext(pushMc), RepoEvent{Repo: "aerial", MainSHA: "main2"}), rec: pushRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101})}},
-		{name: "duplicate main push persists nothing", got: svc.HandleMainPush(restate.WithMockContext(dupMc), RepoEvent{Repo: "aerial", MainSHA: "main1"}), rec: dupRec},
-		{name: "zero sha main push fails terminally", got: svc.HandleMainPush(restate.WithMockContext(badPushMc), RepoEvent{Repo: "aerial", MainSHA: "0000000"}), rec: badPushRec, wantErr: true, wantTerminal: true},
-		{name: "main push load error surfaces", got: svc.HandleMainPush(restate.WithMockContext(errPushMc), RepoEvent{Repo: "aerial", MainSHA: "main1"}), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
-		{name: "fanout sends main advanced once per main sha", got: svc.HandleFanout(restate.WithMockContext(fanMc), RepoEvent{Repo: "aerial"}), rec: fanRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101})}},
+		{name: "main push fans out to open prs", got: svc.HandleMainPush(restate.WithMockContext(pushMc), RepoEvent{Repo: "azylman/aerial", MainSHA: "main2"}), rec: pushRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101})}},
+		{name: "duplicate main push persists nothing", got: svc.HandleMainPush(restate.WithMockContext(dupMc), RepoEvent{Repo: "azylman/aerial", MainSHA: "main1"}), rec: dupRec},
+		{name: "zero sha main push fails terminally", got: svc.HandleMainPush(restate.WithMockContext(badPushMc), RepoEvent{Repo: "azylman/aerial", MainSHA: "0000000"}), rec: badPushRec, wantErr: true, wantTerminal: true},
+		{name: "main push load error surfaces", got: svc.HandleMainPush(restate.WithMockContext(errPushMc), RepoEvent{Repo: "azylman/aerial", MainSHA: "main1"}), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
+		{name: "fanout sends main advanced once per main sha", got: svc.HandleFanout(restate.WithMockContext(fanMc), RepoEvent{Repo: "azylman/aerial"}), rec: fanRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleMainAdvanced", PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101})}},
 		{name: "fanout without repo fails terminally", got: svc.HandleFanout(restate.WithMockContext(badFanMc), RepoEvent{}), rec: badFanRec, wantErr: true, wantTerminal: true},
-		{name: "kustomization status records tombstone and forwards", got: svc.HandleKustomizationStatus(restate.WithMockContext(kustMc), RepoEvent{Repo: "aerial", HeadSHA: "dep1", Generation: 2, Kustomization: "eri"}), rec: kustRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleRolloutProgress", PREvent{Event: "kustomization_status", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", GateGeneration: 2, Kustomization: "eri"})}},
+		{name: "kustomization status records tombstone and forwards", got: svc.HandleKustomizationStatus(restate.WithMockContext(kustMc), RepoEvent{Repo: "azylman/aerial", HeadSHA: "dep1", Generation: 2, Kustomization: "eri"}), rec: kustRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleRolloutProgress", PREvent{Event: "kustomization_status", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", GateGeneration: 2, Kustomization: "eri"})}},
 		{name: "kustomization status without repo fails terminally", got: svc.HandleKustomizationStatus(restate.WithMockContext(badKustMc), RepoEvent{HeadSHA: "dep1"}), rec: badKustRec, wantErr: true, wantTerminal: true},
 		{name: "pr index of a held sha schedules delayed replay", got: svc.HandlePRIndex(restate.WithMockContext(idxMc), idxMerged(101, "h1", "m9")), rec: idxRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldReplay", input: HeldReplayRequest{SHA: "m9"}, delayed: true}}},
 		{name: "pr index without pr number fails terminally", got: svc.HandlePRIndex(restate.WithMockContext(badIdxMc), idxActive(0, "h1", "", 0)), rec: badIdxRec, wantErr: true, wantTerminal: true},
 		{name: "check run hit forwards to probject", got: svc.HandleCheckRunBySHA(restate.WithMockContext(hitMc), heldCheck("abc123")), rec: hitRec, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
 		{name: "workflow run miss holds with delayed expiry", got: svc.HandleWorkflowRunBySHA(restate.WithMockContext(missMc), heldCheck("abc123")), rec: missRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 1}, delayed: true}}},
-		{name: "push hit forwards merged", got: svc.HandlePushBySHA(restate.WithMockContext(pushHitMc), SHAEvent{Repo: "aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}), rec: pushHitRec, wantSends: []sentCall{prObjectSend(101, "HandleMerged", PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"})}},
-		{name: "image ready miss at capacity evicts and holds", got: svc.HandleImageReadyBySHA(restate.WithMockContext(fullMc), SHAEvent{Repo: "aerial", SHA: "m2", Handler: prwire.PRHandlerRolloutProgress}), rec: fullRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 65}, delayed: true}}},
-		{name: "unroutable handler fails terminally", got: svc.HandleImageReadyBySHA(restate.WithMockContext(badRouteMc), SHAEvent{Repo: "aerial", SHA: "m2", Handler: "HandleDeployDispatched"}), rec: badRouteRec, wantErr: true, wantTerminal: true},
+		{name: "push hit forwards merged", got: svc.HandlePushBySHA(restate.WithMockContext(pushHitMc), SHAEvent{Repo: "azylman/aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}), rec: pushHitRec, wantSends: []sentCall{prObjectSend(101, "HandleMerged", PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"})}},
+		{name: "image ready miss at capacity evicts and holds", got: svc.HandleImageReadyBySHA(restate.WithMockContext(fullMc), SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: prwire.PRHandlerRolloutProgress}), rec: fullRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 65}, delayed: true}}},
+		{name: "unroutable handler fails terminally", got: svc.HandleImageReadyBySHA(restate.WithMockContext(badRouteMc), SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: "HandleDeployDispatched"}), rec: badRouteRec, wantErr: true, wantTerminal: true},
 		{name: "route load error surfaces", got: svc.HandleCheckRunBySHA(restate.WithMockContext(errRouteMc), heldCheck("abc123")), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
 		{name: "held replay forwards resolved events", got: svc.HandleHeldReplay(restate.WithMockContext(replayMc), HeldReplayRequest{SHA: "abc123"}), rec: replayRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
 		{name: "held replay without sha fails terminally", got: svc.HandleHeldReplay(restate.WithMockContext(badReplayMc), HeldReplayRequest{}), rec: badReplayRec, wantErr: true, wantTerminal: true},
@@ -965,7 +965,7 @@ func TestRepoObjectService_ResolvePRBySHA(t *testing.T) {
 			} else {
 				mc, rec = repoMock(t, tc.seed)
 			}
-			got, err := NewRepoObjectService().ResolvePRBySHA(restate.WithMockContext(mc), ResolveSHARequest{Repo: "aerial", SHA: tc.sha})
+			got, err := NewRepoObjectService().ResolvePRBySHA(restate.WithMockContext(mc), ResolveSHARequest{Repo: "azylman/aerial", SHA: tc.sha})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ResolvePRBySHA err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -996,7 +996,7 @@ func TestPRObjectService_HandleOpened(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.existing)
-			err := NewPRObjectService().HandleOpened(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", Agent: tc.agent})
+			err := NewPRObjectService().HandleOpened(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Agent: tc.agent})
 			require.NoError(t, err)
 			require.NotNil(t, rec.saved)
 			require.Equal(t, tc.wantAgent, rec.saved.Agent)

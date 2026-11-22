@@ -62,8 +62,8 @@ var (
 )
 
 func seedConflictPR(store *MemPRStore, head string, gen, epoch uint64, terminal TerminalState, conflictMark string, dispatched bool) string {
-	key := PRObjectKey("aerial", 101)
-	ps := NewPRState("aerial", 101)
+	key := prwire.PRObjectKey("azylman/aerial", 101)
+	ps := NewPRState("azylman/aerial", 101)
 	ps.HeadSHA = head
 	ps.GateGeneration = gen
 	ps.ReopenEpoch = epoch
@@ -114,7 +114,7 @@ func runConflictEffect(t *testing.T, store *MemPRStore, seedMark string, conflic
 		schedulerArg = nil
 	}
 	h := testConflictHandlers(t, store, checkerArg, schedulerArg)
-	ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
+	ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
 	out, err := h.HandleConflictCheck(ctx, key, ev)
 	return key, out, checker, scheduler, err
 }
@@ -166,13 +166,13 @@ func TestHandleConflictCheckRoutes(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			store := NewMemPRStore()
-			key := PRObjectKey("aerial", 101)
+			key := prwire.PRObjectKey("azylman/aerial", 101)
 			if !tc.missingPR {
 				seedConflictPR(store, tc.seedHead, tc.seedGen, tc.seedEpoch, tc.seedTerminal, "", tc.seedDispatched)
 			}
 			checker := &fakeConflictChecker{}
 			h := testConflictHandlers(t, store, checker, nil)
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, ReopenEpoch: tc.evEpoch, GateGeneration: tc.seedGen}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, ReopenEpoch: tc.evEpoch, GateGeneration: tc.seedGen}
 			out, err := h.HandleConflictCheck(ctx, key, ev)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleConflictCheck err = %v, wantErr %v", err, tc.wantErr)
@@ -262,7 +262,7 @@ func TestHandleConflictCheckConflictedRetry(t *testing.T) {
 			key := seedConflictPR(store, "abc123", 2, 0, TerminalNone, "", false)
 			scheduler := &fakeRescheduler{err: errFakeSchedule, failCalls: tc.failCalls}
 			h := testConflictHandlers(t, store, &fakeConflictChecker{conflicted: true}, scheduler)
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
 			first, err := h.HandleConflictCheck(ctx, key, ev)
 			if (err != nil) != tc.wantFirstErr {
 				t.Fatalf("first check err = %v, wantErr %v", err, tc.wantFirstErr)

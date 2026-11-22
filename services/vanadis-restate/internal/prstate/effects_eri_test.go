@@ -265,7 +265,7 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 			if tc.eri != nil {
 				svc = svc.WithEriEffector(tc.eri)
 			}
-			err := svc.HandleCollaboratorAlert(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EriEffects: []EriEffect{dmEffect()}})
+			err := svc.HandleCollaboratorAlert(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", EriEffects: []EriEffect{dmEffect()}})
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, !tc.wantErr, rec.setCalled)
 			if tc.eri != nil {

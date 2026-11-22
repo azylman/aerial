@@ -16,7 +16,7 @@ import (
 )
 
 func decisionState(pr int, head string, gen uint64, terminal TerminalState, recordDispatch, recordPRSlot, recordSHASlot bool, evHead, evJob string) *PRState {
-	s := NewPRState("aerial", pr)
+	s := NewPRState("azylman/aerial", pr)
 	s.HeadSHA = head
 	s.GateGeneration = gen
 	if terminal != TerminalNone {
@@ -71,7 +71,7 @@ func TestResolveDeployDispatchDecision(t *testing.T) {
 			if !tc.nilState {
 				s = decisionState(7, tc.stateHead, tc.stateGen, tc.terminal, tc.recordDispatch, tc.recordPRSlot, tc.recordSHASlot, tc.evHead, tc.evJob)
 			}
-			ev := PREvent{Event: "deploy_success", Repo: "aerial", PRNumber: 7, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
+			ev := PREvent{Event: "deploy_success", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
 			got, err := ResolveDeployDispatchDecision(s, ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("ResolveDeployDispatchDecision err = nil, want error")
@@ -129,7 +129,7 @@ func TestRecordDeployPublished(t *testing.T) {
 			if !tc.nilState {
 				s = decisionState(7, tc.stateHead, tc.stateGen, tc.terminal, tc.recordDispatch, tc.recordPRSlot, tc.recordSHASlot, tc.evHead, tc.evJob)
 			}
-			ev := PREvent{Event: "deploy_success", Repo: "aerial", PRNumber: 7, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
+			ev := PREvent{Event: "deploy_success", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
 			got, err := RecordDeployPublished(s, ev)
 			if tc.wantErr {
 				if err == nil {
@@ -207,7 +207,7 @@ type deployServiceCase struct {
 func deployServiceMock(t *testing.T, tc deployServiceCase) (*mocks.MockContext, *stateCapture[*PRState], PREvent) {
 	t.Helper()
 	rec := &stateCapture[*PRState]{}
-	ev := PREvent{Event: "deploy_success", Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
+	ev := PREvent{Event: "deploy_success", Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
 	if tc.failGet {
 		return newStateErrorMock(t), rec, ev
 	}

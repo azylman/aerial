@@ -79,7 +79,7 @@ func (s *PRState) renderableBuildMetadata() *BuildMetadata {
 	if m == nil || !s.buildMetadataRevisionMatches(m.SourceSHA) {
 		return nil
 	}
-	if NormalizeRepo(m.Repository) != s.Repo || (m.PRNumber != nil && *m.PRNumber != s.PRNumber) {
+	if strings.TrimSpace(m.Repository) != s.Repo || (m.PRNumber != nil && *m.PRNumber != s.PRNumber) {
 		return nil
 	}
 	return m

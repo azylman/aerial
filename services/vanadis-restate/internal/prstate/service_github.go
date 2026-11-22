@@ -205,7 +205,7 @@ func logRepoEffect(ctx restate.ObjectContext, out RepoEffectOutcome) {
 		for _, u := range out.Updates {
 			key := EffectKey{Repo: out.Key.Repo, PRNumber: u.PRNumber, HeadSHA: u.HeadSHA, Kind: prwire.EffectGitHubUpdateBranch}
 			effectsTotal.WithLabelValues(prwire.EffectGitHubUpdateBranch, effectResultOK).Inc()
-			slog.InfoContext(rc, "[prstate] effect executed", "pr", PRObjectKey(out.Key.Repo, u.PRNumber), "kind", prwire.EffectGitHubUpdateBranch,
+			slog.InfoContext(rc, "[prstate] effect executed", "pr", prwire.PRObjectKey(out.Key.Repo, u.PRNumber), "kind", prwire.EffectGitHubUpdateBranch,
 				"effect_key", key.String(), "match_key", key.MatchKey(), "outcome", string(u.Outcome))
 		}
 		return restate.Void{}, nil
@@ -232,7 +232,7 @@ func (s *RepoObjectService) scheduleRepoEffectRetry(ctx restate.ObjectContext, h
 	}, restate.WithName("retry-"+kind))
 	next := ev
 	next.Attempt++
-	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(ev.Repo), handler).Send(next, restate.WithDelay(s.retryDelay))
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(ev.Repo), handler).Send(next, restate.WithDelay(s.retryDelay))
 }
 
 // WithGitHub injects the GitHub boundary and returns s. Without it
@@ -250,7 +250,7 @@ func (s *PRObjectService) WithGitHub(gh GitHubEffector) *PRObjectService {
 // otherwise). A failed read never fails the invocation: the delayed recheck
 // is its retry.
 func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || usableHeadSHA(ev.HeadSHA) == "" {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 || usableHeadSHA(ev.HeadSHA) == "" {
 		return nil
 	}
 	store := &restatePRStore{ctx: ctx, svc: s, ev: ev}
@@ -258,12 +258,12 @@ func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREv
 	if err != nil {
 		return restate.ToTerminalError(err, restate.WithErrorCode(500))
 	}
-	out, err := h.HandleConflictCheck(ctx, PRObjectKey(ev.Repo, ev.PRNumber), ev)
+	out, err := h.HandleConflictCheck(ctx, prwire.PRObjectKey(ev.Repo, ev.PRNumber), ev)
 	if store.err != nil {
 		return store.err
 	}
 	if err != nil {
-		slog.WarnContext(ctx, "[prstate] conflict check failed; recheck scheduled", "pr", PRObjectKey(ev.Repo, ev.PRNumber),
+		slog.WarnContext(ctx, "[prstate] conflict check failed; recheck scheduled", "pr", prwire.PRObjectKey(ev.Repo, ev.PRNumber),
 			"head_sha", ev.HeadSHA, "recheck_scheduled", out.RecheckScheduled, "error", err)
 		return nil
 	}
@@ -280,7 +280,7 @@ func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREv
 // collaborator PR marks the conflict and fires the collaborator DM the event
 // carries.
 func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
@@ -320,7 +320,7 @@ func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PRE
 // closed unmerged, mirroring synapse handleStaleOpenPR: the close transition
 // commits, then the closed_unmerged fact rendered here publishes. Like synapse's stale publish, the fact is not quiet.
 func (s *PRObjectService) HandleHeadRefMissing(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
@@ -418,6 +418,6 @@ type restateConflictRescheduler struct {
 }
 
 func (r restateConflictRescheduler) ScheduleConflictRecheck(_ context.Context, delay time.Duration, ev PREvent) error {
-	restate.ObjectSend(r.ctx, prwire.PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), prwire.PRHandlerConflictCheck).Send(ev, restate.WithDelay(delay))
+	restate.ObjectSend(r.ctx, prwire.PRObjectServiceName, prwire.PRObjectKey(ev.Repo, ev.PRNumber), prwire.PRHandlerConflictCheck).Send(ev, restate.WithDelay(delay))
 	return nil
 }

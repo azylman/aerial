@@ -62,7 +62,7 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 	pushKey := EffectKey{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "m1", Kind: prwire.EffectFluxGitPush}
 	pushKeyStr := "azylman/aerial#7@m1:gen0:flux_git_push"
 	push := func() RepoEvent {
-		return RepoEvent{Repo: "aerial", MainSHA: "m1", PRNumber: 7, Ref: "refs/heads/main", TargetID: "t1"}
+		return RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", PRNumber: 7, Ref: "refs/heads/main", TargetID: "t1"}
 	}
 	tests := []struct {
 		name        string
@@ -82,7 +82,7 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 			wantEffects: []string{pushKeyStr},
 		},
 		{
-			name: "direct commit with no pr still dispatches", ev: RepoEvent{Repo: "aerial", MainSHA: "m2", Ref: "refs/heads/main"}, kube: &fakeKube{},
+			name: "direct commit with no pr still dispatches", ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m2", Ref: "refs/heads/main"}, kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m2", Kind: prwire.EffectFluxGitPush}, Executed: true},
 			wantCalls:   []string{"push azylman/aerial refs/heads/main m2 "},
 			wantEffects: []string{"azylman/aerial#0@m2:gen0:flux_git_push"},
@@ -110,7 +110,7 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Retry: true, Kube: errKubeUnconfigured},
 			wantEffects: []string{},
 		},
-		{name: "non-main ref is invalid", ev: RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/heads/feat"}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent},
+		{name: "non-main ref is invalid", ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", Ref: "refs/heads/feat"}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,14 +149,14 @@ var (
 // prPromotion is a tracked PR #7 promotion of eri and haro at s1.
 func prPromotion() RepoEvent {
 	return RepoEvent{
-		Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Branch: "feat", TargetID: "t9", Images: []string{"eri", "haro"}, Jobs: []string{"eri"},
+		Repo: "azylman/aerial", HeadSHA: "s1", PRNumber: 7, Branch: "feat", TargetID: "t9", Images: []string{"eri", "haro"}, Jobs: []string{"eri"},
 		KustomizationRequests: promotionRequests, Facts: []pubsub.PRLifecycleEvent{promotionStarted}, DeployFailedFacts: []pubsub.PRLifecycleEvent{promotionFailed},
 	}
 }
 
 // mainPromotion is an untracked direct-commit promotion of eri at s2.
 func mainPromotion() RepoEvent {
-	return RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: promotionRequests}
+	return RepoEvent{Repo: "azylman/aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: promotionRequests}
 }
 
 // promotionFailureForward is the HandleDeployAttemptFailed forward a failed
@@ -265,7 +265,7 @@ func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 			wantSent:    []sentPR{failureForward(errKubeUnconfigured)},
 			wantEffects: []string{},
 		},
-		{name: "missing images are invalid", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1"}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+		{name: "missing images are invalid", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1"}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -306,7 +306,7 @@ func TestRepoHandlersHandleImagePromotionLoadFailure(t *testing.T) {
 			t.Parallel()
 			store := NewMemRepoStore()
 			store.FailLoads(tc.wantErr)
-			_, err := testRepoHandlers(t, store, nil, nil).HandleImagePromotion(context.Background(), RepoEvent{Repo: "aerial", HeadSHA: "s1", Images: []string{"eri"}})
+			_, err := testRepoHandlers(t, store, nil, nil).HandleImagePromotion(context.Background(), RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1", Images: []string{"eri"}})
 			require.ErrorIs(t, err, tc.wantErr)
 		})
 	}

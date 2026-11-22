@@ -11,23 +11,23 @@ import (
 // Positional fixture constructors for RepoObject routing index rows.
 
 func idxActive(pr int, head, branch string, epoch uint64) PRIndexEvent {
-	return PRIndexEvent{Repo: "aerial", PRNumber: pr, Branch: branch, HeadSHA: head, ReopenEpoch: epoch, Lifecycle: IndexActive}
+	return PRIndexEvent{Repo: "azylman/aerial", PRNumber: pr, Branch: branch, HeadSHA: head, ReopenEpoch: epoch, Lifecycle: IndexActive}
 }
 
 func idxMerged(pr int, head, merge string) PRIndexEvent {
-	return PRIndexEvent{Repo: "aerial", PRNumber: pr, HeadSHA: head, MergeSHA: merge, Lifecycle: IndexMerged}
+	return PRIndexEvent{Repo: "azylman/aerial", PRNumber: pr, HeadSHA: head, MergeSHA: merge, Lifecycle: IndexMerged}
 }
 
 func idxClosed(pr int, head string) PRIndexEvent {
-	return PRIndexEvent{Repo: "aerial", PRNumber: pr, HeadSHA: head, Lifecycle: IndexClosed}
+	return PRIndexEvent{Repo: "azylman/aerial", PRNumber: pr, HeadSHA: head, Lifecycle: IndexClosed}
 }
 
 func idxDeploying(pr int, merge string, gen uint64) PRIndexEvent {
-	return PRIndexEvent{Repo: "aerial", PRNumber: pr, MergeSHA: merge, Generation: gen, Lifecycle: IndexDeploying}
+	return PRIndexEvent{Repo: "azylman/aerial", PRNumber: pr, MergeSHA: merge, Generation: gen, Lifecycle: IndexDeploying}
 }
 
 func idxDeployed(pr int, gen uint64) PRIndexEvent {
-	return PRIndexEvent{Repo: "aerial", PRNumber: pr, Generation: gen, Lifecycle: IndexDeployed}
+	return PRIndexEvent{Repo: "azylman/aerial", PRNumber: pr, Generation: gen, Lifecycle: IndexDeployed}
 }
 
 // headUpdates returns n active updates for one PR with heads h01..hNN.
@@ -50,9 +50,9 @@ func closedPRs(from, to int) []PRIndexEvent {
 }
 
 func seededRepoState(index []PRIndexEvent, heldSHAs []string) *RepoState {
-	st := NewRepoState("aerial")
+	st := NewRepoState("azylman/aerial")
 	for _, sha := range heldSHAs {
-		st.HoldSHAEvent(SHAKindCheckRun, SHAEvent{Repo: "aerial", SHA: sha, Handler: prwire.PRHandlerCheckFailed})
+		st.HoldSHAEvent(SHAKindCheckRun, SHAEvent{Repo: "azylman/aerial", SHA: sha, Handler: prwire.PRHandlerCheckFailed})
 	}
 	for _, ev := range index {
 		st.ApplyPRIndex(ev)
@@ -83,7 +83,7 @@ func TestRepoState_ApplyPRIndex(t *testing.T) {
 		{name: "newer epoch reopens", seed: []PRIndexEvent{idxActive(101, "h1", "", 0), idxClosed(101, "h1")}, ev: idxActive(101, "h1", "", 1), probeSHA: "h1", wantChanged: true, wantOpen: []int{101}, wantPR: 101},
 		{name: "older epoch ignored", seed: []PRIndexEvent{idxActive(101, "h1", "", 2)}, ev: idxActive(101, "h9", "", 1), probeSHA: "h9", wantOpen: []int{101}},
 		{name: "deploying adds merged pr", seed: []PRIndexEvent{idxActive(101, "h1", "", 0), idxMerged(101, "h1", "m1")}, ev: idxDeploying(101, "m1", 1), probeSHA: "m1", wantChanged: true, wantDeploying: []int{101}, wantPR: 101},
-		{name: "deploying falls back to head sha", ev: PRIndexEvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", Generation: 1, Lifecycle: IndexDeploying}, probeSHA: "h1", wantChanged: true, wantOpen: []int{101}, wantDeploying: []int{101}, wantPR: 101},
+		{name: "deploying falls back to head sha", ev: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Generation: 1, Lifecycle: IndexDeploying}, probeSHA: "h1", wantChanged: true, wantOpen: []int{101}, wantDeploying: []int{101}, wantPR: 101},
 		{name: "duplicate deploying changes nothing", seed: []PRIndexEvent{idxDeploying(101, "m1", 1)}, ev: idxDeploying(101, "m1", 1), probeSHA: "m1", wantOpen: []int{101}, wantDeploying: []int{101}, wantPR: 101},
 		{name: "deployed clears deploying", seed: []PRIndexEvent{idxDeploying(101, "m1", 1)}, ev: idxDeployed(101, 1), probeSHA: "m1", wantChanged: true, wantOpen: []int{101}, wantPR: 101},
 		{name: "older generation deployed ignored", seed: []PRIndexEvent{idxDeploying(101, "m1", 2)}, ev: idxDeployed(101, 1), probeSHA: "m1", wantOpen: []int{101}, wantDeploying: []int{101}, wantPR: 101},
@@ -91,7 +91,7 @@ func TestRepoState_ApplyPRIndex(t *testing.T) {
 		{name: "close drops deploying", seed: []PRIndexEvent{idxDeploying(101, "m1", 1)}, ev: idxClosed(101, ""), probeSHA: "m1", wantChanged: true, wantPR: 101},
 		{name: "repeat close keeps first close", seed: []PRIndexEvent{idxActive(101, "h1", "", 0), idxClosed(101, "h1")}, ev: idxClosed(101, "h1"), probeSHA: "h1", wantPR: 101},
 		{name: "newest claim wins shared sha", seed: []PRIndexEvent{idxActive(101, "s1", "old", 0)}, ev: idxActive(102, "s1", "new", 0), probeSHA: "s1", wantChanged: true, wantOpen: []int{101, 102}, wantPR: 102, wantBranch: "new"},
-		{name: "held sha is returned for replay once", heldSHAs: []string{"m1", "zz"}, seed: []PRIndexEvent{idxActive(101, "h1", "", 0)}, ev: PRIndexEvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", MergeSHA: "M1", Lifecycle: IndexMerged}, probeSHA: "m1", wantChanged: true, wantReplay: []string{"m1"}, wantPR: 101},
+		{name: "held sha is returned for replay once", heldSHAs: []string{"m1", "zz"}, seed: []PRIndexEvent{idxActive(101, "h1", "", 0)}, ev: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", MergeSHA: "M1", Lifecycle: IndexMerged}, probeSHA: "m1", wantChanged: true, wantReplay: []string{"m1"}, wantPR: 101},
 		{name: "zero sha never indexes", ev: idxActive(101, "0000000", "", 0), probeSHA: "0000000", wantChanged: true, wantOpen: []int{101}},
 		{name: "missing pr number ignored", ev: idxActive(0, "h1", "", 0), probeSHA: "h1"},
 	}
@@ -224,7 +224,7 @@ func TestRepoState_RoutingSetsNilSafe(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := NewRepoState("aerial")
+			st := NewRepoState("azylman/aerial")
 			if tc.nilState {
 				st = nil
 			}
@@ -285,7 +285,7 @@ func TestRepoState_HoldSHAEvent(t *testing.T) {
 			if tc.nilState {
 				st = nil
 			}
-			held, evicted := st.HoldSHAEvent(SHAKindPush, SHAEvent{Repo: "aerial", SHA: tc.sha, Handler: prwire.PRHandlerMerged})
+			held, evicted := st.HoldSHAEvent(SHAKindPush, SHAEvent{Repo: "azylman/aerial", SHA: tc.sha, Handler: prwire.PRHandlerMerged})
 			if held.ID != tc.wantID {
 				t.Fatalf("held id = %d, want %d", held.ID, tc.wantID)
 			}

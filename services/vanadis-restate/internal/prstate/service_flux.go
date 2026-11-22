@@ -213,7 +213,7 @@ var (
 // never clears effect keys.
 func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PREvent) error {
 	merge := strings.TrimSpace(ev.MergeSHA)
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || merge == "" {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 || merge == "" {
 		return nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)
@@ -309,7 +309,7 @@ func (s *PRObjectService) runReconcile(ctx restate.ObjectContext, st *PRState, r
 func logReconcile(ctx restate.ObjectContext, run reconcileRun, kerr *KubeError) {
 	failure := kerr.Error()
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		attrs := []any{"pr", PRObjectKey(run.key.Repo, run.key.PRNumber), metricLabelKind, prwire.EffectFluxReconcile, "effect_key", run.key.String(), "match_key", run.match}
+		attrs := []any{"pr", prwire.PRObjectKey(run.key.Repo, run.key.PRNumber), metricLabelKind, prwire.EffectFluxReconcile, "effect_key", run.key.String(), "match_key", run.match}
 		if failure != "" {
 			effectsTotal.WithLabelValues(prwire.EffectFluxReconcile, effectResultError).Inc()
 			slog.ErrorContext(rc, "[prstate] effect failed terminally", append(attrs, "error", failure)...)
@@ -330,13 +330,13 @@ func (s *PRObjectService) scheduleReconcileRetry(ctx restate.ObjectContext, st *
 	}
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
 		effectsTotal.WithLabelValues(prwire.EffectFluxReconcile, result).Inc()
-		slog.WarnContext(rc, msg, "pr", PRObjectKey(st.Repo, st.PRNumber), metricLabelKind, prwire.EffectFluxReconcile,
+		slog.WarnContext(rc, msg, "pr", prwire.PRObjectKey(st.Repo, st.PRNumber), metricLabelKind, prwire.EffectFluxReconcile,
 			"effect_key", run.key.String(), "attempt", run.attempt, "error", kerr.Error())
 		return restate.Void{}, nil
 	}, restate.WithName(result+"-"+prwire.EffectFluxReconcile))
 	if result == effectResultDropped {
 		return
 	}
-	restate.ObjectSend(ctx, prwire.PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), prwire.PRHandlerRetryFluxReconcile).
+	restate.ObjectSend(ctx, prwire.PRObjectServiceName, prwire.PRObjectKey(st.Repo, st.PRNumber), prwire.PRHandlerRetryFluxReconcile).
 		Send(FluxReconcileRetryRequest{Generation: run.key.GateGeneration, HeadSHA: run.key.HeadSHA, JobName: run.key.JobName, Attempt: run.attempt + 1}, restate.WithDelay(s.reconcileRetryDelay))
 }

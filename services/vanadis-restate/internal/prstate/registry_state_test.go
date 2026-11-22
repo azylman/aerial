@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 const (
@@ -14,7 +16,7 @@ const (
 
 // rowState builds a registry-row fixture: repo#7 with head, merge, status.
 func rowState(head, merge, status string) *PRState {
-	s := NewPRState("aerial", 7)
+	s := NewPRState("azylman/aerial", 7)
 	s.HeadSHA, s.MergeSHA, s.Status = head, merge, status
 	return s
 }
@@ -47,11 +49,11 @@ func TestIsValidDiscordSnowflake(t *testing.T) {
 func TestPRState_ResolveRegister(t *testing.T) {
 	t.Parallel()
 	owned := func(agent, target string) *PRState {
-		s := NewPRState("aerial", 7)
+		s := NewPRState("azylman/aerial", 7)
 		s.Agent, s.TargetID = agent, target
 		return s
 	}
-	base := RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1"}
+	base := RegisterRequest{Repo: "azylman/aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1"}
 	withTarget := func(r RegisterRequest, target, fallback string) RegisterRequest {
 		r.TargetID, r.FallbackTargetID = target, fallback
 		return r
@@ -75,8 +77,8 @@ func TestPRState_ResolveRegister(t *testing.T) {
 		{name: "enforced owner mismatch rejected", state: owned("agent-alpha", ""), req: withOwner(withTarget(base, snowA, ""), "aerial"), wantVerdict: RegisterOwnerMismatch},
 		{name: "enforced owner with no stored owner passes", state: owned("", ""), req: withOwner(withTarget(base, snowA, ""), ""), wantVerdict: RegisterOK, wantTarget: snowA},
 		{name: "unenforced owner mismatch passes", state: owned("agent-alpha", ""), req: withTarget(base, snowA, ""), wantVerdict: RegisterOK, wantTarget: snowA},
-		{name: "missing head is invalid", state: owned("", ""), req: RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", TargetID: snowA}, wantVerdict: RegisterInvalid},
-		{name: "missing branch is invalid", state: owned("", ""), req: RegisterRequest{Repo: "aerial", PRNumber: 7, HeadSHA: "h1", TargetID: snowA}, wantVerdict: RegisterInvalid},
+		{name: "missing head is invalid", state: owned("", ""), req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 7, Branch: "feat", TargetID: snowA}, wantVerdict: RegisterInvalid},
+		{name: "missing branch is invalid", state: owned("", ""), req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "h1", TargetID: snowA}, wantVerdict: RegisterInvalid},
 		{name: "nil state is invalid", req: withTarget(base, snowA, ""), wantVerdict: RegisterInvalid},
 	}
 	for _, tc := range tests {
@@ -320,14 +322,14 @@ func TestPRState_RecordCheckState(t *testing.T) {
 		want       bool
 		wantChecks map[string]string
 	}{
-		{name: "open head records", state: rowState("h1", "", ""), sha: "h1", check: "ci", state2: CheckStateFailed, want: true, wantChecks: map[string]string{"ci": "failed"}},
-		{name: "merged merge sha records", state: rowState("h1", "m1", RegistryStatusMerged), sha: "m1", check: "ci", state2: CheckStatePassed, want: true, wantChecks: map[string]string{"ci": "passed"}},
-		{name: "merged head sha is ignored", state: rowState("h1", "m1", RegistryStatusMerged), sha: "h1", check: "ci", state2: CheckStatePassed, want: false},
-		{name: "stale head is ignored", state: rowState("h1", "", RegistryStatusOpen), sha: "h0", check: "ci", state2: CheckStatePassed, want: false},
-		{name: "deploying is ignored", state: rowState("h1", "m1", RegistryStatusDeploying), sha: "m1", check: "ci", state2: CheckStatePassed, want: false},
-		{name: "blank check is ignored", state: rowState("h1", "", ""), sha: "h1", check: " ", state2: CheckStatePassed, want: false},
-		{name: "same value is a no-op", state: checked("h1", "failed"), sha: "h1", check: "ci", state2: CheckStateFailed, want: false, wantChecks: map[string]string{"ci": "failed"}},
-		{name: "new value replaces", state: checked("h1", "failed"), sha: "h1", check: "ci", state2: CheckStatePending, want: true, wantChecks: map[string]string{"ci": "pending"}},
+		{name: "open head records", state: rowState("h1", "", ""), sha: "h1", check: "ci", state2: prwire.CheckStateFailed, want: true, wantChecks: map[string]string{"ci": "failed"}},
+		{name: "merged merge sha records", state: rowState("h1", "m1", RegistryStatusMerged), sha: "m1", check: "ci", state2: prwire.CheckStatePassed, want: true, wantChecks: map[string]string{"ci": "passed"}},
+		{name: "merged head sha is ignored", state: rowState("h1", "m1", RegistryStatusMerged), sha: "h1", check: "ci", state2: prwire.CheckStatePassed, want: false},
+		{name: "stale head is ignored", state: rowState("h1", "", RegistryStatusOpen), sha: "h0", check: "ci", state2: prwire.CheckStatePassed, want: false},
+		{name: "deploying is ignored", state: rowState("h1", "m1", RegistryStatusDeploying), sha: "m1", check: "ci", state2: prwire.CheckStatePassed, want: false},
+		{name: "blank check is ignored", state: rowState("h1", "", ""), sha: "h1", check: " ", state2: prwire.CheckStatePassed, want: false},
+		{name: "same value is a no-op", state: checked("h1", "failed"), sha: "h1", check: "ci", state2: prwire.CheckStateFailed, want: false, wantChecks: map[string]string{"ci": "failed"}},
+		{name: "new value replaces", state: checked("h1", "failed"), sha: "h1", check: "ci", state2: prwire.CheckStatePending, want: true, wantChecks: map[string]string{"ci": "pending"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -973,7 +975,7 @@ func TestPRState_Untracked(t *testing.T) {
 
 func TestPRState_HasDeployResidue(t *testing.T) {
 	t.Parallel()
-	with := func(f func(*PRState)) *PRState { s := NewPRState("aerial", 101); f(s); return s }
+	with := func(f func(*PRState)) *PRState { s := NewPRState("azylman/aerial", 101); f(s); return s }
 	tests := []struct {
 		name string
 		st   *PRState

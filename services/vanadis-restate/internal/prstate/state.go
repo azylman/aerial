@@ -104,7 +104,7 @@ type PRState struct {
 // NewPRState returns an empty PR state for repo#prNumber.
 func NewPRState(repo string, prNumber int) *PRState {
 	return &PRState{
-		Repo:     NormalizeRepo(repo),
+		Repo:     strings.TrimSpace(repo),
 		PRNumber: prNumber,
 		Checks: FailedCheckState{
 			EverFailed:   make(map[string]bool),
@@ -326,7 +326,7 @@ func (s *PRState) IsCachedFailedCISHA(headSHA string) bool {
 // SHA change resets the nested shape before recording.
 func (s *PRState) RecordFailedCheckRunDetailed(headSHA, checkName string) (emitAdditional, wasActive, hadPriorEverFailed bool) {
 	normHeadSHA := strings.TrimSpace(headSHA)
-	normCheck := CanonicalFailedCheckKey(checkName)
+	normCheck := prwire.CanonicalFailedCheckKey(checkName)
 	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) || normCheck == "" {
 		return false, false, false
 	}
@@ -343,7 +343,7 @@ func (s *PRState) RecordFailedCheckRunDetailed(headSHA, checkName string) (emitA
 		s.Checks.RoboRevActiveFailed = false
 	}
 	hadPriorFailure := len(s.Checks.EverFailed) > 0 || s.Checks.RoboRevActiveFailed
-	if IsRoboRevCheck(checkName) {
+	if prwire.IsRoboRevCheck(checkName) {
 		wasActive = s.Checks.RoboRevActiveFailed
 		hadPriorEverFailed = s.Checks.EverFailed["roborev"]
 		s.Checks.EverFailed["roborev"] = true
@@ -361,14 +361,14 @@ func (s *PRState) RecordFailedCheckRunDetailed(headSHA, checkName string) (emitA
 // It is a no-op when the check was already active before recording or when
 // the entry no longer matches headSHA.
 func (s *PRState) RollbackFailedCheckRun(headSHA, checkName string, wasActive, hadPriorEverFailed bool) {
-	normCheck := CanonicalFailedCheckKey(checkName)
+	normCheck := prwire.CanonicalFailedCheckKey(checkName)
 	if s == nil || s.PRNumber <= 0 || normCheck == "" || wasActive {
 		return
 	}
 	if !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) {
 		return
 	}
-	if IsRoboRevCheck(checkName) {
+	if prwire.IsRoboRevCheck(checkName) {
 		s.Checks.RoboRevActiveFailed = false
 		if !hadPriorEverFailed {
 			delete(s.Checks.EverFailed, "roborev")
@@ -387,14 +387,14 @@ func (s *PRState) RollbackFailedCheckRun(headSHA, checkName string, wasActive, h
 // ClearActiveFailedCheckRun removes one active failure for the check name on
 // the matching head SHA; ever-failed history is kept.
 func (s *PRState) ClearActiveFailedCheckRun(headSHA, checkName string) {
-	normCheck := CanonicalFailedCheckKey(checkName)
+	normCheck := prwire.CanonicalFailedCheckKey(checkName)
 	if s == nil || normCheck == "" {
 		return
 	}
 	if !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) {
 		return
 	}
-	if IsRoboRevCheck(checkName) {
+	if prwire.IsRoboRevCheck(checkName) {
 		s.Checks.RoboRevActiveFailed = false
 		return
 	}
@@ -404,18 +404,18 @@ func (s *PRState) ClearActiveFailedCheckRun(headSHA, checkName string) {
 // ClearFailedCheckRun clears one active failure and reports whether an active
 // entry was cleared.
 func (s *PRState) ClearFailedCheckRun(headSHA, checkName string) bool {
-	if CanonicalFailedCheckKey(checkName) == "" {
+	if prwire.CanonicalFailedCheckKey(checkName) == "" {
 		return false
 	}
 	if s == nil || !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) {
 		return false
 	}
-	if IsRoboRevCheck(checkName) {
+	if prwire.IsRoboRevCheck(checkName) {
 		was := s.Checks.RoboRevActiveFailed
 		s.Checks.RoboRevActiveFailed = false
 		return was
 	}
-	normCheck := CanonicalFailedCheckKey(checkName)
+	normCheck := prwire.CanonicalFailedCheckKey(checkName)
 	was := s.Checks.ActiveFailed[normCheck]
 	delete(s.Checks.ActiveFailed, normCheck)
 	return was
@@ -459,22 +459,22 @@ func (s *PRState) HasActiveRoboRevFailure(headSHA string) bool {
 
 // HasActiveCheckRun reports whether checkName is an active failure for headSHA.
 func (s *PRState) HasActiveCheckRun(headSHA, checkName string) bool {
-	if CanonicalFailedCheckKey(checkName) == "" {
+	if prwire.CanonicalFailedCheckKey(checkName) == "" {
 		return false
 	}
 	if s == nil || !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) {
 		return false
 	}
-	if IsRoboRevCheck(checkName) {
+	if prwire.IsRoboRevCheck(checkName) {
 		return s.Checks.RoboRevActiveFailed
 	}
-	return s.Checks.ActiveFailed[CanonicalFailedCheckKey(checkName)]
+	return s.Checks.ActiveFailed[prwire.CanonicalFailedCheckKey(checkName)]
 }
 
 // HasEverFailedCheckRun reports whether checkName ever failed on headSHA.
 func (s *PRState) HasEverFailedCheckRun(headSHA, checkName string) bool {
 	normHeadSHA := strings.TrimSpace(headSHA)
-	normCheck := CanonicalFailedCheckKey(checkName)
+	normCheck := prwire.CanonicalFailedCheckKey(checkName)
 	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) || normCheck == "" {
 		return false
 	}
@@ -489,7 +489,7 @@ func (s *PRState) HasEverFailedCheckRun(headSHA, checkName string) bool {
 // last non-roborev failure also clears the non-roborev SHA slot and recovers
 // only when no roborev failure stays active.
 func (s *PRState) CanRecoverNonGateCheckSuccess(checkName, headSHA string) bool {
-	normCheck := CanonicalFailedCheckKey(checkName)
+	normCheck := prwire.CanonicalFailedCheckKey(checkName)
 	if s == nil || normCheck == "" {
 		return false
 	}
@@ -932,7 +932,7 @@ func (s *RepoState) MarkRepoEffect(k EffectKey) {
 // NewRepoState returns an empty repo state.
 func NewRepoState(repo string) *RepoState {
 	return &RepoState{
-		Repo:       NormalizeRepo(repo),
+		Repo:       strings.TrimSpace(repo),
 		Tombstones: make(map[string]uint64),
 		touchedSet: make(map[string]bool),
 	}
@@ -1090,7 +1090,7 @@ func (s *RepoState) ApplyPRIndex(ev PRIndexEvent) (bool, []string) {
 		return false, nil
 	}
 	s.ensureIndex()
-	changed := s.TouchPRKey(PRObjectKey(s.Repo, ev.PRNumber))
+	changed := s.TouchPRKey(prwire.PRObjectKey(s.Repo, ev.PRNumber))
 	status := s.PRs[ev.PRNumber]
 	if status == nil {
 		status = &RepoPRStatus{Epoch: ev.ReopenEpoch}

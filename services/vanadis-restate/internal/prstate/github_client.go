@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/githubapi"
@@ -192,7 +191,7 @@ func (c *GitHubClient) getJSON(ctx context.Context, path string, maxBytes int64,
 // conflict is a conflict, a 422 with no new base commits is up to date, a
 // missing head ref is reported so the caller can close the stale PR.
 func (c *GitHubClient) UpdateBranch(ctx context.Context, repo string, prNumber int) (UpdateBranchOutcome, *GitHubError) {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" || prNumber <= 0 {
 		return "", &GitHubError{Status: http.StatusBadRequest, Message: "invalid repo or pr number for update-branch"}
 	}
@@ -223,7 +222,7 @@ func classifyUpdateBranch(status int, body string) (UpdateBranchOutcome, *GitHub
 
 // ListOpenPRs lists open PRs targeting main in ascending creation order.
 func (c *GitHubClient) ListOpenPRs(ctx context.Context, repo string) ([]GitHubPR, *GitHubError) {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" {
 		return nil, &GitHubError{Status: http.StatusBadRequest, Message: "invalid repo for open pr list"}
 	}
@@ -237,7 +236,7 @@ func (c *GitHubClient) ListOpenPRs(ctx context.Context, repo string) ([]GitHubPR
 
 // FetchPR reads one pull request.
 func (c *GitHubClient) FetchPR(ctx context.Context, repo string, prNumber int) (GitHubPR, *GitHubError) {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" || prNumber <= 0 {
 		return GitHubPR{}, &GitHubError{Status: http.StatusBadRequest, Message: "invalid repo or pr number for pr fetch"}
 	}
@@ -280,7 +279,7 @@ type gitHubCheckRun struct {
 // runs, matching synapse HasPendingOrFailedChecksForSHA: a read failure other
 // than 404 counts as blocked so the auto-update never races unknown CI.
 func (c *GitHubClient) HeadChecksBlocked(ctx context.Context, repo, sha string) bool {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	sha = strings.TrimSpace(sha)
 	if repo == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return false
@@ -301,11 +300,11 @@ func (c *GitHubClient) HeadChecksBlocked(ctx context.Context, repo, sha string) 
 func checkRunsBlocked(runs []gitHubCheckRun) bool {
 	pending := false
 	for _, cr := range dedupeLatestCheckRuns(runs) {
-		state := ClassifyCheckState(cr.Status, cr.Conclusion)
-		if state == CheckStateFailed && !IsGateAggregatorCheck(cr.Name) {
+		state := prwire.ClassifyCheckState(cr.Status, cr.Conclusion)
+		if state == prwire.CheckStateFailed && !prwire.IsGateAggregatorCheck(cr.Name) {
 			return true
 		}
-		if state == CheckStatePending {
+		if state == prwire.CheckStatePending {
 			pending = true
 		}
 	}
@@ -319,7 +318,7 @@ func dedupeLatestCheckRuns(runs []gitHubCheckRun) []gitHubCheckRun {
 		if isBuildMetadataCheckName(cr.Name) || strings.EqualFold(strings.TrimSpace(cr.App.Slug), "dependabot") {
 			continue
 		}
-		key := CanonicalFailedCheckKey(cr.Name)
+		key := prwire.CanonicalFailedCheckKey(cr.Name)
 		if key == "" {
 			continue
 		}
@@ -341,7 +340,7 @@ func isBuildMetadataCheckName(name string) bool {
 
 // RerunFailedJobs reruns the failed jobs of one workflow run.
 func (c *GitHubClient) RerunFailedJobs(ctx context.Context, repo string, runID int64) *GitHubError {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" || runID <= 0 {
 		return &GitHubError{Status: http.StatusBadRequest, Message: "invalid repo or run id for rerun-failed-jobs"}
 	}
@@ -356,34 +355,6 @@ func (c *GitHubClient) RerunFailedJobs(ctx context.Context, repo string, runID i
 	return &GitHubError{Status: status, Message: fmt.Sprintf("rerun-failed-jobs returned status %d: %s", status, strings.TrimSpace(string(raw)))}
 }
 
-// ClassifyCheckState maps a GitHub check status and conclusion to the
-// canonical CheckStatePassed/Failed/Pending values (or ""), matching synapse
-// ClassifyCheckState.
-func ClassifyCheckState(status, conclusion string) string {
-	s := strings.ToLower(strings.TrimSpace(status))
-	c := strings.ToLower(strings.TrimSpace(conclusion))
-	if s == "completed" {
-		switch c {
-		case "success", "neutral", "skipped":
-			return CheckStatePassed
-		case "failure", "timed_out", "cancelled", "action_required":
-			return CheckStateFailed
-		default:
-			return ""
-		}
-	}
-	if s == "" {
-		return ""
-	}
-	return CheckStatePending
-}
-
-// IsGateAggregatorCheck reports an overarching gate check ("CI Gate", "* gate").
-func IsGateAggregatorCheck(checkName string) bool {
-	lower := strings.ToLower(strings.TrimSpace(checkName))
-	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
-}
-
 // IsMergeabilityUnknown reports whether GitHub has not computed
 // mergeability yet.
 func IsMergeabilityUnknown(pr GitHubPR) bool {
@@ -394,28 +365,9 @@ func IsMergeabilityUnknown(pr GitHubPR) bool {
 	return state == "" || strings.EqualFold(state, "unknown")
 }
 
-// AutoMergeBlockReason maps mergeability to a block reason, matching
-// synapse ExtractAutoMergeBlockReason.
-func AutoMergeBlockReason(mergeableState string, mergeable *bool) string {
-	state := strings.ToLower(strings.TrimSpace(mergeableState))
-	switch {
-	case state == "dirty" || (mergeable != nil && !*mergeable):
-		return "merge_conflict"
-	case state == "blocked":
-		return "checks_or_reviews_blocked"
-	case state == "behind":
-		return "branch_behind_base"
-	case slices.Contains([]string{"", "clean", "unstable", "has_hooks"}, state):
-		return ""
-	default:
-		return state
-	}
-}
-
 // IsMergeConflict reports whether the PR's mergeability is an actionable
 // auto-merge block (conflict or behind base), matching synapse
 // isPRMergeConflict.
 func IsMergeConflict(pr GitHubPR) bool {
-	reason := AutoMergeBlockReason(pr.MergeableState, pr.Mergeable)
-	return reason == "merge_conflict" || reason == "dirty" || strings.Contains(reason, "conflict") || reason == "branch_behind_base"
+	return prwire.IsActionableAutoMergeBlock(prwire.AutoMergeBlockReason(pr.MergeableState, pr.Mergeable))
 }

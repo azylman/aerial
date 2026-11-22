@@ -112,7 +112,7 @@ func TestKubeStepError(t *testing.T) {
 func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 	t.Parallel()
 	push := func(attempt int) RepoEvent {
-		return RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/heads/main", Attempt: attempt}
+		return RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", Ref: "refs/heads/main", Attempt: attempt}
 	}
 	tests := []struct {
 		name      string
@@ -128,7 +128,7 @@ func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 			name: "retryable failure schedules a delayed retry", ev: push(1), kube: &fakeKube{pushErr: errKubeDown}, wantRun: true,
 			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: prwire.RepoHandlerGitPush, input: push(2), delayed: true}},
 		},
-		{name: "non-main ref fails terminally", ev: RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/tags/v1"}, kube: &fakeKube{}, wantErr: true},
+		{name: "non-main ref fails terminally", ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", Ref: "refs/tags/v1"}, kube: &fakeKube{}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,17 +158,17 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 		wantSends []sentCall
 	}{
 		{
-			name: "unstamped untracked promotion promotes and reconciles", ev: RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{},
+			name: "unstamped untracked promotion promotes and reconciles", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{},
 			wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s2", "reconcile flux-system/core@t1"},
 		},
 		{
-			name: "restate pr promotion forwards the rollout", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Images: []string{"eri"}, KustomizationRequests: requests},
+			name: "restate pr promotion forwards the rollout", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1", PRNumber: 7, Images: []string{"eri"}, KustomizationRequests: requests},
 			kube: &fakeKube{}, wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s1"},
 			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#7", method: prwire.PRHandlerKustomizationRequested, input: PREvent{
 				Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", KustomizationRequests: requests,
 			}}},
 		},
-		{name: "missing images fail terminally", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1"}, kube: &fakeKube{}, wantErr: true},
+		{name: "missing images fail terminally", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1"}, kube: &fakeKube{}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,7 +206,7 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 	indexSend := prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Generation: 1, Lifecycle: IndexDeploying})
 	retrySend := sentCall{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerRetryFluxReconcile, input: FluxReconcileRetryRequest{Generation: 1, HeadSHA: "m1", Attempt: 1}, delayed: true}
 	ev := func(requests map[string]KustomizationRequest) PREvent {
-		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", KustomizationRequests: requests}
+		return PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", KustomizationRequests: requests}
 	}
 	tests := []struct {
 		name           string
@@ -315,10 +315,10 @@ func TestPRObjectServiceHandleReadinessRetry(t *testing.T) {
 		wantCalls  []string
 		wantSends  int
 	}{
-		{name: "retry applies the gate and re-requests the reconcile", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantSends: 2},
-		{name: "stale merge sha drops", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m9"}},
-		{name: "merged pr without a rollout persists unchanged", seed: merged(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusMerged},
-		{name: "missing merge sha does nothing", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101}},
+		{name: "retry applies the gate and re-requests the reconcile", seed: deployedRollout(), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantSends: 2},
+		{name: "stale merge sha drops", seed: deployedRollout(), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m9"}},
+		{name: "merged pr without a rollout persists unchanged", seed: merged(), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusMerged},
+		{name: "missing merge sha does nothing", seed: deployedRollout(), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
