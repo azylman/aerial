@@ -31,7 +31,7 @@ BEGIN
 	RETURN v;
 END $$;
 ALTER TABLE vanadis_chunks RENAME TO vanadis_chunks_base;
-CREATE VIEW vanadis_chunks AS SELECT id, build_id, chunk_index, bm_boom(mode, banner) AS mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks_base;`
+CREATE VIEW vanadis_chunks AS SELECT id, build_id, chunk_index, bm_boom(mode, banner) AS mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks_base;`
 
 // bmNullChunkIDSQL lets a stored chunk id be NULL so scanning it into a
 // string fails.
