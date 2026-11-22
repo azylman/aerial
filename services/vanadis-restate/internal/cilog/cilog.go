@@ -19,13 +19,21 @@ import (
 	"github.com/azylman/aerial/pkg/strutil"
 )
 
-const maxRoboRevCommentRunes = 4000
+const (
+	maxRoboRevCommentRunes = 4000
+	// maxRunFailedJobLogs caps how many failed jobs' logs a run-level failure fetches.
+	maxRunFailedJobLogs = 3
+)
 
 var (
 	actionsJobIDRegex = regexp.MustCompile(`/actions/runs/\d+/job/(\d+)`)
-	ghaTimestampRegex = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
-	ansiEscapeRegex   = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	goCoordinateRegex = regexp.MustCompile(`\.go:\d+`)
+	actionsRunIDRegex = regexp.MustCompile(`/actions/runs/(\d+)`)
+	// workflowConclusionRegex matches synapse's generic workflow_run details,
+	// e.g. `Workflow "CI" concluded with failure`.
+	workflowConclusionRegex = regexp.MustCompile(`^Workflow ".*" concluded with [a-z_]+$`)
+	ghaTimestampRegex       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
+	ansiEscapeRegex         = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	goCoordinateRegex       = regexp.MustCompile(`\.go:\d+`)
 
 	ciPlumbingPrefixes = []string{
 		"##[group]",
@@ -83,11 +91,15 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	if !NeedsCIJobLogFetch(details) {
 		return details, nil
 	}
-	jobID := ExtractActionsJobID(checkURL)
-	if jobID <= 0 {
+	var logDetails string
+	var err error
+	if jobID := ExtractActionsJobID(checkURL); jobID > 0 {
+		logDetails, err = c.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
+	} else if runID := ExtractActionsRunID(checkURL); runID > 0 {
+		logDetails, err = c.fetchRunFailureLogsChecked(ctx, repo, runID)
+	} else {
 		return details, nil
 	}
-	logDetails, err := c.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
 	if err != nil {
 		return details, err
 	}
@@ -132,6 +144,95 @@ func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo strin
 		body = body[len(body)-(256<<10):]
 	}
 	return ExtractCIFailureDetails(string(body)), nil
+}
+
+type gitHubRunJob struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Conclusion string `json:"conclusion"`
+}
+
+type gitHubRunJobs struct {
+	Jobs []gitHubRunJob `json:"jobs"`
+}
+
+// fetchRunFailureLogsChecked lists a workflow run's latest jobs and joins the
+// extracted logs of up to maxRunFailedJobLogs failed or timed-out jobs, skipping
+// gate aggregators. It returns "" when no failed job yields a log.
+func (c *Client) fetchRunFailureLogsChecked(ctx context.Context, repo string, runID int64) (string, error) {
+	if c == nil || c.HTTPClient == nil {
+		return "", nil
+	}
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
+	if repoPath == "" || runID <= 0 {
+		return "", nil
+	}
+	jobs, err := c.listRunJobsChecked(ctx, repoPath, runID)
+	if err != nil {
+		return "", err
+	}
+	var sections []string
+	fetched := 0
+	for _, job := range jobs {
+		if fetched >= maxRunFailedJobLogs {
+			break
+		}
+		if !isFailedJobConclusion(job.Conclusion) || isGateAggregatorJob(job.Name) || job.ID <= 0 {
+			continue
+		}
+		fetched++
+		logDetails, err := c.fetchCheckJobFailureLogsChecked(ctx, repoPath, job.ID)
+		if err != nil {
+			return "", err
+		}
+		if logDetails == "" {
+			continue
+		}
+		sections = append(sections, "### Job: "+job.Name+"\n"+logDetails)
+	}
+	return strings.Join(sections, "\n\n"), nil
+}
+
+func (c *Client) listRunJobsChecked(ctx context.Context, repoPath string, runID int64) ([]gitHubRunJob, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	path := fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", repoPath, runID)
+	req, err := githubapi.NewRequest(timeoutCtx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if githubapi.IsRetryable(resp) {
+		return nil, fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	var listing gitHubRunJobs
+	if json.Unmarshal(body, &listing) != nil {
+		return nil, nil
+	}
+	return listing.Jobs, nil
+}
+
+func isFailedJobConclusion(conclusion string) bool {
+	return strings.EqualFold(conclusion, "failure") || strings.EqualFold(conclusion, "timed_out")
+}
+
+// isGateAggregatorJob mirrors executor.IsGateAggregatorCheck (executor imports
+// cilog, so it cannot be imported here).
+func isGateAggregatorJob(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
 }
 
 type gitHubIssueComment struct {
@@ -278,14 +379,30 @@ func isHighSignalLine(line string) bool {
 	return goCoordinateRegex.MatchString(line)
 }
 
-// NeedsCIJobLogFetch reports whether details require a CI job log fetch.
+// NeedsCIJobLogFetch reports whether details require a CI job log fetch: empty,
+// a bare failure conclusion, or synapse's generic workflow-level summary.
 func NeedsCIJobLogFetch(details string) bool {
-	return strings.TrimSpace(details) == "" || strings.EqualFold(details, "failure") || strings.EqualFold(details, "timed_out")
+	trimmed := strings.TrimSpace(details)
+	return trimmed == "" || strings.EqualFold(details, "failure") || strings.EqualFold(details, "timed_out") ||
+		workflowConclusionRegex.MatchString(trimmed)
 }
 
 // ExtractActionsJobID parses a GitHub Actions job ID from a check URL.
 func ExtractActionsJobID(url string) int64 {
 	m := actionsJobIDRegex.FindStringSubmatch(url)
+	if len(m) < 2 {
+		return 0
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+// ExtractActionsRunID parses a GitHub Actions workflow run ID from a check URL.
+func ExtractActionsRunID(url string) int64 {
+	m := actionsRunIDRegex.FindStringSubmatch(url)
 	if len(m) < 2 {
 		return 0
 	}

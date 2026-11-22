@@ -16,6 +16,16 @@ const (
 	ciCommentsPath = "GET /repos/acme/aerial/issues/10/comments?per_page=100"
 	ciJobURL       = "https://github.com/acme/aerial/actions/runs/1/job/42"
 	ciRoboRevBody  = "## roborev: findings for `abcdef1`\nVerified finding"
+	ciRunURL       = "https://github.com/acme/aerial/actions/runs/7"
+	ciRunJobsPath  = "GET /repos/acme/aerial/actions/runs/7/jobs?filter=latest&per_page=100"
+	ciJob1LogsPath = "GET /repos/acme/aerial/actions/jobs/1/logs"
+	ciJob2LogsPath = "GET /repos/acme/aerial/actions/jobs/2/logs"
+	ciJob3LogsPath = "GET /repos/acme/aerial/actions/jobs/3/logs"
+	ciJob4LogsPath = "GET /repos/acme/aerial/actions/jobs/4/logs"
+	ciWorkflowFail = `Workflow "CI" concluded with failure`
+	// ciRunJobs lists two failed jobs, a success, and a failed gate aggregator.
+	ciRunJobs = `{"jobs":[{"id":1,"name":"lint","conclusion":"failure"},{"id":5,"name":"build","conclusion":"success"},` +
+		`{"id":6,"name":"CI Gate","conclusion":"failure"},{"id":2,"name":"unit","conclusion":"timed_out"}]}`
 )
 
 // ciLogEnv declares the client and fake GitHub API one row runs against.
@@ -181,6 +191,121 @@ func TestExtractActionsJobIDCases(t *testing.T) {
 	assert.Equal(t, int64(456789), ExtractActionsJobID("https://github.com/o/r/actions/runs/123/job/456789"))
 	assert.Equal(t, int64(0), ExtractActionsJobID("https://github.com/o/r/actions"))
 	assert.Equal(t, int64(0), ExtractActionsJobID("https://github.com/o/r/actions/runs/1/job/9999999999999999999999"))
+}
+
+func TestExtractActionsRunIDCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		url  string
+		want int64
+	}{
+		{name: "run url", url: "https://github.com/o/r/actions/runs/123", want: 123},
+		{name: "job url yields run", url: "https://github.com/o/r/actions/runs/123/job/456", want: 123},
+		{name: "attempt url", url: "https://github.com/o/r/actions/runs/88/attempts/2", want: 88},
+		{name: "no run", url: "https://github.com/o/r/actions"},
+		{name: "overflow", url: "https://github.com/o/r/actions/runs/9999999999999999999999"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, ExtractActionsRunID(tc.url))
+		})
+	}
+}
+
+func TestNeedsCIJobLogFetch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		details string
+		want    bool
+	}{
+		{name: "empty", details: "  ", want: true},
+		{name: "failure", details: "FAILURE", want: true},
+		{name: "timed out", details: "timed_out", want: true},
+		{name: "workflow failure", details: ciWorkflowFail, want: true},
+		{name: "other workflow timed out", details: ` Workflow "Release Build" concluded with timed_out `, want: true},
+		{name: "workflow prefix with extra text", details: ciWorkflowFail + ": see logs", want: false},
+		{name: "specific details", details: "--- FAIL: TestX", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, NeedsCIJobLogFetch(tc.details))
+		})
+	}
+}
+
+func TestFetchRunFailureLogsChecked(t *testing.T) {
+	t.Parallel()
+	log1 := ciResp(http.StatusOK, "--- FAIL: TestLint (0.01s)\n")
+	log2 := ciResp(http.StatusOK, "--- FAIL: TestUnit (0.01s)\n")
+	tests := []struct {
+		name      string
+		env       ciLogEnv
+		repo      string
+		runID     int64
+		want      string
+		wantErr   string
+		wantPaths []string
+	}{
+		{name: "nil client", env: ciLogEnv{nilClient: true}, repo: "aerial", runID: 7},
+		{name: "nil http client", env: ciLogEnv{noHTTPClient: true}, repo: "aerial", runID: 7},
+		{name: "empty repo", repo: " / ", runID: 7},
+		{name: "zero run id", repo: "aerial"},
+		{name: "malformed api url", env: ciLogEnv{apiURL: "://bad-url"}, repo: "aerial", runID: 7, wantErr: "missing protocol scheme"},
+		{name: "transport error", env: ciLogEnv{serverDown: true}, repo: "aerial", runID: 7, wantErr: "connection refused"},
+		{
+			name: "retryable listing", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciRunJobsPath: ciResp(http.StatusInternalServerError, "")}},
+			repo: "aerial", runID: 7, wantErr: "github api error (500): Internal Server Error", wantPaths: []string{ciRunJobsPath},
+		},
+		{name: "listing not found is empty", repo: "aerial", runID: 7, wantPaths: []string{ciRunJobsPath}},
+		{
+			name: "invalid listing json is empty", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciRunJobsPath: ciResp(http.StatusOK, `{not-json`)}},
+			repo: "aerial", runID: 7, wantPaths: []string{ciRunJobsPath},
+		},
+		{
+			name: "failed jobs joined in order", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciRunJobsPath: ciResp(http.StatusOK, ciRunJobs), ciJob1LogsPath: log1, ciJob2LogsPath: log2}},
+			repo: "aerial", runID: 7, want: "### Job: lint\n--- FAIL: TestLint (0.01s)\n\n### Job: unit\n--- FAIL: TestUnit (0.01s)",
+			wantPaths: []string{ciRunJobsPath, ciJob1LogsPath, ciJob2LogsPath},
+		},
+		{
+			name: "at most three failed jobs and empty logs dropped",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath: ciResp(http.StatusOK, `{"jobs":[{"id":0,"name":"ghost","conclusion":"failure"},{"id":1,"name":"a","conclusion":"failure"},{"id":2,"name":"b","conclusion":"failure"},`+
+					`{"id":3,"name":"c","conclusion":"failure"},{"id":4,"name":"d","conclusion":"failure"}]}`),
+				ciJob1LogsPath: log1, ciJob2LogsPath: ciResp(http.StatusOK, ""), ciJob3LogsPath: log2, ciJob4LogsPath: log2,
+			}},
+			repo: "aerial", runID: 7, want: "### Job: a\n--- FAIL: TestLint (0.01s)\n\n### Job: c\n--- FAIL: TestUnit (0.01s)",
+			wantPaths: []string{ciRunJobsPath, ciJob1LogsPath, ciJob2LogsPath, ciJob3LogsPath},
+		},
+		{
+			name: "job log retryable error", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciRunJobsPath: ciResp(http.StatusOK, ciRunJobs), ciJob1LogsPath: ciResp(http.StatusBadGateway, "")}},
+			repo: "aerial", runID: 7, wantErr: "github api error (502): Bad Gateway", wantPaths: []string{ciRunJobsPath, ciJob1LogsPath},
+		},
+		{
+			name: "qualified repo retains owner",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				"GET /repos/alpha/aerial/actions/runs/7/jobs?filter=latest&per_page=100": ciResp(http.StatusOK, `{"jobs":[{"id":1,"name":"lint","conclusion":"failure"}]}`),
+				"GET /repos/alpha/aerial/actions/jobs/1/logs":                            log1,
+			}},
+			repo: "alpha/aerial", runID: 7, want: "### Job: lint\n--- FAIL: TestLint (0.01s)",
+			wantPaths: []string{"GET /repos/alpha/aerial/actions/runs/7/jobs?filter=latest&per_page=100", "GET /repos/alpha/aerial/actions/jobs/1/logs"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, srv := newCILogClient(t, tc.env)
+			got, err := c.fetchRunFailureLogsChecked(context.Background(), tc.repo, tc.runID)
+			assertCILogErr(t, err, tc.wantErr)
+			assert.Equal(t, tc.want, got)
+			if !tc.env.serverDown {
+				assertCILogRequests(t, srv, tc.env, tc.wantPaths)
+			}
+		})
+	}
 }
 
 func TestFetchCheckJobFailureLogsChecked(t *testing.T) {
@@ -405,6 +530,29 @@ func TestResolveCIFailureDetailsChecked(t *testing.T) {
 		},
 		{name: "check url without job id keeps details", pr: 10, check: "unit-tests", url: "https://github.com/acme/aerial/actions", details: "timed_out", want: "timed_out"},
 		{name: "specific details skip the log fetch", pr: 10, check: "unit-tests", url: ciJobURL, details: "already specific error details", want: "already specific error details"},
+		{
+			name: "workflow failure on run url fetches failed job logs",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath: ciResp(http.StatusOK, ciRunJobs), ciJob1LogsPath: ciResp(http.StatusOK, "--- FAIL: TestLint (0.01s)\n"), ciJob2LogsPath: failLog,
+			}},
+			pr: 10, check: "CI", url: ciRunURL, details: ciWorkflowFail,
+			want:      "### Job: lint\n--- FAIL: TestLint (0.01s)\n\n### Job: unit\n=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL",
+			wantPaths: []string{ciRunJobsPath, ciJob1LogsPath, ciJob2LogsPath},
+		},
+		{
+			name: "run without failed jobs keeps details",
+			env:  ciLogEnv{routes: map[string][]githubapitest.Response{ciRunJobsPath: ciResp(http.StatusOK, `{"jobs":[{"id":5,"name":"build","conclusion":"success"}]}`)}},
+			pr:   10, check: "CI", url: ciRunURL, details: ciWorkflowFail, want: ciWorkflowFail, wantPaths: []string{ciRunJobsPath},
+		},
+		{
+			name: "run jobs listing error keeps details", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciRunJobsPath: ciResp(http.StatusInternalServerError, "")}},
+			pr: 10, check: "CI", url: ciRunURL, details: ciWorkflowFail, want: ciWorkflowFail,
+			wantErr: "github api error (500): Internal Server Error", wantPaths: []string{ciRunJobsPath},
+		},
+		{
+			name: "job url preferred over run url", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciLogsPath: failLog}},
+			pr: 10, check: "CI", url: ciJobURL, details: ciWorkflowFail, want: "=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL", wantPaths: []string{ciLogsPath},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
