@@ -717,7 +717,7 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		covenURL = fc.Current().CovenURL
 	}
 	deps := interactions.InteractionDeps{
-		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
+		Store: store, Pool: pool, PoolProvider: funnelPool.Load, TurnCancellerProvider: activeTurnCanceller,
 		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
 	}
 	if qp := currentFunnelQuotaProvider(); qp != nil {
@@ -728,6 +728,16 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 
 	openDiscordSessionWithRetry(ctx, dg)
 	return dg
+}
+
+// activeTurnCanceller returns the Restate ingress client as an untyped nil interface when unset,
+// so the router never sees a typed-nil *RestateIngressClient.
+func activeTurnCanceller() interactions.TurnCanceller {
+	client := ActiveRestateIngressClient()
+	if client == nil {
+		return nil
+	}
+	return client
 }
 
 func initFunnelInteractionRouter(store db.Store, pool *queue.WorkerPool) *interactions.Router {
@@ -741,7 +751,7 @@ func initFunnelInteractionRouter(store db.Store, pool *queue.WorkerPool) *intera
 		covenURL = fc.Current().CovenURL
 	}
 	deps := interactions.InteractionDeps{
-		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
+		Store: store, Pool: pool, PoolProvider: funnelPool.Load, TurnCancellerProvider: activeTurnCanceller,
 		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
 	}
 	if qp := currentFunnelQuotaProvider(); qp != nil {

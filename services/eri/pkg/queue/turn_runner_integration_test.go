@@ -28,8 +28,7 @@ import (
 
 // The coordinator + TurnRunner loop end to end against a real restate-server: ThreadSession /
 // DispatchSession coordinators and the TurnRunner service bound over a WorkerPool whose agent,
-// store and pre_turn hook are scripted, driven only through Restate ingress. Flip and rollback
-// cases register a second deployment with the other queue mode's binding.
+// store and pre_turn hook are scripted, driven only through Restate ingress.
 
 const (
 	itThreadKey       = "thread-it"
@@ -75,11 +74,11 @@ type itFault struct {
 }
 
 // itStep is a test action taken at a point: a gate ("agent:n" or "<StoreMethod>:n", the n-th
-// call blocks until every consecutive step at that point ran), "waiting" (the coordinator's
-// active turn is a rescheduled Waiting turn) or "idle" (nothing left to run on the key).
+// call blocks until every consecutive step at that point ran) or "waiting" (the coordinator's
+// active turn is a rescheduled Waiting turn).
 type itStep struct {
 	at   string
-	do   string // enqueue, cancel, restart, outage, awaitQueued, awaitWaiting, deploy-legacy, deploy-coordinator
+	do   string // enqueue, cancel, restart, outage, awaitQueued, awaitWaiting
 	ids  []string
 	skip bool // enqueue with SkipIfActive
 }
@@ -93,16 +92,15 @@ type itRow struct {
 }
 
 type itCase struct {
-	name        string
-	legacyFirst bool     // the first deployment binds the legacy queue mode
-	dispatch    bool     // items are dispatches on itSessionKey, else messages on itThreadKey
-	seed        []string // rows inserted PENDING straight into the store
-	runTurn     bool     // send a legacy RunTurn payload after seeding
-	enqueue     []string // items enqueued through Enqueue at the start
-	agent       []itAgent
-	preTurn     []string // scripted pre_turn answers: retry, allow (nil: no hook)
-	faults      []itFault
-	steps       []itStep
+	name     string
+	dispatch bool     // items are dispatches on itSessionKey, else messages on itThreadKey
+	seed     []string // rows inserted PENDING straight into the store
+	runTurn  bool     // send a legacy RunTurn payload after seeding
+	enqueue  []string // items enqueued through Enqueue at the start
+	agent    []itAgent
+	preTurn  []string // scripted pre_turn answers: retry, allow (nil: no hook)
+	faults   []itFault
+	steps    []itStep
 
 	wantRows          map[string]itRow
 	wantRequeued      map[string]int // at the waiting point: row PENDING with this retry_count
@@ -118,7 +116,7 @@ type itCase struct {
 
 func TestCoordinatorRunnerIntegration(t *testing.T) {
 	t.Parallel()
-	tests := append(turnQueueCases(), queueModeFlipCases()...)
+	tests := turnQueueCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -127,7 +125,7 @@ func TestCoordinatorRunnerIntegration(t *testing.T) {
 	}
 }
 
-// turnQueueCases run on one coordinator-mode deployment.
+// turnQueueCases run on one coordinator deployment.
 func turnQueueCases() []itCase {
 	completed, failed := db.StatusCompleted, db.StatusFailed
 	return []itCase{
@@ -279,71 +277,10 @@ func turnQueueCases() []itCase {
 	}
 }
 
-// queueModeFlipCases register a second (and third) deployment with the other queue mode's
-// binding while turns are in flight; invocations already started stay pinned to theirs.
-func queueModeFlipCases() []itCase {
-	completed := db.StatusCompleted
-	return []itCase{
-		{
-			name: "FlipLegacyToCoordinatorMidBurst", legacyFirst: true, enqueue: []string{"a"}, agent: []itAgent{itReply("reply-a"), itReply("reply-b")},
-			steps: []itStep{{at: "agent:1", do: "deploy-coordinator"}, {at: "agent:1", do: "enqueue", ids: []string{"b"}}},
-			wantRows: map[string]itRow{
-				"a": {status: completed, reply: "reply-a"},
-				"b": {status: completed, reply: "reply-b"},
-			},
-			wantDone:      []TurnOutcome{OutcomeEmpty},
-			wantDelivered: []string{"reply-a", "reply-b"}, wantAgentCalls: 2,
-		},
-		{
-			name: "RollbackRescheduledKickLandsOnLegacy", preTurn: []string{"retry", "allow"}, enqueue: []string{"a"}, agent: []itAgent{itReply("reply-a")},
-			steps:         []itStep{{at: "waiting", do: "deploy-legacy"}},
-			wantRequeued:  map[string]int{"a": 1},
-			wantRows:      map[string]itRow{"a": {status: completed, reply: "reply-a", retry: 1}},
-			wantDone:      []TurnOutcome{OutcomeReschedule},
-			wantDelivered: []string{"reply-a"}, wantAgentCalls: 1,
-		},
-		{
-			name: "RollbackWithStaleActiveAndPending", enqueue: []string{"a"}, agent: []itAgent{itReply("reply-a"), itReply("reply-b")},
-			steps: []itStep{
-				{at: "agent:1", do: "enqueue", ids: []string{"b"}},
-				{at: "agent:1", do: "awaitQueued", ids: []string{"b"}},
-				{at: "agent:1", do: "deploy-legacy"},
-			},
-			wantRows: map[string]itRow{
-				"a": {status: completed, reply: "reply-a", retry: 1},
-				"b": {status: completed, reply: "reply-b"},
-			},
-			wantDone:      []TurnOutcome{OutcomeCompleted},
-			wantDelivered: []string{"reply-a", "reply-b"}, wantAgentCalls: 2,
-		},
-		{
-			name: "ReflipForwardAfterRollback", enqueue: []string{"a"}, agent: []itAgent{itReply("reply-a"), itReply("reply-b"), itReply("reply-c")},
-			steps: []itStep{
-				{at: "agent:1", do: "enqueue", ids: []string{"b"}},
-				{at: "agent:1", do: "awaitQueued", ids: []string{"b"}},
-				{at: "agent:1", do: "deploy-legacy"},
-				{at: "idle", do: "deploy-coordinator"},
-				{at: "idle", do: "enqueue", ids: []string{"c"}},
-			},
-			wantRows: map[string]itRow{
-				"a": {status: completed, reply: "reply-a", retry: 1},
-				"b": {status: completed, reply: "reply-b"},
-				"c": {status: completed, reply: "reply-c", retry: 1},
-			},
-			wantDone:      []TurnOutcome{OutcomeCompleted, OutcomeCompleted},
-			wantDelivered: []string{"reply-a", "reply-b", "reply-c"}, wantAgentCalls: 3,
-		},
-	}
-}
-
 func runIntegrationCase(t *testing.T, tc itCase) {
 	t.Helper()
 	env := newITEnv(t, tc)
-	firstMode := config.TurnQueueCoordinator
-	if tc.legacyFirst {
-		firstMode = config.TurnQueueLegacy
-	}
-	env.primary = env.definitions(firstMode)
+	env.primary = env.definitions()
 	env.h = restatetest.StartWithOptions(t, restatetest.Options{Env: itServerEnv}, env.primary...)
 
 	for _, id := range tc.seed {
@@ -443,21 +380,13 @@ func (e *itEnv) key() string {
 }
 
 // definitions is one deployment ("pod"): its own WorkerPool over the shared scripted boundaries,
-// bound in mode with the same services and handler names as production.
-func (e *itEnv) definitions(mode string) []restate.ServiceDefinition {
+// bound with the same services and handler names as production.
+func (e *itEnv) definitions() []restate.ServiceDefinition {
 	pool := e.newPool()
 	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
-	var thread, dispatch any
-	if mode == config.TurnQueueCoordinator {
-		thread = itThread{ThreadCoordinator: NewThreadCoordinator(e.store, pool, ""), env: e}
-		dispatch = itDispatch{DispatchCoordinator: NewDispatchCoordinator(e.store, ""), env: e}
-	} else {
-		thread = itLegacyThread{ThreadSessionObject: NewThreadSessionObject(pool, ""), env: e}
-		dispatch = itLegacyDispatch{DispatchSessionObject: NewDispatchSessionObject(pool, ""), env: e}
-	}
 	return []restate.ServiceDefinition{
-		restate.Reflect(thread, hour...),
-		restate.Reflect(dispatch, hour...),
+		restate.Reflect(itThread{ThreadCoordinator: NewThreadCoordinator(e.store, pool, ""), env: e}, hour...),
+		restate.Reflect(itDispatch{DispatchCoordinator: NewDispatchCoordinator(e.store, ""), env: e}, hour...),
 		ReflectTurnRunner(NewTurnRunnerService(pool, "")),
 	}
 }
@@ -631,8 +560,6 @@ func (e *itEnv) waitPoint(at string) {
 			return st.Active != nil && st.Active.Waiting
 		})
 		e.assertRequeued()
-	case at == "idle":
-		e.awaitIdle("the key to go quiet", e.quiescent)
 	default:
 		e.t.Fatalf("unknown point %q", at)
 	}
@@ -663,10 +590,6 @@ func (e *itEnv) do(st itStep) {
 			s := e.status()
 			return s.Active != nil && s.Active.Waiting && containsAll(s.Pending, st.ids)
 		})
-	case "deploy-legacy":
-		e.h.AddDeployment(e.definitions(config.TurnQueueLegacy)...)
-	case "deploy-coordinator":
-		e.h.AddDeployment(e.definitions(config.TurnQueueCoordinator)...)
 	default:
 		e.t.Fatalf("unknown step action %q", st.do)
 	}
@@ -995,26 +918,4 @@ type itDispatch struct {
 func (c itDispatch) OnTurnDone(ctx restate.ObjectContext, req TurnDoneRequest) error {
 	c.env.recordDone(ctx.Request().ID, req)
 	return c.DispatchCoordinator.OnTurnDone(ctx, req)
-}
-
-type itLegacyThread struct {
-	*ThreadSessionObject
-
-	env *itEnv
-}
-
-func (c itLegacyThread) OnTurnDone(ctx restate.ObjectContext, req TurnDoneRequest) error {
-	c.env.recordDone(ctx.Request().ID, req)
-	return c.ThreadSessionObject.OnTurnDone(ctx, req)
-}
-
-type itLegacyDispatch struct {
-	*DispatchSessionObject
-
-	env *itEnv
-}
-
-func (c itLegacyDispatch) OnTurnDone(ctx restate.ObjectContext, req TurnDoneRequest) error {
-	c.env.recordDone(ctx.Request().ID, req)
-	return c.DispatchSessionObject.OnTurnDone(ctx, req)
 }

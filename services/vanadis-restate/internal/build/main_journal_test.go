@@ -19,7 +19,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -135,33 +134,85 @@ func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (sto
 	return store.BuildRoute{}, "", s.err
 }
 
+// createConflictSetupSQL seeds build b0 owning chunk c1 titled "Chunk".
+const createConflictSetupSQL = `INSERT INTO vanadis_builds (id, thread_id, objective) VALUES ('b0', 'th0', 'Other');
+INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions) VALUES ('c1', 'b0', 0, 'aerial', 'Chunk', 'Other work');`
+
+// createGhostChunkSQL makes every new build arrive with a chunk at index 0,
+// so the first planned chunk collides on the per-build index.
+const createGhostChunkSQL = `CREATE FUNCTION pgtest_ghost_chunk() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions) VALUES ('ghost-' || NEW.id, NEW.id, 0, 'aerial', 'Ghost', 'Ghost');
+	RETURN NULL;
+END $$;
+CREATE TRIGGER pgtest_ghost_chunk AFTER INSERT ON vanadis_builds FOR EACH ROW EXECUTE FUNCTION pgtest_ghost_chunk();`
+
+// raiseOnChunkInsertSQL makes chunk inserts fail with SQLSTATE code.
+func raiseOnChunkInsertSQL(code string) string {
+	return fmt.Sprintf(`CREATE FUNCTION pgtest_raise() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE EXCEPTION 'injected failure' USING ERRCODE = '%s';
+END $$;
+CREATE TRIGGER pgtest_raise BEFORE INSERT ON vanadis_chunks FOR EACH ROW EXECUTE FUNCTION pgtest_raise();`, code)
+}
+
+// observeCreateCallback checks the raw create callback error: a terminal
+// error carries code and exact message, a retryable one keeps its SQLSTATE
+// (empty for driver errors) and message fragment.
+func observeCreateCallback(t *testing.T, mc *mocks.MockContext, code restate.Code, sqlState, wantErr string) {
+	t.Helper()
+	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
+		res, err := fn(mockRunContext{Context: context.Background()})
+		require.Error(t, err)
+		var terminal restate.TerminalError
+		if code != 0 {
+			require.ErrorAs(t, err, &terminal)
+			assert.Equal(t, code, terminal.Code())
+			assert.EqualError(t, err, wantErr)
+		} else {
+			assert.False(t, restate.IsTerminalError(err))
+			assert.ErrorContains(t, err, wantErr)
+			var pgErr *pgconn.PgError
+			if sqlState != "" {
+				require.ErrorAs(t, err, &pgErr)
+				assert.Equal(t, sqlState, pgErr.Code)
+			} else {
+				assert.False(t, errors.As(err, &pgErr))
+			}
+		}
+		return runMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
+	})
+}
+
 func TestCreateBuildJournalCallback(t *testing.T) {
 	t.Parallel()
+	conflict := fmt.Sprintf("%s: chunk %q in build %q already exists", store.ErrBuildConflict, "c1", "b1")
 	tests := []struct {
-		name       string
-		code       string
-		constraint string
-		terminal   restate.Code
+		name     string
+		setup    string
+		closed   bool
+		terminal restate.Code
+		sqlState string
+		wantErr  string
 	}{
-		{"chunk ID", "23505", "vanadis_chunks_pkey", 409},
-		{"chunk index", "23505", "uq_vanadis_chunks_build_index", 409},
-		{"unknown unique", "23505", "unknown", 0},
-		{"serialization", "40001", "vanadis_chunks_pkey", 0},
-		{"deadlock", "40P01", "", 0},
-		{"connection", "08006", "", 0},
+		{name: "chunk ID", setup: createConflictSetupSQL, terminal: 409, wantErr: conflict},
+		{name: "chunk index", setup: createGhostChunkSQL, terminal: 409, wantErr: conflict},
+		{name: "unknown unique", setup: createConflictSetupSQL + ` UPDATE vanadis_chunks SET id = 'c0'; CREATE UNIQUE INDEX pgtest_unique_title ON vanadis_chunks (title);`, sqlState: "23505", wantErr: "pgtest_unique_title"},
+		{name: "serialization", setup: raiseOnChunkInsertSQL("40001"), sqlState: "40001", wantErr: "injected failure"},
+		{name: "deadlock", setup: raiseOnChunkInsertSQL("40P01"), sqlState: "40P01", wantErr: "injected failure"},
+		{name: "connection", closed: true, wantErr: "begin tx"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dbErr := fmt.Errorf("database: %w", &pgconn.PgError{Code: tc.code, ConstraintName: tc.constraint, Detail: "private database details"})
-			st, _ := open(dbScript{FailExec: "INSERT INTO vanadis_chunks", ExecErr: dbErr})
+			st, pool := openStore(t)
+			mustExec(t, pool, tc.setup)
+			if tc.closed {
+				pool.Close()
+			}
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)
 			mc := mocks.NewMockContext(t)
-			want := dbErr
-			if tc.terminal != 0 {
-				want = fmt.Errorf("%w: chunk %q in build %q already exists", store.ErrBuildConflict, "c1", "b1")
-			}
-			observeJournalCallback(t, mc, want, tc.terminal)
+			observeCreateCallback(t, mc, tc.terminal, tc.sqlState, tc.wantErr)
 			_, _ = RunJournaled(restate.WithMockContext(mc), labelCreate, "create-build-postgres", func(rc restate.RunContext) (bool, error) {
 				return bo.persistBuildCreation(rc, model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}})
 			})
@@ -169,29 +220,50 @@ func TestCreateBuildJournalCallback(t *testing.T) {
 	}
 }
 
+// A lost COMMIT acknowledgement cannot be forced on a real server. The two
+// durable outcomes it hides are covered instead: a transaction that fails at
+// COMMIT persists nothing and is not accepted, and a request replayed after
+// its commit landed is accepted without duplicating the build.
 func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 	t.Parallel()
-	lostAck := errors.New("connection lost after commit")
 	build := model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}
 	chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}}
 	tests := []struct {
-		name string
-		db   dbScript
-		want error
+		name       string
+		sabotage   string
+		calls      int
+		wantErr    string
+		wantChunks []string
 	}{
-		{"acknowledgement lost", dbScript{CommitErr: lostAck}, lostAck},
-		{"committed request replay", dbScript{ExecTag: "INSERT 0 0", BuildRow: &sqltest.Row{Build: &build}, Chunks: chunks}, nil},
+		{name: "commit fails", sabotage: failFunctionSQL + ` CREATE CONSTRAINT TRIGGER pgtest_fail_commit AFTER INSERT ON vanadis_chunks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION pgtest_fail();`, calls: 1, wantErr: "sabotaged INSERT on vanadis_chunks"},
+		{name: "committed request replay", calls: 2, wantChunks: []string{"c1"}},
 	}
-	// The second database fixture represents the durable state after the first
-	// commit succeeded at PostgreSQL but its response failed at the connection.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := open(tc.db)
+			st, pool := openStore(t)
+			mustExec(t, pool, tc.sabotage)
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)
-			accepted, err := bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
-			assert.ErrorIs(t, err, tc.want)
-			assert.Equal(t, tc.want == nil, accepted)
+			var accepted bool
+			var err error
+			for range tc.calls {
+				accepted, err = bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
+			}
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.False(t, accepted)
+				_, _, getErr := st.GetBuild(context.Background(), "b1")
+				assert.ErrorIs(t, getErr, store.ErrBuildNotFound)
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, accepted)
+			_, stored := loadBuild(t, st, "b1")
+			var ids []string
+			for _, c := range stored {
+				ids = append(ids, c.ID)
+			}
+			assert.Equal(t, tc.wantChunks, ids)
 		})
 	}
 }
@@ -293,13 +365,9 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 				inputs[i] = store.CreateChunkInput{ID: fmt.Sprintf("c%d", i+1), Title: fmt.Sprintf("Chunk %d", i+1), Repo: "aerial", Instructions: "Do work", DependsOn: deps, TargetFiles: []string{fmt.Sprintf("pkg/%d.go", i+1)}}
 			}
 			req := CreateBuildRequest{ID: tc.buildID, ThreadID: "th1", Objective: "Obj", Chunks: inputs}
-			openCapture := func() *captureCreateStore {
-				b := model.VanadisBuild{ID: tc.buildID, ThreadID: "th1", Objective: "Obj", Status: "running"}
-				st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}})
-				return &captureCreateStore{VanadisStore: st}
-			}
+			st, _ := openStore(t)
 			journal := &createJournal{}
-			cap1 := openCapture()
+			cap1 := &captureCreateStore{VanadisStore: st}
 			bo1 := NewBuildObject("", nil).WithAuthority(cap1, nil)
 			var state1 *model.BuildObjectState
 			cursor1 := 0
@@ -318,7 +386,7 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 				assert.Equal(t, got1.CreatedAt, state1.Chunks[i].CreatedAt)
 			}
 			replayed := len(journal.executed)
-			cap2 := openCapture()
+			cap2 := &captureCreateStore{VanadisStore: st}
 			bo2 := NewBuildObject("", nil).WithAuthority(cap2, nil)
 			var state2 *model.BuildObjectState
 			cursor2 := 0
@@ -538,7 +606,7 @@ func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
 		want    []string
 	}{
 		{name: "deploy success reconciles", outcome: prEventOutcome{Applied: true}, want: []string{"run handle-pr-event-postgres", "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
-		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.BuildRoute{{BuildID: "b2"}}}, want: []string{"run handle-pr-event-postgres", `send {"reason":"widget_sync"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
+		{name: "deploy success with cross build sweep", outcome: prEventOutcome{Applied: true, ReconcileTargets: []store.SweptChunk{{ChunkID: "c1", BuildID: "b2"}}}, want: []string{"run handle-pr-event-postgres", `send {"action":"chunk_deploy_success","chunk_id":"c1"}`, "get state", "get launched", "run reconcile-after-pr-event", "set state", "set launched"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

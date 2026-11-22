@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"testing"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -92,10 +91,11 @@ func WithIgnore(opts ...goleak.Option) Option {
 	return func(c *config) { c.ignores = append(c.ignores, opts...) }
 }
 
-// Main is a drop-in TestMain body: it installs the transport guard, unsets every
+// Main is a drop-in TestMain body (m is the *testing.M, or a wrapper whose Run
+// sets up per-package fixtures such as pgtest.Main around it): it installs the transport guard, unsets every
 // OTEL_* environment variable, runs the tests, runs the registered cleanups,
 // closes idle HTTP connections and verifies no goroutines leaked.
-func Main(m *testing.M, opts ...Option) {
+func Main(m goleak.TestingM, opts ...Option) {
 	var c config
 	for _, opt := range opts {
 		opt(&c)

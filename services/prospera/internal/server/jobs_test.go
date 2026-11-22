@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,15 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
@@ -783,6 +780,7 @@ func newTestConfigSource(cfg *config.Config) *httpkit.Reloadable[config.Config] 
 
 func TestRunApp_Validation(t *testing.T) {
 	t.Parallel()
+	dsn := pgtest.NewDSN(t)
 	tests := []struct {
 		name    string
 		cfg     *config.Config
@@ -795,7 +793,7 @@ func TestRunApp_Validation(t *testing.T) {
 		},
 		{
 			name:    "empty port",
-			cfg:     &config.Config{Port: "   ", DatabaseURL: "sqlite://:memory:"},
+			cfg:     &config.Config{Port: "   ", DatabaseURL: dsn},
 			wantErr: true,
 		},
 		{
@@ -805,7 +803,7 @@ func TestRunApp_Validation(t *testing.T) {
 		},
 		{
 			name:    "server listen error",
-			cfg:     &config.Config{Port: "-1", DatabaseURL: "sqlite://:memory:"},
+			cfg:     &config.Config{Port: "-1", DatabaseURL: dsn},
 			wantErr: true,
 		},
 	}
@@ -826,62 +824,18 @@ func TestRunApp_Validation(t *testing.T) {
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "prospera_app_test.db")
+	dsn := pgtest.NewDSN(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
+	// The bus is built after the store opened and reconciled, so cancelling
+	// here drives shutdown only once RunApp is past the real Postgres open.
 	origBusFn := newProsperaBusFn
-	newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+	newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
+		cancel()
 		return pubsub.NewMemoryBus(), nil
 	}
 	defer func() { newProsperaBusFn = origBusFn }()
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("failed to open sqlite: %v", err)
-	}
-
-	schema := `
-	CREATE TABLE voice_calls (
-		call_id TEXT PRIMARY KEY,
-		provider_call_sid TEXT UNIQUE,
-		direction TEXT NOT NULL,
-		state TEXT NOT NULL,
-		end_reason TEXT,
-		from_number TEXT NOT NULL,
-		to_number TEXT NOT NULL,
-		callback_of_call_id TEXT,
-		discord_channel_id TEXT,
-		discord_thread_id TEXT,
-		brief TEXT NOT NULL DEFAULT '{}',
-		owner_instructions TEXT NOT NULL DEFAULT '[]',
-		transcript TEXT NOT NULL DEFAULT '[]',
-		live_transcript_cursor INTEGER NOT NULL DEFAULT 0,
-		answered_by TEXT,
-		voicemail_recording_url TEXT,
-		report_status TEXT NOT NULL DEFAULT 'pending',
-		report_summary TEXT,
-		started_at TIMESTAMP NOT NULL,
-		answered_at TIMESTAMP,
-		ended_at TIMESTAMP,
-		updated_at TIMESTAMP NOT NULL
-	);
-	CREATE TABLE voice_messages (
-		message_sid TEXT PRIMARY KEY,
-		direction TEXT NOT NULL,
-		from_number TEXT NOT NULL,
-		to_number TEXT NOT NULL,
-		body TEXT NOT NULL,
-		media_urls TEXT NOT NULL DEFAULT '[]',
-		related_call_id TEXT,
-		discord_delivered BOOLEAN NOT NULL DEFAULT FALSE,
-		created_at TIMESTAMP NOT NULL
-	);
-	`
-	if _, err = db.Exec(schema); err != nil {
-		db.Close()
-		t.Fatalf("failed to create test schema: %v", err)
-	}
-	_ = db.Close()
 
 	natsLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -892,19 +846,16 @@ func TestRunApp_Lifecycle(t *testing.T) {
 
 	cfg := &config.Config{
 		Port:                  "0",
-		DatabaseURL:           "sqlite://" + dbPath,
+		DatabaseURL:           dsn,
 		DefaultDiscordChannel: "prospera",
 		NATSURL:               "nats://" + closedNATSAddr,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	appDone := make(chan error, 1)
 
 	go func() {
 		appDone <- RunApp(ctx, newTestConfigSource(cfg))
 	}()
-
-	cancel()
 
 	select {
 	case err := <-appDone:

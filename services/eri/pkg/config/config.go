@@ -363,9 +363,6 @@ type ConfigData struct {
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
 	PushScan                  PushScanConfig           `yaml:"push_scan,omitempty"                    json:"push_scan,omitempty"`
 	EgressScan                EgressScanConfig         `yaml:"egress_scan,omitempty"                  json:"egress_scan,omitempty"`
-	// TurnQueue is only cross-checked by eri-restate against its pod annotation, which alone
-	// selects the bound handler set ("" or "legacy" -> legacy, "coordinator" -> coordinator).
-	TurnQueue string `yaml:"turn_queue,omitempty" json:"turn_queue,omitempty"`
 	// TurnTimeoutMinutes caps one turn attempt; 0 (unset) resolves to DefaultTurnTimeoutMinutes.
 	// Read it through TurnTimeout, never directly.
 	TurnTimeoutMinutes int `yaml:"turn_timeout_minutes,omitempty" json:"turn_timeout_minutes,omitempty"`
@@ -395,26 +392,6 @@ func (c *ConfigData) TurnTimeout() int {
 		return DefaultTurnTimeoutMinutes
 	}
 	return min(c.TurnTimeoutMinutes, MaxTurnTimeoutMinutes)
-}
-
-// Turn queue modes selected by eri-restate's pod annotation and cross-checked against
-// ConfigData.TurnQueue.
-const (
-	TurnQueueLegacy      = "legacy"
-	TurnQueueCoordinator = "coordinator"
-)
-
-// ParseTurnQueueMode normalizes a turn queue mode: blank or "legacy" is legacy, "coordinator"
-// is coordinator (surrounding whitespace ignored), anything else is an error.
-func ParseTurnQueueMode(v string) (string, error) {
-	switch strings.TrimSpace(v) {
-	case "", TurnQueueLegacy:
-		return TurnQueueLegacy, nil
-	case TurnQueueCoordinator:
-		return TurnQueueCoordinator, nil
-	default:
-		return "", fmt.Errorf("invalid turn_queue %q: want %q or %q", strings.TrimSpace(v), TurnQueueLegacy, TurnQueueCoordinator)
-	}
 }
 
 // PushScanConfig tunes the GitHub egress proxy secret scan.
@@ -618,7 +595,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
 		PushScan                  PushScanConfig           `yaml:"push_scan"`
 		EgressScan                EgressScanConfig         `yaml:"egress_scan"`
-		TurnQueue                 string                   `yaml:"turn_queue"`
 		TurnTimeoutMinutes        int                      `yaml:"turn_timeout_minutes"`
 	}
 
@@ -656,10 +632,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	}
 	c.PushScan = PushScanConfig{RegexAllowlist: cloneStringSlice(raw.PushScan.RegexAllowlist)}
 	c.EgressScan = EgressScanConfig{BlockedMCP: normalizeBlockedMCP(raw.EgressScan.BlockedMCP)}
-	if _, err := ParseTurnQueueMode(raw.TurnQueue); err != nil {
-		return err
-	}
-	c.TurnQueue = strings.TrimSpace(raw.TurnQueue)
 	if err := ParseTurnTimeoutMinutes(raw.TurnTimeoutMinutes); err != nil {
 		return err
 	}
