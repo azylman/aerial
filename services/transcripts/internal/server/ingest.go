@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/transcriptwire"
+	"github.com/azylman/aerial/services/transcripts/internal/store"
 )
 
 // Ingester consumes transcript step batches from the AERIAL_TRANSCRIPTS stream
@@ -18,19 +19,19 @@ import (
 // TranscriptsIndexedEvent per ingested batch. Publish failures return an error
 // so the batch naks and redelivers; stale gap batches ack silently.
 type Ingester struct {
-	store   *Store
+	store   *store.Store
 	publish func(ctx context.Context, subject, msgID string, data any) error
 }
 
 // NewIngester wires an Ingester with constructor injection. A nil publish
 // function disables event emission (read-path and dark-run use).
-func NewIngester(store *Store, publish func(ctx context.Context, subject, msgID string, data any) error) *Ingester {
-	return &Ingester{store: store, publish: publish}
+func NewIngester(st *store.Store, publish func(ctx context.Context, subject, msgID string, data any) error) *Ingester {
+	return &Ingester{store: st, publish: publish}
 }
 
 // NewBusIngester wires an Ingester that publishes through a JetStream bus.
-func NewBusIngester(store *Store, bus pubsub.Bus) *Ingester {
-	return NewIngester(store, func(ctx context.Context, subject, msgID string, data any) error {
+func NewBusIngester(st *store.Store, bus pubsub.Bus) *Ingester {
+	return NewIngester(st, func(ctx context.Context, subject, msgID string, data any) error {
 		if bus == nil {
 			return fmt.Errorf("transcripts ingester bus is nil")
 		}
@@ -71,8 +72,8 @@ func (g *Ingester) resolveBatchSubjectAgent(msg pubsub.Message, batch *transcrip
 	if !k8sauth.IsValidAgentSlug(payloadAgent) {
 		return termBatchWithError(msg, fmt.Sprintf("term invalid agent %q transcript batch", payloadAgent), fmt.Errorf("invalid agent %q in batch payload", payloadAgent))
 	}
-	if g.store.stack != "" && payloadAgent != g.store.stack {
-		return termBatchWithError(msg, fmt.Sprintf("term cross-agent legacy subject batch for %q", payloadAgent), fmt.Errorf("legacy 4-token subject cannot write agent %q on store stack %q", payloadAgent, g.store.stack))
+	if g.store.Stack() != "" && payloadAgent != g.store.Stack() {
+		return termBatchWithError(msg, fmt.Sprintf("term cross-agent legacy subject batch for %q", payloadAgent), fmt.Errorf("legacy 4-token subject cannot write agent %q on store stack %q", payloadAgent, g.store.Stack()))
 	}
 	return nil
 }
@@ -116,7 +117,7 @@ func (g *Ingester) HandleBatchMessage(ctx context.Context, msg pubsub.Message) e
 	}
 	agent := batch.EffectiveAgent()
 	if agent == "" {
-		agent = g.store.stack
+		agent = g.store.Stack()
 	}
 	event := pubsub.TranscriptsIndexedEvent{
 		Agent:        agent,
