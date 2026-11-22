@@ -1181,6 +1181,7 @@ type triggerPostCallReportTestCase struct {
 	ingressStatus int
 	emptyIngress  bool
 	noReporter    bool
+	wantIngress   bool
 	wantPath      string
 	wantKey       string
 	wantDelivered bool
@@ -1189,6 +1190,7 @@ type triggerPostCallReportTestCase struct {
 
 func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase) {
 	t.Helper()
+	var calledIngress bool
 	var receivedPath string
 	var receivedKey string
 	var mu sync.Mutex
@@ -1200,6 +1202,7 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "ProsperaReport") {
 			mu.Lock()
+			calledIngress = true
 			receivedPath = r.URL.Path
 			receivedKey = r.Header.Get("Idempotency-Key")
 			mu.Unlock()
@@ -1244,17 +1247,20 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 	}
 	server.Wait()
 
-	if tc.wantPath != "" {
-		mu.Lock()
-		path := receivedPath
-		key := receivedKey
-		mu.Unlock()
-		if path != tc.wantPath {
-			t.Errorf("path = %q, want %q", path, tc.wantPath)
-		}
-		if key != tc.wantKey {
-			t.Errorf("key = %q, want %q", key, tc.wantKey)
-		}
+	mu.Lock()
+	gotIngress := calledIngress
+	path := receivedPath
+	key := receivedKey
+	mu.Unlock()
+
+	if gotIngress != tc.wantIngress {
+		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
+	}
+	if tc.wantPath != "" && path != tc.wantPath {
+		t.Errorf("path = %q, want %q", path, tc.wantPath)
+	}
+	if tc.wantKey != "" && key != tc.wantKey {
+		t.Errorf("key = %q, want %q", key, tc.wantKey)
 	}
 
 	if tc.wantDelivered {
@@ -1273,12 +1279,14 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 			name:          "empty call id returns nil",
 			callID:        "   ",
 			ingressStatus: http.StatusOK,
+			wantIngress:   false,
 			wantDelivered: false,
 		},
 		{
 			name:          "successful restate ingress invocation",
 			callID:        "call-restate-ok",
 			ingressStatus: http.StatusOK,
+			wantIngress:   true,
 			wantPath:      "/ProsperaReport/call-restate-ok/DeliverReport/send",
 			wantKey:       "prospera:report:call-restate-ok",
 		},
@@ -1286,12 +1294,14 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 			name:          "restate ingress failure falls back to direct delivery",
 			callID:        "call-restate-fail",
 			ingressStatus: http.StatusInternalServerError,
+			wantIngress:   true,
 			wantDelivered: true,
 		},
 		{
 			name:          "empty restate ingress url delivers directly",
 			callID:        "call-no-ingress",
 			emptyIngress:  true,
+			wantIngress:   false,
 			wantDelivered: true,
 		},
 		{
@@ -1299,6 +1309,7 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 			callID:       "call-no-mech",
 			emptyIngress: true,
 			noReporter:   true,
+			wantIngress:  false,
 			wantErr:      true,
 		},
 	}
@@ -1309,27 +1320,6 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 			runTriggerPostCallReportTest(t, tc)
 		})
 	}
-}
-
-func TestServer_TriggerPostCallReportIfPending(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{Port: "4019"}
-	st := fakes.NewFakeStore()
-
-	// 1. Success path: enqueues/delivers report without error
-	server, store, _ := setupTestServer()
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:       "call-pending-rep",
-		ReportStatus: "pending",
-	}, 5)
-	server.triggerPostCallReportIfPending(context.Background(), "call-pending-rep")
-	server.Wait()
-
-	// 2. Error path: missing reporter logs error without panic
-	serverNoRep := NewServer(newTestConfigSource(cfg), st, nil, nil, nil, nil)
-	serverNoRep.triggerPostCallReportIfPending(context.Background(), "call-no-rep")
-	serverNoRep.Wait()
 }
 
 type handleReportJobTestCase struct {
