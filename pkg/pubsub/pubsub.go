@@ -701,8 +701,7 @@ func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durab
 	case err == nil && durableCompatible(info.Config, subject):
 		return stream, cons, nil
 	case err == nil:
-		desired.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-		desired.OptStartSeq = info.AckFloor.Stream + 1
+		resumeAt(&desired, stream, info.AckFloor.Stream+1)
 		log.Printf("[pubsub] migrating consumer %s/%s (filter %q, deliver subject %q) to pull, resuming at stream seq %d",
 			name, durable, info.Config.FilterSubject, info.Config.DeliverSubject, desired.OptStartSeq)
 		if deleteErr := stream.DeleteConsumer(ctx, durable); deleteErr != nil && !errors.Is(deleteErr, jetstream.ErrConsumerNotFound) {
@@ -728,6 +727,17 @@ func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durab
 		return nil, nil, fmt.Errorf("consumer %s/%s was concurrently created with an incompatible config", name, durable)
 	}
 	return stream, cons, nil
+}
+
+// resumeAt points cfg at stream sequence seq. WorkQueue streams reject any
+// deliver policy but "all", and need none: they hold only unacked messages, so
+// DeliverAll already resumes exactly where the old consumer left off.
+func resumeAt(cfg *jetstream.ConsumerConfig, stream jetstream.Stream, seq uint64) {
+	if info := stream.CachedInfo(); info != nil && info.Config.Retention == jetstream.WorkQueuePolicy {
+		return
+	}
+	cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+	cfg.OptStartSeq = seq
 }
 
 // resumeCursor tracks the stream sequence a recreated consumer must start at
@@ -899,8 +909,7 @@ func (s *jsSubscription) recover(subCtx context.Context, cause error) bool {
 // cursor. A creation race is resolved by the next probe.
 func (s *jsSubscription) recreate(ctx context.Context, name string) {
 	cfg := durableConsumerConfig(s.subject, s.durable)
-	cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-	cfg.OptStartSeq = s.cursor.start()
+	resumeAt(&cfg, s.stream, s.cursor.start())
 	log.Printf("[pubsub] recreating missing consumer %s/%s as pull, resuming at stream seq %d", name, s.durable, cfg.OptStartSeq)
 	if _, err := s.stream.CreateConsumer(ctx, cfg); err != nil && !isConsumerExists(err) {
 		log.Printf("[pubsub] warning: recreating consumer %s/%s: %v", name, s.durable, err)

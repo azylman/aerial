@@ -821,3 +821,59 @@ func TestJetStreamBus_UnsubscribeStopsBlockedRecovery(t *testing.T) {
 		t.Errorf("push consumer after Unsubscribe = %+v, %v; want it untouched", info, err)
 	}
 }
+
+// WorkQueue streams reject any deliver policy but "all"; they hold only
+// unacked messages, so both migration and recovery recreate with DeliverAll.
+func TestJetStreamBus_WorkQueueMigrationAndRecovery(t *testing.T) {
+	t.Parallel()
+	const subj, durable = "aerial.jobs.wqmigrate", "wq-migrate"
+	bus := newServerBus(t)
+	publishAll(t, bus, subj, "m1", "m2", "m3")
+
+	if _, err := bus.js.AddConsumer(StreamAerialJobs, &nats.ConsumerConfig{
+		Durable: durable, FilterSubject: subj, AckPolicy: nats.AckExplicitPolicy, AckWait: 30 * time.Second,
+		DeliverPolicy: nats.DeliverAllPolicy, DeliverSubject: "_DELIVER.AERIAL_JOBS.wq-migrate", DeliverGroup: durable, MaxAckPending: 1,
+	}); err != nil {
+		t.Fatalf("add push consumer: %v", err)
+	}
+	legacy, err := bus.nc.QueueSubscribeSync("_DELIVER.AERIAL_JOBS.wq-migrate", durable)
+	if err != nil {
+		t.Fatalf("legacy subscribe: %v", err)
+	}
+	m, err := legacy.NextMsg(brokerDeadline)
+	if err != nil {
+		t.Fatalf("legacy delivery: %v", err)
+	}
+	if err := m.AckSync(); err != nil {
+		t.Fatalf("legacy ack: %v", err)
+	}
+	if err := legacy.Unsubscribe(); err != nil {
+		t.Fatalf("legacy unsubscribe: %v", err)
+	}
+	awaitConsumer(t, bus, StreamAerialJobs, durable, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 1 })
+
+	handler, handled := recordingHandler("", nil)
+	subscribe(t, bus, subj, durable, handler)
+	if got, want := receive(t, handled, 2), []handledMsg{{"m2", 1}, {"m3", 1}}; !equalHandled(got, want) {
+		t.Errorf("after migration handled %v, want %v", got, want)
+	}
+	info := awaitConsumer(t, bus, StreamAerialJobs, durable, func(ci *nats.ConsumerInfo) bool {
+		return ci.AckFloor.Stream == 3 && ci.NumWaiting == 1
+	})
+	if info.Config.DeliverSubject != "" || info.Config.DeliverPolicy != nats.DeliverAllPolicy {
+		t.Errorf("migrated consumer deliver subject %q policy %v, want pull delivering all", info.Config.DeliverSubject, info.Config.DeliverPolicy)
+	}
+
+	if err := bus.js.DeleteConsumer(StreamAerialJobs, durable); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	publishAll(t, bus, subj, "m4")
+	if got := receive(t, handled, 1); got[0] != (handledMsg{"m4", 1}) {
+		t.Errorf("after recovery got %+v, want m4 delivered once", got[0])
+	}
+	info = awaitConsumer(t, bus, StreamAerialJobs, durable, func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending == 0 && ci.NumPending == 0 })
+	assertNoMore(t, handled)
+	if info.Config.DeliverPolicy != nats.DeliverAllPolicy {
+		t.Errorf("recreated consumer policy %v, want deliver all", info.Config.DeliverPolicy)
+	}
+}
