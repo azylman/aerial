@@ -510,16 +510,6 @@ func buildFunnelMessage(ctx context.Context, s *discordgo.Session, m *discordgo.
 	return msg
 }
 
-func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, store db.Store, m *discordgo.Message, targetThreadID string, createdAt time.Time, extraRoleNames ...map[string]string) (db.Message, error) {
-	msg := buildFunnelMessage(ctx, s, m, targetThreadID, createdAt, extraRoleNames...)
-	if store != nil {
-		if err := store.InsertMessage(ctx, msg); err != nil {
-			return msg, err
-		}
-	}
-	return msg, nil
-}
-
 func seedSessionStateForIngress(s *discordgo.Session, botUserID string, m *discordgo.Message) {
 	if botUserID == "" || s == nil || s.State == nil {
 		return
@@ -553,7 +543,7 @@ func isSelfOrNilMessage(s *discordgo.Session, m *discordgo.Message, botUserID st
 	return false
 }
 
-func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, store db.Store, pool *queue.WorkerPool, m *discordgo.Message, botUserID string, extraRoleNames map[string]string, clients ...*RestateIngressClient) (string, error) {
+func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, m *discordgo.Message, botUserID string, extraRoleNames map[string]string, clients ...*RestateIngressClient) (string, error) {
 	seedSessionStateForIngress(s, botUserID, m)
 
 	if isSelfOrNilMessage(s, m, botUserID) {
@@ -565,49 +555,18 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, stor
 		return "ignored", nil
 	}
 
-	if client := resolveRestateClient(clients...); client != nil {
-		targetThreadID, _ := getOrCreateThreadID(ctx, s, m)
-		if strings.TrimSpace(targetThreadID) == "" {
-			return "", errors.New("target thread ID is empty")
-		}
-		msg := buildFunnelMessage(ctx, s, m, targetThreadID, m.Timestamp, extraRoleNames)
-		idempotencyKey := "discord:" + m.ID
-		resp, err := client.EnqueueThread(ctx, targetThreadID, queue.ThreadEnqueueRequest{
-			Message: &msg,
-		}, idempotencyKey)
-		if err != nil {
-			return "", err
-		}
-		if resp.Status == "already_exists" {
-			return "duplicate", nil
-		}
-		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
-		return "enqueued", nil
-	}
-
-	if store != nil {
-		exists, err := store.MessageExists(ctx, m.ID)
-		if err != nil {
-			return "", err
-		}
-		if exists {
-			return "duplicate", nil
-		}
-	}
-
 	targetThreadID, _ := getOrCreateThreadID(ctx, s, m)
 	if strings.TrimSpace(targetThreadID) == "" {
 		return "", errors.New("target thread ID is empty")
 	}
-	msg, err := buildAndInsertFunnelMessage(ctx, s, store, m, targetThreadID, m.Timestamp, extraRoleNames)
-	if err != nil {
+	msg := buildFunnelMessage(ctx, s, m, targetThreadID, m.Timestamp, extraRoleNames)
+	idempotencyKey := "discord:" + m.ID
+	if _, err := resolveRestateClient(clients...).EnqueueThread(ctx, targetThreadID, queue.ThreadEnqueueRequest{
+		Message: &msg,
+	}, idempotencyKey); err != nil {
 		return "", err
 	}
-
 	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
-	if pool != nil {
-		pool.Enqueue(msg)
-	}
 	return "enqueued", nil
 }
 
