@@ -10,9 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
-
-var nilDB = &bareStore{store: &Store{}}
 
 // ch builds a mutation fixture chunk; pr chunks get the default repo.
 func ch(id, mode, status string, deps ...string) model.VanadisChunk {
@@ -100,9 +99,9 @@ func TestResolveChunkRef(t *testing.T) {
 
 func TestPostgresVanadisStore_UpdateBuild_Errors(t *testing.T) {
 	t.Parallel()
-	running := sqlRoute{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")}
+	running := sqlRoute{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ValuesRow("running")}
 	updated := func(status string) sqlRoute {
-		return sqlRoute{match: "FROM vanadis_builds WHERE id = $1", row: &mockRow{b: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: status}}}
+		return sqlRoute{Match: "FROM vanadis_builds WHERE id = $1", Row: &sqltest.Row{Build: &model.VanadisBuild{ID: "b1", Title: "Updated Title", Status: status}}}
 	}
 	title := UpdateBuildRequest{Title: "Title"}
 	full := UpdateBuildRequest{Title: "Updated Title", Objective: "Updated Obj", SharedContext: "Shared"}
@@ -116,33 +115,33 @@ func TestPostgresVanadisStore_UpdateBuild_Errors(t *testing.T) {
 	}{
 		{name: "empty input", buildID: "b1", wantErrIs: ErrInvalidBuildInput, wantErr: "build id and at least one non-empty field"},
 		{name: "empty build id", req: title, wantErrIs: ErrInvalidBuildInput, wantErr: "build id and at least one non-empty field"},
-		{name: "build not found", buildID: "b1", req: title, db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
-		{name: "build not running", buildID: "b1", req: title, db: dbScript{row: valuesRow("completed")}, wantErrIs: ErrBuildConflict, wantErr: "must be running"},
-		{name: "nil db", buildID: "b1", req: title, db: dbScript{bare: nilDB}, wantErr: "database connection is nil"},
-		{name: "begin error", buildID: "b1", req: title, db: dbScript{beginErr: errors.New("begin fail")}, wantErr: "begin update build tx"},
+		{name: "build not found", buildID: "b1", req: title, db: dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
+		{name: "build not running", buildID: "b1", req: title, db: dbScript{Row: sqltest.ValuesRow("completed")}, wantErrIs: ErrBuildConflict, wantErr: "must be running"},
+		{name: "nil db", buildID: "b1", req: title, db: nilDB, wantErr: "database connection is nil"},
+		{name: "begin error", buildID: "b1", req: title, db: dbScript{BeginErr: errors.New("begin fail")}, wantErr: "begin update build tx"},
 		{
 			name: "check status error", buildID: "b1", req: UpdateBuildRequest{Title: "T"},
-			db: dbScript{routes: []sqlRoute{{match: "SELECT status FROM vanadis_builds", row: errRow(errors.New("boom"))}}}, wantErr: "check build status",
+			db: dbScript{Routes: []sqlRoute{{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ErrRow(errors.New("boom"))}}}, wantErr: "check build status",
 		},
 		{
 			name: "exec error", buildID: "b1", req: title,
-			db: dbScript{routes: []sqlRoute{running}, failExec: "UPDATE vanadis_builds", execErr: errors.New("exec fail")}, wantErr: "update build",
+			db: dbScript{Routes: []sqlRoute{running}, FailExec: "UPDATE vanadis_builds", ExecErr: errors.New("exec fail")}, wantErr: "update build",
 		},
 		{
 			name: "fetch error", buildID: "b1", req: UpdateBuildRequest{Title: "T"},
-			db: dbScript{routes: []sqlRoute{running, {match: "FROM vanadis_builds WHERE id = $1", row: errRow(errors.New("boom"))}}}, wantErr: "fetch updated build",
+			db: dbScript{Routes: []sqlRoute{running, {Match: "FROM vanadis_builds WHERE id = $1", Row: sqltest.ErrRow(errors.New("boom"))}}}, wantErr: "fetch updated build",
 		},
-		{name: "commit error", buildID: "b1", req: title, db: dbScript{routes: []sqlRoute{running, updated("running")}, commitErr: errors.New("commit fail")}, wantErr: "commit update build tx"},
-		{name: "update build success", buildID: "b1", req: full, db: dbScript{routes: []sqlRoute{running, updated("running")}}},
+		{name: "commit error", buildID: "b1", req: title, db: dbScript{Routes: []sqlRoute{running, updated("running")}, CommitErr: errors.New("commit fail")}, wantErr: "commit update build tx"},
+		{name: "update build success", buildID: "b1", req: full, db: dbScript{Routes: []sqlRoute{running, updated("running")}}},
 		{
 			name: "update build success on failed build", buildID: "b1", req: full,
-			db: dbScript{routes: []sqlRoute{{match: "SELECT status FROM vanadis_builds", row: valuesRow("failed")}, updated("failed")}},
+			db: dbScript{Routes: []sqlRoute{{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ValuesRow("failed")}, updated("failed")}},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			_, err := st.UpdateBuild(context.Background(), tc.buildID, tc.req)
 			assertMutateErr(t, err, tc.wantErrIs, tc.wantErr)
 		})
@@ -248,31 +247,31 @@ func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
 		wantErrIs error
 		wantErr   string
 	}{
-		{name: "success", db: dbScript{row: valuesRow("running"), chunks: one, execTag: "INSERT 0 1"}, in: in},
-		{name: "success on failed build", db: dbScript{row: valuesRow("failed"), chunks: one, execTag: "INSERT 0 1"}, in: in},
-		{name: "nil db", db: dbScript{bare: nilDB}, in: in, wantErr: "database connection is nil"},
+		{name: "success", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: one, ExecTag: "INSERT 0 1"}, in: in},
+		{name: "success on failed build", db: dbScript{Row: sqltest.ValuesRow("failed"), Chunks: one, ExecTag: "INSERT 0 1"}, in: in},
+		{name: "nil db", db: nilDB, in: in, wantErr: "database connection is nil"},
 		{name: "invalid input", in: []CreateChunkInput{{Mode: "action", Instructions: "I"}}, wantErr: "title and instructions cannot be empty"},
 		{name: "invalid id", in: []CreateChunkInput{{ID: "bad id!", Mode: "action", Title: "T", Instructions: "I"}}, wantErr: "invalid id"},
-		{name: "begin error", db: dbScript{beginErr: errors.New("begin fail")}, in: in, wantErr: "begin append chunks tx"},
-		{name: "build not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, in: in, wantErrIs: ErrBuildNotFound},
-		{name: "build not running", db: dbScript{row: valuesRow("completed")}, in: in, wantErrIs: ErrBuildConflict},
-		{name: "lock query error", db: dbScript{row: valuesRow("running"), queryErr: errors.New("query fail")}, in: in, wantErr: "lock chunks for append"},
-		{name: "lock scan error", db: dbScript{row: valuesRow("running"), chunks: pending, scanErr: errors.New("scan fail")}, in: in, wantErr: "scan fail"},
+		{name: "begin error", db: dbScript{BeginErr: errors.New("begin fail")}, in: in, wantErr: "begin append chunks tx"},
+		{name: "build not found", db: dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}, in: in, wantErrIs: ErrBuildNotFound},
+		{name: "build not running", db: dbScript{Row: sqltest.ValuesRow("completed")}, in: in, wantErrIs: ErrBuildConflict},
+		{name: "lock query error", db: dbScript{Row: sqltest.ValuesRow("running"), QueryErr: errors.New("query fail")}, in: in, wantErr: "lock chunks for append"},
+		{name: "lock scan error", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: pending, ScanErr: errors.New("scan fail")}, in: in, wantErr: "scan fail"},
 		{
-			name: "duplicate id", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c-dup", "action", "running"))},
+			name: "duplicate id", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c-dup", "action", "running"))},
 			in: []CreateChunkInput{{ID: "c-dup", Mode: "action", Title: "New Chunk", Instructions: "Inst", DependsOn: []string{}}}, wantErrIs: ErrBuildConflict,
 		},
-		{name: "dag cycle", db: dbScript{row: valuesRow("running"), chunks: pending}, in: cycle, wantErr: "cycle"},
+		{name: "dag cycle", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: pending}, in: cycle, wantErr: "cycle"},
 		{
-			name: "insert error", db: dbScript{row: valuesRow("running"), chunks: pending, failExec: "INSERT INTO vanadis_chunks", execErr: errors.New("exec fail")},
+			name: "insert error", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: pending, FailExec: "INSERT INTO vanadis_chunks", ExecErr: errors.New("exec fail")},
 			in: in, wantErr: "failed to insert",
 		},
-		{name: "commit error", db: dbScript{row: valuesRow("running"), chunks: one, execTag: "INSERT 0 1", commitErr: errors.New("commit fail")}, in: in, wantErr: "commit append chunks tx"},
+		{name: "commit error", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: one, ExecTag: "INSERT 0 1", CommitErr: errors.New("commit fail")}, in: in, wantErr: "commit append chunks tx"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			_, err := st.AppendChunks(context.Background(), "b1", tc.in)
 			assertMutateErr(t, err, tc.wantErrIs, tc.wantErr)
 		})
@@ -290,35 +289,35 @@ func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
 		wantErrIs error
 		wantErr   string
 	}{
-		{name: "success", db: dbScript{row: valuesRow("running"), chunks: pr, execTag: "UPDATE 1"}, req: title},
-		{name: "success on failed build", db: dbScript{row: valuesRow("failed"), chunks: pr, execTag: "UPDATE 1"}, req: title},
-		{name: "nil db", db: dbScript{bare: nilDB}, req: title, wantErr: "database connection is nil"},
-		{name: "empty request", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrInvalidBuildInput},
-		{name: "begin error", db: dbScript{beginErr: errors.New("begin fail")}, req: title, wantErr: "begin update chunk tx"},
-		{name: "build not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, req: title, wantErrIs: ErrBuildNotFound},
-		{name: "build not running", db: dbScript{row: valuesRow("completed")}, req: title, wantErrIs: ErrBuildConflict},
-		{name: "lock query error", db: dbScript{row: valuesRow("running"), queryErr: errors.New("query fail")}, req: title, wantErr: "lock chunks for update"},
-		{name: "lock scan error", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c1", "action", "pending")), scanErr: errors.New("scan fail")}, req: title, wantErr: "scan fail"},
-		{name: "chunk not found", db: dbScript{row: valuesRow("running"), chunks: mutateChunks()}, req: title, wantErrIs: ErrChunkNotFound},
-		{name: "chunk not pending", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c1", "pr", "running"))}, req: title, wantErrIs: ErrBuildConflict},
+		{name: "success", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: pr, ExecTag: "UPDATE 1"}, req: title},
+		{name: "success on failed build", db: dbScript{Row: sqltest.ValuesRow("failed"), Chunks: pr, ExecTag: "UPDATE 1"}, req: title},
+		{name: "nil db", db: nilDB, req: title, wantErr: "database connection is nil"},
+		{name: "empty request", db: dbScript{ExecTag: "UPDATE 0"}, wantErrIs: ErrInvalidBuildInput},
+		{name: "begin error", db: dbScript{BeginErr: errors.New("begin fail")}, req: title, wantErr: "begin update chunk tx"},
+		{name: "build not found", db: dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}, req: title, wantErrIs: ErrBuildNotFound},
+		{name: "build not running", db: dbScript{Row: sqltest.ValuesRow("completed")}, req: title, wantErrIs: ErrBuildConflict},
+		{name: "lock query error", db: dbScript{Row: sqltest.ValuesRow("running"), QueryErr: errors.New("query fail")}, req: title, wantErr: "lock chunks for update"},
+		{name: "lock scan error", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c1", "action", "pending")), ScanErr: errors.New("scan fail")}, req: title, wantErr: "scan fail"},
+		{name: "chunk not found", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks()}, req: title, wantErrIs: ErrChunkNotFound},
+		{name: "chunk not pending", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c1", "pr", "running"))}, req: title, wantErrIs: ErrBuildConflict},
 		{
-			name: "action with repo", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c1", "action", "pending"))},
+			name: "action with repo", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c1", "action", "pending"))},
 			req: UpdateChunkRequest{Mode: new("action"), Repo: "aerial"}, wantErr: "action chunk must have empty repo",
 		},
 		{
-			name: "dag cycle", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c1", "action", "pending"), ch("c2", "action", "pending", "c1"))},
+			name: "dag cycle", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c1", "action", "pending"), ch("c2", "action", "pending", "c1"))},
 			req: UpdateChunkRequest{Title: "T", DependsOn: &[]string{"c2"}}, wantErr: "cycle",
 		},
 		{
-			name: "exec error", db: dbScript{row: valuesRow("running"), chunks: pr, failExec: "UPDATE vanadis_chunks SET mode", execErr: errors.New("exec fail")},
+			name: "exec error", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: pr, FailExec: "UPDATE vanadis_chunks SET mode", ExecErr: errors.New("exec fail")},
 			req: title, wantErr: "execute update chunk",
 		},
-		{name: "commit error", db: dbScript{row: valuesRow("running"), chunks: pr, execTag: "UPDATE 1", commitErr: errors.New("commit fail")}, req: title, wantErr: "commit update chunk tx"},
+		{name: "commit error", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: pr, ExecTag: "UPDATE 1", CommitErr: errors.New("commit fail")}, req: title, wantErr: "commit update chunk tx"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			_, err := st.UpdateChunk(context.Background(), "b1", "c1", tc.req)
 			assertMutateErr(t, err, tc.wantErrIs, tc.wantErr)
 		})
@@ -339,39 +338,39 @@ func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
 		wantErrIs          error
 		wantErr            string
 	}{
-		{name: "success", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("running"), chunks: two, execTag: "DELETE 1"}},
-		{name: "success on failed build", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("failed"), chunks: two, execTag: "DELETE 1"}},
-		{name: "nil db", buildID: "b1", ref: "c1", db: dbScript{bare: nilDB}, wantErr: "database connection is nil"},
-		{name: "empty build id", ref: "c1", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrInvalidBuildInput},
-		{name: "begin error", buildID: "b1", ref: "c1", db: dbScript{beginErr: errors.New("begin fail")}, wantErr: "begin remove chunk tx"},
-		{name: "build not found", buildID: "b1", ref: "c1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
-		{name: "build not running", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("completed")}, wantErrIs: ErrBuildConflict},
-		{name: "lock query error", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("running"), queryErr: errors.New("query fail")}, wantErr: "lock chunks"},
-		{name: "lock scan error", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("running"), chunks: two, scanErr: errors.New("scan fail")}, wantErr: "scan fail"},
-		{name: "chunk not found", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("running"), chunks: mutateChunks()}, wantErrIs: ErrChunkNotFound},
-		{name: "chunk not pending", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c1", "action", "running"))}, wantErrIs: ErrBuildConflict},
-		{name: "only chunk", buildID: "b1", ref: "c1", db: dbScript{row: valuesRow("running"), chunks: mutateChunks(ch("c1", "action", "pending"))}, wantErrIs: ErrBuildConflict},
+		{name: "success", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: two, ExecTag: "DELETE 1"}},
+		{name: "success on failed build", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("failed"), Chunks: two, ExecTag: "DELETE 1"}},
+		{name: "nil db", buildID: "b1", ref: "c1", db: nilDB, wantErr: "database connection is nil"},
+		{name: "empty build id", ref: "c1", db: dbScript{ExecTag: "UPDATE 0"}, wantErrIs: ErrInvalidBuildInput},
+		{name: "begin error", buildID: "b1", ref: "c1", db: dbScript{BeginErr: errors.New("begin fail")}, wantErr: "begin remove chunk tx"},
+		{name: "build not found", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
+		{name: "build not running", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("completed")}, wantErrIs: ErrBuildConflict},
+		{name: "lock query error", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("running"), QueryErr: errors.New("query fail")}, wantErr: "lock chunks"},
+		{name: "lock scan error", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: two, ScanErr: errors.New("scan fail")}, wantErr: "scan fail"},
+		{name: "chunk not found", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks()}, wantErrIs: ErrChunkNotFound},
+		{name: "chunk not pending", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c1", "action", "running"))}, wantErrIs: ErrBuildConflict},
+		{name: "only chunk", buildID: "b1", ref: "c1", db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(ch("c1", "action", "pending"))}, wantErrIs: ErrBuildConflict},
 		{
 			name: "dag invalid", buildID: "b1", ref: "c3",
-			db: dbScript{row: valuesRow("running"), chunks: mutateChunks(prFiles("c1"), prFiles("c2"), ch("c3", "action", "pending"))}, wantErr: "invalid DAG",
+			db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: mutateChunks(prFiles("c1"), prFiles("c2"), ch("c3", "action", "pending"))}, wantErr: "invalid DAG",
 		},
 		{
 			name: "delete error", buildID: "b1", ref: "c1",
-			db: dbScript{row: valuesRow("running"), chunks: two, failExec: "DELETE FROM vanadis_chunks", execErr: errors.New("exec fail")}, wantErr: "delete chunk",
+			db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: two, FailExec: "DELETE FROM vanadis_chunks", ExecErr: errors.New("exec fail")}, wantErr: "delete chunk",
 		},
 		{
 			name: "reindex error", buildID: "b1", ref: "c1",
-			db: dbScript{row: valuesRow("running"), chunks: two, execTag: "DELETE 1", failExec: "SET chunk_index", execErr: errors.New("exec fail")}, wantErr: "reindex chunk",
+			db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: two, ExecTag: "DELETE 1", FailExec: "SET chunk_index", ExecErr: errors.New("exec fail")}, wantErr: "reindex chunk",
 		},
 		{
 			name: "commit error", buildID: "b1", ref: "c1",
-			db: dbScript{row: valuesRow("running"), chunks: two, execTag: "DELETE 1", commitErr: errors.New("commit fail")}, wantErr: "commit remove chunk tx",
+			db: dbScript{Row: sqltest.ValuesRow("running"), Chunks: two, ExecTag: "DELETE 1", CommitErr: errors.New("commit fail")}, wantErr: "commit remove chunk tx",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			_, _, err := st.RemoveChunk(context.Background(), tc.buildID, tc.ref)
 			assertMutateErr(t, err, tc.wantErrIs, tc.wantErr)
 		})

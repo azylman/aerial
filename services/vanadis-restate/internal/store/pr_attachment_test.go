@@ -11,17 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
-var aerialRepoSet = []string{"aerial", "azylman/aerial"}
-
-func attachRoutes(mode string, exists, cancelled bool) []sqlRoute {
-	return []sqlRoute{
-		{match: "SELECT mode", row: valuesRow(mode)},
-		{match: "c.status = 'cancelled'", row: valuesRow(cancelled)},
-		{match: "SELECT EXISTS", row: valuesRow(exists)},
-	}
-}
+var aerialRepoSet = []string{"aerial", "example-org/aerial"}
 
 func assertCandidates(t *testing.T, got *[]string, want []string) {
 	t.Helper()
@@ -35,7 +28,7 @@ func attachRequest(chunkID, repo string) AttachChunkPRRequest {
 }
 
 func attachmentScript(chunk, build, thread, status, repo string) dbScript {
-	return dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow(build)}}, buildRow: &mockRow{b: &model.VanadisBuild{ID: build, ThreadID: thread, Status: status}}, chunks: []model.VanadisChunk{{ID: chunk, BuildID: build, Mode: "pr", Repo: repo, Status: "running"}}}
+	return dbScript{Routes: []sqlRoute{{Match: "SELECT mode", Row: sqltest.ValuesRow("pr")}, {Match: "SELECT build_id", Row: sqltest.ValuesRow(build)}}, BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: build, ThreadID: thread, Status: status}}, Chunks: []model.VanadisChunk{{ID: chunk, BuildID: build, Mode: "pr", Repo: repo, Status: "running"}}}
 }
 
 func TestFirstAttachmentRecovery(t *testing.T) {
@@ -53,7 +46,7 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := model.VanadisBuild{ID: "b1", Status: tc.parent}
-			st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
+			st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, Routes: []sqlRoute{{Match: "UPDATE vanadis_chunks", Row: sqltest.ValuesRow("b1", "c1", "")}, {Match: "SELECT mode", Row: sqltest.ValuesRow("pr")}, {Match: "SELECT build_id", Row: sqltest.ValuesRow("b1")}}, Row: sqltest.ValuesRow("b1", "c1", "")})
 			_, _, _, err := st.AttachChunkPR(context.Background(), attachRequest("c1", "aerial"))
 			if tc.wantConflict {
 				assertStoreErr(t, err, ErrBuildConflict, false)
@@ -112,13 +105,13 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 				chunks[(tc.index+1)%3].Status = tc.sibling
 			}
 			script := attachmentScript("selected", "b1", "thread-1", tc.parent, "aerial")
-			script.chunks = chunks
-			script.failExec, script.execErr, script.commitErr = tc.failure, writeErr, tc.commitErr
+			script.Chunks = chunks
+			script.FailExec, script.ExecErr, script.CommitErr = tc.failure, writeErr, tc.commitErr
 			// No failure route means writes succeed; this fake does not apply SQL state changes.
 			if tc.failure == "" {
-				script.execErr = nil
+				script.ExecErr = nil
 			}
-			st, _ := script.open()
+			st, _ := open(script)
 			b, c, th, err := st.AttachChunkPR(context.Background(), attachRequest("selected", "aerial"))
 			if assertStoreErr(t, err, tc.wantErr, false) {
 				return
@@ -175,8 +168,8 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 		errChunkIns  = errors.New("insert chunk err")
 		errCommit    = errors.New("commit standalone err")
 	)
-	noRows := errRow(pgx.ErrNoRows)
-	attached := func(mode string) *genericMockRow { return valuesRow("b-"+mode, "c-"+mode, "thread-"+mode) }
+	noRows := sqltest.ErrRow(pgx.ErrNoRows)
+	attached := func(mode string) sqltest.Values { return sqltest.ValuesRow("b-"+mode, "c-"+mode, "thread-"+mode) }
 	existing := attachRequest("c1", "aerial")
 	standalone := attachRequest("", "aerial")
 	tests := []struct {
@@ -190,42 +183,42 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 		wantNewBuild    bool
 		wantCandidates  []string
 	}{
-		{name: "nil receiver", req: existing, db: dbScript{bare: nilReceiver}, wantErr: true},
-		{name: "nil db", req: existing, db: dbScript{bare: nilDB}, wantErr: true},
+		{name: "nil receiver", req: existing, db: nilReceiver, wantErr: true},
+		{name: "nil db", req: existing, db: nilDB, wantErr: true},
 		{name: "empty chunk id and zero pr number", req: AttachChunkPRRequest{Repo: "aerial"}, wantErrIs: ErrInvalidBuildInput},
-		{name: "chunk not found", req: existing, db: dbScript{row: noRows}, wantErrIs: ErrChunkNotFound},
-		{name: "mode query error", req: existing, db: dbScript{row: errRow(errModeQuery)}, wantErrIs: errModeQuery},
-		{name: "action chunk requires repo", req: attachRequest("c1", ""), db: dbScript{routes: attachRoutes("action", true, false), row: noRows}, wantErrIs: ErrInvalidBuildInput},
-		{name: "action blank repo", req: attachRequest("c1", " \t"), db: dbScript{routes: attachRoutes("action", true, false)}, wantErrIs: ErrInvalidBuildInput},
+		{name: "chunk not found", req: existing, db: dbScript{Row: noRows}, wantErrIs: ErrChunkNotFound},
+		{name: "mode query error", req: existing, db: dbScript{Row: sqltest.ErrRow(errModeQuery)}, wantErrIs: errModeQuery},
+		{name: "action chunk requires repo", req: attachRequest("c1", ""), db: dbScript{Routes: sqltest.AttachRoutes("action", true, false), Row: noRows}, wantErrIs: ErrInvalidBuildInput},
+		{name: "action blank repo", req: attachRequest("c1", " \t"), db: dbScript{Routes: sqltest.AttachRoutes("action", true, false)}, wantErrIs: ErrInvalidBuildInput},
 		{name: "negative pr number", req: AttachChunkPRRequest{ChunkID: "c1", PRNumber: -1}, wantErrIs: ErrInvalidBuildInput},
 		{name: "mismatched repo", req: existing, db: attachmentScript("c1", "b1", "", "running", "other"), wantErrIs: ErrBuildConflict},
 		{name: "cancelled chunk or build with repo conflicts", req: existing, db: attachmentScript("c1", "b1", "", "cancelled", "aerial"), wantErrIs: ErrBuildConflict},
 		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: attachmentScript("c1", "b1", "", "cancelled", "aerial"), wantErrIs: ErrBuildConflict},
 		{name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
 		{name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
-		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}, wantCandidates: aerialRepoSet},
-		{name: "action attachment removed chunk", req: existing, db: dbScript{routes: attachRoutes("action", false, false), row: noRows}, wantErrIs: ErrChunkNotFound},
-		{name: "action attachment terminal parent", req: existing, db: dbScript{routes: attachRoutes("action", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
-		{name: "action attachment mismatching repository", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("action")}, {match: "c.status = 'cancelled'", row: valuesRow(false)}, {match: "repo != ''", row: valuesRow(true)}, {match: "SELECT EXISTS", row: valuesRow(true)}}, row: noRows}, wantErrIs: ErrBuildConflict},
-		{name: "action attachment unknown rejection", req: existing, db: dbScript{routes: attachRoutes("action", true, false), row: noRows}, wantErr: true},
-		{name: "pr transaction begin error", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), beginErr: errBegin}, wantErrIs: errBegin},
-		{name: "pr transaction chunk removed", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), row: noRows}, wantErrIs: ErrChunkNotFound},
-		{name: "pr transaction lookup failure", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), row: errRow(errLookup)}, wantErrIs: errLookup},
-		{name: "pr parent lock failure", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, buildRow: errRow(errLookup)}, wantErrIs: errLookup},
-		{name: "pr locked chunk absent", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", Status: "running"}}}, wantErrIs: ErrChunkNotFound},
+		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{Routes: sqltest.AttachRoutes("action", true, false), Row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}, wantCandidates: aerialRepoSet},
+		{name: "action attachment removed chunk", req: existing, db: dbScript{Routes: sqltest.AttachRoutes("action", false, false), Row: noRows}, wantErrIs: ErrChunkNotFound},
+		{name: "action attachment terminal parent", req: existing, db: dbScript{Routes: sqltest.AttachRoutes("action", true, true), Row: noRows}, wantErrIs: ErrBuildConflict},
+		{name: "action attachment mismatching repository", req: existing, db: dbScript{Routes: []sqlRoute{{Match: "SELECT mode", Row: sqltest.ValuesRow("action")}, {Match: "c.status = 'cancelled'", Row: sqltest.ValuesRow(false)}, {Match: "repo != ''", Row: sqltest.ValuesRow(true)}, {Match: "SELECT EXISTS", Row: sqltest.ValuesRow(true)}}, Row: noRows}, wantErrIs: ErrBuildConflict},
+		{name: "action attachment unknown rejection", req: existing, db: dbScript{Routes: sqltest.AttachRoutes("action", true, false), Row: noRows}, wantErr: true},
+		{name: "pr transaction begin error", req: existing, db: dbScript{Routes: sqltest.AttachRoutes("pr", true, false), BeginErr: errBegin}, wantErrIs: errBegin},
+		{name: "pr transaction chunk removed", req: existing, db: dbScript{Routes: sqltest.AttachRoutes("pr", true, false), Row: noRows}, wantErrIs: ErrChunkNotFound},
+		{name: "pr transaction lookup failure", req: existing, db: dbScript{Routes: sqltest.AttachRoutes("pr", true, false), Row: sqltest.ErrRow(errLookup)}, wantErrIs: errLookup},
+		{name: "pr parent lock failure", req: existing, db: dbScript{Routes: []sqlRoute{{Match: "SELECT mode", Row: sqltest.ValuesRow("pr")}, {Match: "SELECT build_id", Row: sqltest.ValuesRow("b1")}}, BuildRow: sqltest.ErrRow(errLookup)}, wantErrIs: errLookup},
+		{name: "pr locked chunk absent", req: existing, db: dbScript{Routes: []sqlRoute{{Match: "SELECT mode", Row: sqltest.ValuesRow("pr")}, {Match: "SELECT build_id", Row: sqltest.ValuesRow("b1")}}, BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b1", Status: "running"}}}, wantErrIs: ErrChunkNotFound},
 		{name: "standalone requires repo", req: attachRequest("", ""), wantErrIs: ErrInvalidBuildInput},
-		{name: "standalone begin error", req: standalone, db: dbScript{beginErr: errBegin}, wantErrIs: errBegin},
-		{name: "standalone existing pr lookup error", req: standalone, db: dbScript{row: errRow(errLookup)}, wantErrIs: errLookup},
-		{name: "standalone reuses existing pr chunk", req: standalone, db: dbScript{row: valuesRow("b-existing", "c-existing", "thread-existing")}, want: attachResult{"b-existing", "c-existing", "thread-existing"}, wantCandidates: aerialRepoSet},
-		{name: "standalone insert build error", req: standalone, db: dbScript{row: noRows, failExec: "INSERT INTO vanadis_builds", execErr: errBuildIns}, wantErrIs: errBuildIns},
-		{name: "standalone insert chunk error", req: standalone, db: dbScript{row: noRows, failExec: "INSERT INTO vanadis_chunks", execErr: errChunkIns}, wantErrIs: errChunkIns},
-		{name: "standalone commit error", req: standalone, db: dbScript{row: noRows, commitErr: errCommit}, wantErrIs: errCommit},
-		{name: "standalone creates build in target thread", req: AttachChunkPRRequest{Repo: "aerial", PRNumber: 101, TargetID: "123456789012345678", Branch: "dependabot/npm_and_yarn/foo", Title: "Bump foo"}, db: dbScript{row: noRows}, want: attachResult{ThreadID: "123456789012345678"}, wantNewBuild: true},
+		{name: "standalone begin error", req: standalone, db: dbScript{BeginErr: errBegin}, wantErrIs: errBegin},
+		{name: "standalone existing pr lookup error", req: standalone, db: dbScript{Row: sqltest.ErrRow(errLookup)}, wantErrIs: errLookup},
+		{name: "standalone reuses existing pr chunk", req: standalone, db: dbScript{Row: sqltest.ValuesRow("b-existing", "c-existing", "thread-existing")}, want: attachResult{"b-existing", "c-existing", "thread-existing"}, wantCandidates: aerialRepoSet},
+		{name: "standalone insert build error", req: standalone, db: dbScript{Row: noRows, FailExec: "INSERT INTO vanadis_builds", ExecErr: errBuildIns}, wantErrIs: errBuildIns},
+		{name: "standalone insert chunk error", req: standalone, db: dbScript{Row: noRows, FailExec: "INSERT INTO vanadis_chunks", ExecErr: errChunkIns}, wantErrIs: errChunkIns},
+		{name: "standalone commit error", req: standalone, db: dbScript{Row: noRows, CommitErr: errCommit}, wantErrIs: errCommit},
+		{name: "standalone creates build in target thread", req: AttachChunkPRRequest{Repo: "aerial", PRNumber: 101, TargetID: "123456789012345678", Branch: "dependabot/npm_and_yarn/foo", Title: "Bump foo"}, db: dbScript{Row: noRows}, want: attachResult{ThreadID: "123456789012345678"}, wantNewBuild: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, candidates := tc.db.open()
+			st, candidates := open(tc.db)
 			bID, cID, threadID, err := st.AttachChunkPR(context.Background(), tc.req)
 			if tc.wantErrContains != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
@@ -266,15 +259,15 @@ func TestAttachStandalonePR_RecordsOwner(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var buildArgs []any
-			queryRow := func(context.Context, string, ...any) pgx.Row { return errRow(pgx.ErrNoRows) }
+			queryRow := func(context.Context, string, ...any) pgx.Row { return sqltest.ErrRow(pgx.ErrNoRows) }
 			exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 				if strings.Contains(query, "INSERT INTO vanadis_builds") {
 					buildArgs = args
 				}
 				return pgconn.NewCommandTag("INSERT 0 1"), nil
 			}
-			tx := &mockTx{queryRowFn: queryRow, execFn: exec}
-			st := New(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "azylman")
+			tx := &sqltest.Tx{QueryRowFn: queryRow, ExecFn: exec}
+			st := New(sqltest.DB{BeginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "example-org")
 			req := AttachChunkPRRequest{Repo: "aerial", PRNumber: 9, Agent: tc.agent}
 			if _, _, _, err := st.AttachChunkPR(context.Background(), req); err != nil {
 				t.Fatalf("AttachChunkPR: %v", err)
