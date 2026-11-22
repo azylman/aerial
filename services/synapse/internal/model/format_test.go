@@ -116,31 +116,43 @@ func TestRandomNonce(t *testing.T) {
 	}
 }
 
-func TestPromptFormattingAndTruncation(t *testing.T) {
+func TestTruncatePromptDetails(t *testing.T) {
 	t.Parallel()
-	short := "short text"
-	if TruncatePromptDetails(short) != short {
-		t.Fatalf("TruncatePromptDetails modified short string")
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "short text unchanged", in: "short text", want: "short text"},
+		{name: "backtick fences neutralized", in: "code ```block```", want: "code '''block'''"},
+		{name: "long text truncated to the rune cap", in: strings.Repeat("x", 2000), want: strings.Repeat("x", 1500) + "... (truncated)"},
 	}
-
-	backtickStr := "code ```block```"
-	if !strings.Contains(TruncatePromptDetails(backtickStr), "'''block'''") {
-		t.Fatalf("TruncatePromptDetails did not replace backticks: %s", TruncatePromptDetails(backtickStr))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TruncatePromptDetails(tc.in); got != tc.want {
+				t.Errorf("TruncatePromptDetails() = %q, want %q", got, tc.want)
+			}
+		})
 	}
+}
 
-	longStr := strings.Repeat("x", 2000)
-	truncated := TruncatePromptDetails(longStr)
-	if !strings.HasSuffix(truncated, "... (truncated)") || len([]rune(truncated)) != 1515 {
-		t.Fatalf("unexpected truncation result: %s", truncated)
+func TestFormatErrorDetailsBlock(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                               string
+		header, details, extraLine, footer string
+		want                               string
+	}{
+		{name: "all parts", header: "Header:", details: "details", extraLine: "Extra info", footer: "Footer.", want: "Header:\nError details:\n```\ndetails\n```\nExtra info\nFooter."},
+		{name: "header only", header: "Header:", want: "Header:"},
 	}
-
-	block := FormatErrorDetailsBlock("Header:", "details", "Extra info", "Footer.")
-	if !strings.Contains(block, "Header:") || !strings.Contains(block, "```\ndetails\n```") || !strings.Contains(block, "Extra info") || !strings.Contains(block, "Footer.") {
-		t.Fatalf("unexpected FormatErrorDetailsBlock result: %s", block)
-	}
-
-	blockMinimal := FormatErrorDetailsBlock("Header:", "", "", "")
-	if blockMinimal != "Header:" {
-		t.Fatalf("unexpected FormatErrorDetailsBlock minimal: %q", blockMinimal)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatErrorDetailsBlock(tc.header, tc.details, tc.extraLine, tc.footer); got != tc.want {
+				t.Errorf("FormatErrorDetailsBlock() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

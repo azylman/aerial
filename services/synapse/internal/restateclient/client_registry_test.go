@@ -79,9 +79,9 @@ func TestClientRegister(t *testing.T) {
 		wantBodySub  string
 		want         prwire.RegisterResponse
 	}{
-		{name: "register round-trips", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", FallbackTargetID: "123456789012345678", EnforceOwner: true, ExpectedOwner: "aerial"}, status: 200, body: okBody, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register", wantBodySub: `"expected_owner":"aerial"`, want: prwire.RegisterResponse{TargetID: "123456789012345678", Agent: "aerial", Status: "open"}},
-		{name: "owner mismatch is terminal", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 409, body: "owner", wantErrSub: "HTTP 409", wantTerminal: true, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
-		{name: "undecodable body surfaces", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 200, body: "nope{", wantErrSub: "decode restate response", wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
+		{name: "register round-trips", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", FallbackTargetID: "123456789012345678", EnforceOwner: true, ExpectedOwner: "aerial"}, status: 200, body: okBody, wantCalls: 1, wantPath: "/PRObject/acme%2Faerial%237/Register", wantBodySub: `"expected_owner":"aerial"`, want: prwire.RegisterResponse{TargetID: "123456789012345678", Agent: "aerial", Status: "open"}},
+		{name: "owner mismatch is terminal", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 409, body: "owner", wantErrSub: "HTTP 409", wantTerminal: true, wantCalls: 1, wantPath: "/PRObject/acme%2Faerial%237/Register"},
+		{name: "undecodable body surfaces", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 200, body: "nope{", wantErrSub: "decode restate response", wantCalls: 1, wantPath: "/PRObject/acme%2Faerial%237/Register"},
 		{name: "missing pr rejected without request", req: prwire.RegisterRequest{Repo: "aerial"}, status: 200, body: okBody, wantErrSub: "required", wantTerminal: true},
 		{name: "unconfigured fails closed", unconfigured: true, req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, wantErrSub: "not configured"},
 	}
@@ -109,7 +109,7 @@ func TestClientRegister(t *testing.T) {
 
 func TestClientGetBuildLifecycle(t *testing.T) {
 	t.Parallel()
-	const lifecycleBody = `{"found":true,"status":"merged","head_sha":"h1","merge_sha":"m1","started":true,"has_build_metadata":true,"build_metadata":{"version":1,"kind":"final","repository":"azylman/aerial","run_id":9,"source_sha":"m1","pr_number":null,"selected":null}}`
+	const lifecycleBody = `{"found":true,"status":"merged","head_sha":"h1","merge_sha":"m1","started":true,"has_build_metadata":true,"build_metadata":{"version":1,"kind":"final","repository":"acme/aerial","run_id":9,"source_sha":"m1","pr_number":null,"selected":null}}`
 	tests := []struct {
 		name         string
 		unconfigured bool
@@ -121,7 +121,7 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 		wantCalls    int
 		want         prwire.BuildLifecycle
 	}{
-		{name: "lifecycle round-trips", repo: "aerial", pr: 7, status: 200, body: lifecycleBody, wantCalls: 1, want: prwire.BuildLifecycle{Found: true, Status: "merged", HeadSHA: "h1", MergeSHA: "m1", Started: true, HasBuildMetadata: true, BuildMetadata: &prwire.BuildMetadata{Version: 1, Kind: "final", Repository: "azylman/aerial", RunID: 9, SourceSHA: "m1"}}},
+		{name: "lifecycle round-trips", repo: "aerial", pr: 7, status: 200, body: lifecycleBody, wantCalls: 1, want: prwire.BuildLifecycle{Found: true, Status: "merged", HeadSHA: "h1", MergeSHA: "m1", Started: true, HasBuildMetadata: true, BuildMetadata: &prwire.BuildMetadata{Version: 1, Kind: "final", Repository: "acme/aerial", RunID: 9, SourceSHA: "m1"}}},
 		{name: "unknown pr is zero", repo: "aerial", pr: 7, status: 200, body: `{"found":false,"status":"","head_sha":"","merge_sha":"","started":false,"has_build_metadata":false}`, wantCalls: 1},
 		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "HTTP 500", wantCalls: 1},
 		{name: "empty repo rejected without request", pr: 7, wantErrSub: "required"},
@@ -144,7 +144,7 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 			if (got.BuildMetadata == nil) != (tc.want.BuildMetadata == nil) || (got.BuildMetadata != nil && (got.BuildMetadata.RunID != tc.want.BuildMetadata.RunID || got.BuildMetadata.SourceSHA != tc.want.BuildMetadata.SourceSHA)) {
 				t.Fatalf("BuildMetadata = %+v, want %+v", got.BuildMetadata, tc.want.BuildMetadata)
 			}
-			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/azylman%2Faerial%237/GetBuildLifecycle", "{}")
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/acme%2Faerial%237/GetBuildLifecycle", "{}")
 		})
 	}
 }
@@ -185,7 +185,7 @@ func TestClientRetryReadiness(t *testing.T) {
 			if got.Status != tc.wantStatus || len(got.Requests) != tc.wantRequests {
 				t.Fatalf("RetryReadiness() = %+v, want status %d with %d requests", got, tc.wantStatus, tc.wantRequests)
 			}
-			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/azylman%2Faerial%237/RetryReadiness", wantBody)
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/acme%2Faerial%237/RetryReadiness", wantBody)
 		})
 	}
 }
@@ -195,13 +195,13 @@ func TestIdempotencyPayload(t *testing.T) {
 	req := func(ns, at string) map[string]prwire.KustomizationRequest {
 		return map[string]prwire.KustomizationRequest{"aerial-core": {Namespace: ns, RequestedAt: at}}
 	}
-	base := prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, Jobs: []string{"eri"}, KustomizationRequests: req("flux-system", "2026-11-20T00:00:00Z")}
+	base := prwire.PREvent{Repo: "acme/aerial", PRNumber: 7, Jobs: []string{"eri"}, KustomizationRequests: req("flux-system", "2026-11-20T00:00:00Z")}
 	retried := base
 	retried.KustomizationRequests = req("flux-system", "2026-11-20T00:05:00Z")
 	otherNS := base
 	otherNS.KustomizationRequests = req("apps", "2026-11-20T00:00:00Z")
 	fact := func(at time.Time, status string) prwire.PREvent {
-		return prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, Facts: []pubsub.PRLifecycleEvent{{Event: "conflict", HeadSHA: "h1", Status: status, OccurredAt: at}}}
+		return prwire.PREvent{Repo: "acme/aerial", PRNumber: 7, Facts: []pubsub.PRLifecycleEvent{{Event: "conflict", HeadSHA: "h1", Status: status, OccurredAt: at}}}
 	}
 	t0 := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -211,8 +211,8 @@ func TestIdempotencyPayload(t *testing.T) {
 	}{
 		{name: "retry with new requested_at dedups", a: base, b: retried, wantSame: true},
 		{name: "different namespace does not dedup", a: base, b: otherNS, wantSame: false},
-		{name: "repo events digest as sent", a: prwire.RepoEvent{Repo: "azylman/aerial", MainSHA: "a"}, b: prwire.RepoEvent{Repo: "azylman/aerial", MainSHA: "b"}, wantSame: false},
-		{name: "events without requests digest as sent", a: prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7}, b: prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7}, wantSame: true},
+		{name: "repo events digest as sent", a: prwire.RepoEvent{Repo: "acme/aerial", MainSHA: "a"}, b: prwire.RepoEvent{Repo: "acme/aerial", MainSHA: "b"}, wantSame: false},
+		{name: "events without requests digest as sent", a: prwire.PREvent{Repo: "acme/aerial", PRNumber: 7}, b: prwire.PREvent{Repo: "acme/aerial", PRNumber: 7}, wantSame: true},
 		{name: "fact retry with new occurred_at dedups", a: fact(t0, "conflict"), b: fact(t0.Add(time.Minute), "conflict"), wantSame: true},
 		{name: "different fact body does not dedup", a: fact(t0, "conflict"), b: fact(t0, "open"), wantSame: false},
 	}
@@ -239,9 +239,9 @@ func TestDigestShape(t *testing.T) {
 		payload any
 		want    string
 	}{
-		{name: "pr event digests in the pre-prwire field order", payload: prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, Agent: "agent-alpha", Jobs: []string{"eri"}, AutoUpdate: &prwire.AutoUpdatePolicy{DefaultOwner: true}}, want: `{"event":"","repo":"azylman/aerial","pr_number":7,"head_sha":"","merge_sha":"","check_name":"","job_name":"","branch":"","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"agent-alpha","jobs":["eri"],"auto_update":{"default_owner":true}}`},
-		{name: "sha event wraps the pre-prwire pr event with an empty agent key", payload: prwire.SHAEvent{Repo: "azylman/aerial", SHA: "abc", Handler: "HandleMerged", Event: prwire.PREvent{Repo: "azylman/aerial", MergeSHA: "abc"}}, want: `{"repo":"azylman/aerial","sha":"abc","handler":"HandleMerged","event":{"event":"","repo":"azylman/aerial","pr_number":0,"head_sha":"","merge_sha":"abc","check_name":"","job_name":"","branch":"","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":""}}`},
-		{name: "repo event digests as sent", payload: prwire.RepoEvent{Repo: "azylman/aerial", MainSHA: "a"}, want: `{"repo":"azylman/aerial","main_sha":"a","generation":0,"pr_number":0,"head_sha":""}`},
+		{name: "pr event digests in the pre-prwire field order", payload: prwire.PREvent{Repo: "acme/aerial", PRNumber: 7, Agent: "agent-alpha", Jobs: []string{"eri"}, AutoUpdate: &prwire.AutoUpdatePolicy{DefaultOwner: true}}, want: `{"event":"","repo":"acme/aerial","pr_number":7,"head_sha":"","merge_sha":"","check_name":"","job_name":"","branch":"","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"agent-alpha","jobs":["eri"],"auto_update":{"default_owner":true}}`},
+		{name: "sha event wraps the pre-prwire pr event with an empty agent key", payload: prwire.SHAEvent{Repo: "acme/aerial", SHA: "abc", Handler: "HandleMerged", Event: prwire.PREvent{Repo: "acme/aerial", MergeSHA: "abc"}}, want: `{"repo":"acme/aerial","sha":"abc","handler":"HandleMerged","event":{"event":"","repo":"acme/aerial","pr_number":0,"head_sha":"","merge_sha":"abc","check_name":"","job_name":"","branch":"","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":""}}`},
+		{name: "repo event digests as sent", payload: prwire.RepoEvent{Repo: "acme/aerial", MainSHA: "a"}, want: `{"repo":"acme/aerial","main_sha":"a","generation":0,"pr_number":0,"head_sha":""}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,13 +272,13 @@ func TestClientSendSHAEvent(t *testing.T) {
 		wantPath     string
 		wantBodySub  string
 	}{
-		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: prwire.PREvent{HeadSHA: sha, CheckName: "ci"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"azylman/aerial","pr_number":0`},
-		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: prwire.PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandlePushBySHA/send", wantBodySub: `"merge_sha":"0123456789abcdef0123456789abcdef01234567"`},
+		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: prwire.PREvent{HeadSHA: sha, CheckName: "ci"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/acme%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"acme/aerial","pr_number":0`},
+		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: prwire.PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/acme%2Faerial/HandlePushBySHA/send", wantBodySub: `"merge_sha":"0123456789abcdef0123456789abcdef01234567"`},
 		{name: "unknown sha handler rejected without request", handler: "HandleMainPush", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "unknown repo sha handler", wantTerminal: true},
 		{name: "unroutable pr handler rejected without request", handler: "HandleCheckRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckStatus"}, wantErrSub: "not routable", wantTerminal: true},
 		{name: "zero sha rejected without request", handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: "0000000", Handler: "HandleMerged"}, wantErrSub: "sha is required", wantTerminal: true},
 		{name: "empty repo rejected without request", handler: "HandlePushBySHA", ev: prwire.SHAEvent{SHA: sha, Handler: "HandleMerged"}, wantErrSub: "repo is required", wantTerminal: true},
-		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "HTTP 500", wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleWorkflowRunBySHA/send"},
+		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "HTTP 500", wantCalls: 1, wantPath: "/RepoObject/acme%2Faerial/HandleWorkflowRunBySHA/send"},
 		{name: "unconfigured fails closed", unconfigured: true, handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "not configured"},
 	}
 	for _, tc := range tests {
@@ -340,14 +340,14 @@ func TestClientResolvePRBySHA(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("ResolvePRBySHA() = %+v, want %+v", got, tc.want)
 			}
-			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/RepoObject/azylman%2Faerial/ResolvePRBySHA", `"sha":"abc"`)
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/RepoObject/acme%2Faerial/ResolvePRBySHA", `"sha":"abc"`)
 		})
 	}
 }
 
 func TestClientGetDeployView(t *testing.T) {
 	t.Parallel()
-	const viewBody = `{"found":true,"repo":"azylman/aerial","pr_number":7,"status":"deploying","branch":"feat/x","head_sha":"h1","merge_sha":"m1","target_id":"123456789012345678","kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["core"],"has_expected_deploy_jobs":true}`
+	const viewBody = `{"found":true,"repo":"acme/aerial","pr_number":7,"status":"deploying","branch":"feat/x","head_sha":"h1","merge_sha":"m1","target_id":"123456789012345678","kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["core"],"has_expected_deploy_jobs":true}`
 	tests := []struct {
 		name         string
 		unconfigured bool
@@ -362,7 +362,7 @@ func TestClientGetDeployView(t *testing.T) {
 		{
 			name: "view round-trips", repo: "aerial", pr: 7, status: 200, body: viewBody, wantCalls: 1,
 			want: prwire.DeployView{
-				Found: true, Repo: "azylman/aerial", PRNumber: 7, Status: "deploying", Branch: "feat/x", HeadSHA: "h1", MergeSHA: "m1", TargetID: "123456789012345678",
+				Found: true, Repo: "acme/aerial", PRNumber: 7, Status: "deploying", Branch: "feat/x", HeadSHA: "h1", MergeSHA: "m1", TargetID: "123456789012345678",
 				KustomizationRequests: map[string]prwire.KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t1"}}, DeployedKustomizations: []string{"core"}, HasExpectedDeployJobs: true,
 			},
 		},
@@ -384,7 +384,7 @@ func TestClientGetDeployView(t *testing.T) {
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("GetDeployView() = %+v, want %+v", got, tc.want)
 			}
-			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/azylman%2Faerial%237/GetDeployView", "{}")
+			assertRegistryCall(t, calls, &mu, tc.wantCalls, "/PRObject/acme%2Faerial%237/GetDeployView", "{}")
 		})
 	}
 }
@@ -400,7 +400,7 @@ func TestClientListRollouts(t *testing.T) {
 		wantCalls    int
 		want         []prwire.RolloutRef
 	}{
-		{name: "rollouts round-trip", status: 200, body: `{"rollouts":[{"repo":"azylman/aerial","pr_number":7}]}`, wantCalls: 1, want: []prwire.RolloutRef{{Repo: "azylman/aerial", PRNumber: 7}}},
+		{name: "rollouts round-trip", status: 200, body: `{"rollouts":[{"repo":"acme/aerial","pr_number":7}]}`, wantCalls: 1, want: []prwire.RolloutRef{{Repo: "acme/aerial", PRNumber: 7}}},
 		{name: "empty index", status: 200, body: `{"rollouts":null}`, wantCalls: 1},
 		{name: "undecodable body surfaces", status: 200, body: `nope`, wantErrSub: "decode", wantCalls: 1},
 		{name: "unconfigured fails closed", unconfigured: true, wantErrSub: "not configured"},

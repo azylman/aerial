@@ -67,82 +67,76 @@ func TestTracker(t *testing.T) {
 	}
 }
 
-func TestFormatAndClassifyVMAlert(t *testing.T) {
+func TestVMAlertFingerprint(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{name: "nil labels", labels: nil, want: "unknown"},
+		{name: "empty labels", labels: map[string]string{}, want: "unknown"},
+		{name: "single pair", labels: map[string]string{"alertname": "PostgresDeadlocks"}, want: "9:alertname=17:PostgresDeadlocks;"},
+		{name: "multiple pairs sorted", labels: map[string]string{"severity": "critical", "alertname": "PostgresDeadlocks", "job": "postgres-cnpg"}, want: "9:alertname=17:PostgresDeadlocks;3:job=13:postgres-cnpg;8:severity=8:critical;"},
+		{name: "separator inside a value stays length-prefixed", labels: map[string]string{"alertname": "A", "instance": "x,job=y", "severity": "critical"}, want: "9:alertname=1:A;8:instance=7:x,job=y;8:severity=8:critical;"},
+		{name: "split labels differ from the joined value", labels: map[string]string{"alertname": "A", "instance": "x", "job": "y", "severity": "critical"}, want: "9:alertname=1:A;8:instance=1:x;3:job=1:y;8:severity=8:critical;"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := VMAlertFingerprint(tc.labels); got != tc.want {
+				t.Fatalf("VMAlertFingerprint() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
-	t.Run("fingerprint", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name   string
-			labels map[string]string
-			want   string
-		}{
-			{name: "nil labels", labels: nil, want: "unknown"},
-			{name: "empty labels", labels: map[string]string{}, want: "unknown"},
-			{name: "single pair", labels: map[string]string{"alertname": "PostgresDeadlocks"}, want: "9:alertname=17:PostgresDeadlocks;"},
-			{name: "multiple pairs sorted", labels: map[string]string{"severity": "critical", "alertname": "PostgresDeadlocks", "job": "postgres-cnpg"}, want: "9:alertname=17:PostgresDeadlocks;3:job=13:postgres-cnpg;8:severity=8:critical;"},
-			{name: "collision resistance", labels: map[string]string{"alertname": "A", "instance": "x,job=y", "severity": "critical"}, want: "9:alertname=1:A;8:instance=7:x,job=y;8:severity=8:critical;"},
-		}
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				if got := VMAlertFingerprint(tc.labels); got != tc.want {
-					t.Fatalf("VMAlertFingerprint() = %q, want %q", got, tc.want)
-				}
-			})
-		}
-		if VMAlertFingerprint(map[string]string{"alertname": "A", "instance": "x,job=y", "severity": "critical"}) == VMAlertFingerprint(map[string]string{"alertname": "A", "instance": "x", "job": "y", "severity": "critical"}) {
-			t.Fatalf("expected distinct fingerprints for distinct label sets")
-		}
-	})
+func TestIsVMAlertResolved(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		alert VMAlertNotification
+		want  bool
+	}{
+		{name: "status resolved lowercase", alert: VMAlertNotification{Status: "resolved"}, want: true},
+		{name: "status RESOLVED uppercase", alert: VMAlertNotification{Status: "RESOLVED"}, want: true},
+		{name: "status firing is not resolved", alert: VMAlertNotification{Status: "firing"}, want: false},
+		{name: "empty status with zero endsAt is not resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute)}, want: false},
+		{name: "empty status with endsAt in future is not resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute), EndsAt: now.Add(10 * time.Minute)}, want: false},
+		{name: "empty status with endsAt before startsAt is resolved", alert: VMAlertNotification{StartsAt: now.Add(10 * time.Minute), EndsAt: now}, want: true},
+		{name: "empty status with endsAt equal to startsAt is resolved", alert: VMAlertNotification{StartsAt: now.Add(-5 * time.Minute), EndsAt: now.Add(-5 * time.Minute)}, want: true},
+		{name: "empty status with endsAt in past is resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute), EndsAt: now.Add(-1 * time.Minute)}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsVMAlertResolved(tc.alert, now); got != tc.want {
+				t.Fatalf("IsVMAlertResolved() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
-	t.Run("isResolved", func(t *testing.T) {
-		t.Parallel()
-		now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
-		tests := []struct {
-			name  string
-			alert VMAlertNotification
-			want  bool
-		}{
-			{name: "status resolved lowercase", alert: VMAlertNotification{Status: "resolved"}, want: true},
-			{name: "status RESOLVED uppercase", alert: VMAlertNotification{Status: "RESOLVED"}, want: true},
-			{name: "status firing is not resolved", alert: VMAlertNotification{Status: "firing"}, want: false},
-			{name: "empty status with zero endsAt is not resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute)}, want: false},
-			{name: "empty status with endsAt in future is not resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute), EndsAt: now.Add(10 * time.Minute)}, want: false},
-			{name: "empty status with endsAt before startsAt is resolved", alert: VMAlertNotification{StartsAt: now.Add(10 * time.Minute), EndsAt: now}, want: true},
-			{name: "empty status with endsAt equal to startsAt is resolved", alert: VMAlertNotification{StartsAt: now.Add(-5 * time.Minute), EndsAt: now.Add(-5 * time.Minute)}, want: true},
-			{name: "empty status with endsAt in past is resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute), EndsAt: now.Add(-1 * time.Minute)}, want: true},
-		}
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				if got := IsVMAlertResolved(tc.alert, now); got != tc.want {
-					t.Fatalf("IsVMAlertResolved() = %v, want %v", got, tc.want)
-				}
-			})
-		}
-	})
-
-	t.Run("formatMessage", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name  string
-			alert VMAlertNotification
-			want  string
-		}{
-			{name: "defaults with no labels or annotations", alert: VMAlertNotification{}, want: "🚨 **[ALERT: UnnamedAlert]** (warning)"},
-			{name: "custom alertname and severity with summary", alert: VMAlertNotification{Labels: map[string]string{"alertname": "PostgresDeadlocks", "severity": "critical"}, Annotations: map[string]string{"summary": "deadlocks detected"}}, want: "🚨 **[ALERT: PostgresDeadlocks]** (critical)\ndeadlocks detected"},
-			{name: "falls back to description if summary empty", alert: VMAlertNotification{Labels: map[string]string{"alertname": "PostgresDeadlocks", "severity": "critical"}, Annotations: map[string]string{"description": "postgres deadlock description"}}, want: "🚨 **[ALERT: PostgresDeadlocks]** (critical)\npostgres deadlock description"},
-		}
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				if got := FormatVMAlertMessage(tc.alert); got != tc.want {
-					t.Fatalf("FormatVMAlertMessage() = %q, want %q", got, tc.want)
-				}
-			})
-		}
-	})
+func TestFormatVMAlertMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		alert VMAlertNotification
+		want  string
+	}{
+		{name: "defaults with no labels or annotations", alert: VMAlertNotification{}, want: "🚨 **[ALERT: UnnamedAlert]** (warning)"},
+		{name: "custom alertname and severity with summary", alert: VMAlertNotification{Labels: map[string]string{"alertname": "PostgresDeadlocks", "severity": "critical"}, Annotations: map[string]string{"summary": "deadlocks detected"}}, want: "🚨 **[ALERT: PostgresDeadlocks]** (critical)\ndeadlocks detected"},
+		{name: "falls back to description if summary empty", alert: VMAlertNotification{Labels: map[string]string{"alertname": "PostgresDeadlocks", "severity": "critical"}, Annotations: map[string]string{"description": "postgres deadlock description"}}, want: "🚨 **[ALERT: PostgresDeadlocks]** (critical)\npostgres deadlock description"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatVMAlertMessage(tc.alert); got != tc.want {
+				t.Fatalf("FormatVMAlertMessage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestFireEventTriggers(t *testing.T) {
@@ -165,10 +159,10 @@ func TestFireEventTriggers(t *testing.T) {
 		},
 		{
 			name:             "fires triggers via bus with context header",
-			targets:          []string{"azylman/aerial"},
-			contextHeader:    "GitHub ci_passed on azylman/aerial",
+			targets:          []string{"acme/aerial"},
+			contextHeader:    "GitHub ci_passed on acme/aerial",
 			wantFired:        1,
-			wantHeaderSubstr: "GitHub ci_passed on azylman/aerial",
+			wantHeaderSubstr: "GitHub ci_passed on acme/aerial",
 		},
 	}
 
@@ -227,7 +221,7 @@ func TestEvaluateFluxEventTriggers(t *testing.T) {
 			name: "unsupported event ignored",
 			evt: model.DeployEvent{
 				Event: "sync_started",
-				Repo:  "azylman/aerial",
+				Repo:  "acme/aerial",
 			},
 			wantFired: false,
 		},
@@ -243,21 +237,21 @@ func TestEvaluateFluxEventTriggers(t *testing.T) {
 			name: "sync_success fires with generated prompt",
 			evt: model.DeployEvent{
 				Event: "sync_success",
-				Repo:  "azylman/aerial",
+				Repo:  "acme/aerial",
 			},
 			wantFired:     true,
-			wantTarget:    "azylman/aerial",
+			wantTarget:    "acme/aerial",
 			wantEventType: "sync_success",
 		},
 		{
 			name: "sync_failed with details includes details in prompt",
 			evt: model.DeployEvent{
 				Event:   "sync_failed",
-				Repo:    "azylman/mirrormere",
+				Repo:    "acme/mirrormere",
 				Details: "kustomization failed to apply",
 			},
 			wantFired:     true,
-			wantTarget:    "azylman/mirrormere",
+			wantTarget:    "acme/mirrormere",
 			wantEventType: "sync_failed",
 		},
 	}
@@ -474,7 +468,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 			name: "unsupported event type is no-op",
 			res: &ResolvedGitHubEvent{
 				Event: "ping",
-				Repo:  "azylman/aerial",
+				Repo:  "acme/aerial",
 			},
 			wantFired: false,
 		},
@@ -484,13 +478,13 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 				Event:  "pull_request",
 				Action: "closed",
 				Merged: true,
-				Repo:   "azylman/aerial",
+				Repo:   "acme/aerial",
 				Branch: "refs/heads/feat/trigger-eval",
 			},
 			wantFired:     true,
 			wantSource:    "github",
 			wantEventType: "pr_merged",
-			wantTargets:   []string{"azylman/aerial", "azylman/aerial:feat/trigger-eval"},
+			wantTargets:   []string{"acme/aerial", "acme/aerial:feat/trigger-eval"},
 		},
 		{
 			name: "pull_request closed unmerged does not fire",
@@ -498,7 +492,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 				Event:  "pull_request",
 				Action: "closed",
 				Merged: false,
-				Repo:   "azylman/aerial",
+				Repo:   "acme/aerial",
 				Branch: "refs/heads/feat/trigger-eval",
 			},
 			wantFired: false,
@@ -509,14 +503,14 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 				Event:      "check_run",
 				Action:     "completed",
 				Conclusion: "success",
-				Repo:       " azylman/aerial ",
+				Repo:       " acme/aerial ",
 				Branch:     "",
 			},
 			body:          `{"check_run":{"check_suite":{"head_branch":"refs/heads/feat/auto-extract"}}}`,
 			wantFired:     true,
 			wantSource:    "github",
 			wantEventType: "ci_passed",
-			wantTargets:   []string{"azylman/aerial", "azylman/aerial:feat/auto-extract"},
+			wantTargets:   []string{"acme/aerial", "acme/aerial:feat/auto-extract"},
 		},
 		{
 			name: "workflow_run completed failure with qualified repo",
@@ -524,13 +518,13 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 				Event:      "workflow_run",
 				Action:     "completed",
 				Conclusion: "failure",
-				Repo:       "azylman/aerial",
+				Repo:       "acme/aerial",
 				Branch:     "",
 			},
 			wantFired:     true,
 			wantSource:    "github",
 			wantEventType: "ci_failed",
-			wantTargets:   []string{"azylman/aerial"},
+			wantTargets:   []string{"acme/aerial"},
 		},
 	}
 
