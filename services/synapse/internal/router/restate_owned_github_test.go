@@ -127,7 +127,7 @@ func (h *ownedHarness) effectCount() int {
 	h.bus.mu.Unlock()
 	h.disp.mu.Lock()
 	defer h.disp.mu.Unlock()
-	return n + len(h.disp.gitPushCalls) + len(h.disp.promptCalls) + len(h.disp.dispatchCalls) + len(h.disp.directMessageCalls) + len(h.disp.promoteCalls) + len(h.disp.reconcileCalls)
+	return n + len(h.disp.promptCalls) + len(h.disp.dispatchCalls) + len(h.disp.directMessageCalls) + len(h.disp.reconcileCalls)
 }
 
 // assertEdgeOnly checks the exact Restate sends (each body containing its

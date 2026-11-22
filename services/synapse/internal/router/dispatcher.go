@@ -18,11 +18,10 @@ import (
 // client and to the one ericlient.Client that owns eri dispatch, its HTTP
 // clients and its retry bounds.
 type DefaultOutboundDispatcher struct {
-	fluxReceiverURL string
-	kubeAPIServer   string
-	kubeToken       string
-	httpClient      *http.Client
-	cfgSrc          ConfigSource
+	kubeAPIServer string
+	kubeToken     string
+	httpClient    *http.Client
+	cfgSrc        ConfigSource
 
 	kubeClient *kube.Client
 	eriClient  *ericlient.Client
@@ -70,33 +69,10 @@ func (d *DefaultOutboundDispatcher) resolveEriURL(agent string) string {
 func (d *DefaultOutboundDispatcher) ensureClients() {
 	if d.kubeClient == nil {
 		d.kubeClient = kube.NewClient(d.httpClient)
-		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
 		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
 	}
 	if d.eriClient == nil {
 		d.eriClient = ericlient.NewClient("", d.httpClient)
-	}
-}
-
-func isFluxEventServerRootURL(rawURL string) bool {
-	_, rest, ok := strings.Cut(strings.ToLower(strings.TrimSpace(rawURL)), "://")
-	if !ok {
-		return false
-	}
-	hostPort, path, _ := strings.Cut(rest, "/")
-	host, _, _ := strings.Cut(hostPort, ":")
-	return (host == "notification-controller" || strings.HasPrefix(host, "notification-controller.")) && strings.Trim(path, "/") == ""
-}
-
-func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(receiverURL string) {
-	trimmed := strings.TrimRight(strings.TrimSpace(receiverURL), "/")
-	if isFluxEventServerRootURL(trimmed) {
-		d.fluxReceiverURL = ""
-	} else {
-		d.fluxReceiverURL = trimmed
-	}
-	if d.kubeClient != nil {
-		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
 	}
 }
 
@@ -123,16 +99,6 @@ func (d *DefaultOutboundDispatcher) APIServer() string {
 func (d *DefaultOutboundDispatcher) RetryDelay() time.Duration {
 	d.ensureClients()
 	return d.kubeClient.RetryDelay()
-}
-
-func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	d.ensureClients()
-	return d.kubeClient.DispatchGitPush(ctx, req)
-}
-
-func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
-	d.ensureClients()
-	return d.kubeClient.PromoteImageTag(ctx, req)
 }
 
 func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error) {

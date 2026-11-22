@@ -8,14 +8,11 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 type mockOutboundDispatcher struct {
 	mu                           sync.Mutex
-	gitPushCalls                 []GitPushEventRequest
-	promoteCalls                 []ImageReadyEventRequest
 	reconcileCalls               []fluxKustomizationRef
 	reconcileRequestedAts        []string
 	promptCalls                  []PromptRequest
@@ -24,8 +21,6 @@ type mockOutboundDispatcher struct {
 	discordMessageCalls          []DiscordMessageIngressRequest
 	discordInteractionCalls      []*discordgo.Interaction
 	discordInteractionAgentCalls []string
-	gitPushErr                   error
-	promoteErr                   error
 	discoverErr                  error
 	reconcileErrs                map[string]error
 	sourceRepo                   string
@@ -46,13 +41,6 @@ type mockOutboundDispatcher struct {
 	repoDiscoverErr              error
 }
 
-func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	m.mu.Lock()
-	m.gitPushCalls = append(m.gitPushCalls, req)
-	m.mu.Unlock()
-	return m.gitPushErr
-}
-
 func (m *mockOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -68,17 +56,6 @@ func (m *mockOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context
 		}
 	}
 	return refs, nil
-}
-
-func (m *mockOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.promoteCalls = append(m.promoteCalls, req)
-	if m.promoteErr != nil {
-		return "", m.promoteErr
-	}
-	_, _, workload := kube.ResolveImageTag(req.Repo, req.Image)
-	return workload, nil
 }
 
 func (m *mockOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
@@ -111,18 +88,6 @@ func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req 
 	m.directMessageCalls = append(m.directMessageCalls, req)
 	m.mu.Unlock()
 	return m.directMessageErr
-}
-
-func (m *mockOutboundDispatcher) GitPushCalls() []GitPushEventRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]GitPushEventRequest(nil), m.gitPushCalls...)
-}
-
-func (m *mockOutboundDispatcher) PromoteCalls() []ImageReadyEventRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]ImageReadyEventRequest(nil), m.promoteCalls...)
 }
 
 func (m *mockOutboundDispatcher) ReconcileCalls() []fluxKustomizationRef {

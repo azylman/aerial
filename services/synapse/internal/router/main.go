@@ -712,7 +712,6 @@ func RunServer(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config], o
 	})))
 	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)
 	dispatcher.SetConfigSource(cfgSrc)
-	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
 	dispatcher.SetKubeConfig(cfg.KubeAPIServer, cfg.KubeToken)
 	server.SetDispatcher(dispatcher)
 

@@ -87,6 +87,29 @@ func TestBuildMetadataValidationCases(t *testing.T) {
 	}
 }
 
+func TestIsBuildMetadataCheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		check string
+		want  bool
+	}{
+		{"manifest check", "build-metadata", true},
+		{"result check", "build-metadata-result", true},
+		{"other check", "roborev", false},
+		{"case differs", "Build-Metadata", false},
+		{"empty", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBuildMetadataCheck(tc.check); got != tc.want {
+				t.Fatalf("IsBuildMetadataCheck(%q) = %v, want %v", tc.check, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidWorkflowPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

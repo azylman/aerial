@@ -39,7 +39,6 @@ type Config struct {
 	RestateURL           string
 	RestatePRService     string
 	RestateRepoService   string
-	FluxReceiverURL      string
 	BrainURL             string
 	EriURL               string
 	NATSURL              string
@@ -65,7 +64,6 @@ type CollaboratorCIAlertRule struct {
 type RouterYAMLConfig struct {
 	LegacyBuildWorkflows []LegacyBuildWorkflow `yaml:"legacy_build_workflows"`
 	Port                 string                `yaml:"port"`
-	FluxReceiverURL      string                `yaml:"flux_receiver_url"`
 	EriURL               string                `yaml:"eri_url"`
 	NATSURL              string                `yaml:"nats_url"`
 	// RestateURL is the Restate ingress synapse sends every PR lifecycle
@@ -238,7 +236,6 @@ func RestartRequired(old, next *Config) bool {
 		old.DiscordToken != next.DiscordToken ||
 		old.BotID != next.BotID ||
 		old.BrainURL != next.BrainURL ||
-		old.FluxReceiverURL != next.FluxReceiverURL ||
 		old.KubeAPIServer != next.KubeAPIServer ||
 		old.KubeToken != next.KubeToken ||
 		old.NATSURL != next.NATSURL ||
@@ -526,7 +523,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		GitHubAPIURL:         strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		GitHubCredential:     ghCredential,
 		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		FluxReceiverURL:      strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
 		BrainURL:             eriURL,
 		EriURL:               eriURL,
 		NATSURL:              strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),

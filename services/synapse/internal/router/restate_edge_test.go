@@ -128,8 +128,8 @@ func (e *acceptEdge) run(ctx context.Context, t *testing.T, steps []paritySynaps
 func (e *acceptEdge) synapseEffects() int {
 	e.disp.mu.Lock()
 	defer e.disp.mu.Unlock()
-	return e.bus.factCount() + len(e.disp.gitPushCalls) + len(e.disp.promptCalls) + len(e.disp.dispatchCalls) +
-		len(e.disp.directMessageCalls) + len(e.disp.promoteCalls) + len(e.disp.reconcileCalls)
+	return e.bus.factCount() + len(e.disp.promptCalls) + len(e.disp.dispatchCalls) +
+		len(e.disp.directMessageCalls) + len(e.disp.reconcileCalls)
 }
 
 // ownedHandlers counts the Restate writes by handler (one-way sends plus

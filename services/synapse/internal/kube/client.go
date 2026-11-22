@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -61,14 +62,16 @@ var (
 	}
 )
 
-// Client handles Kubernetes API interactions and Flux receiver webhooks.
+// Client lists and watches Flux Kustomizations, workloads, ConfigMaps and
+// GitRepositories. Writes are limited to Kustomization reconcile requests.
 type Client struct {
-	fluxReceiverURL string
-	kubeAPIServer   string
-	kubeToken       string
-	httpClient      *http.Client
-	retryDelay      time.Duration
-	maxAttempts     int
+	kubeAPIServer string
+	kubeToken     string
+	httpClient    *http.Client
+	apiClient     *http.Client
+	tokenSource   *k8sauth.TokenSource
+	retryDelay    time.Duration
+	maxAttempts   int
 }
 
 // NewClient constructs a new Client with optional custom http.Client.
@@ -76,8 +79,11 @@ func NewClient(client *http.Client) *Client {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
+	httpClient := tracing.Client(client)
 	return &Client{
-		httpClient:  tracing.Client(client),
+		httpClient:  httpClient,
+		apiClient:   httpClient,
+		tokenSource: k8sauth.NewTokenSource(k8sauth.DefaultTokenPath, nil),
 		retryDelay:  1500 * time.Millisecond,
 		maxAttempts: 6,
 	}
@@ -99,256 +105,24 @@ func (c *Client) APIServer() string {
 	return c.kubeAPIServer
 }
 
-func isFluxEventServerRootURL(rawURL string) bool {
-	_, rest, ok := strings.Cut(strings.ToLower(strings.TrimSpace(rawURL)), "://")
-	if !ok {
-		return false
-	}
-	hostPort, path, _ := strings.Cut(rest, "/")
-	host, _, _ := strings.Cut(hostPort, ":")
-	return (host == "notification-controller" || strings.HasPrefix(host, "notification-controller.")) && strings.Trim(path, "/") == ""
-}
-
-// SetFluxReceiverURL configures the Flux notification controller receiver webhook URL.
-func (c *Client) SetFluxReceiverURL(receiverURL string) {
-	trimmed := strings.TrimRight(strings.TrimSpace(receiverURL), "/")
-	if isFluxEventServerRootURL(trimmed) {
-		c.fluxReceiverURL = ""
-		return
-	}
-	c.fluxReceiverURL = trimmed
-}
-
-// SetKubeConfig sets the Kubernetes API server endpoint and service account bearer token.
+// SetKubeConfig sets the Kubernetes API server endpoint and an explicit
+// bearer token, and builds the API server HTTP client once for every request.
+// An empty token falls back to the mounted service account token.
 func (c *Client) SetKubeConfig(apiServer, token string) {
 	c.kubeAPIServer = strings.TrimRight(apiServer, "/")
 	c.kubeToken = strings.TrimSpace(token)
+	c.apiClient = k8sauth.NewAPIServerClient(c.kubeAPIServer, c.httpClient, k8sauth.DefaultCAPath)
 }
 
 func (c *Client) getKubeToken() string {
-	return GetKubeServiceAccountToken(c.kubeToken)
-}
-
-func (c *Client) forwardFluxReceiver(ctx context.Context, payload any) error {
-	if c.fluxReceiverURL == "" {
-		return nil
+	if c.kubeToken != "" {
+		return c.kubeToken
 	}
-	bodyBytes, err := json.Marshal(payload)
+	token, err := c.tokenSource.Token()
 	if err != nil {
-		return fmt.Errorf("marshal flux receiver payload: %w", err)
+		return ""
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.fluxReceiverURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("create flux receiver request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("flux receiver request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr != nil {
-			return fmt.Errorf("flux receiver returned status %d", resp.StatusCode)
-		}
-		return fmt.Errorf("flux receiver returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
-}
-
-// DispatchGitPush forwards a git push event to the Flux notification receiver.
-func (c *Client) DispatchGitPush(ctx context.Context, req model.GitPushEventRequest) error {
-	if c.fluxReceiverURL != "" {
-		return c.forwardFluxReceiver(ctx, req)
-	}
-	return nil
-}
-
-// ExtractImageWorkloadName extracts the base workload name from a container image reference.
-func ExtractImageWorkloadName(imageRef string) string {
-	ref := strings.TrimSpace(imageRef)
-	if lastSlash := strings.LastIndex(ref, "/"); lastSlash != -1 {
-		ref = ref[lastSlash+1:]
-	}
-	if colonIdx := strings.Index(ref, ":"); colonIdx != -1 {
-		ref = ref[:colonIdx]
-	}
-	return strings.TrimSpace(ref)
-}
-
-// ResolveImageTag resolves the ConfigMap tag key, canonical image name, and workload name for a repository and image.
-func ResolveImageTag(repo, imageRef string) (tagKey, imageName, workloadName string) {
-	workloadName = ExtractImageWorkloadName(imageRef)
-	if workloadName == "" || strings.EqualFold(workloadName, "none") {
-		return "", "", ""
-	}
-	switch repo[strings.LastIndex(repo, "/")+1:] {
-	case "aerial":
-		imageName = "aerial-" + strings.TrimPrefix(workloadName, "aerial-")
-	case "aerial-sidecars":
-		imageName = "aerial-sidecar-" + strings.TrimPrefix(workloadName, "aerial-sidecar-")
-	case "mirrormere":
-		if strings.HasPrefix(workloadName, "mirrormere") {
-			imageName = workloadName
-		} else {
-			imageName = "mirrormere-" + workloadName
-		}
-	default:
-		imageName = workloadName
-	}
-	tagKey = "TAG_" + strings.ToUpper(strings.ReplaceAll(imageName, "-", "_"))
-	return tagKey, imageName, workloadName
-}
-
-// IsZeroSHA reports whether sha is empty or consists of forty zero characters.
-func IsZeroSHA(sha string) bool {
-	return sha == "" || sha == "0000000000000000000000000000000000000000"
-}
-
-// PromoteImageTag writes the image tag to the ConfigMap and forwards to the Flux receiver.
-func (c *Client) PromoteImageTag(ctx context.Context, req model.ImageReadyEventRequest) (string, error) {
-	tagKey, _, workloadName := ResolveImageTag(req.Repo, req.Image)
-	if workloadName == "" {
-		return "", nil
-	}
-
-	var kubeSuccess, fluxSuccess bool
-	var kubeErr, fluxErr error
-
-	if c.kubeAPIServer != "" && req.CommitSHA != "" && !IsZeroSHA(req.CommitSHA) {
-		if err := c.upsertImageTagConfigMap(ctx, tagKey, req.CommitSHA); err != nil {
-			kubeErr = fmt.Errorf("upsert image tag configmap: %w", err)
-		} else {
-			kubeSuccess = true
-		}
-	}
-
-	if c.fluxReceiverURL != "" {
-		if err := c.forwardFluxReceiver(ctx, req); err != nil {
-			fluxErr = fmt.Errorf("forward flux receiver: %w", err)
-		} else {
-			fluxSuccess = true
-		}
-	}
-
-	if kubeErr != nil && fluxErr != nil {
-		return "", errors.Join(kubeErr, fluxErr)
-	}
-	if kubeErr != nil && !fluxSuccess {
-		return "", kubeErr
-	}
-	if fluxErr != nil && !kubeSuccess {
-		return "", fluxErr
-	}
-	if kubeSuccess || fluxSuccess {
-		return workloadName, nil
-	}
-	return "", nil
-}
-
-func (c *Client) createOrRetryImageTagConfigMap(ctx context.Context, client *http.Client, token, tagKey, commitSHA string, doPatch func() (int, []byte, error)) error {
-	postBody, err := json.Marshal(map[string]any{
-		"apiVersion": "v1",
-		fieldKind:    kindConfigMap,
-		fieldMetadata: map[string]string{
-			"name":      configMapAerialImageTags,
-			"namespace": "flux-system",
-		},
-		"data": map[string]string{
-			tagKey: strings.TrimSpace(commitSHA),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal configmap post body: %w", err)
-	}
-	postURL := c.kubeAPIServer + "/api/v1/namespaces/flux-system/configmaps"
-	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, postURL, bytes.NewReader(postBody))
-	if err != nil {
-		return fmt.Errorf("create configmap post request: %w", err)
-	}
-	postReq.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		postReq.Header.Set("Authorization", "Bearer "+token)
-	}
-	postResp, err := client.Do(postReq)
-	if err != nil {
-		return fmt.Errorf("configmap post request failed: %w", err)
-	}
-	defer postResp.Body.Close()
-	postRespBody, readErr := io.ReadAll(io.LimitReader(postResp.Body, 64<<10))
-	if readErr != nil {
-		return fmt.Errorf("read configmap post response: %w", readErr)
-	}
-	if postResp.StatusCode >= 200 && postResp.StatusCode < 300 {
-		return nil
-	}
-	if postResp.StatusCode == http.StatusConflict {
-		retryCode, retryBody, retryErr := doPatch()
-		if retryErr != nil {
-			return retryErr
-		}
-		if retryCode >= 200 && retryCode < 300 {
-			return nil
-		}
-		return fmt.Errorf("configmap retry patch returned status %d: %s", retryCode, string(retryBody))
-	}
-	return fmt.Errorf("configmap post returned status %d: %s", postResp.StatusCode, string(postRespBody))
-}
-
-func (c *Client) upsertImageTagConfigMap(ctx context.Context, tagKey, commitSHA string) error {
-	apiServer := c.kubeAPIServer
-	token := c.getKubeToken()
-	client := GetK8sHTTPClient(apiServer, c.httpClient)
-
-	patchBody, err := json.Marshal(map[string]any{
-		"apiVersion": "v1",
-		fieldKind:    kindConfigMap,
-		fieldMetadata: map[string]string{
-			"name":      configMapAerialImageTags,
-			"namespace": "flux-system",
-		},
-		"data": map[string]string{
-			tagKey: strings.TrimSpace(commitSHA),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal configmap patch body: %w", err)
-	}
-
-	patchURL := apiServer + "/api/v1/namespaces/flux-system/configmaps/" + configMapAerialImageTags
-	doPatch := func() (int, []byte, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, patchURL, bytes.NewReader(patchBody))
-		if reqErr != nil {
-			return 0, nil, fmt.Errorf("create configmap patch request: %w", reqErr)
-		}
-		req.Header.Set("Content-Type", "application/strategic-merge-patch+json")
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		resp, respErr := client.Do(req)
-		if respErr != nil {
-			return 0, nil, fmt.Errorf("configmap patch request failed: %w", respErr)
-		}
-		defer resp.Body.Close()
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr != nil {
-			return resp.StatusCode, nil, fmt.Errorf("read configmap patch response: %w", readErr)
-		}
-		return resp.StatusCode, body, nil
-	}
-
-	statusCode, body, err := doPatch()
-	if err != nil {
-		return err
-	}
-	if statusCode >= 200 && statusCode < 300 {
-		return nil
-	}
-	if statusCode == http.StatusNotFound {
-		return c.createOrRetryImageTagConfigMap(ctx, client, token, tagKey, commitSHA, doPatch)
-	}
-	return fmt.Errorf("configmap patch returned status %d: %s", statusCode, string(body))
+	return token
 }
 
 // KubeJSON performs a raw kube API request and returns the response body, failing on non-2xx statuses.
@@ -371,7 +145,7 @@ func (c *Client) KubeJSON(ctx context.Context, method, path, contentType string,
 	if token := c.getKubeToken(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := GetK8sHTTPClient(c.kubeAPIServer, c.httpClient).Do(req)
+	resp, err := c.apiClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("kube %s %s request failed: %w", method, path, err)
 	}
@@ -653,7 +427,7 @@ func (c *Client) watchKube(ctx context.Context, path string, query url.Values, r
 	if token := c.getKubeToken(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	streamClient := *GetK8sHTTPClient(c.kubeAPIServer, c.httpClient)
+	streamClient := *c.apiClient
 	streamClient.Timeout = 0
 	resp, err := streamClient.Do(req)
 	if err != nil {
