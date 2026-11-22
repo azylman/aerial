@@ -15,6 +15,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -146,78 +148,6 @@ func (s *checkStatusSpyStore) AttachChunkPR(_ context.Context, req store.AttachC
 	}
 	s.attached = append(s.attached, req.ChunkID)
 	return "b1", req.ChunkID, "th-1", nil
-}
-
-type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req eriwire.BrainDispatchRequest) error
-	cancelFn   func(ctx context.Context, chunkID string) error
-	promptFn   func(ctx context.Context, threadID, prompt string) error
-	widgetFn   func(ctx context.Context, req executor.StatusWidgetRequest) (string, error)
-	messageFn  func(ctx context.Context, channelID, content string) error
-
-	lastDispatch *eriwire.BrainDispatchRequest
-	lastCancel   string
-	lastThreadID string
-	lastPrompt   string
-	lastWidget   *executor.StatusWidgetRequest
-	lastMsgChan  string
-	lastMsgCont  string
-}
-
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
-	return m.Dispatch(ctx, req)
-}
-
-func (m *mockEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
-	m.lastDispatch = &req
-	if m.dispatchFn != nil {
-		return m.dispatchFn(ctx, req)
-	}
-	return nil
-}
-
-func (m *mockEriClient) CancelDispatch(ctx context.Context, chunkID string) error {
-	m.lastCancel = chunkID
-	if m.cancelFn != nil {
-		return m.cancelFn(ctx, chunkID)
-	}
-	return nil
-}
-
-func (m *mockEriClient) Prompt(ctx context.Context, threadID, prompt string) error {
-	m.lastThreadID = threadID
-	m.lastPrompt = prompt
-	if m.promptFn != nil {
-		return m.promptFn(ctx, threadID, prompt)
-	}
-	return nil
-}
-
-func (m *mockEriClient) Widget(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
-	m.lastWidget = &req
-	if m.widgetFn != nil {
-		return m.widgetFn(ctx, req)
-	}
-	return "msg-123", nil
-}
-
-func (m *mockEriClient) Message(ctx context.Context, channelID, content string) error {
-	m.lastMsgChan = channelID
-	m.lastMsgCont = content
-	if m.messageFn != nil {
-		return m.messageFn(ctx, channelID, content)
-	}
-	return nil
-}
-
-type mockBusError struct {
-	pubsub.Bus
-
-	err error
-}
-
-func (m *mockBusError) Publish(context.Context, string, string, any) error {
-	return m.err
 }
 
 func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
@@ -366,8 +296,8 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 				skipFailApply: tc.skipFailApply,
 				failBanner:    tc.failBanner,
 			}
-			eri := &mockEriClient{}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+			eri := &eritest.Client{}
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 			f := NewFlow(spy, exec)
 
 			err := f.HandlePREventType(context.Background(), "b1", "c1", tc.event, tc.prEvent)
@@ -380,67 +310,50 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			assert.Equal(t, tc.wantBanners, spy.banners)
 			switch {
 			case tc.wantSilentIn != "":
-				assert.Empty(t, eri.lastPrompt)
-				if assert.NotNil(t, eri.lastDispatch) {
-					assert.Contains(t, eri.lastDispatch.Prompt, tc.wantSilentIn)
-					assert.Equal(t, "th-1", eri.lastDispatch.TargetID)
-					assert.Equal(t, "vanadis-c1", eri.lastDispatch.SessionID)
-					assert.True(t, eri.lastDispatch.SkipIfActive)
-					assert.NotEmpty(t, eri.lastDispatch.ID)
+				assert.Empty(t, eri.LastPrompt)
+				if assert.NotNil(t, eri.LastDispatch) {
+					assert.Contains(t, eri.LastDispatch.Prompt, tc.wantSilentIn)
+					assert.Equal(t, "th-1", eri.LastDispatch.TargetID)
+					assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
+					assert.True(t, eri.LastDispatch.SkipIfActive)
+					assert.NotEmpty(t, eri.LastDispatch.ID)
 				}
 			case tc.wantPromptIn != "":
-				assert.Contains(t, eri.lastPrompt, tc.wantPromptIn)
-				assert.Equal(t, "th-1", eri.lastThreadID)
+				assert.Contains(t, eri.LastPrompt, tc.wantPromptIn)
+				assert.Equal(t, "th-1", eri.LastThreadID)
 			default:
-				assert.Empty(t, eri.lastPrompt)
+				assert.Empty(t, eri.LastPrompt)
 			}
 		})
 	}
 }
 
-func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchErr, notifyErr error) (*Flow, *mockEriClient) {
+func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchErr, notifyErr error) (*Flow, *eritest.Client) {
 	t.Helper()
-	eri := &mockEriClient{}
-	var active bool
-	var activeDispatch *eriwire.BrainDispatchRequest
-	eri.dispatchFn = func(_ context.Context, req eriwire.BrainDispatchRequest) error {
-		if dispatchErr != nil {
-			return dispatchErr
-		}
-		if req.SkipIfActive && active {
-			eri.lastDispatch = activeDispatch
-			return eriwire.ErrDispatchActive
-		}
-		active = true
-		activeDispatch = &req
-		return nil
-	}
+	eri := &eritest.Client{DispatchErr: dispatchErr, SimulateActive: true, CancelErr: notifyErr, MessageErr: notifyErr, WidgetErr: notifyErr}
 	var bus pubsub.Bus
 	if notifyErr != nil {
-		eri.cancelFn = func(context.Context, string) error { return notifyErr }
-		eri.messageFn = func(context.Context, string, string) error { return notifyErr }
-		eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
-		bus = &mockBusError{err: notifyErr}
+		bus = &pubsubtest.FaultBus{PublishErr: notifyErr}
 	}
-	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "example-owner", nil)
 	f := NewFlow(spy, exec)
 	return f, eri
 }
 
-func assertRemediationDispatch(t *testing.T, eri *mockEriClient, wantDispatch bool, wantDispatchID string, wantSkipIfActive ...bool) {
+func assertRemediationDispatch(t *testing.T, eri *eritest.Client, wantDispatch bool, wantDispatchID string, wantSkipIfActive ...bool) {
 	t.Helper()
 	if !wantDispatch {
-		assert.Nil(t, eri.lastDispatch)
+		assert.Nil(t, eri.LastDispatch)
 		return
 	}
-	assert.NotNil(t, eri.lastDispatch)
-	assert.Equal(t, "vanadis-c1", eri.lastDispatch.SessionID)
-	assert.Equal(t, "c1", eri.lastDispatch.VanadisChunkID)
+	assert.NotNil(t, eri.LastDispatch)
+	assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
+	assert.Equal(t, "c1", eri.LastDispatch.VanadisChunkID)
 	if len(wantSkipIfActive) > 0 {
-		assert.Equal(t, wantSkipIfActive[0], eri.lastDispatch.SkipIfActive)
+		assert.Equal(t, wantSkipIfActive[0], eri.LastDispatch.SkipIfActive)
 	}
 	if wantDispatchID != "" {
-		assert.Equal(t, wantDispatchID, eri.lastDispatch.ID)
+		assert.Equal(t, wantDispatchID, eri.LastDispatch.ID)
 	}
 }
 
@@ -594,8 +507,8 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 			if tc.wantRemediatedSHA != "" {
 				assert.Equal(t, tc.wantRemediatedSHA, spy.chunk("c1").RemediatedSHA)
 			}
-			assert.Equal(t, tc.wantCancel, eri.lastCancel)
-			assert.Equal(t, tc.wantMsgChan, eri.lastMsgChan)
+			assert.Equal(t, tc.wantCancel, eri.LastCancel)
+			assert.Equal(t, tc.wantMsgChan, eri.LastMsgChan)
 		})
 	}
 }
@@ -605,9 +518,9 @@ func TestFlow_HandleCIFailureEventSyncsBuildWidget(t *testing.T) {
 	spy := &checkStatusSpyStore{}
 	f, eri := newRemediationTestHarness(t, spy, nil, nil)
 	require.NoError(t, f.HandleCIFailureEvent(context.Background(), "b1", "c1", "ci_failed", ciFailEv("unit-tests", "abcdef1234")))
-	if assert.NotNil(t, eri.lastWidget, "ci_failed must sync the build widget so the card shows remediation instead of going static") {
-		assert.Contains(t, eri.lastWidget.Banner, "remediation")
-		assert.Contains(t, eri.lastWidget.Banner, "unit-tests")
+	if assert.NotNil(t, eri.LastWidget, "ci_failed must sync the build widget so the card shows remediation instead of going static") {
+		assert.Contains(t, eri.LastWidget.Banner, "remediation")
+		assert.Contains(t, eri.LastWidget.Banner, "unit-tests")
 	}
 }
 
@@ -618,7 +531,7 @@ func TestFlow_TrailingSameSHAFailureAtCapDoesNotCancelActiveRemediation(t *testi
 	ctx := context.Background()
 
 	require.NoError(t, f.HandlePREventType(ctx, "b1", "c1", "ci_failed", ciFailEv("unit-tests", "abcdef1234")))
-	require.NotNil(t, eri.lastDispatch)
+	require.NotNil(t, eri.LastDispatch)
 	require.Equal(t, 1, len(spy.failCountCalls))
 	require.Equal(t, 5, spy.chunk("c1").CIFailCount)
 
@@ -627,7 +540,7 @@ func TestFlow_TrailingSameSHAFailureAtCapDoesNotCancelActiveRemediation(t *testi
 
 	assert.Equal(t, 1, len(spy.failCountCalls), "trailing same-SHA failure must not increment ci_fail_count to 6")
 	assert.Empty(t, spy.failed, "trailing same-SHA failure must not trip the remediation cap")
-	assert.Empty(t, eri.lastCancel, "trailing same-SHA failure must not cancel the active remediation turn")
+	assert.Empty(t, eri.LastCancel, "trailing same-SHA failure must not cancel the active remediation turn")
 
 	newHead := ciFailEv("unit-tests", "feeedd9876")
 	require.NoError(t, f.HandlePREventType(ctx, "b1", "c1", "ci_failed", newHead))
@@ -636,7 +549,7 @@ func TestFlow_TrailingSameSHAFailureAtCapDoesNotCancelActiveRemediation(t *testi
 	assert.Equal(t, 6, spy.chunk("c1").CIFailCount)
 	assert.Equal(t, "abcdef1234", spy.chunk("c1").RemediatedSHA, "tripping cap must not overwrite RemediatedSHA with failing head")
 	assert.Equal(t, []string{"c1:ci_remediation_cap_reached"}, spy.failed)
-	assert.Equal(t, "c1", eri.lastCancel)
+	assert.Equal(t, "c1", eri.LastCancel)
 
 	// Restate retry when failCount is already 6 (> MaxCIRemediationAttempts)
 	retryEv := ciFailEv("unit-tests", "feeedd9876")
@@ -644,7 +557,7 @@ func TestFlow_TrailingSameSHAFailureAtCapDoesNotCancelActiveRemediation(t *testi
 
 	assert.Equal(t, 2, len(spy.failCountCalls), "retry when failCount > cap must not call IncrementChunkCIFailCount again")
 	assert.Equal(t, []string{"c1:ci_remediation_cap_reached", "c1:ci_remediation_cap_reached"}, spy.failed)
-	assert.Equal(t, "c1", eri.lastCancel)
+	assert.Equal(t, "c1", eri.LastCancel)
 }
 
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
@@ -778,7 +691,7 @@ func TestFlow_SelectUnattachedTargetChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := SelectUnattachedTargetChunk("azylman", tc.build, tc.chunks, tc.ev)
+			got := SelectUnattachedTargetChunk("example-owner", tc.build, tc.chunks, tc.ev)
 			if tc.want == "" {
 				assert.Nil(t, got)
 				return
@@ -847,13 +760,11 @@ func TestFlow_ResolveOrAttachPRChunk(t *testing.T) {
 				_, _ = w.Write([]byte(tc.apiBody))
 			}))
 			defer api.Close()
-			eri := &mockEriClient{}
+			eri := &eritest.Client{}
 			if tc.widgetErr {
-				eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
-					return "", errors.New("widget unavailable")
-				}
+				eri.WidgetErr = errors.New("widget unavailable")
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 			exec.GitHubAPIURL = api.URL
 			spy := &checkStatusSpyStore{chunks: tc.chunks, attachErr: tc.attachErr, getBuildErr: tc.getBuildErr}
 			ex := exec
@@ -888,24 +799,20 @@ func TestFlow_ResumeNoPRChunk(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{}
-			eri := &mockEriClient{}
+			eri := &eritest.Client{}
 			if tc.dispatchErr {
-				eri.dispatchFn = func(context.Context, eriwire.BrainDispatchRequest) error {
-					return errors.New("dispatch unavailable")
-				}
+				eri.DispatchErr = errors.New("dispatch unavailable")
 			}
 			if tc.widgetErr {
-				eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
-					return "", errors.New("widget unavailable")
-				}
+				eri.WidgetErr = errors.New("widget unavailable")
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 			f := NewFlow(spy, exec)
 			err := f.ResumeNoPRChunk(context.Background(), bld, chunks, 0)
 			assert.Equal(t, tc.wantErr, err != nil)
-			require.NotNil(t, eri.lastDispatch)
-			assert.Equal(t, "vanadis-c1-nopr-resume-1", eri.lastDispatch.ID)
-			assert.False(t, eri.lastDispatch.SkipIfActive)
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, "vanadis-c1-nopr-resume-1", eri.LastDispatch.ID)
+			assert.False(t, eri.LastDispatch.SkipIfActive)
 		})
 	}
 }
@@ -957,25 +864,22 @@ func TestFlow_ResumeActionChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			eri := &mockEriClient{
-				dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr },
-				widgetFn:   func(context.Context, executor.StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
-			}
-			f := NewFlow(&checkStatusSpyStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil))
+			eri := &eritest.Client{DispatchErr: tc.dispatchErr, WidgetErr: tc.widgetErr, WidgetID: "msg-1"}
+			f := NewFlow(&checkStatusSpyStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil))
 			err := f.ResumeActionChunk(context.Background(), bld, chunks, 0, tc.k)
 			assert.Equal(t, tc.wantErr, err != nil)
-			require.NotNil(t, eri.lastDispatch)
-			assert.Equal(t, tc.wantID, eri.lastDispatch.ID)
-			assert.Equal(t, "vanadis-c1", eri.lastDispatch.SessionID)
-			assert.False(t, eri.lastDispatch.SkipIfActive)
-			assert.True(t, strings.HasPrefix(eri.lastDispatch.Prompt, tc.wantPrefix), eri.lastDispatch.Prompt)
-			assert.Contains(t, eri.lastDispatch.Prompt, "Verify it live")
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, tc.wantID, eri.LastDispatch.ID)
+			assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
+			assert.False(t, eri.LastDispatch.SkipIfActive)
+			assert.True(t, strings.HasPrefix(eri.LastDispatch.Prompt, tc.wantPrefix), eri.LastDispatch.Prompt)
+			assert.Contains(t, eri.LastDispatch.Prompt, "Verify it live")
 			if tc.wantNoWidget {
-				assert.Nil(t, eri.lastWidget)
+				assert.Nil(t, eri.LastWidget)
 				return
 			}
-			require.NotNil(t, eri.lastWidget)
-			assert.Contains(t, eri.lastWidget.Banner, tc.wantBanner)
+			require.NotNil(t, eri.LastWidget)
+			assert.Contains(t, eri.LastWidget.Banner, tc.wantBanner)
 		})
 	}
 }
@@ -1019,21 +923,12 @@ func TestFlow_HandleClosedPREventNotifyBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{getBuildErr: tc.getBuildErr}
-			eri := &mockEriClient{}
-			if tc.cancelErr != nil {
-				eri.cancelFn = func(context.Context, string) error { return tc.cancelErr }
-			}
-			if tc.promptErr != nil {
-				eri.promptFn = func(context.Context, string, string) error { return tc.promptErr }
-			}
-			if tc.widgetErr != nil {
-				eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", tc.widgetErr }
-			}
+			eri := &eritest.Client{CancelErr: tc.cancelErr, PromptErr: tc.promptErr, WidgetErr: tc.widgetErr}
 			var bus pubsub.Bus
 			if tc.busErr != nil {
-				bus = &mockBusError{err: tc.busErr}
+				bus = &pubsubtest.FaultBus{PublishErr: tc.busErr}
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "example-owner", nil)
 			f := NewFlow(spy, exec)
 			err := f.HandleClosedPREvent(context.Background(), "c1", pubsub.PRLifecycleEvent{Event: "closed_unmerged"})
 			assert.Equal(t, tc.wantErr, err != nil)
@@ -1067,11 +962,8 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{getBuildErr: tc.getBuildErr, nilBuild: tc.nilBuild}
-			eri := &mockEriClient{}
-			if tc.promptErr != nil {
-				eri.dispatchFn = func(context.Context, eriwire.BrainDispatchRequest) error { return tc.promptErr }
-			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+			eri := &eritest.Client{DispatchErr: tc.promptErr}
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 			var st store.VanadisStore = spy
 			ex := exec
 			if tc.storeNil {
@@ -1087,16 +979,16 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 				assert.ErrorIs(t, err, store.ErrBuildNotFound)
 			}
 			if tc.execNil || tc.storeNil {
-				assert.Empty(t, eri.lastPrompt)
-				assert.Nil(t, eri.lastDispatch)
+				assert.Empty(t, eri.LastPrompt)
+				assert.Nil(t, eri.LastDispatch)
 				return
 			}
 			if tc.wantErr {
 				return
 			}
-			assert.Empty(t, eri.lastPrompt)
-			if assert.NotNil(t, eri.lastDispatch) {
-				assert.Contains(t, eri.lastDispatch.Prompt, "Deployment failed")
+			assert.Empty(t, eri.LastPrompt)
+			if assert.NotNil(t, eri.LastDispatch) {
+				assert.Contains(t, eri.LastDispatch.Prompt, "Deployment failed")
 			}
 		})
 	}
@@ -1108,14 +1000,14 @@ func TestFlow_HandleDeployFailureEvent_OccurrenceDistinguishesDispatchID(t *test
 	dispatch := func(details string) string {
 		t.Helper()
 		spy := &checkStatusSpyStore{}
-		eri := &mockEriClient{}
-		f := NewFlow(spy, executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil))
+		eri := &eritest.Client{}
+		f := NewFlow(spy, executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil))
 		ev := pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse", Details: details}
 		if err := f.HandleDeployFailureEvent(ctx, "b1", "c1", ev); err != nil {
 			t.Fatal(err)
 		}
-		if assert.NotNil(t, eri.lastDispatch) {
-			return eri.lastDispatch.ID
+		if assert.NotNil(t, eri.LastDispatch) {
+			return eri.LastDispatch.ID
 		}
 		return ""
 	}
@@ -1147,8 +1039,8 @@ func TestFlow_CIFailureDetailsErrorPropagates(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer api.Close()
-	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+	eri := &eritest.Client{}
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	exec.GitHubAPIURL = api.URL
 	spy := &checkStatusSpyStore{}
 	f := NewFlow(spy, exec)
@@ -1183,21 +1075,19 @@ func TestFlow_HandlePREventTypeMergedBranches(t *testing.T) {
 
 	notifySpy := &checkStatusSpyStore{}
 	notifyErr := errors.New("notify unavailable")
-	eri := &mockEriClient{}
-	bus := &mockBusError{err: notifyErr}
-	eri.cancelFn = func(context.Context, string) error { return notifyErr }
-	eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
-	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
+	eri := &eritest.Client{CancelErr: notifyErr, WidgetErr: notifyErr}
+	bus := &pubsubtest.FaultBus{PublishErr: notifyErr}
+	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "example-owner", nil)
 	assert.NoError(t, NewFlow(notifySpy, exec).HandlePREventType(ctx, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: "merge"}))
 	assert.Equal(t, "merged", notifySpy.lifecycleStatus)
-	assert.Equal(t, "c1", eri.lastCancel)
+	assert.Equal(t, "c1", eri.LastCancel)
 
 	actionSpy := &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", HeadSHA: "head"}}}
-	eriAction := &mockEriClient{}
-	execAction := executor.NewExecutor(t.TempDir(), eriAction, bus, "token", "azylman", nil)
+	eriAction := &eritest.Client{}
+	execAction := executor.NewExecutor(t.TempDir(), eriAction, bus, "token", "example-owner", nil)
 	assert.NoError(t, NewFlow(actionSpy, execAction).HandlePREventType(ctx, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: "merge"}))
 	assert.Equal(t, "merged", actionSpy.lifecycleStatus)
-	assert.Empty(t, eriAction.lastCancel)
+	assert.Empty(t, eriAction.LastCancel)
 }
 
 func TestFlow_LocateOrAttachPRChunkUnmatched(t *testing.T) {
@@ -1228,7 +1118,7 @@ func TestFlow_NotifyChunkFailure_Guards(t *testing.T) {
 			if !tc.nilFlow {
 				var exec *executor.Executor
 				if !tc.nilExec {
-					exec = executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", "azylman", nil)
+					exec = executor.NewExecutor(t.TempDir(), &eritest.Client{}, nil, "token", "example-owner", nil)
 				}
 				f = NewFlow(&checkStatusSpyStore{}, exec)
 			}
@@ -1263,7 +1153,7 @@ func TestFlow_IsEligibleUnattachedChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, IsEligibleUnattachedChunk("azylman", tc.build, tc.chunk, tc.event))
+			assert.Equal(t, tc.want, IsEligibleUnattachedChunk("example-owner", tc.build, tc.chunk, tc.event))
 		})
 	}
 }

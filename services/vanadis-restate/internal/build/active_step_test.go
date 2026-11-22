@@ -201,11 +201,11 @@ func TestUpdateActiveStep(t *testing.T) {
 
 func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string) {
 	t.Helper()
-	require.NotNil(t, eri.lastWidget)
+	require.NotNil(t, eri.LastWidget)
 	if expectStep == "" {
 		return
 	}
-	for _, ch := range eri.lastWidget.Chunks {
+	for _, ch := range eri.LastWidget.Chunks {
 		if ch.ID == chunkID {
 			assert.Equal(t, expectStep, ch.ActiveStep)
 			return

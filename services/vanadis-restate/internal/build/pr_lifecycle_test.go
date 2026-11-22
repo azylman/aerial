@@ -185,7 +185,7 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 			return dispatchErr
 		}
 		if req.SkipIfActive && active {
-			eri.lastDispatch = activeDispatch
+			eri.LastDispatch = activeDispatch
 			return eriwire.ErrDispatchActive
 		}
 		active = true
@@ -286,7 +286,7 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			assert.Equal(t, tc.wantErr, err != nil)
 			assert.Empty(t, spy.failCountCalls)
 			assert.Empty(t, spy.failed)
-			assert.Empty(t, eri.lastCancel)
+			assert.Empty(t, eri.LastCancel)
 		})
 	}
 }
@@ -625,7 +625,7 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 			rt.now = now.Add(15 * time.Minute)
 			require.NoError(t, b.expireDeploymentDeadline(rt, deploygate.DeploymentDeadlineRequest{ChunkID: "c1", Revision: "sha", Generation: 1}))
 			require.Equal(t, statusDeployFailed, st.chunks[0].Status)
-			require.NotNil(t, eri.lastDispatch)
+			require.NotNil(t, eri.LastDispatch)
 			require.True(t, rt.attempts["c1"].Delivered)
 		})
 	}

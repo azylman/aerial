@@ -165,8 +165,8 @@ func assertCompleteChunk(t *testing.T, tc completeChunkCase, got CompleteChunkRe
 		t.Fatalf("build status=%q, want %q", st.build.Status, tc.wantBuild)
 	}
 	banner := ""
-	if eri.lastWidget != nil {
-		banner = eri.lastWidget.Banner
+	if eri.LastWidget != nil {
+		banner = eri.LastWidget.Banner
 	}
 	if banner != tc.wantBanner || bus.lastSubj != tc.wantEvent {
 		t.Fatalf("banner=%q event=%q, want %q %q", banner, bus.lastSubj, tc.wantBanner, tc.wantEvent)

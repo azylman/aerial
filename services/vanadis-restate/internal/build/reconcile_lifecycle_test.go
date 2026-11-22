@@ -567,12 +567,12 @@ func TestActionCompletionContinuation(t *testing.T) {
 				assert.Empty(t, queuedPrompts)
 			}
 			if tc.buildStatus == "running" {
-				assert.NotNil(t, eri.lastDispatch)
-				if eri.lastDispatch != nil {
-					assert.Equal(t, "next", eri.lastDispatch.VanadisChunkID)
+				assert.NotNil(t, eri.LastDispatch)
+				if eri.LastDispatch != nil {
+					assert.Equal(t, "next", eri.LastDispatch.VanadisChunkID)
 				}
 			} else if tc.wantEvents > 0 {
-				assert.NotNil(t, eri.lastWidget)
+				assert.NotNil(t, eri.LastWidget)
 			}
 		})
 	}
@@ -688,16 +688,16 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 			assert.Equal(t, tc.wantPrompts, prompts)
 			assert.Equal(t, tc.wantFailReason, st.failReason)
 			if tc.wantDispatchID == "" {
-				assert.Nil(t, eri.lastDispatch)
+				assert.Nil(t, eri.LastDispatch)
 				return
 			}
-			require.NotNil(t, eri.lastDispatch)
-			assert.Equal(t, tc.wantDispatchID, eri.lastDispatch.ID)
-			assert.Equal(t, tc.wantSession, eri.lastDispatch.SessionID)
-			assert.Equal(t, "thread", eri.lastDispatch.TargetID)
-			assert.False(t, eri.lastDispatch.SkipIfActive)
-			assert.True(t, strings.HasPrefix(eri.lastDispatch.Prompt, tc.wantPromptPrefix), eri.lastDispatch.Prompt)
-			assert.Contains(t, eri.lastDispatch.Prompt, "Do step 1")
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, tc.wantDispatchID, eri.LastDispatch.ID)
+			assert.Equal(t, tc.wantSession, eri.LastDispatch.SessionID)
+			assert.Equal(t, "thread", eri.LastDispatch.TargetID)
+			assert.False(t, eri.LastDispatch.SkipIfActive)
+			assert.True(t, strings.HasPrefix(eri.LastDispatch.Prompt, tc.wantPromptPrefix), eri.LastDispatch.Prompt)
+			assert.Contains(t, eri.LastDispatch.Prompt, "Do step 1")
 		})
 	}
 }
@@ -832,12 +832,12 @@ func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, tc.prior, false)
 			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, tc.wantDispatch, eri.lastDispatch != nil)
+			assert.Equal(t, tc.wantDispatch, eri.LastDispatch != nil)
 			if tc.wantKey != "" {
 				assert.True(t, out.LaunchedMap[tc.wantKey])
 			}
-			if eri.lastDispatch != nil {
-				assert.Equal(t, fmt.Sprintf("vanadis-c-turn-%d", tc.generation), eri.lastDispatch.ID)
+			if eri.LastDispatch != nil {
+				assert.Equal(t, fmt.Sprintf("vanadis-c-turn-%d", tc.generation), eri.LastDispatch.ID)
 			}
 		})
 	}
@@ -995,7 +995,7 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	eriQuiet := &mockEriClient{}
 	boQuiet := NewBuildObject("", nil).WithAuthority(storeQuiet, executor.NewExecutor(t.TempDir(), eriQuiet, nil, "", "example-owner", nil))
 	require.NoError(t, boQuiet.notifyTransitionError(context.Background(), "b-quiet", "step", nil, errors.New("trans err")))
-	assert.Nil(t, eriQuiet.lastWidget)
+	assert.Nil(t, eriQuiet.LastWidget)
 
 	// Non-quiet build resolves from store and emits banner
 	buildActive := model.VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
@@ -1003,22 +1003,22 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	eriActive := &mockEriClient{}
 	boActive := NewBuildObject("", nil).WithAuthority(storeActive, executor.NewExecutor(t.TempDir(), eriActive, nil, "", "example-owner", nil))
 	require.NoError(t, boActive.notifyTransitionError(context.Background(), "b-active", "step", nil, errors.New("trans err")))
-	require.NotNil(t, eriActive.lastWidget)
-	assert.Equal(t, "b-active", eriActive.lastWidget.ID)
-	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriActive.lastWidget.Banner)
-	require.Len(t, eriActive.lastWidget.Chunks, 1)
-	assert.Equal(t, "c1", eriActive.lastWidget.Chunks[0].ID)
+	require.NotNil(t, eriActive.LastWidget)
+	assert.Equal(t, "b-active", eriActive.LastWidget.ID)
+	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriActive.LastWidget.Banner)
+	require.Len(t, eriActive.LastWidget.Chunks, 1)
+	assert.Equal(t, "c1", eriActive.LastWidget.Chunks[0].ID)
 
 	// Fallback to priorState when store is nil
 	eriPrior := &mockEriClient{}
 	boNoStore := NewBuildObject("", nil).WithAuthority(nil, executor.NewExecutor(t.TempDir(), eriPrior, nil, "", "example-owner", nil))
 	prior := &model.BuildObjectState{Build: model.VanadisBuild{ID: "b-prior", Title: "Prior Build"}, Chunks: []model.VanadisChunk{{ID: "c-prior", Title: "Prior Chunk"}}}
 	require.NoError(t, boNoStore.notifyTransitionError(context.Background(), "b-prior", "step", prior, errors.New("trans err")))
-	require.NotNil(t, eriPrior.lastWidget)
-	assert.Equal(t, "b-prior", eriPrior.lastWidget.ID)
-	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriPrior.lastWidget.Banner)
-	require.Len(t, eriPrior.lastWidget.Chunks, 1)
-	assert.Equal(t, "c-prior", eriPrior.lastWidget.Chunks[0].ID)
+	require.NotNil(t, eriPrior.LastWidget)
+	assert.Equal(t, "b-prior", eriPrior.LastWidget.ID)
+	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriPrior.LastWidget.Banner)
+	require.Len(t, eriPrior.LastWidget.Chunks, 1)
+	assert.Equal(t, "c-prior", eriPrior.LastWidget.Chunks[0].ID)
 
 	// Retry inside RunReconcileStep records counter and emits banner before succeeding on retry
 	attempts := 0

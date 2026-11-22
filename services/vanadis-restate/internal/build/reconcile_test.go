@@ -472,7 +472,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 	resDone, err := boDone.Reconcile(ctx, ReconcileBuildRequest{})
 	assert.NoError(t, err)
 	assert.Equal(t, statusCompleted, resDone.Status)
-	assert.Equal(t, statusCompleted, eri.lastWidget.Status)
+	assert.Equal(t, statusCompleted, eri.LastWidget.Status)
 
 	// Chunk failed -> status failed
 	cFailed := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "failed", Repo: "aerial", Mode: "pr"}

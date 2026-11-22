@@ -14,7 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
@@ -41,21 +41,17 @@ func attachRequest(chunkID, repo string) store.AttachChunkPRRequest {
 	return store.AttachChunkPRRequest{ChunkID: chunkID, PRNumber: 101, Repo: repo}
 }
 
+// mockEriClient layers build's behavioural closures (attempt counters,
+// prompt/banner capture) over the shared eritest.Client, which records every
+// call; error-only cases should prefer the embedded Client's error fields.
 type mockEriClient struct {
+	eritest.Client
+
 	dispatchFn func(ctx context.Context, req eriwire.BrainDispatchRequest) error
 	cancelFn   func(ctx context.Context, chunkID string) error
 	promptFn   func(ctx context.Context, threadID, prompt string) error
 	widgetFn   func(ctx context.Context, req executor.StatusWidgetRequest) (string, error)
 	messageFn  func(ctx context.Context, channelID, content string) error
-
-	lastDispatch *eriwire.BrainDispatchRequest
-	lastCancel   string
-	cancelAgent  string
-	lastThreadID string
-	lastPrompt   string
-	lastWidget   *executor.StatusWidgetRequest
-	lastMsgChan  string
-	lastMsgCont  string
 }
 
 func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
@@ -63,46 +59,43 @@ func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainD
 }
 
 func (m *mockEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
-	m.lastDispatch = &req
+	err := m.Client.Dispatch(ctx, req)
 	if m.dispatchFn != nil {
 		return m.dispatchFn(ctx, req)
 	}
-	return nil
+	return err
 }
 
 func (m *mockEriClient) CancelDispatch(ctx context.Context, chunkID string) error {
-	m.lastCancel = chunkID
-	m.cancelAgent = ericlient.AgentFromContext(ctx)
+	err := m.Client.CancelDispatch(ctx, chunkID)
 	if m.cancelFn != nil {
 		return m.cancelFn(ctx, chunkID)
 	}
-	return nil
+	return err
 }
 
 func (m *mockEriClient) Prompt(ctx context.Context, threadID, prompt string) error {
-	m.lastThreadID = threadID
-	m.lastPrompt = prompt
+	err := m.Client.Prompt(ctx, threadID, prompt)
 	if m.promptFn != nil {
 		return m.promptFn(ctx, threadID, prompt)
 	}
-	return nil
+	return err
 }
 
 func (m *mockEriClient) Widget(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
-	m.lastWidget = &req
+	id, err := m.Client.Widget(ctx, req)
 	if m.widgetFn != nil {
 		return m.widgetFn(ctx, req)
 	}
-	return "msg-123", nil
+	return id, err
 }
 
 func (m *mockEriClient) Message(ctx context.Context, channelID, content string) error {
-	m.lastMsgChan = channelID
-	m.lastMsgCont = content
+	err := m.Client.Message(ctx, channelID, content)
 	if m.messageFn != nil {
 		return m.messageFn(ctx, channelID, content)
 	}
-	return nil
+	return err
 }
 
 type mockStoreForLaunch struct {
