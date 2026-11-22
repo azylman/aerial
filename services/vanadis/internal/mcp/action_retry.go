@@ -162,7 +162,7 @@ func (h *Handler) ValidateRetryEligibility(ctx context.Context, req RetryActionC
 	if parseErr == nil && generation >= 0 && generation < c.StallNudges && req.ExpectedDispatchID == fmt.Sprintf("vanadis-%s-turn-%d", c.ID, generation) {
 		return nil
 	}
-	if c.PRNumber != 0 || b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
+	if b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
 		return model.ErrBuildConflict
 	}
 	if !retryInstructionsMatch(req, c) {
