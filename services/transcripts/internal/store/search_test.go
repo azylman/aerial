@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
@@ -96,22 +94,20 @@ func TestBuildStepsQuery(t *testing.T) {
 		session        string
 		tool           string
 		limit          int
-		useFTS         bool
 		since          time.Time
 		wantContains   string
 		wantNotContain string
 		wantArgs       []any
 	}{
-		{"sqlite keeps like scan", "", "hello", "", "", 20, false, time.Time{}, "t.content LIKE '%' || $1 || '%'", "fts_tokens", []any{"hello", 20}},
-		{"postgres uses fts index", "", "hello", "", "", 20, true, time.Time{}, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
-		{"postgres keeps filter placeholders", "aerial", "hello", "sess-a", "bash", 10, true, time.Time{}, "t.agent = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
-		{"comma-separated sessions in IN clause", "", "hello", "sess-a,sess-b", "", 20, false, time.Time{}, "t.session_id IN ($2, $3)", "fts_tokens", []any{"hello", "sess-a", "sess-b", 20}},
-		{"since clause added", "", "hello", "", "", 20, false, epoch, "t.created_at >= $2", "fts_tokens", []any{"hello", epoch, 20}},
+		{"content uses fts index", "", "hello", "", "", 20, time.Time{}, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
+		{"filters keep placeholders", "aerial", "hello", "sess-a", "bash", 10, time.Time{}, "t.agent = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
+		{"comma-separated sessions in IN clause", "", "hello", "sess-a,sess-b", "", 20, time.Time{}, "t.session_id IN ($2, $3)", "LIKE", []any{"hello", "sess-a", "sess-b", 20}},
+		{"since clause added", "", "hello", "", "", 20, epoch, "t.created_at >= $2", "LIKE", []any{"hello", epoch, 20}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, args := buildStepsQuery(tc.stack, tc.query, tc.session, tc.tool, tc.limit, tc.useFTS, tc.since)
+			got, args := buildStepsQuery(tc.stack, tc.query, tc.session, tc.tool, tc.limit, tc.since)
 			if !strings.Contains(got, tc.wantContains) {
 				t.Errorf("buildStepsQuery() = %q, want it to contain %q", got, tc.wantContains)
 			}
@@ -328,24 +324,6 @@ func TestGetStepsNegativeStart(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Errorf("GetSteps(negative start) = %d rows, want 3", len(got))
-	}
-}
-
-func TestPostgresDriverClause(t *testing.T) {
-	t.Parallel()
-	db, err := sql.Open("pgx", "postgres://127.0.0.1:1/db?sslmode=disable")
-	if err != nil {
-		t.Fatalf("sql.Open pgx: %v", err)
-	}
-	defer db.Close()
-	if !isPostgresDriver(db.Driver()) {
-		t.Errorf("expected pgx stdlib driver to match")
-	}
-	if got := forUpdateClause(db); got != " FOR UPDATE" {
-		t.Errorf("forUpdateClause = %q, want FOR UPDATE", got)
-	}
-	if isPostgresDriver(nil) {
-		t.Errorf("nil driver must not match")
 	}
 }
 

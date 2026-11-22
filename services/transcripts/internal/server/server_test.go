@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,10 +13,9 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/transcriptwire"
@@ -30,46 +28,19 @@ func init() {
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 }
 
-const transcriptsTestSchema = `CREATE TABLE session_summaries (
-    agent TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    engine TEXT NOT NULL DEFAULT '',
-    thread_id TEXT NOT NULL DEFAULT '',
-    summary TEXT NOT NULL DEFAULT '',
-    last_indexed_step INT NOT NULL DEFAULT -1,
-    last_mtime DATETIME,
-    summary_step_watermark INT NOT NULL DEFAULT -1,
-    is_settled BOOLEAN NOT NULL DEFAULT 0,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (agent, session_id)
-);
-CREATE TABLE transcript_steps (
-    agent TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    step_index INT NOT NULL,
-    step_type TEXT NOT NULL DEFAULT '',
-    tool_name TEXT NOT NULL DEFAULT '',
-    tool_kind TEXT NOT NULL DEFAULT '',
-    tool_call_id TEXT NOT NULL DEFAULT '',
-    content TEXT NOT NULL DEFAULT '',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (agent, session_id, step_index)
-);`
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
 
-var testStoreSeq atomic.Int64
-
+// newTestStoreWithDB opens a private clone of the production schema through
+// the production constructor (pgutil.OpenSQL, as RunApp does).
 func newTestStoreWithDB(t *testing.T, stack string) (*store.Store, *sql.DB) {
 	t.Helper()
-	dsn := fmt.Sprintf("file:transcripts-server-%d?mode=memory&cache=shared", testStoreSeq.Add(1))
-	db, err := sql.Open("sqlite", dsn)
+	db, err := pgutil.OpenSQL(context.Background(), pgtest.NewDSN(t), pgutil.SQLOptions{})
 	if err != nil {
-		t.Fatalf("open sqlite fixture: %v", err)
+		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(transcriptsTestSchema); err != nil {
-		t.Fatalf("create fixture schema: %v", err)
-	}
 	return store.NewStore(db, stack), db
 }
 
