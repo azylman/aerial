@@ -199,15 +199,10 @@ func (s *PGStore) GetCallByProviderSID(ctx context.Context, providerSID string) 
 	return scanCall(row)
 }
 
-// ListCalls lists the most recent calls up to limit.
-func (s *PGStore) ListCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	query := fmt.Sprintf("SELECT %s FROM voice_calls ORDER BY started_at DESC LIMIT $1", selectCallFields)
-	rows, err := s.db.QueryContext(ctx, query, limit)
+func (s *PGStore) queryCalls(ctx context.Context, op, query string, args ...any) ([]model.VoiceCall, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: list calls: %w", err)
+		return nil, fmt.Errorf("store: list %s: %w", op, err)
 	}
 	defer rows.Close()
 
@@ -220,9 +215,18 @@ func (s *PGStore) ListCalls(ctx context.Context, limit int) ([]model.VoiceCall, 
 		calls = append(calls, *c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate calls: %w", err)
+		return nil, fmt.Errorf("store: iterate %s: %w", op, err)
 	}
 	return calls, nil
+}
+
+// ListCalls lists the most recent calls up to limit.
+func (s *PGStore) ListCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := fmt.Sprintf("SELECT %s FROM voice_calls ORDER BY started_at DESC LIMIT $1", selectCallFields)
+	return s.queryCalls(ctx, "calls", query, limit)
 }
 
 // FindRecentOutboundCall searches for a recent outbound call to fromE164 within the specified duration window.
@@ -421,6 +425,15 @@ func (s *PGStore) TransitionReportStatus(ctx context.Context, callID string, all
 		return false, fmt.Errorf("store: rows affected: %w", err)
 	}
 	return rows > 0, nil
+}
+
+// ListUnfinishedReportCalls lists calls with report_status in ('pending', 'processing') up to limit.
+func (s *PGStore) ListUnfinishedReportCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := fmt.Sprintf("SELECT %s FROM voice_calls WHERE report_status IN ('pending', 'processing') ORDER BY started_at ASC LIMIT $1", selectCallFields)
+	return s.queryCalls(ctx, "unfinished report calls", query, limit)
 }
 
 // ReconcileOrphanedCalls marks calls with ended_at IS NULL as ended if they have no provider SID or are inactive.

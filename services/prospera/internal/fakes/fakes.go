@@ -303,6 +303,24 @@ func (*FakeStore) ReconcileOrphanedCalls(ctx context.Context, checkActive func(c
 	return 0, nil
 }
 
+func (m *FakeStore) ListUnfinishedReportCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.OpErr != nil {
+		return nil, m.OpErr
+	}
+	var list []model.VoiceCall
+	for _, c := range m.calls {
+		if c.ReportStatus == "pending" || c.ReportStatus == "processing" {
+			list = append(list, *c)
+		}
+	}
+	if limit > 0 && len(list) > limit {
+		list = list[:limit]
+	}
+	return list, nil
+}
+
 func (m *FakeStore) SaveVoiceMessage(ctx context.Context, msg model.VoiceMessage) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

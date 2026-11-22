@@ -393,6 +393,75 @@ func TestPGStore_TransitionReportStatus(t *testing.T) {
 	}
 }
 
+func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
+	t.Parallel()
+	st := testutil.SetUpTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+
+	// Initial empty check
+	calls, err := st.ListUnfinishedReportCalls(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListUnfinishedReportCalls() initial error = %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("expected 0 calls, got %d", len(calls))
+	}
+
+	cPending := model.VoiceCall{
+		CallID:       "call-pending",
+		Direction:    "outbound",
+		State:        "completed",
+		FromNumber:   "+15105550100",
+		ToNumber:     "+15105550101",
+		ReportStatus: "pending",
+		StartedAt:    now.Add(-2 * time.Minute),
+		UpdatedAt:    now.Add(-2 * time.Minute),
+	}
+	cProcessing := model.VoiceCall{
+		CallID:       "call-processing",
+		Direction:    "outbound",
+		State:        "completed",
+		FromNumber:   "+15105550100",
+		ToNumber:     "+15105550102",
+		ReportStatus: "processing",
+		StartedAt:    now.Add(-1 * time.Minute),
+		UpdatedAt:    now.Add(-1 * time.Minute),
+	}
+	cDelivered := model.VoiceCall{
+		CallID:       "call-delivered",
+		Direction:    "outbound",
+		State:        "completed",
+		FromNumber:   "+15105550100",
+		ToNumber:     "+15105550103",
+		ReportStatus: "delivered",
+		StartedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	_ = st.CreateInboundCall(ctx, cPending)
+	_ = st.CreateInboundCall(ctx, cProcessing)
+	_ = st.CreateInboundCall(ctx, cDelivered)
+
+	calls, err = st.ListUnfinishedReportCalls(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListUnfinishedReportCalls() error = %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 unfinished calls, got %d", len(calls))
+	}
+	if calls[0].CallID != "call-pending" || calls[1].CallID != "call-processing" {
+		t.Fatalf("unexpected calls order: %s, %s", calls[0].CallID, calls[1].CallID)
+	}
+
+	// Limit test
+	limited, err := st.ListUnfinishedReportCalls(ctx, 1)
+	if err != nil || len(limited) != 1 {
+		t.Fatalf("ListUnfinishedReportCalls(limit=1) len=%d, err=%v", len(limited), err)
+	}
+}
+
 func TestPGStore_ReconcileOrphanedCalls(t *testing.T) {
 	t.Parallel()
 	st := testutil.SetUpTestStore(t)
@@ -577,6 +646,7 @@ func TestPGStore_DatabaseErrors(t *testing.T) {
 	_ = st.AppendOwnerInstruction(ctx, "id", model.OwnerInstruction{})
 	_ = st.SetVoicemailRecording(ctx, "id", "url")
 	_, _ = st.TransitionReportStatus(ctx, "id", nil, "done", "")
+	_, _ = st.ListUnfinishedReportCalls(ctx, 10)
 	_, _ = st.ReconcileOrphanedCalls(ctx, nil)
 	_, _ = st.SaveVoiceMessage(ctx, model.VoiceMessage{MessageSID: "SM1"})
 	_ = st.MarkVoiceMessageDelivered(ctx, "SM1")
