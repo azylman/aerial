@@ -1160,7 +1160,10 @@ func TestRetryEligibility(t *testing.T) {
 		{name: "future identity", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-1", wantErr: true},
 		{name: "retired generation fence", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-2147483647", generation: 2147483647, wantErr: true},
 		{name: "cancelled", buildStatus: "cancelled", chunkStatus: "failed", identity: "vanadis-c1-turn-0", generation: 1},
-		{name: "other failure", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &model.VanadisChunk{ID: "c2", Status: "failed"}, wantErr: true},
+		{name: "other failure accepted", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &model.VanadisChunk{ID: "c2", Status: "failed"}},
+		{name: "running sibling accepted", buildStatus: "running", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &model.VanadisChunk{ID: "c2", Status: "running"}},
+		{name: "running descendant rejected", buildStatus: "running", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &model.VanadisChunk{ID: "c2", Status: "running", DependsOn: []string{"c1"}}, wantErr: true},
+		{name: "completed build rejected", buildStatus: "completed", chunkStatus: "failed", identity: "vanadis-c1-turn-0", wantErr: true},
 		{name: "completed descendant", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &model.VanadisChunk{ID: "c2", Status: "completed", DependsOn: []string{"c1"}}, wantErr: true},
 		{name: "pending descendant", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &model.VanadisChunk{ID: "c2", Status: "pending", DependsOn: []string{"c1"}}},
 	}

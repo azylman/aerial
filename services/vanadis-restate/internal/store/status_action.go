@@ -117,12 +117,18 @@ func currentActionIdentity(chunk model.VanadisChunk, dispatchID string) bool {
 	return ok
 }
 
+// buildActive reports whether chunk verdicts still apply to a build. A failed
+// build keeps accepting them: a failed chunk blocks only its dependents.
+func buildActive(status string) bool {
+	return status == statusRunning || status == statusFailed
+}
+
 // ActionCompletionAllowed reports whether an action chunk completion applies.
 // A chunk with an attached repair PR qualifies once the repair deployed and
 // moved it back to running.
 func ActionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
 	identityMatches := currentActionIdentity(chunk, dispatchID) || (dispatchID == "" && chunk.StallNudges == 0)
-	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && identityMatches
+	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildActive(buildStatus) && identityMatches
 }
 
 func (s *Store) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {
@@ -302,14 +308,8 @@ func (s *Store) FailChunk(ctx context.Context, chunkID, reason, dispatchID strin
 		return nil, nil, false, fmt.Errorf("fail chunk %s: %w", chunkID, err)
 	}
 
-	if b.Status != statusFailed && b.Status != statusCancelled {
-		b.Status = statusFailed
-		b.UpdatedAt = now
-		const failBuildSQL = `UPDATE vanadis_builds SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-		if _, err := tx.Exec(ctx, failBuildSQL, b.ID); err != nil {
-			return nil, nil, false, fmt.Errorf("fail build %s: %w", b.ID, err)
-		}
-	}
+	// Build status is decided only by reconcile: a failed chunk blocks its
+	// dependents while independent chunks keep running.
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, false, fmt.Errorf("commit fail chunk tx: %w", err)
@@ -318,7 +318,7 @@ func (s *Store) FailChunk(ctx context.Context, chunkID, reason, dispatchID strin
 }
 
 func actionCompletionAccepted(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
+	if chunk.Status == statusCompleted && (buildActive(buildStatus) || buildStatus == statusCompleted) {
 		chunk.Status = statusRunning
 		buildStatus = statusRunning
 	}
@@ -334,7 +334,7 @@ func ActionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) 
 	// identities, while old action-turn identities must still match the generation.
 	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
 		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
-	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
+	return buildActive(buildStatus) && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
 		(prIdentity || currentActionIdentity(c, dispatchID))
 }
 
