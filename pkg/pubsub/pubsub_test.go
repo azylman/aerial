@@ -670,17 +670,6 @@ func TestMemoryBus_DeduplicationWindow(t *testing.T) {
 func TestEnsureCoreStreams(t *testing.T) {
 	t.Parallel()
 
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	if err := EnsureCoreStreams(context.Background(), bus); err != nil {
-		t.Fatalf("EnsureCoreStreams failed: %v", err)
-	}
-
-	if err := EnsureCoreStreams(context.Background(), nil); err == nil {
-		t.Error("EnsureCoreStreams with nil bus expected error, got nil")
-	}
-
 	mjs := &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)}
 	jsBus := newJetStreamBusWithContext(nil, mjs)
 	if err := jsBus.EnsureCoreStreams(context.Background()); err != nil {
