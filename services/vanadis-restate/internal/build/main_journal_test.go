@@ -482,12 +482,15 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 	transition := reconcileStepOutput{BuildStatus: "running", LaunchedMap: map[string]bool{}, State: &model.BuildObjectState{Build: model.VanadisBuild{ID: "b1", Status: "running"}}}
 	prefix := []string{"run handle-dispatch-outcome-postgres"}
 	tests := []struct {
-		name    string
-		status  string
-		applied bool
-		noPR    noPRAction
-		want    []string
+		name       string
+		status     string
+		dispatchID string
+		applied    bool
+		noPR       noPRAction
+		want       []string
 	}{
+		{name: "verdictless ci fix-up turn checks then reconciles", status: "completed", dispatchID: "vanadis-c1-cifail-abc123-1", want: []string{"run handle-cifail-turn-ended", "get state", "get launched", "run reconcile-after-dispatch-outcome", "set state", "set launched"}},
+		{name: "timed-out ci fix-up turn checks then reconciles", status: "timeout", dispatchID: "vanadis-c1-cifail-abc123-1", want: []string{"run handle-cifail-turn-ended", "get state", "get launched", "run reconcile-after-dispatch-outcome", "set state", "set launched"}},
 		{name: "legacy accepted action completion reconciles", status: "completed", applied: true, want: []string{"get state", "get launched", "run reconcile-after-dispatch-outcome", "set state", "set launched"}},
 		{name: "verdictless turn resumed", status: "completed", noPR: noPRActionResume, want: []string{"run handle-nopr-turn-outcome"}},
 		{name: "verdictless turn ignored", status: "completed", noPR: noPRActionNone, want: []string{"run handle-nopr-turn-outcome"}},
@@ -503,12 +506,17 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 			journal := map[string]any{
 				"handle-dispatch-outcome-postgres": tc.applied,
 				"handle-nopr-turn-outcome":         tc.noPR,
+				"handle-cifail-turn-ended":         true,
 				labelReconcileAfterDispatch:        transition,
 				labelReconcileAfterNoPRFail:        transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
 			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
-			err := bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", DispatchID: "vanadis-c1-turn-0", Status: tc.status})
+			dispatchID := tc.dispatchID
+			if dispatchID == "" {
+				dispatchID = "vanadis-c1-turn-0"
+			}
+			err := bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", DispatchID: dispatchID, Status: tc.status})
 			require.NoError(t, err)
 			assert.Equal(t, append(append([]string{}, prefix...), tc.want...), commands)
 		})
