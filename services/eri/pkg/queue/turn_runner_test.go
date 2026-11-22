@@ -622,8 +622,8 @@ func TestReflectTurnRunner(t *testing.T) {
 			opts := def.GetOptions()
 			require.NotNil(t, opts.InactivityTimeout)
 			require.NotNil(t, opts.AbortTimeout)
-			assert.Equal(t, 75*time.Minute, *opts.InactivityTimeout)
-			assert.Equal(t, time.Hour, *opts.AbortTimeout)
+			assert.Equal(t, 255*time.Minute, *opts.InactivityTimeout)
+			assert.Equal(t, 255*time.Minute, *opts.AbortTimeout)
 			// No retry policy: the server default retries, then PAUSES; nothing configures KILL.
 			assert.Nil(t, opts.InvocationRetryPolicy)
 		})

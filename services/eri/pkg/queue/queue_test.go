@@ -115,7 +115,7 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 	a1Started, b1Finished := make(chan struct{}), make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			key := prompt
 			if strings.Contains(prompt, "A1") {
@@ -214,7 +214,7 @@ func runRecoverInterruptedCase(t *testing.T, tc recoverInterruptedCase) {
 	}
 
 	pool := New(tc.appCfg, WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: maxAttempts,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: maxAttempts,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "OK"), "", 0, nil
 		},
@@ -303,7 +303,7 @@ func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 	}
 
 	cfg := WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1, Classifier: cls,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1, Classifier: cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			runnerCalls++
@@ -678,7 +678,7 @@ func verifyShutdownRecovery(t *testing.T, store db.Store, msg db.Message) {
 	var finalDelivered string
 	var mu sync.Mutex
 	newPool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("c3333333-2222-3333-4444-555555555555", "Successfully processed on new container!"), "", 0, nil
 		},
@@ -727,7 +727,7 @@ func runWorkerPoolShutdownCase(t *testing.T, tc workerPoolShutdownCase) {
 	}
 
 	cfg := WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3, Classifier: cls,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3, Classifier: cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			once.Do(func() { close(stageStarted) })
 			if tc.blockRunnerOnCtx {
@@ -858,7 +858,7 @@ func TestWorkerPool_LeaderHoldAndRecovery_Isolation(t *testing.T) {
 	var dispCount atomic.Int32
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			if strings.Contains(prompt, "p1") || strings.Contains(prompt, "p2") {
 				if dispCount.Add(1) == 2 {
@@ -917,7 +917,6 @@ func TestQueue_WatchdogAndRecoveryMatrix(t *testing.T) {
 	tests := []workerTestCase{
 		{name: "WatchdogInactivityRetryAndExhaustion", maxAttempts: 3, messages: []db.Message{{ID: "msg-watchdog-101", ThreadID: "thread-watchdog-202", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run a long task"}}, runnerSteps: []mockRunnerStep{{stderr: "[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"}}, wantRunnerCalls: 3, checkRunnerCalls: true, wantStatus: db.StatusFailed, wantErrorContains: "inactivity timeout exceeded", wantDeliveredChannels: []string{"thread-watchdog-202"}, wantDeliveredSubstrings: []string{"timed out"}},
 		{name: "WatchdogInactivityRetryAndRecovery", maxAttempts: 3, initialSessionID: "recovery-uuid-505", seedTranscriptFiles: map[string]string{"recovery-uuid-505": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-recovery-101", ThreadID: "thread-recovery-505", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run a long task"}}, runnerSteps: []mockRunnerStep{{stderr: "[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"}, {response: "Recovered successfully on retry!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantDeliveredChannels: []string{"thread-recovery-505"}, wantDeliveredSubstrings: []string{"Recovered successfully on retry!"}, wantAttemptPromptContains: map[int][]string{0: {"Run a long task"}, 1: {"timed out or was interrupted"}}},
-		{name: "DefaultTimeoutMinutes_Is60", wantDefaultTimeout: 60},
 		{name: "ColdStartWatchdogRecoveryAndContinuation", maxAttempts: 3, seedTranscriptFiles: map[string]string{"88888888-aaaa-4bbb-cccc-111122223333": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-cold-101", ThreadID: "thread-cold-606", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Execute initial task cold"}}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for 88888888-aaaa-4bbb-cccc-111122223333\n[watchdog] inactivity timeout exceeded (5m without output)", exitCode: -1, errMsg: "exit status 255"}, {response: "Cold start recovered successfully on retry!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"", "88888888-aaaa-4bbb-cccc-111122223333"}, wantSavedSession: "88888888-aaaa-4bbb-cccc-111122223333", wantDeliveredChannels: []string{"thread-cold-606"}, wantDeliveredSubstrings: []string{"Cold start recovered successfully on retry!"}, wantAttemptPromptContains: map[int][]string{0: {"Execute initial task cold"}, 1: {"timed out or was interrupted"}}},
 		{name: "ColdStartStreamJsonInitLatchingOnFailure", maxAttempts: 3, seedTranscriptFiles: map[string]string{"99999999-bbbb-4ccc-dddd-555566667777": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-cold-stream-1", ThreadID: "thread-cold-stream-1", Content: "Please write the code for stream-json"}}, runnerSteps: []mockRunnerStep{{rawStdout: "{\"event\":\"init\",\"conversation_id\":\"99999999-bbbb-4ccc-dddd-555566667777\"}\n{\"event\":\"step_update\"}\n", stderr: "[watchdog] inactivity timeout exceeded (5m without output)\n", exitCode: -1, errMsg: "exit status 255"}, {response: "Stream-json cold start recovered!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"", "99999999-bbbb-4ccc-dddd-555566667777"}, wantSavedSession: "99999999-bbbb-4ccc-dddd-555566667777", wantDeliveredChannels: []string{"thread-cold-stream-1"}, wantDeliveredSubstrings: []string{"Stream-json cold start recovered!"}},
 		{name: "ColdStartTransientRecoveryAndContinuation", maxAttempts: 3, seedTranscriptFiles: map[string]string{"80808080-bbbb-4ccc-dddd-444455556666": "mock transcript data\n"}, messages: []db.Message{{ID: "msg-transient-101", ThreadID: "thread-transient-707", GuildID: "guild-303", AuthorID: "user-404", AuthorName: "User", Content: "Run transient task cold"}}, runnerSteps: []mockRunnerStep{{stderr: "Starting conversation update stream for 80808080-bbbb-4ccc-dddd-444455556666\nError 503: high demand service unavailable", exitCode: 1, errMsg: "exit status 1"}, {response: "Transient error recovered on retry!"}}, wantRunnerCalls: 2, checkRunnerCalls: true, wantPassedSessions: []string{"", "80808080-bbbb-4ccc-dddd-444455556666"}, wantSavedSession: "80808080-bbbb-4ccc-dddd-444455556666", wantAttemptPromptContains: map[int][]string{1: {"Run transient task cold"}}, wantAttemptPromptExcludes: map[int][]string{1: {"timed out or was interrupted"}}},
@@ -1093,7 +1092,7 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 
 	cfg := WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 		EventBus: haroBus,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
@@ -1185,7 +1184,7 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 	var activeWorkers, maxActiveWorkers int
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			activeWorkers++
@@ -1250,7 +1249,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	doneCh := make(chan struct{}, 10)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 		LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
 			mu.Lock()
 			llmCallCount++
@@ -1355,7 +1354,7 @@ func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorCl
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, ""), Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		SessionManager: session.New(tmpDir, ""), Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			defer mu.Unlock()
