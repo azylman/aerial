@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,8 +33,9 @@ const (
 	logTailBytes   = 4000
 )
 
-// Harness is one restate-server child process plus one SDK endpoint serving
-// the bound service definitions.
+// Harness is one restate-server child process plus one primary SDK endpoint
+// serving the bound service definitions. Tests may register further
+// deployments (AddDeployment) and take the primary endpoint down (StopEndpoint).
 type Harness struct {
 	t          testing.TB
 	IngressURL string
@@ -44,6 +46,22 @@ type Harness struct {
 	mu           sync.Mutex
 	endpoint     *http.Server
 	endpointDone chan struct{}
+	extra        []*servedEndpoint
+	downAttempts atomic.Int64
+	downHit      chan struct{}
+}
+
+// Options tunes the restate-server child process.
+type Options struct {
+	// Env is appended to the child's environment, e.g.
+	// RESTATE_DEFAULT_RETRY_POLICY__MAX_INTERVAL=200ms.
+	Env []string
+}
+
+// servedEndpoint is one running h2c endpoint server.
+type servedEndpoint struct {
+	srv  *http.Server
+	done chan struct{}
 }
 
 func serverConfig(dataDir string, ports []int) string {
@@ -69,6 +87,12 @@ pgsql-bind-address = "127.0.0.1:%d"
 // t.Cleanup.
 func Start(t testing.TB, defs ...restate.ServiceDefinition) *Harness {
 	t.Helper()
+	return StartWithOptions(t, Options{}, defs...)
+}
+
+// StartWithOptions is Start with server options (extra environment).
+func StartWithOptions(t testing.TB, opts Options, defs ...restate.ServiceDefinition) *Harness {
+	t.Helper()
 	bin := *restateServerBin
 	if bin == "" {
 		t.Fatal("restatetest: -restate-server-bin is required under the restateintegration tag (run scripts/restate-integration-test.sh)")
@@ -88,6 +112,9 @@ func Start(t testing.TB, defs ...restate.ServiceDefinition) *Harness {
 	cmd := exec.CommandContext(procCtx, bin, "-c", cfgPath, "--no-logo", "--log-disable-ansi-codes", "true")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	if len(opts.Env) > 0 {
+		cmd.Env = append(os.Environ(), opts.Env...)
+	}
 	if err := cmd.Start(); err != nil {
 		killProc()
 		t.Fatalf("restatetest: start restate-server: %v", err)
@@ -100,9 +127,11 @@ func Start(t testing.TB, defs ...restate.ServiceDefinition) *Harness {
 		AdminURL:     fmt.Sprintf("http://127.0.0.1:%d", ports[2]),
 		client:       &http.Client{Timeout: requestTimeout},
 		endpointAddr: fmt.Sprintf("127.0.0.1:%d", ports[4]),
+		downHit:      make(chan struct{}, 1),
 	}
 	t.Cleanup(func() {
 		h.stopEndpoint()
+		h.stopExtra()
 		killProc()
 		waitErr := <-exited
 		if err := logFile.Close(); err != nil {
@@ -118,7 +147,7 @@ func Start(t testing.TB, defs ...restate.ServiceDefinition) *Harness {
 
 	h.waitReady(exited)
 	h.serveEndpoint(defs...)
-	h.register()
+	h.register(h.endpointAddr)
 	return h
 }
 
@@ -161,7 +190,7 @@ func (h *Harness) closeBody(resp *http.Response) {
 	}
 }
 
-func (h *Harness) serveEndpoint(defs ...restate.ServiceDefinition) {
+func (h *Harness) endpointHandler(defs ...restate.ServiceDefinition) http.Handler {
 	h.t.Helper()
 	rs := server.NewRestate()
 	for _, d := range defs {
@@ -171,10 +200,16 @@ func (h *Harness) serveEndpoint(defs ...restate.ServiceDefinition) {
 	if err != nil {
 		h.t.Fatalf("restatetest: endpoint handler: %v", err)
 	}
+	return handler
+}
+
+// serve runs handler as an h2c server on addr.
+func (h *Harness) serve(addr string, handler http.Handler) *servedEndpoint {
+	h.t.Helper()
 	var protocols http.Protocols
 	protocols.SetUnencryptedHTTP2(true)
 	srv := &http.Server{Handler: handler, Protocols: &protocols, ReadHeaderTimeout: 5 * time.Second}
-	ln := h.listenEndpoint()
+	ln := h.listen(addr)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -182,15 +217,26 @@ func (h *Harness) serveEndpoint(defs ...restate.ServiceDefinition) {
 			h.t.Errorf("restatetest: endpoint serve: %v", err)
 		}
 	}()
+	return &servedEndpoint{srv: srv, done: done}
+}
+
+func (h *Harness) servePrimary(handler http.Handler) {
+	h.t.Helper()
+	ep := h.serve(h.endpointAddr, handler)
 	h.mu.Lock()
-	h.endpoint = srv
-	h.endpointDone = done
+	h.endpoint = ep.srv
+	h.endpointDone = ep.done
 	h.mu.Unlock()
 }
 
-// listenEndpoint binds the fixed endpoint address, retrying until a previous
-// endpoint on the same address has released it.
-func (h *Harness) listenEndpoint() net.Listener {
+func (h *Harness) serveEndpoint(defs ...restate.ServiceDefinition) {
+	h.t.Helper()
+	h.servePrimary(h.endpointHandler(defs...))
+}
+
+// listen binds addr, retrying until a previous endpoint on the same address
+// has released it.
+func (h *Harness) listen(addr string) net.Listener {
 	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), readyTimeout)
 	defer cancel()
@@ -198,13 +244,13 @@ func (h *Harness) listenEndpoint() net.Listener {
 	defer ticker.Stop()
 	var lc net.ListenConfig
 	for {
-		ln, err := lc.Listen(ctx, "tcp", h.endpointAddr)
+		ln, err := lc.Listen(ctx, "tcp", addr)
 		if err == nil {
 			return ln
 		}
 		select {
 		case <-ctx.Done():
-			h.t.Fatalf("restatetest: listen on %s: %v", h.endpointAddr, err)
+			h.t.Fatalf("restatetest: listen on %s: %v", addr, err)
 		case <-ticker.C:
 		}
 	}
@@ -225,6 +271,19 @@ func (h *Harness) stopEndpoint() {
 	<-done
 }
 
+func (h *Harness) stopExtra() {
+	h.mu.Lock()
+	extra := h.extra
+	h.extra = nil
+	h.mu.Unlock()
+	for _, ep := range extra {
+		if err := ep.srv.Close(); err != nil {
+			h.t.Logf("restatetest: close endpoint: %v", err)
+		}
+		<-ep.done
+	}
+}
+
 // RestartEndpoint simulates a pod crash: it closes the endpoint server,
 // dropping every in-flight invocation stream, and serves fresh service
 // instances on the same address. Restate retries the dropped invocations
@@ -235,9 +294,60 @@ func (h *Harness) RestartEndpoint(defs ...restate.ServiceDefinition) {
 	h.serveEndpoint(defs...)
 }
 
-func (h *Harness) register() {
+// StopEndpoint takes the primary endpoint down like an outage: it drops every
+// in-flight invocation stream and answers each later request (one Restate
+// invocation attempt each) with 503, counting them in DownAttempts. A later
+// RestartEndpoint brings the deployment back on the same address.
+func (h *Harness) StopEndpoint() {
 	h.t.Helper()
-	body := h.mustJSON(map[string]any{"uri": "http://" + h.endpointAddr, "use_http_11": false})
+	h.stopEndpoint()
+	h.downAttempts.Store(0)
+	h.servePrimary(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h.downAttempts.Add(1)
+		select {
+		case h.downHit <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+}
+
+// DownAttempts is how many invocation attempts reached the endpoint since StopEndpoint.
+func (h *Harness) DownAttempts() int64 {
+	return h.downAttempts.Load()
+}
+
+// WaitDownAttempts blocks until at least n invocation attempts reached the
+// stopped endpoint; it fails the test after timeout.
+func (h *Harness) WaitDownAttempts(n int64, timeout time.Duration) {
+	h.t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for h.downAttempts.Load() < n {
+		select {
+		case <-h.downHit:
+		case <-deadline.C:
+			h.t.Fatalf("restatetest: only %d of %d attempts reached the stopped endpoint after %s", h.downAttempts.Load(), n, timeout)
+		}
+	}
+}
+
+// AddDeployment serves defs on a new address and registers it as the newest
+// deployment: invocations that start from now on run there, while invocations
+// already started on an earlier deployment stay pinned to it.
+func (h *Harness) AddDeployment(defs ...restate.ServiceDefinition) {
+	h.t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", freePorts(h.t, 1)[0])
+	ep := h.serve(addr, h.endpointHandler(defs...))
+	h.mu.Lock()
+	h.extra = append(h.extra, ep)
+	h.mu.Unlock()
+	h.register(addr)
+}
+
+func (h *Harness) register(addr string) {
+	h.t.Helper()
+	body := h.mustJSON(map[string]any{"uri": "http://" + addr, "use_http_11": false})
 	status, out := h.post(h.AdminURL+"/deployments", body, nil)
 	if status/100 != 2 {
 		h.t.Fatalf("restatetest: register deployment: status %d: %s", status, out)
