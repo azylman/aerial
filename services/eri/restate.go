@@ -5,14 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
@@ -273,37 +270,4 @@ func handleCancelDispatchViaRestate(ctx context.Context, client *RestateIngressC
 		return 0, nil, err
 	}
 	return resp.CancelledCount, resp.CancelledIDs, nil
-}
-
-func handleInteractionViaRestate(ctx context.Context, client *RestateIngressClient, interaction *discordgo.Interaction) (bool, error) {
-	if client == nil || interaction == nil || strings.TrimSpace(interaction.ChannelID) == "" {
-		return false, nil
-	}
-	switch interaction.Type {
-	case discordgo.InteractionApplicationCommand:
-		cmd := interaction.ApplicationCommandData()
-		if cmd.Name == "interrupt" {
-			if _, err := client.CancelThreadTurn(ctx, interaction.ChannelID, queue.CancelTurnRequest{
-				Reason: "cancelled by operator via /interrupt",
-			}); err != nil {
-				log.Printf("[Restate] Failed to cancel thread turn: %v", err)
-				return true, err
-			}
-			return true, nil
-		}
-	case discordgo.InteractionMessageComponent:
-		data := interaction.MessageComponentData()
-		if strings.HasPrefix(data.CustomID, "stop_turn") {
-			if _, err := client.CancelThreadTurn(ctx, interaction.ChannelID, queue.CancelTurnRequest{
-				Reason: "cancelled by operator via stop_turn button",
-			}); err != nil {
-				log.Printf("[Restate] Failed to cancel thread turn via button: %v", err)
-				return true, err
-			}
-			return true, nil
-		}
-	default:
-		// Ignored.
-	}
-	return false, nil
 }

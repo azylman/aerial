@@ -218,23 +218,14 @@ func (b *BuildObject) markActionRepairDeployed(ctx context.Context, deploying mo
 }
 
 // completeCrossBuildSweptDeployments completes eligible earlier chunks in
-// other builds superseded by the deploying chunk's landed commit, including
-// already-completed chunks re-derived for retry recovery. Skewed or
-// concurrent transitions surface as skipped writes inside the store sweep;
-// other errors return after processing partial progress so the journaled
-// step retries the remainder. It publishes a completed event per swept
-// chunk, then queues one Reconcile per affected build for that build's own
-// runner: this object never evaluates another build's terminal status or
-// widget with its own lock, token or eri session.
+// other builds superseded by the deploying chunk's landed commit.
+// It queues one Mutate(chunk_deploy_success) per swept chunk for that
+// build's own runner: this object never evaluates another build's terminal
+// status or widget with its own lock, token or eri session.
 func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, deploying model.VanadisChunk) error {
-	swept, recovered, err := b.store.SweepEarlierDeploymentsAcrossBuilds(ctx, deploying)
-	for _, sw := range append(swept, recovered...) {
-		if b.executor != nil {
-			if pubErr := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{sw.ChunkID}, ""); pubErr != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
-			}
-		}
-		recordCrossBuildReconcile(ctx, store.BuildRoute{BuildID: sw.BuildID})
+	swept, err := b.store.SweepEarlierDeploymentsAcrossBuilds(ctx, deploying)
+	for _, sw := range swept {
+		recordCrossBuildReconcile(ctx, sw)
 	}
 	return err
 }
@@ -331,7 +322,7 @@ func (b *BuildObject) locateOrAttachPRChunk(ctx context.Context, buildID string,
 
 // dispatchPREvent applies one PR event and returns the other builds a
 // deploy_success sweep changed, for reconciliation by their own runners.
-func (b *BuildObject) dispatchPREvent(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) ([]store.BuildRoute, error) {
+func (b *BuildObject) dispatchPREvent(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) ([]store.SweptChunk, error) {
 	if event == "deploy_success" {
 		cctx, crossBuild := withCrossBuildReconciles(ctx)
 		err := b.applyMutation(cctx, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
@@ -425,7 +416,7 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 // prEventOutcome is the journaled result of applying one PR lifecycle event.
 type prEventOutcome struct {
 	Applied          bool               `json:"applied"`
-	ReconcileTargets []store.BuildRoute `json:"reconcile_targets,omitempty"`
+	ReconcileTargets []store.SweptChunk `json:"reconcile_targets,omitempty"`
 	RetryAfter       time.Duration      `json:"retry_after,omitempty"`
 }
 

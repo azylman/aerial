@@ -20,7 +20,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -77,7 +76,7 @@ func TestBuildObject_ValidationFailures(t *testing.T) {
 			}
 			bo := NewBuildObject(url, nil)
 			if !tc.nilStore {
-				st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b-validate", Status: "running", ThreadID: "th-1"}}})
+				st, _ := seededStore(t, []model.VanadisBuild{{ID: "b-validate", Status: "running", ThreadID: "th-1"}}, nil)
 				bo = bo.WithAuthority(st, nil)
 			}
 			bo.runtimeFactory = func(_ restate.ObjectContext) objectRuntime { return rt }
@@ -99,14 +98,19 @@ func TestBuildObject_ValidationFailures(t *testing.T) {
 	}
 }
 
-// ck is one aerial chunk of build b1; deps become DependsOn.
+// ck is one chunk of build b1; deps become DependsOn. Pr chunks target
+// aerial; action chunks without a PR carry no repo, as the schema requires.
 func ck(id, status, mode string, pr int, deps ...string) model.VanadisChunk {
-	return model.VanadisChunk{ID: id, BuildID: "b1", Status: status, Repo: "aerial", Mode: mode, PRNumber: pr, DependsOn: deps}
+	repo := "aerial"
+	if mode == "action" && pr == 0 {
+		repo = ""
+	}
+	return model.VanadisChunk{ID: id, BuildID: "b1", Status: status, Repo: repo, Mode: mode, PRNumber: pr, DependsOn: deps}
 }
 
-// bld is build b1 at status with a posted status widget.
+// bld is tier-2 build b1 at status with a posted status widget.
 func bld(status string) model.VanadisBuild {
-	return model.VanadisBuild{ID: "b1", Title: "Build", Status: status, ThreadID: "th-1", StatusMessageID: "msg-123"}
+	return model.VanadisBuild{ID: "b1", Title: "Build", Tier: 2, Status: status, ThreadID: "th-1", StatusMessageID: "msg-123"}
 }
 
 // objState is the object state holding build and chunks.
@@ -151,7 +155,6 @@ func TestExecuteObjectTransition(t *testing.T) {
 
 	const expired = "RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"
 	rollout := &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}
-	failRoute := []sqlRoute{{Match: "SELECT c.id, c.build_id", Row: sqltest.FailRow("running", "running")}}
 	running, pending := ck("c1", "running", "pr", 0), ck("c1", "pending", "pr", 0)
 	action := ck("c1", "running", "action", 0)
 	syncedPrior := func(s string) *model.BuildObjectState {
@@ -162,8 +165,8 @@ func TestExecuteObjectTransition(t *testing.T) {
 		name          string
 		build         model.VanadisBuild
 		chunks        []model.VanadisChunk
-		dbErr         error
-		routes        []sqlRoute
+		missing       bool
+		closed        bool
 		nilStore      bool
 		mutation      *BuildMutationRequest
 		prior         *model.BuildObjectState
@@ -181,6 +184,8 @@ func TestExecuteObjectTransition(t *testing.T) {
 		wantReserved  []string
 		wantFailed    []string
 		wantWidget    string
+		wantStored    map[string]string
+		wantBuildRow  string
 	}{
 		{name: "pending chunk launches", build: bld("running"), chunks: cks(pending), prior: launchedState(nil, "c0"), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
 		{name: "deferred launch starts lease chain", build: bld("running"), chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 1}}, wantDeferrals: map[string]int{"c1": 1}, wantSeq: 1, wantWidget: "running"},
@@ -195,31 +200,26 @@ func TestExecuteObjectTransition(t *testing.T) {
 		{name: "cancelled build clears state", build: bld(statusCancelled), chunks: cks(ck("c1", statusCancelled, "pr", 0)), wantStatus: statusCancelled, wantCleared: true},
 		{name: "cancel mutation clears state", build: bld(statusCancelled), chunks: cks(running), mutation: &BuildMutationRequest{Action: "cancelled", Reason: "user requested"}, prior: objState(bld(statusCancelled), running), wantStatus: statusCancelled, wantCleared: true},
 		{name: "completed build reports completed", build: bld(statusCompleted), chunks: cks(ck("c1", statusCompleted, "pr", 0)), wantStatus: statusCompleted, wantCleared: true},
-		{name: "build not found", dbErr: store.ErrBuildNotFound, wantStatus: statusNotFound, wantCleared: true},
-		{name: "store read failure", dbErr: errors.New("database unavailable"), wantErr: "database unavailable"},
+		{name: "build not found", missing: true, wantStatus: statusNotFound, wantCleared: true},
+		{name: "store read failure", closed: true, wantErr: "closed pool"},
 		{name: "reconcile without store", nilStore: true, wantErr: "store not configured"},
 		{name: "mutate without store", nilStore: true, mutation: &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}, wantErr: "store not configured"},
-		{name: "unchanged widget state skips sync", build: bld("running"), chunks: cks(running), prior: syncedPrior("running"), wantStatus: "running"},
+		{name: "unchanged widget state skips sync", build: bld("running"), chunks: cks(ciChunk("running", "passed", 0, rollout)), prior: syncedPrior("running"), wantStatus: "running", wantStored: map[string]string{"c1": "running"}},
 		{name: "ci check change syncs widget", build: bld("running"), chunks: cks(ciChunk("pr_opened", "pending", 0, nil)), prior: syncedPrior("pr_opened"), wantStatus: "running", wantWidget: "running"},
 		{name: "chunk status change syncs widget", build: bld("running"), chunks: cks(running), prior: syncedPrior("pending"), wantStatus: "running", wantWidget: "running"},
 		{name: "pr number change syncs widget", build: bld("running"), chunks: cks(ck("c1", "pr_opened", "pr", 101)), prior: syncedPrior("pr_opened"), wantStatus: "running", wantWidget: "running"},
 		{name: "running chunk in prior state", build: bld("running"), chunks: cks(running), prior: objState(bld("running"), running), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
 		{name: "complete_chunk on action chunk", build: bld("running"), chunks: cks(action), mutation: &BuildMutationRequest{Action: "complete_chunk", ChunkID: "c1"}, prior: objState(bld("running"), action), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
-		{name: "chunk_deploy_success", build: bld("running"), chunks: cks(running), routes: failRoute, mutation: &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1"}, wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
-		{name: "action_completed", build: bld("running"), chunks: cks(running), routes: failRoute, mutation: &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}, wantStatus: "running"},
+		{name: "chunk_deploy_success", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1"}, wantStatus: statusCompleted, wantCleared: true, wantWidget: statusCompleted, wantStored: map[string]string{"c1": statusCompleted}, wantBuildRow: statusCompleted},
+		{name: "action_completed", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}, wantStatus: "running"},
 		{name: "chunk_failed", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", Reason: "boom"}, wantStatus: statusFailed, wantFailed: []string{"c1  boom"}},
-		{name: "cancelled mutation on running build", build: bld("running"), chunks: cks(running), routes: failRoute, mutation: &BuildMutationRequest{Action: "cancelled", ChunkID: "c1", Reason: "stopped"}, wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
+		{name: "cancelled mutation on running build", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "cancelled", ChunkID: "c1", Reason: "stopped"}, wantStatus: statusCancelled, wantCleared: true, wantStored: map[string]string{"c1": "running"}, wantBuildRow: statusCancelled},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := tc.build
-			script := dbScript{Row: &sqltest.Row{Build: &b}, Routes: tc.routes, Chunks: tc.chunks, ExecTag: "UPDATE 1"}
-			if tc.dbErr != nil {
-				script = dbScript{Row: sqltest.ErrRow(tc.dbErr)}
-			}
-			raw, _ := open(script)
+			raw := reconcileStore(t, tc.build, tc.chunks, tc.missing, tc.closed)
 			st := &leaseStore{VanadisStore: raw, failErr: tc.failErr}
 			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
 			bo := NewBuildObject("", nil)
@@ -248,6 +248,13 @@ func TestExecuteObjectTransition(t *testing.T) {
 			assert.Equal(t, tc.wantSeq, seq)
 			assert.Equal(t, tc.wantDeferrals, counts)
 			assert.Equal(t, tc.wantWidget, widgetStatus(eri))
+			if tc.wantStored != nil {
+				assert.Equal(t, tc.wantStored, chunkStatuses(t, raw, "b1"))
+			}
+			if tc.wantBuildRow != "" {
+				stored, _ := loadBuild(t, raw, "b1")
+				assert.Equal(t, tc.wantBuildRow, stored.Status)
+			}
 		})
 	}
 }
@@ -263,7 +270,8 @@ func TestExecuteAuthoritativeTransition(t *testing.T) {
 		name         string
 		build        model.VanadisBuild
 		chunks       []model.VanadisChunk
-		dbErr        error
+		missing      bool
+		closed       bool
 		nilStore     bool
 		mutation     *BuildMutationRequest
 		prior        map[string]bool
@@ -272,10 +280,11 @@ func TestExecuteAuthoritativeTransition(t *testing.T) {
 		wantLaunched map[string]bool
 		wantErr      string
 		wantWidget   string
+		wantStored   map[string]string
 	}{
-		{name: "pending chunk launches", build: bld("running"), chunks: cks(c1), prior: map[string]bool{"prior": true}, wantStatus: "running", wantChunks: []string{"c1"}, wantLaunched: map[string]bool{"prior": true, "c1": true}, wantWidget: "running"},
-		{name: "dependent waits for its dependency", build: bld("running"), chunks: cks(c1, c2), wantStatus: "running", wantChunks: []string{"c1"}, wantLaunched: map[string]bool{"c1": true}, wantWidget: "running"},
-		{name: "merge launches the dependent", build: bld("running"), chunks: cks(c1Merged, c2), mutation: merged, wantStatus: "running", wantChunks: []string{"c2"}, wantLaunched: map[string]bool{"c2": true}, wantWidget: "running"},
+		{name: "pending chunk launches", build: bld("running"), chunks: cks(c1), prior: map[string]bool{"prior": true}, wantStatus: "running", wantChunks: []string{"c1"}, wantLaunched: map[string]bool{"prior": true, "c1": true}, wantWidget: "running", wantStored: map[string]string{"c1": "running"}},
+		{name: "dependent waits for its dependency", build: bld("running"), chunks: cks(c1, c2), wantStatus: "running", wantChunks: []string{"c1"}, wantLaunched: map[string]bool{"c1": true}, wantWidget: "running", wantStored: map[string]string{"c1": "running", "c2": "pending"}},
+		{name: "merge launches the dependent", build: bld("running"), chunks: cks(c1Merged, c2), mutation: merged, wantStatus: "running", wantChunks: []string{"c2"}, wantLaunched: map[string]bool{"c2": true}, wantWidget: "running", wantStored: map[string]string{"c1": "merged", "c2": "running"}},
 		{name: "merged plus completed stays running", build: bld("running"), chunks: cks(c1Merged, c2Done), wantStatus: "running", wantLaunched: map[string]bool{}, wantWidget: "running"},
 		{name: "all completed completes build", build: bld("running"), chunks: cks(c1Done, c2Done), wantStatus: statusCompleted, wantLaunched: map[string]bool{}, wantWidget: statusCompleted},
 		{name: "failed chunk fails build", build: bld("running"), chunks: cks(ck("c1", "failed", "pr", 0)), wantStatus: statusFailed, wantLaunched: map[string]bool{}, wantWidget: statusFailed},
@@ -283,20 +292,15 @@ func TestExecuteAuthoritativeTransition(t *testing.T) {
 		{name: "terminal completed build is left alone", build: bld(statusCompleted), chunks: cks(ck("c1", statusCompleted, "pr", 0)), wantStatus: statusCompleted, wantLaunched: map[string]bool{}},
 		{name: "terminal failed build is left alone", build: bld(statusFailed), chunks: cks(ck("c1", statusFailed, "pr", 0)), wantStatus: statusFailed, wantLaunched: map[string]bool{}},
 		{name: "terminal cancelled build is left alone", build: bld(statusCancelled), chunks: cks(ck("c1", statusCancelled, "pr", 0)), wantStatus: statusCancelled, wantLaunched: map[string]bool{}},
-		{name: "build not found", dbErr: store.ErrBuildNotFound, wantStatus: statusNotFound},
-		{name: "store read failure", dbErr: errors.New("db fail"), wantErr: "db fail"},
+		{name: "build not found", missing: true, wantStatus: statusNotFound},
+		{name: "store read failure", closed: true, wantErr: "closed pool"},
 		{name: "store not configured", nilStore: true, wantErr: "store not configured"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := tc.build
-			script := dbScript{BuildRow: &sqltest.Row{Build: &b}, Chunks: tc.chunks, ExecTag: "UPDATE 1"}
-			if tc.dbErr != nil {
-				script = dbScript{Row: sqltest.ErrRow(tc.dbErr)}
-			}
-			st, _ := open(script)
+			st := reconcileStore(t, tc.build, tc.chunks, tc.missing, tc.closed)
 			eri := &eritest.Client{}
 			bo := NewBuildObject("", nil)
 			if !tc.nilStore {
@@ -312,8 +316,32 @@ func TestExecuteAuthoritativeTransition(t *testing.T) {
 			assert.Equal(t, tc.wantChunks, out.LaunchedChunks)
 			assert.Equal(t, tc.wantLaunched, out.LaunchedMap)
 			assert.Equal(t, tc.wantWidget, widgetStatus(eri))
+			if tc.wantStored != nil {
+				assert.Equal(t, tc.wantStored, chunkStatuses(t, st, "b1"))
+			}
 		})
 	}
+}
+
+// reconcileStore is a real store holding build and chunks, each chunk
+// persisted at its slice position; missing leaves the database empty and
+// closed returns a store whose pool is already closed.
+func reconcileStore(t *testing.T, build model.VanadisBuild, chunks []model.VanadisChunk, missing, closed bool) *store.Store {
+	t.Helper()
+	if closed {
+		return closedStore(t)
+	}
+	if missing {
+		st, _ := openStore(t)
+		return st
+	}
+	indexed := make([]model.VanadisChunk, len(chunks))
+	for i, c := range chunks {
+		c.ChunkIndex = i
+		indexed[i] = c
+	}
+	st, _ := seededStore(t, []model.VanadisBuild{build}, indexed)
+	return st
 }
 
 func TestNotifyChunkFailure_NilObjectIsNoop(t *testing.T) {
@@ -324,7 +352,7 @@ func TestNotifyChunkFailure_NilObjectIsNoop(t *testing.T) {
 
 // leaseChunks is one action chunk at the given status and retry generation.
 func leaseChunks(status string, nudges int) []model.VanadisChunk {
-	return []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: status, Repo: "aerial", Mode: "action", StallNudges: nudges}}
+	return []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: status, Mode: "action", StallNudges: nudges}}
 }
 
 // expiredLease is a deferral that began well over ten minutes ago.
@@ -395,25 +423,18 @@ func openAuthorityHandlerHarness(t *testing.T) (*BuildObject, *fakeObjectRuntime
 	t.Helper()
 	b1 := model.VanadisBuild{ID: "b-cov", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-cov", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
-	st, _ := open(dbScript{
-		BuildRow: &sqltest.Row{Build: &b1},
-		Chunks:   []model.VanadisChunk{c1},
-		Routes: []sqlRoute{
-			{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("action")},
-			{Match: "UPDATE vanadis_chunks", Row: sqltest.ValuesRow("b-cov", "c1", "th-1")},
-			{Match: "WHERE c.repo = ANY($1) AND c.pr_number = $2", Row: sqltest.ValuesRow("c1", "b-cov", 0, "medium", false)},
-			{Match: "SELECT id, build_id, chunk_index, mode, title, status", Row: sqltest.ValuesRow("c1", "b-cov", 0, "action", "C1", "running", 0)},
-			{Match: "SELECT id, thread_id, tier", Row: sqltest.ValuesRow("b-cov", "th-1", 1, "Build Title", "Build Obj", "running", "")},
-			{Match: "SELECT COUNT(*)", Row: sqltest.ValuesRow(0)},
-			{Match: "SELECT c.id, c.build_id, c.chunk_index, c.mode", Row: sqltest.FailRow("running", "running")},
-		},
-		ExecTag: "UPDATE 1",
-	})
-	exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, &mockBusExecutor{}, "token", "example-owner", nil)
-	bo := NewBuildObject("", nil).WithAuthority(st, exec)
+	st, _ := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	bo := authorityObject(t, st)
 	rt := newFakeObjectRuntime("b-cov")
 	rt.SetState(model.BuildObjectState{Build: b1, Chunks: []model.VanadisChunk{c1}})
 	return bo, rt
+}
+
+// authorityObject is a BuildObject over st with a stub eri and bus.
+func authorityObject(t *testing.T, st store.VanadisStore) *BuildObject {
+	t.Helper()
+	exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, &mockBusExecutor{}, "token", "example-owner", nil)
+	return NewBuildObject("", nil).WithAuthority(st, exec)
 }
 
 func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
@@ -461,11 +482,14 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 	for _, tc := range terminals {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			boTerm, _ := openAuthorityHandlerHarness(t)
 			bTerm := model.VanadisBuild{ID: tc.buildID, Status: "running", ThreadID: "th-1"}
-			termStatus, err := boTerm.evaluateBuildTerminalStatus(context.Background(), &bTerm, []model.VanadisChunk{{ID: "c1", Status: tc.chunkStatus}}, map[string]bool{}, false)
+			cTerm := model.VanadisChunk{ID: "c1", BuildID: tc.buildID, Status: tc.chunkStatus}
+			st, _ := seededStore(t, []model.VanadisBuild{bTerm}, []model.VanadisChunk{cTerm})
+			termStatus, err := authorityObject(t, st).evaluateBuildTerminalStatus(context.Background(), &bTerm, []model.VanadisChunk{cTerm}, map[string]bool{}, false)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, termStatus)
+			stored, _ := loadBuild(t, st, tc.buildID)
+			assert.Equal(t, tc.wantStatus, stored.Status)
 		})
 	}
 }
@@ -581,19 +605,21 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 
 	bMerge := model.VanadisBuild{ID: "b-merge", Status: "running", ThreadID: "th-1"}
 	cMerge := model.VanadisChunk{ID: "c1", BuildID: "b-merge", Status: "open", Mode: "pr", Repo: "aerial"}
-	stMerge, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bMerge}, Chunks: []model.VanadisChunk{cMerge}, ExecTag: "UPDATE 1"})
+	stMerge, _ := seededStore(t, []model.VanadisBuild{bMerge}, []model.VanadisChunk{cMerge})
 	busErr := &pubsubtest.FaultBus{PublishErr: errors.New("pub fail")}
 	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", "example-owner", nil))
 	assert.NoError(t, boMerge.applyMutation(context.Background(), "b-merge", &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}))
 
 	bBegin := model.VanadisBuild{ID: "b-begin", Status: "running", ThreadID: "th-1"}
 	cBegin := model.VanadisChunk{ID: "c1", BuildID: "b-begin", Status: "running", Mode: "action"}
-	stBegin, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bBegin}, Chunks: []model.VanadisChunk{cBegin}, BeginErr: errors.New("begin fail")})
+	stBegin, poolBegin := seededStore(t, []model.VanadisBuild{bBegin}, []model.VanadisChunk{cBegin})
+	mustExec(t, poolBegin, failStatement("vanadis_chunks", "UPDATE"))
 	boBegin := NewBuildObject("", nil).WithAuthority(stBegin, nil)
-	assert.Error(t, boBegin.applyMutation(context.Background(), "b-begin", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}))
+	assert.ErrorContains(t, boBegin.applyMutation(context.Background(), "b-begin", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}), "sabotaged UPDATE on vanadis_chunks")
+	assert.Equal(t, map[string]string{"c1": "running"}, chunkStatuses(t, stBegin, "b-begin"))
 
 	bTerm := model.VanadisBuild{ID: "b-term", Status: "completed", ThreadID: "th-1"}
-	stTerm, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bTerm}})
+	stTerm, _ := seededStore(t, []model.VanadisBuild{bTerm}, nil)
 	boTerm := NewBuildObject("", nil).WithAuthority(stTerm, nil)
 	outTerm, err := boTerm.executeAuthoritativeTransition(context.Background(), "b-term", nil, nil, nil, false)
 	assert.NoError(t, err)
@@ -617,7 +643,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 
 	bDeadline := model.VanadisBuild{ID: "b-deadline", Status: "running", ThreadID: "th-1"}
 	cDeadline := model.VanadisChunk{ID: "c1", BuildID: "b-deadline", Status: statusDeploying, Mode: "pr", Repo: "aerial", PRNumber: 1, MergeSHA: "sha"}
-	stDeadline, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bDeadline}, Chunks: []model.VanadisChunk{cDeadline}, ExecTag: "UPDATE 1"})
+	stDeadline, _ := seededStore(t, []model.VanadisBuild{bDeadline}, []model.VanadisChunk{cDeadline})
 	eriDeadlineWidgetFail := &mockEriClient{}
 	eriDeadlineWidgetFail.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
 		return "", errors.New("widget fail")
@@ -672,7 +698,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := model.VanadisBuild{ID: "b1", ThreadID: "th-1", Title: "Build", Objective: "Obj", Status: "running"}
-			st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}})
+			st, _ := seededStore(t, []model.VanadisBuild{b}, nil)
 			widgetCalls, deliveries := 0, 0
 			eri := &mockEriClient{}
 			eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {

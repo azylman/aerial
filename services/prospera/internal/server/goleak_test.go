@@ -7,13 +7,20 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/hermetictest"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 )
 
+// pgRunner runs the package under pkg/pgtest so RunApp tests open a real
+// Postgres clone, inside hermetictest's goleak check.
+type pgRunner struct{ m *testing.M }
+
+func (r pgRunner) Run() int { return pgtest.Main(r.m) }
+
 func TestMain(m *testing.M) {
-	hermetictest.Main(m)
+	hermetictest.Main(pgRunner{m: m})
 }
 
 func TestDrain(t *testing.T) {

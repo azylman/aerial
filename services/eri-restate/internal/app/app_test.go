@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,30 +56,18 @@ func WithAppConfig(cfg *config.Config) AppOption {
 func TestNewEriRestateServer(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		mode string
-	}{
-		{name: "legacy", mode: "legacy"},
-		{name: "coordinator", mode: "coordinator"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := NewEriRestateServer(nil, "aerial", tc.mode, nil)
-			require.NotNil(t, srv)
-			h, err := srv.Handler()
-			require.NoError(t, err)
+	srv := NewEriRestateServer(nil, "aerial", nil)
+	require.NotNil(t, srv)
+	h, err := srv.Handler()
+	require.NoError(t, err)
 
-			req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
-			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusOK, rec.Code)
-			for _, svc := range []string{`"ThreadSession"`, `"DispatchSession"`, `"VoiceSession"`, `"SessionManager"`, `"TurnRunner"`, `"LLM"`} {
-				assert.Contains(t, rec.Body.String(), svc)
-			}
-		})
+	req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
+	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	for _, svc := range []string{`"ThreadSession"`, `"DispatchSession"`, `"VoiceSession"`, `"SessionManager"`, `"TurnRunner"`, `"LLM"`} {
+		assert.Contains(t, rec.Body.String(), svc)
 	}
 }
 
@@ -104,8 +91,8 @@ func boundHandlers(defs []restate.ServiceDefinition) map[string]map[string]strin
 func TestEriRestateDefinitions(t *testing.T) {
 	t.Parallel()
 
-	// Both modes must bind exactly this set, so a flip or rollback never drops a service or
-	// changes a handler's name or kind on a deployment with in-flight invocations.
+	// Every revision binds exactly this set, so a deploy never drops a service or changes a
+	// handler's name or kind on a deployment with in-flight invocations.
 	want := func(suffix string) map[string]map[string]string {
 		return map[string]map[string]string{
 			"ThreadSession" + suffix + " VIRTUAL_OBJECT": {
@@ -127,93 +114,15 @@ func TestEriRestateDefinitions(t *testing.T) {
 	tests := []struct {
 		name  string
 		agent string
-		mode  string
 		want  map[string]map[string]string
 	}{
-		{name: "aerial legacy", agent: "aerial", mode: "legacy", want: want("")},
-		{name: "aerial coordinator", agent: "aerial", mode: "coordinator", want: want("")},
-		{name: "miorine legacy", agent: "miorine", mode: "legacy", want: want("-miorine")},
-		{name: "miorine coordinator", agent: "miorine", mode: "coordinator", want: want("-miorine")},
+		{name: "aerial", agent: "aerial", want: want("")},
+		{name: "miorine", agent: "miorine", want: want("-miorine")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, boundHandlers(eriRestateDefinitions(nil, tc.agent, tc.mode, nil)))
-		})
-	}
-}
-
-func TestResolveTurnQueueMode(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		fileValue    string
-		filePresent  bool
-		configValue  string
-		wantMode     string
-		wantMismatch bool
-		wantErr      string
-	}{
-		{name: "file absent is legacy", wantMode: "legacy"},
-		{name: "file absent ignores config coordinator", configValue: "coordinator", wantMode: "legacy", wantMismatch: true},
-		{name: "empty file is legacy", filePresent: true, wantMode: "legacy"},
-		{name: "legacy", fileValue: "legacy", filePresent: true, configValue: "legacy", wantMode: "legacy"},
-		{name: "coordinator", fileValue: "coordinator", filePresent: true, configValue: "coordinator", wantMode: "coordinator"},
-		{name: "whitespace and newline trimmed", fileValue: " coordinator\n", filePresent: true, configValue: "coordinator", wantMode: "coordinator"},
-		{name: "unknown value fails", fileValue: "restate", filePresent: true, wantErr: `invalid turn_queue "restate"`},
-		{name: "annotation coordinator config legacy", fileValue: "coordinator", filePresent: true, configValue: "legacy", wantMode: "coordinator", wantMismatch: true},
-		{name: "annotation legacy config coordinator (old-revision restart)", fileValue: "legacy", filePresent: true, configValue: "coordinator", wantMode: "legacy", wantMismatch: true},
-		{name: "blank config matches legacy", fileValue: "legacy", filePresent: true, configValue: "", wantMode: "legacy"},
-		{name: "invalid config is only a mismatch", fileValue: "coordinator", filePresent: true, configValue: "bogus", wantMode: "coordinator", wantMismatch: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mode, mismatch, err := ResolveTurnQueueMode(tc.fileValue, tc.filePresent, tc.configValue)
-			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantMode, mode)
-			assert.Equal(t, tc.wantMismatch, mismatch)
-		})
-	}
-}
-
-func TestReadTurnQueueModeFile(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	present := filepath.Join(dir, "turn-queue")
-	require.NoError(t, os.WriteFile(present, []byte("coordinator"), 0o600))
-
-	tests := []struct {
-		name        string
-		path        string
-		wantValue   string
-		wantPresent bool
-		wantErr     string
-	}{
-		{name: "blank path is absent", path: ""},
-		{name: "missing file is absent", path: filepath.Join(dir, "missing")},
-		{name: "present file", path: present, wantValue: "coordinator", wantPresent: true},
-		{name: "unreadable path fails", path: dir, wantErr: "read turn queue mode file"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			value, ok, err := readTurnQueueModeFile(tc.path)
-			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantValue, value)
-			assert.Equal(t, tc.wantPresent, ok)
+			assert.Equal(t, tc.want, boundHandlers(eriRestateDefinitions(nil, tc.agent, nil)))
 		})
 	}
 }
@@ -225,7 +134,7 @@ func TestDiscoveryManifestTimeoutsAndH2C(t *testing.T) {
 	h2cProtocols.SetHTTP1(true)
 	h2cProtocols.SetUnencryptedHTTP2(true)
 
-	srv := NewEriRestateServer(nil, "aerial", "legacy", nil)
+	srv := NewEriRestateServer(nil, "aerial", nil)
 	rawHandler, err := srv.Handler()
 	require.NoError(t, err)
 
@@ -301,7 +210,6 @@ func runConfigEnvCase(t *testing.T, tc configEnvCase) {
 	assert.Equal(t, tc.wantRestatePort, cfg.RestatePort)
 	assert.Equal(t, tc.wantHealthPort, cfg.HealthPort)
 	assert.Equal(t, tc.wantAgentName, cfg.AgentName)
-	assert.Equal(t, "/etc/aerial/podinfo/turn-queue", cfg.TurnQueueModeFile)
 }
 
 func TestLoadConfigFromEnv(t *testing.T) {
@@ -861,33 +769,6 @@ func TestWireOutboundIntegrations(t *testing.T) {
 			if closeFn != nil {
 				closeFn()
 			}
-		})
-	}
-}
-
-func TestRunApp_TurnQueueModeFailsStartup(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	bogus := filepath.Join(dir, "turn-queue")
-	require.NoError(t, os.WriteFile(bogus, []byte("restate\n"), 0o600))
-
-	tests := []struct {
-		name    string
-		file    string
-		wantErr string
-	}{
-		{name: "unknown annotation value", file: bogus, wantErr: `pod annotation aerial.dev/turn-queue: invalid turn_queue "restate"`},
-		{name: "unreadable annotation file", file: dir, wantErr: "read turn queue mode file"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			appCfg := config.NewFromData(&config.ConfigData{DataDir: t.TempDir(), GeminiHomeDir: t.TempDir()})
-			cfg := Config{RestatePort: "0", HealthPort: "0", AgentName: "aerial-test", TurnQueueModeFile: tc.file}
-			err := RunApp(t.Context(), cfg, WithStore(dbtest.NewFakeStore(), nil), WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
 }

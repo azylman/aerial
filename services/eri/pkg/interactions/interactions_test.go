@@ -20,7 +20,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type capturedRequest struct {
@@ -127,40 +126,6 @@ func ResetRegisteredGuilds() {
 	registeredGuilds.Range(func(key, value any) bool {
 		registeredGuilds.Delete(key)
 		return true
-	})
-}
-
-type mockInteractionsProcessHandle struct{}
-
-func (mockInteractionsProcessHandle) Pid() int    { return 12345 }
-func (mockInteractionsProcessHandle) Kill() error { return nil }
-func (mockInteractionsProcessHandle) Wait() error { return nil }
-
-type mockInteractionsDaemonSpawner struct{}
-
-func (mockInteractionsDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-	inR, inW := io.Pipe()
-	outR, outW := io.Pipe()
-	errR, errW := io.Pipe()
-	go func() {
-		_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
-		_ = errW.Close()
-		_, _ = io.Copy(io.Discard, inR)
-	}()
-	return inW, outR, errR, mockInteractionsProcessHandle{}, nil
-}
-
-func newMockProcessPools(threadID string) *queue.WorkerPool {
-	spawner := mockInteractionsDaemonSpawner{}
-	mk := func(m string) *runner.UnifiedProcessPool {
-		p := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: m}, spawner)
-		_, _ = p.GetOrCreate(context.Background(), threadID, "")
-		return p
-	}
-	return queue.New(nil, queue.WorkerPoolConfig{
-		ProcessPool:             mk("gemini-2.5-flash"),
-		LowEffortProcessPool:    mk("gemini-2.5-flash"),
-		MediumEffortProcessPool: mk("gemini-3.8-flash-medium"),
 	})
 }
 
@@ -619,93 +584,111 @@ func TestRouter_HandleQuota(t *testing.T) {
 	}
 }
 
-type sessionQueueTestCase struct {
-	name         string
-	cmdName      string
-	opts         []*discordgo.ApplicationCommandInteractionDataOption
-	seedPending  bool
-	failStore    bool
-	withPools    bool
-	httpStatus   int
-	wantRequests int
-	wantSubstrs  []string
-	avoidSubstrs []string
+type fakeTurnCanceller struct {
+	resp      queue.CancelTurnResponse
+	err       error
+	mu        sync.Mutex
+	threadIDs []string
+	reasons   []string
 }
 
-func assertSessionQueueResponseBody(t *testing.T, reqs []capturedRequest, wantSubstrs, avoidSubstrs []string) {
-	t.Helper()
-	body := ""
-	if len(reqs) == 2 {
-		var deferredResp discordgo.InteractionResponse
-		_ = json.Unmarshal(reqs[0].Body, &deferredResp)
-		if deferredResp.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
-			t.Errorf("expected deferred response type, got %d", deferredResp.Type)
-		}
-		body = string(reqs[1].Body)
-	} else if len(reqs) == 1 {
-		body = string(reqs[0].Body)
-	}
-
-	for _, want := range wantSubstrs {
-		if !strings.Contains(body, want) {
-			t.Errorf("expected body to contain %q, got: %s", want, body)
-		}
-	}
-	for _, avoid := range avoidSubstrs {
-		if strings.Contains(body, avoid) {
-			t.Errorf("expected body NOT to contain %q, got: %s", avoid, body)
-		}
-	}
+func (f *fakeTurnCanceller) CancelThreadTurn(_ context.Context, threadID string, req queue.CancelTurnRequest) (queue.CancelTurnResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threadIDs = append(f.threadIDs, threadID)
+	f.reasons = append(f.reasons, req.Reason)
+	return f.resp, f.err
 }
 
-func runSessionAndQueueCommandCase(t *testing.T, tc sessionQueueTestCase) {
-	t.Helper()
-	router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
-	store := dbtest.NewFakeStore()
-	targetChan := "chan-" + tc.name
-
-	if tc.seedPending {
-		_ = store.InsertMessage(context.Background(), db.Message{ID: "msg-pending-1", ThreadID: targetChan, Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	}
-	if tc.failStore {
-		store.FailNext("RotateSessionID", errors.New("db error"))
-		store.FailNext("GetPendingOrProcessingMessages", errors.New("db error"))
-		store.FailNext("RotateSessionID", errors.New("db error"))
-	}
-	router.deps.Store = store
-
-	if tc.withPools {
-		router.deps.Pool = newMockProcessPools(targetChan)
-	}
-
-	router.Handle(t.Context(), session, mkCmd("int-"+tc.name, targetChan, "admin-123", tc.cmdName, tc.opts...))
-
-	reqs := transport.Requests()
-	if len(reqs) != tc.wantRequests {
-		t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
-	}
-
-	assertSessionQueueResponseBody(t, reqs, tc.wantSubstrs, tc.avoidSubstrs)
-
-	if tc.seedPending {
-		msg, err := store.GetMessage(context.Background(), "msg-pending-1")
-		if err != nil || msg.Status != db.StatusFailed {
-			t.Errorf("expected message status failed, got %v (err=%v)", msg.Status, err)
-		}
-	}
-}
-
-func TestRouter_SessionAndQueueCommands(t *testing.T) {
-	tests := []sessionQueueTestCase{
-		{"Interrupt_DrainsAndPurges", "interrupt", nil, true, false, false, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged"}, []string{"Session rotated"}},
-		{"Interrupt_StoreAndPoolFailures", "interrupt", nil, false, true, true, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged"}, []string{"Session rotated"}},
-		{"ErrorLogging_InterruptHttp500", "interrupt", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
+func TestRouter_HandleInterrupt(t *testing.T) {
+	t.Parallel()
+	const reason = "cancelled by operator via /interrupt"
+	tests := []struct {
+		name            string
+		userID          string
+		noProvider      bool
+		providerNil     bool
+		httpStatus      int
+		resp            queue.CancelTurnResponse
+		err             error
+		wantDeferred    bool
+		wantContent     string
+		wantCancelCalls int
+	}{
+		{name: "admin active-turn cancel", userID: "admin-123", resp: queue.CancelTurnResponse{CancelledActiveTurn: true, CancelledCount: 2}, wantDeferred: true, wantContent: "🛑 Interrupted the active turn in <#chan-int> and dropped 2 queued messages", wantCancelCalls: 1},
+		{name: "admin active-turn cancel without queue", userID: "admin-123", resp: queue.CancelTurnResponse{CancelledActiveTurn: true}, wantDeferred: true, wantContent: "🛑 Interrupted the active turn in <#chan-int>", wantCancelCalls: 1},
+		{name: "admin queued-only cancel", userID: "admin-123", resp: queue.CancelTurnResponse{CancelledCount: 3}, wantDeferred: true, wantContent: "No active turn in <#chan-int>; dropped 3 queued messages.", wantCancelCalls: 1},
+		{name: "admin nothing running", userID: "admin-123", wantDeferred: true, wantContent: "Nothing was running in <#chan-int>.", wantCancelCalls: 1},
+		{name: "admin canceller error", userID: "admin-123", err: errors.New("restate down"), wantDeferred: true, wantContent: "Interrupt failed: restate down", wantCancelCalls: 1},
+		{name: "non-admin rejection", userID: "attacker-999", wantContent: "Unauthorized"},
+		{name: "nil provider", userID: "admin-123", noProvider: true, wantDeferred: true, wantContent: "interrupt unavailable"},
+		{name: "provider returning nil", userID: "admin-123", providerNil: true, wantDeferred: true, wantContent: "interrupt unavailable"},
+		{name: "discord defer failure skips cancel", userID: "admin-123", httpStatus: http.StatusInternalServerError, wantContent: `"type":5`},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSessionAndQueueCommandCase(t, tc)
+			t.Parallel()
+			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			fake := &fakeTurnCanceller{resp: tc.resp, err: tc.err}
+			router.deps.TurnCancellerProvider = interruptProvider(fake, tc.noProvider, tc.providerNil)
+
+			router.Handle(t.Context(), session, mkCmd("int-"+tc.name, "chan-int", tc.userID, "interrupt"))
+
+			assertInterruptResponses(t, transport.Requests(), tc.wantDeferred, tc.wantContent)
+			assertCancelCalls(t, fake, tc.wantCancelCalls, "chan-int", reason)
 		})
+	}
+}
+
+func interruptProvider(fake *fakeTurnCanceller, noProvider, providerNil bool) TurnCancellerProvider {
+	if noProvider {
+		return nil
+	}
+	if providerNil {
+		return func() TurnCanceller { return nil }
+	}
+	return func() TurnCanceller { return fake }
+}
+
+func assertInterruptResponses(t *testing.T, reqs []capturedRequest, wantDeferred bool, wantContent string) {
+	t.Helper()
+	if !wantDeferred {
+		if len(reqs) != 1 || !strings.Contains(string(reqs[0].Body), wantContent) {
+			t.Fatalf("expected one response containing %q, got %+v", wantContent, reqs)
+		}
+		return
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("expected deferred response plus edit, got %d requests", len(reqs))
+	}
+	var deferred discordgo.InteractionResponse
+	if err := json.Unmarshal(reqs[0].Body, &deferred); err != nil {
+		t.Fatalf("decode deferred response: %v", err)
+	}
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource || deferred.Data == nil || deferred.Data.Flags != discordgo.MessageFlagsEphemeral {
+		t.Errorf("expected deferred ephemeral response, got %s", reqs[0].Body)
+	}
+	var edit discordgo.WebhookEdit
+	if err := json.Unmarshal(reqs[1].Body, &edit); err != nil {
+		t.Fatalf("decode edit: %v", err)
+	}
+	if reqs[1].Method != http.MethodPatch || edit.Content == nil || *edit.Content != wantContent {
+		t.Errorf("expected PATCH edit %q, got %s %s", wantContent, reqs[1].Method, reqs[1].Body)
+	}
+}
+
+func assertCancelCalls(t *testing.T, fake *fakeTurnCanceller, wantCalls int, wantThreadID, wantReason string) {
+	t.Helper()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.threadIDs) != wantCalls {
+		t.Fatalf("expected %d cancel calls, got %d", wantCalls, len(fake.threadIDs))
+	}
+	for idx := range fake.threadIDs {
+		if fake.threadIDs[idx] != wantThreadID || fake.reasons[idx] != wantReason {
+			t.Errorf("cancel call %d: got thread %q reason %q", idx, fake.threadIDs[idx], fake.reasons[idx])
+		}
 	}
 }
 
