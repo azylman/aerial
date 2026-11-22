@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/githubauth"
@@ -59,9 +60,10 @@ type GitHubPR struct {
 
 // GitHubError is one failed GitHub call. Status is 0 for transport errors.
 type GitHubError struct {
-	Status      int    `json:"status"`
-	Message     string `json:"message"`
-	RateLimited bool   `json:"rate_limited"`
+	Status      int           `json:"status"`
+	Message     string        `json:"message"`
+	RateLimited bool          `json:"rate_limited"`
+	RetryAfter  time.Duration `json:"retry_after,omitempty"`
 }
 
 func (e *GitHubError) Error() string {
@@ -136,6 +138,7 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, body io.Read
 		return resp.StatusCode, raw, &GitHubError{
 			Status:      resp.StatusCode,
 			RateLimited: true,
+			RetryAfter:  githubauth.RateLimitDelay(resp, time.Now()),
 			Message:     fmt.Sprintf("github api rate limited (status %d, remaining: %s): %s", resp.StatusCode, resp.Header.Get("X-Ratelimit-Remaining"), gitHubMessage(raw)),
 		}
 	}

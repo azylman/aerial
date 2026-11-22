@@ -92,12 +92,14 @@ func countedSchedulerCalls(scheduler *fakeRescheduler, nilDep bool) int {
 	return len(scheduler.calls)
 }
 
-func runConflictEffect(t *testing.T, store *MemPRStore, seedMark string, conflicted, checkerErr, schedulerErr, nilChecker, nilScheduler bool) (string, ConflictOutcome, *fakeConflictChecker, *fakeRescheduler, error) {
+func runConflictEffect(t *testing.T, store *MemPRStore, seedMark string, conflicted, checkerErr, schedulerErr, nilChecker, nilScheduler bool, overrideCheckerErr ...error) (string, ConflictOutcome, *fakeConflictChecker, *fakeRescheduler, error) {
 	t.Helper()
 	ctx := context.Background()
 	key := seedConflictPR(store, "abc123", 2, 0, TerminalNone, seedMark, false)
 	checker := &fakeConflictChecker{conflicted: conflicted}
-	if checkerErr {
+	if len(overrideCheckerErr) > 0 && overrideCheckerErr[0] != nil {
+		checker.err = overrideCheckerErr[0]
+	} else if checkerErr {
 		checker.err = errFakeCheck
 	}
 	var checkerArg ConflictChecker = checker
@@ -195,6 +197,7 @@ func TestHandleConflictCheckEffects(t *testing.T) {
 		seedConflictMark  string
 		checkerConflicted bool
 		checkerErr        bool
+		customCheckerErr  error
 		schedulerErr      bool
 		nilChecker        bool
 		nilScheduler      bool
@@ -202,12 +205,14 @@ func TestHandleConflictCheckEffects(t *testing.T) {
 		wantConflicted    bool
 		wantRecheck       bool
 		wantConflictMark  string
+		wantDelay         time.Duration
 		wantCheckerCalls  int
 		wantSchedCalls    int
 	}{
 		{name: "clean check clears mark", seedConflictMark: "abc123", wantConflictMark: "", wantCheckerCalls: 1},
-		{name: "conflict marks and schedules recheck", checkerConflicted: true, wantConflicted: true, wantRecheck: true, wantConflictMark: "abc123", wantCheckerCalls: 1, wantSchedCalls: 1},
-		{name: "checker error schedules recheck and errors", checkerErr: true, wantErr: true, wantRecheck: true, wantCheckerCalls: 1, wantSchedCalls: 1},
+		{name: "conflict marks and schedules recheck", checkerConflicted: true, wantConflicted: true, wantRecheck: true, wantConflictMark: "abc123", wantDelay: ConflictRecheckDelay, wantCheckerCalls: 1, wantSchedCalls: 1},
+		{name: "checker error schedules recheck and errors", checkerErr: true, wantErr: true, wantRecheck: true, wantDelay: ConflictRecheckDelay, wantCheckerCalls: 1, wantSchedCalls: 1},
+		{name: "rate limit error schedules recheck with backoff", customCheckerErr: &GitHubError{Status: 403, RateLimited: true, RetryAfter: 5 * time.Minute, Message: "rate limit"}, wantErr: true, wantRecheck: true, wantDelay: 5 * time.Minute, wantCheckerCalls: 1, wantSchedCalls: 1},
 		{name: "checker and scheduler both fail", checkerErr: true, schedulerErr: true, wantErr: true, wantCheckerCalls: 1, wantSchedCalls: 1},
 		{name: "conflicted scheduler failure persists nothing", checkerConflicted: true, schedulerErr: true, wantErr: true, wantConflicted: true, wantConflictMark: "", wantCheckerCalls: 1, wantSchedCalls: 1},
 		{name: "nil checker defaults to clean", nilChecker: true, wantConflictMark: ""},
@@ -217,7 +222,7 @@ func TestHandleConflictCheckEffects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := NewMemPRStore()
-			key, out, checker, scheduler, err := runConflictEffect(t, store, tc.seedConflictMark, tc.checkerConflicted, tc.checkerErr, tc.schedulerErr, tc.nilChecker, tc.nilScheduler)
+			key, out, checker, scheduler, err := runConflictEffect(t, store, tc.seedConflictMark, tc.checkerConflicted, tc.checkerErr, tc.schedulerErr, tc.nilChecker, tc.nilScheduler, tc.customCheckerErr)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleConflictCheck err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -228,8 +233,14 @@ func TestHandleConflictCheckEffects(t *testing.T) {
 			if got := countedSchedulerCalls(scheduler, tc.nilScheduler); got != tc.wantSchedCalls {
 				t.Fatalf("scheduler calls = %d, want %d", got, tc.wantSchedCalls)
 			}
-			if !tc.wantErr && !tc.nilScheduler && tc.wantRecheck && scheduler.calls[0].delay != ConflictRecheckDelay {
-				t.Fatalf("recheck delay = %v, want %v", scheduler.calls[0].delay, ConflictRecheckDelay)
+			if !tc.nilScheduler && tc.wantRecheck {
+				wantDelay := tc.wantDelay
+				if wantDelay == 0 {
+					wantDelay = ConflictRecheckDelay
+				}
+				if scheduler.calls[0].delay != wantDelay {
+					t.Fatalf("recheck delay = %v, want %v", scheduler.calls[0].delay, wantDelay)
+				}
 			}
 			ps, ok := store.LoadPR(key)
 			if !ok {

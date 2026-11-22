@@ -542,6 +542,8 @@ func TestPRStateArmDeployFailure(t *testing.T) {
 		want      *PendingDeployFailure
 	}{
 		{name: "nil state arms nothing", ev: PREvent{Banner: "x"}},
+		{name: "rate limit banner arms nothing", state: deployingMergedPR(), ev: PREvent{Banner: "github api rate limit exceeded"}},
+		{name: "rate limit facts arms nothing", state: deployingMergedPR(), ev: PREvent{Facts: []pubsub.PRLifecycleEvent{{Details: "rate limited by GitHub API"}}}},
 		{
 			name: "first failure arms a numbered deadline", state: deployingMergedPR(), ev: PREvent{HeadSHA: " h1 ", MergeSHA: " m1 ", Banner: " boom ", Facts: []pubsub.PRLifecycleEvent{failedFact()}},
 			wantSeq: 1, wantArmed: true, want: &PendingDeployFailure{Seq: 1, HeadSHA: "h1", MergeSHA: "m1", Banner: "boom", Facts: []pubsub.PRLifecycleEvent{failedFact()}},
@@ -630,6 +632,14 @@ func TestPRObjectServiceHandleDeployAttemptFailed(t *testing.T) {
 		{
 			name: "first restate failure arms the deadline", state: deployingMergedPR(), ev: attempt("m1"), wantSet: true, wantBanner: "boom",
 			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerDeployFailureDeadline, input: DeployFailureDeadlineRequest{Seq: 1}, delayed: true}},
+		},
+		{
+			name: "rate limit failure never arms the deadline", state: deployingMergedPR(),
+			ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", Banner: "github api rate limit exceeded", Facts: []pubsub.PRLifecycleEvent{failedFact()}},
+		},
+		{
+			name: "fact details rate limit failure never arms the deadline", state: deployingMergedPR(),
+			ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", Banner: "deploy failed", Facts: []pubsub.PRLifecycleEvent{{Details: "GitHub API rate limited"}}},
 		},
 		{name: "repeat failure refreshes without a second timer", state: armed(), ev: attempt("m1"), wantSet: true, wantBanner: "boom"},
 		{name: "stale sha drops", state: deployingMergedPR(), ev: attempt("m9")},
