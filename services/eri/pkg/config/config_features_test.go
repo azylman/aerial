@@ -77,75 +77,91 @@ func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 	}
 }
 
-func TestChannelHooks_MethodsAndCloning(t *testing.T) {
-	endpoints := []struct {
-		ep       *WebhookEndpoint
-		wantTime time.Duration
-		defAct   string
-		wantAct  string
-	}{
-		{nil, 3000 * time.Millisecond, "drop", "drop"},
-		{&WebhookEndpoint{TimeoutMs: 0}, 3000 * time.Millisecond, "fallback", "fallback"},
-		{&WebhookEndpoint{TimeoutMs: -500, OnTimeoutAction: "   "}, 3000 * time.Millisecond, "fallback", "fallback"},
-		{&WebhookEndpoint{TimeoutMs: 5000, OnTimeoutAction: "  RETRY  "}, 5000 * time.Millisecond, "drop", "retry"},
-		{&WebhookEndpoint{TimeoutMs: 2500, OnTimeoutAction: "WaKe"}, 2500 * time.Millisecond, "drop", "wake"},
+// channelHooksSummary renders the resolved hooks through the accessor methods, so nil endpoints, timeout
+// defaults and on_timeout normalization all show up in one comparable string.
+func channelHooksSummary(p ChannelPolicy) string {
+	parts := make([]string, 0, 3)
+	for _, h := range []struct {
+		name string
+		ep   *WebhookEndpoint
+	}{{"on_wake", p.Hooks.OnWake}, {"pre_turn", p.Hooks.PreTurn}, {"post_turn", p.Hooks.PostTurn}} {
+		url := "-"
+		if h.ep != nil {
+			url = h.ep.URL
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s,%v,%s", h.name, url, h.ep.GetTimeout(), h.ep.GetOnTimeout("drop")))
 	}
-	for i, tc := range endpoints {
-		t.Run(fmt.Sprintf("endpoint_%d", i), func(t *testing.T) {
-			if tc.ep.GetTimeout() != tc.wantTime || tc.ep.GetOnTimeout(tc.defAct) != tc.wantAct {
-				t.Fatalf("endpoint timeout/action mismatch")
-			}
-		})
-	}
-
-	p := ChannelPolicy{Mode: "threads", NoBuildUpdates: true, Hooks: ChannelHooksConfig{
-		OnWake:   &WebhookEndpoint{URL: "https://sidecar:8080/on-wake", TimeoutMs: 2500, OnTimeoutAction: "wake"},
-		PreTurn:  &WebhookEndpoint{URL: "http://127.0.0.1:9090/pre", TimeoutMs: 1500, OnTimeoutAction: "retry"},
-		PostTurn: &WebhookEndpoint{URL: "http://127.0.0.1:9090/post", TimeoutMs: 4000, OnTimeoutAction: "proceed"},
-	}}
-
-	channels := map[string]ChannelPolicy{
-		"default": {Mode: "threads", Hooks: ChannelHooksConfig{OnWake: &WebhookEndpoint{URL: "http://def/wake"}, PreTurn: &WebhookEndpoint{URL: "http://def/pre"}}},
-		"custom":  {Mode: "channel", Hooks: ChannelHooksConfig{PreTurn: &WebhookEndpoint{URL: "http://cust/pre"}, PostTurn: &WebhookEndpoint{URL: "http://cust/post"}}},
-	}
-	res := ResolveChannelPolicy(channels, "", "custom")
-	if res.Hooks.OnWake.URL != "http://def/wake" || res.Hooks.PreTurn.URL != "http://cust/pre" || res.Hooks.PostTurn.URL != "http://cust/post" {
-		t.Fatal("ResolveChannelPolicy hook inheritance failed")
-	}
-	res.Hooks.OnWake.URL = "http://mutated/wake"
-	if channels["default"].Hooks.OnWake.URL == "http://mutated/wake" {
-		t.Fatal("resolved policy mutation leaked to source")
-	}
-	cloned := cloneChannelPolicy(p)
-	cloned.Hooks.OnWake.URL = "http://cloned/wake"
-	if p.Hooks.OnWake.URL == "http://cloned/wake" || !cloned.NoBuildUpdates {
-		t.Fatal("cloneChannelPolicy deep copy failed")
-	}
+	return fmt.Sprintf("%s no_build_updates=%v", strings.Join(parts, " "), p.NoBuildUpdates)
 }
 
 func TestChannelHooks_Validation(t *testing.T) {
+	const def = "channels:\n  default:\n    mode: threads\n"
 	tests := []struct {
-		name          string
-		yaml          string
-		wantErrSubstr string
+		name    string
+		yaml    string
+		channel string
+		want    string
+		wantErr string
 	}{
-		{"valid", "channels:\n  default:\n    mode: threads\n    hooks:\n      on_wake: {url: 'http://127.0.0.1:8080/w', timeout_ms: 1000}\n      pre_turn: {url: 'https://ex.com/p', timeout_ms: 2000}\n      post_turn: {url: 'http://loc:9000/po'}", ""},
-		{"default empty url", "channels:\n  default:\n    mode: threads\n    hooks:\n      on_wake: {url: '   '}", `channel "default" on_wake webhook url is required`},
-		{"default invalid scheme", "channels:\n  default:\n    mode: threads\n    hooks:\n      pre_turn: {url: 'ftp://ex.com/h'}", `channel "default" pre_turn webhook url must be a valid http or https URL`},
-		{"default malformed url", "channels:\n  default:\n    mode: threads\n    hooks:\n      post_turn: {url: '://invalid'}", `channel "default" post_turn webhook url must be a valid http or https URL`},
-		{"default neg timeout", "channels:\n  default:\n    mode: threads\n    hooks:\n      on_wake: {url: 'http://loc:8080/w', timeout_ms: -1}", `channel "default" on_wake webhook timeout_ms cannot be negative`},
-		{"custom empty url", "channels:\n  default: {mode: threads}\n  custom:\n    mode: channel\n    hooks:\n      pre_turn: {url: ''}", `channel "custom" pre_turn webhook url is required`},
-		{"custom invalid host", "channels:\n  default: {mode: threads}\n  custom:\n    mode: channel\n    hooks:\n      post_turn: {url: 'http://'}", `channel "custom" post_turn webhook url must be a valid http or https URL`},
-		{"custom neg timeout", "channels:\n  default: {mode: threads}\n  custom:\n    mode: channel\n    hooks:\n      on_wake: {url: 'https://ex.com/w', timeout_ms: -100}", `channel "custom" on_wake webhook timeout_ms cannot be negative`},
+		{
+			name: "valid",
+			yaml: def + "    hooks:\n      on_wake: {url: 'http://127.0.0.1:8080/w', timeout_ms: 1000}\n      pre_turn: {url: 'https://ex.com/p', timeout_ms: 2000}\n      post_turn: {url: 'http://loc:9000/po'}",
+			want: "on_wake=http://127.0.0.1:8080/w,1s,drop pre_turn=https://ex.com/p,2s,drop post_turn=http://loc:9000/po,3s,drop no_build_updates=false",
+		},
+		{
+			name: "timeout defaults and on_timeout normalization",
+			yaml: def + "    no_build_updates: true\n    hooks:\n      on_wake: {url: 'http://h/w', timeout_ms: 0, on_timeout: '   '}\n" +
+				"      pre_turn: {url: 'http://h/p', timeout_ms: 5000, on_timeout: '  RETRY  '}\n      post_turn: {url: 'http://h/po', timeout_ms: 2500, on_timeout: WaKe}",
+			want: "on_wake=http://h/w,3s,drop pre_turn=http://h/p,5s,retry post_turn=http://h/po,2.5s,wake no_build_updates=true",
+		},
+		{name: "no hooks resolve to nil endpoints", yaml: def, want: "on_wake=-,3s,drop pre_turn=-,3s,drop post_turn=-,3s,drop no_build_updates=false"},
+		{
+			name:    "custom inherits missing default hooks",
+			yaml:    def + "    hooks: {on_wake: {url: 'http://def/wake'}, pre_turn: {url: 'http://def/pre'}}\n  custom:\n    mode: channel\n    hooks: {pre_turn: {url: 'http://cust/pre'}, post_turn: {url: 'http://cust/post'}}",
+			channel: "custom",
+			want:    "on_wake=http://def/wake,3s,drop pre_turn=http://cust/pre,3s,drop post_turn=http://cust/post,3s,drop no_build_updates=false",
+		},
+		{name: "default empty url", yaml: def + "    hooks:\n      on_wake: {url: '   '}", wantErr: `channel "default" on_wake webhook url is required`},
+		{name: "default invalid scheme", yaml: def + "    hooks:\n      pre_turn: {url: 'ftp://ex.com/h'}", wantErr: `channel "default" pre_turn webhook url must be a valid http or https URL`},
+		{name: "default malformed url", yaml: def + "    hooks:\n      post_turn: {url: '://invalid'}", wantErr: `channel "default" post_turn webhook url must be a valid http or https URL`},
+		{name: "default neg timeout", yaml: def + "    hooks:\n      on_wake: {url: 'http://loc:8080/w', timeout_ms: -1}", wantErr: `channel "default" on_wake webhook timeout_ms cannot be negative`},
+		{name: "custom empty url", yaml: def + "  custom:\n    mode: channel\n    hooks:\n      pre_turn: {url: ''}", wantErr: `channel "custom" pre_turn webhook url is required`},
+		{
+			name:    "custom invalid host",
+			yaml:    def + "  custom:\n    mode: channel\n    hooks:\n      post_turn: {url: 'http://'}",
+			wantErr: `channel "custom" post_turn webhook url must be a valid http or https URL`,
+		},
+		{
+			name:    "custom neg timeout",
+			yaml:    def + "  custom:\n    mode: channel\n    hooks:\n      on_wake: {url: 'https://ex.com/w', timeout_ms: -100}",
+			wantErr: `channel "custom" on_wake webhook timeout_ms cannot be negative`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
-			if tc.wantErrSubstr == "" && err != nil {
+			cfg, err := LoadConfigFromLookup(mapLookup(nil), writeTempYAML(t, tc.yaml))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("got err=%v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
-				t.Fatalf("got err=%v, want %q", err, tc.wantErrSubstr)
+			channels := cfg.Current().Channels
+			res := ResolveChannelPolicy(channels, "", tc.channel)
+			if got := channelHooksSummary(res); got != tc.want {
+				t.Fatalf("resolved hooks = %q, want %q", got, tc.want)
+			}
+			// The resolved policy is a deep copy: mutating it must not leak back into the source channels.
+			for _, ep := range []*WebhookEndpoint{res.Hooks.OnWake, res.Hooks.PreTurn, res.Hooks.PostTurn} {
+				if ep != nil {
+					ep.URL = "http://mutated"
+				}
+			}
+			if got := channelHooksSummary(ResolveChannelPolicy(channels, "", tc.channel)); got != tc.want {
+				t.Errorf("after mutating the resolved copy, hooks = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -638,227 +654,73 @@ func TestRegisterConfigTokens(t *testing.T) {
 	}
 }
 
-func TestLoadSharedSecrets_TableDriven(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	validJSON := filepath.Join(tmpDir, "valid.json")
-	_ = os.WriteFile(validJSON, []byte(`{
-		"FOO": "  bar  ",
-		"DISCORD_BOT_TOKEN": "bot-tok-123",
-		"1PASSWORD_SERVICE_ACCOUNT_TOKEN": "op-tok-789",
-		"GEMINI_HARNESS_API_KEY": "harness-key-abc",
-		"UNIFI_PASS": "unifi-pass-def"
-	}`), 0o600)
-
-	existingPrimaryJSON := filepath.Join(tmpDir, "existing-primary.json")
-	_ = os.WriteFile(existingPrimaryJSON, []byte(`{
-		"DISCORD_TOKEN": "primary-tok",
-		"DISCORD_BOT_TOKEN": "fallback-tok"
-	}`), 0o600)
-
-	invalidJSON := filepath.Join(tmpDir, "invalid.json")
-	_ = os.WriteFile(invalidJSON, []byte(`{not valid json`), 0o600)
-
-	secretsDir := filepath.Join(tmpDir, "secrets_dir")
-	_ = os.MkdirAll(filepath.Join(secretsDir, "..data"), 0o755)
-	_ = os.WriteFile(filepath.Join(secretsDir, "..data", "IGNORE_ME"), []byte("ignored"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignored"), 0o600)
-	_ = os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755)
-	_ = os.WriteFile(filepath.Join(secretsDir, "subdir", "IGNORE_SUB"), []byte("ignored"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "DISCORD_BOT_TOKEN"), []byte("dir-bot-token\n"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "POSTGRES_PASSWORD"), []byte("  dir-pg-pass  "), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("  "), 0o600)
-
-	tests := []struct {
-		name         string
-		filePath     string
-		wantKey      string
-		wantVal      string
-		wantMapEmpty bool
-	}{
-		{
-			name:         "empty path returns empty map",
-			filePath:     "",
-			wantMapEmpty: true,
-		},
-		{
-			name:         "missing file returns empty map",
-			filePath:     filepath.Join(tmpDir, "nonexistent.json"),
-			wantMapEmpty: true,
-		},
-		{
-			name:         "invalid json returns empty map",
-			filePath:     invalidJSON,
-			wantMapEmpty: true,
-		},
-		{
-			name:     "trimmed values parsed correctly",
-			filePath: validJSON,
-			wantKey:  "FOO",
-			wantVal:  "bar",
-		},
-		{
-			name:     "discord bot token alias fallback",
-			filePath: validJSON,
-			wantKey:  "DISCORD_TOKEN",
-			wantVal:  "bot-tok-123",
-		},
-		{
-			name:     "1password service account alias fallback",
-			filePath: validJSON,
-			wantKey:  "OP_SERVICE_ACCOUNT_TOKEN",
-			wantVal:  "op-tok-789",
-		},
-		{
-			name:     "gemini harness api key is not aliased to agy gemini api key",
-			filePath: validJSON,
-			wantKey:  "AGY_GEMINI_API_KEY",
-			wantVal:  "",
-		},
-		{
-			name:     "unifi pass alias fallback",
-			filePath: validJSON,
-			wantKey:  "UNIFI_PASSWORD",
-			wantVal:  "unifi-pass-def",
-		},
-		{
-			name:     "primary key not overwritten by alias fallback",
-			filePath: existingPrimaryJSON,
-			wantKey:  "DISCORD_TOKEN",
-			wantVal:  "primary-tok",
-		},
-		{
-			name:     "directory mount reads individual files",
-			filePath: secretsDir,
-			wantKey:  "POSTGRES_PASSWORD",
-			wantVal:  "dir-pg-pass",
-		},
-		{
-			name:     "directory mount alias fallback",
-			filePath: secretsDir,
-			wantKey:  "DISCORD_TOKEN",
-			wantVal:  "dir-bot-token",
-		},
-		{
-			name:     "directory mount skips dotfiles",
-			filePath: secretsDir,
-			wantKey:  ".hidden",
-			wantVal:  "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			res := LoadSharedSecrets(tc.filePath)
-			if tc.wantMapEmpty {
-				if len(res) != 0 {
-					t.Errorf("LoadSharedSecrets() returned non-empty map: %v", res)
-				}
-				return
-			}
-			if got := res[tc.wantKey]; got != tc.wantVal {
-				t.Errorf("LoadSharedSecrets()[%q] = %q, want %q", tc.wantKey, got, tc.wantVal)
-			}
-		})
-	}
-}
-
 func TestWithSharedSecretsLookup_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
+	writeSecrets := func(name, body string) string {
+		p := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		return p
+	}
+	sharedFile := writeSecrets("shared.json", `{"SECRET_ONLY": "secret-val", "OVERRIDDEN": "shared-val", "POSTGRES_PASSWORD": "secret-pg-pass", "FOO": "  bar  ",
+		"DISCORD_BOT_TOKEN": "bot-tok-123", "1PASSWORD_SERVICE_ACCOUNT_TOKEN": "op-tok-789", "GEMINI_HARNESS_API_KEY": "harness-key-abc", "UNIFI_PASS": "unifi-pass-def"}`)
+	customHostFile := writeSecrets("custom-host.json", `{"POSTGRES_HOST": "shared-db.internal", "POSTGRES_PASSWORD": "secret-pg-pass"}`)
+	noPassFile := writeSecrets("no-pass.json", `{"OTHER": "val"}`)
+	stalePrimaryFile := writeSecrets("stale-primary.json", `{"DISCORD_TOKEN": "primary-tok", "DISCORD_BOT_TOKEN": "fallback-tok"}`)
+	invalidFile := writeSecrets("invalid.json", `{not valid json`)
 
-	sharedFile := filepath.Join(tmpDir, "shared.json")
-	_ = os.WriteFile(sharedFile, []byte(`{
-		"SECRET_ONLY": "secret-val",
-		"OVERRIDDEN": "shared-val",
-		"POSTGRES_PASSWORD": "secret-pg-pass"
-	}`), 0o600)
-
-	customHostFile := filepath.Join(tmpDir, "custom-host.json")
-	_ = os.WriteFile(customHostFile, []byte(`{
-		"POSTGRES_HOST": "shared-db.internal",
-		"POSTGRES_PASSWORD": "secret-pg-pass"
-	}`), 0o600)
-
-	noPassFile := filepath.Join(tmpDir, "no-pass.json")
-	_ = os.WriteFile(noPassFile, []byte(`{
-		"OTHER": "val"
-	}`), 0o600)
+	secretsDir := filepath.Join(tmpDir, "secrets_dir")
+	for _, sub := range []string{"..data", "subdir"} {
+		if err := os.MkdirAll(filepath.Join(secretsDir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		"..data/IGNORE_ME": "ignored", ".hidden": "ignored", "subdir/IGNORE_SUB": "ignored",
+		"DISCORD_BOT_TOKEN": "dir-bot-token\n", "POSTGRES_PASSWORD": "  dir-pg-pass  ", "EMPTY_KEY": "  ",
+	} {
+		writeSecrets(filepath.Join("secrets_dir", name), body)
+	}
 
 	tests := []struct {
-		name       string
-		primaryMap map[string]string
-		isNilPrim  bool
-		filePath   string
-		queryKey   string
-		expected   string
+		name    string
+		primary map[string]string
+		path    string
+		key     string
+		want    string
 	}{
-		{
-			name:       "primary wins over shared secret",
-			primaryMap: map[string]string{"OVERRIDDEN": "primary-val"},
-			filePath:   sharedFile,
-			queryKey:   "OVERRIDDEN",
-			expected:   "primary-val",
-		},
-		{
-			name:       "fallback to shared secret when unset in primary",
-			primaryMap: map[string]string{},
-			filePath:   sharedFile,
-			queryKey:   "SECRET_ONLY",
-			expected:   "secret-val",
-		},
-		{
-			name:      "nil primary handled safely",
-			isNilPrim: true,
-			filePath:  sharedFile,
-			queryKey:  "SECRET_ONLY",
-			expected:  "secret-val",
-		},
-		{
-			name:       "postgres host defaulted when password present in shared secrets",
-			primaryMap: map[string]string{},
-			filePath:   sharedFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "postgres",
-		},
-		{
-			name:       "postgres host preserved from primary even if password in shared secrets",
-			primaryMap: map[string]string{"POSTGRES_HOST": "primary-db.internal"},
-			filePath:   sharedFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "primary-db.internal",
-		},
-		{
-			name:       "postgres host preserved from shared secrets if specified",
-			primaryMap: map[string]string{},
-			filePath:   customHostFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "shared-db.internal",
-		},
-		{
-			name:       "postgres host empty when password unset",
-			primaryMap: map[string]string{},
-			filePath:   noPassFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "",
-		},
-		{
-			name:       "missing key returns empty",
-			primaryMap: map[string]string{},
-			filePath:   sharedFile,
-			queryKey:   "NONEXISTENT",
-			expected:   "",
-		},
+		{name: "primary wins over shared secret", primary: map[string]string{"OVERRIDDEN": "primary-val"}, path: sharedFile, key: "OVERRIDDEN", want: "primary-val"},
+		{name: "fallback to shared secret when unset in primary", primary: map[string]string{}, path: sharedFile, key: "SECRET_ONLY", want: "secret-val"},
+		{name: "nil primary handled safely", path: sharedFile, key: "SECRET_ONLY", want: "secret-val"},
+		{name: "postgres host defaulted when password present in shared secrets", path: sharedFile, key: "POSTGRES_HOST", want: "postgres"},
+		{name: "postgres host preserved from primary", primary: map[string]string{"POSTGRES_HOST": "primary-db.internal"}, path: sharedFile, key: "POSTGRES_HOST", want: "primary-db.internal"},
+		{name: "postgres host preserved from shared secrets if specified", path: customHostFile, key: "POSTGRES_HOST", want: "shared-db.internal"},
+		{name: "postgres host empty when password unset", path: noPassFile, key: "POSTGRES_HOST", want: ""},
+		{name: "missing key returns empty", path: sharedFile, key: "NONEXISTENT", want: ""},
+		{name: "shared values are trimmed", path: sharedFile, key: "FOO", want: "bar"},
+		{name: "discord bot token alias fallback", path: sharedFile, key: "DISCORD_TOKEN", want: "bot-tok-123"},
+		{name: "1password service account alias fallback", path: sharedFile, key: "OP_SERVICE_ACCOUNT_TOKEN", want: "op-tok-789"},
+		{name: "gemini harness api key is not aliased to agy gemini api key", path: sharedFile, key: "AGY_GEMINI_API_KEY", want: ""},
+		{name: "unifi pass alias fallback", path: sharedFile, key: "UNIFI_PASSWORD", want: "unifi-pass-def"},
+		{name: "file primary key not overwritten by stale alias", path: stalePrimaryFile, key: "DISCORD_TOKEN", want: "primary-tok"},
+		{name: "directory mount file-only secret is trimmed", path: secretsDir, key: "POSTGRES_PASSWORD", want: "dir-pg-pass"},
+		{name: "directory mount alias fallback", path: secretsDir, key: "DISCORD_TOKEN", want: "dir-bot-token"},
+		{name: "directory mount skips dotfiles", path: secretsDir, key: ".hidden", want: ""},
+		{name: "directory mount skips subdirectories", path: secretsDir, key: "IGNORE_SUB", want: ""},
+		{name: "invalid json yields no secrets", path: invalidFile, key: "POSTGRES_HOST", want: ""},
+		{name: "missing file yields no secrets", path: filepath.Join(tmpDir, "nonexistent.json"), key: "SECRET_ONLY", want: ""},
+		{name: "empty path yields no secrets", primary: map[string]string{"OTHER": "primary"}, key: "OTHER", want: "primary"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var prim func(string) string
-			if !tc.isNilPrim {
-				prim = mapLookup(tc.primaryMap)
+			if tc.primary != nil {
+				prim = mapLookup(tc.primary)
 			}
-			lookup := WithSharedSecretsLookup(prim, tc.filePath)
-			if got := lookup(tc.queryKey); got != tc.expected {
-				t.Errorf("lookup(%q) = %q, want %q", tc.queryKey, got, tc.expected)
+			if got := WithSharedSecretsLookup(prim, tc.path)(tc.key); got != tc.want {
+				t.Errorf("lookup(%q) = %q, want %q", tc.key, got, tc.want)
 			}
 		})
 	}
@@ -934,58 +796,58 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 
 func TestCredentialSourcesValidate(t *testing.T) {
 	t.Parallel()
+	oauthPath, codexPath, musePath := CredentialSource{Path: "/fake/oauth"}, CredentialSource{Path: "/fake/codex"}, CredentialSource{Path: "/fake/muse"}
+	off := CredentialSource{Disabled: true}
+	const oauthErr = "credential_sources.oauth must specify exactly one nonblank path or disabled: true"
+	const codexErr = "credential_sources.codex must specify exactly one nonblank path or disabled: true"
+	const museErr = "credential_sources.muse must specify exactly one nonblank path or disabled: true"
 	tests := []struct {
 		name    string
-		sources CredentialSources
-		wantErr bool
+		yaml    string
+		want    CredentialSources
+		wantErr string
 	}{
-		{"omitted", CredentialSources{}, true},
-		{"paths", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Path: "/fake/codex"}}, false},
-		{"disabled", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}}, false},
-		{"mixed", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Disabled: true}}, false},
-		{"oauth missing", CredentialSources{Codex: CredentialSource{Disabled: true}}, true},
-		{"codex missing", CredentialSources{OAuth: CredentialSource{Disabled: true}}, true},
-		{"oauth both", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth", Disabled: true}, Codex: CredentialSource{Disabled: true}}, true},
-		{"codex both", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Path: "/fake/codex", Disabled: true}}, true},
-		{"oauth whitespace", CredentialSources{OAuth: CredentialSource{Path: " \t\n"}, Codex: CredentialSource{Disabled: true}}, true},
-		{"codex whitespace", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Path: " \t"}}, true},
-		{"muse path valid", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Path: "/fake/muse"}}, false},
-		{"muse disabled", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Disabled: true}}, false},
-		{"muse both", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Path: "/fake/muse", Disabled: true}}, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if err := tc.sources.Validate(); (err != nil) != tc.wantErr {
-				t.Fatalf("Validate error = %v, wantErr %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestConfigCredentialSources(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		input string
-		want  CredentialSources
-	}{
-		{"omitted", "model: fake", CredentialSources{}},
-		{"paths", "credential_sources:\n  oauth:\n    path: /fake/oauth\n  codex:\n    path: /fake/codex\n  muse:\n    path: /fake/muse\n", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Path: "/fake/codex"}, Muse: CredentialSource{Path: "/fake/muse"}}},
-		{"disabled", "credential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Disabled: true}}},
+		{name: "omitted has no defaults", yaml: "model: fake", wantErr: oauthErr},
+		{name: "paths", yaml: "credential_sources: {oauth: {path: /fake/oauth}, codex: {path: /fake/codex}, muse: {path: /fake/muse}}", want: CredentialSources{oauthPath, codexPath, musePath}},
+		{name: "disabled", yaml: "credential_sources: {oauth: {disabled: true}, codex: {disabled: true}, muse: {disabled: true}}", want: CredentialSources{off, off, off}},
+		{name: "mixed", yaml: "credential_sources: {oauth: {path: /fake/oauth}, codex: {disabled: true}}", want: CredentialSources{OAuth: oauthPath, Codex: off}},
+		{name: "oauth missing", yaml: "credential_sources: {codex: {disabled: true}}", want: CredentialSources{Codex: off}, wantErr: oauthErr},
+		{name: "codex missing", yaml: "credential_sources: {oauth: {disabled: true}}", want: CredentialSources{OAuth: off}, wantErr: codexErr},
+		{
+			name:    "oauth both",
+			yaml:    "credential_sources: {oauth: {path: /fake/oauth, disabled: true}, codex: {disabled: true}}",
+			want:    CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth", Disabled: true}, Codex: off},
+			wantErr: oauthErr,
+		},
+		{
+			name:    "codex both",
+			yaml:    "credential_sources: {oauth: {disabled: true}, codex: {path: /fake/codex, disabled: true}}",
+			want:    CredentialSources{OAuth: off, Codex: CredentialSource{Path: "/fake/codex", Disabled: true}},
+			wantErr: codexErr,
+		},
+		{name: "oauth whitespace", yaml: "credential_sources: {oauth: {path: \" \\t\\n\"}, codex: {disabled: true}}", want: CredentialSources{OAuth: CredentialSource{Path: " \t\n"}, Codex: off}, wantErr: oauthErr},
+		{name: "codex whitespace", yaml: "credential_sources: {oauth: {disabled: true}, codex: {path: \" \\t\"}}", want: CredentialSources{OAuth: off, Codex: CredentialSource{Path: " \t"}}, wantErr: codexErr},
+		{name: "muse path valid", yaml: "credential_sources: {oauth: {disabled: true}, codex: {disabled: true}, muse: {path: /fake/muse}}", want: CredentialSources{off, off, musePath}},
+		{
+			name:    "muse both",
+			yaml:    "credential_sources: {oauth: {disabled: true}, codex: {disabled: true}, muse: {path: /fake/muse, disabled: true}}",
+			want:    CredentialSources{off, off, CredentialSource{Path: "/fake/muse", Disabled: true}},
+			wantErr: museErr,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := DefaultConfigData()
-			if cfg.CredentialSources != (CredentialSources{}) {
-				t.Fatal("credential sources must have no defaults")
-			}
-			if err := yaml.Unmarshal([]byte(tc.input), cfg); err != nil {
+			if err := yaml.Unmarshal([]byte(tc.yaml), cfg); err != nil {
 				t.Fatal(err)
 			}
 			if cfg.CredentialSources != tc.want {
 				t.Fatalf("sources = %+v, want %+v", cfg.CredentialSources, tc.want)
+			}
+			err := cfg.CredentialSources.Validate()
+			if got := fmt.Sprint(err); (tc.wantErr == "" && err != nil) || (tc.wantErr != "" && got != tc.wantErr) {
+				t.Fatalf("Validate error = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
