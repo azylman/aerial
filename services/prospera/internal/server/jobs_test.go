@@ -12,51 +12,22 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	_ "modernc.org/sqlite"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/delivery"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 	"github.com/azylman/aerial/services/prospera/internal/model"
-	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
-
-type mockJobMsg struct {
-	data      []byte
-	delivered uint64
-	termed    bool
-	naked     bool
-	nakDelay  time.Duration
-	termErr   error
-	nakErr    error
-}
-
-func (m *mockJobMsg) Data() []byte         { return m.data }
-func (*mockJobMsg) Subject() string        { return "" }
-func (*mockJobMsg) Header() nats.Header    { return nil }
-func (m *mockJobMsg) NumDelivered() uint64 { return m.delivered }
-func (*mockJobMsg) Ack() error             { return nil }
-func (m *mockJobMsg) NakWithDelay(d time.Duration) error {
-	m.naked = true
-	m.nakDelay = d
-	return m.nakErr
-}
-
-func (m *mockJobMsg) Term() error {
-	m.termed = true
-	return m.termErr
-}
-func (*mockJobMsg) Snooze(_ time.Duration) error { return nil }
-func (*mockJobMsg) InProgress() error            { return nil }
 
 type failConsumeQueueBus struct {
 	pubsub.Bus
@@ -65,7 +36,7 @@ type failConsumeQueueBus struct {
 }
 
 func (b *failConsumeQueueBus) ConsumeQueue(ctx context.Context, subject string, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	if b.failSubject == "" || b.failSubject == subject {
+	if b.failSubject == subject {
 		return nil, errors.New("consume queue failed")
 	}
 	return b.Bus.ConsumeQueue(ctx, subject, queue, handler)
@@ -87,34 +58,40 @@ func (c *captureConsumerBus) ConsumeQueue(ctx context.Context, subject string, q
 	return nil, nil
 }
 
-func setupMockReporterServer(t *testing.T) (*Server, *mockStoreForDelivery, *httptest.Server) {
+func setupMockReporterServer(t *testing.T) (*Server, *fakes.FakeStore, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	server, store, _ := setupTestServer()
-	twilioMock := &mockTwilioForDelivery{
-		audioData:   []byte("test-audio"),
-		contentType: "audio/wav",
+	twilioMock := &fakes.FakeTwilio{
+		AudioData:   []byte("test-audio"),
+		ContentType: "audio/wav",
 	}
-	server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: srv.URL, DefaultDiscordChannel: "prospera"}}, store, twilioMock)
+	server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: srv.URL, DefaultDiscordChannel: "prospera"}}, store, twilioMock)
 	return server, store, srv
 }
 
 func assertJobMsgOutcome(t *testing.T, pubMsg pubsub.Message, wantTermed, wantNaked bool, wantNakDelay time.Duration) {
 	t.Helper()
-	msg, ok := pubMsg.(*mockJobMsg)
+	msg, ok := pubMsg.(*pubsubtest.Message)
 	if !ok || msg == nil {
 		return
 	}
-	if msg.termed != wantTermed {
-		t.Errorf("termed = %v, want %v", msg.termed, wantTermed)
+	assertJobMsgSettlement(t, msg, wantTermed, wantNaked, wantNakDelay)
+}
+
+func assertJobMsgSettlement(t *testing.T, msg *pubsubtest.Message, wantTermed, wantNaked bool, wantNakDelay time.Duration) {
+	t.Helper()
+	if msg.Termed() != wantTermed {
+		t.Errorf("termed = %v, want %v", msg.Termed(), wantTermed)
 	}
-	if msg.naked != wantNaked {
-		t.Errorf("naked = %v, want %v", msg.naked, wantNaked)
+	nakDelay, naked := msg.NakDelay()
+	if naked != wantNaked {
+		t.Errorf("naked = %v, want %v", naked, wantNaked)
 	}
-	if wantNakDelay > 0 && msg.nakDelay != wantNakDelay {
-		t.Errorf("nakDelay = %v, want %v", msg.nakDelay, wantNakDelay)
+	if wantNakDelay > 0 && nakDelay != wantNakDelay {
+		t.Errorf("nakDelay = %v, want %v", nakDelay, wantNakDelay)
 	}
 }
 
@@ -202,7 +179,7 @@ func TestServer_StartJobConsumers(t *testing.T) {
 			case "capture":
 				bus = &captureConsumerBus{handlers: make(map[string]pubsub.Handler)}
 			case "fail_report":
-				bus = &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}
+				bus = &pubsubtest.FaultBus{Bus: pubsub.NewMemoryBus(), ConsumeErr: errors.New("consume queue failed")}
 			case "fail_voicemail":
 				bus = &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaVoicemailJob}
 			case "fail_sms":
@@ -246,33 +223,33 @@ func TestServer_HandleReportJob(t *testing.T) {
 		},
 		{
 			name:       "invalid json terminates message",
-			msg:        &mockJobMsg{data: []byte("invalid json")},
+			msg:        &pubsubtest.Message{Payload: []byte("invalid json")},
 			wantTermed: true,
 		},
 		{
 			name:       "invalid json term failure still drops",
-			msg:        &mockJobMsg{data: []byte("invalid json"), termErr: errors.New("term failed")},
+			msg:        &pubsubtest.Message{Payload: []byte("invalid json"), TermErr: errors.New("term failed")},
 			wantTermed: true,
 		},
 		{
 			name:       "empty call id terminates message",
-			msg:        &mockJobMsg{data: []byte(`{"call_id":"   "}`)},
+			msg:        &pubsubtest.Message{Payload: []byte(`{"call_id":"   "}`)},
 			wantTermed: true,
 		},
 		{
 			name:       "empty call id term failure still drops",
-			msg:        &mockJobMsg{data: []byte(`{"call_id":"   "}`), termErr: errors.New("term failed")},
+			msg:        &pubsubtest.Message{Payload: []byte(`{"call_id":"   "}`), TermErr: errors.New("term failed")},
 			wantTermed: true,
 		},
 		{
 			name:        "nil reporter returns error",
-			msg:         &mockJobMsg{data: []byte(`{"call_id":"c1"}`)},
+			msg:         &pubsubtest.Message{Payload: []byte(`{"call_id":"c1"}`)},
 			nilReporter: true,
 			wantErr:     true,
 		},
 		{
 			name:         "reporter error naks with backoff delay",
-			msg:          &mockJobMsg{data: []byte(`{"call_id":"c1"}`), delivered: 1},
+			msg:          &pubsubtest.Message{Payload: []byte(`{"call_id":"c1"}`), Delivered: 1},
 			reporterErr:  true,
 			wantErr:      true,
 			wantNaked:    true,
@@ -280,19 +257,19 @@ func TestServer_HandleReportJob(t *testing.T) {
 		},
 		{
 			name:        "reporter error drops after max deliveries",
-			msg:         &mockJobMsg{data: []byte(`{"call_id":"c1"}`), delivered: 5},
+			msg:         &pubsubtest.Message{Payload: []byte(`{"call_id":"c1"}`), Delivered: 5},
 			reporterErr: true,
 			wantErr:     false,
 			wantTermed:  true,
 		},
 		{
 			name:        "successful delivery transitions pending call report to delivered",
-			msg:         &mockJobMsg{data: []byte(`{"call_id":"call-rep-ok"}`), delivered: 1},
+			msg:         &pubsubtest.Message{Payload: []byte(`{"call_id":"call-rep-ok"}`), Delivered: 1},
 			checkCallID: "call-rep-ok",
 		},
 		{
 			name:        "retry delivery transitions previously failed call report to delivered",
-			msg:         &mockJobMsg{data: []byte(`{"call_id":"call-rep-retry"}`), delivered: 2},
+			msg:         &pubsubtest.Message{Payload: []byte(`{"call_id":"call-rep-retry"}`), Delivered: 2},
 			checkCallID: "call-rep-retry",
 		},
 	}
@@ -315,7 +292,7 @@ func TestServer_HandleReportJob(t *testing.T) {
 			if tc.nilReporter {
 				server.reporter = nil
 			} else if tc.reporterErr {
-				server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: ""}}, store, nil)
+				server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, nil)
 			}
 
 			err := server.HandleReportJob(context.Background(), tc.msg)
@@ -439,7 +416,7 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 			if tc.nilReporter {
 				server.reporter = nil
 			} else if tc.reporterErr {
-				server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: ""}}, store, nil)
+				server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, nil)
 			}
 
 			var pubMsg pubsub.Message
@@ -451,7 +428,7 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 						RecordingURL: tc.recordingURL,
 					})
 				}
-				pubMsg = &mockJobMsg{data: payload, delivered: tc.delivered, termErr: tc.termErr}
+				pubMsg = &pubsubtest.Message{Payload: payload, Delivered: tc.delivered, TermErr: tc.termErr}
 			}
 
 			err := server.HandleVoicemailJob(context.Background(), pubMsg)
@@ -488,23 +465,23 @@ func TestServer_HandleSMSJob(t *testing.T) {
 		},
 		{
 			name:       "invalid json terminates message",
-			msg:        &mockJobMsg{data: []byte("invalid json")},
+			msg:        &pubsubtest.Message{Payload: []byte("invalid json")},
 			wantTermed: true,
 		},
 		{
 			name:       "invalid json term failure still drops",
-			msg:        &mockJobMsg{data: []byte("invalid json"), termErr: errors.New("term failed")},
+			msg:        &pubsubtest.Message{Payload: []byte("invalid json"), TermErr: errors.New("term failed")},
 			wantTermed: true,
 		},
 		{
 			name:        "nil reporter returns error",
-			msg:         &mockJobMsg{data: []byte(`{"message_sid":"SM1","body":"hello"}`)},
+			msg:         &pubsubtest.Message{Payload: []byte(`{"message_sid":"SM1","body":"hello"}`)},
 			nilReporter: true,
 			wantErr:     true,
 		},
 		{
 			name:         "reporter error naks with backoff delay",
-			msg:          &mockJobMsg{data: []byte(`{"message_sid":"SM1","body":"hello"}`), delivered: 4},
+			msg:          &pubsubtest.Message{Payload: []byte(`{"message_sid":"SM1","body":"hello"}`), Delivered: 4},
 			reporterErr:  true,
 			wantErr:      true,
 			wantNaked:    true,
@@ -512,14 +489,14 @@ func TestServer_HandleSMSJob(t *testing.T) {
 		},
 		{
 			name:        "reporter error drops after max deliveries",
-			msg:         &mockJobMsg{data: []byte(`{"message_sid":"SM1","body":"hello"}`), delivered: 5},
+			msg:         &pubsubtest.Message{Payload: []byte(`{"message_sid":"SM1","body":"hello"}`), Delivered: 5},
 			reporterErr: true,
 			wantErr:     false,
 			wantTermed:  true,
 		},
 		{
 			name: "successful sms delivery returns nil",
-			msg:  &mockJobMsg{data: []byte(`{"message_sid":"SM-ok","body":"hi"}`), delivered: 1},
+			msg:  &pubsubtest.Message{Payload: []byte(`{"message_sid":"SM-ok","body":"hi"}`), Delivered: 1},
 		},
 	}
 
@@ -532,7 +509,7 @@ func TestServer_HandleSMSJob(t *testing.T) {
 			if tc.nilReporter {
 				server.reporter = nil
 			} else if tc.reporterErr {
-				server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: ""}}, store, nil)
+				server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, nil)
 			}
 
 			err := server.HandleSMSJob(context.Background(), tc.msg)
@@ -542,14 +519,6 @@ func TestServer_HandleSMSJob(t *testing.T) {
 			assertJobMsgOutcome(t, tc.msg, tc.wantTermed, tc.wantNaked, tc.wantNakDelay)
 		})
 	}
-}
-
-type failPublishBus struct {
-	pubsub.Bus
-}
-
-func (*failPublishBus) Publish(ctx context.Context, subject string, msgID string, data any) error {
-	return errors.New("simulated publish failure")
 }
 
 type recordPublishBus struct {
@@ -579,7 +548,7 @@ func (r *recordPublishBus) publishedJobs(subject string) []any {
 	return append([]any(nil), r.published[subject]...)
 }
 
-func triggerTwilioWebhooks(t *testing.T, server *Server, store *mockStoreForDelivery, cfg *config.Config, suffix string) (string, string, string) {
+func triggerTwilioWebhooks(t *testing.T, server *Server, store *fakes.FakeStore, cfg *config.Config, suffix string) (string, string, string) {
 	t.Helper()
 	mux := server.Routes()
 
@@ -598,7 +567,7 @@ func triggerTwilioWebhooks(t *testing.T, server *Server, store *mockStoreForDeli
 		"CallStatus": []string{"completed"},
 	}
 	statusURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/status"
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, statusURL, statusForm)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, statusURL, statusForm)
 	reqStat := httptest.NewRequest(http.MethodPost, statusURL, strings.NewReader(statusForm.Encode()))
 	reqStat.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqStat.Header.Set("X-Twilio-Signature", sig)
@@ -621,7 +590,7 @@ func triggerTwilioWebhooks(t *testing.T, server *Server, store *mockStoreForDeli
 		"RecordingUrl": []string{"https://api.twilio.com/rec.wav"},
 	}
 	vmURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voicemail"
-	sigVM := generateTwilioSignature(cfg.TwilioAuthToken, vmURL, vmForm)
+	sigVM := fakes.TwilioSignature(cfg.TwilioAuthToken, vmURL, vmForm)
 	reqVM := httptest.NewRequest(http.MethodPost, vmURL, strings.NewReader(vmForm.Encode()))
 	reqVM.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqVM.Header.Set("X-Twilio-Signature", sigVM)
@@ -640,7 +609,7 @@ func triggerTwilioWebhooks(t *testing.T, server *Server, store *mockStoreForDeli
 		"Body":       []string{"sms bus test"},
 	}
 	smsURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/sms"
-	sigSMS := generateTwilioSignature(cfg.TwilioAuthToken, smsURL, smsForm)
+	sigSMS := fakes.TwilioSignature(cfg.TwilioAuthToken, smsURL, smsForm)
 	reqSMS := httptest.NewRequest(http.MethodPost, smsURL, strings.NewReader(smsForm.Encode()))
 	reqSMS.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqSMS.Header.Set("X-Twilio-Signature", sigSMS)
@@ -696,18 +665,18 @@ func TestServer_Webhooks_FallbackToBackgroundGoroutine(t *testing.T) {
 	defer srv.Close()
 
 	server, store, cfg := setupTestServer()
-	twilioMock := &mockTwilioForDelivery{
-		audioData:   []byte("test-audio"),
-		contentType: "audio/wav",
+	twilioMock := &fakes.FakeTwilio{
+		AudioData:   []byte("test-audio"),
+		ContentType: "audio/wav",
 	}
-	server.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{
+	server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{
 		BrainURL:              srv.URL,
 		DefaultDiscordChannel: "prospera",
 		TwilioAuthToken:       cfg.TwilioAuthToken,
 		TwilioFromNumber:      cfg.TwilioFromNumber,
 		PublicWebhookBaseURL:  cfg.PublicWebhookBaseURL,
 	}}, store, twilioMock)
-	server.SetEventBus(&failPublishBus{Bus: pubsub.NewMemoryBus()})
+	server.SetEventBus(&pubsubtest.FaultBus{Bus: pubsub.NewMemoryBus(), PublishErr: errors.New("simulated publish failure")})
 
 	callID, vmCallID, smsID := triggerTwilioWebhooks(t, server, store, cfg, "fallback")
 
@@ -787,14 +756,10 @@ func TestNakOrDropJob(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var msg *mockJobMsg
+			var msg *pubsubtest.Message
 			var pubMsg pubsub.Message
 			if !tc.nilMsg {
-				msg = &mockJobMsg{
-					delivered: tc.delivered,
-					termErr:   tc.termErr,
-					nakErr:    tc.nakErr,
-				}
+				msg = &pubsubtest.Message{Delivered: tc.delivered, TermErr: tc.termErr, NakErr: tc.nakErr}
 				pubMsg = msg
 			}
 			err := nakOrDropJob(context.Background(), pubMsg, "test", "id1", errors.New("underlying error"))
@@ -802,331 +767,16 @@ func TestNakOrDropJob(t *testing.T) {
 				t.Fatalf("nakOrDropJob() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if msg != nil {
-				if msg.termed != tc.wantTermed {
-					t.Errorf("termed = %v, want %v", msg.termed, tc.wantTermed)
-				}
-				if msg.naked != tc.wantNaked {
-					t.Errorf("naked = %v, want %v", msg.naked, tc.wantNaked)
-				}
-				if tc.wantNakDelay > 0 && msg.nakDelay != tc.wantNakDelay {
-					t.Errorf("nakDelay = %v, want %v", msg.nakDelay, tc.wantNakDelay)
-				}
+				assertJobMsgSettlement(t, msg, tc.wantTermed, tc.wantNaked, tc.wantNakDelay)
 			}
 		})
 	}
 }
 
-// ---- test helpers (moved from root config/delivery tests) ----
-
-// staticConfig is a fixed ConfigSource for tests.
-type staticConfig struct {
-	cfg *config.Config
-}
-
-func (s staticConfig) Current() *config.Config { return s.cfg }
-
 // newTestConfigSource wraps cfg in a real Reloadable whose loader always
 // yields cfg, so reload requests report "unchanged".
 func newTestConfigSource(cfg *config.Config) *httpkit.Reloadable[config.Config] {
 	return httpkit.NewReloadable(cfg, func() (*config.Config, error) { return cfg, nil }, config.RestartRequired)
-}
-
-type mockStoreForDelivery struct {
-	mu             sync.Mutex
-	calls          map[string]*model.VoiceCall
-	messages       map[string]*model.VoiceMessage
-	advances       int
-	statusTrans    []string
-	vmRecordings   map[string]string
-	opErr          error
-	bindErr        error
-	updateStateErr error
-	transErr       error
-	advanceErr     error
-	vmRecErr       error
-	markErr        error
-	saveErr        error
-	failTrans      map[string]bool
-}
-
-func newMockStoreForDelivery() *mockStoreForDelivery {
-	return &mockStoreForDelivery{
-		calls:        make(map[string]*model.VoiceCall),
-		messages:     make(map[string]*model.VoiceMessage),
-		vmRecordings: make(map[string]string),
-	}
-}
-
-func (m *mockStoreForDelivery) CreateOutboundCall(ctx context.Context, call model.VoiceCall, maxConcurrent int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return m.opErr
-	}
-	m.calls[call.CallID] = &call
-	return nil
-}
-
-func (m *mockStoreForDelivery) CreateInboundCall(ctx context.Context, call model.VoiceCall) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls[call.CallID] = &call
-	return nil
-}
-
-func (m *mockStoreForDelivery) BindProviderCallSID(ctx context.Context, callID, providerSID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.bindErr != nil {
-		return m.bindErr
-	}
-	if c, ok := m.calls[callID]; ok {
-		c.ProviderCallSID = providerSID
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) GetCall(ctx context.Context, callID string) (*model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	c, ok := m.calls[callID]
-	if !ok {
-		return nil, nil
-	}
-	cpy := *c
-	return &cpy, nil
-}
-
-func (m *mockStoreForDelivery) GetCallByProviderSID(ctx context.Context, providerSID string) (*model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	for _, c := range m.calls {
-		if c.ProviderCallSID == providerSID {
-			cpy := *c
-			return &cpy, nil
-		}
-	}
-	return nil, nil
-}
-
-func (m *mockStoreForDelivery) ListCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	var list []model.VoiceCall
-	for _, c := range m.calls {
-		list = append(list, *c)
-	}
-	return list, nil
-}
-
-func (m *mockStoreForDelivery) FindRecentOutboundCall(ctx context.Context, fromE164 string, window time.Duration) (*model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, c := range m.calls {
-		if c.Direction == "outbound" && c.ToNumber == fromE164 {
-			cpy := *c
-			return &cpy, nil
-		}
-	}
-	return nil, nil
-}
-
-func (m *mockStoreForDelivery) UpdateCallState(ctx context.Context, callID, state, endReason, answeredBy string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.updateStateErr != nil {
-		return m.updateStateErr
-	}
-	if c, ok := m.calls[callID]; ok {
-		c.State = state
-		if endReason != "" {
-			c.EndReason = endReason
-		}
-		if answeredBy != "" {
-			c.AnsweredBy = answeredBy
-		}
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) AppendTranscriptTurn(ctx context.Context, callID string, turn model.TranscriptTurn) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if c, ok := m.calls[callID]; ok {
-		c.Transcript = append(c.Transcript, turn)
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) AdvanceLiveTranscriptCursor(ctx context.Context, callID string, fromCursor, toCursor int) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.advanceErr != nil {
-		return false, m.advanceErr
-	}
-	if c, ok := m.calls[callID]; ok {
-		if c.LiveTranscriptCursor == fromCursor {
-			c.LiveTranscriptCursor = toCursor
-			m.advances++
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (m *mockStoreForDelivery) AppendOwnerInstruction(ctx context.Context, callID string, instr model.OwnerInstruction) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if c, ok := m.calls[callID]; ok {
-		c.OwnerInstructions = append(c.OwnerInstructions, instr)
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) SetVoicemailRecording(ctx context.Context, callID, recordingURL string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.vmRecErr != nil {
-		return m.vmRecErr
-	}
-	m.vmRecordings[callID] = recordingURL
-	if c, ok := m.calls[callID]; ok {
-		c.VoicemailRecordingURL = recordingURL
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) TransitionReportStatus(ctx context.Context, callID string, allowedFrom []string, toStatus, summary string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.transErr != nil {
-		return false, m.transErr
-	}
-	if m.failTrans[toStatus] {
-		return false, errors.New("transition to " + toStatus + " failed")
-	}
-	c, ok := m.calls[callID]
-	if !ok {
-		return false, nil
-	}
-	if len(allowedFrom) > 0 {
-		matched := slices.Contains(allowedFrom, c.ReportStatus)
-		if !matched {
-			return false, nil
-		}
-	}
-	c.ReportStatus = toStatus
-	if summary != "" {
-		c.ReportSummary = summary
-	}
-	m.statusTrans = append(m.statusTrans, toStatus)
-	return true, nil
-}
-
-func (*mockStoreForDelivery) ReconcileOrphanedCalls(ctx context.Context, checkActive func(ctx context.Context, providerSID string) (bool, error)) (int, error) {
-	return 0, nil
-}
-
-func (m *mockStoreForDelivery) SaveVoiceMessage(ctx context.Context, msg model.VoiceMessage) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.saveErr != nil {
-		return false, m.saveErr
-	}
-	m.messages[msg.MessageSID] = &msg
-	return true, nil
-}
-
-func (m *mockStoreForDelivery) MarkVoiceMessageDelivered(ctx context.Context, messageSID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.markErr != nil {
-		return m.markErr
-	}
-	if msg, ok := m.messages[messageSID]; ok {
-		msg.DiscordDelivered = true
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) ListVoiceMessages(ctx context.Context, limit int) ([]model.VoiceMessage, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	var list []model.VoiceMessage
-	for _, msg := range m.messages {
-		list = append(list, *msg)
-	}
-	return list, nil
-}
-
-func (*mockStoreForDelivery) Close() error {
-	return nil
-}
-
-type mockTwilioForDelivery struct {
-	audioData          []byte
-	contentType        string
-	downloadErr        error
-	createCallErr      error
-	sendSMSErr         error
-	ensurePhoneErr     error
-	hangupErr          error
-	lastWebhookBaseURL string
-	lastCreateCallReq  twilio.CreateCallRequest
-	lastSendSMSFrom    string
-	lastSendSMSTo      string
-}
-
-func (m *mockTwilioForDelivery) CreateCall(ctx context.Context, req twilio.CreateCallRequest) (string, error) {
-	m.lastCreateCallReq = req
-	if m.createCallErr != nil {
-		return "", m.createCallErr
-	}
-	return "CA12345", nil
-}
-
-func (m *mockTwilioForDelivery) HangupCall(ctx context.Context, providerCallSID string) error {
-	if m.hangupErr != nil {
-		return m.hangupErr
-	}
-	return nil
-}
-
-func (*mockTwilioForDelivery) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
-	return true, nil
-}
-
-func (m *mockTwilioForDelivery) SendSMS(ctx context.Context, to, from, body string) (string, error) {
-	m.lastSendSMSTo = to
-	m.lastSendSMSFrom = from
-	if m.sendSMSErr != nil {
-		return "", m.sendSMSErr
-	}
-	return "SM12345", nil
-}
-
-func (m *mockTwilioForDelivery) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
-	m.lastWebhookBaseURL = webhookBaseURL
-	if m.ensurePhoneErr != nil {
-		return "", m.ensurePhoneErr
-	}
-	return "+15105550100", nil
-}
-
-func (m *mockTwilioForDelivery) DownloadRecording(ctx context.Context, recordingURL string) ([]byte, string, error) {
-	return m.audioData, m.contentType, m.downloadErr
 }
 
 // ---- app lifecycle tests (moved from root main_test.go) ----
@@ -1270,9 +920,9 @@ func TestRunApp_TranscriptBatcher(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{DefaultDiscordChannel: "prospera"}
-	store := newMockStoreForDelivery()
-	sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
-	reporter := delivery.NewReporter(staticConfig{cfg: cfg}, store, &mockTwilioForDelivery{})
+	store := fakes.NewFakeStore()
+	sessionMgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
+	reporter := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{})
 
 	// Test flush with nil sessionMgr or reporter
 	flushActiveSessions(context.Background(), nil, reporter)
@@ -1303,8 +953,8 @@ func TestRoutes_HealthAndCoverage(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{Port: "4019"}
-	store := newMockStoreForDelivery()
-	server := NewServer(newTestConfigSource(cfg), store, &mockTwilioForDelivery{}, nil, nil, nil)
+	store := fakes.NewFakeStore()
+	server := NewServer(newTestConfigSource(cfg), store, &fakes.FakeTwilio{}, nil, nil, nil)
 	handler := server.Routes()
 	// Test binaries carry no runtime/coverage meta-data (only `go build -cover`
 	// binaries do), so the wired flush handler answers 500 here, never 404.
@@ -1402,8 +1052,8 @@ func startShutdownTestServer(t *testing.T, blockHTTP bool) (*http.Server, string
 func runShutdownAppCase(t *testing.T, tc shutdownAppTestCase) {
 	t.Helper()
 	cfg := &config.Config{Port: "4019"}
-	store := newMockStoreForDelivery()
-	mgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, nil)
+	store := fakes.NewFakeStore()
+	mgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, store, nil, nil, nil)
 	sess := &stubSession{}
 	mgr.RegisterSession("call-drain-shutdown", sess)
 	server := NewServer(newTestConfigSource(cfg), store, nil, nil, mgr, nil)

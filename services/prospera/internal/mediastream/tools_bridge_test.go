@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/services/prospera/internal/audio"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/gemini"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/testutil"
@@ -304,14 +305,14 @@ func TestMediaStreamSession_HandleTwilioHangupMark(t *testing.T) {
 		UpdatedAt:  time.Now().UTC(),
 	}, 5)
 
-	failingClient := &mockTwilioClient{hangupErr: errors.New("hangup boom")}
-	plainClient := &mockTwilioClient{}
+	failingClient := &fakes.FakeTwilio{HangupErr: errors.New("hangup boom")}
+	plainClient := &fakes.FakeTwilio{}
 
 	tests := []struct {
 		name      string
 		callID    string
 		sid       string
-		client    *mockTwilioClient
+		client    *fakes.FakeTwilio
 		withStore bool
 	}{
 		{name: "hangup error surfaces caller sid", callID: "call-hangup-err", sid: "CA_hang_err", client: failingClient},
@@ -328,8 +329,8 @@ func TestMediaStreamSession_HandleTwilioHangupMark(t *testing.T) {
 			}
 			sess.SetProviderCallSID(tc.sid)
 			sess.handleTwilioHangupMark(context.Background())
-			if len(tc.client.hungUpCallSIDs) != 1 || tc.client.hungUpCallSIDs[0] != tc.sid {
-				t.Fatalf("hungUpCallSIDs = %q, want [%q]", tc.client.hungUpCallSIDs, tc.sid)
+			if len(tc.client.HungUpCallSIDs) != 1 || tc.client.HungUpCallSIDs[0] != tc.sid {
+				t.Fatalf("hungUpCallSIDs = %q, want [%q]", tc.client.HungUpCallSIDs, tc.sid)
 			}
 			if tc.withStore {
 				got, err := st.GetCall(context.Background(), tc.callID)
