@@ -215,131 +215,85 @@ func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 	assertDefaultDaemonSpawnerEngine(t, engineMuse, "/custom/bin/muse", "muse")
 }
 
+// retrySpawnStep scripts one spawnOnceFn attempt: delegate to the real spawnOnce, fail with err
+// (optionally cancelling the startup context first), or (zero value) succeed with pipes.
+type retrySpawnStep struct {
+	real   bool
+	err    error
+	cancel bool
+}
+
+// retrySpawnScript replays steps in order (repeating the last one) and counts attempts.
+type retrySpawnScript struct {
+	steps    []retrySpawnStep
+	cancel   context.CancelFunc
+	attempts int
+}
+
+func (s *retrySpawnScript) spawn(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	step := s.steps[min(s.attempts, len(s.steps)-1)]
+	s.attempts++
+	if step.cancel {
+		s.cancel()
+	}
+	if step.real {
+		return spawnOnce(ctx, bin, args, cfg)
+	}
+	if step.err != nil {
+		return nil, nil, nil, nil, step.err
+	}
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	closeQuietlyAll(inR, outW, errW)
+	return inW, outR, errR, NewMockProcessHandle(12345), nil
+}
+
 func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 	tempDir := t.TempDir()
-
-	// 1. Binary with sibling .old backup retries and exhausts retries.
-	missingWithOldBin := filepath.Join(tempDir, "missing-with-old")
-	if err := os.WriteFile(missingWithOldBin+".12345.old", []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	// A missing binary with a sibling .old backup and a non-executable binary both look like an
+	// in-progress binary replacement, so their spawn errors are transient.
+	if err := os.WriteFile(filepath.Join(tempDir, "missing-with-old.12345.old"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("failed creating old backup: %v", err)
 	}
-
-	// 2. Binary with non-executable file during replacement.
-	nonExecBin := filepath.Join(tempDir, "non-exec-bin")
-	if err := os.WriteFile(nonExecBin, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tempDir, "non-exec-bin"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
 		t.Fatalf("failed creating non-executable bin: %v", err)
 	}
-
-	// 3. Simulated transient failure recovering on second attempt using mock spawn seam.
-	recoveryAttempts := 0
-	mockRecoverySpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		recoveryAttempts++
-		if recoveryAttempts == 1 {
-			return nil, nil, nil, nil, syscall.ETXTBSY
-		}
-		inR, inW := io.Pipe()
-		outR, outW := io.Pipe()
-		errR, errW := io.Pipe()
-		closeQuietlyAll(inR, outW, errW)
-		return inW, outR, errR, NewMockProcessHandle(12345), nil
-	}
-
-	// Track attempt counts for exhaustion and cancellation cases
-	missingAttempts := 0
-	wrappedMissingSpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		missingAttempts++
-		return spawnOnce(ctx, bin, args, cfg)
-	}
-
-	nonExecAttempts := 0
-	wrappedNonExecSpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		nonExecAttempts++
-		return spawnOnce(ctx, bin, args, cfg)
-	}
-
-	// Deterministic cancellation seam: cancel context inside the first failure so retry timer wait hits ctx.Done().
-	cancelCtx, cancelFn := context.WithCancel(context.Background())
-	defer cancelFn()
-	cancelAttempts := 0
-	mockCancelSpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		cancelAttempts++
-		cancelFn()
-		return nil, nil, nil, nil, syscall.ETXTBSY
-	}
+	ms := time.Millisecond
 
 	tests := []struct {
-		name          string
-		ctx           context.Context
-		bin           string
-		retryDelays   []time.Duration
-		spawnMode     string
-		expectSuccess bool
-		expectErrSub  string
-		assertCtxErr  bool
+		name         string
+		bin          string
+		retryDelays  []time.Duration
+		steps        []retrySpawnStep
+		wantAttempts int
+		wantOK       bool
+		wantErrSub   string
+		wantCanceled bool
 	}{
+		{name: "missing binary with old sibling exhausts retries", bin: "missing-with-old", retryDelays: []time.Duration{ms, ms}, steps: []retrySpawnStep{{real: true}}, wantAttempts: 3},
+		{name: "non-executable binary during replacement exhausts retries", bin: "non-exec-bin", retryDelays: []time.Duration{ms, ms}, steps: []retrySpawnStep{{real: true}}, wantAttempts: 3},
+		{name: "recovering binary succeeds on retry", bin: "dummy-binary", retryDelays: []time.Duration{ms, 2 * ms}, steps: []retrySpawnStep{{err: syscall.ETXTBSY}, {}}, wantAttempts: 2, wantOK: true},
 		{
-			name:          "missing_binary_with_old_sibling_retries_and_fails_after_exhaustion",
-			ctx:           context.Background(),
-			bin:           missingWithOldBin,
-			retryDelays:   []time.Duration{time.Millisecond, time.Millisecond},
-			spawnMode:     "missing",
-			expectSuccess: false,
-		},
-		{
-			name:          "non_executable_binary_during_replacement_retries_and_fails",
-			ctx:           context.Background(),
-			bin:           nonExecBin,
-			retryDelays:   []time.Duration{time.Millisecond, time.Millisecond},
-			spawnMode:     "non_exec",
-			expectSuccess: false,
-		},
-		{
-			name:          "recovering_binary_succeeds_on_retry",
-			ctx:           context.Background(),
-			bin:           "dummy-binary",
-			retryDelays:   []time.Duration{time.Millisecond, 2 * time.Millisecond},
-			spawnMode:     "recovery",
-			expectSuccess: true,
-		},
-		{
-			name:          "context_cancellation_during_wait_returns_context_error",
-			ctx:           cancelCtx,
-			bin:           missingWithOldBin,
-			retryDelays:   []time.Duration{500 * time.Millisecond},
-			spawnMode:     "cancel",
-			expectSuccess: false,
-			expectErrSub:  "failed spawning daemon",
-			assertCtxErr:  true,
+			name: "cancellation during retry wait returns context error", bin: "missing-with-old", retryDelays: []time.Duration{500 * ms},
+			steps: []retrySpawnStep{{err: syscall.ETXTBSY, cancel: true}}, wantAttempts: 1, wantErrSub: "failed spawning daemon", wantCanceled: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var spawnOnceFn func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
-			switch tc.spawnMode {
-			case "missing":
-				spawnOnceFn = wrappedMissingSpawn
-			case "non_exec":
-				spawnOnceFn = wrappedNonExecSpawn
-			case "recovery":
-				spawnOnceFn = mockRecoverySpawn
-			case "cancel":
-				spawnOnceFn = mockCancelSpawn
-			default:
-				t.Fatalf("unknown spawnMode %q", tc.spawnMode)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			script := &retrySpawnScript{steps: tc.steps, cancel: cancel}
+			spawner := &DefaultDaemonSpawner{RetryDelays: tc.retryDelays, spawnOnceFn: script.spawn}
+			stdin, stdout, stderr, handle, err := spawner.Spawn(ctx, DaemonConfig{AgyBin: filepath.Join(tempDir, tc.bin)})
+			if script.attempts != tc.wantAttempts {
+				t.Errorf("attempts = %d, want %d", script.attempts, tc.wantAttempts)
 			}
-			spawner := &DefaultDaemonSpawner{
-				RetryDelays: tc.retryDelays,
-				spawnOnceFn: spawnOnceFn,
-			}
-			stdin, stdout, stderr, handle, err := spawner.Spawn(tc.ctx, DaemonConfig{
-				AgyBin: tc.bin,
-			})
-			if !tc.expectSuccess {
-				assertSpawnFailure(t, err, tc.expectErrSub, tc.assertCtxErr)
+			if !tc.wantOK {
+				assertSpawnFailure(t, err, tc.wantErrSub, tc.wantCanceled)
 				return
 			}
-
 			if err != nil || stdin == nil || stdout == nil || stderr == nil || handle == nil {
 				t.Fatalf("expected success with valid pipes and handle, got err: %v", err)
 			}
@@ -348,8 +302,6 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 			_ = handle.Wait()
 		})
 	}
-
-	assertSpawnerAttempts(t, missingAttempts, nonExecAttempts, recoveryAttempts, cancelAttempts)
 }
 
 func assertSpawnFailure(t *testing.T, err error, expectSub string, assertCtx bool) {
@@ -362,22 +314,6 @@ func assertSpawnFailure(t *testing.T, err error, expectSub string, assertCtx boo
 	}
 	if assertCtx && !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
-	}
-}
-
-func assertSpawnerAttempts(t *testing.T, missing, nonExec, recovery, cancel int) {
-	t.Helper()
-	if missing != 3 {
-		t.Errorf("expected missing binary to exhaust 3 attempts, got %d", missing)
-	}
-	if nonExec != 3 {
-		t.Errorf("expected non-exec binary to exhaust 3 attempts, got %d", nonExec)
-	}
-	if recovery != 2 {
-		t.Errorf("expected recovering case to take exactly 2 attempts, got %d", recovery)
-	}
-	if cancel != 1 {
-		t.Errorf("expected cancel case to attempt once before canceling wait, got %d", cancel)
 	}
 }
 

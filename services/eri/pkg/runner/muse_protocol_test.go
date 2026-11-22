@@ -442,24 +442,9 @@ func TestMuseProtocol_IsChildSession(t *testing.T) {
 		rootSessionID string
 		want          bool
 	}{
-		{
-			name:          "nil params",
-			params:        nil,
-			rootSessionID: "root-1",
-			want:          false,
-		},
-		{
-			name:          "matching session id",
-			params:        map[string]any{"sessionId": "root-1"},
-			rootSessionID: "root-1",
-			want:          false,
-		},
-		{
-			name:          "different session id",
-			params:        map[string]any{"sessionId": "child-1"},
-			rootSessionID: "root-1",
-			want:          true,
-		},
+		{name: "nil params", params: nil, rootSessionID: "root-1", want: false},
+		{name: "matching session id", params: map[string]any{"sessionId": "root-1"}, rootSessionID: "root-1", want: false},
+		{name: "different session id", params: map[string]any{"sessionId": "child-1"}, rootSessionID: "root-1", want: true},
 		{
 			name: "item with different session id",
 			params: map[string]any{
@@ -476,14 +461,7 @@ func TestMuseProtocol_IsChildSession(t *testing.T) {
 			rootSessionID: "root-1",
 			want:          true,
 		},
-		{
-			name: "params with kind reminderChild",
-			params: map[string]any{
-				"kind": "reminderChild",
-			},
-			rootSessionID: "root-1",
-			want:          true,
-		},
+		{name: "params with kind reminderChild", params: map[string]any{"kind": "reminderChild"}, rootSessionID: "root-1", want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -552,13 +530,7 @@ func TestMuseProtocol_ExtractUsage(t *testing.T) {
 		wantOutput int
 		wantCached int
 	}{
-		{
-			name:       "nil params",
-			params:     nil,
-			wantInput:  0,
-			wantOutput: 0,
-			wantCached: 0,
-		},
+		{name: "nil params", params: nil, wantInput: 0, wantOutput: 0, wantCached: 0},
 		{
 			name: "usage map float",
 			params: map[string]any{
@@ -600,12 +572,7 @@ func TestMuseProtocol_ParseTurnOutcome(t *testing.T) {
 		wantStatus string
 		wantErrMsg string
 	}{
-		{
-			name:       "nil params returns done",
-			params:     nil,
-			wantStatus: statusUpperDone,
-			wantErrMsg: "",
-		},
+		{name: "nil params returns done", params: nil, wantStatus: statusUpperDone, wantErrMsg: ""},
 		{
 			name:       "completed status returns done",
 			params:     map[string]any{fieldStatus: "completed"},
@@ -831,26 +798,10 @@ func TestMuseProtocol_ExtractRPCErrorMessage(t *testing.T) {
 		raw  map[string]any
 		want string
 	}{
-		{
-			name: "string error",
-			raw:  map[string]any{"error": "string"},
-			want: "",
-		},
-		{
-			name: "error without ID",
-			raw:  map[string]any{"error": map[string]any{"message": "err"}},
-			want: "",
-		},
-		{
-			name: "empty message fallback",
-			raw:  map[string]any{"id": 1.0, "error": map[string]any{}},
-			want: "muse rpc error",
-		},
-		{
-			name: "custom message",
-			raw:  map[string]any{"id": 2.0, "error": map[string]any{"message": "custom err"}},
-			want: "custom err",
-		},
+		{name: "string error", raw: map[string]any{"error": "string"}, want: ""},
+		{name: "error without ID", raw: map[string]any{"error": map[string]any{"message": "err"}}, want: ""},
+		{name: "empty message fallback", raw: map[string]any{"id": 1.0, "error": map[string]any{}}, want: "muse rpc error"},
+		{name: "custom message", raw: map[string]any{"id": 2.0, "error": map[string]any{"message": "custom err"}}, want: "custom err"},
 	}
 
 	for _, tc := range tests {

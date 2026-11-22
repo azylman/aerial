@@ -690,16 +690,8 @@ func TestDeduplicateRetrievedMemory(t *testing.T) {
 		want       string
 		wantSeen   []string
 	}{
-		{
-			name:   "no memory block unchanged",
-			prompt: "Hello world",
-			want:   "Hello world",
-		},
-		{
-			name:   "unclosed memory block unchanged",
-			prompt: "<retrieved_memory>\n- [id:1] fact one",
-			want:   "<retrieved_memory>\n- [id:1] fact one",
-		},
+		{name: "no memory block unchanged", prompt: "Hello world", want: "Hello world"},
+		{name: "unclosed memory block unchanged", prompt: "<retrieved_memory>\n- [id:1] fact one", want: "<retrieved_memory>\n- [id:1] fact one"},
 		{
 			name:   "empty memory block unchanged",
 			prompt: "<retrieved_memory>\n</retrieved_memory>\n\nHello",
@@ -1411,6 +1403,24 @@ func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {
 }
 
 func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
+	tests := []struct {
+		name         string
+		saTokenSrc   string
+		wantTokenEnv string
+	}{
+		{"token file is copied and exported", "token", "export AERIAL_SA_TOKEN_PATH="},
+		{"unreadable token source logs and omits the export", "token-dir", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setTurnSATokenSrc(t, tc.saTokenSrc)
+			runTurnEnvFileCase(t, tc.wantTokenEnv)
+		})
+	}
+}
+
+func runTurnEnvFileCase(t *testing.T, wantTokenEnv string) {
+	t.Helper()
 	tempDir := t.TempDir()
 	envFile := filepath.Join(tempDir, "turn_env", "test-daemon.sh")
 	if err := os.MkdirAll(filepath.Dir(envFile), 0o755); err != nil {
@@ -1428,15 +1438,7 @@ func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
 	h := startTestStreamingDaemon(t, cfg, "", true)
 
 	// Turn 1: explicit TargetID and VanadisChunkID
-	sink1 := newMockTurnSink()
-	turn1 := &TurnContext{
-		TurnID:         "t1",
-		TargetID:       "discord-987654",
-		VanadisChunkID: "build-abc-chunk-1",
-		Prompt:         "turn 1",
-		Sink:           sink1,
-		CreatedAt:      time.Now(),
-	}
+	turn1 := &TurnContext{TurnID: "t1", TargetID: "discord-987654", VanadisChunkID: "build-abc-chunk-1", Prompt: "turn 1", Sink: newMockTurnSink(), CreatedAt: time.Now()}
 	if err := h.daemon.Send("turn 1", turn1); err != nil {
 		t.Fatalf("send turn 1 failed: %v", err)
 	}
@@ -1456,15 +1458,16 @@ func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
 		!strings.Contains(content1, "export AERIAL_VANADIS_CHUNK_ID='build-abc-chunk-1'\n") {
 		t.Errorf("unexpected turn 1 env file content:\n%s", content1)
 	}
+	wantTokenLine := ""
+	if wantTokenEnv != "" {
+		wantTokenLine = wantTokenEnv + "'" + filepath.Join(tempDir, "turn_env", "sa-token") + "'\n"
+	}
+	if gotToken := strings.Contains(content1, "AERIAL_SA_TOKEN_PATH"); gotToken != (wantTokenLine != "") || !strings.Contains(content1, wantTokenLine) {
+		t.Errorf("turn env file SA token export = %v, want line %q:\n%s", gotToken, wantTokenLine, content1)
+	}
 
 	// Turn 2: empty TargetID falls back to cfg.ThreadID, empty VanadisChunkID unsets
-	sink2 := newMockTurnSink()
-	turn2 := &TurnContext{
-		TurnID:    "t2",
-		Prompt:    "turn 2",
-		Sink:      sink2,
-		CreatedAt: time.Now(),
-	}
+	turn2 := &TurnContext{TurnID: "t2", Prompt: "turn 2", Sink: newMockTurnSink(), CreatedAt: time.Now()}
 	if err = h.daemon.Send("turn 2", turn2); err != nil {
 		t.Fatalf("send turn 2 failed: %v", err)
 	}

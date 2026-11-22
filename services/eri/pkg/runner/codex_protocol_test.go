@@ -378,31 +378,15 @@ func TestCodexProtocol_ExtractAgentMessageText(t *testing.T) {
 		item map[string]any
 		want string
 	}{
-		{
-			name: "text string takes precedence",
-			item: map[string]any{"text": "direct reply", "content": []any{"ignored"}},
-			want: "direct reply",
-		},
-		{
-			name: "content slice of strings",
-			item: map[string]any{"content": []any{"part 1 ", "part 2"}},
-			want: "part 1 part 2",
-		},
+		{name: "text string takes precedence", item: map[string]any{"text": "direct reply", "content": []any{"ignored"}}, want: "direct reply"},
+		{name: "content slice of strings", item: map[string]any{"content": []any{"part 1 ", "part 2"}}, want: "part 1 part 2"},
 		{
 			name: "content slice of map blocks with text or content",
 			item: map[string]any{"content": []any{map[string]any{"text": "block 1\n"}, map[string]any{"content": "block 2"}}},
 			want: "block 1\nblock 2",
 		},
-		{
-			name: "non-slice content",
-			item: map[string]any{"content": "not-a-slice"},
-			want: "",
-		},
-		{
-			name: "empty item",
-			item: map[string]any{},
-			want: "",
-		},
+		{name: "non-slice content", item: map[string]any{"content": "not-a-slice"}, want: ""},
+		{name: "empty item", item: map[string]any{}, want: ""},
 	}
 
 	for _, tc := range tests {
@@ -431,12 +415,7 @@ func TestCodexProtocol_IsChildCodexThread(t *testing.T) {
 			rootThreadID: "",
 			want:         false,
 		},
-		{
-			name:         "nil params returns false",
-			params:       nil,
-			rootThreadID: "root_123",
-			want:         false,
-		},
+		{name: "nil params returns false", params: nil, rootThreadID: "root_123", want: false},
 		{
 			name:         "matching root thread id returns false",
 			params:       map[string]any{"threadId": "root_123"},
@@ -471,14 +450,7 @@ func TestCodexProtocol_IsChildCodexThread(t *testing.T) {
 			rootThreadID: "root_123",
 			want:         true,
 		},
-		{
-			name: "no threadId in params returns false",
-			params: map[string]any{
-				"other": "value",
-			},
-			rootThreadID: "root_123",
-			want:         false,
-		},
+		{name: "no threadId in params returns false", params: map[string]any{"other": "value"}, rootThreadID: "root_123", want: false},
 	}
 
 	for _, tc := range tests {
