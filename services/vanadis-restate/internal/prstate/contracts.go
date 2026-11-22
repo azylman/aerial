@@ -26,7 +26,6 @@
 package prstate
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -213,50 +212,26 @@ const (
 	DispositionRecoverStale EventDisposition = "recover_stale"
 )
 
-// EffectsOwner is the effect-owner stamp synapse still puts on the wire.
-// Restate owns every effect and every pr_registry write: PRObject and
-// RepoObject reject an event explicitly stamped legacy with a terminal
-// error (rejectLegacyOwner), so no second writer can exist. A missing or
-// empty stamp is restate-owned, so internal one-way sends and a synapse
-// that stops sending the field both keep working.
-type EffectsOwner string
-
-// Effect owner values on the wire.
-const (
-	EffectsOwnerLegacy  EffectsOwner = "legacy"
-	EffectsOwnerRestate EffectsOwner = "restate"
-)
-
-// ParseEffectsOwner maps a wire stamp to an owner. Only an exact
-// (case-insensitive) legacy stamp is legacy; anything else is restate.
-func ParseEffectsOwner(raw string) EffectsOwner {
-	if strings.EqualFold(strings.TrimSpace(raw), string(EffectsOwnerLegacy)) {
-		return EffectsOwnerLegacy
-	}
-	return EffectsOwnerRestate
-}
-
 // PREvent is the canonical PRObject payload. It carries the head or merge SHA
 // every cross-object send needs for the stale-SHA guard, plus the gate
 // generation and reopen epoch the disposition logic compares.
 // PREvent marshals with the snake_case wire format the synapse ingress
 // invoker emits; the tags are load-bearing for cross-module interop.
 type PREvent struct {
-	Event          string       `json:"event"`
-	Repo           string       `json:"repo"`
-	PRNumber       int          `json:"pr_number"`
-	Agent          string       `json:"agent,omitempty"`
-	HeadSHA        string       `json:"head_sha"`
-	MergeSHA       string       `json:"merge_sha"`
-	CheckName      string       `json:"check_name"`
-	JobName        string       `json:"job_name"`
-	Branch         string       `json:"branch"`
-	Title          string       `json:"title"`
-	GateGeneration uint64       `json:"gate_generation"`
-	ReopenEpoch    uint64       `json:"reopen_epoch"`
-	Unmanaged      bool         `json:"unmanaged"`
-	BuildID        string       `json:"build_id"`
-	EffectsOwner   EffectsOwner `json:"effects_owner,omitempty"`
+	Event          string `json:"event"`
+	Repo           string `json:"repo"`
+	PRNumber       int    `json:"pr_number"`
+	Agent          string `json:"agent,omitempty"`
+	HeadSHA        string `json:"head_sha"`
+	MergeSHA       string `json:"merge_sha"`
+	CheckName      string `json:"check_name"`
+	JobName        string `json:"job_name"`
+	Branch         string `json:"branch"`
+	Title          string `json:"title"`
+	GateGeneration uint64 `json:"gate_generation"`
+	ReopenEpoch    uint64 `json:"reopen_epoch"`
+	Unmanaged      bool   `json:"unmanaged"`
+	BuildID        string `json:"build_id"`
 	// Kustomization names the Flux Kustomization a forwarded
 	// kustomization status observed; empty for every other event.
 	Kustomization string `json:"kustomization,omitempty"`
@@ -294,13 +269,12 @@ type PREvent struct {
 	// BuildMetadata is one build-metadata snapshot for the PR revision.
 	BuildMetadata *BuildMetadata `json:"build_metadata,omitempty"`
 	// EriEffects are the rendered eri-bound effects synapse resolved for
-	// this event (collaborator DMs today). PRObject executes them for
-	// effects_owner=restate and records them as intended otherwise.
+	// this event (collaborator DMs today). PRObject executes them once
+	// the event's transition commits.
 	EriEffects []EriEffect `json:"eri_effects,omitempty"`
 	// Facts are the rendered aerial.pr.> lifecycle facts synapse resolved
 	// for this event. Verdict handlers and the deploy-failure deadline
-	// publish them for effects_owner=restate once their decision commits,
-	// and record them as intended otherwise.
+	// publish them once their decision commits.
 	Facts []pubsub.PRLifecycleEvent `json:"facts,omitempty"`
 	// ExpectedJobs are the deploy jobs a deploy alert announced
 	// (RecordExpectedJobs); HandleDeployObserved records them.
@@ -328,12 +302,11 @@ type EriEffect struct {
 // RepoEvent marshals with the snake_case wire format the synapse ingress
 // invoker emits; the tags are load-bearing for cross-module interop.
 type RepoEvent struct {
-	Repo         string       `json:"repo"`
-	MainSHA      string       `json:"main_sha"`
-	Generation   uint64       `json:"generation"`
-	PRNumber     int          `json:"pr_number"`
-	HeadSHA      string       `json:"head_sha"`
-	EffectsOwner EffectsOwner `json:"effects_owner,omitempty"`
+	Repo       string `json:"repo"`
+	MainSHA    string `json:"main_sha"`
+	Generation uint64 `json:"generation"`
+	PRNumber   int    `json:"pr_number"`
+	HeadSHA    string `json:"head_sha"`
 	// Kustomization names the Flux Kustomization a status event observed.
 	Kustomization string `json:"kustomization,omitempty"`
 
@@ -520,7 +493,7 @@ const (
 // SHAEvent is the RepoObject payload for an event that carries only a
 // commit SHA. RepoObject resolves the SHA to a PR and forwards Event to the
 // PRObject Handler with the PR number (and branch, when Event has none)
-// filled in. Event keeps the synapse effects_owner stamp untouched.
+// filled in.
 type SHAEvent struct {
 	Repo    string  `json:"repo"`
 	SHA     string  `json:"sha"`
@@ -570,30 +543,4 @@ type SHARouteOutcome struct {
 	Held      bool
 	HeldID    uint64
 	Evicted   []HeldSHAEvent
-}
-
-// UnmarshalJSON decodes the wire payload and normalizes EffectsOwner, so
-// every decoded PREvent carries legacy or restate, never empty.
-func (ev *PREvent) UnmarshalJSON(data []byte) error {
-	type wirePREvent PREvent
-	var w wirePREvent
-	if err := json.Unmarshal(data, &w); err != nil {
-		return err
-	}
-	*ev = PREvent(w)
-	ev.EffectsOwner = ParseEffectsOwner(string(ev.EffectsOwner))
-	return nil
-}
-
-// UnmarshalJSON decodes the wire payload and normalizes EffectsOwner, so
-// every decoded RepoEvent carries legacy or restate, never empty.
-func (ev *RepoEvent) UnmarshalJSON(data []byte) error {
-	type wireRepoEvent RepoEvent
-	var w wireRepoEvent
-	if err := json.Unmarshal(data, &w); err != nil {
-		return err
-	}
-	*ev = RepoEvent(w)
-	ev.EffectsOwner = ParseEffectsOwner(string(ev.EffectsOwner))
-	return nil
 }

@@ -97,8 +97,8 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 	t.Parallel()
 	defaultPolicy := &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true, Collaborators: []CollaboratorAlert{{Author: "bot", ChannelID: testChannel, Mention: "<@1>"}}}
 	indexedOnly := &AutoUpdatePolicy{Authors: []string{"bot"}}
-	mainPush := func(owner EffectsOwner, policy *AutoUpdatePolicy) RepoEvent {
-		return RepoEvent{Repo: "aerial", MainSHA: "m1", EffectsOwner: owner, AutoUpdate: policy}
+	mainPush := func(policy *AutoUpdatePolicy) RepoEvent {
+		return RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}
 	}
 	draft := openGitHubPR(3, "bot", "h3")
 	draft.Draft = true
@@ -119,34 +119,34 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 		wantEffects []string
 	}{
 		{
-			name: "fired trigger dedupes", ev: mainPush(EffectsOwnerRestate, defaultPolicy), gh: &fakeGitHub{},
+			name: "fired trigger dedupes", ev: mainPush(defaultPolicy), gh: &fakeGitHub{},
 			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{autoUpdateKeyMain}},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Deduped: true},
 			wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
-			name: "no allowlisted authors skips", ev: mainPush(EffectsOwnerRestate, &AutoUpdatePolicy{DefaultOwner: true}), gh: &fakeGitHub{},
+			name: "no allowlisted authors skips", ev: mainPush(&AutoUpdatePolicy{DefaultOwner: true}), gh: &fakeGitHub{},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Skipped: true},
 			wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
-			name: "missing github client retries", ev: mainPush(EffectsOwnerRestate, defaultPolicy), noGitHub: true,
+			name: "missing github client retries", ev: mainPush(defaultPolicy), noGitHub: true,
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Retry: true, Err: errGitHubUnconfigured},
 		},
 		{
-			name: "retryable list failure retries", ev: mainPush(EffectsOwnerRestate, defaultPolicy), gh: &fakeGitHub{listErr: errGHServer},
+			name: "retryable list failure retries", ev: mainPush(defaultPolicy), gh: &fakeGitHub{listErr: errGHServer},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Retry: true, Err: errGHServer},
 			wantCalls:   []string{"list azylman/aerial"},
 		},
 		{
-			name: "terminal list failure commits", ev: mainPush(EffectsOwnerRestate, defaultPolicy), gh: &fakeGitHub{listErr: errGHNotFound},
+			name: "terminal list failure commits", ev: mainPush(defaultPolicy), gh: &fakeGitHub{listErr: errGHNotFound},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Executed: true, Err: errGHNotFound},
 			wantCalls:   []string{"list azylman/aerial"},
 			wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
 			name: "cascade skips ineligible and blocked prs, forwards conflicts and stale closes, stops at the first update",
-			ev:   RepoEvent{Repo: "aerial", PRNumber: 9, HeadSHA: "h9", CheckName: "CI Gate", EffectsOwner: EffectsOwnerRestate, AutoUpdate: defaultPolicy},
+			ev:   RepoEvent{Repo: "aerial", PRNumber: 9, HeadSHA: "h9", CheckName: "CI Gate", AutoUpdate: defaultPolicy},
 			gh: &fakeGitHub{
 				prs:     []GitHubPR{openGitHubPR(1, "human", "h1"), openGitHubPR(2, "bot", "h2"), draft, openGitHubPR(4, "bot", "h4"), openGitHubPR(5, "bot", "h5"), openGitHubPR(6, "bot", "h6"), openGitHubPR(7, "bot", "h7"), openGitHubPR(8, "bot", "h8"), openGitHubPR(10, "bot", "h10")},
 				blocked: map[string]bool{"h2": true},
@@ -165,13 +165,13 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 			},
 			wantCalls: []string{"list azylman/aerial", "checks h2", "checks h4", "update 4", "checks h5", "update 5", "fetch 5", "checks h6", "update 6", "checks h7", "update 7", "fetch 7", "checks h8", "update 8"},
 			wantSent: []sentPR{
-				{handler: PRHandlerBranchConflict, ev: PREvent{Event: "branch_conflict", Repo: "azylman/aerial", PRNumber: 4, HeadSHA: "h4", Branch: "b4", Title: "PR 4", EffectsOwner: EffectsOwnerRestate, EriEffects: []EriEffect{conflictDM}}},
-				{handler: PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 5, HeadSHA: "h5", Branch: "b5", EffectsOwner: EffectsOwnerRestate}},
+				{handler: PRHandlerBranchConflict, ev: PREvent{Event: "branch_conflict", Repo: "azylman/aerial", PRNumber: 4, HeadSHA: "h4", Branch: "b4", Title: "PR 4", EriEffects: []EriEffect{conflictDM}}},
+				{handler: PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 5, HeadSHA: "h5", Branch: "b5"}},
 			},
 			wantEffects: []string{"azylman/aerial#9@h9:gen0:github_auto_update:check=ci gate"},
 		},
 		{
-			name: "non-default owner only updates indexed prs", ev: mainPush(EffectsOwnerRestate, indexedOnly),
+			name: "non-default owner only updates indexed prs", ev: mainPush(indexedOnly),
 			seed: &RepoState{Repo: "azylman/aerial", PRs: map[int]*RepoPRStatus{2: {}}},
 			gh:   &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1"), openGitHubPR(2, "bot", "h2")}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantOutcome: RepoEffectOutcome{
@@ -182,13 +182,13 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 			wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
-			name: "rate limit stops the cascade and retries", ev: mainPush(EffectsOwnerRestate, defaultPolicy),
+			name: "rate limit stops the cascade and retries", ev: mainPush(defaultPolicy),
 			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1"), openGitHubPR(2, "bot", "h2")}, updates: map[int]updateResult{1: {err: errGHRateLimited}}},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Retry: true, Err: errGHRateLimited},
 			wantCalls:   []string{"list azylman/aerial", "checks h1", "update 1"},
 		},
 		{
-			name: "stale read failure closes nothing", ev: mainPush(EffectsOwnerRestate, defaultPolicy),
+			name: "stale read failure closes nothing", ev: mainPush(defaultPolicy),
 			gh: &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchHeadMissing}}, fetches: map[int]fetchResult{1: {err: errGHServer}}},
 			wantOutcome: RepoEffectOutcome{
 				Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Executed: true,
@@ -198,17 +198,17 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 			wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
-			name: "deleted pr closes as stale", ev: mainPush(EffectsOwnerRestate, defaultPolicy),
+			name: "deleted pr closes as stale", ev: mainPush(defaultPolicy),
 			gh: &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchHeadMissing}}, fetches: map[int]fetchResult{1: {err: errGHNotFound}}},
 			wantOutcome: RepoEffectOutcome{
 				Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: EffectGitHubAutoUpdate}, Executed: true, Forwards: 1,
 				Updates: []BranchUpdate{{PRNumber: 1, HeadSHA: "h1", Outcome: UpdateBranchHeadMissing}},
 			},
 			wantCalls:   []string{"list azylman/aerial", "checks h1", "update 1", "fetch 1"},
-			wantSent:    []sentPR{{handler: PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 1, EffectsOwner: EffectsOwnerRestate}}},
+			wantSent:    []sentPR{{handler: PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 1}}},
 			wantEffects: []string{autoUpdateKeyMain},
 		},
-		{name: "missing trigger sha is invalid", ev: RepoEvent{Repo: "aerial", EffectsOwner: EffectsOwnerRestate}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
+		{name: "missing trigger sha is invalid", ev: RepoEvent{Repo: "aerial"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,7 +218,7 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 				store.SaveRepo(tc.seed)
 			}
 			prs := &fakePRSender{}
-			h := NewRepoHandlers(store, nil, prs, nil)
+			h := testRepoHandlers(t, store, prs, nil)
 			if !tc.noGitHub {
 				h = h.WithGitHub(tc.gh)
 			}
@@ -263,8 +263,8 @@ func TestRepoHandlersHandleAutoUpdateForwardFailure(t *testing.T) {
 			t.Parallel()
 			store := NewMemRepoStore()
 			gh := &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchConflict}}}
-			h := NewRepoHandlers(store, nil, &fakePRSender{failPR: tc.failPR}, nil).WithGitHub(gh)
-			out, err := h.HandleAutoUpdate(context.Background(), RepoEvent{Repo: "aerial", MainSHA: "m1", EffectsOwner: EffectsOwnerRestate, AutoUpdate: &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true}})
+			h := testRepoHandlers(t, store, &fakePRSender{failPR: tc.failPR}, nil).WithGitHub(gh)
+			out, err := h.HandleAutoUpdate(context.Background(), RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true}})
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Equal(t, tc.wantForward, out.Forwards)
 			st, lerr := store.LoadRepo("aerial")
@@ -278,8 +278,8 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 	t.Parallel()
 	rerunKey := "azylman/aerial#12@s1:gen0:github_rerun:check=ci"
 	key := EffectKey{Repo: "azylman/aerial", PRNumber: 12, HeadSHA: "s1", Kind: EffectGitHubRerun, CheckName: "CI"}
-	ev := func(owner EffectsOwner) RepoEvent {
-		return RepoEvent{Repo: "aerial", PRNumber: 12, HeadSHA: "s1", CheckName: "CI", RunID: 55, EffectsOwner: owner}
+	ev := func() RepoEvent {
+		return RepoEvent{Repo: "aerial", PRNumber: 12, HeadSHA: "s1", CheckName: "CI", RunID: 55}
 	}
 	tests := []struct {
 		name        string
@@ -292,18 +292,18 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 		wantCalls   []string
 		wantEffects []string
 	}{
-		{name: "restate rerun executes", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{}, wantOutcome: RepoEffectOutcome{Key: key, Executed: true}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
-		{name: "retryable failure leaves the key open", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{rerunErr: errGHServer}, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGHServer}, wantCalls: []string{"rerun 55"}},
-		{name: "terminal failure commits the key", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{rerunErr: errGHNotFound}, wantOutcome: RepoEffectOutcome{Key: key, Err: errGHNotFound}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
-		{name: "missing client retries", ev: ev(EffectsOwnerRestate), noGitHub: true, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGitHubUnconfigured}},
+		{name: "restate rerun executes", ev: ev(), gh: &fakeGitHub{}, wantOutcome: RepoEffectOutcome{Key: key, Executed: true}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
+		{name: "retryable failure leaves the key open", ev: ev(), gh: &fakeGitHub{rerunErr: errGHServer}, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGHServer}, wantCalls: []string{"rerun 55"}},
+		{name: "terminal failure commits the key", ev: ev(), gh: &fakeGitHub{rerunErr: errGHNotFound}, wantOutcome: RepoEffectOutcome{Key: key, Err: errGHNotFound}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
+		{name: "missing client retries", ev: ev(), noGitHub: true, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGitHubUnconfigured}},
 		{name: "missing run id is invalid", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
-		{name: "store failure surfaces", ev: ev(EffectsOwnerRestate), gh: &fakeGitHub{}, storeErr: errKVUnavailable, wantErr: errKVUnavailable},
+		{name: "store failure surfaces", ev: ev(), gh: &fakeGitHub{}, storeErr: errKVUnavailable, wantErr: errKVUnavailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := NewMemRepoStore()
-			h := NewRepoHandlers(store, nil, &fakePRSender{}, nil)
+			h := testRepoHandlers(t, store, &fakePRSender{}, nil)
 			if !tc.noGitHub {
 				h = h.WithGitHub(tc.gh)
 			}

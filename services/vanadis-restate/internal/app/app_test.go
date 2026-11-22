@@ -220,31 +220,30 @@ func TestBindRestateServices(t *testing.T) {
 		wantRouter   string
 		wantPRState  bool
 		wantServices int
-		projection   bool
+		noProjection bool
 		noGitHub     bool
 	}{
-		{name: "aerial agent with projection store owns pr state", agent: "aerial", projection: true, wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
-		{name: "empty agent owns pr state", agent: "", noGitHub: true, wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
+		{name: "empty agent owns pr state", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "aerial agent owns pr state", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
-		{name: "sibling agent never binds pr state", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantPRState: false, wantServices: 2},
+		{name: "sibling agent never binds pr state", agent: "agent-alpha", noProjection: true, noGitHub: true, wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantPRState: false, wantServices: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
 			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
-			var projection *prstate.PgProjectionStore
-			if tc.projection {
-				projection = prstate.NewPgProjectionStore(nil)
+			projection := prstate.NewPgProjectionStore(nil)
+			if tc.noProjection {
+				projection = nil
 			}
 			gh := prstate.NewGitHubClient(nil, "", "")
 			kube := prstate.NewKubeClient(nil, "", "", "", "")
 			if tc.noGitHub {
 				gh, kube = nil, nil
 			}
-			srv := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh, kube)
-			require.NotNil(t, srv)
+			srv, err := bindRestateServices(tc.agent, restateObj, routerSvc, projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh, kube)
+			require.NoError(t, err)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
@@ -274,16 +273,14 @@ func TestBindRestateServices(t *testing.T) {
 				require.NotContains(t, byName, "RepoObject")
 				return
 			}
-			require.Len(t, byName["PRObject"], 44)
+			require.Len(t, byName["PRObject"], 42)
 			require.True(t, byName["PRObject"]["RetryReadiness"])
 			require.True(t, byName["PRObject"]["RetryFluxReconcile"])
 			require.True(t, byName["PRObject"]["HandleConflictCheck"])
 			require.True(t, byName["PRObject"]["HandleBranchConflict"])
 			require.True(t, byName["PRObject"]["HandleHeadRefMissing"])
 			require.True(t, byName["PRObject"]["RetryEriEffect"])
-			require.True(t, byName["PRObject"]["Hydrate"])
 			require.True(t, byName["PRObject"]["Project"])
-			require.True(t, byName["PRObject"]["CompareProjection"])
 			require.True(t, byName["PRObject"]["HandleCheckFailed"])
 			require.True(t, byName["PRObject"]["HandleDeploySuccessPublished"])
 			require.True(t, byName["PRObject"]["HandleConflictDetected"])
@@ -517,6 +514,48 @@ func TestInitPostgres(t *testing.T) {
 			if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
 			}
+		})
+	}
+}
+
+// TestNewPRStateServices pins that the default-agent prstate wiring needs
+// every boundary and names the missing one.
+func TestNewPRStateServices(t *testing.T) {
+	t.Parallel()
+	projection := prstate.NewPgProjectionStore(nil)
+	eri := prstate.NewSessionEriEffector(nil)
+	facts := prstate.NewBusFactPublisher(nil)
+	gh := prstate.NewGitHubClient(nil, "", "")
+	kube := prstate.NewKubeClient(nil, "", "", "", "")
+	tests := []struct {
+		name       string
+		projection *prstate.PgProjectionStore
+		eri        prstate.EriEffector
+		facts      prstate.FactPublisher
+		gh         *prstate.GitHubClient
+		kube       *prstate.KubeClient
+		wantErr    string
+	}{
+		{name: "every boundary wires", projection: projection, eri: eri, facts: facts, gh: gh, kube: kube},
+		{name: "nil projection fails", eri: eri, facts: facts, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: projection store"},
+		{name: "nil eri fails", projection: projection, facts: facts, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: eri effector"},
+		{name: "nil facts fails", projection: projection, eri: eri, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: fact publisher"},
+		{name: "nil github fails", projection: projection, eri: eri, facts: facts, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: GitHub client"},
+		{name: "nil kube fails", projection: projection, eri: eri, facts: facts, gh: gh, wantErr: "vanadis-restate: prstate dependency is nil: Kubernetes client"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pr, repo, err := newPRStateServices(tc.projection, tc.eri, tc.facts, tc.gh, tc.kube)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				require.Nil(t, pr)
+				require.Nil(t, repo)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, pr)
+			require.NotNil(t, repo)
 		})
 	}
 }

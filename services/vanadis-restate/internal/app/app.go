@@ -141,49 +141,50 @@ func LoadConfig(getenv func(string) string) Config {
 // sibling runner registering them would steal PR lifecycle traffic from
 // whichever deployment registered last.
 //
-// projection is the pr_registry writer/reader PRObject uses; nil leaves
-// PRObject without registry writes or shadow compares. eri is the effect
-// boundary for restate-owned eri wakes and DMs; nil leaves them unconfigured.
-// facts publishes restate-owned aerial.pr.> lifecycle facts; nil leaves them
-// unconfigured. gh is the GitHub client restate-owned GitHub effects
-// (auto-update, update-branch, conflict checks, workflow reruns) call; nil
-// leaves them unconfigured. kube is the Kubernetes/Flux client restate-owned
-// Flux and image effects (git-push dispatch, image promotion, reconcile
-// requests) call; nil leaves them unconfigured.
-func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) *server.Restate {
+// The default-agent runner requires every prstate boundary and fails to
+// start when one is nil: projection is the pr_registry writer PRObject
+// uses, eri the boundary for eri wakes and DMs, facts the aerial.pr.>
+// lifecycle fact publisher, gh the GitHub client for GitHub effects
+// (auto-update, update-branch, conflict checks, workflow reruns), and kube
+// the Kubernetes/Flux client for Flux and image effects (git-push dispatch,
+// image promotion, reconcile requests). A sibling runner binds no prstate
+// services and ignores them.
+func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*server.Restate, error) {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))
 	if ownsPRState(agent) {
-		pr, repo := newPRStateServices(projection, eri, facts, gh, kube)
+		pr, repo, err := newPRStateServices(projection, eri, facts, gh, kube)
+		if err != nil {
+			return nil, err
+		}
 		prstate.RegisterPRStateServices(srv, pr, repo)
 	}
-	return srv
+	return srv, nil
 }
 
+// errMissingPRStateDependency is the startup error for a nil prstate
+// boundary on the default-agent runner.
+var errMissingPRStateDependency = errors.New("vanadis-restate: prstate dependency is nil")
+
 // newPRStateServices wires the PRObject and RepoObject services with every
-// configured boundary; a nil boundary stays unconfigured.
-func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*prstate.PRObjectService, *prstate.RepoObjectService) {
-	pr := prstate.NewPRObjectService()
-	repo := prstate.NewRepoObjectService()
-	if projection != nil {
-		pr = pr.WithProjection(projection)
+// boundary passed explicitly; a nil boundary is a wiring error.
+func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*prstate.PRObjectService, *prstate.RepoObjectService, error) {
+	switch {
+	case projection == nil:
+		return nil, nil, fmt.Errorf("%w: projection store", errMissingPRStateDependency)
+	case eri == nil:
+		return nil, nil, fmt.Errorf("%w: eri effector", errMissingPRStateDependency)
+	case facts == nil:
+		return nil, nil, fmt.Errorf("%w: fact publisher", errMissingPRStateDependency)
+	case gh == nil:
+		return nil, nil, fmt.Errorf("%w: GitHub client", errMissingPRStateDependency)
+	case kube == nil:
+		return nil, nil, fmt.Errorf("%w: Kubernetes client", errMissingPRStateDependency)
 	}
-	if eri != nil {
-		pr = pr.WithEriEffector(eri)
-	}
-	if facts != nil {
-		pr = pr.WithFactPublisher(facts)
-	}
-	if gh != nil {
-		pr = pr.WithGitHub(gh)
-		repo = repo.WithGitHub(gh)
-	}
-	if kube != nil {
-		pr = pr.WithKube(kube)
-		repo = repo.WithKube(kube)
-	}
-	return pr, repo
+	pr := prstate.NewPRObjectService().WithProjection(projection).WithEriEffector(eri).WithFactPublisher(facts).WithGitHub(gh).WithKube(kube)
+	repo := prstate.NewRepoObjectService().WithGitHub(gh).WithKube(kube)
+	return pr, repo, nil
 }
 
 // ownsPRState reports whether agent is the default agent that owns prstate.
@@ -272,9 +273,12 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
-	restateServer := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()), prstate.NewSessionEriEffector(eriClient), prstate.NewBusFactPublisher(bus),
+	restateServer, bindErr := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()), prstate.NewSessionEriEffector(eriClient), prstate.NewBusFactPublisher(bus),
 		prstate.NewGitHubClient(newGitHubHTTPClient(ghSource, nil, 30*time.Second), "", ""),
 		prstate.NewKubeClient(tracing.ExternalClient(&http.Client{Timeout: 15 * time.Second}), cfg.KubeAPIServer, prstate.DefaultKubeTokenPath, prstate.DefaultKubeCAPath, cfg.FluxReceiverURL))
+	if bindErr != nil {
+		return errors.Join(fmt.Errorf("bind restate services: %w", bindErr), healthServer.Close())
+	}
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)

@@ -13,20 +13,6 @@ import (
 // Hermetic fakes for RepoHandlers: no I/O, clocks, or sleeps. The Restate
 // bindings for these seams are proven in service_test.go.
 
-type projectionCall struct {
-	repo    string
-	mainSHA string
-}
-
-type fakeProjector struct {
-	calls []projectionCall
-}
-
-func (f *fakeProjector) SyncMainPush(ctx context.Context, repo, mainSHA string) {
-	_ = ctx
-	f.calls = append(f.calls, projectionCall{repo: repo, mainSHA: mainSHA})
-}
-
 type sentPR struct {
 	handler string
 	ev      PREvent
@@ -132,12 +118,12 @@ func loadRepoForTest(t *testing.T, store *MemRepoStore) *RepoState {
 	return st
 }
 
-func mainAdvanced(pr int, owner EffectsOwner) sentPR {
-	return sentPR{handler: PRHandlerMainAdvanced, ev: PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: pr, EffectsOwner: owner}}
+func mainAdvanced(pr int) sentPR {
+	return sentPR{handler: PRHandlerMainAdvanced, ev: PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: pr}}
 }
 
 func rolloutStatus(pr int, branch string, gen uint64) sentPR {
-	return sentPR{handler: PRHandlerRolloutProgress, ev: PREvent{Event: "kustomization_status", Repo: "azylman/aerial", PRNumber: pr, Branch: branch, GateGeneration: gen, EffectsOwner: EffectsOwnerRestate, Kustomization: "eri"}}
+	return sentPR{handler: PRHandlerRolloutProgress, ev: PREvent{Event: "kustomization_status", Repo: "azylman/aerial", PRNumber: pr, Branch: branch, GateGeneration: gen, Kustomization: "eri"}}
 }
 
 func heldCheck(sha string) SHAEvent {
@@ -186,28 +172,25 @@ func TestRepoHandlers_HandleMainPush(t *testing.T) {
 	t.Parallel()
 	openTwoClosedOne := []PRIndexEvent{idxActive(101, "h1", "", 0), idxActive(102, "h2", "", 0), idxActive(103, "h3", "", 0), idxClosed(103, "h3")}
 	tests := []struct {
-		name            string
-		seed            repoSeed
-		loadErr         bool
-		nilProjector    bool
-		failPR          int
-		ev              RepoEvent
-		wantErr         bool
-		wantInvalid     bool
-		wantLatest      string
-		wantIndexLen    int
-		wantIndexFirst  string
-		wantTouched     []string
-		wantSent        []sentPR
-		wantProjections []projectionCall
+		name           string
+		seed           repoSeed
+		loadErr        bool
+		failPR         int
+		ev             RepoEvent
+		wantErr        bool
+		wantInvalid    bool
+		wantLatest     string
+		wantIndexLen   int
+		wantIndexFirst string
+		wantTouched    []string
+		wantSent       []sentPR
 	}{
-		{name: "fresh push records sha", ev: RepoEvent{Repo: "aerial", MainSHA: "MainSHA1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantProjections: []projectionCall{{repo: "azylman/aerial", mainSHA: "mainsha1"}}},
-		{name: "new sha fans out to open prs only", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha2", EffectsOwner: EffectsOwnerRestate}, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerRestate), mainAdvanced(102, EffectsOwnerRestate)}, wantProjections: []projectionCall{{repo: "azylman/aerial", mainSHA: "mainsha2"}}},
-		{name: "duplicate sha sends and projects nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}},
+		{name: "fresh push records sha", ev: RepoEvent{Repo: "aerial", MainSHA: "MainSHA1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1"},
+		{name: "new sha fans out to open prs only", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha2"}, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
+		{name: "duplicate sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}},
 		{name: "duplicate sha still records a new pr key", seed: repoSeed{mains: []string{"mainsha1"}}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1", PRNumber: 104}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#104"}},
-		{name: "index bounds at fifty", seed: repoSeed{mains: seedMainIndex50()}, ev: RepoEvent{Repo: "aerial", MainSHA: "newsha99"}, wantLatest: "newsha99", wantIndexLen: 50, wantIndexFirst: "base01", wantProjections: []projectionCall{{repo: "azylman/aerial", mainSHA: "newsha99"}}},
-		{name: "nil projector still commits", nilProjector: true, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1"},
-		{name: "failing send never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, failPR: 101, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha2"}, wantErr: true, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerRestate), mainAdvanced(102, EffectsOwnerRestate)}, wantProjections: []projectionCall{{repo: "azylman/aerial", mainSHA: "mainsha2"}}},
+		{name: "index bounds at fifty", seed: repoSeed{mains: seedMainIndex50()}, ev: RepoEvent{Repo: "aerial", MainSHA: "newsha99"}, wantLatest: "newsha99", wantIndexLen: 50, wantIndexFirst: "base01"},
+		{name: "failing send never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, failPR: 101, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha2"}, wantErr: true, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
 		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1"}, wantErr: true},
 		{name: "empty sha is invalid", ev: RepoEvent{Repo: "aerial"}, wantErr: true, wantInvalid: true},
 		{name: "zero sha is invalid", ev: RepoEvent{Repo: "aerial", MainSHA: "0000000"}, wantErr: true, wantInvalid: true},
@@ -217,18 +200,10 @@ func TestRepoHandlers_HandleMainPush(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := seedRepoStore(tc.seed, tc.loadErr)
-			projector := &fakeProjector{}
-			var projectArg RepoProjector = projector
-			if tc.nilProjector {
-				projectArg = nil
-			}
 			sender := &fakePRSender{failPR: tc.failPR}
-			err := NewRepoHandlers(store, projectArg, sender, nil).HandleMainPush(context.Background(), tc.ev)
+			err := testRepoHandlers(t, store, sender, nil).HandleMainPush(context.Background(), tc.ev)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			assertSent(t, sender.calls, tc.wantSent)
-			if !reflect.DeepEqual(projector.calls, tc.wantProjections) {
-				t.Fatalf("projections = %+v, want %+v", projector.calls, tc.wantProjections)
-			}
 			if tc.wantLatest == "" {
 				return
 			}
@@ -256,12 +231,12 @@ func TestRepoHandlers_HandleFanout(t *testing.T) {
 		wantInvalid bool
 		wantSent    []sentPR
 	}{
-		{name: "fans out latest main to open prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, ev: RepoEvent{Repo: "aerial", EffectsOwner: EffectsOwnerRestate}, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerRestate), mainAdvanced(102, EffectsOwnerRestate)}},
+		{name: "fans out latest main to open prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, ev: RepoEvent{Repo: "aerial"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
 		{name: "no main push sends nothing", seed: repoSeed{index: openTwo}, ev: RepoEvent{Repo: "aerial"}},
 		{name: "already fanned out main sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}},
-		{name: "stale fanned out sha fans out the newer main", seed: repoSeed{mains: []string{"mainsha1", "mainsha2"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerRestate), mainAdvanced(102, EffectsOwnerRestate)}},
+		{name: "stale fanned out sha fans out the newer main", seed: repoSeed{mains: []string{"mainsha1", "mainsha2"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
 		{name: "missing repo state sends nothing", ev: RepoEvent{Repo: "aerial"}},
-		{name: "failing pr never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial"}, wantErr: true, wantSent: []sentPR{mainAdvanced(101, EffectsOwnerRestate), mainAdvanced(102, EffectsOwnerRestate)}},
+		{name: "failing pr never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial"}, wantErr: true, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
 		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial"}, wantErr: true},
 		{name: "empty repo is invalid", ev: RepoEvent{}, wantErr: true, wantInvalid: true},
 	}
@@ -269,7 +244,7 @@ func TestRepoHandlers_HandleFanout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			sender := &fakePRSender{failPR: tc.failPR}
-			err := NewRepoHandlers(seedRepoStore(tc.seed, tc.loadErr), nil, sender, nil).HandleFanout(context.Background(), tc.ev)
+			err := testRepoHandlers(t, seedRepoStore(tc.seed, tc.loadErr), sender, nil).HandleFanout(context.Background(), tc.ev)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			assertSent(t, sender.calls, tc.wantSent)
 		})
@@ -297,10 +272,10 @@ func TestRepoHandlers_HandleKustomizationStatus(t *testing.T) {
 	}{
 		{name: "records tombstone without deploying prs", ev: RepoEvent{Repo: "aerial", HeadSHA: "depsha1", Generation: 3}, wantStored: true, wantTombstones: map[string]uint64{"depsha1": 3}},
 		{name: "evicts older generations", seed: repoSeed{tombstones: map[string]uint64{"oldsha": 1, "peersha": 3}}, ev: RepoEvent{Repo: "aerial", HeadSHA: "depsha2", Generation: 3}, wantStored: true, wantTombstones: map[string]uint64{"peersha": 3, "depsha2": 3}},
-		{name: "forwards status to every deploying pr", seed: repoSeed{index: deployingTwo}, ev: RepoEvent{Repo: "aerial", Kustomization: " eri ", EffectsOwner: EffectsOwnerRestate}, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
+		{name: "forwards status to every deploying pr", seed: repoSeed{index: deployingTwo}, ev: RepoEvent{Repo: "aerial", Kustomization: " eri "}, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
 		{name: "status without sha persists nothing", ev: RepoEvent{Repo: "aerial", Generation: 3}},
 		{name: "zero sha persists nothing", ev: RepoEvent{Repo: "aerial", HeadSHA: "0000000", Generation: 3}},
-		{name: "failing pr never starves later prs", seed: repoSeed{index: deployingTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial", Kustomization: "eri", EffectsOwner: EffectsOwnerRestate}, wantErr: true, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
+		{name: "failing pr never starves later prs", seed: repoSeed{index: deployingTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial", Kustomization: "eri"}, wantErr: true, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
 		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial", HeadSHA: "depsha1"}, wantErr: true},
 		{name: "empty repo is invalid", ev: RepoEvent{HeadSHA: "depsha1", Generation: 3}, wantErr: true, wantInvalid: true},
 	}
@@ -309,7 +284,7 @@ func TestRepoHandlers_HandleKustomizationStatus(t *testing.T) {
 			t.Parallel()
 			store := seedRepoStore(tc.seed, tc.loadErr)
 			sender := &fakePRSender{failPR: tc.failPR}
-			err := NewRepoHandlers(store, nil, sender, nil).HandleKustomizationStatus(context.Background(), tc.ev)
+			err := testRepoHandlers(t, store, sender, nil).HandleKustomizationStatus(context.Background(), tc.ev)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			assertSent(t, sender.calls, tc.wantSent)
 			if tc.loadErr {
@@ -353,13 +328,13 @@ func TestRepoHandlers_HandlePRIndex(t *testing.T) {
 			t.Parallel()
 			store := seedRepoStore(tc.seed, tc.loadErr)
 			self := &fakeSelfScheduler{fail: tc.failSched}
-			err := NewRepoHandlers(store, nil, nil, self).HandlePRIndex(context.Background(), tc.ev)
+			err := testRepoHandlers(t, store, nil, self).HandlePRIndex(context.Background(), tc.ev)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			assertSelf(t, self.calls, tc.wantSelf)
 			if tc.loadErr {
 				return
 			}
-			pr, _, _ := NewRepoHandlers(store, nil, nil, nil).ResolvePRBySHA(context.Background(), "aerial", tc.probeSHA)
+			pr, _, _ := testRepoHandlers(t, store, nil, nil).ResolvePRBySHA(context.Background(), "aerial", tc.probeSHA)
 			if pr != tc.wantPR {
 				t.Fatalf("ResolvePRBySHA(%q) = %d, want %d", tc.probeSHA, pr, tc.wantPR)
 			}
@@ -396,13 +371,13 @@ func TestRepoHandlers_RouteBySHA(t *testing.T) {
 		wantSelf       []selfCall
 		wantHeld       []string
 	}{
-		{name: "check run hit forwards with pr branch and head", seed: repoSeed{index: indexed}, kind: SHAKindCheckRun, ev: SHAEvent{Repo: "aerial", SHA: "ABC123", Handler: PRHandlerCheckFailed, Event: PREvent{Event: "check_failed", CheckName: "ci", EffectsOwner: EffectsOwnerRestate}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci", EffectsOwner: EffectsOwnerRestate}}}},
-		{name: "workflow run hit keeps event branch and head", seed: repoSeed{index: indexed}, kind: SHAKindWorkflowRun, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: PRHandlerCheckPassed, Event: PREvent{Event: "check_passed", Branch: "own", HeadSHA: "abc123"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: PRHandlerCheckPassed, ev: PREvent{Event: "check_passed", Repo: "azylman/aerial", PRNumber: 101, Branch: "own", HeadSHA: "abc123", EffectsOwner: EffectsOwnerRestate}}}},
-		{name: "push hit fills merge sha", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1")}}, kind: SHAKindPush, ev: SHAEvent{Repo: "aerial", SHA: "m1", Handler: PRHandlerMerged, Event: PREvent{Event: "merged"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate}}}},
+		{name: "check run hit forwards with pr branch and head", seed: repoSeed{index: indexed}, kind: SHAKindCheckRun, ev: SHAEvent{Repo: "aerial", SHA: "ABC123", Handler: PRHandlerCheckFailed, Event: PREvent{Event: "check_failed", CheckName: "ci"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci"}}}},
+		{name: "workflow run hit keeps event branch and head", seed: repoSeed{index: indexed}, kind: SHAKindWorkflowRun, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: PRHandlerCheckPassed, Event: PREvent{Event: "check_passed", Branch: "own", HeadSHA: "abc123"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: PRHandlerCheckPassed, ev: PREvent{Event: "check_passed", Repo: "azylman/aerial", PRNumber: 101, Branch: "own", HeadSHA: "abc123"}}}},
+		{name: "push hit fills merge sha", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1")}}, kind: SHAKindPush, ev: SHAEvent{Repo: "aerial", SHA: "m1", Handler: PRHandlerMerged, Event: PREvent{Event: "merged"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"}}}},
 		{name: "miss holds and schedules expiry", kind: SHAKindImageReady, ev: SHAEvent{Repo: "aerial", SHA: "m2", Handler: PRHandlerRolloutProgress}, wantHeldID: 1, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 1, delay: 30 * time.Minute}}, wantHeld: []string{"m2"}},
 		{name: "miss at capacity evicts oldest held", seed: repoSeed{held: heldFill(64)}, kind: SHAKindPush, ev: SHAEvent{Repo: "aerial", SHA: "m2", Handler: PRHandlerMerged}, wantHeldID: 65, wantEvictedIDs: []uint64{1}, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 65, delay: 30 * time.Minute}}, wantHeld: append(numberedSHAs(64)[1:], "m2")},
 		{name: "expiry schedule failure persists nothing", failSched: true, kind: SHAKindCheckRun, ev: heldCheck("m2"), wantErr: true, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 1, delay: 30 * time.Minute}}},
-		{name: "forward failure surfaces", seed: repoSeed{index: indexed}, failPR: 101, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true, wantSent: []sentPR{{handler: PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci", EffectsOwner: EffectsOwnerRestate}}}},
+		{name: "forward failure surfaces", seed: repoSeed{index: indexed}, failPR: 101, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true, wantSent: []sentPR{{handler: PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci"}}}},
 		{name: "load error surfaces", loadErr: true, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true},
 		{name: "verdict handler is not routable", kind: SHAKindCheckRun, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: "HandleCIRecovery"}, wantErr: true, wantInvalid: true},
 		{name: "handler outside the kind allowlist is invalid", kind: SHAKindImageReady, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: PRHandlerCheckFailed}, wantErr: true, wantInvalid: true},
@@ -415,7 +390,7 @@ func TestRepoHandlers_RouteBySHA(t *testing.T) {
 			store := seedRepoStore(tc.seed, tc.loadErr)
 			sender := &fakePRSender{failPR: tc.failPR}
 			self := &fakeSelfScheduler{fail: tc.failSched}
-			out, err := NewRepoHandlers(store, nil, sender, self).RouteBySHA(context.Background(), tc.kind, tc.ev)
+			out, err := testRepoHandlers(t, store, sender, self).RouteBySHA(context.Background(), tc.kind, tc.ev)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			var evictedIDs []uint64
 			for _, e := range out.Evicted {
@@ -440,7 +415,7 @@ func TestRepoHandlers_RouteBySHA(t *testing.T) {
 
 func TestRepoHandlers_ReplayHeld(t *testing.T) {
 	t.Parallel()
-	pushHeld := SHAEvent{Repo: "aerial", SHA: "m1", Handler: PRHandlerMerged, Event: PREvent{Event: "merged", EffectsOwner: EffectsOwnerRestate}}
+	pushHeld := SHAEvent{Repo: "aerial", SHA: "m1", Handler: PRHandlerMerged, Event: PREvent{Event: "merged"}}
 	mergedIndex := []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1")}
 	tests := []struct {
 		name        string
@@ -453,11 +428,11 @@ func TestRepoHandlers_ReplayHeld(t *testing.T) {
 		wantSent    []sentPR
 		wantHeld    []string
 	}{
-		{name: "resolved sha forwards its held events and keeps others", seed: repoSeed{held: []SHAEvent{pushHeld, heldCheck("zz")}, index: mergedIndex}, sha: "M1", wantSent: []sentPR{{handler: PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "m1", EffectsOwner: EffectsOwnerRestate}}}, wantHeld: []string{"zz"}},
+		{name: "resolved sha forwards its held events and keeps others", seed: repoSeed{held: []SHAEvent{pushHeld, heldCheck("zz")}, index: mergedIndex}, sha: "M1", wantSent: []sentPR{{handler: PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "m1"}}}, wantHeld: []string{"zz"}},
 		{name: "unresolved sha stays held", seed: repoSeed{held: []SHAEvent{heldCheck("zz")}}, sha: "zz", wantHeld: []string{"zz"}},
 		{name: "resolved sha without held events is a no-op", seed: repoSeed{index: mergedIndex}, sha: "m1"},
 		{name: "missing state is a no-op", sha: "m1"},
-		{name: "forward failure keeps events held", seed: repoSeed{held: []SHAEvent{pushHeld}, index: mergedIndex}, failPR: 101, sha: "m1", wantErr: true, wantSent: []sentPR{{handler: PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "m1", EffectsOwner: EffectsOwnerRestate}}}, wantHeld: []string{"m1"}},
+		{name: "forward failure keeps events held", seed: repoSeed{held: []SHAEvent{pushHeld}, index: mergedIndex}, failPR: 101, sha: "m1", wantErr: true, wantSent: []sentPR{{handler: PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "m1"}}}, wantHeld: []string{"m1"}},
 		{name: "load error surfaces", loadErr: true, sha: "m1", wantErr: true},
 		{name: "zero sha is invalid", sha: "0000000", wantErr: true, wantInvalid: true},
 	}
@@ -466,7 +441,7 @@ func TestRepoHandlers_ReplayHeld(t *testing.T) {
 			t.Parallel()
 			store := seedRepoStore(tc.seed, tc.loadErr)
 			sender := &fakePRSender{failPR: tc.failPR}
-			err := NewRepoHandlers(store, nil, sender, nil).ReplayHeld(context.Background(), "aerial", tc.sha)
+			err := testRepoHandlers(t, store, sender, nil).ReplayHeld(context.Background(), "aerial", tc.sha)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			assertSent(t, sender.calls, tc.wantSent)
 			if tc.loadErr || tc.wantInvalid {
@@ -502,7 +477,7 @@ func TestRepoHandlers_ExpireHeld(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := seedRepoStore(tc.seed, tc.loadErr)
-			got, err := NewRepoHandlers(store, nil, nil, nil).ExpireHeld(context.Background(), tc.repo, tc.id)
+			got, err := testRepoHandlers(t, store, nil, nil).ExpireHeld(context.Background(), tc.repo, tc.id)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			if got != tc.want {
 				t.Fatalf("ExpireHeld = %v, want %v", got, tc.want)
@@ -537,9 +512,35 @@ func TestRepoHandlers_ResolvePRBySHA(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pr, branch, ok := NewRepoHandlers(seedRepoStore(tc.seed, tc.loadErr), nil, nil, nil).ResolvePRBySHA(context.Background(), "aerial", tc.sha)
+			pr, branch, ok := testRepoHandlers(t, seedRepoStore(tc.seed, tc.loadErr), nil, nil).ResolvePRBySHA(context.Background(), "aerial", tc.sha)
 			if pr != tc.wantPR || branch != tc.wantBranch || ok != tc.wantOK {
 				t.Fatalf("ResolvePRBySHA = (%d,%q,%v), want (%d,%q,%v)", pr, branch, ok, tc.wantPR, tc.wantBranch, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestNewRepoHandlers pins that every RepoHandlers dependency is required.
+func TestNewRepoHandlers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		store   RepoStateStore
+		prs     PRSender
+		self    RepoSelfScheduler
+		wantErr bool
+	}{
+		{name: "every dependency builds", store: NewMemRepoStore(), prs: &fakePRSender{}, self: &fakeSelfScheduler{}},
+		{name: "nil store fails", prs: &fakePRSender{}, self: &fakeSelfScheduler{}, wantErr: true},
+		{name: "nil pr sender fails", store: NewMemRepoStore(), self: &fakeSelfScheduler{}, wantErr: true},
+		{name: "nil self scheduler fails", store: NewMemRepoStore(), prs: &fakePRSender{}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, err := NewRepoHandlers(tc.store, tc.prs, tc.self)
+			if errors.Is(err, errNilDependency) != tc.wantErr || (h == nil) != tc.wantErr {
+				t.Fatalf("NewRepoHandlers() = (%v, %v), wantErr %v", h, err, tc.wantErr)
 			}
 		})
 	}

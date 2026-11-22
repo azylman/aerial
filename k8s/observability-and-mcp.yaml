@@ -737,13 +737,6 @@ spec:
             severity: warning
           annotations:
             summary: PRObject pr_registry projection writes are failing
-        - alert: PrstateLegacyEventsRejected
-          expr: |
-            sum by (handler) (increase(prstate_legacy_events_rejected_total[15m])) > 0
-          labels:
-            severity: critical
-          annotations:
-            summary: prstate rejected legacy-stamped {{ $labels.handler }} events; a synapse still runs the legacy lifecycle path
     - name: nats_health
       interval: 1m
       rules:

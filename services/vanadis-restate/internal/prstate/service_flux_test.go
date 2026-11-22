@@ -109,8 +109,8 @@ func TestKubeStepError(t *testing.T) {
 
 func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 	t.Parallel()
-	push := func(owner EffectsOwner, attempt int) RepoEvent {
-		return RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/heads/main", EffectsOwner: owner, Attempt: attempt}
+	push := func(attempt int) RepoEvent {
+		return RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/heads/main", Attempt: attempt}
 	}
 	tests := []struct {
 		name      string
@@ -121,11 +121,10 @@ func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 		wantRun   bool
 		wantSends []sentCall
 	}{
-		{name: "legacy push is rejected", ev: push(EffectsOwnerLegacy, 0), kube: &fakeKube{}, wantErr: true},
-		{name: "restate push dispatches", ev: push(EffectsOwnerRestate, 0), kube: &fakeKube{}, wantSet: true, wantRun: true},
+		{name: "restate push dispatches", ev: push(0), kube: &fakeKube{}, wantSet: true, wantRun: true},
 		{
-			name: "retryable failure schedules a delayed retry", ev: push(EffectsOwnerRestate, 1), kube: &fakeKube{pushErr: errKubeDown}, wantRun: true,
-			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: RepoHandlerGitPush, input: push(EffectsOwnerRestate, 2), delayed: true}},
+			name: "retryable failure schedules a delayed retry", ev: push(1), kube: &fakeKube{pushErr: errKubeDown}, wantRun: true,
+			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: RepoHandlerGitPush, input: push(2), delayed: true}},
 		},
 		{name: "non-main ref fails terminally", ev: RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/tags/v1"}, kube: &fakeKube{}, wantErr: true},
 	}
@@ -156,16 +155,15 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 		wantCalls []string
 		wantSends []sentCall
 	}{
-		{name: "legacy promotion is rejected", ev: RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests, EffectsOwner: EffectsOwnerLegacy}, kube: &fakeKube{}, wantErr: true},
 		{
 			name: "unstamped untracked promotion promotes and reconciles", ev: RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{},
 			wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s2", "reconcile flux-system/core@t1"},
 		},
 		{
-			name: "restate pr promotion forwards the rollout", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Images: []string{"eri"}, KustomizationRequests: requests, EffectsOwner: EffectsOwnerRestate},
+			name: "restate pr promotion forwards the rollout", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Images: []string{"eri"}, KustomizationRequests: requests},
 			kube: &fakeKube{}, wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s1"},
 			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#7", method: PRHandlerKustomizationRequested, input: PREvent{
-				Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", KustomizationRequests: requests, EffectsOwner: EffectsOwnerRestate,
+				Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", KustomizationRequests: requests,
 			}}},
 		},
 		{name: "missing images fail terminally", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1"}, kube: &fakeKube{}, wantErr: true},
@@ -205,8 +203,8 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 	gen1Key := EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 1, Kind: EffectFluxReconcile}
 	indexSend := prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Generation: 1, Lifecycle: IndexDeploying})
 	retrySend := sentCall{service: "PRObject", key: "azylman/aerial#101", method: PRHandlerRetryFluxReconcile, input: FluxReconcileRetryRequest{Generation: 1, HeadSHA: "m1", Attempt: 1}, delayed: true}
-	ev := func(owner EffectsOwner, requests map[string]KustomizationRequest) PREvent {
-		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", KustomizationRequests: requests, EffectsOwner: owner}
+	ev := func(requests map[string]KustomizationRequest) PREvent {
+		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", KustomizationRequests: requests}
 	}
 	tests := []struct {
 		name           string
@@ -218,15 +216,14 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 		wantSends      []sentCall
 	}{
 		{
-			name: "restate request patches after the commit", ev: ev(EffectsOwnerRestate, coreRequests), kube: &fakeKube{},
+			name: "restate request patches after the commit", ev: ev(coreRequests), kube: &fakeKube{},
 			wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend},
 		},
 		{
-			name: "retryable patch failure schedules a delayed retry", ev: ev(EffectsOwnerRestate, coreRequests), kube: &fakeKube{reconcileErr: map[string]*KubeError{"core": errKubeDown}},
+			name: "retryable patch failure schedules a delayed retry", ev: ev(coreRequests), kube: &fakeKube{reconcileErr: map[string]*KubeError{"core": errKubeDown}},
 			wantCalls: []string{"reconcile flux-system/core@t1"}, wantSends: []sentCall{indexSend, retrySend},
 		},
-		{name: "legacy request is rejected", ev: ev(EffectsOwnerLegacy, coreRequests), kube: &fakeKube{}, wantErr: true},
-		{name: "request without kustomizations patches nothing", ev: ev(EffectsOwnerRestate, nil), kube: &fakeKube{}, wantSends: []sentCall{indexSend}},
+		{name: "request without kustomizations patches nothing", ev: ev(nil), kube: &fakeKube{}, wantSends: []sentCall{indexSend}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -263,21 +260,20 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 	}{
 		{name: "unknown pr has no gate", req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{}, want: RetryReadinessResponse{Status: 409}},
 		{name: "mismatched merge sha has no gate", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m9"}, kube: &fakeKube{}, want: RetryReadinessResponse{Status: 409}},
-		{name: "legacy retry is rejected", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy}, kube: &fakeKube{}, wantErr: true},
 		{
 			name: "unstamped retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
 			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},
 		{
-			name: "restate retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EffectsOwner: EffectsOwnerRestate}, kube: &fakeKube{},
+			name: "restate retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
 			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},
 		{name: "missing merge sha fails terminally", req: RetryReadinessRequest{}, kube: &fakeKube{}, wantErr: true},
 		{name: "fenced caller for another owner fails terminally", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "agent-beta"}, kube: &fakeKube{}, wantErr: true},
 		{
-			name: "fenced caller for the stored owner is accepted", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "agent-alpha", EffectsOwner: EffectsOwnerRestate}, kube: &fakeKube{},
+			name: "fenced caller for the stored owner is accepted", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "agent-alpha"}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
 			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},
@@ -318,7 +314,6 @@ func TestPRObjectServiceHandleReadinessRetry(t *testing.T) {
 		wantSends  int
 	}{
 		{name: "retry applies the gate and re-requests the reconcile", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantSends: 2},
-		{name: "legacy retry is rejected", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", EffectsOwner: EffectsOwnerLegacy}, wantErr: true},
 		{name: "stale merge sha drops", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m9"}},
 		{name: "merged pr without a rollout persists unchanged", seed: merged(), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1"}, wantSet: true, wantStatus: RegistryStatusMerged},
 		{name: "missing merge sha does nothing", seed: deployedRollout(), ev: PREvent{Repo: "aerial", PRNumber: 101}},

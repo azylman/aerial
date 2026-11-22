@@ -239,9 +239,6 @@ func (s *PRState) TakeDeployFailure(seq uint64) (*PendingDeployFailure, bool) {
 // deploy-failure deadline as a delayed self-send; the deadline, not a
 // delivery count, decides deploy_failed.
 func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleDeployAttemptFailed", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
