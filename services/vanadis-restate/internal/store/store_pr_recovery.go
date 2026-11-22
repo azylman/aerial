@@ -57,7 +57,7 @@ func (s *Store) recoverFailedPR(ctx context.Context, id, head string) error {
 		c := &chunks[i]
 		if c.ID == id {
 			selected = c
-		} else if c.Status == statusFailed || c.Status == statusCancelled {
+		} else if c.Status == statusCancelled {
 			reopen = false
 		}
 	}

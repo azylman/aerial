@@ -489,9 +489,8 @@ func (s recoveryLifecycleStore) GetBuild(context.Context, string) (*model.Vanadi
 }
 
 func (s recoveryLifecycleStore) FailChunk(context.Context, string, string, string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
-	*s.parent = "failed"
 	(*s.chunks)[0].Status = "failed"
-	return &model.VanadisBuild{ID: "b1", Status: "failed"}, &(*s.chunks)[0], true, nil
+	return &model.VanadisBuild{ID: "b1", Status: *s.parent}, &(*s.chunks)[0], true, nil
 }
 
 func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *store.Store {
@@ -781,5 +780,5 @@ func (s *unattachedPREventSpyStore) IncrementChunkCIFailCount(_ context.Context,
 
 func (s *unattachedPREventSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
 	s.failedChunkID = chunkID + ":" + reason
-	return &model.VanadisBuild{ID: "b1", Status: statusFailed, ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, Status: statusFailed}, true, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusRunning, ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, Status: statusFailed}, true, nil
 }
