@@ -48,10 +48,11 @@ const (
 
 // Shared field keys for tool responses and HTTP error bodies.
 const (
-	FieldStatus  = "status"
-	FieldEffort  = "effort"
-	FieldMessage = "message"
-	FieldError   = "error"
+	FieldStatus       = "status"
+	FieldEffort       = "effort"
+	FieldMessage      = "message"
+	FieldError        = "error"
+	FieldScheduleType = "schedule_type"
 )
 
 // DefaultAgent is the fallback agent tenancy identifier across haro schedules.
@@ -126,16 +127,17 @@ type HeartbeatSchedule = CronSchedule
 
 // EventTrigger is an event-watch trigger row.
 type EventTrigger struct {
-	ID         string    `json:"id"`
-	Agent      string    `json:"agent"`
-	ChannelID  string    `json:"channel_id"`
-	Source     string    `json:"source"`
-	Target     string    `json:"target"`
-	EventType  string    `json:"event_type"`
-	Prompt     string    `json:"prompt"`
-	Effort     string    `json:"effort"`
-	CreatedAt  time.Time `json:"created_at"`
-	Persistent bool      `json:"persistent"`
+	ID         string     `json:"id"`
+	Agent      string     `json:"agent"`
+	ChannelID  string     `json:"channel_id"`
+	Source     string     `json:"source"`
+	Target     string     `json:"target"`
+	EventType  string     `json:"event_type"`
+	Prompt     string     `json:"prompt"`
+	Effort     string     `json:"effort"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+	Persistent bool       `json:"persistent"`
 }
 
 // ScheduleRun is a schedule execution record row.

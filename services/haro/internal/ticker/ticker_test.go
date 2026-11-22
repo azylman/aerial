@@ -373,7 +373,7 @@ func TestTicker_Start(t *testing.T) {
 			doneCh := make(chan struct{})
 			go func() {
 				defer close(doneCh)
-				ticker.Start(ctx)
+				_ = ticker.Start(ctx)
 			}()
 
 			select {
