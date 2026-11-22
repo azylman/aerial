@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -217,119 +218,6 @@ func TestLRUCache_Lifecycle(t *testing.T) {
 	}
 }
 
-func TestTokenSource_ReadAndCache(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		initialTok  string
-		updatedTok  string
-		timeAdvance time.Duration
-		wantToken   string
-		useNilClock bool
-	}{
-		{
-			name:        "initial read with nil clock",
-			initialTok:  "tok-1",
-			wantToken:   "tok-1",
-			useNilClock: true,
-		},
-		{
-			name:        "cached within reload ttl",
-			initialTok:  "tok-1",
-			updatedTok:  "tok-2",
-			timeAdvance: 30 * time.Second,
-			wantToken:   "tok-1",
-		},
-		{
-			name:        "reloaded after reload ttl",
-			initialTok:  "tok-1",
-			updatedTok:  "tok-2",
-			timeAdvance: 61 * time.Second,
-			wantToken:   "tok-2",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if err := os.WriteFile(tokenFile, []byte(tc.initialTok), 0o600); err != nil {
-				t.Fatalf("write token: %v", err)
-			}
-
-			nowTime := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
-			nowFunc := func() time.Time { return nowTime }
-			if tc.useNilClock {
-				nowFunc = nil
-			}
-
-			ts := NewTokenSource(tokenFile, nowFunc)
-
-			tok, err := ts.Token()
-			if err != nil {
-				t.Fatalf("initial ts.Token() error = %v", err)
-			}
-			if tok != tc.initialTok {
-				t.Fatalf("initial ts.Token() = %q, want %q", tok, tc.initialTok)
-			}
-
-			if tc.updatedTok != "" {
-				if err := os.WriteFile(tokenFile, []byte(tc.updatedTok), 0o600); err != nil {
-					t.Fatalf("update token file: %v", err)
-				}
-				nowTime = nowTime.Add(tc.timeAdvance)
-				tok2, err2 := ts.Token()
-				if err2 != nil {
-					t.Fatalf("second ts.Token() error = %v", err2)
-				}
-				if tok2 != tc.wantToken {
-					t.Fatalf("second ts.Token() = %q, want %q", tok2, tc.wantToken)
-				}
-			}
-		})
-	}
-}
-
-func TestTokenSource_Errors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		writeToken bool
-		content    string
-	}{
-		{
-			name:       "missing file on disk",
-			writeToken: false,
-		},
-		{
-			name:       "empty token file",
-			writeToken: true,
-			content:    "  \t\n  ",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if tc.writeToken {
-				if err := os.WriteFile(tokenFile, []byte(tc.content), 0o600); err != nil {
-					t.Fatalf("write token file: %v", err)
-				}
-			}
-
-			ts := NewTokenSource(tokenFile, time.Now)
-			if _, err := ts.Token(); err == nil {
-				t.Fatalf("expected error from ts.Token(), got nil")
-			}
-		})
-	}
-}
-
 type staticRoundTripper struct {
 	status   int
 	body     string
@@ -477,427 +365,6 @@ func TestContextHelpers(t *testing.T) {
 	}
 }
 
-func TestAuthenticate_Success(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		bearerToken  string
-		httpBody     string
-		wantIdentity CallerIdentity
-	}{
-		{
-			name:        "authenticated agent via alias",
-			bearerToken: "alias-token",
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri","groups":["system:authenticated"]}}}`,
-			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:default:eri",
-				CallerAgent: "aerial",
-				Groups:      []string{"system:authenticated"},
-				IsService:   false,
-			},
-		},
-		{
-			name:        "authenticated agent via prefix",
-			bearerToken: "prefix-token",
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha","groups":["system:authenticated"]}}}`,
-			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:default:eri-agent-alpha",
-				CallerAgent: "agent-alpha",
-				Groups:      []string{"system:authenticated"},
-				IsService:   false,
-			},
-		},
-		{
-			name:        "authenticated control plane service",
-			bearerToken: "service-token",
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:synapse","groups":["system:authenticated"]}}}`,
-			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:default:synapse",
-				CallerAgent: "synapse",
-				Groups:      []string{"system:authenticated"},
-				IsService:   true,
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-				t.Fatalf("write host token: %v", err)
-			}
-
-			rt := &staticRoundTripper{status: http.StatusOK, body: tc.httpBody}
-			auth := NewAuthenticator(Config{
-				Enabled:      true,
-				TokenPath:    tokenFile,
-				APIServerURL: "https://k8s.local",
-				HTTPClient:   &http.Client{Transport: rt},
-			})
-
-			id, err := auth.Authenticate(context.Background(), tc.bearerToken)
-			if err != nil {
-				t.Fatalf("Authenticate() unexpected error = %v", err)
-			}
-			if id.CallerAgent != tc.wantIdentity.CallerAgent {
-				t.Fatalf("CallerAgent = %q, want %q", id.CallerAgent, tc.wantIdentity.CallerAgent)
-			}
-			if id.IsService != tc.wantIdentity.IsService {
-				t.Fatalf("IsService = %v, want %v", id.IsService, tc.wantIdentity.IsService)
-			}
-		})
-	}
-}
-
-func TestAuthenticate_CustomConfig(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		bearerToken  string
-		prefix       string
-		aliases      map[string]string
-		httpBody     string
-		wantIdentity CallerIdentity
-	}{
-		{
-			name:        "authenticated agent via saName alias",
-			bearerToken: "saname-alias-token",
-			aliases:     map[string]string{"eri": "aerial"},
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:custom:eri"}}}`,
-			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:custom:eri",
-				CallerAgent: "aerial",
-				IsService:   false,
-			},
-		},
-		{
-			name:        "authenticated agent via saName prefix",
-			bearerToken: "saname-prefix-token",
-			prefix:      "eri-",
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:custom:eri-agent-beta"}}}`,
-			wantIdentity: CallerIdentity{
-				Username:    "system:serviceaccount:custom:eri-agent-beta",
-				CallerAgent: "agent-beta",
-				IsService:   false,
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-				t.Fatalf("write host token: %v", err)
-			}
-
-			rt := &staticRoundTripper{status: http.StatusOK, body: tc.httpBody}
-			cfg := Config{
-				Enabled:        true,
-				TokenPath:      tokenFile,
-				AgentSAPrefix:  tc.prefix,
-				SAAgentAliases: tc.aliases,
-				APIServerURL:   "https://k8s.local",
-				HTTPClient:     &http.Client{Transport: rt},
-			}
-			auth := NewAuthenticator(cfg)
-
-			id, err := auth.Authenticate(context.Background(), tc.bearerToken)
-			if err != nil {
-				t.Fatalf("Authenticate() unexpected error = %v", err)
-			}
-			if id.CallerAgent != tc.wantIdentity.CallerAgent {
-				t.Fatalf("CallerAgent = %q, want %q", id.CallerAgent, tc.wantIdentity.CallerAgent)
-			}
-			if id.IsService != tc.wantIdentity.IsService {
-				t.Fatalf("IsService = %v, want %v", id.IsService, tc.wantIdentity.IsService)
-			}
-		})
-	}
-}
-
-func TestAuthenticate_CacheHit(t *testing.T) {
-	t.Parallel()
-
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-		t.Fatalf("write host token: %v", err)
-	}
-
-	rt := &staticRoundTripper{
-		status: http.StatusOK,
-		body:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-beta"}}}`,
-	}
-	auth := NewAuthenticator(Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: rt},
-	})
-
-	id, err := auth.Authenticate(context.Background(), "cached-token")
-	if err != nil {
-		t.Fatalf("Authenticate() unexpected error = %v", err)
-	}
-	if id.CallerAgent != "agent-beta" {
-		t.Fatalf("CallerAgent = %q, want %q", id.CallerAgent, "agent-beta")
-	}
-
-	rt.err = errors.New("transport should not be called on cache hit")
-	cachedID, err := auth.Authenticate(context.Background(), "cached-token")
-	if err != nil {
-		t.Fatalf("Authenticate() repeat cache hit error = %v", err)
-	}
-	if cachedID.CallerAgent != "agent-beta" {
-		t.Fatalf("cached CallerAgent = %q, want %q", cachedID.CallerAgent, "agent-beta")
-	}
-}
-
-func TestAuthenticate_Errors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		bearerToken  string
-		hostTokenErr bool
-		httpStatus   int
-		httpBody     string
-		transportErr bool
-		wantUnauth   bool
-	}{
-		{
-			name:        "empty token error",
-			bearerToken: "",
-			wantUnauth:  true,
-		},
-		{
-			name:         "host token failure",
-			bearerToken:  "test-token",
-			hostTokenErr: true,
-		},
-		{
-			name:         "network transport error",
-			bearerToken:  "test-token",
-			transportErr: true,
-		},
-		{
-			name:        "api server http 500 error",
-			bearerToken: "test-token",
-			httpStatus:  http.StatusInternalServerError,
-			httpBody:    `{"error":"internal"}`,
-		},
-		{
-			name:        "api server malformed json",
-			bearerToken: "test-token",
-			httpStatus:  http.StatusOK,
-			httpBody:    `not-json`,
-		},
-		{
-			name:        "unauthenticated token",
-			bearerToken: "bad-token",
-			httpStatus:  http.StatusOK,
-			httpBody:    `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`,
-			wantUnauth:  true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if !tc.hostTokenErr {
-				if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-					t.Fatalf("write host token: %v", err)
-				}
-			}
-
-			rt := &staticRoundTripper{status: tc.httpStatus, body: tc.httpBody}
-			if tc.transportErr {
-				rt.err = errors.New("simulated network failure")
-			}
-
-			cfg := Config{
-				Enabled:      true,
-				TokenPath:    tokenFile,
-				APIServerURL: "https://k8s.local",
-				HTTPClient:   &http.Client{Transport: rt},
-			}
-			auth := NewAuthenticator(cfg)
-
-			_, err := auth.Authenticate(context.Background(), tc.bearerToken)
-			if err == nil {
-				t.Fatalf("expected error from Authenticate(), got nil")
-			}
-
-			if tc.wantUnauth {
-				uErr, ok := errors.AsType[*UnauthorizedError](err)
-				if !ok {
-					t.Fatalf("expected UnauthorizedError, got %T: %v", err, err)
-				}
-				if uErr.StatusCode() != http.StatusUnauthorized {
-					t.Fatalf("StatusCode() = %d, want 401", uErr.StatusCode())
-				}
-				if uErr.Error() == "" {
-					t.Fatalf("expected non-empty Error()")
-				}
-			}
-		})
-	}
-}
-
-func TestAuthorize_Allowed(t *testing.T) {
-	t.Parallel()
-
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-		t.Fatalf("write host token: %v", err)
-	}
-
-	rt := &staticRoundTripper{
-		status: http.StatusOK,
-		body:   `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-
-	auth := NewAuthenticator(Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: rt},
-	})
-
-	caller := CallerIdentity{
-		Username:    "system:serviceaccount:default:eri-aerial",
-		CallerAgent: "aerial",
-		Groups:      []string{"group-a"},
-		Extra:       map[string][]string{"role": {"admin"}},
-	}
-	if err := auth.Authorize(context.Background(), caller, "builds", "get", "aerial"); err != nil {
-		t.Fatalf("Authorize() unexpected error = %v", err)
-	}
-
-	// Repeat call must hit cache without transport invocation
-	rt.err = errors.New("transport should not be called on cache hit")
-	if err := auth.Authorize(context.Background(), caller, "builds", "get", "aerial"); err != nil {
-		t.Fatalf("Authorize() cache hit error = %v", err)
-	}
-
-	// Call with different groups must not hit cache
-	callerDiffGroup := CallerIdentity{
-		Username:    "system:serviceaccount:default:eri-aerial",
-		CallerAgent: "aerial",
-		Groups:      []string{"group-b"},
-		Extra:       map[string][]string{"role": {"admin"}},
-	}
-	if err := auth.Authorize(context.Background(), callerDiffGroup, "builds", "get", "aerial"); err == nil {
-		t.Fatalf("expected transport error on different groups cache miss, got nil")
-	}
-}
-
-func TestAuthorize_Denied(t *testing.T) {
-	t.Parallel()
-
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-		t.Fatalf("write host token: %v", err)
-	}
-
-	rt := &staticRoundTripper{
-		status: http.StatusOK,
-		body:   `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"RBAC: access denied"}}`,
-	}
-
-	auth := NewAuthenticator(Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: rt},
-	})
-
-	caller := CallerIdentity{Username: "system:serviceaccount:default:eri-agent-alpha", CallerAgent: "agent-alpha"}
-	err := auth.Authorize(context.Background(), caller, "builds/all", "create", "aerial")
-	if err == nil {
-		t.Fatalf("expected ForbiddenError, got nil")
-	}
-
-	fErr, ok := errors.AsType[*ForbiddenError](err)
-	if !ok {
-		t.Fatalf("expected ForbiddenError, got %T: %v", err, err)
-	}
-	if fErr.StatusCode() != http.StatusForbidden {
-		t.Fatalf("StatusCode() = %d, want 403", fErr.StatusCode())
-	}
-	if fErr.Error() == "" {
-		t.Fatalf("expected non-empty Error()")
-	}
-}
-
-func TestAuthorize_Errors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		hostTokenErr bool
-		httpStatus   int
-		httpBody     string
-		transportErr bool
-	}{
-		{
-			name:         "host token error",
-			hostTokenErr: true,
-		},
-		{
-			name:         "transport error",
-			transportErr: true,
-		},
-		{
-			name:       "http 500 error",
-			httpStatus: http.StatusInternalServerError,
-			httpBody:   `{"error":"internal"}`,
-		},
-		{
-			name:       "malformed json response",
-			httpStatus: http.StatusOK,
-			httpBody:   `not-valid-json`,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if !tc.hostTokenErr {
-				if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-					t.Fatalf("write host token: %v", err)
-				}
-			}
-
-			rt := &staticRoundTripper{status: tc.httpStatus, body: tc.httpBody}
-			if tc.transportErr {
-				rt.err = errors.New("simulated transport error")
-			}
-
-			auth := NewAuthenticator(Config{
-				Enabled:      true,
-				TokenPath:    tokenFile,
-				APIServerURL: "https://k8s.local",
-				HTTPClient:   &http.Client{Transport: rt},
-			})
-
-			caller := CallerIdentity{Username: "system:serviceaccount:default:eri"}
-			if err := auth.Authorize(context.Background(), caller, "schedules", "get", ""); err == nil {
-				t.Fatalf("expected error from Authorize(), got nil")
-			}
-		})
-	}
-}
-
 func TestIsValidAgentSlug(t *testing.T) {
 	t.Parallel()
 
@@ -924,202 +391,6 @@ func TestIsValidAgentSlug(t *testing.T) {
 			t.Parallel()
 			if got := IsValidAgentSlug(tc.slug); got != tc.want {
 				t.Errorf("IsValidAgentSlug(%q) = %v, want %v", tc.slug, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestResolveTargetAgent_Read(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		requestedTarget string
-		baseResource    string
-		wantTarget      string
-		wantResource    string
-		wantErr         bool
-	}{
-		{
-			name:            "valid agent slug target",
-			requestedTarget: "agent-alpha",
-			baseResource:    "builds",
-			wantTarget:      "agent-alpha",
-			wantResource:    "builds",
-		},
-		{
-			name:            "empty target",
-			requestedTarget: "",
-			baseResource:    "transcripts",
-			wantTarget:      "",
-			wantResource:    "transcripts",
-		},
-		{
-			name:            "wildcard target",
-			requestedTarget: "*",
-			baseResource:    "prs",
-			wantTarget:      "*",
-			wantResource:    "prs",
-		},
-		{
-			name:            "invalid slug target fails validation",
-			requestedTarget: "Invalid_Agent",
-			baseResource:    "memories",
-			wantErr:         true,
-		},
-	}
-
-	caller := CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial"}
-	auth := NewAuthenticator(Config{})
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			target, resource, err := auth.ResolveTargetAgent(caller, tc.requestedTarget, tc.baseResource, "get")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ResolveTargetAgent() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				vErr, ok := errors.AsType[*ValidationError](err)
-				if !ok || vErr.StatusCode() != http.StatusBadRequest || vErr.Error() == "" {
-					t.Fatalf("expected valid ValidationError, got %v", err)
-				}
-				return
-			}
-			if target != tc.wantTarget || resource != tc.wantResource {
-				t.Fatalf("ResolveTargetAgent() = (%q, %q), want (%q, %q)", target, resource, tc.wantTarget, tc.wantResource)
-			}
-		})
-	}
-}
-
-func TestResolveTargetAgent_WriteService(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		requestedTarget string
-		wantTarget      string
-		wantResource    string
-		wantErr         bool
-	}{
-		{
-			name:            "missing target fails validation",
-			requestedTarget: "",
-			wantErr:         true,
-		},
-		{
-			name:            "invalid slug target fails validation",
-			requestedTarget: "rogue_agent!",
-			wantErr:         true,
-		},
-		{
-			name:            "valid target escalates to all",
-			requestedTarget: "agent-alpha",
-			wantTarget:      "agent-alpha",
-			wantResource:    "prs/all",
-		},
-	}
-
-	serviceCaller := CallerIdentity{Username: "system:serviceaccount:default:synapse", CallerAgent: "synapse", IsService: true}
-	auth := NewAuthenticator(Config{})
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			target, resource, err := auth.ResolveTargetAgent(serviceCaller, tc.requestedTarget, "prs", "create")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ResolveTargetAgent() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				vErr, ok := errors.AsType[*ValidationError](err)
-				if !ok || vErr.StatusCode() != http.StatusBadRequest || vErr.Error() == "" {
-					t.Fatalf("expected valid ValidationError, got %v", err)
-				}
-				return
-			}
-			if target != tc.wantTarget || resource != tc.wantResource {
-				t.Fatalf("ResolveTargetAgent() = (%q, %q), want (%q, %q)", target, resource, tc.wantTarget, tc.wantResource)
-			}
-		})
-	}
-}
-
-func TestResolveTargetAgent_WriteAgent(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		requestedTarget string
-		baseResource    string
-		verb            string
-		wantTarget      string
-		wantResource    string
-		wantErr         bool
-	}{
-		{
-			name:            "empty target defaults to self",
-			requestedTarget: "",
-			baseResource:    "schedules",
-			verb:            "create",
-			wantTarget:      "aerial",
-			wantResource:    "schedules",
-		},
-		{
-			name:            "explicit self target stays base resource",
-			requestedTarget: "aerial",
-			baseResource:    "builds",
-			verb:            "update",
-			wantTarget:      "aerial",
-			wantResource:    "builds",
-		},
-		{
-			name:            "cross agent target escalates to all",
-			requestedTarget: "agent-beta",
-			baseResource:    "builds",
-			verb:            "patch",
-			wantTarget:      "agent-beta",
-			wantResource:    "builds/all",
-		},
-		{
-			name:            "wildcard target escalates to all",
-			requestedTarget: "*",
-			baseResource:    "memories",
-			verb:            "delete",
-			wantTarget:      "*",
-			wantResource:    "memories/all",
-		},
-		{
-			name:            "invalid slug target fails validation",
-			requestedTarget: "non_existent_agent",
-			baseResource:    "schedules",
-			verb:            "delete",
-			wantErr:         true,
-		},
-	}
-
-	agentCaller := CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial", IsService: false}
-	auth := NewAuthenticator(Config{})
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			target, resource, err := auth.ResolveTargetAgent(agentCaller, tc.requestedTarget, tc.baseResource, tc.verb)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ResolveTargetAgent() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				vErr, ok := errors.AsType[*ValidationError](err)
-				if !ok || vErr.StatusCode() != http.StatusBadRequest || vErr.Error() == "" {
-					t.Fatalf("expected valid ValidationError, got %v", err)
-				}
-				return
-			}
-			if target != tc.wantTarget || resource != tc.wantResource {
-				t.Fatalf("ResolveTargetAgent() = (%q, %q), want (%q, %q)", target, resource, tc.wantTarget, tc.wantResource)
 			}
 		})
 	}
@@ -1241,89 +512,399 @@ func TestAuthorizeTarget(t *testing.T) {
 	}
 }
 
-func TestNewAuthenticator_APIServerURL(t *testing.T) {
+// newTestAuth returns an enabled Authenticator that posts to https://k8s.local
+// through rt. The host token file exists only when hostToken is true; its
+// path is auth.Config().TokenPath.
+func newTestAuth(t *testing.T, rt http.RoundTripper, hostToken bool, cfg Config) *Authenticator {
+	t.Helper()
+	cfg.Enabled = true
+	cfg.TokenPath = filepath.Join(t.TempDir(), "token")
+	cfg.APIServerURL = "https://k8s.local"
+	cfg.HTTPClient = &http.Client{Transport: rt}
+	if hostToken {
+		writeTokenFile(t, cfg.TokenPath, "host-sa-token")
+	}
+	return NewAuthenticator(cfg)
+}
+
+// authErrText returns err's text with the host token path (when set)
+// replaced by TOKEN, or "" for a nil error.
+func authErrText(auth *Authenticator, err error) string {
+	if path := auth.Config().TokenPath; path != "" {
+		return tokenErrText(err, path)
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// authErrStatus returns the StatusCode of a coded error, or 0.
+func authErrStatus(err error) int {
+	if coded, ok := errors.AsType[interface {
+		error
+		StatusCode() int
+	}](err); ok {
+		return coded.StatusCode()
+	}
+	return 0
+}
+
+// tokenReview returns an authenticated TokenReview response body for user.
+func tokenReview(user string) string {
+	return `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"` +
+		user + `","groups":["system:authenticated"]}}}`
+}
+
+// sar returns a SubjectAccessReview response body with the given verdict.
+func sar(allowed bool) string {
+	return fmt.Sprintf(`{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":%t}}`, allowed)
+}
+
+var errAuthTransport = errors.New("simulated network failure")
+
+func TestAuthenticate(t *testing.T) {
+	t.Parallel()
+
+	authed := []string{"system:authenticated"}
 	tests := []struct {
-		name    string
-		url     string
-		envHost string
-		envPort string
-		wantURL string
+		name        string
+		cfg         Config
+		token       string
+		noHostToken bool
+		rt          staticRoundTripper
+		want        CallerIdentity
+		wantErr     string
+		wantStatus  int
 	}{
 		{
-			name:    "default url when env unset",
-			wantURL: "https://kubernetes.default.svc",
+			name: "agent via username alias", token: "alias-token", rt: staticRoundTripper{body: tokenReview("system:serviceaccount:default:eri")},
+			want: CallerIdentity{Username: "system:serviceaccount:default:eri", CallerAgent: "aerial", Groups: authed},
 		},
 		{
-			name:    "custom url with trailing slash trimmed",
-			url:     "https://apiserver.custom.domain/",
-			wantURL: "https://apiserver.custom.domain",
+			name: "agent via username prefix", token: "prefix-token",
+			rt:   staticRoundTripper{body: tokenReview("system:serviceaccount:default:eri-agent-alpha")},
+			want: CallerIdentity{Username: "system:serviceaccount:default:eri-agent-alpha", CallerAgent: "agent-alpha", Groups: authed},
 		},
 		{
-			name:    "environment service host and port used",
-			envHost: "192.0.2.1",
-			envPort: "443",
-			wantURL: "https://192.0.2.1:443",
+			name: "control plane service", token: "service-token", rt: staticRoundTripper{body: tokenReview("system:serviceaccount:default:synapse")},
+			want: CallerIdentity{Username: "system:serviceaccount:default:synapse", CallerAgent: "synapse", Groups: authed, IsService: true},
+		},
+		{
+			name: "agent via saName alias", cfg: Config{SAAgentAliases: map[string]string{"eri": "aerial"}}, token: "saname-alias-token",
+			rt:   staticRoundTripper{body: tokenReview("system:serviceaccount:custom:eri")},
+			want: CallerIdentity{Username: "system:serviceaccount:custom:eri", CallerAgent: "aerial", Groups: authed},
+		},
+		{
+			name: "agent via saName prefix", cfg: Config{AgentSAPrefix: "eri-"}, token: "saname-prefix-token",
+			rt:   staticRoundTripper{body: tokenReview("system:serviceaccount:custom:eri-agent-beta")},
+			want: CallerIdentity{Username: "system:serviceaccount:custom:eri-agent-beta", CallerAgent: "agent-beta", Groups: authed},
+		},
+		{name: "empty bearer token", wantErr: "empty bearer token", wantStatus: http.StatusUnauthorized},
+		{
+			name: "missing host token", token: "test-token", noHostToken: true,
+			wantErr: "k8sauth: tokenreview: read host token: read serviceaccount token from TOKEN: open TOKEN: no such file or directory",
+		},
+		{
+			name: "network transport error", token: "test-token", rt: staticRoundTripper{err: errAuthTransport},
+			wantErr: `k8sauth: tokenreview: execute request: Post "https://k8s.local/apis/authentication.k8s.io/v1/tokenreviews": simulated network failure`,
+		},
+		{
+			name: "api server http 500", token: "test-token",
+			rt:      staticRoundTripper{status: http.StatusInternalServerError, body: `{"error":"internal"}`},
+			wantErr: "k8sauth: tokenreview: api returned status 500",
+		},
+		{
+			name: "api server malformed json", token: "test-token", rt: staticRoundTripper{body: "not-json"},
+			wantErr: "k8sauth: tokenreview: decode response: invalid character 'o' in literal null (expecting 'u')",
+		},
+		{
+			name: "unauthenticated with reason", token: "bad-token", wantErr: "token expired", wantStatus: http.StatusUnauthorized,
+			rt: staticRoundTripper{body: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`},
+		},
+		{
+			name: "unauthenticated without reason", token: "bad-token", wantErr: "token not authenticated", wantStatus: http.StatusUnauthorized,
+			rt: staticRoundTripper{body: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envHost != "" {
-				t.Setenv("KUBERNETES_SERVICE_HOST", tc.envHost)
-				t.Setenv("KUBERNETES_SERVICE_PORT", tc.envPort)
-			} else {
-				t.Setenv("KUBERNETES_SERVICE_HOST", "")
-				t.Setenv("KUBERNETES_SERVICE_PORT", "")
-			}
+			t.Parallel()
 
-			auth := NewAuthenticator(Config{APIServerURL: tc.url})
-			if auth.cfg.APIServerURL != tc.wantURL {
-				t.Fatalf("APIServerURL = %q, want %q", auth.cfg.APIServerURL, tc.wantURL)
+			rt := tc.rt
+			auth := newTestAuth(t, &rt, !tc.noHostToken, tc.cfg)
+			got, err := auth.Authenticate(context.Background(), tc.token)
+			if gotErr := authErrText(auth, err); gotErr != tc.wantErr {
+				t.Fatalf("Authenticate() error = %q, want %q", gotErr, tc.wantErr)
+			}
+			if gotStatus := authErrStatus(err); gotStatus != tc.wantStatus {
+				t.Fatalf("Authenticate() error status = %d, want %d", gotStatus, tc.wantStatus)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("Authenticate() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestNewAuthenticator_Defaults(t *testing.T) {
+func TestAuthenticate_CacheHit(t *testing.T) {
 	t.Parallel()
 
-	auth := NewAuthenticator(Config{})
-	if auth.cfg.CacheTTL <= 0 {
-		t.Fatalf("expected positive default CacheTTL, got %v", auth.cfg.CacheTTL)
+	rt := &staticRoundTripper{body: tokenReview("system:serviceaccount:default:eri-agent-beta")}
+	auth := newTestAuth(t, rt, true, Config{})
+
+	id, err := auth.Authenticate(context.Background(), "cached-token")
+	if err != nil {
+		t.Fatalf("Authenticate() unexpected error = %v", err)
 	}
-	if auth.cfg.CacheMaxEntries <= 0 {
-		t.Fatalf("expected positive default CacheMaxEntries, got %d", auth.cfg.CacheMaxEntries)
+	if id.CallerAgent != "agent-beta" {
+		t.Fatalf("CallerAgent = %q, want %q", id.CallerAgent, "agent-beta")
 	}
-	if auth.cfg.AgentSAPrefix == "" {
-		t.Fatalf("expected non-empty default AgentSAPrefix")
+
+	rt.err = errors.New("transport should not be called on cache hit")
+	cachedID, err := auth.Authenticate(context.Background(), "cached-token")
+	if err != nil {
+		t.Fatalf("Authenticate() repeat cache hit error = %v", err)
 	}
-	if auth.cfg.TokenPath == "" {
-		t.Fatalf("expected non-empty default TokenPath")
+	if cachedID.CallerAgent != "agent-beta" {
+		t.Fatalf("cached CallerAgent = %q, want %q", cachedID.CallerAgent, "agent-beta")
 	}
 }
 
-func TestNewAuthenticator_CustomConfig(t *testing.T) {
+func TestAuthorize(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{
+	caller := CallerIdentity{
+		Username:    "system:serviceaccount:default:eri-agent-alpha",
+		CallerAgent: "agent-alpha",
+		Groups:      []string{"group-a"},
+		Extra:       map[string][]string{"role": {"admin"}},
+	}
+	tests := []struct {
+		name        string
+		noHostToken bool
+		rt          staticRoundTripper
+		wantErr     string
+		wantStatus  int
+	}{
+		{name: "allowed", rt: staticRoundTripper{body: sar(true)}},
+		{
+			name: "denied with reason", wantErr: "RBAC: access denied", wantStatus: http.StatusForbidden,
+			rt: staticRoundTripper{body: `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"RBAC: access denied"}}`},
+		},
+		{
+			name: "denied without reason", rt: staticRoundTripper{body: sar(false)}, wantStatus: http.StatusForbidden,
+			wantErr: `access denied for user "system:serviceaccount:default:eri-agent-alpha" on builds/all/create (target: "aerial")`,
+		},
+		{
+			name: "missing host token", noHostToken: true,
+			wantErr: "k8sauth: subjectaccessreview: read host token: read serviceaccount token from TOKEN: open TOKEN: no such file or directory",
+		},
+		{
+			name: "transport error", rt: staticRoundTripper{err: errAuthTransport},
+			wantErr: `k8sauth: subjectaccessreview: execute request: Post "https://k8s.local/apis/authorization.k8s.io/v1/subjectaccessreviews": simulated network failure`,
+		},
+		{
+			name: "api server http 500", rt: staticRoundTripper{status: http.StatusInternalServerError, body: `{"error":"internal"}`},
+			wantErr: "k8sauth: subjectaccessreview: api returned status 500",
+		},
+		{
+			name: "api server malformed json", rt: staticRoundTripper{body: "not-valid-json"},
+			wantErr: "k8sauth: subjectaccessreview: decode response: invalid character 'o' in literal null (expecting 'u')",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt := tc.rt
+			auth := newTestAuth(t, &rt, !tc.noHostToken, Config{})
+			err := auth.Authorize(context.Background(), caller, "builds/all", "create", "aerial")
+			if gotErr := authErrText(auth, err); gotErr != tc.wantErr {
+				t.Fatalf("Authorize() error = %q, want %q", gotErr, tc.wantErr)
+			}
+			if gotStatus := authErrStatus(err); gotStatus != tc.wantStatus {
+				t.Fatalf("Authorize() error status = %d, want %d", gotStatus, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestAuthorize_CacheHit(t *testing.T) {
+	t.Parallel()
+
+	rt := &staticRoundTripper{body: sar(true)}
+	auth := newTestAuth(t, rt, true, Config{})
+
+	caller := CallerIdentity{
+		Username:    "system:serviceaccount:default:eri-aerial",
+		CallerAgent: "aerial",
+		Groups:      []string{"group-a"},
+		Extra:       map[string][]string{"role": {"admin"}},
+	}
+	if err := auth.Authorize(context.Background(), caller, "builds", "get", "aerial"); err != nil {
+		t.Fatalf("Authorize() unexpected error = %v", err)
+	}
+
+	// Repeat call must hit cache without transport invocation
+	rt.err = errors.New("transport should not be called on cache hit")
+	if err := auth.Authorize(context.Background(), caller, "builds", "get", "aerial"); err != nil {
+		t.Fatalf("Authorize() cache hit error = %v", err)
+	}
+
+	// Call with different groups must not hit cache
+	callerDiffGroup := caller
+	callerDiffGroup.Groups = []string{"group-b"}
+	if err := auth.Authorize(context.Background(), callerDiffGroup, "builds", "get", "aerial"); err == nil {
+		t.Fatalf("expected transport error on different groups cache miss, got nil")
+	}
+}
+
+func TestResolveTargetAgent(t *testing.T) {
+	t.Parallel()
+
+	agent := CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial"}
+	service := CallerIdentity{Username: "system:serviceaccount:default:synapse", CallerAgent: "synapse", IsService: true}
+	tests := []struct {
+		name         string
+		caller       CallerIdentity
+		target       string
+		resource     string
+		verb         string
+		wantTarget   string
+		wantResource string
+		wantErr      string
+		wantStatus   int
+	}{
+		{
+			name: "read valid slug target", caller: agent, target: "agent-alpha", resource: "builds", verb: "get",
+			wantTarget: "agent-alpha", wantResource: "builds",
+		},
+		{name: "read empty target", caller: agent, resource: "transcripts", verb: "get", wantResource: "transcripts"},
+		{name: "read wildcard target", caller: agent, target: "*", resource: "prs", verb: "list", wantTarget: "*", wantResource: "prs"},
+		{
+			name: "read invalid slug fails validation", caller: agent, target: "Invalid_Agent", resource: "memories", verb: "get",
+			wantErr: `invalid target agent "Invalid_Agent"`, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "service write missing target fails validation", caller: service, resource: "prs", verb: "create",
+			wantErr: `missing or invalid target agent "" for service principal`, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "service write invalid slug fails validation", caller: service, target: "rogue_agent!", resource: "prs", verb: "create",
+			wantErr: `missing or invalid target agent "rogue_agent!" for service principal`, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "service write valid target escalates to all", caller: service, target: "agent-alpha", resource: "prs", verb: "create",
+			wantTarget: "agent-alpha", wantResource: "prs/all",
+		},
+		{
+			name: "agent write empty target defaults to self", caller: agent, resource: "schedules", verb: "create",
+			wantTarget: "aerial", wantResource: "schedules",
+		},
+		{
+			name: "agent write explicit self stays base resource", caller: agent, target: "aerial", resource: "builds", verb: "update",
+			wantTarget: "aerial", wantResource: "builds",
+		},
+		{
+			name: "agent write cross agent escalates to all", caller: agent, target: "agent-beta", resource: "builds", verb: "patch",
+			wantTarget: "agent-beta", wantResource: "builds/all",
+		},
+		{
+			name: "agent write wildcard escalates to all", caller: agent, target: "*", resource: "memories", verb: "delete",
+			wantTarget: "*", wantResource: "memories/all",
+		},
+		{
+			name: "agent write invalid slug fails validation", caller: agent, target: "non_existent_agent", resource: "schedules", verb: "delete",
+			wantErr: `invalid target agent "non_existent_agent"`, wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	auth := &Authenticator{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			target, resource, err := auth.ResolveTargetAgent(tc.caller, tc.target, tc.resource, tc.verb)
+			if gotErr := authErrText(auth, err); gotErr != tc.wantErr {
+				t.Fatalf("ResolveTargetAgent() error = %q, want %q", gotErr, tc.wantErr)
+			}
+			if gotStatus := authErrStatus(err); gotStatus != tc.wantStatus {
+				t.Fatalf("ResolveTargetAgent() error status = %d, want %d", gotStatus, tc.wantStatus)
+			}
+			if target != tc.wantTarget || resource != tc.wantResource {
+				t.Fatalf("ResolveTargetAgent() = (%q, %q), want (%q, %q)", target, resource, tc.wantTarget, tc.wantResource)
+			}
+		})
+	}
+}
+
+// authConfigDefaults returns the Config NewAuthenticator builds from an empty
+// Config with client and apiServerURL.
+func authConfigDefaults(client *http.Client, apiServerURL string) Config {
+	return Config{
+		TokenPath:       "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		AgentSAPrefix:   "system:serviceaccount:default:eri-",
+		SAAgentAliases:  map[string]string{"system:serviceaccount:default:eri": "aerial"},
+		CacheTTL:        45 * time.Second,
+		CacheMaxEntries: 1024,
+		APIServerURL:    apiServerURL,
+		HTTPClient:      client,
+	}
+}
+
+func TestNewAuthenticator(t *testing.T) {
+	// Not parallel: rows set KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT.
+	// Every row passes HTTPClient so no row reads the in-cluster CA bundle.
+	client := &http.Client{Transport: &staticRoundTripper{}}
+	custom := Config{
+		Enabled:         true,
 		TokenPath:       "/custom/token",
 		AgentSAPrefix:   "custom-prefix-",
 		SAAgentAliases:  map[string]string{"custom": "aerial"},
 		CacheTTL:        10 * time.Second,
 		CacheMaxEntries: 500,
+		APIServerURL:    "https://apiserver.example.com",
+		HTTPClient:      client,
 	}
-	auth := NewAuthenticator(cfg)
+	tests := []struct {
+		name    string
+		cfg     Config
+		envHost string
+		envPort string
+		want    Config
+	}{
+		{name: "defaults when env unset", cfg: Config{HTTPClient: client}, want: authConfigDefaults(client, "https://kubernetes.default.svc")},
+		{
+			name: "custom url trailing slash trimmed", cfg: Config{APIServerURL: "https://apiserver.example.com/", HTTPClient: client},
+			want: authConfigDefaults(client, "https://apiserver.example.com"),
+		},
+		{
+			name: "service host and port env used", cfg: Config{HTTPClient: client}, envHost: "192.0.2.1", envPort: "443",
+			want: authConfigDefaults(client, "https://192.0.2.1:443"),
+		},
+		{
+			name: "host env without port falls back", cfg: Config{HTTPClient: client}, envHost: "192.0.2.1",
+			want: authConfigDefaults(client, "https://kubernetes.default.svc"),
+		},
+		{name: "custom config kept", cfg: custom, want: custom},
+	}
 
-	if auth.cfg.TokenPath != cfg.TokenPath {
-		t.Fatalf("TokenPath = %q, want %q", auth.cfg.TokenPath, cfg.TokenPath)
-	}
-	if auth.cfg.AgentSAPrefix != cfg.AgentSAPrefix {
-		t.Fatalf("AgentSAPrefix = %q, want %q", auth.cfg.AgentSAPrefix, cfg.AgentSAPrefix)
-	}
-	if auth.cfg.CacheTTL != cfg.CacheTTL {
-		t.Fatalf("CacheTTL = %v, want %v", auth.cfg.CacheTTL, cfg.CacheTTL)
-	}
-	if auth.cfg.CacheMaxEntries != cfg.CacheMaxEntries {
-		t.Fatalf("CacheMaxEntries = %d, want %d", auth.cfg.CacheMaxEntries, cfg.CacheMaxEntries)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KUBERNETES_SERVICE_HOST", tc.envHost)
+			t.Setenv("KUBERNETES_SERVICE_PORT", tc.envPort)
+
+			got := NewAuthenticator(tc.cfg).Config()
+			if got.Now == nil {
+				t.Fatalf("NewAuthenticator() Config().Now = nil, want time.Now default")
+			}
+			got.Now = nil
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("NewAuthenticator() Config() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
