@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -613,14 +614,16 @@ func TestPRRolloutStatus(t *testing.T) {
 	eriConfig := []model.ConfigMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}}
 
 	tests := []struct {
-		name       string
-		workloads  []model.WorkloadRollout
-		configMaps []model.ConfigMapChange
-		commitSHA  string
-		now        time.Time
-		wantDone   bool
-		wantFailed bool
-		wantReason string
+		name            string
+		workloads       []model.WorkloadRollout
+		configMaps      []model.ConfigMapChange
+		commitSHA       string
+		includedCommits []string
+		expectedJobs    []string
+		now             time.Time
+		wantDone        bool
+		wantFailed      bool
+		wantReason      string
 	}{
 		{name: "no workloads is done", commitSHA: rolloutSHA, wantDone: true},
 		{name: "image match pending", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total)"},
@@ -645,11 +648,48 @@ func TestPRRolloutStatus(t *testing.T) {
 		{name: "reloader restart timeout fails", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 6, 1), wantFailed: true, wantReason: "Deployment default/eri: not restarted by Reloader within 5m0s of ConfigMap default/eri-config changing"},
 		{name: "reloader reload annotation names configmap", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), map[string]string{"configmap.reloader.stakater.com/reload": "eri-flags, eri-config"})}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
 		{name: "reloader configmap auto annotation gates", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), map[string]string{"configmap.reloader.stakater.com/auto": "true"}, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{
+			name: "expected jobs ignores unready unrelated workload changed after since",
+			workloads: []model.WorkloadRollout{
+				deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false),
+				withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 0, 2, false), rolloutClock(10, 1, 0), nil),
+			},
+			commitSHA:    rolloutSHA,
+			expectedJobs: []string{"synapse"},
+			wantDone:     true,
+		},
+		{
+			name: "expected jobs awaits image tag when matching workload runs older ancestor tag",
+			workloads: []model.WorkloadRollout{
+				deployRollout("synapse", otherImage, 3, 3, 1, 1, 1, 1, false),
+			},
+			commitSHA:    rolloutSHA,
+			expectedJobs: []string{"synapse"},
+			wantReason:   "Deployment default/synapse (awaiting image tag 0123abcd)",
+		},
+		{
+			name: "included commits completes when matching workload runs descendant commit tag",
+			workloads: []model.WorkloadRollout{
+				deployRollout("synapse", "ghcr.io/example/aerial-synapse:descendant-sha", 3, 3, 1, 1, 1, 1, false),
+			},
+			commitSHA:       rolloutSHA,
+			includedCommits: []string{"descendant-sha"},
+			expectedJobs:    []string{"synapse"},
+			wantDone:        true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			done, failed, reason := PRRolloutStatus(PRRolloutInput{Workloads: tc.workloads, ConfigMaps: tc.configMaps, CommitSHA: tc.commitSHA, Since: since, Now: tc.now})
+			done, failed, reason := PRRolloutStatus(PRRolloutInput{
+				Workloads:       tc.workloads,
+				ConfigMaps:      tc.configMaps,
+				CommitSHA:       tc.commitSHA,
+				IncludedCommits: tc.includedCommits,
+				ExpectedJobs:    tc.expectedJobs,
+				Since:           since,
+				Now:             tc.now,
+			})
 			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
 				t.Errorf("PRRolloutStatus() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
 			}
@@ -704,11 +744,13 @@ func TestReadyForCommitServices(t *testing.T) {
 	auto := map[string]string{"reloader.stakater.com/auto": "true"}
 
 	tests := []struct {
-		name       string
-		workloads  []model.WorkloadRollout
-		configMaps []model.ConfigMapChange
-		commitSHA  string
-		want       []string
+		name            string
+		workloads       []model.WorkloadRollout
+		configMaps      []model.ConfigMapChange
+		commitSHA       string
+		includedCommits []string
+		expectedJobs    []string
+		want            []string
 	}{
 		{name: "empty commitSHA returns nil", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false)}, commitSHA: "", want: nil},
 		{name: "empty workloads returns nil", workloads: nil, commitSHA: rolloutSHA, want: nil},
@@ -737,13 +779,321 @@ func TestReadyForCommitServices(t *testing.T) {
 			deployRollout("haro", otherImage, 3, 3, 1, 1, 1, 1, false),
 			deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false),
 		}, commitSHA: rolloutSHA, want: []string{"aerial-synapse", "synapse"}},
+		{
+			name: "expected jobs skips unrelated unready workload",
+			workloads: []model.WorkloadRollout{
+				deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false),
+				deployRollout("eri", eriImage, 3, 3, 1, 1, 0, 2, false),
+			},
+			commitSHA:    rolloutSHA,
+			expectedJobs: []string{"synapse"},
+			want:         []string{"aerial-synapse", "synapse"},
+		},
+		{
+			name: "included commits reports ready candidate for descendant commit tag",
+			workloads: []model.WorkloadRollout{
+				deployRollout("synapse", "ghcr.io/example/aerial-synapse:descendant-sha", 3, 3, 1, 1, 1, 1, false),
+			},
+			commitSHA:       rolloutSHA,
+			includedCommits: []string{"descendant-sha"},
+			expectedJobs:    []string{"synapse"},
+			want:            []string{"aerial-synapse", "synapse"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ReadyForCommitServices(PRRolloutInput{Workloads: tc.workloads, ConfigMaps: tc.configMaps, CommitSHA: tc.commitSHA, Since: since, Now: rolloutClock(10, 5, 0)})
+			got := ReadyForCommitServices(PRRolloutInput{
+				Workloads:       tc.workloads,
+				ConfigMaps:      tc.configMaps,
+				CommitSHA:       tc.commitSHA,
+				IncludedCommits: tc.includedCommits,
+				ExpectedJobs:    tc.expectedJobs,
+				Since:           since,
+				Now:             rolloutClock(10, 5, 0),
+			})
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("ReadyForCommitServices() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestServiceJobs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		jobs     []string
+		requests map[string]prwire.KustomizationRequest
+		want     []string
+	}{
+		{
+			name:     "nil jobs returns nil",
+			jobs:     nil,
+			requests: nil,
+			want:     nil,
+		},
+		{
+			name:     "empty strings dropped",
+			jobs:     []string{"", "  ", "\t"},
+			requests: nil,
+			want:     nil,
+		},
+		{
+			name: "kustomization names filtered",
+			jobs: []string{"k8s-aerial", "synapse", " aerial "},
+			requests: map[string]prwire.KustomizationRequest{
+				"k8s-aerial": {},
+				"aerial":     {},
+			},
+			want: []string{"synapse"},
+		},
+		{
+			name: "trims and deduplicates preserving first seen",
+			jobs: []string{" synapse ", "eri", "synapse", "  eri  ", "haro"},
+			requests: map[string]prwire.KustomizationRequest{
+				"manifests": {},
+			},
+			want: []string{"synapse", "eri", "haro"},
+		},
+		{
+			name: "all jobs match kustomization requests returns nil",
+			jobs: []string{"k8s-aerial", "aerial-config"},
+			requests: map[string]prwire.KustomizationRequest{
+				"k8s-aerial":    {},
+				"aerial-config": {},
+			},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ServiceJobs(tc.jobs, tc.requests)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ServiceJobs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkloadMatchesJobs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		workload     model.WorkloadRollout
+		expectedJobs []string
+		want         bool
+	}{
+		{
+			name:         "empty expectedJobs returns true",
+			workload:     model.WorkloadRollout{Kind: "Deployment", Name: "synapse"},
+			expectedJobs: nil,
+			want:         true,
+		},
+		{
+			name:         "workload name exact match",
+			workload:     model.WorkloadRollout{Kind: "Deployment", Name: "synapse"},
+			expectedJobs: []string{"synapse"},
+			want:         true,
+		},
+		{
+			name:         "workload name case-insensitive and trimmed",
+			workload:     model.WorkloadRollout{Kind: "Deployment", Name: " Synapse "},
+			expectedJobs: []string{"synapse"},
+			want:         true,
+		},
+		{
+			name: "image service candidate matches stripped prefix",
+			workload: model.WorkloadRollout{
+				Kind:   "Deployment",
+				Name:   "worker",
+				Images: []string{"ghcr.io/example/aerial-synapse:sha-1"},
+			},
+			expectedJobs: []string{"synapse"},
+			want:         true,
+		},
+		{
+			name: "image service candidate matches full name",
+			workload: model.WorkloadRollout{
+				Kind:   "Deployment",
+				Name:   "worker",
+				Images: []string{"ghcr.io/example/aerial-synapse:sha-1"},
+			},
+			expectedJobs: []string{"aerial-synapse"},
+			want:         true,
+		},
+		{
+			name: "sidecar image does not match unrelated job",
+			workload: model.WorkloadRollout{
+				Kind:   "Deployment",
+				Name:   "worker",
+				Images: []string{"fluent/fluent-bit:v1.9"},
+			},
+			expectedJobs: []string{"synapse"},
+			want:         false,
+		},
+		{
+			name: "restate cluster managed child matches by name",
+			workload: model.WorkloadRollout{
+				Kind: "RestateCluster",
+				Name: "restate-cluster",
+				ManagedWorkloads: []model.WorkloadRollout{
+					{Kind: "StatefulSet", Name: "restate"},
+				},
+			},
+			expectedJobs: []string{"restate"},
+			want:         true,
+		},
+		{
+			name: "restate cluster managed child matches by image",
+			workload: model.WorkloadRollout{
+				Kind: "RestateCluster",
+				Name: "cluster-x",
+				ManagedWorkloads: []model.WorkloadRollout{
+					{Kind: "StatefulSet", Name: "sts-x", Images: []string{"ghcr.io/example/aerial-restate:tag"}},
+				},
+			},
+			expectedJobs: []string{"restate"},
+			want:         true,
+		},
+		{
+			name: "no match returns false",
+			workload: model.WorkloadRollout{
+				Kind:   "Deployment",
+				Name:   "haro",
+				Images: []string{"ghcr.io/example/aerial-haro:sha"},
+			},
+			expectedJobs: []string{"synapse"},
+			want:         false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := WorkloadMatchesJobs(tc.workload, tc.expectedJobs)
+			if got != tc.want {
+				t.Errorf("WorkloadMatchesJobs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCandidateDescendantTags(t *testing.T) {
+	t.Parallel()
+	const prSHA = "0123abcd"
+	tests := []struct {
+		name         string
+		workloads    []model.WorkloadRollout
+		commitSHA    string
+		expectedJobs []string
+		want         []string
+	}{
+		{
+			name:         "empty commitSHA returns nil",
+			workloads:    []model.WorkloadRollout{{Kind: "Deployment", Name: "synapse", Images: []string{"ghcr.io/example/aerial-synapse:new-sha"}}},
+			commitSHA:    "",
+			expectedJobs: []string{"synapse"},
+			want:         nil,
+		},
+		{
+			name:         "empty expectedJobs returns nil",
+			workloads:    []model.WorkloadRollout{{Kind: "Deployment", Name: "synapse", Images: []string{"ghcr.io/example/aerial-synapse:new-sha"}}},
+			commitSHA:    prSHA,
+			expectedJobs: nil,
+			want:         nil,
+		},
+		{
+			name:         "empty workloads returns nil",
+			workloads:    nil,
+			commitSHA:    prSHA,
+			expectedJobs: []string{"synapse"},
+			want:         nil,
+		},
+		{
+			name: "matching job extracts descendant tag and ignores prSHA and latest",
+			workloads: []model.WorkloadRollout{
+				{
+					Kind:   "Deployment",
+					Name:   "synapse",
+					Images: []string{"ghcr.io/example/aerial-synapse:descendant-1", "ghcr.io/example/aerial-synapse:" + prSHA, "ghcr.io/example/aerial-synapse:latest"},
+				},
+			},
+			commitSHA:    prSHA,
+			expectedJobs: []string{"synapse"},
+			want:         []string{"descendant-1"},
+		},
+		{
+			name: "sidecar image excluded",
+			workloads: []model.WorkloadRollout{
+				{
+					Kind:   "Deployment",
+					Name:   "synapse",
+					Images: []string{"ghcr.io/example/aerial-synapse:descendant-1", "docker.io/fluent/fluent-bit:v1.9"},
+				},
+			},
+			commitSHA:    prSHA,
+			expectedJobs: []string{"synapse"},
+			want:         []string{"descendant-1"},
+		},
+		{
+			name: "deleting workload ignored",
+			workloads: []model.WorkloadRollout{
+				{
+					Kind:              "Deployment",
+					Name:              "synapse",
+					Images:            []string{"ghcr.io/example/aerial-synapse:descendant-1"},
+					DeletionTimestamp: "2026-11-20T18:00:00Z",
+				},
+			},
+			commitSHA:    prSHA,
+			expectedJobs: []string{"synapse"},
+			want:         nil,
+		},
+		{
+			name: "restate cluster links and extracts child image tag",
+			workloads: []model.WorkloadRollout{
+				{
+					Kind:      "RestateCluster",
+					Namespace: "default",
+					Name:      "restate",
+				},
+				{
+					Kind:      "StatefulSet",
+					Namespace: "default",
+					Name:      "restate",
+					Images:    []string{"ghcr.io/example/aerial-restate:descendant-restate"},
+				},
+			},
+			commitSHA:    prSHA,
+			expectedJobs: []string{"restate"},
+			want:         []string{"descendant-restate"},
+		},
+		{
+			name: "multiple workloads deduplicate in first seen order",
+			workloads: []model.WorkloadRollout{
+				{
+					Kind:   "Deployment",
+					Name:   "synapse-1",
+					Images: []string{"ghcr.io/example/aerial-synapse:tag-a", "ghcr.io/example/aerial-synapse:tag-b"},
+				},
+				{
+					Kind:   "Deployment",
+					Name:   "synapse-2",
+					Images: []string{"ghcr.io/example/aerial-synapse:tag-a", "ghcr.io/example/aerial-synapse:tag-c"},
+				},
+			},
+			commitSHA:    prSHA,
+			expectedJobs: []string{"synapse"},
+			want:         []string{"tag-a", "tag-b", "tag-c"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := CandidateDescendantTags(tc.workloads, tc.commitSHA, tc.expectedJobs)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("CandidateDescendantTags() = %v, want %v", got, tc.want)
 			}
 		})
 	}
