@@ -366,20 +366,14 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 	}
 }
 
-// cgFailF2UpdateSQL fails only chunk f2's update.
-const cgFailF2UpdateSQL = failFunctionSQL + ` CREATE TRIGGER pgtest_fail_f2 BEFORE UPDATE ON vanadis_chunks FOR EACH ROW WHEN (OLD.id = 'f2') EXECUTE FUNCTION pgtest_fail();`
-
-// cgSkipChunkUpdateSQL makes every chunk update affect zero rows, as a
-// concurrent terminal transition would.
-const cgSkipChunkUpdateSQL = `CREATE FUNCTION pgtest_skip() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
-CREATE TRIGGER pgtest_skip BEFORE UPDATE ON vanadis_chunks FOR EACH ROW EXECUTE FUNCTION pgtest_skip();`
-
 func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	deploying := xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, base.Add(time.Hour), []string{"eri"}, nil)
 	noID := deploying
 	noID.ID = " "
+	noBuildID := deploying
+	noBuildID.BuildID = " "
 	noRepo := deploying
 	noRepo.Repo = ""
 	cand := func(id, buildID string, idx int, status string, pr int) model.VanadisChunk {
@@ -390,33 +384,23 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 	boom.Banner = "boom"
 	sweptF1 := []SweptChunk{{ChunkID: "f1", BuildID: "b2"}}
 	tests := []struct {
-		name          string
-		nilDB         bool
-		deploying     model.VanadisChunk
-		candidates    []model.VanadisChunk
-		sabotage      string
-		want          []SweptChunk
-		wantRecovered []SweptChunk
-		wantErr       bool
-		wantStatuses  map[string]string
+		name         string
+		nilDB        bool
+		deploying    model.VanadisChunk
+		candidates   []model.VanadisChunk
+		sabotage     string
+		want         []SweptChunk
+		wantErr      bool
+		wantStatuses map[string]string
 	}{
-		{name: "sweeps eligible candidate and returns ids", deploying: deploying, candidates: mutateChunks(f1), want: sweptF1, wantStatuses: map[string]string{"f1": "completed"}},
+		{name: "sweeps eligible candidate and returns ids", deploying: deploying, candidates: mutateChunks(f1), want: sweptF1, wantStatuses: map[string]string{"f1": "merged"}},
 		{name: "nil database errors", nilDB: true, deploying: deploying, wantErr: true},
 		{name: "blank deploying id is a no-op", deploying: noID, candidates: mutateChunks(f1), wantStatuses: map[string]string{"f1": "merged"}},
+		{name: "blank deploying build id is a no-op", deploying: noBuildID, candidates: mutateChunks(f1), wantStatuses: map[string]string{"f1": "merged"}},
 		{name: "blank deploying repo is a no-op", deploying: noRepo, candidates: mutateChunks(f1), wantStatuses: map[string]string{"f1": "merged"}},
 		{name: "query error aborts", deploying: deploying, candidates: mutateChunks(f1), sabotage: cgBreakChunkPrepareSQL, wantErr: true},
 		{name: "scan error aborts", deploying: deploying, candidates: mutateChunks(f1), sabotage: breakChunkScanSQL, wantErr: true},
 		{name: "rows error aborts", deploying: deploying, candidates: mutateChunks(boom), sabotage: failChunkRowsSQL, wantErr: true},
-		{name: "update error aborts", deploying: deploying, candidates: mutateChunks(f1), sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErr: true, wantStatuses: map[string]string{"f1": "merged"}},
-		{name: "skipped transition is harmless", deploying: deploying, candidates: mutateChunks(f1), sabotage: cgSkipChunkUpdateSQL, wantStatuses: map[string]string{"f1": "merged"}},
-		{
-			name: "recovers already completed eligible chunk", deploying: deploying, candidates: mutateChunks(f1, cand("r1", "b3", 1, "completed", 5)),
-			want: sweptF1, wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3"}}, wantStatuses: map[string]string{"f1": "completed", "r1": "completed"},
-		},
-		{
-			name: "failing candidate keeps earlier successes alongside error", deploying: deploying, candidates: mutateChunks(f1, cand("f2", "b2", 1, "merged", 6)),
-			sabotage: cgFailF2UpdateSQL, want: sweptF1, wantErr: true, wantStatuses: map[string]string{"f1": "completed", "f2": "merged"},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -424,15 +408,12 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			st, pool := cgStore(t, false, tc.nilDB)
 			seed(t, pool, []model.VanadisBuild{{ID: "b2", ThreadID: "t2"}, {ID: "b3", ThreadID: "t3"}}, tc.candidates)
 			mustExec(t, pool, tc.sabotage)
-			got, recovered, err := st.SweepEarlierDeploymentsAcrossBuilds(context.Background(), tc.deploying)
+			got, err := st.SweepEarlierDeploymentsAcrossBuilds(context.Background(), tc.deploying)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SweepEarlierDeploymentsAcrossBuilds err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("SweepEarlierDeploymentsAcrossBuilds = %v, want %v", got, tc.want)
-			}
-			if !slices.Equal(recovered, tc.wantRecovered) {
-				t.Errorf("SweepEarlierDeploymentsAcrossBuilds recovered = %v, want %v", recovered, tc.wantRecovered)
 			}
 			for id, want := range tc.wantStatuses {
 				if got := loadChunk(t, pool, id).Status; got != want {

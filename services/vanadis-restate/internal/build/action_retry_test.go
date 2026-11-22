@@ -11,13 +11,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -65,15 +65,54 @@ func (r *retryJournalRuntime) RunReconcileStep(name string, fn func(context.Cont
 	return out, nil
 }
 
-type retryAuthorityFixture struct {
-	store.VanadisStore
+// retryAckStore wraps the real store and, when loseAck is set, lets the
+// first RetryActionChunk transaction commit in PostgreSQL but reports a lost
+// response to the caller, the way a dropped connection after COMMIT does.
+type retryAckStore struct {
+	*store.Store
 
-	current     *model.VanadisChunk
-	buildStatus *string
+	loseAck bool
 }
 
-func (f *retryAuthorityFixture) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return &model.VanadisBuild{ID: "b1", Status: *f.buildStatus}, []model.VanadisChunk{*f.current}, nil
+func (s *retryAckStore) RetryActionChunk(ctx context.Context, req store.RetryActionChunkRequest) (*store.RetryActionChunkResult, error) {
+	result, err := s.Store.RetryActionChunk(ctx, req)
+	if err == nil && s.loseAck {
+		s.loseAck = false
+		return nil, errors.New("commit response lost")
+	}
+	return result, err
+}
+
+// retryStore seeds build b1 (failed) with a completed c0 and the failed
+// action chunk c1 carrying instructions, applying sabotage afterwards.
+func retryStore(t *testing.T, instructions, sabotage string) (*store.Store, *pgxpool.Pool) {
+	t.Helper()
+	st, pool := seededStore(t,
+		[]model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: "failed"}},
+		[]model.VanadisChunk{
+			{ID: "c0", BuildID: "b1", Status: "completed"},
+			{ID: "c1", BuildID: "b1", ChunkIndex: 1, Mode: "action", Status: "failed", Instructions: instructions},
+		})
+	mustExec(t, pool, sabotage)
+	return st, pool
+}
+
+// retryStored is the persisted retry-relevant view of c1 and its build.
+type retryStored struct {
+	Status, Instructions, BuildStatus string
+	Generation                        int
+}
+
+func loadRetryStored(t *testing.T, st *store.Store) retryStored {
+	t.Helper()
+	b, chunks := loadBuild(t, st, "b1")
+	for _, c := range chunks {
+		if c.ID == "c1" {
+			return retryStored{Status: c.Status, Instructions: c.Instructions, BuildStatus: b.Status, Generation: c.StallNudges}
+		}
+	}
+	t.Fatal("c1 not stored")
+	return retryStored{}
 }
 
 func TestBuildRetryAction(t *testing.T) {
@@ -98,18 +137,18 @@ func TestBuildRetryAction(t *testing.T) {
 		{name: "reconcile crash", reconcileErr: errors.New("worker interrupted")},
 		{name: "wrong build", reqBuild: "other", wantErr: invalid},
 		{name: "stale", identity: "vanadis-c1-turn-8", wantErr: "action retry preconditions changed"},
-		{name: "build write fails", failBuild: true, wantErr: "build write failed"},
+		{name: "build write fails", failBuild: true, wantErr: "sabotaged UPDATE on vanadis_builds"},
 		{name: "no authority", noAuthority: true, wantErr: "retry authority not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}
-			status := "failed"
-			lost := tc.lostCommit
-			st := store.New(sqltest.RetryFixtureDB(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, tc.failBuild, &lost), "example-owner")
-			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
+			sabotage := ""
+			if tc.failBuild {
+				sabotage = failStatement("vanadis_builds", "UPDATE")
+			}
+			st, _ := retryStore(t, "", sabotage)
+			authority := &retryAckStore{Store: st, loseAck: tc.lostCommit}
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
 			if tc.noAuthority {
@@ -125,28 +164,61 @@ func TestBuildRetryAction(t *testing.T) {
 			}
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				require.Equal(t, model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, current, "rejected request mutated the chunk")
+				require.Equal(t, retryStored{Status: "failed", BuildStatus: "failed"}, loadRetryStored(t, st), "rejected request mutated the chunk")
 				return
 			}
 			require.NoError(t, err)
-			if !got.Accepted || got.DispatchID != "vanadis-c1-turn-1" || current.StallNudges != 1 || status != "running" {
-				t.Fatalf("result=%+v chunk=%+v status=%s", got, current, status)
-			}
+			require.Equal(t, store.RetryActionChunkResult{BuildID: "b1", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Accepted: true}, got)
+			require.Equal(t, retryStored{Status: "pending", BuildStatus: "running", Generation: 1}, loadRetryStored(t, st))
 			again, err := bo.RetryActionChunk(nil, req)
-			if err != nil || again != got || current.StallNudges != 1 {
-				t.Fatalf("journal replay=%+v err=%v", again, err)
-			}
+			require.NoError(t, err, "journal replay")
+			require.Equal(t, got, again, "journal replay")
+			require.Equal(t, retryStored{Status: "pending", BuildStatus: "running", Generation: 1}, loadRetryStored(t, st), "journal replay reset again")
 		})
 	}
 }
 
-func (f *retryAuthorityFixture) ReserveChunkForLaunch(context.Context, string) error {
-	f.current.Status = "running"
-	return nil
-}
-
-func (*retryAuthorityFixture) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
+// Duplicate retries from independent invocations race on the same database:
+// the parent row lock serializes them, so exactly one generation reset
+// commits and every caller acknowledges the same dispatch identity.
+func TestBuildRetryActionConcurrent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		concurrent int
+	}{
+		{"two invocations", 2},
+		{"eight invocations", 8},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, _ := retryStore(t, "", "")
+			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}
+			results := make(chan store.RetryActionChunkResult, tc.concurrent)
+			errs := make(chan error, tc.concurrent)
+			var wg sync.WaitGroup
+			for range tc.concurrent {
+				wg.Go(func() {
+					rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}}
+					bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
+					got, err := bo.RetryActionChunk(nil, req)
+					results <- got
+					errs <- err
+				})
+			}
+			wg.Wait()
+			close(results)
+			close(errs)
+			for err := range errs {
+				require.NoError(t, err)
+			}
+			for got := range results {
+				require.Equal(t, store.RetryActionChunkResult{BuildID: "b1", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Accepted: true}, got)
+			}
+			require.Equal(t, retryStored{Status: "pending", BuildStatus: "running", Generation: 1}, loadRetryStored(t, st))
+		})
+	}
 }
 
 type retryDispatchFixture struct {
@@ -186,17 +258,12 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", Instructions: "verify"}
-			status := "failed"
-			lost := false
-			st := store.New(sqltest.RetryFixtureDB(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost), "example-owner")
-			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
+			st, _ := retryStore(t, "verify", "")
 			f := &retryDispatchFixture{accepted: map[string]eriwire.BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
-			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", "example-owner", nil))
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", "example-owner", nil))
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {
@@ -206,8 +273,9 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 				req.ExpectedInstructions, req.ReplacementInstructions = new("changed"), new("must not apply")
 				got, err = bo.RetryActionChunk(nil, req)
 			}
-			if err != nil || !got.Accepted || current.Status != "running" || current.StallNudges != 1 {
-				t.Fatalf("result=%+v err=%v chunk=%+v", got, err, current)
+			current := loadRetryStored(t, st)
+			if err != nil || !got.Accepted || current.Status != "running" || current.Generation != 1 || current.BuildStatus != "running" {
+				t.Fatalf("result=%+v err=%v stored=%+v", got, err, current)
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()

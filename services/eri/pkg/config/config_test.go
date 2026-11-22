@@ -247,6 +247,17 @@ mcp_config:
 			wantModel: DefaultConfigData().Model,
 		},
 		{
+			name: "stray turn_queue key ignored",
+			content: `
+model: "gemini-1.5-pro"
+channels:
+  default:
+    mode: "threads"
+turn_queue: coordinator
+`,
+			wantModel: "gemini-1.5-pro",
+		},
+		{
 			name: "service urls trimming and bot id",
 			content: `
 model: "gemini-1.5-pro"
