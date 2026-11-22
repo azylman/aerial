@@ -47,6 +47,7 @@ type checkStatusSpyStore struct {
 	failErr         error
 	skipFailApply   bool
 	failBanner      string
+	quiet           bool
 }
 
 func (s *checkStatusSpyStore) chunk(chunkID string) *model.VanadisChunk {
@@ -120,7 +121,7 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 	} else if !s.skipFailApply && banner == "" {
 		banner = "Chunk 1 failed: " + reason
 	}
-	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1", Quiet: s.quiet}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -623,6 +624,95 @@ func TestFlow_HandleDeployFailureEvent(t *testing.T) {
 			if tc.wantDispatchID != "" {
 				assert.Equal(t, tc.wantDispatchID, eri.LastDispatch.ID)
 			}
+		})
+	}
+}
+
+func TestFlow_HandleCIRemediationTurnEnded(t *testing.T) {
+	t.Parallel()
+	const (
+		head       = "abcdef1234567"
+		openPR     = `{"state":"open","merged":false,"head":{"sha":"abcdef1234567"}}`
+		movedPR    = `{"state":"open","merged":false,"head":{"sha":"fedcba7654321"}}`
+		closedPR   = `{"state":"closed","merged":false,"head":{"sha":"abcdef1234567"}}`
+		mergedPR   = `{"state":"closed","merged":true,"head":{"sha":"abcdef1234567"}}`
+		override   = `[{"id":1,"body":"## roborev-override (` + "`abcdef1`" + `)"}]`
+		noComments = `[]`
+		pauseFail  = "c1:" + CIRemediationNoOutcomeReason
+		pauseMsg   = "🛑 [aerial#42] CI fix-up turn ended without pushing a fix, recording an override, or calling fail_chunk. Chunk paused for a decision."
+		pauseNote  = "CI fix-up turn ended without an outcome — awaiting a decision"
+	)
+	ciFailed := func(checks map[string]string, banner string) model.VanadisChunk {
+		return model.VanadisChunk{ID: "c1", BuildID: "b1", Repo: "aerial", Status: statusCIFailed, PRNumber: 42, CIFailCount: 2, CIChecks: checks, Banner: banner}
+	}
+	tests := []struct {
+		name         string
+		dispatchID   string
+		chunk        model.VanadisChunk
+		quiet        bool
+		prStatus     int
+		prBody       string
+		commentsBody string
+		wantErr      bool
+		wantFailed   []string
+		wantMsg      string
+		wantCancel   string
+		wantWidget   string
+	}{
+		{name: "head same pauses with alert and banner", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, `CI check "unit-tests" failed`), prStatus: 200, prBody: openPR, wantFailed: []string{pauseFail}, wantMsg: pauseMsg, wantCancel: "c1", wantWidget: pauseNote},
+		{name: "quiet build pauses without alert", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), quiet: true, prStatus: 200, prBody: openPR, wantFailed: []string{pauseFail}, wantCancel: "c1", wantWidget: pauseNote},
+		{name: "head moved is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), prStatus: 200, prBody: movedPR},
+		{name: "closed pr is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), prStatus: 200, prBody: closedPR},
+		{name: "merged pr is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), prStatus: 200, prBody: mergedPR},
+		{name: "missing pr is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), prStatus: 404, prBody: `{}`},
+		{name: "github outage stays retryable", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), prStatus: 500, prBody: `{}`, wantErr: true},
+		{name: "chunk already failed is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Repo: "aerial", Status: statusFailed, PRNumber: 42, CIFailCount: 2}},
+		{name: "stale attempt is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 1), chunk: ciFailed(nil, "")},
+		{name: "chunk without pr is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Status: statusCIFailed, CIFailCount: 2}},
+		{name: "sha-less dispatch is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", "", 2), chunk: ciFailed(nil, "")},
+		{name: "other chunk dispatch is a no-op", dispatchID: executor.CIRemediationDispatchID("c2", head, 2), chunk: ciFailed(nil, "")},
+		{name: "unknown chunk is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: model.VanadisChunk{ID: "c9", BuildID: "b1"}},
+		{name: "roborev override on head is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"roborev": "failed"}, ""), prStatus: 200, prBody: openPR, commentsBody: override},
+		{name: "roborev banner override on head is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, `CI check "RoboRev Code Review" failed`), prStatus: 200, prBody: openPR, commentsBody: override},
+		{name: "roborev without override pauses", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"roborev": "failed"}, ""), prStatus: 200, prBody: openPR, commentsBody: noComments, wantFailed: []string{pauseFail}, wantMsg: pauseMsg, wantCancel: "c1", wantWidget: pauseNote},
+		{name: "passed roborev skips override lookup and pauses", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"roborev": "passed", "unit-tests": "failed"}, `CI check unquoted`), prStatus: 200, prBody: openPR, commentsBody: override, wantFailed: []string{pauseFail}, wantMsg: pauseMsg, wantCancel: "c1", wantWidget: pauseNote},
+		{name: "override lookup outage stays retryable", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"roborev": "failed"}, ""), prStatus: 200, prBody: openPR, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/example-owner/aerial/pulls/42":
+					w.WriteHeader(tc.prStatus)
+					_, _ = w.Write([]byte(tc.prBody))
+				case "/repos/example-owner/aerial/issues/42/comments":
+					if tc.commentsBody == "" {
+						w.WriteHeader(http.StatusBadGateway)
+						return
+					}
+					_, _ = w.Write([]byte(tc.commentsBody))
+				default:
+					t.Errorf("unexpected GitHub request %s", r.URL.Path)
+					w.WriteHeader(http.StatusTeapot)
+				}
+			}))
+			t.Cleanup(api.Close)
+			eri := &eritest.Client{}
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", api.Client())
+			exec.GitHubAPIURL = api.URL
+			spy := &checkStatusSpyStore{chunks: []model.VanadisChunk{tc.chunk}, quiet: tc.quiet}
+			err := NewFlow(spy, exec).HandleCIRemediationTurnEnded(context.Background(), "b1", "c1", tc.dispatchID)
+			assert.Equal(t, tc.wantErr, err != nil, err)
+			assert.Equal(t, tc.wantFailed, spy.failed)
+			assert.Equal(t, tc.wantMsg, eri.LastMsgCont)
+			assert.Equal(t, tc.wantCancel, eri.LastCancel)
+			if tc.wantWidget == "" {
+				assert.Nil(t, eri.LastWidget)
+				return
+			}
+			require.NotNil(t, eri.LastWidget)
+			assert.Equal(t, tc.wantWidget, eri.LastWidget.Banner)
 		})
 	}
 }
